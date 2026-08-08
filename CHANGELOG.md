@@ -17,6 +17,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `/usr/share/doc/rustbgpd/monitoring/` after a `.deb`/`.rpm` install; the
   canonical dashboard and rule files remain the packaging sources (LAN-928).
 
+### Fixed
+
+- Passive-open GTSM sessions now send the listener's SYN-ACK with IPv4 TTL or
+  IPv6 Hop Limit 255. Previously the peer-specific receive threshold was
+  installed only after `accept()`, so conformant peers could reject the
+  otherwise authenticated handshake before rustbgpd saw the connection. Live
+  GTSM policy additions update the existing listener before any MD5 inventory
+  mutation (LAN-935).
+
 ## [0.64.0] — 2026-08-08
 
 ### Security

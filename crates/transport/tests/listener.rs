@@ -12,7 +12,7 @@ mod inbound_auth {
 
     use rustbgpd_transport::{
         AcceptedConnection, BgpListener, ListenerSocketOptions, Md5ListenerKey,
-        TcpAoListenerOwnerKind, TtlSecurityListenerPolicy, set_tcp_md5sig,
+        TcpAoListenerOwnerKind, TtlSecurityListenerPolicy, set_gtsm, set_tcp_md5sig,
     };
     use tokio::io::AsyncReadExt;
     use tokio::sync::mpsc;
@@ -107,6 +107,32 @@ mod inbound_auth {
         })
         .await
         .expect("client connect task")
+    }
+
+    /// Connect with full GTSM enabled before the handshake. This makes the
+    /// client send its SYN with TTL/Hop-Limit 255 and reject a passive-open
+    /// SYN-ACK unless the listening socket also emitted it with 255.
+    async fn spawn_gtsm_connect(
+        server: SocketAddr,
+        source: Option<IpAddr>,
+    ) -> std::io::Result<std::net::TcpStream> {
+        tokio::task::spawn_blocking(move || {
+            let domain = if server.is_ipv4() {
+                socket2::Domain::IPV4
+            } else {
+                socket2::Domain::IPV6
+            };
+            let socket =
+                socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+            set_gtsm(&socket, server)?;
+            if let Some(source) = source {
+                socket.bind(&SocketAddr::new(source, 0).into())?;
+            }
+            socket.connect_timeout(&server.into(), CONNECT_TIMEOUT)?;
+            Ok(socket.into())
+        })
+        .await
+        .expect("GTSM client connect task")
     }
 
     async fn expect_accept(rx: &mut mpsc::Receiver<AcceptedConnection>) -> AcceptedConnection {
@@ -258,9 +284,9 @@ mod inbound_auth {
         let accepted = expect_accept(&mut accept_rx).await;
         expect_data_blocked(low_ttl, accepted).await;
 
-        let compliant = spawn_connect(addr, None, None, Some(255))
+        let compliant = spawn_gtsm_connect(addr, None)
             .await
-            .expect("TCP handshake for TTL-255 client");
+            .expect("GTSM TCP handshake with TTL-255 SYN-ACK");
         let accepted = expect_accept(&mut accept_rx).await;
         expect_data_flows(compliant, accepted).await;
     }
@@ -360,6 +386,44 @@ mod inbound_auth {
         expect_data_flows(plaintext, accepted).await;
     }
 
+    /// Reload-time GTSM addition must raise the already-listening socket's
+    /// outbound TTL before the next passive open. The GTSM client enforces
+    /// TTL 255 on the SYN-ACK, so this handshake fails against the kernel's
+    /// ordinary listener default even though accepted-child setup is correct.
+    #[tokio::test]
+    async fn replace_inbound_auth_enables_passive_open_gtsm() {
+        let (accept_tx, mut accept_rx) = mpsc::channel(4);
+        let listener = BgpListener::bind_with_options(
+            "127.0.0.1:0".parse().unwrap(),
+            accept_tx,
+            ListenerSocketOptions::default(),
+        )
+        .await
+        .expect("listener bind without initial GTSM policy");
+        let addr = listener.local_addr().unwrap();
+        let control = listener.tcp_ao_rotation_handle();
+        tokio::spawn(listener.run());
+
+        control
+            .replace_inbound_auth(
+                Vec::new(),
+                vec![TtlSecurityListenerPolicy {
+                    owner: TcpAoListenerOwnerKind::Static,
+                    peer: "127.0.0.1".parse().unwrap(),
+                    prefix_len: 32,
+                    enforce: true,
+                }],
+            )
+            .await
+            .expect("add GTSM policy to live listener");
+
+        let client = spawn_gtsm_connect(addr, None)
+            .await
+            .expect("GTSM TCP handshake after live policy addition");
+        let accepted = expect_accept(&mut accept_rx).await;
+        expect_data_flows(client, accepted).await;
+    }
+
     /// LAN-907: an IPv6 neighbor's MD5 password must be enforced on the
     /// inbound half of the dual-family listener — unsigned IPv6 connections
     /// are rejected in the kernel, signed ones establish — while the
@@ -430,9 +494,9 @@ mod inbound_auth {
         let accepted = expect_accept(&mut accept_rx).await;
         expect_data_blocked(low_hops, accepted).await;
 
-        let compliant = spawn_connect(v6_addr, None, None, Some(255))
+        let compliant = spawn_gtsm_connect(v6_addr, None)
             .await
-            .expect("TCP handshake for hop-limit-255 client");
+            .expect("GTSM TCP handshake with hop-limit-255 SYN-ACK");
         let accepted = expect_accept(&mut accept_rx).await;
         expect_data_flows(compliant, accepted).await;
     }

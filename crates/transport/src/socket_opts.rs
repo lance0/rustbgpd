@@ -3191,6 +3191,11 @@ fn read_sockaddr(storage: &libc::sockaddr_storage) -> io::Result<IpAddr> {
 ///
 /// Sets GTSM for the remote address family: accept only directly connected
 /// packets and send with TTL/Hop-Limit 255.
+///
+/// # Errors
+///
+/// Returns an error if the platform does not support GTSM or a required
+/// socket option cannot be installed.
 #[cfg(target_os = "linux")]
 #[allow(
     unsafe_code,
@@ -3239,10 +3244,7 @@ fn set_gtsm_v4(socket: &Socket) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
 
-    // socket2 0.6 renamed `set_ttl` → `set_ttl_v4` for the IPv4 path.
-    // GTSM (RFC 5082) on this socket is IPv4-only, so the IPv4-specific
-    // setter is the correct call.
-    socket.set_ttl_v4(255)?;
+    set_gtsm_outbound(socket, true)?;
 
     Ok(())
 }
@@ -3270,11 +3272,29 @@ fn set_gtsm_v6(socket: &Socket) -> io::Result<()> {
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
-    socket.set_unicast_hops_v6(255)?;
+    set_gtsm_outbound(socket, false)?;
     Ok(())
 }
 
-/// Stub for non-Linux platforms.
+/// Set the outbound TTL/Hop Limit required by GTSM for one socket family.
+///
+/// Listening sockets need this before `listen(2)` so the kernel's passive-open
+/// SYN-ACK is emitted with 255; accepted children get the inbound minimum from
+/// [`set_gtsm`] once the peer-specific policy has been resolved.
+pub(crate) fn set_gtsm_outbound(socket: &Socket, is_v4: bool) -> io::Result<()> {
+    if is_v4 {
+        // socket2 0.6 renamed `set_ttl` → `set_ttl_v4` for IPv4.
+        socket.set_ttl_v4(255)
+    } else {
+        socket.set_unicast_hops_v6(255)
+    }
+}
+
+/// Report that GTSM receive enforcement is unavailable on non-Linux systems.
+///
+/// # Errors
+///
+/// Always returns [`io::ErrorKind::Unsupported`].
 #[cfg(not(target_os = "linux"))]
 pub fn set_gtsm(_socket: &Socket, _remote: SocketAddr) -> io::Result<()> {
     Err(io::Error::new(
