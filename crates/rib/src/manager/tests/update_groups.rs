@@ -2621,6 +2621,98 @@ async fn rejected_policy_transition_batches_leave_observability_idle() {
     );
 }
 
+/// An authoritative replacement batch whose caller already abandoned
+/// the reply (its deadline lapsed while the command sat in the actor
+/// queue) is skipped whole — applying it would diverge RIB export
+/// state from the caller's rolled-back session chains: no chain is
+/// installed, nothing reaches the wire, and the skip is logged with
+/// the batch size.
+#[tokio::test]
+async fn abandoned_authoritative_replacement_batch_is_skipped() {
+    use std::collections::BTreeMap;
+    use std::sync::Arc as StdArc;
+
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+
+    #[derive(Default)]
+    struct Fields(BTreeMap<String, String>);
+    impl Visit for Fields {
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    struct Capture(StdArc<Mutex<Vec<Fields>>>);
+    impl Subscriber for Capture {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields);
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer: IpAddr = "192.0.2.254".parse().unwrap();
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(1);
+    manager.outbound_peers.insert(peer, outbound_tx);
+
+    let deny_all = PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }]);
+    let (reply, response) = oneshot::channel();
+    drop(response);
+    let captured = StdArc::new(Mutex::new(Vec::new()));
+    tracing::subscriber::with_default(Capture(StdArc::clone(&captured)), || {
+        manager.handle_replace_peer_export_policies_authoritatively(
+            vec![crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(deny_all),
+            }],
+            reply,
+        );
+    });
+
+    assert!(
+        !manager.peer_export_policies.contains_key(&peer),
+        "abandoned batch must not install its chains"
+    );
+    assert!(
+        matches!(
+            outbound_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ),
+        "abandoned batch must not reach the wire"
+    );
+    let events = captured.lock().unwrap();
+    assert_eq!(events.len(), 1, "exactly the skip line is logged");
+    let fields = &events[0].0;
+    assert!(
+        fields.get("message").is_some_and(
+            |message| message.contains("skipping abandoned authoritative export-policy batch")
+        ),
+        "skip message missing: {fields:?}"
+    );
+    assert_eq!(fields.get("replacements").map(String::as_str), Some("1"));
+}
+
 #[tokio::test]
 async fn duplicate_pending_policy_transition_returns_internal_error_without_gauge_churn() {
     let (_tx, rx) = mpsc::channel(1);

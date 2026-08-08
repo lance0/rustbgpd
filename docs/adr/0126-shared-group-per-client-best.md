@@ -102,7 +102,11 @@ today's grouped pass. Each overlapped prefix adds one candidate evaluation.
 No term anywhere scales with member count: the receipt's steady-state
 plateau (per-client-best-only, F-scaling, upstream of the commit fan-out)
 belongs to the per-member candidate-multiplicity class this design removes
-structurally, and no phase of this design reintroduces it.
+structurally, and no phase of this design reintroduces it. The bound
+extends to the emit seam's per-member derived-view queries (the OTC and
+denial views): each probes the pass's staged set against the lane and
+denial residues rather than scanning a residue per member, keeping the
+per-pass cost O(members × staged prefixes).
 
 **Staging trigger:** the pass hands per-client-best groups the same
 widened changed-prefix set the ungrouped per-client-best path enumerates

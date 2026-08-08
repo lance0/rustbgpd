@@ -407,7 +407,7 @@ seal_cell_evidence() {
         fi
         ;;
     rustbgpd-sighup | "$GROUPED_CELL")
-        evidence_files+=(config.toml topology.json topology.tsv metrics-1.prom metrics-2.prom metrics-3.prom pre-churn/ready pre-churn/ack received-view.tsv)
+        evidence_files+=(config.toml topology.json topology.tsv metrics-1.prom metrics-2.prom metrics-3.prom metrics-mid.prom pre-churn/ready pre-churn/ack received-view.tsv)
         ;;
     esac
     : >"$cdir/evidence.sha256.tmp"
@@ -816,7 +816,25 @@ run_cell() {
             rc=94
             break
         fi
-        if [ "$final_acked" != true ] && [ -e "$final_barrier/ready" ]; then
+        # Mid-reload scrape: one metrics capture inside the measured
+        # window, after the first reload trigger — the pre-churn scrapes
+        # are all pre-trigger, so ingest-depth/backpressure signals of a
+        # mid-window stall were previously invisible in the evidence.
+        # Same single-curl cost as one existing pre-churn capture.
+        if [ -n "$topology_mode" ] && [ ! -f "$cdir/metrics-mid.prom" ] &&
+            grep -q '^reload 1 .*wall_us=' "$cdir/reloadstall.log" 2>/dev/null; then
+            if curl -fsS --max-time 2 'http://127.0.0.1:9179/metrics' \
+                >"$cdir/metrics-mid.prom.tmp" 2>/dev/null; then
+                mv "$cdir/metrics-mid.prom.tmp" "$cdir/metrics-mid.prom"
+            else
+                rm -f "$cdir/metrics-mid.prom.tmp"
+            fi
+        fi
+        # The harness waits at the final barrier for this ack, so
+        # withholding it until the mid-window scrape landed keeps the
+        # window open for a retry on a failed capture.
+        if [ "$final_acked" != true ] && [ -e "$final_barrier/ready" ] &&
+            { [ -z "$topology_mode" ] || [ -f "$cdir/metrics-mid.prom" ]; }; then
             entries=$(find "$final_barrier" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
             if [ "$entries" != ready ] || ! ack_final_evidence \
                 "$final_barrier" "$cdir" "$daemon_pid" "$daemon_start"; then

@@ -1430,10 +1430,17 @@ pub(in crate::manager) struct GroupRibOut {
     pub(in crate::manager) vpn_tombstones: HashSet<VpnRouteKey>,
     pub(in crate::manager) members: HashSet<IpAddr>,
     pub(in crate::manager) dirty_members: HashSet<IpAddr>,
-    /// Persistent group-verdict export-policy denials (target stamped
-    /// with [`GROUP_FILTERED_PLACEHOLDER`], restamped per member) with
-    /// the denying policy's label for join-time counter replay.
-    policy_filtered: FxHashMap<PolicyFilteredRouteKey, Option<PolicyLabel>>,
+    /// Persistent group-verdict export-policy denials with the denying
+    /// policy's label for join-time counter replay, keyed by prefix so
+    /// a scoped per-member query probes the pass's staged set instead
+    /// of scanning the whole residue. The stored target is always
+    /// [`GROUP_FILTERED_PLACEHOLDER`] (every record funnels through
+    /// [`Self::record_policy_filtered`] from the group walk), so only
+    /// the varying key parts — `(source_peer, path_id)` — are kept;
+    /// readers restamp the concrete member. Inner maps are never left
+    /// empty ([`Self::record_policy_filtered`] removes whole prefixes),
+    /// so outer emptiness remains "no denials".
+    policy_filtered: FxHashMap<Prefix, FxHashMap<(IpAddr, u32), Option<PolicyLabel>>>,
     /// Terminal policy label per staged entry — join-time counter replay
     /// residue. Entries ONLY for labelled entries: an inline (unlabelled)
     /// entry stores nothing and its key is removed, so absent and
@@ -1644,18 +1651,53 @@ impl GroupRibOut {
         // `source(w)`. Together the two terms reproduce the pre-commit
         // backstop's per-member outcome, blocked(adv(m)), exactly.
         if self.per_client_best {
-            blocked.extend(
-                self.runner_up
-                    .iter()
-                    .filter(|(prefix, entry)| {
-                        entry.winner_source == member
-                            && prefixes.is_none_or(|prefixes| prefixes.contains(prefix))
-                            && super::distribution::otc_egress_blocked(
-                                &entry.route,
-                                self.local_role,
-                            )
-                    })
-                    .map(|(_, entry)| entry.route.clone()),
+            #[cfg(any(test, feature = "bench-internals"))]
+            let mut visits = 0_usize;
+            let lane_blocked = |entry: &RunnerUp| {
+                entry.winner_source == member
+                    && super::distribution::otc_egress_blocked(&entry.route, self.local_role)
+            };
+            match prefixes {
+                // The staged scope is the small side on the churn hot
+                // path: probe the lane per staged prefix instead of
+                // scanning the whole lane per member, keeping the pass
+                // at O(members × staged) rather than O(members × lane).
+                Some(prefixes) if prefixes.len() <= self.runner_up.len() => {
+                    for prefix in prefixes {
+                        #[cfg(any(test, feature = "bench-internals"))]
+                        {
+                            visits += 1;
+                        }
+                        if let Some(entry) = self.runner_up.get(prefix)
+                            && lane_blocked(entry)
+                        {
+                            blocked.push(entry.route.clone());
+                        }
+                    }
+                }
+                // Resync (`None`): the whole table IS the scope, so the
+                // lane scan is the small side by definition. A `Some`
+                // scope wider than the lane keeps the scan for the same
+                // reason.
+                _ => {
+                    for (prefix, entry) in &self.runner_up {
+                        #[cfg(any(test, feature = "bench-internals"))]
+                        {
+                            visits += 1;
+                        }
+                        if prefixes.is_none_or(|prefixes| prefixes.contains(prefix))
+                            && lane_blocked(entry)
+                        {
+                            blocked.push(entry.route.clone());
+                        }
+                    }
+                }
+            }
+            #[cfg(any(test, feature = "bench-internals"))]
+            assert_scoped_visit_bound(
+                visits,
+                prefixes.map_or(usize::MAX, HashSet::len),
+                self.runner_up.len(),
             );
         }
         blocked
@@ -2167,9 +2209,15 @@ impl GroupRibOut {
         staged: &HashSet<Prefix>,
         current: &[(PolicyFilteredRouteKey, Option<PolicyLabel>)],
     ) {
-        self.policy_filtered
-            .retain(|key, _| !staged.contains(&key.prefix));
-        self.policy_filtered.extend(current.iter().cloned());
+        for prefix in staged {
+            self.policy_filtered.remove(prefix);
+        }
+        for (key, label) in current {
+            self.policy_filtered
+                .entry(key.prefix)
+                .or_default()
+                .insert((key.source_peer, key.path_id), label.clone());
+        }
     }
 
     /// The member's view of the group-verdict denial set, restamped
@@ -2177,19 +2225,78 @@ impl GroupRibOut {
     /// pass's evaluation scope). The member's own-sourced denials are
     /// excluded — the per-peer path's split horizon returns before the
     /// policy evaluation for those.
-    pub(in crate::manager) fn policy_filtered_for_member<'a>(
-        &'a self,
+    ///
+    /// Iterates whichever side is smaller: on the churn hot path the
+    /// staged scope is a handful of prefixes against a residue that can
+    /// hold most of the table, so probing the residue per staged prefix
+    /// keeps each distribution pass at O(members × staged) instead of
+    /// O(members × residue) — the per-pass lane-scan shape that
+    /// saturated the actor at high overlap. A scope wider than the
+    /// residue (resync-scale callers pass the whole table) keeps the
+    /// residue scan, which is the small side by the same argument.
+    pub(in crate::manager) fn policy_filtered_for_member(
+        &self,
         member: IpAddr,
-        prefixes: &'a HashSet<Prefix>,
-    ) -> impl Iterator<Item = PolicyFilteredRouteKey> + 'a {
-        self.policy_filtered
-            .keys()
-            .filter(move |key| key.source_peer != member && prefixes.contains(&key.prefix))
-            .map(move |key| PolicyFilteredRouteKey {
-                target_peer: member,
-                ..*key
-            })
+        prefixes: &HashSet<Prefix>,
+    ) -> Vec<PolicyFilteredRouteKey> {
+        #[cfg(any(test, feature = "bench-internals"))]
+        let mut visits = 0_usize;
+        let mut restamped = Vec::new();
+        let mut collect =
+            |prefix: Prefix, denials: &FxHashMap<(IpAddr, u32), Option<PolicyLabel>>| {
+                restamped.extend(
+                    denials
+                        .keys()
+                        .filter(|(source_peer, _)| *source_peer != member)
+                        .map(|&(source_peer, path_id)| PolicyFilteredRouteKey {
+                            target_peer: member,
+                            source_peer,
+                            prefix,
+                            path_id,
+                        }),
+                );
+            };
+        if prefixes.len() <= self.policy_filtered.len() {
+            for prefix in prefixes {
+                #[cfg(any(test, feature = "bench-internals"))]
+                {
+                    visits += 1;
+                }
+                if let Some(denials) = self.policy_filtered.get(prefix) {
+                    collect(*prefix, denials);
+                }
+            }
+        } else {
+            for (prefix, denials) in &self.policy_filtered {
+                #[cfg(any(test, feature = "bench-internals"))]
+                {
+                    visits += 1;
+                }
+                if prefixes.contains(prefix) {
+                    collect(*prefix, denials);
+                }
+            }
+        }
+        #[cfg(any(test, feature = "bench-internals"))]
+        assert_scoped_visit_bound(visits, prefixes.len(), self.policy_filtered.len());
+        restamped
     }
+}
+
+/// Tripwire for the scoped derived-view queries: a query must touch at
+/// most `min(scope, residue)` slots of the residue it consults, keeping
+/// the per-pass emit cost O(members × staged prefixes). Restoring a
+/// per-member full scan of the lane or denial residue trips this in
+/// `cargo test` and in the bench-internals smoke instead of surfacing
+/// as actor saturation four hours into a campaign. Compiled into test
+/// and bench-internals builds only.
+#[cfg(any(test, feature = "bench-internals"))]
+fn assert_scoped_visit_bound(visits: usize, scope: usize, residue: usize) {
+    assert!(
+        visits <= scope.min(residue),
+        "scoped derived-view query visited {visits} residue slots; \
+         bound is min(scope {scope}, residue {residue})"
+    );
 }
 
 impl RibManager {
@@ -3366,11 +3473,16 @@ impl RibManager {
                 };
                 bump(&adv.policy_label.cloned(), PolicyAction::Permit);
             }
-            for (key, label) in &group.policy_filtered {
-                if key.source_peer == peer || !in_family(&key.prefix) {
+            for (prefix, denials) in &group.policy_filtered {
+                if !in_family(prefix) {
                     continue;
                 }
-                bump(label, PolicyAction::Deny);
+                for (&(source_peer, _), label) in denials {
+                    if source_peer == peer {
+                        continue;
+                    }
+                    bump(label, PolicyAction::Deny);
+                }
             }
             // VPN dimension (only staged for non-RTC groups): permits
             // from the staged labels, denies from the denial residue —
@@ -4397,8 +4509,10 @@ impl RibManager {
         for entry in destination.runner_up.values() {
             counters.record_lane(entry.winner_source, entry.policy_label.clone());
         }
-        for (key, label) in &destination.policy_filtered {
-            counters.record_deny(key.source_peer, label.clone());
+        for denials in destination.policy_filtered.values() {
+            for (&(source_peer, _), label) in denials {
+                counters.record_deny(source_peer, label.clone());
+            }
         }
         Some(BatchedTransitionInventory {
             announce: announce.into(),
@@ -5746,13 +5860,12 @@ mod tests {
             HashSet::from([OTHER1, OTHER2, MEMBER])
         );
         let group = m.group_ribs.get(&PCB_GID).unwrap();
-        let denied = PolicyFilteredRouteKey {
-            target_peer: GROUP_FILTERED_PLACEHOLDER,
-            source_peer: OTHER1,
-            prefix: p,
-            path_id: 0,
-        };
-        assert!(group.policy_filtered.contains_key(&denied));
+        assert!(
+            group
+                .policy_filtered
+                .get(&p)
+                .is_some_and(|denials| denials.contains_key(&(OTHER1, 0)))
+        );
     }
 
     /// A same-source remainder is stepped over WITHOUT evaluation: the
@@ -5903,16 +6016,11 @@ mod tests {
                 .and_then(|label| label.as_deref()),
             Some("tail")
         );
-        let denied = PolicyFilteredRouteKey {
-            target_peer: GROUP_FILTERED_PLACEHOLDER,
-            source_peer: OTHER2,
-            prefix: p,
-            path_id: 0,
-        };
         assert_eq!(
             group
                 .policy_filtered
-                .get(&denied)
+                .get(&p)
+                .and_then(|denials| denials.get(&(OTHER2, 0)))
                 .and_then(|label| label.as_deref()),
             Some("screen")
         );
@@ -9419,6 +9527,132 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![OTHER2]
         );
+    }
+
+    /// The scoped lane query returns exactly the unscoped result
+    /// restricted to the scope, whichever side it iterates (staged
+    /// scope smaller or larger than the lane), for every member shape
+    /// — including a prefix whose winner AND runner-up are both
+    /// blocked (residue arm + lane arm overlap). Every scoped call
+    /// also runs the `assert_scoped_visit_bound` tripwire: restoring
+    /// the per-member full lane scan makes the one-prefix scopes here
+    /// visit the whole lane and panics the bound.
+    #[test]
+    fn pcb_otc_blocked_scoped_query_matches_unscoped_across_scope_shapes() {
+        let mut m = staging_manager();
+        let staged: Vec<Prefix> = (1..=3).map(prefix).collect();
+        for &p in &staged {
+            seed(&mut m, cand(p, OTHER1, 300));
+            seed(&mut m, with_otc_attr(cand(p, OTHER2, 200)));
+        }
+        m.group_ribs
+            .insert(PCB_GID, per_client_best_customer_group());
+        stage_pcb(&mut m, &staged);
+        // Overlap cell: prefix 2's winner turns blocked too, so its
+        // residue entry (toward everyone but the source) coexists with
+        // its blocked lane entry (toward the winner source).
+        seed(&mut m, with_otc_attr(cand(prefix(2), OTHER1, 300)));
+        stage_pcb(&mut m, &[prefix(2)]);
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert_eq!(group.runner_up.len(), 3);
+
+        let view = |routes: Vec<Route>| {
+            let mut view: Vec<(Prefix, IpAddr)> = routes
+                .iter()
+                .map(|route| (route.prefix, route.peer))
+                .collect();
+            view.sort_unstable();
+            view
+        };
+        for member in [MEMBER, OTHER1, OTHER2] {
+            let unscoped = view(group.otc_blocked_for_member(member, None));
+            // Probe branch: scopes smaller than the lane, hitting and
+            // missing entries.
+            for scope in [
+                HashSet::from([prefix(1)]),
+                HashSet::from([prefix(2)]),
+                HashSet::from([prefix(9)]),
+                HashSet::from([prefix(2), prefix(9)]),
+            ] {
+                let expected: Vec<(Prefix, IpAddr)> = unscoped
+                    .iter()
+                    .copied()
+                    .filter(|(p, _)| scope.contains(p))
+                    .collect();
+                assert_eq!(
+                    view(group.otc_blocked_for_member(member, Some(&scope))),
+                    expected,
+                    "member {member} scope {scope:?}"
+                );
+            }
+            // Scan branch: a scope wider than the lane covers it all.
+            let wide: HashSet<Prefix> = (1..=4).map(prefix).collect();
+            assert_eq!(
+                view(group.otc_blocked_for_member(member, Some(&wide))),
+                unscoped,
+                "member {member} wide scope"
+            );
+        }
+    }
+
+    /// The scoped denial query returns the member-restamped denial set
+    /// restricted to the scope, on both iteration sides, with the
+    /// member's own-sourced denials excluded — asserted against an
+    /// expectation built from the staging inputs, not the residue.
+    #[test]
+    fn pcb_policy_filtered_scoped_query_matches_full_residue() {
+        let mut m = staging_manager();
+        let staged: Vec<Prefix> = (1..=3).map(prefix).collect();
+        for &p in &staged {
+            seed(&mut m, cand(p, OTHER1, 300));
+            seed(&mut m, cand(p, OTHER2, 200));
+        }
+        m.group_ribs.insert(
+            PCB_GID,
+            per_client_best_group(Some(deny_sources_chain(&[OTHER1]))),
+        );
+        stage_pcb(&mut m, &staged);
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert_eq!(group.policy_filtered.len(), 3);
+
+        let sorted = |mut keys: Vec<PolicyFilteredRouteKey>| {
+            keys.sort_unstable_by_key(|key| (key.prefix, key.source_peer, key.path_id));
+            keys
+        };
+        let wide: HashSet<Prefix> = (1..=4).map(prefix).collect();
+        let scopes = [
+            HashSet::from([prefix(1)]),
+            HashSet::from([prefix(9)]),
+            HashSet::from([prefix(1), prefix(9)]),
+            wide,
+        ];
+        // Every staged prefix denied OTHER1's candidate at path 0 —
+        // visible to every member except OTHER1 itself.
+        for member in [MEMBER, OTHER2] {
+            for scope in &scopes {
+                let expected: Vec<PolicyFilteredRouteKey> = staged
+                    .iter()
+                    .filter(|p| scope.contains(p))
+                    .map(|&p| PolicyFilteredRouteKey {
+                        target_peer: member,
+                        source_peer: OTHER1,
+                        prefix: p,
+                        path_id: 0,
+                    })
+                    .collect();
+                assert_eq!(
+                    sorted(group.policy_filtered_for_member(member, scope)),
+                    sorted(expected),
+                    "member {member} scope {scope:?}"
+                );
+            }
+        }
+        for scope in &scopes {
+            assert!(
+                group.policy_filtered_for_member(OTHER1, scope).is_empty(),
+                "own-sourced denials are excluded, scope {scope:?}"
+            );
+        }
     }
 
     /// Backstop parity through the REAL commit path: a delivered clean
