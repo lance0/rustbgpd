@@ -2955,6 +2955,18 @@ impl RibManager {
         replacements: Vec<PeerExportPolicyReplacement>,
         reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
+        // The caller's deadline may have lapsed while this command sat
+        // in the actor queue — by then the reload has rolled back its
+        // session chains, so applying the batch anyway would diverge
+        // RIB export state from the rolled-back sessions with nobody
+        // reading the outcome. An abandoned batch is skipped whole.
+        if reply.is_closed() {
+            info!(
+                replacements = replacements.len(),
+                "skipping abandoned authoritative export-policy batch: caller dropped the reply"
+            );
+            return;
+        }
         let _ = reply.send(self.apply_export_policy_replacements_synchronously(replacements));
     }
 
@@ -3325,6 +3337,7 @@ impl RibManager {
                 .map(|group| {
                     group
                         .policy_filtered_for_member(peer, &filtered_scope)
+                        .into_iter()
                         .collect()
                 })
                 .unwrap_or_default();

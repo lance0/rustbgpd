@@ -161,6 +161,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The RIB actor no longer saturates under churn on per-client-best
+  fleets at high announcement overlap. Every distribution pass asked
+  each member's derived-view queries — the OTC-blocked view and the
+  export-policy-denial view — to scan the whole runner-up lane and
+  denial residue per member while filtering for the pass's few staged
+  prefixes: at the canonical IRR shape with half the table overlapped,
+  tens of millions of map visits per churn pass for an almost-always-
+  empty result, leaving the actor several times oversubscribed at
+  steady churn. The scoped queries now iterate whichever side is
+  smaller — probing the residue per staged prefix on the churn hot
+  path — keeping each pass at O(members × staged prefixes), with
+  resync-scale scopes keeping the residue scan; a test/bench-internals
+  visit-bound assertion trips any reintroduction of the per-member full
+  scan. On the same seam, an authoritative export-policy batch whose
+  caller already abandoned the reply (reload deadline lapse while the
+  command sat in the actor queue) is now skipped and logged instead of
+  applying long after the reload rolled back, which left RIB export
+  state diverged from the rolled-back session chains.
 - Fleet-wide policy reloads on high-overlap per-client-best fleets no
   longer halt partway through cohort setup with healthy sessions timed
   out and every applied peer rolled back. Two peer-manager actor waits
