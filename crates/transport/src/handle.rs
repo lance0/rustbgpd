@@ -1655,18 +1655,7 @@ impl PeerHandle {
         policy: Option<PolicyChain>,
         deadline: Duration,
     ) -> Result<(), PeerCommandError> {
-        match tokio::time::timeout(deadline, async move {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            commands
-                .send(PeerCommand::UpdateImportPolicy {
-                    policy,
-                    reply: reply_tx,
-                })
-                .await
-                .map_err(|_| PeerCommandError::SessionExited)?;
-            reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
-        })
-        .await
+        match tokio::time::timeout(deadline, Self::update_import_policy_via(commands, policy)).await
         {
             Ok(result) => result,
             Err(_elapsed) => Err(PeerCommandError::TimedOut {
@@ -1674,6 +1663,29 @@ impl PeerHandle {
                 deadline,
             }),
         }
+    }
+
+    /// Owned-sender, deadline-free variant of [`Self::update_import_policy`].
+    /// See [`Self::update_export_policy_via`] for rationale.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PeerCommandError::SessionExited`] if the session task's
+    /// command channel is closed, or [`PeerCommandError::ReplyDropped`] if the
+    /// task accepted the command but dropped the reply before responding.
+    pub async fn update_import_policy_via(
+        commands: mpsc::Sender<PeerCommand>,
+        policy: Option<PolicyChain>,
+    ) -> Result<(), PeerCommandError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        commands
+            .send(PeerCommand::UpdateImportPolicy {
+                policy,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| PeerCommandError::SessionExited)?;
+        reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
     }
 
     /// Query this session's import-decision cache (ADR-0073).
@@ -1797,18 +1809,7 @@ impl PeerHandle {
         policy: Option<PolicyChain>,
         deadline: Duration,
     ) -> Result<(), PeerCommandError> {
-        match tokio::time::timeout(deadline, async move {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            commands
-                .send(PeerCommand::UpdateExportPolicy {
-                    policy,
-                    reply: reply_tx,
-                })
-                .await
-                .map_err(|_| PeerCommandError::SessionExited)?;
-            reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
-        })
-        .await
+        match tokio::time::timeout(deadline, Self::update_export_policy_via(commands, policy)).await
         {
             Ok(result) => result,
             Err(_elapsed) => Err(PeerCommandError::TimedOut {
@@ -1816,6 +1817,36 @@ impl PeerHandle {
                 deadline,
             }),
         }
+    }
+
+    /// Owned-sender, deadline-free variant of [`Self::update_export_policy`].
+    ///
+    /// The round trip carries no internal wall-clock timeout: a caller that
+    /// interleaves other work with this future (the peer-manager actor
+    /// servicing its readiness lane) owns the deadline and charges it only
+    /// for the time it actually spends driving the round trip. A wall-clock
+    /// `tokio::time::timeout` inside the round trip would keep counting
+    /// while the caller is busy elsewhere, deducting that time from the
+    /// session's allowance.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PeerCommandError::SessionExited`] if the session task's
+    /// command channel is closed, or [`PeerCommandError::ReplyDropped`] if the
+    /// task accepted the command but dropped the reply before responding.
+    pub async fn update_export_policy_via(
+        commands: mpsc::Sender<PeerCommand>,
+        policy: Option<PolicyChain>,
+    ) -> Result<(), PeerCommandError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        commands
+            .send(PeerCommand::UpdateExportPolicy {
+                policy,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| PeerCommandError::SessionExited)?;
+        reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
     }
 
     /// Bounded hot-apply of reload-matrix `live` per-session runtime

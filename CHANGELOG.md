@@ -161,6 +161,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Fleet-wide policy reloads on high-overlap per-client-best fleets no
+  longer halt partway through cohort setup with healthy sessions timed
+  out and every applied peer rolled back. Two peer-manager actor waits
+  starved the per-peer session hot-apply deadlines: the cohort opened
+  with an unbounded clean-transition destination-prestage round trip to
+  the RIB — statically dead for a per-client-best source group (ADR-0126
+  Decision 8) yet still queued behind the reload's lane-heavy RIB work —
+  and readiness-query servicing interleaved with an in-flight session
+  command was wall-clock-deducted from that command's 500 ms budget. The
+  prestage is now skipped outright when the source group's per-client-best
+  classification makes it statically dead, and bounded by the standard
+  RIB-reply deadline otherwise (elapsing degrades to the existing
+  best-effort unprestaged path); session hot-apply deadlines now accrue
+  only while the actor is actually driving the round trip, so readiness
+  servicing and RIB dequeue latency can no longer time out a healthy
+  session. Cohort setup also logs progress (applied count + elapsed) and
+  a stamped prestage outcome instead of running silent.
 - The authoritative per-peer export-policy handoff no longer costs one
   full-table resync per member. When the optimized clean transition
   declines a reload cohort — per-client-best groups always decline it
