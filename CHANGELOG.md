@@ -112,6 +112,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- ADR-0126 (shared-group per-client best-path) is Accepted: the Phase 4
+  acceptance campaign at the canonical 320-member × 183,040-prefix
+  route-server shape measured the grouped mitigation against the sealed
+  ungrouped baseline and passed both committed gate prongs —
+  byte-identical per-member received views (every runner-up pair
+  delivered, 18,304 / 91,520 at overlap 0.1 / 0.5, nothing else) at
+  5.28–5.50× lower sampler RSS peak and steady-state reload completion
+  p50 of 3.25–3.77 s versus ~87–143 s ungrouped. Rendered
+  `rs-config-render` route-server fleets therefore group at ship with
+  `path_hiding = true` retained, with no opt-out hold. Receipt:
+  `docs/perf/irr-reload-grouped-per-client-best-2026-08.md`.
+
 - Per-client best-path peers with shareable export chains and
   unicast-only sessions now join update groups (ADR-0126): the RFC 7947
   §2.3 path-hiding mitigation is computed once per group — first

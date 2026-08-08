@@ -15,6 +15,10 @@ The announcement-overlap sensitivity campaign (eight sealed roots, four
 per overlap point at `OVERLAP_FRACTION` 0.1 and 0.5) is complete as
 well: the published receipt is
 [`docs/perf/irr-reload-realistic-mix-2026-08.md`](../../../docs/perf/irr-reload-realistic-mix-2026-08.md).
+The ADR-0126 acceptance campaign — the same overlap cells rerun with
+the per-client-best fleet grouped after the classifier flip — is also
+complete: the published receipt is
+[`docs/perf/irr-reload-grouped-per-client-best-2026-08.md`](../../../docs/perf/irr-reload-grouped-per-client-best-2026-08.md).
 
 This directory is the campaign runner and protocol. The instrument is the
 existing `bench/scale/reloadstall` harness — real BGP stub
