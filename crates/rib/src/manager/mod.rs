@@ -62,6 +62,13 @@ struct PolicyTransitionStats {
     max_prefix_snapshot_poll: std::time::Duration,
     max_finalize_poll: std::time::Duration,
     max_commit_poll: std::time::Duration,
+    /// Batched authoritative applies
+    /// (`RibUpdate::ReplacePeerExportPoliciesAuthoritatively`) and how
+    /// their members split between the shared cohort transition and the
+    /// per-member fallback — the one-pass receipt for tests.
+    batched_authoritative_batches: usize,
+    batched_authoritative_shared_members: usize,
+    batched_authoritative_fallback_members: usize,
     #[cfg(feature = "bench-internals")]
     authoritative_peer_applies: usize,
     #[cfg(feature = "bench-internals")]
@@ -1442,6 +1449,7 @@ impl RibManager {
             // so advancing here at acceptance covers the whole transaction.
             RibUpdate::ReplacePeerExportPolicy { .. }
             | RibUpdate::ReplacePeerExportPolicies { .. }
+            | RibUpdate::ReplacePeerExportPoliciesAuthoritatively { .. }
             | RibUpdate::ApplyOutboundPrefixLimits { .. }
             | RibUpdate::RefreshPeerOutbound { .. } => self.advance_advertised_pages(),
             RibUpdate::PeerUp { .. }
@@ -2241,6 +2249,10 @@ impl RibManager {
                 replacements,
                 reply,
             } => self.handle_replace_peer_export_policies(replacements, reply),
+            RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            } => self.handle_replace_peer_export_policies_authoritatively(replacements, reply),
             RibUpdate::PrepareExportPolicyDestination {
                 peer,
                 export_policy,

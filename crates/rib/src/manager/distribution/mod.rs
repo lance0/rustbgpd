@@ -2950,6 +2950,553 @@ impl RibManager {
             Some(PendingCleanPolicyTransition::new(replacements, Some(reply)));
     }
 
+    pub(super) fn handle_replace_peer_export_policies_authoritatively(
+        &mut self,
+        replacements: Vec<PeerExportPolicyReplacement>,
+        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
+    ) {
+        let _ = reply.send(self.apply_export_policy_replacements_synchronously(replacements));
+    }
+
+    /// Apply a batch of authoritative export-policy replacements in one
+    /// actor call with ONE trailing distribution pass — the batched form
+    /// of [`Self::replace_peer_export_policy_synchronously`] the
+    /// clean-transition fallback hands whole cohorts to (per-client-best
+    /// groups always land here per ADR-0126 Decision 8).
+    ///
+    /// A source group whose batched movers all target one fresh
+    /// destination differing only in chain content takes the shared
+    /// transition ([`Self::apply_batched_group_transition`]): the
+    /// destination table is built once, the old→new wire delta is
+    /// derived once from the source group's shared view plus the
+    /// ADR-0126 Decision 4 per-member exceptions (split horizon via
+    /// `announce_source_exclusion`, lane substitutions as member-scoped
+    /// supplements), and the announce payload is encode-once shared
+    /// across the cohort. Everything else — partial-group moves,
+    /// already-owned destinations, ungrouped members, non-unicast
+    /// profiles, rs-tagged or OTC-bearing deltas — takes the ordinary
+    /// per-member regroup machinery (baseline snapshot + dirty resync),
+    /// drained together by the single trailing pass.
+    ///
+    /// State commits entirely within this call: after validation there
+    /// is no partial-state failure mode. Replacements naming peers no
+    /// longer registered are skipped (serial-loop parity); a member
+    /// whose emission cannot be prepared is marked dirty and healed by
+    /// the ordinary resync from the committed state.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the batch keeps validation, cohort selection, and the single \
+                  distribution pass in one auditable transaction body"
+    )]
+    pub(in crate::manager) fn apply_export_policy_replacements_synchronously(
+        &mut self,
+        replacements: Vec<PeerExportPolicyReplacement>,
+    ) -> Result<(), RibCommandError> {
+        if self.pending_clean_policy_transition.is_some() {
+            return Err(RibCommandError::internal(
+                "internal RIB sequencing error: policy transition already in progress",
+            ));
+        }
+        let started = std::time::Instant::now();
+        let n_replacements = replacements.len();
+        // Duplicate targets: the cohort math below assumes one
+        // replacement per peer. Apply duplicates in caller order through
+        // the single-peer seam instead — last-writer-wins, exactly the
+        // serial loop's shape (a departed peer is skipped identically).
+        let mut seen: HashSet<IpAddr> = HashSet::new();
+        if replacements
+            .iter()
+            .any(|replacement| !seen.insert(replacement.peer))
+        {
+            for replacement in replacements {
+                match self.replace_peer_export_policy_synchronously(
+                    replacement.peer,
+                    replacement.export_policy,
+                ) {
+                    Ok(()) | Err(RibCommandError::NotFound(_)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            return Ok(());
+        }
+        // A still-running destination preparation cannot be trusted
+        // mid-walk (same guard as the cohort transition command).
+        if let Some(prestage) = self.pending_destination_prestage.take() {
+            self.discard_uncommitted_policy_transition_group(prestage.destination);
+        }
+
+        let mut present: Vec<PeerExportPolicyReplacement> = Vec::with_capacity(replacements.len());
+        let mut n_skipped_unregistered = 0_usize;
+        for replacement in replacements {
+            if self.outbound_peers.contains_key(&replacement.peer) {
+                present.push(replacement);
+            } else {
+                info!(
+                    peer = %replacement.peer,
+                    "authoritative export-policy batch skipped a peer no longer registered in the RIB; a reconnect will install the desired policy"
+                );
+                n_skipped_unregistered += 1;
+            }
+        }
+
+        // Previous memberships, captured before any mutation.
+        let previous: Vec<Option<usize>> = present
+            .iter()
+            .map(|replacement| self.grouped_member_of(replacement.peer))
+            .collect();
+        // Install the new chains (content-equal INSTANCE guard — see
+        // `replace_peer_export_policy_synchronously` for the ADR-0096
+        // term-hit rationale), then classify each member's destination.
+        for replacement in &present {
+            if self.peer_export_policies.get(&replacement.peer) != Some(&replacement.export_policy)
+            {
+                self.peer_export_policies
+                    .insert(replacement.peer, replacement.export_policy.clone());
+            }
+        }
+        let destinations: Vec<Option<usize>> = present
+            .iter()
+            .map(
+                |replacement| match self.compute_update_group_membership(replacement.peer) {
+                    super::update_groups::GroupMembership::Grouped(gid) => Some(gid),
+                    _ => None,
+                },
+            )
+            .collect();
+
+        // Candidate cohorts: batched movers of one source group whose
+        // destinations agree. A source group with mixed or ungrouped
+        // destinations degrades wholesale to the per-member machinery.
+        let mut cohorts: Vec<(usize, usize, Vec<IpAddr>)> = Vec::new();
+        let mut residual: Vec<IpAddr> = Vec::new();
+        {
+            let mut by_source: HashMap<usize, Option<(usize, Vec<IpAddr>)>> = HashMap::new();
+            for (index, replacement) in present.iter().enumerate() {
+                match (previous[index], destinations[index]) {
+                    (Some(source), Some(destination)) if source != destination => {
+                        match by_source
+                            .entry(source)
+                            .or_insert_with(|| Some((destination, Vec::new())))
+                        {
+                            Some((expected, members)) if *expected == destination => {
+                                members.push(replacement.peer);
+                            }
+                            entry => *entry = None,
+                        }
+                    }
+                    _ => residual.push(replacement.peer),
+                }
+            }
+            // Deterministic cohort order (source gid) so two source
+            // groups converging on one destination resolve stably: the
+            // first claims the fresh destination, the second degrades.
+            let mut sources: Vec<usize> = by_source.keys().copied().collect();
+            sources.sort_unstable();
+            for source in sources {
+                match by_source.remove(&source).flatten() {
+                    Some((destination, members)) => {
+                        cohorts.push((source, destination, members));
+                    }
+                    None => {
+                        // Mixed destinations under one source group: every
+                        // one of its batched movers takes the per-member
+                        // path.
+                        for (index, replacement) in present.iter().enumerate() {
+                            if previous[index] == Some(source)
+                                && destinations[index]
+                                    .is_some_and(|destination| Some(destination) != previous[index])
+                            {
+                                residual.push(replacement.peer);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut n_shared_members = 0_usize;
+        let mut n_destination_groups = 0_usize;
+        for (source, destination, members) in cohorts {
+            if self.apply_batched_group_transition(source, destination, &members) {
+                n_shared_members += members.len();
+                n_destination_groups += 1;
+            } else {
+                residual.extend(members);
+            }
+        }
+
+        // Per-member fallback: the ordinary regroup lifecycle (baseline
+        // snapshot + dirty), drained by the one pass below — the exact
+        // body of the single-peer seam, minus its per-call pass.
+        let n_fallback_members = residual.len();
+        for peer in residual {
+            let before = self.grouped_member_of(peer);
+            self.recompute_update_group(peer);
+            let key_stable = before.is_some() && before == self.grouped_member_of(peer);
+            if !key_stable {
+                self.mark_outbound_dirty(peer);
+            }
+        }
+
+        // Group tables and memberships moved above without a staging
+        // pass; advertised-query continuations must not survive that.
+        self.advance_advertised_pages();
+        // ONE distribution pass: drains every fallback/dirty member and
+        // owns the global retry opportunity, exactly like the single-peer
+        // seam's per-call pass.
+        self.distribute_changes(&HashSet::new(), &HashSet::new());
+        #[cfg(any(test, feature = "bench-internals"))]
+        {
+            self.policy_transition_stats.batched_authoritative_batches = self
+                .policy_transition_stats
+                .batched_authoritative_batches
+                .saturating_add(1);
+            self.policy_transition_stats
+                .batched_authoritative_shared_members = self
+                .policy_transition_stats
+                .batched_authoritative_shared_members
+                .saturating_add(n_shared_members);
+            self.policy_transition_stats
+                .batched_authoritative_fallback_members = self
+                .policy_transition_stats
+                .batched_authoritative_fallback_members
+                .saturating_add(n_fallback_members);
+        }
+        info!(
+            outcome = "batched_authoritative",
+            n_replacements,
+            n_destination_groups,
+            n_shared_members,
+            n_fallback_members,
+            n_skipped_unregistered,
+            elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "authoritative export-policy batch applied"
+        );
+        Ok(())
+    }
+
+    /// Commit one qualifying cohort through the shared batched
+    /// transition: build the destination table once, derive the shared
+    /// old→new delta plus ADR-0126 per-member exceptions once, move the
+    /// memberships, and enqueue the encode-once shared payload per
+    /// member. Returns `false` (nothing externally visible mutated
+    /// beyond an unowned staged destination the per-member fallback then
+    /// adopts) when the cohort does not qualify.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the cohort commit keeps its gates, membership moves, and \
+                  per-member emissions in one auditable body"
+    )]
+    fn apply_batched_group_transition(
+        &mut self,
+        source: usize,
+        destination: usize,
+        members: &[IpAddr],
+    ) -> bool {
+        // The shared delta covers unicast-only, chain-only moves — the
+        // same narrow shape as the clean transition, with the
+        // authoritative per-member path as the complete fallback for
+        // everything else.
+        if !self.batched_transition_keys_qualify(source, destination) {
+            return false;
+        }
+        // The destination must be memberless: an owned destination's
+        // members must see nothing, which is the regroup baseline diff's
+        // job, not this transition's.
+        if self
+            .group_ribs
+            .get(&destination)
+            .is_some_and(|group| !group.members.is_empty())
+        {
+            return false;
+        }
+        // Consume the completed-prestage record exactly like the clean
+        // transition's Classify phase: a match hands the staged table to
+        // this transition, a mismatch discards the never-adopted group.
+        if let Some(prepared) = self.prepared_destination.take()
+            && prepared != destination
+        {
+            self.discard_uncommitted_policy_transition_group(prepared);
+        }
+        let Some(&exemplar) = members.first() else {
+            return false;
+        };
+        // Build (or adopt) the destination table — the join-time build
+        // pass, run once for the whole cohort.
+        self.ensure_group_table(destination, exemplar);
+        let inventory = {
+            let (Some(source_group), Some(destination_group)) = (
+                self.group_ribs.get(&source),
+                self.group_ribs.get(&destination),
+            ) else {
+                return false;
+            };
+            // RFC 9234 OTC enforcement rides inside the inventory build:
+            // a blocked route in the emitted delta, or blocked-winner
+            // residue on either side, degrades the cohort to the
+            // per-member path, whose seams run the pre-commit backstop
+            // (ADR-0126 Decision 5). A role-bearing route-server fleet
+            // with no OTC-attributed routes — the rendered default —
+            // shares normally.
+            let mut rs_asns: Vec<u32> = members
+                .iter()
+                .filter_map(|member| self.peer_rs_control.get(member).copied())
+                .collect();
+            rs_asns.sort_unstable();
+            rs_asns.dedup();
+            let Some(inventory) =
+                Self::batched_transition_inventory(source_group, destination_group, &rs_asns)
+            else {
+                return false;
+            };
+            inventory
+        };
+
+        // Everything below commits: no fallible step touches shared
+        // state before this point.
+        let source_tombstones: Vec<(Prefix, u32)> = self
+            .group_ribs
+            .get(&source)
+            .map(|group| group.tombstones.iter().copied().collect())
+            .unwrap_or_default();
+        // A member whose wire lags its table (dirty, or carrying regroup
+        // residue) cannot take the shared delta — its resync owns the
+        // heal. It still moves with the cohort, carrying the source
+        // group's tombstones as extra (over-)withdraws (the regroup
+        // dirty-leaver rule).
+        let lagging: HashSet<IpAddr> = members
+            .iter()
+            .copied()
+            .filter(|member| {
+                self.dirty_peers.contains(member)
+                    || self.pending_regroup_baseline.contains_key(member)
+                    || self.pending_extra_withdraws.contains_key(member)
+            })
+            .collect();
+        for &peer in members {
+            if lagging.contains(&peer) && !source_tombstones.is_empty() {
+                let extras = self.pending_extra_withdraws.entry(peer).or_default();
+                extras.unicast.extend(source_tombstones.iter().copied());
+            }
+            self.commit_clean_policy_transition_member(peer, source, destination);
+            if lagging.contains(&peer) {
+                // Re-flag into the destination's dirty set (the leave
+                // above dropped the source-side flag).
+                self.mark_outbound_dirty(peer);
+            }
+        }
+
+        // The prefix scope of the per-member policy-denial restamp: every
+        // prefix whose verdict this transition may have moved.
+        let mut filtered_scope: HashSet<Prefix> =
+            self.loc_rib.iter().map(|route| route.prefix).collect();
+        if let Some(group) = self.group_ribs.get(&destination) {
+            filtered_scope.extend(group.table.iter().map(|route| route.prefix));
+        }
+        filtered_scope.extend(source_tombstones.iter().map(|(prefix, _)| *prefix));
+        filtered_scope.extend(inventory.withdraw.iter().map(|(prefix, _)| *prefix));
+
+        let shared_encode = (!inventory.announce.is_empty())
+            .then(|| Arc::new(crate::update::SharedGroupEncode::default()));
+        let mut probe_cache = SharedUnicastProbeCache::default();
+        for &peer in members {
+            if lagging.contains(&peer) {
+                continue;
+            }
+            if let Err(reason) = self.emit_batched_member_envelopes(
+                peer,
+                destination,
+                &inventory,
+                shared_encode.as_ref(),
+                &mut probe_cache,
+            ) {
+                debug!(
+                    %peer,
+                    reason,
+                    "batched authoritative transition member emission degraded to dirty resync"
+                );
+                self.mark_outbound_dirty(peer);
+                continue;
+            }
+            self.apply_batched_transition_counters(peer, &inventory);
+            let current: HashSet<PolicyFilteredRouteKey> = self
+                .group_ribs
+                .get(&destination)
+                .map(|group| {
+                    group
+                        .policy_filtered_for_member(peer, &filtered_scope)
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.update_policy_filtered_routes_for_prefixes(peer, &filtered_scope, &current);
+            let advertised = self.grouped_advertised_count(peer).unwrap_or(0);
+            self.metrics
+                .set_adj_rib_out_prefixes(&peer.to_string(), "all", gauge_val(advertised));
+        }
+        self.finish_clean_policy_transition_commit();
+        info!(
+            source_group = source,
+            destination_group = destination,
+            members = members.len(),
+            announced = inventory.announce.len(),
+            withdrawn = inventory.withdraw.len(),
+            supplemented = inventory.supplements.len(),
+            "applied batched authoritative export-policy transition"
+        );
+        true
+    }
+
+    /// Prepare and enqueue one clean cohort member's wire delta: the
+    /// shared announce payload (split horizon via
+    /// `announce_source_exclusion`, encode-once via the shared cell)
+    /// plus, when needed, one member-scoped envelope carrying the shared
+    /// withdraws and the member's ADR-0126 lane corrections. Probes
+    /// everything against the member's exact-export snapshot before
+    /// reserving or sending anything; any failure leaves the member's
+    /// wire untouched for the dirty resync.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "probe, reserve, and send stay in one body so the \
+                  nothing-sent-on-failure ordering is auditable"
+    )]
+    fn emit_batched_member_envelopes(
+        &mut self,
+        peer: IpAddr,
+        destination: usize,
+        inventory: &super::update_groups::BatchedTransitionInventory,
+        shared_encode: Option<&Arc<crate::update::SharedGroupEncode>>,
+        probe_cache: &mut SharedUnicastProbeCache,
+    ) -> Result<(), &'static str> {
+        let Some(sender) = self.outbound_peers.get(&peer).cloned() else {
+            return Err("peer no longer registered");
+        };
+        if sender.is_closed() {
+            return Err("outbound channel closed");
+        }
+        let Some(encoder) = self.peer_export_encoders.get(&peer) else {
+            return Err("no exact-export encoder");
+        };
+        let snapshot = encoder.snapshot();
+        if snapshot.owner_id() != encoder.owner_id() {
+            return Err("exact-export encoder churned");
+        }
+        let supplement = inventory.supplements.get(&peer);
+        let supplement_announce = supplement.map_or(0, |entry| entry.announce.len());
+        let supplement_withdraw: Vec<(Prefix, u32)> = inventory
+            .withdraw
+            .iter()
+            .copied()
+            .chain(
+                supplement
+                    .into_iter()
+                    .flat_map(|entry| entry.withdraw.iter().copied()),
+            )
+            .collect();
+        // Probe the shared payload: the first member's full batch probe
+        // seeds the cohort cache; every compatible member afterwards
+        // proves only the largest encoded message against its own
+        // ceiling (the clean transition's reuse shape).
+        if !inventory.announce.is_empty() {
+            let reused = probe_cache.reuse_grouped_exact_export_maximum(
+                destination,
+                &inventory.announce,
+                &inventory.next_hop_override,
+                snapshot.as_ref(),
+            );
+            match reused {
+                Some(Ok(_)) => {}
+                Some(Err(_)) => return Err("shared payload exceeds the member's message ceiling"),
+                None => {
+                    let candidates: Vec<crate::update::ExactExportCandidate<'_>> = inventory
+                        .announce
+                        .iter()
+                        .zip(inventory.next_hop_override.iter())
+                        .map(
+                            |(route, next_hop)| crate::update::ExactExportCandidate::Unicast {
+                                route,
+                                next_hop_override: next_hop.as_ref(),
+                            },
+                        )
+                        .collect();
+                    let (results, cardinality_correct) =
+                        probe_exact_export_announcements(peer, snapshot.as_ref(), &candidates);
+                    if !cardinality_correct || results.iter().any(Result::is_err) {
+                        return Err("shared payload exact-export probe rejected");
+                    }
+                    let encoded_lengths = results
+                        .iter()
+                        .filter_map(|result| result.as_ref().ok().map(|result| result.encoded_len))
+                        .collect();
+                    probe_cache.store(
+                        destination,
+                        Arc::clone(&inventory.announce),
+                        Arc::clone(&inventory.next_hop_override),
+                        Arc::clone(&snapshot),
+                        encoded_lengths,
+                    );
+                }
+            }
+        }
+        // Probe the member-scoped lane substitutions.
+        if let Some(entry) = supplement {
+            for (route, next_hop) in &entry.announce {
+                if snapshot
+                    .probe_announcement(crate::update::ExactExportCandidate::Unicast {
+                        route,
+                        next_hop_override: next_hop.as_ref(),
+                    })
+                    .is_err()
+                {
+                    return Err("lane supplement exact-export probe rejected");
+                }
+            }
+        }
+        // Reserve every needed permit before sending anything, so a full
+        // channel degrades the member cleanly instead of half-emitting.
+        let shared_permit = if inventory.announce.is_empty() {
+            None
+        } else {
+            match sender.clone().try_reserve_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => return Err("outbound channel full"),
+            }
+        };
+        let supplement_permit = if supplement_announce == 0 && supplement_withdraw.is_empty() {
+            None
+        } else {
+            match sender.clone().try_reserve_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => return Err("outbound channel full"),
+            }
+        };
+        if let Some(permit) = shared_permit {
+            permit.send(OutboundRouteUpdate {
+                exact_export_snapshot: Some(Arc::clone(&snapshot)),
+                announce_source_exclusion: Some(peer),
+                announce: Arc::clone(&inventory.announce),
+                next_hop_override: Arc::clone(&inventory.next_hop_override),
+                shared_group_encode: shared_encode.map(Arc::clone),
+                ..OutboundRouteUpdate::default()
+            });
+        }
+        if let Some(permit) = supplement_permit {
+            let (announce, next_hop_override): (
+                Vec<crate::route::Route>,
+                Vec<Option<rustbgpd_policy::NextHopAction>>,
+            ) = supplement
+                .map(|entry| entry.announce.iter().cloned().unzip())
+                .unwrap_or_default();
+            permit.send(OutboundRouteUpdate {
+                exact_export_snapshot: Some(snapshot),
+                announce: announce.into(),
+                next_hop_override: next_hop_override.into(),
+                withdraw: supplement_withdraw,
+                ..OutboundRouteUpdate::default()
+            });
+        }
+        Ok(())
+    }
+
     /// Begin the unfenced staging of a prospective clean-transition
     /// destination group ([`crate::update::RibUpdate::PrepareExportPolicyDestination`]).
     /// The reply is held until [`Self::advance_destination_prestage`]

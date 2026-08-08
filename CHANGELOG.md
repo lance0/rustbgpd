@@ -161,6 +161,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The authoritative per-peer export-policy handoff no longer costs one
+  full-table resync per member. When the optimized clean transition
+  declines a reload cohort — per-client-best groups always decline it
+  (ADR-0126 Decision 8) — the peer manager handed each member to the RIB
+  one command at a time, and each command drained as an O(table)
+  clone-walk, probe, and encode: a 320-member per-client-best SIGHUP
+  reload at the canonical IRR shape spent 99.8% of its 140–148 s
+  completing 320 serial full-table resyncs while the equivalent grouped
+  reload committed in ~3 s. The handoff is now ONE batched RIB command:
+  a source group whose batched members all move to one fresh chain-only
+  destination builds the destination table once, derives one
+  equality-suppressed old→new wire delta (O(actual policy diff), shared
+  `Arc` payload, encode-once fanout with per-member split-horizon
+  exclusion), and delivers each winner-source member its runner-up lane
+  substitution as a member-scoped supplement; every other batch shape
+  degrades member-by-member to the existing regroup baseline machinery,
+  drained by one trailing distribution pass instead of one pass per
+  member. Policy and membership state commit atomically within the one
+  actor call; a member whose emission cannot be prepared (closed or full
+  channel, encoder churn, exact-export rejection) is marked dirty and
+  healed by the ordinary resync from the committed state.
 - Non-unicast route listings no longer stall the RIB actor with a
   full-table copy the API then discards (LAN-905). `ListEvpnRoutes`,
   `ListBgpLsRoutes`, `ListVpnRoutes`, `ListLabeledRoutes`,

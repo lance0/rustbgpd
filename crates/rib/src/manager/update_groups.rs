@@ -785,6 +785,133 @@ impl GroupStageOutput {
     }
 }
 
+/// Shared old→new wire delta of one batched authoritative cohort
+/// transition ([`RibManager::batched_transition_inventory`]): the
+/// equality-suppressed announce/withdraw payload every member shares
+/// (split horizon via `announce_source_exclusion`), the member-scoped
+/// lane/source-flip corrections, and the pre-aggregated counter rows.
+pub(in crate::manager) struct BatchedTransitionInventory {
+    /// Destination entries whose wire form differs from the source
+    /// entry at the same key — `Arc`-shared across every member
+    /// envelope (one `Route` shell clone per changed entry, total).
+    pub(in crate::manager) announce: Arc<[Route]>,
+    /// Next-hop-override flags aligned with `announce`.
+    pub(in crate::manager) next_hop_override: Arc<[Option<NextHopAction>]>,
+    /// Keys the destination no longer stages (over-withdraw safe).
+    pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
+    /// Member-scoped corrections the shared exclusion cannot express:
+    /// the ADR-0126 lane substitution toward each winner's source
+    /// (announce) and the displaced/retired own-sourced slot (withdraw).
+    pub(in crate::manager) supplements: FxHashMap<IpAddr, BatchedMemberSupplement>,
+    counters: BatchedTransitionCounters,
+}
+
+/// One member's corrections beside the shared batched-transition payload.
+#[derive(Default)]
+pub(in crate::manager) struct BatchedMemberSupplement {
+    pub(in crate::manager) announce: Vec<(Route, Option<NextHopAction>)>,
+    pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
+}
+
+/// Pre-aggregated export-counter rows of one batched cohort transition:
+/// permit totals per label with per-source breakdown, the lane's
+/// per-winner-source substitution labels, and the denial residue rows —
+/// the inputs of the ADR-0126 Decision 4 `totals − own + lane`
+/// synthesis, folded once per cohort so the per-member replay is
+/// O(labels) instead of the O(table) walk
+/// [`RibManager::apply_group_join_counters`] performs.
+#[derive(Default)]
+struct BatchedTransitionCounters {
+    permit_totals: FxHashMap<Option<PolicyLabel>, u64>,
+    permit_by_source: FxHashMap<IpAddr, FxHashMap<Option<PolicyLabel>, u64>>,
+    lane_by_winner_source: FxHashMap<IpAddr, FxHashMap<Option<PolicyLabel>, u64>>,
+    deny_totals: FxHashMap<Option<PolicyLabel>, u64>,
+    deny_by_source: FxHashMap<IpAddr, FxHashMap<Option<PolicyLabel>, u64>>,
+}
+
+impl BatchedTransitionCounters {
+    fn record_permit(&mut self, source: IpAddr, label: Option<PolicyLabel>) {
+        *self
+            .permit_by_source
+            .entry(source)
+            .or_default()
+            .entry(label.clone())
+            .or_default() += 1;
+        *self.permit_totals.entry(label).or_default() += 1;
+    }
+
+    fn record_lane(&mut self, winner_source: IpAddr, label: Option<PolicyLabel>) {
+        *self
+            .lane_by_winner_source
+            .entry(winner_source)
+            .or_default()
+            .entry(label)
+            .or_default() += 1;
+    }
+
+    fn record_deny(&mut self, source: IpAddr, label: Option<PolicyLabel>) {
+        *self
+            .deny_by_source
+            .entry(source)
+            .or_default()
+            .entry(label.clone())
+            .or_default() += 1;
+        *self.deny_totals.entry(label).or_default() += 1;
+    }
+
+    /// One member's replay rows: `totals − own-sourced (+ lane
+    /// substitutions)` per label, permits and denials alike — the fold
+    /// [`RibManager::apply_group_join_counters`] derives per member from
+    /// a full table walk.
+    fn rows_for(&self, peer: IpAddr) -> Vec<(Option<String>, PolicyAction, u64)> {
+        let mut rows = Vec::new();
+        let own_permits = self.permit_by_source.get(&peer);
+        let lane = self.lane_by_winner_source.get(&peer);
+        let mut labels: Vec<&Option<PolicyLabel>> = self.permit_totals.keys().collect();
+        if let Some(lane) = lane {
+            labels.extend(
+                lane.keys()
+                    .filter(|label| !self.permit_totals.contains_key(*label)),
+            );
+        }
+        for label in labels {
+            let total = self.permit_totals.get(label).copied().unwrap_or(0);
+            let own = own_permits
+                .and_then(|counts| counts.get(label))
+                .copied()
+                .unwrap_or(0);
+            let substituted = lane
+                .and_then(|counts| counts.get(label))
+                .copied()
+                .unwrap_or(0);
+            let count = total.saturating_sub(own) + substituted;
+            if count > 0 {
+                rows.push((
+                    label.as_ref().map(ToString::to_string),
+                    PolicyAction::Permit,
+                    count,
+                ));
+            }
+        }
+        let own_denies = self.deny_by_source.get(&peer);
+        for (label, total) in &self.deny_totals {
+            let own = own_denies
+                .and_then(|counts| counts.get(label))
+                .copied()
+                .unwrap_or(0);
+            let count = total.saturating_sub(own);
+            if count > 0 {
+                rows.push((
+                    label.as_ref().map(ToString::to_string),
+                    PolicyAction::Deny,
+                    count,
+                ));
+            }
+        }
+        rows
+    }
+}
+
 /// Export-policy verdicts of one shared staging pass, aggregated by
 /// (terminal policy, action) with a per-source-peer breakdown so each
 /// member can be bumped by `totals − own-sourced` — exactly what the
@@ -3730,6 +3857,15 @@ impl RibManager {
         // without ever emitting them (LAN-463). The discard makes the
         // group absent again, so the ordinary rebuild below runs.
         self.discard_destination_prestage_on_membership(gid);
+        self.ensure_group_table(gid, peer);
+        self.install_group_member(gid, peer);
+    }
+
+    /// Build the group's staged table when it does not exist yet — the
+    /// join-time build pass (one shared staging walk, deltas discarded:
+    /// correct only while the group is memberless). `peer` is the
+    /// exemplar whose group-uniform staging inputs seed the profile.
+    pub(in crate::manager) fn ensure_group_table(&mut self, gid: usize, peer: IpAddr) {
         if !self.group_ribs.contains_key(&gid) {
             let group = GroupRibOut::new(
                 // `share()`, not `clone()`: the snapshot must keep
@@ -3773,7 +3909,6 @@ impl RibManager {
                 }
             }
         }
-        self.install_group_member(gid, peer);
     }
 
     /// Install one peer into an already-created group and make the peer's
@@ -3874,9 +4009,32 @@ impl RibManager {
         self.distribute_changes_after_advertised_page_advance(&HashSet::new(), &HashSet::new());
     }
 
+    /// Whether a source/destination group pair qualifies for the shared
+    /// batched authoritative transition: unicast-only on both sides and
+    /// differing only in export-chain content (the clean transition's
+    /// narrow shape, checked on the interned keys).
+    pub(in crate::manager) fn batched_transition_keys_qualify(
+        &self,
+        source: usize,
+        destination: usize,
+    ) -> bool {
+        let (Some(source_key), Some(destination_key)) = (
+            self.update_groups.group_key(source),
+            self.update_groups.group_key(destination),
+        ) else {
+            return false;
+        };
+        source_key.is_unicast_only()
+            && destination_key.is_unicast_only()
+            && source_key.same_staging_profile_except_chain(destination_key)
+    }
+
     /// The fingerprint itself: disqualifiers first (design §1), then
     /// the group key from RIB-staging inputs.
-    fn compute_update_group_membership(&mut self, peer: IpAddr) -> GroupMembership {
+    pub(in crate::manager) fn compute_update_group_membership(
+        &mut self,
+        peer: IpAddr,
+    ) -> GroupMembership {
         let chain = self.export_policy_for(peer).cloned();
         self.compute_update_group_membership_for_policy(peer, chain.as_ref())
     }
@@ -4086,6 +4244,186 @@ impl RibManager {
     pub(in crate::manager) fn finish_clean_policy_transition_commit(&mut self) {
         self.refresh_update_group_gauges();
         self.refresh_group_residue_gauge();
+    }
+
+    /// Build the shared old→new inventory for one batched authoritative
+    /// cohort transition ([`crate::update::RibUpdate::ReplacePeerExportPoliciesAuthoritatively`]):
+    /// every batch member of `source` moves to the freshly staged
+    /// `destination` (same staging profile except the chain — validated
+    /// by the caller). Returns `None` when the delta carries an RFC 7947
+    /// control-form community for one of the cohort's rs-control ASNs on
+    /// either side of policy — per-target suppress/prepend/scrub cannot
+    /// ride a shared payload, so the caller degrades the cohort to the
+    /// ordinary per-member machinery (the clean transition's
+    /// tagged-inventory posture).
+    ///
+    /// The shared announce carries each destination entry whose wire
+    /// form differs from the source entry at the same key
+    /// (equality-suppressed — O(actual policy diff), a content-equal
+    /// restage emits nothing); the shared withdraw carries the keys the
+    /// destination no longer stages (over-withdraw safe toward members
+    /// whose wire never held them). Per-member divergence is exactly the
+    /// ADR-0126 Decision 4 emit-time exception set: split horizon rides
+    /// the envelope's `announce_source_exclusion`, and the lane
+    /// substitution toward each winner's source rides the member-scoped
+    /// supplements built here. Counter aggregates are folded once so the
+    /// per-member replay is O(labels), not O(table) — the same rows
+    /// [`RibManager::apply_group_join_counters`] would derive per member.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one walk keeps the shared delta, the lane supplements, the \
+                  OTC/rs-control degrade gates, and the counter fold aligned"
+    )]
+    pub(in crate::manager) fn batched_transition_inventory(
+        source: &GroupRibOut,
+        destination: &GroupRibOut,
+        rs_asns: &[u32],
+    ) -> Option<BatchedTransitionInventory> {
+        use super::distribution::rs_control::rs_control_route_tagged;
+        // RFC 9234 OTC residue on either side means blocked staged
+        // winners (or lane runner-ups) whose per-member diagnostics and
+        // withdraw conversions belong to the pre-commit backstop this
+        // shared emission does not run — the per-member path owns those.
+        // A role-bearing fleet with no OTC-attributed routes (the
+        // rendered route-server default) carries no residue and shares.
+        if !source.otc_blocked.is_empty() || !destination.otc_blocked.is_empty() {
+            return None;
+        }
+        let attrs_tagged = |attrs: (&[u32], &[LargeCommunity])| {
+            rs_asns
+                .iter()
+                .any(|&rs_asn| rs_control_route_tagged(attrs.0, attrs.1, rs_asn))
+        };
+        let route_tagged = |route: &Route| {
+            rs_asns.iter().any(|&rs_asn| {
+                rs_control_route_tagged(route.communities(), route.large_communities(), rs_asn)
+            })
+        };
+        // The pre-commit backstop strips an OTC-blocked route from every
+        // emission; an emitted delta containing one cannot ride the
+        // shared payload, so its cohort degrades to the per-member path
+        // (which runs the backstop at its own seams).
+        let blocked =
+            |route: &Route| super::distribution::otc_egress_blocked(route, destination.local_role);
+        let mut announce: Vec<Route> = Vec::new();
+        let mut next_hop_override: Vec<Option<NextHopAction>> = Vec::new();
+        let mut supplements: FxHashMap<IpAddr, BatchedMemberSupplement> = FxHashMap::default();
+        let mut counters = BatchedTransitionCounters::default();
+        for route in destination.table.iter() {
+            let key = (route.prefix, route.path_id);
+            let next_hop = destination.nh_override(key);
+            let prior = source.table.get(&route.prefix, route.path_id);
+            let changed = match prior {
+                None => true,
+                Some(prior_route) => {
+                    !routes_equal(prior_route, route) || source.nh_override(key) != next_hop
+                }
+            };
+            if changed {
+                if blocked(route)
+                    || (!rs_asns.is_empty()
+                        && (route_tagged(route)
+                            || attrs_tagged(destination.source_control(key))
+                            || attrs_tagged(source.source_control(key))))
+                {
+                    return None;
+                }
+                next_hop_override.push(next_hop);
+                announce.push(route.clone());
+            }
+            // Counter fold: one permit per staged entry, labelled by its
+            // retained terminal policy; per-source rows feed the
+            // Decision 4 `totals − own + lane` synthesis below.
+            let label = destination.staged_labels.get(&key).cloned().unwrap_or(None);
+            counters.record_permit(route.peer, label);
+            // Member-scoped correction for the slot's own source — the
+            // one member the shared exclusion silences at this key. Its
+            // wire held `adv_source(m)` (the source group's lane
+            // substitution when it also sourced the old winner, the old
+            // entry otherwise); its target is the destination lane's
+            // substitution or nothing (ADR-0126 Decision 4).
+            let lane_new = destination.runner_up.get(&route.prefix);
+            let prior_source = prior.map(|prior_route| prior_route.peer);
+            let lane_old = source.runner_up.get(&route.prefix);
+            if let Some(entry) = lane_new {
+                let suppressed = prior_source == Some(route.peer)
+                    && lane_old.is_some_and(|prev| {
+                        routes_equal(&prev.route, &entry.route) && prev.nh == entry.nh
+                    });
+                if !suppressed {
+                    if blocked(&entry.route)
+                        || (!rs_asns.is_empty()
+                            && (route_tagged(&entry.route)
+                                || attrs_tagged(source_control_input(entry.source_attrs.as_ref()))
+                                || lane_old.is_some_and(|prev| {
+                                    attrs_tagged(source_control_input(prev.source_attrs.as_ref()))
+                                })))
+                    {
+                        return None;
+                    }
+                    supplements
+                        .entry(route.peer)
+                        .or_default()
+                        .announce
+                        .push((entry.route.clone(), entry.nh.clone()));
+                }
+            } else {
+                // Over-withdraw-safe: emit whenever the source group
+                // staged the key and the member's wire could hold
+                // anything there (a displaced other-sourced entry — the
+                // source-flip arm — or a retired substitution). A no-op
+                // when the wire was already empty.
+                let had_wire =
+                    prior.is_some() && (prior_source != Some(route.peer) || lane_old.is_some());
+                if had_wire {
+                    supplements
+                        .entry(route.peer)
+                        .or_default()
+                        .withdraw
+                        .push(key);
+                }
+            }
+        }
+        let mut withdraw: Vec<(Prefix, u32)> = Vec::new();
+        for route in source.table.iter() {
+            if destination
+                .table
+                .get(&route.prefix, route.path_id)
+                .is_none()
+            {
+                withdraw.push((route.prefix, route.path_id));
+            }
+        }
+        for entry in destination.runner_up.values() {
+            counters.record_lane(entry.winner_source, entry.policy_label.clone());
+        }
+        for (key, label) in &destination.policy_filtered {
+            counters.record_deny(key.source_peer, label.clone());
+        }
+        Some(BatchedTransitionInventory {
+            announce: announce.into(),
+            next_hop_override: next_hop_override.into(),
+            withdraw,
+            supplements,
+            counters,
+        })
+    }
+
+    /// Replay one cohort member's export counters from the batched
+    /// inventory's pre-aggregated rows — the exact rows
+    /// [`Self::apply_group_join_counters`] would fold from a full table
+    /// walk (`totals − own-sourced + lane substitutions` on the permit
+    /// side, `totals − own-sourced` on the denial side), at O(labels)
+    /// per member instead of O(table).
+    pub(in crate::manager) fn apply_batched_transition_counters(
+        &mut self,
+        peer: IpAddr,
+        inventory: &BatchedTransitionInventory,
+    ) {
+        let rows = inventory.counters.rows_for(peer);
+        if !rows.is_empty() {
+            self.bump_export_counters(peer, &rows);
+        }
     }
 
     /// Build the classifier input for one peer.

@@ -1209,37 +1209,50 @@ impl PeerManager {
         }
     }
 
-    /// Complete a cohort handoff through the ordinary authoritative RIB seam.
+    /// Complete a cohort handoff through the batched authoritative RIB seam.
     ///
-    /// Session chains were already applied during cohort setup. Sending one
-    /// ordinary RIB replacement at a time avoids a second session hot-apply,
-    /// keeps the next peer out of the RIB queue until the prior peer replies,
-    /// and admits the dedicated readiness lane throughout each send/reply.
+    /// Session chains were already applied during cohort setup. One RIB
+    /// command carries every replacement of the cohort: the RIB recomputes
+    /// the memberships together, shares the destination-group build and the
+    /// old→new wire delta across the cohort, and runs ONE distribution pass
+    /// — instead of one full-table resync per member. Peers no longer
+    /// registered in the RIB are skipped inside the batch (a reconnect
+    /// installs the desired policy), matching the prior per-peer loop. The
+    /// dedicated readiness lane is admitted throughout the send/reply.
     async fn apply_export_policy_replacements_authoritatively(
         &mut self,
         replacements: &[PeerExportPolicyReplacement],
     ) -> Result<(), String> {
-        for replacement in replacements {
-            match self
-                .replace_peer_export_policy_in_rib(
-                    replacement.peer,
-                    replacement.export_policy.clone(),
-                )
-                .await
-            {
-                Ok(()) => {}
-                Err(error @ RibCommandError::NotFound(_)) => {
-                    info!(
-                        peer = %replacement.peer,
-                        %error,
-                        "authoritative export-policy handoff skipped a peer no longer registered in the RIB; a reconnect will install the desired policy"
-                    );
-                }
-                Err(error) => return Err(format!("{}: {error}", replacement.peer)),
-            }
-            self.drain_readiness_queries().await;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let rib_tx = self.rib_tx.clone();
+        if self
+            .await_with_readiness(rib_tx.send(
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                    replacements: replacements.to_vec(),
+                    reply: reply_tx,
+                },
+            ))
+            .await
+            .is_err()
+        {
+            return Err("RIB manager unavailable".to_string());
         }
-        Ok(())
+        let result = match tokio::time::timeout(
+            super::RIB_BATCH_REPLY_TIMEOUT,
+            self.await_with_readiness(reply_rx),
+        )
+        .await
+        {
+            Err(_) => Err(format!(
+                "RIB manager did not reply within {:?} while applying the authoritative export-policy batch",
+                super::RIB_BATCH_REPLY_TIMEOUT
+            )),
+            Ok(Err(_)) => Err("RIB manager dropped authoritative batch reply".to_string()),
+            Ok(Ok(Err(error))) => Err(error.to_string()),
+            Ok(Ok(Ok(()))) => Ok(()),
+        };
+        self.drain_readiness_queries().await;
+        result
     }
 
     /// Run one ordinary RIB export-policy replacement while servicing the

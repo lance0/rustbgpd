@@ -801,8 +801,10 @@ pub struct PeerExportPolicyReplacement {
 ///
 /// A handoff is fail-closed: the RIB has removed every uncommitted destination
 /// and has not changed any peer policy, group membership, counter, or wire
-/// state. The caller must then apply the replacements through ordinary
-/// [`RibUpdate::ReplacePeerExportPolicy`] commands.
+/// state. The caller must then apply the replacements through one
+/// [`RibUpdate::ReplacePeerExportPoliciesAuthoritatively`] batch (or ordinary
+/// per-peer [`RibUpdate::ReplacePeerExportPolicy`] commands for genuinely
+/// single-peer operations).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExportPolicyCohortOutcome {
     /// The cohort transition committed atomically.
@@ -2077,6 +2079,29 @@ pub enum RibUpdate {
         replacements: Vec<PeerExportPolicyReplacement>,
         /// Response channel for failure or the committed/per-peer-handoff outcome.
         reply: oneshot::Sender<Result<ExportPolicyCohortOutcome, String>>,
+    },
+    /// Apply a batch of authoritative export-policy replacements in one
+    /// actor call with one trailing distribution pass — the batched form
+    /// of [`RibUpdate::ReplacePeerExportPolicy`] used when the optimized
+    /// clean-transition cohort replies
+    /// [`ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply`]
+    /// (ADR-0105's complete fallback; per-client-best groups always land
+    /// here per ADR-0126 Decision 8).
+    ///
+    /// Contract: replacements naming peers no longer registered for
+    /// outbound updates are skipped (a reconnect installs the desired
+    /// policy — the same posture as the serial per-peer loop this
+    /// replaces). Everything else commits in the one synchronous call:
+    /// there is no partial-state failure mode after the first mutation.
+    /// Per-member wire delivery is best-effort — a member whose emission
+    /// cannot be prepared (closed channel, encoder churn, exact-export
+    /// rejection) is marked dirty and healed by the ordinary resync from
+    /// the already-committed state.
+    ReplacePeerExportPoliciesAuthoritatively {
+        /// Replacements in caller transaction order.
+        replacements: Vec<PeerExportPolicyReplacement>,
+        /// Response channel for success/failure.
+        reply: oneshot::Sender<Result<(), RibCommandError>>,
     },
     /// Create and stage the prospective destination update-group of an
     /// upcoming [`RibUpdate::ReplacePeerExportPolicies`] cohort — without
