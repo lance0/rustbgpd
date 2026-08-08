@@ -1,23 +1,24 @@
 # ADR-0125: v1.0 stability contract
 
-**Status:** Proposed (nothing freezes until Accepted)
+**Status:** Accepted (tagging remains evidence-gated; no tag is scheduled)
 **Date:** 2026-08-04
+**Decision recorded:** 2026-08-08
 
-## Decisions required
+## Decisions recorded
 
-Every open decision in this proposal, in one place. Each is expanded in
-the section named in the last column.
+The project owner accepted the contract with all eight decisions below. Each
+is expanded in the section named in the last column.
 
-| # | Decision | Recommended default | Where |
+| # | Decision | Recorded outcome | Where |
 |---|----------|---------------------|-------|
-| DR1 | Is at least one external pilot's incorporated feedback a hard tagging gate? | Yes — hard gate. Zero pilots exist today; this is the largest gap. | Evidence bar E1 |
-| DR2 | How many archived soak receipts at RS/RR flagship shapes gate the tag? | Two: the SIGHUP file-reload and max-prefix trip/timed-restart scenarios already scheduled into the authorized soak window, archived at multi-day duration. | Evidence bar E2 |
-| DR3 | Does the tag require a comparative IRR-scale reload row against BIRD and OpenBGPD, or is the existing IXP matrix sufficient? | Require one comparative IRR-scale row; the IXP matrix predates the IRR-scale work and the transactional-apply receipt is single-stack. | Evidence bar E3 |
-| DR4 | RFC 8212 secure-by-default: activate per ADR-0119, or record a decision not to flip the default in 1.0? | Resolve either way before tagging; an undecided default is not a stable contract. | Evidence bar E5 |
-| DR5 | ADR-0122 open items: D2 (unary vs streaming Plan/Apply) and L1 (`--from-file` pledge) | Decide D2 after streaming phase 2; reword the L1 "never" pledge to a scheduled-removal statement before the tag. | Evidence bar E4 |
-| DR6 | Are streaming Plan/Apply, `ListConfigHistory`, and `RollbackConfigTransaction` re-blessed into the frozen inventory at 1.0? | Re-bless only surfaces with a release of production use behind them; otherwise they stay outside and are added in a 1.x minor. | Freeze scope |
-| DR7 | Post-1.0 removal floor for inventoried surface | Deprecations announced in 1.x; removal no earlier than 2.0. | Deprecation policy |
-| DR8 | Supported-versions window after 1.0 (SECURITY.md currently says "0.x") | Latest 1.x minor plus the immediately previous minor (N-1), matching the existing migration-support rule. | Deprecation policy |
+| DR1 | Is at least one external pilot's incorporated feedback a hard tagging gate? | Yes. One external shadow pilot is a hard tag gate: two weekly checkpoints at the pilot's normal refresh cadence, a final semantic diff and support bundle, and a tested rollback. Incorporated feedback may be an explicit no-change finding, but it must be recorded. | Evidence bar E1 |
+| DR2 | How many archived soak receipts at RS/RR flagship shapes gate the tag? | Exactly two receipts, each at least 24 hours. Together they must cover route-server and route-reflector flagship shapes, a real SIGHUP file reload, and a max-prefix trip followed by timed restart. | Evidence bar E2 |
+| DR3 | Does the tag require a comparative IRR-scale reload row against BIRD and OpenBGPD, or is the existing IXP matrix sufficient? | Yes, and the gate is satisfied by the published four-root IRR-scale comparison against BIRD 3.3.1 and OpenBGPD 9.1. | Evidence bar E3 |
+| DR4 | RFC 8212 secure-by-default: activate per ADR-0119, or record a decision not to flip the default in 1.0? | Activate only the `config_epoch = 2` plus omitted-boolean cell after ADR-0119's representation and production-mutation proofs land. Epoch-less and epoch-1 omission remain permissive forever; explicit booleans retain their value. | Evidence bar E5 |
+| DR5 | ADR-0122 open items: D2 (unary vs streaming Plan/Apply) and L1 (`--from-file` pledge) | Unary Plan/Apply is the permanent small-candidate path. Remove the hidden `--from-file` aliases from `config diff`, `config plan`, and `config apply` in v0.65. | Evidence bar E4 |
+| DR6 | Are streaming Plan/Apply, `ListConfigHistory`, and `RollbackConfigTransaction` re-blessed into the frozen inventory at 1.0? | No. They remain outside the initial frozen inventory and may be added deliberately in a later 1.x minor. | Freeze scope |
+| DR7 | Post-1.0 removal floor for inventoried surface | An inventoried surface deprecated in 1.x remains functional throughout 1.x and is removable no earlier than 2.0. | Deprecation policy |
+| DR8 | Supported-versions window after 1.0 (SECURITY.md currently says "0.x") | Security fixes support the latest 1.x release. N-1 is a separate migration-compatibility promise, not a security-support promise. | Deprecation policy |
 
 ## Context
 
@@ -29,7 +30,8 @@ everything else may change between minors with a CHANGELOG migration note.
 The ROADMAP states that v1.0 is not on a timeline and that its intended
 contract is narrower than the complete daemon surface.
 
-What does not yet exist is a definition of what *tagging v1.0* would mean:
+Before this decision, the project had no definition of what *tagging v1.0*
+would mean:
 which surfaces the tag freezes, what evidence must exist before the tag is
 honest, and what compatibility posture replaces the alpha
 correctness-over-compatibility rule afterward. The project's development rule
@@ -38,8 +40,9 @@ largest claim the project can make and deserves the same treatment.
 ADR-0122 (compatibility-debt inventory) supplies the removal schedule and
 lifetime policies this contract builds on.
 
-This ADR defines that contract as a decision draft. It changes no behavior,
-freezes nothing, and sets no date.
+This ADR accepts that contract. Acceptance changes no runtime behavior and
+sets no tag date: the inventory freezes at the v1.0 tag only after the evidence
+bar below is complete.
 
 ## Decision
 
@@ -67,11 +70,9 @@ release, comprising:
   only, per the existing scope rule), the versioned machine formats
   `rbgp-ribdiff/1` and `rbgp-ribsnap/1`, and the test-pinned JSON floors
   (neighbor detail, update-group comparison, support-bundle manifest v2).
-- **On-disk formats.** The commit-confirm v3 journal, config-history v2 rows
-  (plus the metadata-only v3 rows if ADR-0124 ships first), and the `.rpol`
-  grammar/decision corpus rule. Reading a prior release's on-disk state is
-  governed by the recovery-reader lifetimes in ADR-0122, not by an unbounded
-  any-version promise.
+- **Policy programs.** The machine-inventoried `.rpol` compatibility rule and
+  pinned decision corpus: grammar additions are allowed, but an existing
+  program's parse result, accept/reject result, or modification set is frozen.
 - **The upgrade-exercise chain.** The contiguous consecutive-release fixture
   chain must extend to the v1.0 anchor, using the existing milestone-jump
   annotation if the release numbering jumps.
@@ -87,6 +88,10 @@ classifications carry forward):
 - Bench, soak, and harness internals; human-readable CLI output; metrics and
   events beyond the existing semantic rules (consumers ignore unknown
   additive fields and series).
+- Commit-confirm and config-history on-disk formats. These are not present in
+  `docs/v1-stable-surface.json`; their compatibility remains governed by the
+  recovery-reader lifetimes in ADR-0122 and explicit migration notes rather
+  than an unimplemented machine-pinned promise.
 - The daemon remains free to add roles and surfaces in 1.x minors by adding
   inventory entries; blessing is always an explicit, reviewed act, never an
   implication of "shipped".
@@ -98,54 +103,58 @@ an open decision or already satisfied. The gap list below restates these as
 a backlog.
 
 **E1 — External pilot feedback incorporated (DR1).** At least one external
-shadow or canary deployment, run per the shipped shadow-pilot cookbook, with
-its differences explained and at least one resulting change (or explicit
-no-change finding) recorded. Current state: zero external pilots; the tooling
+shadow deployment, run per the shipped shadow-pilot cookbook for two weekly
+checkpoints at the pilot's normal refresh cadence. Archive the final semantic
+diff and support bundle, test the rollback, and record the resulting change or
+explicit no-change finding. Current state: zero external pilots; the tooling
 (semantic diff engine, `rbgp diff`, incumbent adapters, cookbook) is complete
 and unused in anger. This is the single largest gap between the receipts
 culture and a 1.0 claim: every existing receipt is self-generated.
 
-**E2 — Soak receipts at flagship RS/RR shapes (DR2).** Archived multi-day
-soaks against the precommitted acceptance gates
-(`docs/soaks/soak-acceptance-gates.md`), at route-server / route-reflector
-shapes. Current state: all archived 24 h soaks are EVPN-shaped; the
-precommitted gates name eight guarantees with no soak injection today, of
-which the SIGHUP file-reload and max-prefix trip/timed-restart scenarios are
-scheduled and the rest deferred. Recommended bar: the two scheduled scenarios
-archived green (or published red with fixes), leaving the deferred six as
-post-1.0 work.
+**E2 — Soak receipts at flagship RS/RR shapes (DR2).** Exactly two archived
+receipts of at least 24 hours each against the precommitted acceptance gates
+(`docs/soaks/soak-acceptance-gates.md`). Together the two receipts must cover
+route-server and route-reflector flagship shapes, a real SIGHUP file reload,
+and a max-prefix trip followed by timed restart. Current state: all archived
+24 h soaks are EVPN-shaped; the precommitted gates name eight guarantees with
+no soak injection today, of which these two scenarios are scheduled and the
+rest deferred. Exactly two final qualifying receipts must be green. Preserve
+earlier red attempts and their fixes as evidence, but do not count them toward
+the two; the deferred six remain post-1.0 work.
 
 **E3 — Comparative reload evidence at IRR scale (DR3).** The IXP receipt
 matrix (700 clients × 400,400 routes vs BIRD 3.3.1 and OpenBGPD 9.1) exists
-and publishes losses alongside wins. The IRR-scale streamed transactional
-apply receipt (320 members × 183,040 routes, 3.2M filter entries) is
-single-stack. Current state: no same-harness row compares rustbgpd's IRR-scale
-reload against the incumbents. Recommended bar: one comparative IRR-scale
-reload/completion row, losses published if that is the result.
+and publishes losses alongside wins. This gate is satisfied by the four-root,
+counterbalanced IRR-scale reload comparison at 320 members × 183,040 routes
+and 3,218,965 filter entries against BIRD 3.3.1 and OpenBGPD 9.1. The receipt
+publishes rustbgpd's fan-out and memory losses alongside the grouped-control
+win; it is indexed in `docs/RECEIPTS.md` and
+`docs/perf/irr-reload-comparison-2026-08.md`.
 
 **E4 — Compatibility debt executed (DR5).** The ADR-0122 scheduled removals
-land before the tag: the v0.64 items (frozen v1/v2 commit-confirm recovery
-readers, Paths-Limit raw-cap field) and the v0.65 items (legacy enforcement
-enum variant, `rib diff` older-daemon fallbacks, `AddNeighborRequest` legacy
-carrier, `RouteEvent.event_id` mirror). The two open calls — D2
-(unary vs streaming Plan/Apply) and L1 (the `--from-file` "never" pledge) —
-must be resolved, because both sit on the pinned ConfigService/CLI surface
-this contract freezes. Current state: inventory complete, removals scheduled,
-neither open call decided.
+land before the tag. The v0.64 deadline was missed for the frozen v1/v2
+commit-confirm and legacy-history readers and the Paths-Limit raw-cap field;
+those join the existing v0.65 batch. Unary Plan/Apply remains the permanent
+small-candidate path. The hidden `--from-file` compatibility aliases on
+`config diff`, `config plan`, and `config apply` are scheduled for v0.65.
+Current state: inventory and decisions complete; the v0.65 removals remain to
+land.
 
-**E5 — RFC 8212 posture resolved either way (DR4).** Opt-in enforcement is
-shipped and receipted (ADR-0112, M95); the config-epoch representation that
-makes a default flip safe is specified but not implemented (ADR-0119,
-Proposed). A 1.0 contract must state the default; "undecided" is not a
-default. Either activate per ADR-0119's proofs or record an explicit decision
-that 1.0 ships opt-in.
+**E5 — RFC 8212 secure default (DR4).** Opt-in enforcement is shipped and
+receipted (ADR-0112, M95). ADR-0119's config-epoch representation and
+activation are accepted but not implemented. Once every named
+production-mutation proof passes, activation changes only epoch-2 omission
+from invalid to effective `true`; legacy and explicit epoch-1 omission remain
+effective `false`, and explicit booleans retain their value. The proof-gated
+implementation must land before the tag.
 
 **E6 — Security and fuzz posture line items.** Current state, largely
 satisfied: the exact fail-closed 19-target fuzz inventory runs in PR CI with
 the nightly libFuzzer campaign; `cargo audit` runs daily; private
 vulnerability reporting is enabled with a stated response timeline. Remaining
-for the tag: SECURITY.md's supported-versions table gains the 1.x row (DR8),
-and release artifacts keep the documented glibc-floor build discipline.
+for the tag: SECURITY.md's supported-versions table gains a latest 1.x
+security-support row (DR8), and release artifacts keep the documented
+glibc-floor build discipline.
 
 **E7 — Upgrade chain to the anchor.** Already-working machinery: the tagging
 release extends the consecutive-release fixture chain to the v1.0 anchor and
@@ -166,9 +175,10 @@ frozen inventory only**:
   unchanged — retired-config-key pointers live three minors, rolling-upgrade
   fallbacks support N-1, and unlisted surfaces may still change between
   minors with a migration note. 1.0 does not silently widen the promise.
-- **Migration aids:** upgrade support covers the current and immediately
-  previous minor release, as today; SECURITY.md's supported versions align
-  with the same N-1 window (DR8).
+- **Migration aids and security support:** upgrade compatibility covers the
+  current and immediately previous minor release, as today. Security fixes
+  support the latest 1.x release. These are deliberately separate promises
+  (DR8); N-1 migration compatibility does not imply N-1 security support.
 - New compat retentions keep adding rows to the ADR-0122 inventory in the PR
   that introduces them; that inventory remains the single ledger post-1.0.
 
@@ -178,11 +188,11 @@ The actionable backlog seed: criterion → current state → what closes it.
 
 | Criterion | Current state | Closes the gap |
 |-----------|---------------|----------------|
-| E1 external pilot | Zero pilots; cookbook + tooling shipped, unused externally | One sanitized external shadow run with explained differences and a rollback record; incorporate resulting feedback |
-| E2 RS/RR soaks | Archived soaks are EVPN-shaped; eight precommitted gates uninjected | Run the two scheduled scenarios (SIGHUP reload, max-prefix trip/timed restart) through the authorized soak window; archive receipts |
-| E3 comparative IRR row | IXP matrix predates IRR scale; IRR receipt single-stack | One same-harness IRR-scale reload row vs BIRD and OpenBGPD, losses published |
-| E4 debt schedule | ADR-0122 removals scheduled (v0.64/v0.65), not landed; D2/L1 open | Land scheduled removal PRs; decide D2 and L1 |
-| E5 RFC 8212 | Opt-in shipped; ADR-0119 representation unimplemented | Open decision; if activating, ADR-0119's production-mutation proofs |
+| E1 external pilot | Zero pilots; cookbook + tooling shipped, unused externally | Two weekly external shadow checkpoints at normal refresh cadence; archive final semantic diff, support bundle, tested rollback, and incorporated feedback or explicit no-change finding |
+| E2 RS/RR soaks | Archived soaks are EVPN-shaped; eight precommitted gates uninjected | Archive exactly two receipts of at least 24 h that collectively cover flagship RS/RR, real SIGHUP reload, and max-prefix trip/timed restart |
+| E3 comparative IRR row | **Satisfied:** four-root same-harness comparison against BIRD and OpenBGPD publishes wins and losses | Keep the published receipt linked from the evidence index |
+| E4 debt schedule | Decisions recorded; v0.64 removals slipped into the v0.65 batch | Land the complete v0.65 removal batch before the tag |
+| E5 RFC 8212 | Activation authorized; ADR-0119 representation and proofs unimplemented | Land the representation and every named production-mutation proof; activate only epoch-2 omission |
 | E6 security posture | Fuzz/audit/reporting in place | SECURITY.md 1.x supported-versions row; keep artifact build floor |
 | E7 upgrade chain | Chain contiguous through the current anchor | Extend to the v1.0 anchor at tag time (existing process) |
 | DR6 re-bless list | Streaming ingress, history/rollback RPCs outside v1 | Deliberate re-bless review for each, or defer to a 1.x minor |
@@ -203,8 +213,8 @@ The actionable backlog seed: criterion → current state → what closes it.
 - The existing machinery (surface checker, upgrade-exercise chain, ADR-0122
   ledger) becomes the enforcement mechanism of the 1.0 contract rather than
   a parallel system; no new tooling is required to adopt this ADR.
-- Nothing here schedules the tag. Accepting this ADR fixes the meaning and
-  the bar; the timeline remains evidence-driven.
+- Nothing here schedules the tag. Acceptance fixes the meaning and the bar;
+  the timeline remains evidence-driven.
 
 ## References
 
@@ -212,7 +222,7 @@ The actionable backlog seed: criterion → current state → what closes it.
   [`docs/v1-stable-surface.json`](../v1-stable-surface.json), the pinned
   inventory and compatibility rules
 - [ADR-0122](0122-compatibility-debt-inventory.md), debt inventory, lifetime
-  policies, and the D2/L1 open calls
+  policies, and the recorded D2/L1 outcomes
 - [ADR-0112](0112-rfc-8212-ebgp-requires-policy.md) /
   [ADR-0119](0119-rfc-8212-secure-default-config-epoch.md), RFC 8212 posture
 - [ADR-0124](0124-bounded-config-history-retention.md), config-history

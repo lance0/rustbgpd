@@ -1,7 +1,8 @@
 # ADR-0119: RFC 8212 secure-default config epoch
 
-**Status:** Proposed (representation contract and secure-default activation deferred; owner gate required)
+**Status:** Accepted (representation and proof-gated activation; implementation pending)
 **Date:** 2026-07-29
+**Decision recorded:** 2026-08-08
 
 ## Context
 
@@ -15,10 +16,11 @@ files, retained history, generated configurations, and transaction candidates.
 File age, comments, formatting, release provenance, history sequence, and
 whether a document looks canonical are not trustworthy freshness signals.
 
-Future implementation needs an explicit representation boundary before any secure-default
-activation is considered. This ADR defines that representation and its
-diagnostics only. It does not change route handling, activate a new default,
-or supersede ADR-0112 and its M95 real-session receipt.
+Implementation needs an explicit representation boundary before secure-default
+activation. This ADR defines that representation and its diagnostics, and
+authorizes activation only after the production-mutation proof gate below is
+complete. Acceptance itself does not change route handling, activate a new
+default, or supersede ADR-0112 and its M95 real-session receipt.
 
 ## Decision
 
@@ -42,7 +44,7 @@ source verdict is formed.
 
 ### Version matrix
 
-The complete pre-activation and possible later-activation matrix is:
+The complete pre-activation and authorized activation matrix is:
 
 | Epoch syntax | Raw `ebgp_requires_policy` | Pre-activation result | Eventual activation result |
 |---|---|---|---|
@@ -95,9 +97,11 @@ hot-apply any change to that tuple. It reports restart-required and retains
 the complete running startup tuple.
 
 The v1 runtime transaction planner likewise rejects an epoch, raw-presence,
-source-only, or effective-value change before persistence or runtime mutation.
-The candidate is not partially adopted. This extends, rather than weakens,
-ADR-0112 restart pinning.
+source-only, or effective-value change before persistence or runtime mutation,
+except for the named legacy-omission materialization transition below. That
+transition is planned, persisted, and receipted atomically with the durable
+mutation; every other such change is rejected without partial adoption. This
+extends, rather than weakens, ADR-0112 restart pinning.
 
 Text diffs and rejection receipts use these exact line shapes:
 
@@ -163,12 +167,13 @@ then validates the exact bytes against the v0.61 schema/loader. It refuses a
 target that cannot represent or validate the posture. Downgrade necessarily
 loses epoch/source provenance but never changes effective enforcement.
 
-### Deferred activation gate
+### Authorized activation gate
 
-Secure-default activation is a later evidence-and-owner gate, not a date,
-version inference, or automatic follow-on from this ADR. It requires an
-explicit owner decision plus passing production-mutation proofs below.
-No heuristic freshness signal may substitute for `config_epoch`.
+ADR-0125 records the owner decision to activate the secure default after the
+representation and every production-mutation proof below land. Activation is
+still an evidence gate, not a date, version inference, or automatic consequence
+of accepting this ADR. No heuristic freshness signal may substitute for
+`config_epoch`.
 
 Activation changes only epoch-2 omission from invalid to effective `true`.
 Epoch-less, epoch-1, and explicit boolean behavior remains frozen by the matrix.
@@ -183,7 +188,7 @@ weakens Route Refresh and retained-stale-state qualification.
 M95 remains the required real FRR/BIRD policy-presence interop regression.
 Representation work cannot claim success by replacing or bypassing it.
 
-## Future load-bearing proof plan
+## Implementation and activation load-bearing proof plan
 
 The implementation gate must make each production mutation independently red:
 
@@ -217,9 +222,10 @@ coverage cannot satisfy M95 or activation evidence.
 
 ## Current validation gate
 
-Load-bearing executable proof is N/A for this docs-only Proposed ADR. Current
-validation is structural: exact two-file scope, index consistency, line/addition
-budgets, `git diff --check`, matrix review, and contradiction review.
+Load-bearing executable proof is N/A for this docs-only decision record.
+Executable proof remains a hard gate on the implementation and activation.
+Current validation is structural: index consistency, matrix review, and
+contradiction review against ADR-0112 and ADR-0125.
 
 ## Consequences
 
@@ -227,4 +233,5 @@ budgets, `git diff --check`, matrix review, and contradiction review.
 - Untouched legacy files and history have deterministic, permanent semantics.
 - Durable canonicalization changes diagnostics at the named materialization
   transition; source-aware comparison adds state even when behavior is unchanged.
-- Activation remains blocked on evidence and owner approval.
+- Activation remains blocked on the named representation and production-
+  mutation evidence; the owner approval is recorded in ADR-0125.
