@@ -52,7 +52,7 @@ its relative `rule_files` reference:
 (cd share/monitoring && promtool test rules rustbgpd-alerts_test.yml)
 ```
 
-Native packages install the same three files under
+Native packages install the same monitoring payloads under
 `/usr/share/doc/rustbgpd/monitoring/`. Import
 `rustbgpd-overview.json` in Grafana and load `rustbgpd-alerts.yml` from
 Prometheus. [deployment.md](deployment.md#monitoring-payloads) covers the

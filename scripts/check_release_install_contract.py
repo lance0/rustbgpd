@@ -57,6 +57,9 @@ def require(errors: list[str], label: str, text: str, tokens: tuple[str, ...]) -
 def check(root: Path) -> list[str]:
     errors: list[str] = []
     read = lambda path: (root / path).read_text(encoding="utf-8")
+    monitoring_sources = tuple(source for source, _, _ in MONITORING_PAYLOADS)
+    monitoring_tar_paths = tuple(tar for _, tar, _ in MONITORING_PAYLOADS)
+    monitoring_names = tuple(Path(source).name for source in monitoring_sources)
     try:
         release = read(".github/workflows/release.yml")
         package = workflow_step(release, "Package binaries")
@@ -74,11 +77,9 @@ def check(root: Path) -> list[str]:
                 "examples/systemd/rustbgpd-dataplane.conf",
                 "staging/share/systemd/",
                 "staging/share/monitoring",
-                "docs/grafana/rustbgpd-overview.json",
-                "examples/prometheus/rustbgpd-alerts.yml",
-                "examples/prometheus/rustbgpd-alerts_test.yml",
                 "rustbgpd rbgp rs-config-render birdwatcher-adapter",
-            ),
+            )
+            + monitoring_sources,
         )
         require(
             errors,
@@ -88,10 +89,8 @@ def check(root: Path) -> list[str]:
                 "birdwatcher-adapter",
                 "share/systemd/rustbgpd.service",
                 "share/systemd/rustbgpd-dataplane.conf",
-                "share/monitoring/rustbgpd-overview.json",
-                "share/monitoring/rustbgpd-alerts.yml",
-                "share/monitoring/rustbgpd-alerts_test.yml",
-            ),
+            )
+            + monitoring_tar_paths,
         )
 
         nfpm = read("packaging/nfpm.yaml")
@@ -149,10 +148,8 @@ def check(root: Path) -> list[str]:
                 (
                     "share/monitoring/",
                     "/usr/share/doc/rustbgpd/monitoring/",
-                    "rustbgpd-overview.json",
-                    "rustbgpd-alerts.yml",
-                    "rustbgpd-alerts_test.yml",
-                ),
+                )
+                + monitoring_names,
             )
 
         contract_workflow = read(".github/workflows/release-install-contract.yml")
