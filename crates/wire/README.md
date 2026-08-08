@@ -68,6 +68,30 @@ analyzers, test harnesses, MRT readers, etc.
 | draft-abraitis-idr-addpath-paths-limit-04 | Experimental Paths-Limit capability (`PathsLimitFamily`, IANA-assigned capability code 76). The draft is expired and archived; interoperability and behavior remain experimental |
 | 10005 | Link Bandwidth Extended Community receiver subset: decode exact transitive/non-transitive types 0x00/0x40, subtype 0x04, as raw AS + IEEE-754 bytes/second; the constructor remains non-transitive type 0x40 |
 
+### 0.17.0 compatibility note
+
+`rustbgpd-wire` 0.17.0 is a **breaking release**: `encode_evpn_nlri` now
+returns `Result<(), EncodeError>` instead of `()`. Direct callers must handle
+or propagate the result; on `Err` the output buffer may hold a partial
+encoding and must be discarded.
+
+The fallibility is not decorative. Three EVPN wire invariants that the
+decoder discriminates on were previously enforced only by debug assertions —
+release builds silently encoded substitute bytes (an `UNSPECIFIED` gateway,
+a pinned `MAX_ET` tag) that could round-trip as a *different* route. They now
+refuse to encode with `EncodeError::ValueOutOfRange`:
+
+- an EVPN Type 5 route whose gateway address family differs from its prefix
+  family (RFC 9136 §3),
+- an EAD-per-ES route whose ethernet tag is not `MAX_ET` (RFC 7432 §7.1),
+- an EAD-per-EVI route whose ethernet tag is `MAX_ET`.
+
+Indirect encode paths inherit the change: `MP_REACH_NLRI` / `MP_UNREACH_NLRI`
+encoding via `UpdateMessage::try_build` or `encode_message` now returns these
+errors for EVPN route lists that previously emitted silently altered wire
+bytes. Consumers that never encode EVPN NLRI are unaffected beyond the
+signature change at direct call sites.
+
 ### 0.16.0 compatibility note
 
 `rustbgpd-wire` 0.16.0 keeps the public API additive, but **decode acceptance

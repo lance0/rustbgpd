@@ -38,7 +38,7 @@ class EmbeddingVersionContractTests(unittest.TestCase):
 
     def test_each_wire_snippet_is_guarded(self) -> None:
         """Red if either wire dependency example drifts to 0.15.0."""
-        old = 'rustbgpd-wire = "0.16.2"'
+        old = 'rustbgpd-wire = "0.17.0"'
         for occurrence in (0, 1):
             with self.subTest(occurrence=occurrence):
                 self.assert_fails(
@@ -55,7 +55,7 @@ class EmbeddingVersionContractTests(unittest.TestCase):
 
     def test_publish_statuses_are_guarded(self) -> None:
         """Red if either numbered publish heading names an old version."""
-        mutations = (("wire", "0.16.2", "0.16.1"), ("fsm", "0.3.1", "0.3.0"))
+        mutations = (("wire", "0.17.0", "0.16.2"), ("fsm", "0.3.1", "0.3.0"))
         for package, current, old in mutations:
             with self.subTest(package=package):
                 self.assert_fails(
