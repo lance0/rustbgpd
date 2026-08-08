@@ -6169,3 +6169,471 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
     drop(tx);
     handle.await.unwrap();
 }
+
+// --- batched authoritative export-policy apply
+// (`RibUpdate::ReplacePeerExportPoliciesAuthoritatively`) ---
+
+/// Register one per-client-best route-server member directly on the
+/// manager, with an exact-export encoder (the batched shared payload is
+/// probe-gated like the clean transition's).
+fn register_direct_pcb_peer(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    export_policy: Option<PolicyChain>,
+    encoder: Arc<dyn crate::update::ExactExportEncoder>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    manager.handle_update(RibUpdate::SetPeerExportEncoder {
+        peer,
+        session_id: 0,
+        encoder,
+    });
+    // The rendered route-server default carries an RFC 9234 role on
+    // every member; the batched transition must share regardless (a
+    // RouteServer-role fleet with no OTC-attributed routes never blocks).
+    manager.handle_update(RibUpdate::SetPeerExportContext {
+        peer,
+        session_id: 0,
+        local_role: Some(rustbgpd_wire::BgpRole::RouteServer),
+    });
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(32);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer,
+        session_id: 0,
+        peer_asn: 65_100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: true,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    // Drain the initial dump (route replay for a late joiner) up to and
+    // including its End-of-RIB marker.
+    let mut saw_eor = false;
+    while let Ok(update) = outbound_rx.try_recv() {
+        if update.end_of_rib == ipv4_sendable() {
+            saw_eor = true;
+            break;
+        }
+    }
+    assert!(saw_eor, "initial dump must deliver the IPv4-unicast EoR");
+    outbound_rx
+}
+
+struct BatchedPcbFleet {
+    manager: RibManager,
+    members: Vec<IpAddr>,
+    receivers: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    shared_prefix: Ipv4Prefix,
+    probes: Arc<AtomicUsize>,
+    reuses: Arc<AtomicUsize>,
+}
+
+/// Four grouped per-client-best members, each announcing an own /24;
+/// members 0 and 1 both announce `shared_prefix`, so the group's
+/// exception lane holds one runner-up. Setup envelopes are drained.
+fn batched_pcb_fleet(export_policy: Option<&PolicyChain>) -> BatchedPcbFleet {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let members: Vec<IpAddr> = (1..=4)
+        .map(|host| IpAddr::V4(Ipv4Addr::new(10, 40, 0, host)))
+        .collect();
+    let mut receivers = Vec::new();
+    for (index, &peer) in members.iter().enumerate() {
+        receivers.push(register_direct_pcb_peer(
+            &mut manager,
+            peer,
+            export_policy.cloned(),
+            Arc::new(CohortExactEncoder {
+                owner: u64::try_from(index + 1).unwrap(),
+                profile: 23,
+                max_len: 4_096,
+                generation: AtomicUsize::new(0),
+                advance_generation: false,
+                probes: Arc::clone(&probes),
+                reuses: Arc::clone(&reuses),
+            }),
+        ));
+    }
+    for (index, &peer) in members.iter().enumerate() {
+        let IpAddr::V4(source) = peer else {
+            unreachable!()
+        };
+        let index = u8::try_from(index).unwrap();
+        distribute_direct_route(
+            &mut manager,
+            source,
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 110 + index, 0), 24),
+        );
+    }
+    let shared_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 199, 0), 24);
+    for &peer in &members[..2] {
+        let IpAddr::V4(source) = peer else {
+            unreachable!()
+        };
+        distribute_direct_route(&mut manager, source, shared_prefix);
+    }
+    for receiver in &mut receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+    BatchedPcbFleet {
+        manager,
+        members,
+        receivers,
+        shared_prefix,
+        probes,
+        reuses,
+    }
+}
+
+fn batch_replacements(
+    members: &[IpAddr],
+    export_policy: &PolicyChain,
+) -> Vec<crate::update::PeerExportPolicyReplacement> {
+    members
+        .iter()
+        .map(|&peer| crate::update::PeerExportPolicyReplacement {
+            peer,
+            export_policy: Some(export_policy.clone()),
+        })
+        .collect()
+}
+
+/// The canonical batched cohort: every member of one per-client-best
+/// group moves to a fresh chain in ONE command with ZERO per-member
+/// resync passes — the shared payload is one `Arc` and one encode cell
+/// across the cohort, split horizon rides `announce_source_exclusion`,
+/// and the winner's source receives its lane substitution as a
+/// member-scoped supplement.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario pins topology, payload sharing, supplements, counters, and pass count together"
+)]
+fn batched_authoritative_pcb_cohort_commits_in_one_shared_transition() {
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let mut fleet = batched_pcb_fleet(Some(&old_policy));
+    let source_gid = fleet.manager.grouped_member_of(fleet.members[0]).unwrap();
+    let permitted_before: Vec<u64> = fleet
+        .members
+        .iter()
+        .map(|peer| {
+            fleet
+                .manager
+                .export_policy_stats
+                .get(peer)
+                .map_or(0, |stats| stats.export_policy_routes_permitted)
+        })
+        .collect();
+    let passes_before = fleet.manager.adj_rib_out_commit_stats.metrics_handle_clones;
+    let probes_before = fleet.probes.load(Ordering::Relaxed);
+    let reuses_before = fleet.reuses.load(Ordering::Relaxed);
+
+    let (reply, mut response) = oneshot::channel();
+    fleet
+        .manager
+        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: batch_replacements(&fleet.members, &next_policy),
+            reply,
+        });
+    assert_eq!(response.try_recv().unwrap(), Ok(()));
+
+    // One batch, every member on the shared transition, no fallback —
+    // and ZERO distribution passes: the wire delta was derived and
+    // enqueued inside the batch, so nothing was left dirty to resync.
+    let stats = fleet.manager.policy_transition_stats;
+    assert_eq!(stats.batched_authoritative_batches, 1);
+    assert_eq!(stats.batched_authoritative_shared_members, 4);
+    assert_eq!(stats.batched_authoritative_fallback_members, 0);
+    assert_eq!(
+        fleet.manager.adj_rib_out_commit_stats.metrics_handle_clones, passes_before,
+        "the batched transition must not fall back to per-member resync passes"
+    );
+
+    // Final topology: one destination group holding all four members,
+    // per-client-best, with the shared prefix's lane intact.
+    let destination_gid = fleet.manager.grouped_member_of(fleet.members[0]).unwrap();
+    assert_ne!(source_gid, destination_gid);
+    assert_eq!(
+        fleet.manager.group_ribs.len(),
+        1,
+        "source group must be dropped"
+    );
+    let group = &fleet.manager.group_ribs[&destination_gid];
+    assert!(group.per_client_best);
+    assert_eq!(group.members.len(), 4);
+    assert_eq!(group.table.len(), 5);
+    let winner = group
+        .table
+        .get(&Prefix::V4(fleet.shared_prefix), 0)
+        .unwrap()
+        .peer;
+    assert_eq!(group.lane_counts.get(&winner), Some(&[1, 0]));
+    for peer in &fleet.members {
+        assert_eq!(
+            fleet.manager.grouped_member_of(*peer),
+            Some(destination_gid)
+        );
+        assert!(!fleet.manager.dirty_peers.contains(peer));
+    }
+
+    // Wire shape: one shared envelope per member — the SAME announce Arc
+    // and encode cell, split horizon via the exclusion — plus exactly
+    // one lane supplement toward the winner's source.
+    let mut shared_announces = Vec::new();
+    let mut shared_cells = Vec::new();
+    for (index, receiver) in fleet.receivers.iter_mut().enumerate() {
+        let member = fleet.members[index];
+        let shared = receiver.try_recv().unwrap();
+        assert_eq!(shared.announce_source_exclusion, Some(member));
+        assert_eq!(
+            shared.announce.len(),
+            5,
+            "marker-style change re-announces every slot"
+        );
+        assert!(shared.withdraw.is_empty());
+        assert!(
+            shared
+                .announce
+                .iter()
+                .all(|route| route.attributes.iter().any(|attribute| {
+                    matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_0002))
+                })),
+            "shared payload must carry the destination chain's output"
+        );
+        shared_cells.push(shared.shared_group_encode.clone().unwrap());
+        shared_announces.push(shared.announce.clone());
+        if member == winner {
+            let supplement = receiver.try_recv().unwrap();
+            assert_eq!(supplement.announce_source_exclusion, None);
+            assert_eq!(supplement.announce.len(), 1);
+            assert_eq!(
+                supplement.announce[0].prefix,
+                Prefix::V4(fleet.shared_prefix)
+            );
+            assert_ne!(
+                supplement.announce[0].peer, winner,
+                "the lane substitutes the runner-up"
+            );
+            assert!(supplement.withdraw.is_empty());
+        }
+        assert!(
+            receiver.try_recv().is_err(),
+            "no further envelopes: the batch emits at most shared + supplement"
+        );
+    }
+    assert!(
+        shared_announces
+            .iter()
+            .all(|announce| Arc::ptr_eq(announce, &shared_announces[0])),
+        "one announce payload shared across the cohort"
+    );
+    assert!(
+        shared_cells
+            .iter()
+            .all(|cell| Arc::ptr_eq(cell, &shared_cells[0])),
+        "one encode cell shared across the cohort"
+    );
+
+    // Exact-export cost shape: ONE full probe of the shared payload (5
+    // candidates) plus the winner's one-route supplement probe; every
+    // other member proves only the reused maximum.
+    assert_eq!(fleet.probes.load(Ordering::Relaxed) - probes_before, 6);
+    assert_eq!(fleet.reuses.load(Ordering::Relaxed) - reuses_before, 3);
+
+    // Counter replay parity with the join-time fold: every member's
+    // adv(m) is 4 slots (3 other own-prefixes + the shared slot — the
+    // winner substituting its lane entry), replayed as permits.
+    for (index, peer) in fleet.members.iter().enumerate() {
+        let permitted = fleet
+            .manager
+            .export_policy_stats
+            .get(peer)
+            .map_or(0, |stats| stats.export_policy_routes_permitted);
+        assert_eq!(
+            permitted - permitted_before[index],
+            4,
+            "member {peer} replays totals − own + lane"
+        );
+    }
+}
+
+/// The batched wire delta is O(actual policy diff), not O(table): a
+/// chain change touching one prefix announces exactly that slot (and
+/// its lane substitution toward the winner's source) — every unchanged
+/// slot is equality-suppressed out of the shared payload.
+#[test]
+fn batched_authoritative_apply_announces_only_changed_slots() {
+    let mut fleet = batched_pcb_fleet(None);
+    let shared_prefix = fleet.shared_prefix;
+    let mut statement = deny_statement(shared_prefix);
+    statement.action = PolicyAction::Permit;
+    statement.modifications.communities_add.push(0xFDE8_0002);
+    let next_policy = PolicyChain::new(vec![Policy {
+        entries: vec![statement],
+        default_action: PolicyAction::Permit,
+    }]);
+    let passes_before = fleet.manager.adj_rib_out_commit_stats.metrics_handle_clones;
+
+    let (reply, mut response) = oneshot::channel();
+    fleet
+        .manager
+        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: batch_replacements(&fleet.members, &next_policy),
+            reply,
+        });
+    assert_eq!(response.try_recv().unwrap(), Ok(()));
+
+    let stats = fleet.manager.policy_transition_stats;
+    assert_eq!(stats.batched_authoritative_shared_members, 4);
+    assert_eq!(stats.batched_authoritative_fallback_members, 0);
+    assert_eq!(
+        fleet.manager.adj_rib_out_commit_stats.metrics_handle_clones,
+        passes_before
+    );
+
+    let destination_gid = fleet.manager.grouped_member_of(fleet.members[0]).unwrap();
+    let winner = fleet.manager.group_ribs[&destination_gid]
+        .table
+        .get(&Prefix::V4(shared_prefix), 0)
+        .unwrap()
+        .peer;
+    for (index, receiver) in fleet.receivers.iter_mut().enumerate() {
+        let member = fleet.members[index];
+        let shared = receiver.try_recv().unwrap();
+        assert_eq!(
+            shared.announce.len(),
+            1,
+            "only the changed slot is announced — O(changed), not O(table)"
+        );
+        assert_eq!(shared.announce[0].prefix, Prefix::V4(shared_prefix));
+        assert_eq!(shared.announce_source_exclusion, Some(member));
+        assert!(shared.withdraw.is_empty());
+        if member == winner {
+            let supplement = receiver.try_recv().unwrap();
+            assert_eq!(supplement.announce.len(), 1);
+            assert_eq!(supplement.announce[0].prefix, Prefix::V4(shared_prefix));
+        }
+        assert!(receiver.try_recv().is_err());
+    }
+}
+
+/// Failure injection: an unregistered peer in the batch is skipped
+/// (serial-loop parity), and a member whose outbound channel is gone
+/// still commits its policy and membership — delivery degrades to the
+/// established dead-channel handling, never a partial-state error.
+#[test]
+fn batched_authoritative_apply_skips_unregistered_and_degrades_dead_channels() {
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let mut fleet = batched_pcb_fleet(Some(&old_policy));
+    // Kill the last member's outbound channel before the batch.
+    let dead = fleet.members[3];
+    drop(fleet.receivers.pop().unwrap());
+    let unregistered = IpAddr::V4(Ipv4Addr::new(10, 40, 9, 9));
+    let mut replacements = batch_replacements(&fleet.members, &next_policy);
+    replacements.push(crate::update::PeerExportPolicyReplacement {
+        peer: unregistered,
+        export_policy: Some(next_policy.clone()),
+    });
+
+    let (reply, mut response) = oneshot::channel();
+    fleet
+        .manager
+        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        });
+    assert_eq!(response.try_recv().unwrap(), Ok(()));
+
+    let stats = fleet.manager.policy_transition_stats;
+    assert_eq!(stats.batched_authoritative_batches, 1);
+    assert_eq!(stats.batched_authoritative_shared_members, 4);
+    assert!(
+        !fleet
+            .manager
+            .update_groups
+            .members
+            .contains_key(&unregistered)
+    );
+    // The dead-channel member's state committed with the cohort; its
+    // emission was dropped through the established gone-channel path
+    // (no dirty retry against a channel that can never accept).
+    let destination_gid = fleet.manager.grouped_member_of(fleet.members[0]).unwrap();
+    assert_eq!(fleet.manager.grouped_member_of(dead), Some(destination_gid));
+    assert!(!fleet.manager.dirty_peers.contains(&dead));
+    for receiver in &mut fleet.receivers {
+        let shared = receiver.try_recv().unwrap();
+        assert_eq!(shared.announce.len(), 5);
+    }
+}
+
+/// An already-owned destination group disqualifies the shared cohort:
+/// the batch degrades to the ordinary per-member regroup machinery
+/// (baseline snapshot + dirty resync) — drained by ONE trailing
+/// distribution pass, not one pass per member.
+#[test]
+fn batched_authoritative_apply_degrades_to_one_pass_when_destination_is_owned() {
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let mut fleet = batched_pcb_fleet(Some(&old_policy));
+    // A fifth member already runs the destination chain, so the
+    // destination group exists and is owned.
+    let incumbent = IpAddr::V4(Ipv4Addr::new(10, 40, 0, 9));
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let mut incumbent_rx = register_direct_pcb_peer(
+        &mut fleet.manager,
+        incumbent,
+        Some(next_policy.clone()),
+        Arc::new(CohortExactEncoder {
+            owner: 9,
+            profile: 23,
+            max_len: 4_096,
+            generation: AtomicUsize::new(0),
+            advance_generation: false,
+            probes,
+            reuses,
+        }),
+    );
+    while incumbent_rx.try_recv().is_ok() {}
+    let destination_gid = fleet.manager.grouped_member_of(incumbent).unwrap();
+    let passes_before = fleet.manager.adj_rib_out_commit_stats.metrics_handle_clones;
+
+    let (reply, mut response) = oneshot::channel();
+    fleet
+        .manager
+        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: batch_replacements(&fleet.members, &next_policy),
+            reply,
+        });
+    assert_eq!(response.try_recv().unwrap(), Ok(()));
+
+    let stats = fleet.manager.policy_transition_stats;
+    assert_eq!(stats.batched_authoritative_batches, 1);
+    assert_eq!(stats.batched_authoritative_shared_members, 0);
+    assert_eq!(stats.batched_authoritative_fallback_members, 4);
+    assert_eq!(
+        fleet.manager.adj_rib_out_commit_stats.metrics_handle_clones,
+        passes_before + 1,
+        "the per-member fallback drains through exactly ONE distribution pass"
+    );
+    for peer in &fleet.members {
+        assert_eq!(
+            fleet.manager.grouped_member_of(*peer),
+            Some(destination_gid)
+        );
+        assert!(!fleet.manager.dirty_peers.contains(peer));
+    }
+    assert_eq!(fleet.manager.group_ribs[&destination_gid].members.len(), 5);
+}

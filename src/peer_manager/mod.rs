@@ -96,6 +96,15 @@ const READINESS_QUERY_BUDGET_PER_POLICY_STEP: usize = 1;
 /// therefore SIGHUP reload / gRPC policy apply) forever.
 const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Hard deadline for the batched authoritative export-policy apply
+/// (`RibUpdate::ReplacePeerExportPoliciesAuthoritatively`). One command
+/// carries the whole fallback cohort, so unlike the inline replies above
+/// it legitimately performs a destination-table build plus a cohort-wide
+/// emission — seconds at route-server scale. Twice the clean
+/// transition's 60-second pre-commit ownership budget, and still bounded
+/// so a wedged RIB task cannot park the peer-manager actor forever.
+const RIB_BATCH_REPLY_TIMEOUT: Duration = Duration::from_mins(2);
+
 /// ADR-0073: deadline for an `ExplainImportPolicy` round-trip to a
 /// session task. Bounded for the same reason as the policy-update
 /// timeout — a session parked on TCP back-pressure must not park the

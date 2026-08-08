@@ -14811,21 +14811,21 @@ async fn import_tolerant_cohort_handoff_fires_deferred_refresh_once() {
                 rustbgpd_rib::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply,
             ))
             .unwrap();
-        for expected_peer in peers {
-            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
-                rib_rx.recv().await.unwrap()
-            else {
-                panic!("expected ordinary per-peer RIB command");
-            };
-            assert_eq!(peer, expected_peer);
-            assert!(
-                refresh_watch
-                    .iter()
-                    .all(|counter| counter.refreshes.load(Ordering::SeqCst) == 0),
-                "no Route Refresh may fire before the authoritative handoff completes"
-            );
-            reply.send(Ok(())).unwrap();
-        }
+        let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected batched authoritative RIB command");
+        };
+        assert_eq!(replacements.len(), peers.len());
+        assert!(
+            refresh_watch
+                .iter()
+                .all(|counter| counter.refreshes.load(Ordering::SeqCst) == 0),
+            "no Route Refresh may fire before the authoritative handoff completes"
+        );
+        reply.send(Ok(())).unwrap();
     };
     let (result, ()) = tokio::join!(apply, drive_rib);
     result.expect("handoff cohort snapshot must commit");
@@ -15169,7 +15169,11 @@ async fn cohort_export_failure_repair_arms_pending_refresh_when_not_established(
 }
 
 #[tokio::test]
-async fn export_only_snapshot_handoff_applies_one_rib_peer_at_a_time() {
+#[expect(
+    clippy::too_many_lines,
+    reason = "the handoff fixture scripts the full prestage + cohort + batch dialogue"
+)]
+async fn export_only_snapshot_handoff_batches_the_authoritative_apply() {
     use rustbgpd_api::peer_types::{PeerManagerReadinessQuery, ResolvedPeerPolicy};
 
     let peers = [
@@ -15223,34 +15227,42 @@ async fn export_only_snapshot_handoff_applies_one_rib_peer_at_a_time() {
             ))
             .unwrap();
 
-        for (index, expected_peer) in peers.into_iter().enumerate() {
-            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
-                rib_rx.recv().await.unwrap()
-            else {
-                panic!("expected ordinary per-peer RIB command");
-            };
-            assert_eq!(peer, expected_peer);
-            assert!(
-                matches!(rib_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-                "the next peer must not be queued before peer {index} replies"
-            );
-            let (readiness_reply, readiness_response) = oneshot::channel();
-            readiness_tx
-                .send(PeerManagerReadinessQuery::ListPeers {
-                    reply: readiness_reply,
-                })
-                .await
-                .unwrap();
-            let infos = tokio::time::timeout(
-                rustbgpd_api::health_probe::CORE_READINESS_DEADLINE,
-                readiness_response,
-            )
+        // The handoff is ONE batched command carrying the whole cohort in
+        // caller order — never a serial per-peer dialogue.
+        let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected batched authoritative RIB command");
+        };
+        assert_eq!(
+            replacements
+                .iter()
+                .map(|replacement| replacement.peer)
+                .collect::<Vec<_>>(),
+            peers.to_vec()
+        );
+        assert!(
+            matches!(rib_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "no per-peer command may accompany the batch"
+        );
+        let (readiness_reply, readiness_response) = oneshot::channel();
+        readiness_tx
+            .send(PeerManagerReadinessQuery::ListPeers {
+                reply: readiness_reply,
+            })
             .await
-            .expect("readiness must remain live while an ordinary RIB reply is held")
             .unwrap();
-            assert_eq!(infos.len(), peers.len());
-            reply.send(Ok(())).unwrap();
-        }
+        let infos = tokio::time::timeout(
+            rustbgpd_api::health_probe::CORE_READINESS_DEADLINE,
+            readiness_response,
+        )
+        .await
+        .expect("readiness must remain live while the batched RIB reply is held")
+        .unwrap();
+        assert_eq!(infos.len(), peers.len());
+        reply.send(Ok(())).unwrap();
     };
     let (result, ()) = tokio::join!(apply, drive_rib);
 
@@ -15272,11 +15284,14 @@ async fn export_only_snapshot_handoff_applies_one_rib_peer_at_a_time() {
     }
 }
 
+/// A peer that deregistered from the RIB between the cohort hot-apply
+/// and the handoff must stay benign: the skip now happens INSIDE the
+/// batched authoritative apply (the RIB logs and continues — proven at
+/// the RIB seam by
+/// `batched_authoritative_apply_skips_unregistered_and_degrades_dead_channels`),
+/// so the peer manager observes one successful batch reply and performs
+/// no rollback.
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "the handoff fixture scripts the full prestage + cohort + per-peer dialogue"
-)]
 async fn export_only_snapshot_handoff_skips_missing_peer_and_continues_without_rollback() {
     use rustbgpd_api::peer_types::{PeerManagerReadinessQuery, ResolvedPeerPolicy};
 
@@ -15331,16 +15346,16 @@ async fn export_only_snapshot_handoff_skips_missing_peer_and_continues_without_r
             ))
             .unwrap();
 
-        let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = rib_rx.recv().await.unwrap()
+        let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
         else {
-            panic!("expected first ordinary per-peer RIB command");
+            panic!("expected batched authoritative RIB command");
         };
-        assert_eq!(peer, peers[0]);
-        reply
-            .send(Err(rustbgpd_rib::RibCommandError::not_found(
-                "peer disappeared after cohort handoff",
-            )))
-            .unwrap();
+        // The departed peer still rides the batch; the RIB skips it
+        // internally and the whole apply succeeds.
+        assert_eq!(replacements.len(), peers.len());
 
         let (readiness_reply, readiness_response) = oneshot::channel();
         readiness_tx
@@ -15352,11 +15367,6 @@ async fn export_only_snapshot_handoff_skips_missing_peer_and_continues_without_r
         let infos = readiness_response.await.unwrap();
         assert_eq!(infos.len(), peers.len());
 
-        let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = rib_rx.recv().await.unwrap()
-        else {
-            panic!("expected second ordinary per-peer RIB command");
-        };
-        assert_eq!(peer, peers[1]);
         reply.send(Ok(())).unwrap();
         tokio::task::yield_now().await;
         assert!(matches!(
@@ -15368,7 +15378,7 @@ async fn export_only_snapshot_handoff_skips_missing_peer_and_continues_without_r
 
     assert!(
         result.is_ok(),
-        "NotFound handoff race must be benign: {result:?}"
+        "a departed-peer handoff race must be benign: {result:?}"
     );
     assert_eq!(
         installs.load(Ordering::SeqCst),
@@ -15412,25 +15422,30 @@ async fn export_only_snapshot_handoff_failure_restores_every_peer_newest_first()
             ))
             .unwrap();
 
+        // Forward: ONE batched command for the whole cohort; its failure
+        // fails the whole handoff at once.
+        let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected batched authoritative RIB command");
+        };
+        assert_eq!(
+            replacements
+                .iter()
+                .map(|replacement| replacement.peer)
+                .collect::<Vec<_>>(),
+            peers.to_vec()
+        );
+        reply
+            .send(Err(rustbgpd_rib::RibCommandError::internal(
+                "synthetic batch failure",
+            )))
+            .unwrap();
+
+        // Rollback stays on the per-peer restore seam, newest first.
         let mut order = Vec::new();
-        for expected_peer in peers {
-            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
-                rib_rx.recv().await.unwrap()
-            else {
-                panic!("expected forward ordinary RIB command");
-            };
-            assert_eq!(peer, expected_peer);
-            order.push(peer);
-            if peer == peers[1] {
-                reply
-                    .send(Err(rustbgpd_rib::RibCommandError::internal(
-                        "synthetic second-peer failure",
-                    )))
-                    .unwrap();
-            } else {
-                reply.send(Ok(())).unwrap();
-            }
-        }
         for expected_peer in peers.into_iter().rev() {
             let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
                 rib_rx.recv().await.unwrap()
@@ -15479,20 +15494,17 @@ async fn export_only_snapshot_handoff_failure_restores_every_peer_newest_first()
         .await;
     assert!(
         result.as_ref().is_err_and(|error| {
-            error.contains("synthetic second-peer failure")
+            error.contains("synthetic batch failure")
                 && error.contains("already-applied peers restored")
         }),
-        "a later handoff failure must surface after a complete rollback: {result:?}"
+        "a handoff failure must surface after a complete rollback: {result:?}"
     );
     assert_eq!(
         installs.load(Ordering::SeqCst),
         peers.len() * 2,
         "handoff must avoid a second forward session apply and restore every session once"
     );
-    assert_eq!(
-        rib_task.await.unwrap(),
-        vec![peers[0], peers[1], peers[1], peers[0]]
-    );
+    assert_eq!(rib_task.await.unwrap(), vec![peers[1], peers[0]]);
     for peer in peers {
         let peer_state = manager.peers.get(&key(peer)).unwrap();
         assert!(peer_state.export_policy.is_none());
@@ -15559,23 +15571,32 @@ async fn export_only_snapshot_handoff_timeout_restores_after_the_owned_forward_c
             ))
             .unwrap();
 
-        let RibUpdate::ReplacePeerExportPolicy {
-            peer: forward_peer,
-            export_policy: forward_policy,
+        let RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements,
             reply: late_forward_reply,
         } = rib_rx.recv().await.unwrap()
         else {
-            panic!("expected first ordinary forward command");
+            panic!("expected batched authoritative forward command");
         };
-        assert_eq!(forward_peer, peers[0]);
-        assert_eq!(forward_policy, Some(next.clone()));
+        assert_eq!(
+            replacements
+                .iter()
+                .map(|replacement| replacement.peer)
+                .collect::<Vec<_>>(),
+            peers.to_vec()
+        );
+        assert!(
+            replacements
+                .iter()
+                .all(|replacement| replacement.export_policy == Some(next.clone()))
+        );
         assert!(matches!(
             rib_rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
 
         tokio::task::yield_now().await;
-        tokio::time::advance(RIB_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+        tokio::time::advance(RIB_BATCH_REPLY_TIMEOUT + Duration::from_millis(1)).await;
         tokio::task::yield_now().await;
 
         assert!(
