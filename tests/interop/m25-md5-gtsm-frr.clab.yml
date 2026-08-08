@@ -3,9 +3,10 @@
 # Validates: BGP session establishment with TCP MD5 authentication
 # (RFC 2385) and GTSM / TTL security (RFC 5082) enabled on both sides.
 #
-# Two FRR peers:
+# Three FRR peers:
 #   - FRR-A (AS 65002): TCP MD5 password "interop-secret-m25"
-#   - FRR-B (AS 65003): GTSM / TTL security (ebgp-multihop 1 + ttl-security 254)
+#   - FRR-B (AS 65003): GTSM / TTL security
+#   - FRR-C (AS 65004): IPv6 active-open into a dynamic range with MD5 + GTSM
 #
 # Usage:
 #   containerlab deploy -t tests/interop/m25-md5-gtsm-frr.clab.yml
@@ -28,6 +29,8 @@ topology:
         - ip link set eth1 up
         - ip addr add 10.0.1.1/24 dev eth2
         - ip link set eth2 up
+        - ip -6 addr add 2001:db8:25::1/64 dev eth3 nodad
+        - ip link set eth3 up
       env:
         RUST_LOG: info
 
@@ -51,9 +54,22 @@ topology:
         - ip addr add 10.0.1.2/24 dev eth1
         - ip link set eth1 up
 
+    frr-c:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m25-ipv6-auth.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip -6 addr add 2001:db8:25::2/64 dev eth1 nodad
+        - ip link set eth1 up
+
   links:
     - endpoints: ["rustbgpd:eth1", "frr-a:eth1"]
     - endpoints: ["rustbgpd:eth2", "frr-b:eth1"]
+    - endpoints: ["rustbgpd:eth3", "frr-c:eth1"]
 
 # Network A: 10.0.0.0/24 — rustbgpd (10.0.0.1) ↔ FRR-A (10.0.0.2, AS 65002) — TCP MD5
 # Network B: 10.0.1.0/24 — rustbgpd (10.0.1.1) ↔ FRR-B (10.0.1.2, AS 65003) — GTSM
+# Network C: 2001:db8:25::/64 — rustbgpd (::1) accepts FRR-C (::2, AS 65004)
+# through an IPv6 dynamic range with MD5 + GTSM.
