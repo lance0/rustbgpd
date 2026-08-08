@@ -123,7 +123,7 @@ errors. Reading the tables honestly:
   only required landing in the control's class.
 - **The first-reload-cheap pattern reproduces** in every rustbgpd
   cell (completion p50 2.1–2.3 s at reload 1 vs 3.3–3.8 s after;
-  control 1.9 s vs 4.3–4.5 s), as it did in every prior campaign at
+  control 1.9 s vs 4.26–4.55 s), as it did in every prior campaign at
   this shape.
 
 ## The acceptance gate, measured
@@ -288,7 +288,7 @@ the runner-up lane gauge to the manifest's overlap allocation
   and two pre-flip single-cell confirmation roots at the same shape
   (2026-08-07, commit `871ae0a1` — after the intervening fix wave,
   before the classifier flip) still measured the *ungrouped*
-  per-client-best path at 79.0–79.7 s (F = 0.1) and 129.5–129.9 s
+  per-client-best path at 78.9–79.7 s (F = 0.1) and 129.5–129.9 s
   (F = 0.5) steady-state completion p50, so the class change measured
   here belongs to grouping, not to unrelated drift between the two
   receipts' commits.
