@@ -52,6 +52,9 @@ share/man/man8/rustbgpd.8               daemon man page
 share/completions/rbgp.{bash,zsh,fish}  shell completions
 share/systemd/rustbgpd.service          hardened systemd unit
 share/systemd/rustbgpd-dataplane.conf   opt-in CAP_NET_ADMIN drop-in
+share/monitoring/rustbgpd-overview.json Grafana dashboard
+share/monitoring/rustbgpd-alerts.yml    Prometheus alert rules
+share/monitoring/rustbgpd-alerts_test.yml promtool rule tests
 ```
 
 The binaries are built against glibc 2.31; any distro at or above it
@@ -149,7 +152,8 @@ the `rustbgpd` system user (imperatively at install time, plus a
 declarative `sysusers.d` file). A starter config lands at
 `/etc/rustbgpd/config.toml` (mode `0640 root:rustbgpd`, never
 overwritten on upgrade) — the [minimal profile](../examples/minimal/config.toml)
-with its state paths set to `/var/lib/rustbgpd`. Then:
+with its state paths set to `/var/lib/rustbgpd`. Version-matched monitoring
+payloads land under `/usr/share/doc/rustbgpd/monitoring/`. Then:
 <!-- release-install-contract:native-package:end -->
 
 ```sh
@@ -188,6 +192,31 @@ GitHub release; it does not independently authenticate GitHub. The committed
 `Cargo.lock` is the exact Rust dependency inventory for a tagged source tree.
 Release binaries and containers are provided under the repository's license
 terms and warranty disclaimers.
+
+### Monitoring payloads
+
+Every release archive carries its matching Grafana dashboard, Prometheus alert
+rules, and promtool test suite under `share/monitoring/`. Native packages put
+the same files under `/usr/share/doc/rustbgpd/monitoring/`. Keep
+`rustbgpd-alerts.yml` beside `rustbgpd-alerts_test.yml`: the suite deliberately
+uses the relative `rule_files` entry `rustbgpd-alerts.yml`.
+
+Validate the shipped rules before loading them:
+
+```sh
+# From an extracted release tarball:
+(cd share/monitoring && promtool test rules rustbgpd-alerts_test.yml)
+
+# Or from a native package:
+(cd /usr/share/doc/rustbgpd/monitoring && \
+  promtool test rules rustbgpd-alerts_test.yml)
+```
+
+Copy or reference `rustbgpd-alerts.yml` from Prometheus's `rule_files`
+configuration, then import `rustbgpd-overview.json` in Grafana. The
+[Grafana guide](GRAFANA.md) supplies the matching scrape job and dashboard
+setup; keep the payloads from one rustbgpd release together so rules and
+metrics do not drift across versions.
 
 ### From source
 

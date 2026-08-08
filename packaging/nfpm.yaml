@@ -93,3 +93,19 @@ contents:
     dst: /usr/share/doc/rustbgpd/examples/rustbgpd-dataplane.conf
     file_info:
       mode: 0644
+
+  # Version-matched monitoring payloads. Keep the two Prometheus files
+  # together: the promtool test suite resolves rustbgpd-alerts.yml by its
+  # relative filename.
+  - src: docs/grafana/rustbgpd-overview.json
+    dst: /usr/share/doc/rustbgpd/monitoring/rustbgpd-overview.json
+    file_info:
+      mode: 0644
+  - src: examples/prometheus/rustbgpd-alerts.yml
+    dst: /usr/share/doc/rustbgpd/monitoring/rustbgpd-alerts.yml
+    file_info:
+      mode: 0644
+  - src: examples/prometheus/rustbgpd-alerts_test.yml
+    dst: /usr/share/doc/rustbgpd/monitoring/rustbgpd-alerts_test.yml
+    file_info:
+      mode: 0644

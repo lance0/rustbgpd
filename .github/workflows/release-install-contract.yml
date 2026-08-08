@@ -5,7 +5,10 @@ on:
     paths:
       - docs/deployment.md
       - docs/QUICKSTART.md
+      - docs/grafana/rustbgpd-overview.json
       - examples/birdwatcher-adapter/README.md
+      - examples/prometheus/rustbgpd-alerts.yml
+      - examples/prometheus/rustbgpd-alerts_test.yml
       - .github/workflows/release.yml
       - packaging/nfpm.yaml
       - scripts/check_release_install_contract.py
@@ -16,7 +19,10 @@ on:
     paths:
       - docs/deployment.md
       - docs/QUICKSTART.md
+      - docs/grafana/rustbgpd-overview.json
       - examples/birdwatcher-adapter/README.md
+      - examples/prometheus/rustbgpd-alerts.yml
+      - examples/prometheus/rustbgpd-alerts_test.yml
       - .github/workflows/release.yml
       - packaging/nfpm.yaml
       - scripts/check_release_install_contract.py
