@@ -805,7 +805,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
 | `tcp_ao`               | table or array | no | -- | Ordered TCP-AO keyring for static neighbors (RFC 5925; Linux; append a non-preferred successor, then select it in a later observation-gated SIGHUP generation) |
 | `bfd`                  | table    | no       | --      | Single-hop BFD attachment referencing a `[[bfd_profiles]]` entry (RFC 5880/5881/5882; static neighbors only, restart-required edits) |
-| `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only) |
+| `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only). Strict: inbound packets must arrive with TTL/Hop-Limit exactly 255 (`IP_MINTTL` / `IPV6_MINHOPCOUNT`, RFC 5082 §3.2) and outbound packets are sent with 255. Earlier releases accepted 254; a peer that depended on that leniency will not establish |
 | `families`             | [string] | no       | (auto)  | Address families to negotiate (see below)        |
 | `required_families`    | [string] | no       | `[]`    | Families that must appear in the final negotiated intersection; must be a subset of effective `families` |
 | `graceful_restart`     | bool     | no       | true    | Enable Graceful Restart receiving speaker (RFC 4724) |
