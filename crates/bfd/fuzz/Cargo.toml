@@ -1,0 +1,22 @@
+[package]
+name = "rustbgpd-bfd-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.rustbgpd-bfd]
+path = ".."
+
+[[bin]]
+name = "decode_bfd_control"
+path = "fuzz_targets/decode_bfd_control.rs"
+test = false
+doc = false
+
+[workspace]
