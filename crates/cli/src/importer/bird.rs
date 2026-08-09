@@ -43,9 +43,14 @@ enum Event {
 ///   empty header.
 ///
 /// Both are handled with depth counters rather than a real expression parser.
-/// A statement terminator and a block boundary each reset the counters, so a
-/// stray bracket or paren in unexpected input can never swallow more than the
-/// construct it appears in.
+/// Each counter clears at one token — a bracket run at the next `;`, a paren
+/// run at the next `{` or `}` — and that token need not be on the same line.
+/// An unterminated `[` or `(` in unexpected input therefore absorbs the text up
+/// to its reset, including whatever construct that text belonged to. The reach
+/// is that one token and no further: the scanner resumes normally after it, and
+/// a session lost that way is refused rather than half-translated. Both bounds
+/// are pinned by `bird_stray_punctuation_recovers_at_the_next_reset_token` in
+/// `crates/cli/tests/config_import.rs`.
 fn scan(input: &str) -> Vec<Event> {
     let mut events = Vec::new();
     let mut buf = String::new();

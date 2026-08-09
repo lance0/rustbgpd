@@ -904,10 +904,13 @@ fn bird_malformed_sources_refuse_instead_of_emitting_partial_sessions() {
     }
 }
 
-/// The other half: unbalanced punctuation BIRD itself would reject must stay
-/// bounded to its own construct instead of swallowing the rest of the file.
+/// The other half: unbalanced punctuation BIRD itself would reject must stop at
+/// the scanner's next reset token instead of swallowing the rest of the file.
+/// The two depth counters clear at different tokens — a bracket run at the next
+/// `;`, a paren run at the next `{`/`}` — so each bound is pinned separately,
+/// together with the recovery after it.
 #[test]
-fn bird_stray_punctuation_stays_bounded_to_its_construct() {
+fn bird_stray_punctuation_recovers_at_the_next_reset_token() {
     // Closes with no opener pop an empty frame stack; the file still translates.
     let source = "}\nrouter id 192.0.2.10;\n\
                   protocol bgp up { local as 64500; neighbor 192.0.2.1 as 64496; \
@@ -917,8 +920,7 @@ fn bird_stray_punctuation_stays_bounded_to_its_construct() {
     assert_eq!(imported.report.neighbor_count, 1);
     assert_eq!(imported.report.exit_code, 0);
 
-    // An unterminated set literal keeps `{`/`}` literal only until the next
-    // statement terminator resets the bracket depth.
+    // An unterminated set literal keeps `{`/`}` literal until the next `;`.
     let source = "define bogons = [ 1.0.0.0/8{8,32};\n\
                   protocol bgp up { local as 64500; neighbor 192.0.2.1 as 64496; }\n";
     let imported =
@@ -932,6 +934,36 @@ fn bird_stray_punctuation_stays_bounded_to_its_construct() {
             .any(|s| s.stanza.starts_with("define bogons")),
         "{:?}",
         skip_lines(&imported.report)
+    );
+
+    // With no `;` before it, the same run absorbs the following peer's header
+    // and body text up to the first `;` inside it — that terminator is the
+    // reset, and the peer after it translates.
+    let source = "define bogons = [ 1.0.0.0/8\n\
+                  protocol bgp lost { local as 64500; neighbor 192.0.2.1 as 64496; }\n\
+                  protocol bgp kept { local as 64500; neighbor 192.0.2.2 as 64497; }\n";
+    let imported =
+        import_source(SourceFormat::Bird, "open-bracket-run.conf", source).expect("translates");
+    assert_eq!(imported.report.neighbor_count, 1);
+    assert!(imported.config_toml.contains("address = \"192.0.2.2\""));
+
+    // A paren run ignores `;` entirely: it absorbs whole statements — across
+    // lines, and with them the next block's header — until the `{` that resets
+    // it. That block is framed and ignored; the peer after it translates.
+    let source = "function f (int a;\nrouter id 192.0.2.10;\nlog syslog all;\n\
+                  protocol bgp lost { local as 64500; neighbor 192.0.2.1 as 64496; }\n\
+                  protocol bgp kept { local as 64500; neighbor 192.0.2.2 as 64497; }\n";
+    let imported =
+        import_source(SourceFormat::Bird, "open-paren-run.conf", source).expect("translates");
+    assert_eq!(imported.report.neighbor_count, 1);
+    assert!(imported.config_toml.contains("address = \"192.0.2.2\""));
+    assert_eq!(
+        skip_lines(&imported.report),
+        vec![(
+            Some(1),
+            "function f (int a; router id 192.0.2.10; log syslog all; protocol bgp lost".to_owned()
+        )],
+        "the absorbed run must be one report entry, ending at the resetting brace"
     );
 
     // Braces and semicolons inside a quoted value are text, not structure.
