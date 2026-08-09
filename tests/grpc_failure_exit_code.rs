@@ -130,13 +130,38 @@ fn spawn_daemon(dir: &Path, config_path: &Path) -> Daemon {
     }
 }
 
-/// Grab a free localhost port. Racy in principle, fine for a test.
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind 127.0.0.1:0")
-        .local_addr()
-        .unwrap()
-        .port()
+/// Port the config asks for when the test does not care about the value.
+///
+/// Picking one by binding `127.0.0.1:0` and dropping the listener reserves
+/// nothing: the kernel can hand that exact port to a parallel test before
+/// the daemon binds it, and this suite would read the resulting `AddrInUse`
+/// as the bind failure it is asserting on (LAN-941). Port 0 lets the
+/// process that serves the port be the one that binds it.
+const DAEMON_CHOOSES: u16 = 0;
+
+/// The gRPC TCP port the daemon reports it actually bound, for tests that
+/// have to talk to it. Only the gRPC TCP listener logs `bound_addr`.
+fn wait_for_bound_grpc_port(daemon: &mut Daemon) -> u16 {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        let logs = daemon.logs();
+        if let Some(port) = logs
+            .split("\"bound_addr\":\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .and_then(|addr| addr.rsplit(':').next()?.parse().ok())
+        {
+            return port;
+        }
+        if let Ok(Some(status)) = daemon.child.try_wait() {
+            panic!("rustbgpd exited before binding its gRPC listener: {status}\n{logs}");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "rustbgpd never logged a bound gRPC listener\n{}",
+        daemon.logs()
+    );
 }
 
 #[test]
@@ -147,7 +172,7 @@ fn grpc_bind_failure_exits_nonzero() {
     // daemon down with a non-zero exit code.
     let occupied = TcpListener::bind("127.0.0.1:0").expect("bind occupied port");
     let grpc_port = occupied.local_addr().unwrap().port();
-    let config_path = write_config(temp.path(), grpc_port, free_port());
+    let config_path = write_config(temp.path(), grpc_port, DAEMON_CHOOSES);
 
     let mut daemon = spawn_daemon(temp.path(), &config_path);
     let status = daemon.wait_within(Duration::from_secs(120));
@@ -164,8 +189,12 @@ fn metrics_listener_bind_failure_exits_nonzero() {
     let temp = private_tempdir();
     let occupied = TcpListener::bind("127.0.0.1:0").expect("bind occupied metrics port");
     let metrics_port = occupied.local_addr().unwrap().port();
-    let config_path =
-        write_config_with_metrics(temp.path(), free_port(), free_port(), Some(metrics_port));
+    let config_path = write_config_with_metrics(
+        temp.path(),
+        DAEMON_CHOOSES,
+        DAEMON_CHOOSES,
+        Some(metrics_port),
+    );
 
     let mut daemon = spawn_daemon(temp.path(), &config_path);
     let status = daemon.wait_within(Duration::from_secs(30));
@@ -214,7 +243,7 @@ fn bgp_listener_bind_failure_exits_nonzero() {
             }
         }
     };
-    let config_path = write_config(temp.path(), free_port(), bgp_port);
+    let config_path = write_config(temp.path(), DAEMON_CHOOSES, bgp_port);
 
     let mut daemon = spawn_daemon(temp.path(), &config_path);
     let status = daemon.wait_within(Duration::from_secs(120));
@@ -238,13 +267,13 @@ fn bgp_listener_single_family_bind_failure_degrades_and_serves() {
     // other, then still shuts down cleanly on SIGTERM.
     let occupied = TcpListener::bind("0.0.0.0:0").expect("bind occupied v4 port");
     let bgp_port = occupied.local_addr().unwrap().port();
-    let grpc_port = free_port();
-    let config_path = write_config(temp.path(), grpc_port, bgp_port);
+    let config_path = write_config(temp.path(), DAEMON_CHOOSES, bgp_port);
 
     let mut daemon = spawn_daemon(temp.path(), &config_path);
 
     // Startup completed: the gRPC listener answers while the v4 BGP bind
     // failed, proving the daemon degraded instead of exiting.
+    let grpc_port = wait_for_bound_grpc_port(&mut daemon);
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         if TcpStream::connect(("127.0.0.1", grpc_port)).is_ok() {
@@ -290,45 +319,31 @@ fn bgp_listener_single_family_bind_failure_degrades_and_serves() {
 fn sigterm_exits_zero() {
     let temp = private_tempdir();
 
-    // `free_port()` is bind-then-release, so a parallel workspace test can
-    // steal the port before the daemon binds it; the daemon then exits
-    // non-zero (the very contract under test). Retry with fresh ports.
-    let mut daemon = 'spawned: {
-        for attempt in 1..=3 {
-            let grpc_port = free_port();
-            let config_path = write_config(temp.path(), grpc_port, free_port());
-            let mut daemon = spawn_daemon(temp.path(), &config_path);
+    let config_path = write_config(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES);
+    let mut daemon = spawn_daemon(temp.path(), &config_path);
 
-            // Wait until the gRPC listener is up so SIGTERM lands on a
-            // fully started daemon.
-            let deadline = Instant::now() + Duration::from_secs(120);
-            loop {
-                if TcpStream::connect(("127.0.0.1", grpc_port)).is_ok() {
-                    break 'spawned daemon;
-                }
-                if let Ok(Some(status)) = daemon.child.try_wait() {
-                    if attempt < 3 {
-                        eprintln!(
-                            "rustbgpd exited before listening on {grpc_port} \
-                             (attempt {attempt}): {status}; retrying with fresh ports"
-                        );
-                        break;
-                    }
-                    panic!(
-                        "rustbgpd exited before listening on {grpc_port}: {status}\n{}",
-                        daemon.logs()
-                    );
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "rustbgpd did not listen on {grpc_port} within timeout\n{}",
-                    daemon.logs()
-                );
-                thread::sleep(Duration::from_millis(100));
-            }
+    // Wait until the gRPC listener is up so SIGTERM lands on a fully
+    // started daemon. No spawn retry: the daemon picks its own ports, so a
+    // bind failure here is a real one rather than a lost port race.
+    let grpc_port = wait_for_bound_grpc_port(&mut daemon);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        if TcpStream::connect(("127.0.0.1", grpc_port)).is_ok() {
+            break;
         }
-        unreachable!("spawn retry loop either breaks 'spawned or panics");
-    };
+        if let Ok(Some(status)) = daemon.child.try_wait() {
+            panic!(
+                "rustbgpd exited before listening on {grpc_port}: {status}\n{}",
+                daemon.logs()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "rustbgpd did not listen on {grpc_port} within timeout\n{}",
+            daemon.logs()
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
 
     let sigterm = Command::new("kill")
         .args(["-TERM", &daemon.child.id().to_string()])

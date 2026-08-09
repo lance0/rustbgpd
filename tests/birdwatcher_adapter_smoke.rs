@@ -27,7 +27,7 @@
 //! noexport-reason community).
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -56,13 +56,55 @@ impl Drop for Proc {
     }
 }
 
-/// Grab a free localhost port. Racy in principle, fine for a test.
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind 127.0.0.1:0")
-        .local_addr()
-        .unwrap()
-        .port()
+/// Port the spawned process is asked for when it should choose its own.
+///
+/// This test never picks a port itself. Discovering one by binding
+/// `127.0.0.1:0` and dropping the listener reserves nothing — the kernel
+/// can hand that exact port to a parallel test before the spawned process
+/// binds it, and the spawn then dies with `AddrInUse` (LAN-941, reproduced
+/// here as `birdwatcher-adapter exited before serving /status`). Asking
+/// for port 0 makes the process that serves the port the one that binds
+/// it; it reports the address it got and the test reads it back.
+const PROCESS_CHOOSES: u16 = 0;
+
+/// Poll `log` until `extract` finds what the process reported, failing
+/// fast if the process dies first.
+fn wait_for_logged<T>(
+    proc_: &mut Proc,
+    log: &Path,
+    what: &str,
+    extract: impl Fn(&str) -> Option<T>,
+) -> T {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        let logged = std::fs::read_to_string(log).unwrap_or_default();
+        if let Some(value) = extract(&logged) {
+            return value;
+        }
+        if let Ok(Some(status)) = proc_.child.try_wait() {
+            panic!(
+                "{} exited before reporting {what}: {status}\nstderr:\n{}",
+                proc_.name,
+                proc_.stderr()
+            );
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!(
+        "{} did not report {what} within timeout\nstderr:\n{}",
+        proc_.name,
+        proc_.stderr()
+    );
+}
+
+/// Port from the first `"<field>":"<addr>:<port>"` pair in the daemon's
+/// JSON log whose address starts with `prefix`.
+fn logged_port(logs: &str, field: &str, prefix: &str) -> Option<u16> {
+    logs.split(&format!("\"{field}\":\""))
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .find(|addr| addr.starts_with(prefix))
+        .and_then(|addr| addr.rsplit(':').next()?.parse().ok())
 }
 
 /// Minimal HTTP/1.1 GET over a raw TcpStream — avoids an HTTP client
@@ -122,17 +164,18 @@ fn wait_for_http(port: u16, path: &str, proc_: &mut Proc) {
 }
 
 /// Wait until `port` accepts a TCP connection (daemon gRPC readiness).
-/// `Err` carries the exit status when the process died before listening
-/// (the caller may retry — see `spawn_daemon_listening`); a still-running
-/// process that never listens within the timeout panics.
-fn wait_for_tcp(port: u16, proc_: &mut Proc) -> Result<(), std::process::ExitStatus> {
+fn wait_for_tcp(port: u16, proc_: &mut Proc) {
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return Ok(());
+            return;
         }
         if let Ok(Some(status)) = proc_.child.try_wait() {
-            return Err(status);
+            panic!(
+                "{} exited before listening on {port}: {status}\nstderr:\n{}",
+                proc_.name,
+                proc_.stderr()
+            );
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -143,51 +186,54 @@ fn wait_for_tcp(port: u16, proc_: &mut Proc) -> Result<(), std::process::ExitSta
     );
 }
 
-/// Spawn the daemon and wait for its gRPC TCP listener. `free_port()` is
-/// bind-then-release, so a parallel workspace test can steal the port
-/// before the daemon binds it; the daemon treats the lost gRPC bind as a
-/// component failure and exits non-zero. Retry the whole spawn with
-/// fresh ports (bounded) instead of failing the test on that race.
-/// Returns the daemon plus the TCP gRPC and BGP ports the rest of the test
-/// needs; the adapter still talks to `grpc_socket`.
+/// Spawn the daemon on ports it chooses itself and wait for its gRPC TCP
+/// listener. Returns the daemon plus the TCP gRPC and IPv4 BGP ports it
+/// reports binding, which the rest of the test needs; the adapter still
+/// talks to `grpc_socket`.
 fn spawn_daemon_listening(dir: &Path, grpc_socket: &Path, token_path: &Path) -> (Proc, u16, u16) {
-    const ATTEMPTS: u32 = 3;
-    for attempt in 1..=ATTEMPTS {
-        let grpc_port = free_port();
-        let bgp_port = free_port();
-        if grpc_socket.exists() {
-            std::fs::remove_file(grpc_socket).expect("remove stale test gRPC socket");
-        }
-        let config_path = write_config(dir, grpc_port, bgp_port, grpc_socket, token_path);
-        let daemon_stdout = dir.join("rustbgpd.stdout.log");
-        let daemon_stderr = dir.join("rustbgpd.stderr.log");
-        let mut daemon = Proc {
-            child: Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
-                .arg(&config_path)
-                .stdout(Stdio::from(
-                    std::fs::File::create(&daemon_stdout).expect("daemon stdout log"),
-                ))
-                .stderr(Stdio::from(
-                    std::fs::File::create(&daemon_stderr).expect("daemon stderr log"),
-                ))
-                .spawn()
-                .expect("spawn rustbgpd"),
-            name: "rustbgpd",
-            stderr_path: daemon_stderr,
-        };
-        match wait_for_tcp(grpc_port, &mut daemon) {
-            Ok(()) => return (daemon, grpc_port, bgp_port),
-            Err(status) if attempt < ATTEMPTS => eprintln!(
-                "rustbgpd exited before listening on {grpc_port} (attempt {attempt}): \
-                 {status}; retrying with fresh ports"
-            ),
-            Err(status) => panic!(
-                "rustbgpd exited before listening on {grpc_port}: {status}\nstderr:\n{}",
-                daemon.stderr()
-            ),
-        }
+    if grpc_socket.exists() {
+        std::fs::remove_file(grpc_socket).expect("remove stale test gRPC socket");
     }
-    unreachable!("spawn retry loop returns or panics");
+    let config_path = write_config(
+        dir,
+        PROCESS_CHOOSES,
+        PROCESS_CHOOSES,
+        grpc_socket,
+        token_path,
+    );
+    let daemon_stdout = dir.join("rustbgpd.stdout.log");
+    let daemon_stderr = dir.join("rustbgpd.stderr.log");
+    let mut daemon = Proc {
+        child: Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
+            .arg(&config_path)
+            .stdout(Stdio::from(
+                std::fs::File::create(&daemon_stdout).expect("daemon stdout log"),
+            ))
+            .stderr(Stdio::from(
+                std::fs::File::create(&daemon_stderr).expect("daemon stderr log"),
+            ))
+            .spawn()
+            .expect("spawn rustbgpd"),
+        name: "rustbgpd",
+        stderr_path: daemon_stderr,
+    };
+    // The daemon logs JSON to stdout: `bound_addr` on the gRPC TCP
+    // listener, and `addr` on each bound BGP listener family (the test
+    // speaks IPv4, so take the `0.0.0.0` one).
+    let grpc_port = wait_for_logged(
+        &mut daemon,
+        &daemon_stdout,
+        "a bound gRPC listener",
+        |logs| logged_port(logs, "bound_addr", "127.0.0.1:"),
+    );
+    let bgp_port = wait_for_logged(
+        &mut daemon,
+        &daemon_stdout,
+        "a bound IPv4 BGP listener",
+        |logs| logged_port(logs, "addr", "0.0.0.0:"),
+    );
+    wait_for_tcp(grpc_port, &mut daemon);
+    (daemon, grpc_port, bgp_port)
 }
 
 /// Mutation proof: dropping Tier enforcement, the bearer credential, or the
@@ -457,7 +503,6 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     let temp = tempfile::tempdir().expect("create temp dir");
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
         .expect("make temp dir private");
-    let adapter_port = free_port();
     let grpc_socket = temp.path().join("rustbgpd.grpc.sock");
     let token_path = temp.path().join("grpc-token");
     std::fs::write(&token_path, "birdwatcher-smoke-token\n").expect("write test token");
@@ -475,7 +520,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
             .arg("--grpc-token-file")
             .arg(&token_path)
             .arg("--listen")
-            .arg(format!("127.0.0.1:{adapter_port}"))
+            .arg(format!("127.0.0.1:{PROCESS_CHOOSES}"))
             .stdout(Stdio::null())
             .stderr(Stdio::from(
                 std::fs::File::create(&adapter_stderr).expect("adapter stderr log"),
@@ -483,9 +528,26 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
             .spawn()
             .expect("spawn birdwatcher-adapter"),
         name: "birdwatcher-adapter",
-        stderr_path: adapter_stderr,
+        stderr_path: adapter_stderr.clone(),
     };
     let adapter_pid = adapter.child.id();
+    // The adapter logs the address it bound. Its only loopback address is
+    // that listener (the daemon endpoint is a Unix socket), and the text
+    // format interleaves ANSI escapes with the field name, so match on the
+    // address itself rather than on `addr=`.
+    let adapter_port = wait_for_logged(
+        &mut adapter,
+        &adapter_stderr,
+        "a bound HTTP listener",
+        |logs| {
+            logs.split("127.0.0.1:")
+                .nth(1)?
+                .split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse()
+                .ok()
+        },
+    );
     wait_for_http_status(adapter_port, "/status", 502, &mut adapter);
 
     // Now start the daemon. The adapter's lazy UDS channel must reconnect on

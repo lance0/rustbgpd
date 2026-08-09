@@ -478,7 +478,7 @@ mod tests {
     use std::pin::Pin;
     use std::time::Duration;
 
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpSocket};
     use tokio::sync::mpsc;
     use tokio_stream::{Stream, wrappers::TcpListenerStream};
     use tonic::{Request, Response, Status, Streaming};
@@ -666,19 +666,39 @@ mod tests {
         }
     }
 
-    /// Bind (or rebind) a stub collector on `addr` (`None` = ephemeral) and
-    /// return its address, the serve task handle, and the received-message
-    /// channel.
-    async fn spawn_stub_collector(
-        addr: Option<SocketAddr>,
+    /// Hold a loopback port for the lifetime of the test without serving on
+    /// it: bind a socket and never `listen` on it.
+    ///
+    /// Binding `127.0.0.1:0` and dropping the listener to "reserve" the
+    /// address reserves nothing — the kernel hands that exact port to the
+    /// next binder, and under parallel test execution a rebind of it then
+    /// fails `EADDRINUSE` (LAN-941). A bound socket does hold the port, and
+    /// while it is not listening the address still refuses connections,
+    /// which is the "collector down" condition these tests need.
+    ///
+    /// `spawn_stub_collector` serves by calling `listen` on this same
+    /// socket, so no address is ever bound a second time. Passing `Some`
+    /// takes a second reservation of an already-reserved port (hence
+    /// `SO_REUSEPORT`), which keeps it held across a collector restart.
+    fn reserve_port(addr: Option<SocketAddr>) -> (TcpSocket, SocketAddr) {
+        let socket = TcpSocket::new_v4().expect("reservation socket");
+        socket.set_reuseport(true).expect("set SO_REUSEPORT");
+        socket
+            .bind(addr.unwrap_or_else(|| "127.0.0.1:0".parse().expect("valid addr")))
+            .expect("bind reservation");
+        let addr = socket.local_addr().expect("reservation addr");
+        (socket, addr)
+    }
+
+    /// Serve a stub collector on a port reserved by [`reserve_port`], and
+    /// return the serve task handle plus the received-message channel.
+    fn spawn_stub_collector(
+        reservation: TcpSocket,
     ) -> (
-        SocketAddr,
         tokio::task::JoinHandle<()>,
         mpsc::Receiver<gnmi::SubscribeResponse>,
     ) {
-        let bind = addr.unwrap_or_else(|| "127.0.0.1:0".parse().expect("valid addr"));
-        let listener = TcpListener::bind(bind).await.expect("bind stub collector");
-        let addr = listener.local_addr().expect("local addr");
+        let listener = reservation.listen(1024).expect("serve stub collector");
         let (tx, rx) = mpsc::channel(64);
         let handle = tokio::spawn(async move {
             let _ = tonic::transport::Server::builder()
@@ -686,7 +706,7 @@ mod tests {
                 .serve_with_incoming(TcpListenerStream::new(listener))
                 .await;
         });
-        (addr, handle, rx)
+        (handle, rx)
     }
 
     fn test_service() -> GnmiService {
@@ -822,7 +842,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn dial_out_streams_updates_and_reconnects_after_collector_restart() {
         let metrics = BgpMetrics::new();
-        let (addr, server, mut received) = spawn_stub_collector(None).await;
+        let (first, addr) = reserve_port(None);
+        // Second reservation of the same port: it stays held while the
+        // collector is down, so the restart below never rebinds.
+        let (restart, _) = reserve_port(Some(addr));
+        let (server, mut received) = spawn_stub_collector(first);
         let mut manager = DialoutManager::new(test_service(), metrics.clone());
         manager.apply(&[test_target("collector-a", addr)]);
 
@@ -831,14 +855,18 @@ mod tests {
         wait_for_gauge(&metrics, "collector-a", 1).await;
 
         // Kill the collector (stop accepting, then end the live stream):
-        // the gauge must drop (disconnect transition).
+        // the gauge must drop (disconnect transition). Await the aborted
+        // task so its listener is really closed before the restart takes
+        // the port over — both sockets are in the same `SO_REUSEPORT`
+        // group, and a listening corpse would keep drawing connections.
         server.abort();
+        let _ = server.await;
         drop(received);
         wait_for_gauge(&metrics, "collector-a", 0).await;
 
         // Restart the collector on the same address: the client reconnects
         // by itself and streams a fresh initial snapshot.
-        let (_addr, server2, mut received2) = spawn_stub_collector(Some(addr)).await;
+        let (server2, mut received2) = spawn_stub_collector(restart);
         expect_update_with_as(&mut received2).await;
         wait_for_gauge(&metrics, "collector-a", 1).await;
 
@@ -927,7 +955,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn manager_reaps_gauge_series_on_target_removal() {
         let metrics = BgpMetrics::new();
-        let (addr, server, mut received) = spawn_stub_collector(None).await;
+        let (reservation, addr) = reserve_port(None);
+        let (server, mut received) = spawn_stub_collector(reservation);
         let mut manager = DialoutManager::new(test_service(), metrics.clone());
         manager.apply(&[test_target("collector-reap", addr)]);
         expect_update_with_as(&mut received).await;
@@ -943,10 +972,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn collector_down_at_startup_keeps_retrying_without_task_exit() {
         let metrics = BgpMetrics::new();
-        // Reserve an address with nothing listening on it.
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        drop(listener);
+        // An address held by a bound socket that never listens: nothing
+        // serves it, so connections are refused, and nothing else can take
+        // the port before the collector comes up on it below.
+        let (reservation, addr) = reserve_port(None);
 
         let mut manager = DialoutManager::new(test_service(), metrics.clone());
         manager.apply(&[test_target("collector-late", addr)]);
@@ -957,7 +986,7 @@ mod tests {
         assert_eq!(gauge_value(&metrics, "collector-late"), Some(0));
 
         // The collector comes up later; the retry loop finds it.
-        let (_addr, server, mut received) = spawn_stub_collector(Some(addr)).await;
+        let (server, mut received) = spawn_stub_collector(reservation);
         expect_update_with_as(&mut received).await;
         wait_for_gauge(&metrics, "collector-late", 1).await;
         server.abort();

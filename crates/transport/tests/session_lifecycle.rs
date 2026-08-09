@@ -16,7 +16,7 @@ use rustbgpd_wire::{
     encode_message, notification::NotificationCode, peek_message_length,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::mpsc;
 
 /// Local ASN for tests.
@@ -544,10 +544,14 @@ async fn stop_command_sends_cease() {
 
 #[tokio::test]
 async fn connect_failure_retries() {
-    // Learn an ephemeral port, then release it so the first connection attempt fails.
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
+    // Hold an ephemeral port with a socket that never listens: the first
+    // connection attempt is refused, and no parallel test's `:0` bind can
+    // be handed the port before the retry listener takes it over below.
+    // (Learning a port by binding `:0` and dropping the listener reserves
+    // nothing — the rebind then fails `EADDRINUSE`; see LAN-941.)
+    let reservation = TcpSocket::new_v4().unwrap();
+    reservation.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = reservation.local_addr().unwrap();
 
     let metrics = BgpMetrics::new();
     let mut config = transport_config(addr);
@@ -583,8 +587,8 @@ async fn connect_failure_retries() {
     }
 
     // Load-bearing: without InitiateTcpConnection on Active's retry-timer
-    // transition, this second accept times out instead of receiving an OPEN.
-    let listener = TcpListener::bind(addr).await.unwrap();
+    // transition, this accept times out instead of receiving an OPEN.
+    let listener = reservation.listen(1024).unwrap();
     let (mut peer_stream, _) = tokio::time::timeout(Duration::from_millis(1500), listener.accept())
         .await
         .expect("Active retry should connect within 1.5s")
