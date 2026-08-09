@@ -826,6 +826,181 @@ fn keepalive_mismatch_is_warned_never_guessed() {
 }
 
 // ---------------------------------------------------------------------------
+// Malformed BIRD sources: the scanner has no error recovery, so every
+// unbalanced or truncated construct must end as a refusal or a report
+// entry — never a panic, never a half-built session
+// ---------------------------------------------------------------------------
+
+/// A `protocol bgp` body is only finalized at its matching `}`, so anything
+/// that eats the close brace drops the session instead of emitting it half
+/// translated. Exit 3 with nothing written is the contract for all of it.
+#[test]
+fn bird_malformed_sources_refuse_instead_of_emitting_partial_sessions() {
+    for (case, source) in [
+        (
+            "missing closing brace",
+            "router id 192.0.2.10;\nprotocol bgp up {\n local as 64500;\n \
+             neighbor 192.0.2.1 as 64496;\n",
+        ),
+        (
+            "unterminated string",
+            "router id 192.0.2.10;\nprotocol bgp up {\n local as 64500;\n \
+             neighbor 192.0.2.1 as 64496;\n description \"never closed;\n}\n",
+        ),
+        (
+            // A second `"` inside an already-quoted value re-opens the string,
+            // so the rest of the file is swallowed as text.
+            "unbalanced quotes",
+            "protocol bgp up { local as 64500; neighbor 192.0.2.1 as 64496; \
+             description \"a\"b\"; }\n",
+        ),
+        (
+            "nested protocol blocks, none terminated",
+            "protocol bgp a {\n local as 64500;\n neighbor 192.0.2.1 as 64496;\n ipv4 {\n \
+             import all;\n protocol bgp b {\n neighbor 192.0.2.2 as 64497;\n",
+        ),
+        (
+            "empty peer definition",
+            "router id 192.0.2.10;\nprotocol bgp {\n}\n",
+        ),
+        (
+            "peer definition with no neighbor statement",
+            "router id 192.0.2.10;\nprotocol bgp lonely {\n local as 64500;\n}\n",
+        ),
+        (
+            "neighbor without a remote AS",
+            "protocol bgp up { local as 64500; neighbor 192.0.2.1; }\n",
+        ),
+        (
+            "truncated mid-token",
+            "router id 192.0.2.10;\nprotocol bgp up {\n local as 64500;\n \
+             neighbor 192.0.2.1 as 64",
+        ),
+        (
+            // The stray close pops the peer frame early; the neighbor then
+            // lands at top level, where it is reported rather than attached.
+            "stray closing brace inside a peer body",
+            "protocol bgp up {\n local as 64500;\n }\n neighbor 192.0.2.1 as 64496;\n}\n",
+        ),
+        (
+            "unterminated block comment",
+            "/* router id 192.0.2.10;\nprotocol bgp up { local as 64500; \
+             neighbor 192.0.2.1 as 64496; }\n",
+        ),
+        (
+            // `;` inside a parameter list separates declarations, so the peer
+            // header is absorbed into the unterminated `function` header.
+            "unterminated parameter list",
+            "function f (int a;\nprotocol bgp up { local as 64500; \
+             neighbor 192.0.2.1 as 64496; }\n",
+        ),
+    ] {
+        let error = import_source(SourceFormat::Bird, "malformed.conf", source)
+            .err()
+            .unwrap_or_else(|| panic!("{case}: expected a refusal, got a translation"));
+        assert!(matches!(error, ImportError::Empty(_)), "{case}: {error:?}");
+        assert_eq!(error.exit_code(), 3, "{case}");
+        assert!(error.to_string().contains("nothing written"), "{case}");
+    }
+}
+
+/// The other half: unbalanced punctuation BIRD itself would reject must stay
+/// bounded to its own construct instead of swallowing the rest of the file.
+#[test]
+fn bird_stray_punctuation_stays_bounded_to_its_construct() {
+    // Closes with no opener pop an empty frame stack; the file still translates.
+    let source = "}\nrouter id 192.0.2.10;\n\
+                  protocol bgp up { local as 64500; neighbor 192.0.2.1 as 64496; \
+                  ipv4 { import all; }; }\n};\n};\n";
+    let imported =
+        import_source(SourceFormat::Bird, "stray-close.conf", source).expect("translates");
+    assert_eq!(imported.report.neighbor_count, 1);
+    assert_eq!(imported.report.exit_code, 0);
+
+    // An unterminated set literal keeps `{`/`}` literal only until the next
+    // statement terminator resets the bracket depth.
+    let source = "define bogons = [ 1.0.0.0/8{8,32};\n\
+                  protocol bgp up { local as 64500; neighbor 192.0.2.1 as 64496; }\n";
+    let imported =
+        import_source(SourceFormat::Bird, "open-bracket.conf", source).expect("translates");
+    assert_eq!(imported.report.neighbor_count, 1);
+    assert!(
+        imported
+            .report
+            .skipped
+            .iter()
+            .any(|s| s.stanza.starts_with("define bogons")),
+        "{:?}",
+        skip_lines(&imported.report)
+    );
+
+    // Braces and semicolons inside a quoted value are text, not structure.
+    let source = "protocol bgp up { local as 64500; neighbor 192.0.2.1 as 64496; \
+                  description \"}; protocol bgp x {\"; }\n";
+    let imported =
+        import_source(SourceFormat::Bird, "string-braces.conf", source).expect("translates");
+    assert_eq!(imported.report.neighbor_count, 1);
+    assert!(
+        imported
+            .config_toml
+            .contains("description = \"}; protocol bgp x {\"")
+    );
+}
+
+/// Every prefix of both golden fixtures — files cut mid-token, mid-string,
+/// mid-comment, mid-block. Each must return, and whatever it does emit must be
+/// complete: `finish` resolves each emitted neighbor's remote AS through an
+/// `expect`, so a half-built session reaching the emitter would abort here.
+#[test]
+fn bird_truncation_at_every_boundary_emits_a_complete_config_or_refuses() {
+    for (name, full) in [("bird.conf", BIRD), ("bird3.conf", BIRD3)] {
+        for (cut, _) in full.char_indices() {
+            let Ok(imported) = import_source(SourceFormat::Bird, name, &full[..cut]) else {
+                continue;
+            };
+            let neighbors = imported.report.neighbor_count;
+            assert_eq!(
+                imported.config_toml.matches("\n[[neighbors]]\n").count(),
+                neighbors,
+                "{name} cut at {cut}"
+            );
+            assert_eq!(
+                imported.config_toml.matches("\nremote_asn = ").count(),
+                neighbors,
+                "{name} cut at {cut}: every emitted neighbor needs a remote AS"
+            );
+        }
+    }
+}
+
+/// Block depth lives on the heap, not the call stack: a pathologically nested
+/// file — closed or not — must not recurse, and must not lose the peer it
+/// already parsed.
+#[test]
+fn bird_deeply_nested_blocks_do_not_recurse() {
+    const PEER: &str = "protocol bgp up { local as 64500; neighbor 192.0.2.1 as 64496; }\n";
+    for source in [
+        format!("{PEER}{}{}", "x {".repeat(10_000), "}".repeat(10_000)),
+        format!("{PEER}{}", "x {".repeat(10_000)),
+    ] {
+        let imported =
+            import_source(SourceFormat::Bird, "nested.conf", &source).expect("translates");
+        assert_eq!(imported.report.neighbor_count, 1);
+    }
+}
+
+/// The importer's only raw byte index (`text["description".len()..]`) runs on
+/// statement text, so an argument-less `description;` slices at the very end of
+/// the string. It translates the session (with an empty description); the point
+/// is that the index is in bounds.
+#[test]
+fn bird_argument_less_description_indexes_in_bounds() {
+    let source = "protocol bgp up { local as 64500; neighbor 192.0.2.1 as 64496; description; }\n";
+    let imported = import_source(SourceFormat::Bird, "desc.conf", source).expect("translates");
+    assert_eq!(imported.report.neighbor_count, 1);
+}
+
+// ---------------------------------------------------------------------------
 // run_import (the CLI surface): I/O paths of the ladder
 // ---------------------------------------------------------------------------
 
