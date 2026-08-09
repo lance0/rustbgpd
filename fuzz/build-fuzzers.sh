@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Heavy-lab classifier receipt: this standalone builder is lab-independent.
 # Shared OSS-Fuzz / ClusterFuzzLite build: inventory validation remains on the
 # path that produces binaries, rather than being only a separate CI assertion.
 repo_root=${1:-"$SRC/rustbgpd"}
