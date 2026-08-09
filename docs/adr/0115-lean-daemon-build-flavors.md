@@ -14,7 +14,7 @@ activate:
   the netlink client stack.
 
 Runtime opt-in already avoids their operational cost, but it does not remove
-their code and dependencies from the release artifact. LAN-548 asks whether
+their code and dependencies from the release artifact. This ADR asks whether
 one additional lean artifact would materially reduce artifact or build cost
 without fragmenting configuration, packaging, release gates, or support.
 
@@ -74,7 +74,7 @@ complete subtree.
 
 The exact runner, prototype patch, graphs, config smokes, timing rows, binary
 hashes, Cargo timing artifacts, and checksums live in the
-[LAN-548 receipt](../perf/lean-daemon-build-flavors-2026-07.md).
+[lean daemon build-flavor receipt](../perf/lean-daemon-build-flavors-2026-07.md).
 
 ## Decision
 
@@ -95,7 +95,7 @@ in every paired round and neither regressed the median warm rebuild, but those
 properties are safeguards rather than independent reasons to ship a flavor.
 
 The full sealed results, environment, dependency graphs, behavior smokes,
-mutation receipts, and checksums are in the linked LAN-548 receipt.
+mutation receipts, and checksums are in the linked receipt.
 
 ## Consequences
 

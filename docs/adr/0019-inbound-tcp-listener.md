@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-02-27
-**Update (2026-08, LAN-907):** the original single socket bound only
+**Update (2026-08):** the original single socket bound only
 `0.0.0.0:{listen_port}`, so inbound IPv6 sessions could never establish and
 IPv6 peers' listener-side MD5/GTSM/TCP-AO entries were silently skipped.
 `BgpListener` now always binds both families — `0.0.0.0` and `[::]` (with

@@ -183,7 +183,7 @@ dataset community-set scrub-tags
 ```
 
 A **dataset** is a named set whose members come from an
-operator-maintained file instead of source text — the LAN-305 shape of
+operator-maintained file instead of source text — the shape of
 "data the daemon doesn't have": bogon feeds, IX participant lists,
 customer origin sets, tag feeds produced by external automation. The
 declaration carries only the name and kind; the daemon config binds
@@ -376,7 +376,7 @@ to one or more IR terms:
   `Continue` IR term (a small IR addition made for this frontend:
   guard matched → apply modifications → keep walking this policy's
   terms).
-- Each `let` becomes a `Bind` IR term (LAN-302): guard = the
+- Each `let` becomes a `Bind` IR term: guard = the
   enclosing branch condition (`True` in term-body position; the `if`
   guard — or its negation for `else` — for a body binding), action =
   evaluate the initializer and write its frame slot. Like `Continue`
@@ -444,7 +444,7 @@ prefix-set precedent).
 
 u32 value positions — either side of a u32 comparison, and the
 `set local-pref` / `set med` arguments — accept **value expressions**
-(ADR-0103, LAN-299): arithmetic over integer literals, parameters,
+(ADR-0103): arithmetic over integer literals, parameters,
 `let` bindings (below), u32-typed fields (`route.local-pref`,
 `route.med`, `route.as-path.len`, `route.origin-as`, `peer.asn`), and
 three bounded builtins. A comparison's left side may also carry
@@ -534,7 +534,7 @@ on it.
 ### Bindings — `let`
 
 `let <name> = <value expression>` names a computed `u32` in statement
-position — a term body, or an `if`/`else` body (ADR-0103, LAN-302):
+position — a term body, or an `if`/`else` body (ADR-0103):
 
 ```rpol
 policy dampen {
@@ -575,8 +575,8 @@ error naming the u32 field set.
   declared, so `let x = x + 1` reads the outer `x` — shadowing, never
   self-reference.
 - Resolution is **position-typed**, the same rule that lets a
-  parameter named `origin` keep its meaning under `prepend as`
-  (LAN-296): bindings are readable only in value positions. Enum
+  parameter named `origin` keep its meaning under `prepend as`:
+  bindings are readable only in value positions. Enum
   members (`valid`, `internal`, …) still win in enum comparisons,
   `min`/`max`/`clamp` followed by `(` are still builtin calls, and
   `prepend as origin` still means the origin operand even with a
@@ -590,7 +590,7 @@ error naming the u32 field set.
 **Evaluation is eager and fail-closed.** The initializer evaluates
 when its statement executes — reached in the term walk, branch taken —
 whether or not the value is ever read. It rides the same rails as all
-checked arithmetic (LAN-299): overflow, underflow, division/modulo by
+checked arithmetic: overflow, underflow, division/modulo by
 zero, or an absent operand (`route.origin-as` on an origin-less route,
 unknown `peer.asn`) **denies the route** — staged modifications are
 discarded, the eval-error counter increments, explain renders the
@@ -612,7 +612,7 @@ if ever demanded).
 **Static slots, zero allocation.** Bindings compile to fixed slots in
 a 256-slot register file (term, nested loop, and `if` scopes at the
 64-binding per-scope cap; inlined function calls draw on the same
-frame, LAN-304): slot assignment is a pure function of the source
+frame): slot assignment is a pure function of the source
 (identical source → identical compiled form, so unchanged reloads
 still diff as no-ops), sibling scopes reuse slots, and the frame is a
 lazily-materialized stack array — policies without bindings pay
@@ -628,7 +628,7 @@ be a target of `apply` this slice: `apply` inlines its target as a
 pure predicate expression, which has no term walk to execute bindings
 in. The compile error points at the offending `apply` and the target's
 first `let`; factor the shared value into the applying policy, or use
-a user function (`fn`, LAN-304) — the designed vehicle for composing
+a user function (`fn`) — the designed vehicle for composing
 computed values.
 
 Migration example — factoring a repeated computed value:
@@ -661,7 +661,7 @@ fields alone never disqualify grouping.
 
 `for <var> in <source> { ... }` walks a finite collection, binding
 each element to an immutable `u32` loop variable — a fresh binding per
-iteration, scoped to the body (ADR-0103 Decision 3, LAN-303):
+iteration, scoped to the body (ADR-0103 Decision 3):
 
 ```rpol
 community-set scrub { 65000:100, 65000:200 }
@@ -797,7 +797,7 @@ policy bogon-guard {
 ### Functions — `fn`
 
 `fn NAME(param: u32, ...) -> u32 { ... }` names a pure computation
-over `u32` values (ADR-0103 Decision 2, LAN-304):
+over `u32` values (ADR-0103 Decision 2):
 
 ```rpol
 fn penalty(len: u32, weight: u32) -> u32 {
@@ -888,7 +888,7 @@ pure inlined predicate cannot execute. Call the function in the
 applying policy instead.
 
 Migration example — factoring a computation repeated across policies
-(the step beyond LAN-302's single-policy `let`):
+(the step beyond a single-policy `let`):
 
 ```rpol
 # Before: the damping formula is duplicated — and must be kept in
@@ -965,10 +965,10 @@ Two consequences worth internalizing:
   `reject`s is constant-true under `apply`. Predicate policies should
   decide both ways (see `bogon-filter` above: match → `accept`,
   final term → `reject`).
-- A policy that declares `let` bindings cannot be applied (LAN-302):
+- A policy that declares `let` bindings cannot be applied:
   the inlined predicate has no term walk to execute bindings in. The
   compile error names the target's first `let`. The same rule covers
-  `for` loops (LAN-303) and function calls (LAN-304 — a call is sugar
+  `for` loops and function calls (a call is sugar
   for a scope of lets).
 
 ## Actions
@@ -1267,35 +1267,35 @@ no-op: no chain reinstall, no Route Refresh.
 
 ```text
 file        := (import-decl | prefix-set-def | community-set-def | asn-set-def | fn-def | policy-def | test-def)*
-import-decl := "import" STRING                    # contextual `import` (LAN-300)
+import-decl := "import" STRING                    # contextual `import`
 prefix-set-def    := "prefix-set" IDENT "{" [prefix-entry ("," prefix-entry)*] "}"
 prefix-entry      := PREFIX ["ge" INT] ["le" INT]
 community-set-def := "community-set" IDENT "{" [community ("," community)*] "}"
 asn-set-def       := "asn-set" IDENT "{" [INT ("," INT)*] "}"
 fn-def      := "fn" IDENT "(" [param ("," param)*] ")" "->" "u32"
-               "{" fn-let* value "}"               # contextual `fn` (LAN-304)
+               "{" fn-let* value "}"               # contextual `fn`
 fn-let      := "let" IDENT "=" value [";"]
 policy-def  := "policy" IDENT ["(" param ("," param)* ")"] "{" term* "}"
 param       := IDENT ":" "u32"
 term        := "term" IDENT "{" stmt* "}"
 stmt        := if-stmt | let-stmt | for-stmt | action [";"]
-let-stmt    := "let" IDENT "=" value [";"]        # contextual `let` (LAN-302)
-for-stmt    := "for" IDENT "in" for-source "{" stmt* "}"   # contextual `for` (LAN-303)
+let-stmt    := "let" IDENT "=" value [";"]        # contextual `let`
+for-stmt    := "for" IDENT "in" for-source "{" stmt* "}"   # contextual `for`
 for-source  := "route" "." ("communities" | "as-path") | IDENT   # IDENT: asn-set
 if-stmt     := "if" expr "{" body-stmt* "}" ["else" "{" body-stmt* "}"]
 body-stmt   := let-stmt | action [";"]
 action      := "accept" | "reject"
-             | "break" | "continue"               # loop bodies only (LAN-303)
+             | "break" | "continue"               # loop bodies only
              | "set" ("local-pref" | "med") value
              | "set" "next-hop" (IP | "self")
              | ("add" | "remove") ("community" | "large-community" | "ext-community") community
-             | ("add" | "remove") "community" IDENT      # binding-valued (LAN-303)
+             | ("add" | "remove") "community" IDENT      # binding-valued
              | "prepend" "as" (u32arg | "self" | "peer" | "origin") INT
 expr        := and ("||" and)*
 and         := unary ("&&" unary)*
 unary       := "!" unary | "(" expr ")" | "apply" "(" IDENT ["(" u32arg,* ")"] ")" | predicate
              | IDENT [arith-tail] ("=="|"!="|">="|"<=") value     # binding/parameter LHS
-             | IDENT "in" IDENT            # binding vs asn-set / community-set (LAN-303)
+             | IDENT "in" IDENT            # binding vs asn-set / community-set
 predicate   := field (("=="|"!="|">="|"<=") (rhs | value) | "in" IDENT | "has" community
              | "matches" STRING | "contains" u32arg)
              | field arith-tail ("=="|"!="|">="|"<=") value    # LHS arithmetic
@@ -1304,7 +1304,7 @@ mul         := atom (("*"|"/"|"%") atom)*
 atom        := INT | STD-COMMUNITY | IDENT | field | "(" value ")"   # IDENT: parameter or binding
              | ("min"|"max") "(" value "," value ")"
              | "clamp" "(" value "," value "," value ")"
-             | IDENT "(" [value ("," value)*] ")"  # user-function call (LAN-304)
+             | IDENT "(" [value ("," value)*] ")"  # user-function call
 field       := ("route" | "peer") ("." IDENT)+
 u32arg      := INT | IDENT          # parameter reference
 test-def    := "test" IDENT "{" route-block [peer-block] expect+ "}"
@@ -1651,12 +1651,12 @@ hit counters — those come free after the rewrite.
 
 ## Deliberate V1 exclusions
 
-No `while` and no unbounded iteration of any kind — `for` (LAN-303)
+No `while` and no unbounded iteration of any kind — `for`
 iterates finite sources only, capped and fuel-metered. No
 user-defined types, no maps (safety is total by construction —
 ADR-0096 Decision 2). No `as-path-set`. No `else if` chains and no nested `if`
 (keep terms small; use `&&` or more terms). No mutable state of any
-kind — `let` bindings (LAN-302) are immutable, and reads never
+kind — `let` bindings are immutable, and reads never
 observe staged `set` writes (read-back would break memoization and
 needs its own ADR). EVPN route type takes only an integer literal
 (no parameters — the value is wire-encoded u8). Full-form all-numeric
@@ -1664,12 +1664,12 @@ IPv6 literals (use `::` compression). These are scope decisions, not
 parser accidents; each has an error message steering to the
 supported form.
 
-The ADR-0103 v2 extension program is **complete**: checked arithmetic
-(LAN-299), `let` bindings (LAN-302), bounded loops (LAN-303), pure
-functions (LAN-304), modules and imports (LAN-300), external datasets
-(LAN-305), and the metered-runtime operator surface — eval-error
-counters, `rbgp policy stats` exposure, error-pinning test
-expectations (LAN-301) — have all shipped on the tree-walk evaluator.
+The ADR-0103 v2 extension program is **complete**: checked
+arithmetic, `let` bindings, bounded loops, pure functions, modules
+and imports, external datasets, and the metered-runtime operator
+surface — eval-error counters, `rbgp policy stats` exposure,
+error-pinning test expectations — have all shipped on the tree-walk
+evaluator.
 What deliberately did **not** ship: a bytecode tier (deferred behind
 the ADR-0103 Decision 1 re-entry gate — built only if a real-workload
 profile ever shows chain-walk dispatch dominating, which the

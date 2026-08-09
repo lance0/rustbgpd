@@ -27,7 +27,8 @@ convergence, session-writer, socket, or network-throughput claim.
 
 ## Measurement contract
 
-The benchmark is the LAN-671 `grouped_withdrawal_fanout` fixture:
+The benchmark is the `grouped_withdrawal_fanout` fixture from the
+[grouped withdrawal fanout baseline](grouped-withdrawal-fanout-2026-07.md):
 
 - one synthetic unregistered source using the production legacy-producer
   `session_id = 0` compatibility path;

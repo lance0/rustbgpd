@@ -810,7 +810,7 @@ does not change that boundary.
   unreplaced routes. 5-minute timeout on the refresh window.
 - Outbound: Enhanced peers get BoRR → routes → EoRR; legacy peers get
   routes → EoR.
-- Joint behavior with GR/LLGR retention (LAN-187): routes flagged
+- Joint behavior with GR/LLGR retention: routes flagged
   GR-stale or LLGR-stale are NOT snapshotted at BoRR, so EoRR (or the
   window timeout) never purges them. A restarting peer's refresh replay
   is not authoritative while it is still converging — RFC 4724 §4.1

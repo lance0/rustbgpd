@@ -1,4 +1,4 @@
-# LAN-391 route-churn control — 2026-07-13
+# RIB route-paging route-churn control — 2026-07-13
 
 This control compares the same pinned commits as the retained route-paging
 matrix and is intentionally separate from the matrix artifact. It checks that

@@ -197,7 +197,7 @@ The `bridge_vlan` schema is deliberately compatible with this follow-up:
 SVD changes how the Linux binding is observed and programmed, not the
 EVPN wire model.
 
-The LAN-64 follow-up landed this compatible SVD path: rustbgpd detects
+A follow-up landed this compatible SVD path: rustbgpd detects
 collect-metadata VXLAN devices and `vnifilter`, accepts an unambiguous
 `(bridge_vlan, tunnel_info id <VNI>)` mapping as a Ready VXLAN target,
 programs single-dst and FDB-NHG rows on the shared ifindex with

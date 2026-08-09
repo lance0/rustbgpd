@@ -1,6 +1,6 @@
 # Grouped outbound prefix-limit admission compaction receipt — 2026-07
 
-This immediate-parent A/B closes LAN-663 by measuring the live memory required
+This immediate-parent A/B measures the live memory required
 to materialize ADR-0113's exact per-member admitted-prefix sets for grouped
 peers. The candidate keeps the exact semantics but stores IPv4 and IPv6
 prefixes in family-typed sets rather than retaining the larger `Prefix` enum

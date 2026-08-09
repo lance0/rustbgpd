@@ -1113,7 +1113,7 @@
       "id": 39,
       "type": "timeseries",
       "title": "Attribute intern table size (global)",
-      "description": "Unique attribute sets in the daemon-wide cross-peer intern table (LAN-336). Flat under steady-state churn; a monotonic slope means reclaim is broken.",
+      "description": "Unique attribute sets in the daemon-wide cross-peer intern table. Flat under steady-state churn; a monotonic slope means reclaim is broken.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
