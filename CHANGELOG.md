@@ -17,7 +17,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   explicit `[global].ebgp_requires_policy = true|false`. Durable/effective
   renderings materialize the effective epoch (omission becomes epoch 1;
   explicit epoch 2 remains epoch 2) and boolean, while boot and
-  runtime-candidate inputs retain their raw representation.
+  runtime-candidate inputs retain their raw representation. A supported config
+  transaction with another real mutation now plans, receipts, stages, and persists that
+  materialization atomically; posture-only changes remain rejected. FIB failures before durable
+  finalization attempt to restore both tables and the raw prior snapshot. Lost persistence acknowledgement remains ambiguous after attempted restore; rollback failure remains ambiguous.
 - `birdwatcher-adapter` now accepts strict `unix:///absolute/path` daemon
   endpoints plus TCP, preserves lazy 502 recovery, and ships in native packages
   and the production container alongside release tarballs (LAN-925).

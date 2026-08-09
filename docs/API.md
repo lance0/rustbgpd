@@ -451,6 +451,12 @@ retain tonic's 4 MiB decode default.
 | `ListConfigHistory` | List bounded v2 config history — newest row at index 0, then older entries; per-entry timestamp, normalized-TOML SHA-256, config-source SHA-256 over that TOML digest plus the canonical accepted rpol/dataset source roster, provenance status, and one-line summary; never config documents (`rbgp config history`). Valid rows are `RECORDED`; corrupt or duplicate-sequence rows are `UNREADABLE` with both digests empty. Retired TOML files are ignored and retained. |
 | `RollbackConfigTransaction` | Restore a provenance-verified v2 row through the same transaction executor as apply — same plan/impact classification and receipts (`rbgp config rollback N`). Unreadable rows and provenance mismatches fail closed before planning or mutation. |
 
+For a supported transaction with an independent mutation, the plan carries one canonical committed candidate
+through token, runtime stage, persistence, and accepted history. It may materialize omitted RFC 8212 epoch-1/false
+presence without changing effective policy. Representation-only or posture-changing candidates are rejected before
+mutation. FIB transactions stage the full tables-plus-posture snapshot;
+determinate failures attempt to restore both. Lost persistence acknowledgement remains ambiguous after attempted restore; rollback or post-durable finalization failure is also ambiguous.
+
 Index 0 is not necessarily the running or currently persisted config. V2 rows
 hash the accepted external-source identity, but do not archive the
 `.rpol` or dataset bytes. Rollback performs one detached load and requires the

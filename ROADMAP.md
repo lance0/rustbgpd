@@ -534,7 +534,7 @@ Details in the "Recently shipped" section below and ADR-0097.
 - **RFC 8212 secure-by-default.** Opt-in enforcement
   (`ebgp_requires_policy`, ADR-0112) is shipped and receipted; the
   typed config-epoch/raw-presence representation, pre-activation rejection,
-  full-tuple restart pin, and allocation-safe canonical rendering are shipped.
+  full-tuple restart pin, allocation-safe canonical rendering, and transaction-scoped canonical tuple materialization are shipped.
   ADR-0125 authorizes activation only after ADR-0119's remaining mutation and
   interop proofs pass; activation changes only epoch-2 omission to effective
   `true`. Epoch-less and epoch-1 omission stay permissive, and explicit

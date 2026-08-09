@@ -13347,6 +13347,79 @@ fn rfc8212_canonical_sinks_materialize_without_rewriting_boot_input() {
     );
 }
 
+fn rfc8212_transaction_fixture(
+    epoch: Option<&str>,
+    policy: Option<bool>,
+    add_neighbor: bool,
+) -> Config {
+    let mut source = rfc8212_representation_toml(epoch, policy);
+    if add_neighbor {
+        source.push_str(
+            r#"
+[[neighbors]]
+address = "192.0.2.44"
+remote_asn = 65044
+"#,
+        );
+    }
+    parse(&source).unwrap()
+}
+
+/// Load-bearing transaction matrix. Removing the supported-mutation fence,
+/// accepting a partial/source-regressing tuple, or changing the exact
+/// canonical target makes a named row red.
+#[test]
+fn rfc8212_transaction_materialization_requires_real_mutation_and_exact_posture() {
+    for (label, live_epoch, live_policy, candidate_epoch, candidate_policy) in [
+        ("raw legacy", None, None, None, None),
+        ("caller canonical", None, None, Some("1"), Some(false)),
+        ("true posture", None, Some(true), None, Some(true)),
+        ("epoch-only omission", Some("1"), None, Some("1"), None),
+    ] {
+        let live = rfc8212_transaction_fixture(live_epoch, live_policy, false);
+        let mut candidate = rfc8212_transaction_fixture(candidate_epoch, candidate_policy, true);
+        let operational = materialize_rfc8212_transaction_candidate(&live, &mut candidate)
+            .unwrap_or_else(|| panic!("{label} must materialize"));
+        assert_eq!(
+            classify_config_transaction_v1(&operational).supported_sections,
+            vec!["[[neighbors]] add"],
+            "{label}"
+        );
+        let posture = candidate.rfc8212_posture();
+        assert_eq!(posture.config_epoch_raw, Some(ConfigEpoch::V1), "{label}");
+        assert_eq!(
+            posture.policy_raw,
+            Some(posture.policy_effective),
+            "{label}"
+        );
+    }
+
+    for (label, live_epoch, live_policy, candidate_epoch, candidate_policy, mutate) in [
+        ("no-op", None, None, None, None, false),
+        ("representation", None, None, Some("1"), Some(false), false),
+        ("partial", None, None, Some("1"), None, true),
+        ("effective change", None, None, None, Some(true), true),
+        (
+            "source regression",
+            Some("1"),
+            Some(false),
+            None,
+            None,
+            true,
+        ),
+        ("epoch move", None, None, Some("2"), Some(false), true),
+    ] {
+        let live = rfc8212_transaction_fixture(live_epoch, live_policy, false);
+        let mut candidate = rfc8212_transaction_fixture(candidate_epoch, candidate_policy, mutate);
+        let before = candidate.rfc8212_posture();
+        assert!(
+            materialize_rfc8212_transaction_candidate(&live, &mut candidate).is_none(),
+            "{label}"
+        );
+        assert_eq!(candidate.rfc8212_posture(), before, "{label}");
+    }
+}
+
 /// Structural companion to the release HWM receipt: the runtime A/B alone
 /// cannot detect adding the same internal deep clone to both arms. This pins
 /// every large projection field as borrowed, the one allowed small Global

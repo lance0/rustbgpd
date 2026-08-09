@@ -136,6 +136,19 @@ pub(crate) enum InternalCommand {
             >,
         >,
     },
+    /// Stage the FIB tables and RFC 8212 tuple from an already validated
+    /// transaction candidate. All other state stays attached to the live
+    /// snapshot, preserving the pure-FIB external-input exception.
+    StageTransactionConfig {
+        candidate: Box<Config>,
+        reply: oneshot::Sender<Result<Box<Config>, String>>,
+    },
+    /// Restore the exact raw/source-attached snapshot returned by
+    /// [`InternalCommand::StageTransactionConfig`].
+    RestoreTransactionConfig {
+        previous: Box<Config>,
+        reply: oneshot::Sender<()>,
+    },
 }
 
 #[allow(
@@ -1602,13 +1615,51 @@ impl PeerManager {
                             expected_runtime_snapshot_token,
                             reply,
                         }) => {
+                            let mut candidate = snapshot.config();
                             let result = self
                                 .plan_preloaded_config_transaction(
-                                    snapshot.config_ref(),
+                                    &mut candidate,
                                     expected_runtime_snapshot_token.as_deref(),
                                 )
                                 .await;
                             let _ = reply.send(result);
+                        }
+                        Some(InternalCommand::StageTransactionConfig {
+                            candidate,
+                            reply,
+                        }) => {
+                            let mut staged = self.current_config.clone();
+                            staged.fib_tables.clone_from(&candidate.fib_tables);
+                            staged.config_epoch = candidate.config_epoch;
+                            staged.global.ebgp_requires_policy =
+                                candidate.global.ebgp_requires_policy;
+                            let result = staged
+                                .validate()
+                                .map_err(|error| error.to_string())
+                                .map(|()| {
+                                    let previous = std::mem::replace(
+                                        &mut self.current_config,
+                                        staged,
+                                    );
+                                    self.dynamic_ranges =
+                                        Self::parse_dynamic_ranges(&self.current_config);
+                                    self.reconcile_stale_dynamic_max_prefix_restarts();
+                                    self.config_snapshot_staged = true;
+                                    self.metrics.record_policy_generation_loaded();
+                                    Box::new(previous)
+                                });
+                            let _ = reply.send(result);
+                        }
+                        Some(InternalCommand::RestoreTransactionConfig {
+                            previous,
+                            reply,
+                        }) => {
+                            self.current_config = *previous;
+                            self.dynamic_ranges = Self::parse_dynamic_ranges(&self.current_config);
+                            self.reconcile_stale_dynamic_max_prefix_restarts();
+                            self.config_snapshot_staged = false;
+                            self.metrics.record_policy_generation_loaded();
+                            let _ = reply.send(());
                         }
                         None => {}
                     }

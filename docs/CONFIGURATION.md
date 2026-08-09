@@ -143,6 +143,10 @@ boolean: omission becomes `config_epoch = 1`, while an explicit epoch 2 remains
 `config_epoch = 2`. Merely booting an epoch-less operator file does not rewrite
 its bytes.
 
+A supported config transaction with a real non-posture mutation atomically materializes the exact unchanged
+effective posture (for example, omission becomes epoch 1 plus explicit false). Posture-only, effective-value, or partial materialization changes are rejected.
+Boot, SIGHUP, and general diff candidates remain source-preserving; targeted CRUD is unchanged.
+
 ---
 
 ## `[global]`

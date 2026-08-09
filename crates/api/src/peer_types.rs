@@ -430,6 +430,37 @@ pub enum RuntimeConfigTransactionStatus {
     Rejected,
 }
 
+/// Exact normalized candidate selected by the transaction planner.
+///
+/// The document can contain transport authentication secrets. Its `Debug`
+/// implementation is deliberately redacted so deriving `Debug` on the plan
+/// cannot disclose candidate content in logs or assertion failures.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RuntimeConfigTransactionCandidate(String);
+
+impl RuntimeConfigTransactionCandidate {
+    #[must_use]
+    pub fn new(candidate_toml: String) -> Self {
+        Self(candidate_toml)
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for RuntimeConfigTransactionCandidate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RuntimeConfigTransactionCandidate(<redacted>)")
+    }
+}
+
 /// Validate-only transaction plan returned by the peer manager.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeConfigTransactionPlan {
@@ -441,6 +472,9 @@ pub struct RuntimeConfigTransactionPlan {
     /// it, so clients can safely chain a follow-up plan. Not surfaced in the
     /// gRPC plan response.
     pub post_commit_runtime_snapshot_token: String,
+    /// Exact canonical document every apply stage must consume if this plan
+    /// commits. Not surfaced through the public API.
+    pub committed_candidate: Option<RuntimeConfigTransactionCandidate>,
     pub diff: RuntimeConfigDiff,
     pub supported_sections: Vec<String>,
     pub unsupported_sections: Vec<String>,

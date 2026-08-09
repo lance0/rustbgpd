@@ -7533,6 +7533,10 @@ peer_group = "secure"
                 Some(InternalCommand::PlanAcceptedSnapshot { .. }) => {
                     panic!("reload test expected only ReplaceConfigSnapshot")
                 }
+                Some(
+                    InternalCommand::StageTransactionConfig { .. }
+                    | InternalCommand::RestoreTransactionConfig { .. },
+                ) => panic!("reload test expected no config transaction snapshot command"),
                 None => panic!("peer manager must receive the snapshot"),
             }
         });

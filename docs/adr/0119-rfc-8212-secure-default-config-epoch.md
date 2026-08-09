@@ -22,11 +22,10 @@ authorizes activation only after the production-mutation proof gate below is
 complete. Acceptance itself does not change route handling, activate a new
 default, or supersede ADR-0112 and its M95 real-session receipt.
 
-The representation tranche is implemented: typed raw epoch/boolean presence,
-the pre-activation epoch-2 rejection, full-tuple diff/reload pinning, and the
-shared borrowed canonical renderer have landed. The advisory, runtime-mutation
-materialization-transition planning/receipt proof, migration/downgrade tooling,
-M95 extension, and activation are still gated by the proof plan below.
+The representation and transaction-materialization tranches are implemented: typed raw
+presence, pre-activation epoch-2 rejection, full-tuple restart pinning, shared canonical
+rendering, and atomic transaction planning/receipt proofs have landed. The advisory,
+migration/downgrade tooling, M95 extension, and activation remain gated by the proof plan below.
 
 ## Decision
 

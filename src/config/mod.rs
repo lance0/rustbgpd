@@ -2930,6 +2930,58 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
     class
 }
 
+/// Materialize the RFC 8212 tuple for a real v1 transaction mutation.
+///
+/// A caller may preserve the live raw tuple or supply its exact canonical
+/// representation. Every partial representation edit, effective-value move,
+/// or regression from canonical back to omitted remains restart-required.
+/// The candidate is changed only when the non-tuple diff is independently
+/// committable, so a representation-only request remains rejected/no-op.
+pub(crate) fn materialize_rfc8212_transaction_candidate(
+    live: &Config,
+    candidate: &mut Config,
+) -> Option<ConfigDiff> {
+    let live_posture = live.rfc8212_posture();
+    let candidate_posture = candidate.rfc8212_posture();
+    if live_posture.config_epoch_effective != candidate_posture.config_epoch_effective
+        || live_posture.policy_effective != candidate_posture.policy_effective
+    {
+        return None;
+    }
+
+    let live_raw = (live_posture.config_epoch_raw, live_posture.policy_raw);
+    let candidate_raw = (
+        candidate_posture.config_epoch_raw,
+        candidate_posture.policy_raw,
+    );
+    let canonical = (
+        Some(live_posture.config_epoch_effective),
+        Some(live_posture.policy_effective),
+    );
+    if candidate_raw != live_raw && candidate_raw != canonical {
+        return None;
+    }
+    if live_raw == canonical {
+        return None;
+    }
+
+    // Classify only the real mutation. Restoring the live raw tuple prevents
+    // this helper from using its own representation change as authorization.
+    candidate.config_epoch = live_raw.0;
+    candidate.global.ebgp_requires_policy = live_raw.1;
+    let operational_diff = diff_config(live, candidate);
+    let mutation = classify_config_transaction_v1(&operational_diff);
+    candidate.config_epoch = candidate_raw.0;
+    candidate.global.ebgp_requires_policy = candidate_raw.1;
+    if !mutation.is_committable() {
+        return None;
+    }
+
+    candidate.config_epoch = canonical.0;
+    candidate.global.ebgp_requires_policy = canonical.1;
+    Some(operational_diff)
+}
+
 fn session_reshape_transaction(diff: &ConfigDiff) -> bool {
     if !diff.neighbors.added.is_empty() || !diff.neighbors.removed.is_empty() {
         return false;
@@ -3443,6 +3495,40 @@ const fn format_policy_source(source: Rfc8212PolicySource) -> &'static str {
         Rfc8212PolicySource::ExplicitFalse => "explicit_false",
         Rfc8212PolicySource::ExplicitTrue => "explicit_true",
     }
+}
+
+/// Render the exact tuple transition that accompanies an otherwise supported
+/// transaction. The same raw edit remains restart-required in generic diffs.
+pub(crate) fn format_rfc8212_transaction_materialization(diff: &ConfigDiff) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::from("Informational transaction materialization:\n");
+    if let Some(change) = diff.config_epoch {
+        let _ = writeln!(
+            out,
+            "config_epoch: raw={} effective={} source={} -> raw={} effective={} source={}",
+            format_epoch_raw(change.before.raw),
+            change.before.effective.value(),
+            format_epoch_source(change.before.source),
+            format_epoch_raw(change.after.raw),
+            change.after.effective.value(),
+            format_epoch_source(change.after.source),
+        );
+    }
+    if let Some(change) = diff.ebgp_requires_policy {
+        let _ = writeln!(
+            out,
+            "[global].ebgp_requires_policy: raw={} effective={} source={} -> raw={} effective={} source={}",
+            format_policy_raw(change.before.raw),
+            change.before.effective,
+            format_policy_source(change.before.source),
+            format_policy_raw(change.after.raw),
+            change.after.effective,
+            format_policy_source(change.after.source),
+        );
+    }
+    out.push_str("Route behavior is unchanged.\n");
+    out
 }
 
 /// Compare two full configurations and return a structured diff.
