@@ -76,6 +76,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   otherwise authenticated handshake before rustbgpd saw the connection. Live
   GTSM policy additions update the existing listener before any MD5 inventory
   mutation (LAN-935).
+- `.deb`/`.rpm` packages now install a complete `/etc/rustbgpd/config.toml`.
+  The packaging step rewrites the example config's dev-paths comment paragraph
+  by line range, and the range ended on a comment line that 0.64.0 reflowed, so
+  the rewrite ran to end of file and deleted `[global]`, `[policy]`, and
+  `[[neighbors]]`. The 0.64.0 packages shipped a comment-only stub; the range
+  now ends on the paragraph's terminating blank line, and the packaged config
+  body is asserted positively rather than only checked for a leftover dev path.
 
 ## [0.64.0] — 2026-08-08
 

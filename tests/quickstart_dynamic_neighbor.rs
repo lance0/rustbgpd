@@ -149,9 +149,11 @@ fn documented_flow() -> (String, Vec<String>) {
         .find("cat > ix-members.json <<'JSON'")
         .expect("Quickstart passwordless JSON start");
     let block = &quickstart[start..];
+    // Bound the block on the next documented command, not on the comment above
+    // it: comment prose gets reworded and the anchor stops matching silently.
     let end = block
-        .find("# Manage Linux unicast FIB-export tables.")
-        .expect("Quickstart passwordless flow end");
+        .find("rbgp fib-table list")
+        .expect("Quickstart passwordless flow must still end at `rbgp fib-table list`");
     let block = &block[..end];
     let json_start = block.find('{').expect("documented JSON object");
     let json_end = block.find("\nJSON\n").expect("documented JSON terminator");
