@@ -3,7 +3,7 @@
 This page maps common FRR, BIRD, and ARouteServer route-server concepts to
 rustbgpd's config and verification surfaces. Structure is mechanical now —
 policy is not: `rbgp config import` translates the structural subset of a
-BIRD 2, FRR, or GoBGP config and refuses to guess at anything else, so use
+BIRD 2/3, FRR, or GoBGP config and refuses to guess at anything else, so use
 the importer for the skeleton, this page for the policy concepts it lists as
 untranslated, then run the shadow trial from the route-server cookbook
 before carrying production traffic.
@@ -237,7 +237,7 @@ converters exit 0 with the snapshot on stdout, or 2 (nothing emitted)
 when the input is malformed or not the expected form — a truncated or
 wrong-form capture can never read as "in sync".
 
-### BIRD 2 (verified: 2.0.12)
+### BIRD 2/3 (verified: 2.0.12 and 3.3.1)
 
 ```bash
 birdc show route export <member-protocol> all > bird-<member>.txt
@@ -246,13 +246,21 @@ scripts/ribsnap/bird2-export-to-ribsnap.py \
     > bird-<member>.ndjson
 ```
 
+On BIRD 3, enable `export table on` on the member channel and capture the
+retained post-policy view with `birdc show route export table
+<member-channel> all`. The adapter accepts BIRD 3's lowercase `bgp_*`
+attributes while retaining the historical `bird2-export/1` source ID.
+Preconfigure the option before shadowing or use a maintenance window: changing
+it restarts the channel. If a restart is unacceptable, use the on-the-fly
+`show route export <member-protocol> all` view instead; it is less exact.
+
 Prerequisites and limitations:
 
 - `show route export P` computes P's export filters on the fly — no
   config change needed, but it reflects the table *now*, not what was
   actually sent. If the incumbent has `export table on` (an Adj-RIB-Out
   kept per protocol, at ~one table's memory cost per member), capture
-  that instead (`show route export table <member-protocol> all`) for a
+  that instead (`show route export table <member-channel> all`) for a
   true sent-view; the converter accepts both (same text format).
 - The view is pre-encoding: locally-originated routes carry no
   `BGP.as_path` / `BGP.next_hop` / `BGP.origin` — those fields are

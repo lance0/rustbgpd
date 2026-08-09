@@ -1,0 +1,10 @@
+BIRD 3.3.1 ready.
+Table export:
+203.0.113.0/24        [source_member 01:30:07.408] * (0) [AS64501i]
+	bgp_origin: IGP
+	bgp_path: 64501
+	bgp_next_hop: 10.92.6.11
+	bgp_med: 120
+	bgp_community: (64501,111)
+	bgp_large_community: (64501, 92, 6)
+	Internal route handling values: 0L 3G 0S id 0

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""bird2-export/1 — convert BIRD 2 `birdc show route export <proto> all`
+"""bird2-export/1 — convert BIRD 2/3 `birdc show route export ... all`
 output into an `rbgp-ribsnap/1` NDJSON snapshot for `rbgp diff advertised`.
+
+`bird2-export/1` is the legacy, stable source identifier; BIRD 3 support does
+not rename it because existing snapshots and automation key on that value.
 
 Capture (on the incumbent BIRD 2 route server, one run per member):
 
@@ -10,6 +13,9 @@ Capture (on the incumbent BIRD 2 route server, one run per member):
 
 Verified against BIRD 2.0.12. `show route export P` applies P's export
 filters, so attribute rewrites made by the export filter are reflected.
+Also verified against BIRD 3.3.1. Prefer its retained Adj-RIB-Out:
+
+    birdc show route export table <channel> all
 
 Honesty notes (see docs/ribdiff.md for the adapter matrix):
   - The export view is PRE-ENCODING: BGP.as_path / BGP.next_hop show the
@@ -37,13 +43,24 @@ import sys
 SCHEMA = "rbgp-ribsnap/1"
 ADAPTER = "bird2-export/1"
 
-# "100.65.0.0/24        blackhole [statics 02:00:42.574] * (200)"
+# BIRD 2 includes a destination token; a BIRD 3 retained export table omits it.
+# Both still anchor the route head at `[protocol timestamp]`.
 ROUTE_HEAD = re.compile(
     r"^(?P<prefix>[0-9a-fA-F:.]+/\d+)?\s+"
-    r"(?P<dest>unicast|blackhole|unreachable|prohibit)\s+"
+    r"(?:(?P<dest>unicast|blackhole|unreachable|prohibit)\s+)?"
     r"\[(?P<proto>\S+)\s"
 )
 ORIGIN = {"IGP": 0, "EGP": 1, "Incomplete": 2}
+BIRD3_ATTRS = {
+    "bgp_origin": "BGP.origin",
+    "bgp_path": "BGP.as_path",
+    "bgp_next_hop": "BGP.next_hop",
+    "bgp_med": "BGP.med",
+    "bgp_local_pref": "BGP.local_pref",
+    "bgp_community": "BGP.community",
+    "bgp_large_community": "BGP.large_community",
+    "bgp_ext_community": "BGP.ext_community",
+}
 
 
 def fail(msg):
@@ -56,6 +73,7 @@ def note(msg):
 
 
 def parse_attr(route, key, value, line_no):
+    key = BIRD3_ATTRS.get(key, key)
     if key == "BGP.origin":
         if value not in ORIGIN:
             fail(f"line {line_no}: unknown BGP.origin {value!r}")

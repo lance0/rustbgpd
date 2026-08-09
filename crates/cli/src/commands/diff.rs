@@ -2455,7 +2455,20 @@ mod tests {
     ///            form, kept as the refusal fixture)
     ///   gobgp: gobgp neighbor 10.83.2.1 adj-out -j
     ///
-    /// Versions at capture: BIRD 2.0.12, FRR 10.3.1, GoBGP 3.37.0.
+    /// BIRD 3.3.1's retained Adj-RIB-Out was captured separately with:
+    ///
+    ///   birdc show route export table target_member.ipv4 all
+    ///
+    /// Build `bird:3.3.1` from `tests/interop/Dockerfile.bird3` (upstream
+    /// tag commit 695c7b74). The disposable topology is source AS64501
+    /// 10.92.6.11 -> RS AS65500 10.92.6.12 -> target AS64502 10.92.6.13;
+    /// the RS uses `fixtures/import/bird3.conf`. Source announces
+    /// 203.0.113.0/24 with IGP origin, path 64501, next hop 10.92.6.11,
+    /// MED 120, community 64501:111, and large community 64501:92:6.
+    /// Wait for both RS protocols to reach Established before capture.
+    ///
+    /// Versions at capture: BIRD 2.0.12 / 3.3.1, FRR 10.3.1,
+    /// GoBGP 3.37.0.
     /// The M92 GoBGP 4.7.0 dual-stack fixture was captured toward target
     /// 192.0.2.11 / AS64510 and merged deterministically with:
     ///
@@ -2494,6 +2507,15 @@ mod tests {
             peer_asn: 65500,
             source: "m83-bird-member",
             generation: GENERATION,
+        };
+        const BIRD3: Converter = Converter {
+            script: "bird2-export-to-ribsnap.py",
+            raw_fixture: "bird3-export-table.txt",
+            golden: "bird3-export-table.expected.ndjson",
+            peer: "10.92.6.13",
+            peer_asn: 64502,
+            source: "bird-3.3.1-export-table",
+            generation: "1",
         };
         const FRR: Converter = Converter {
             script: "frr-advertised-to-ribsnap.py",
@@ -2643,6 +2665,28 @@ mod tests {
                 diff_golden_against(&BIRD, &server, &["as_path", "next_hop", "origin"]).await;
             assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
             assert!(rendered.contains("matched 4"));
+        }
+
+        /// Real BIRD 3.3.1 retained Adj-RIB-Out: lowercase attribute aliases
+        /// and its destination-less route head must survive byte-for-byte and
+        /// compare deterministically without an ignore set.
+        #[tokio::test]
+        async fn bird3_export_table_golden_diffs_clean_without_ignores() {
+            assert_eq!(BIRD3.golden, "bird3-export-table.expected.ndjson");
+            check_golden(&BIRD3);
+            let routes = vec![server_proto::Route {
+                med: 120,
+                communities: vec![(64501 << 16) | 111],
+                large_communities: vec!["64501:92:6".to_string()],
+                ..wire_route("203.0.113.0", 24, "10.92.6.11", vec![64501])
+            }];
+            let first_server = wire_truth_server(&BIRD3, routes.clone()).await;
+            let second_server = wire_truth_server(&BIRD3, routes).await;
+            let first = diff_golden_against(&BIRD3, &first_server, &[]).await;
+            let second = diff_golden_against(&BIRD3, &second_server, &[]).await;
+            assert_eq!(first, second, "identical inputs must render identically");
+            assert_eq!(first.1, EXIT_IN_SYNC, "output was:\n{}", first.0);
+            assert!(first.0.contains("matched 1"));
         }
 
         #[tokio::test]
@@ -2801,7 +2845,7 @@ mod tests {
         /// because the trailer is only written after a full parse.
         #[test]
         fn garbage_input_is_refused_by_all_converters() {
-            for converter in [&BIRD, &FRR, &GOBGP] {
+            for converter in [&BIRD, &BIRD3, &FRR, &GOBGP] {
                 let mut bad = *converter;
                 bad.raw_fixture = "bird-m83-export.txt"; // valid for BIRD only
                 if converter.script == BIRD.script {

@@ -1,5 +1,5 @@
 //! Emitted-config acceptance gate for `rbgp config import`: the
-//! config.toml translated from each checked-in fixture (BIRD 2, FRR,
+//! config.toml translated from each checked-in fixture (BIRD 2/3, FRR,
 //! GoBGP) must pass the real daemon's `rustbgpd --check`, and that check
 //! must say out loud that nothing filters those eBGP sessions yet.
 //! Golden translations and report content are pinned in
@@ -8,11 +8,16 @@
 
 use rustbgpctl::importer::{SourceFormat, import_source};
 
-const SOURCES: [(SourceFormat, &str, &str); 3] = [
+const SOURCES: [(SourceFormat, &str, &str); 4] = [
     (
         SourceFormat::Bird,
         "bird.conf",
         include_str!("../crates/cli/tests/fixtures/import/bird.conf"),
+    ),
+    (
+        SourceFormat::Bird,
+        "bird3.conf",
+        include_str!("../crates/cli/tests/fixtures/import/bird3.conf"),
     ),
     (
         SourceFormat::Frr,

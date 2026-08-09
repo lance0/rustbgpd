@@ -1,4 +1,4 @@
-//! BIRD 2 configuration structural frontend.
+//! BIRD 2/3 configuration structural frontend.
 //!
 //! A small scanner splits the file into brace/statement events (string-
 //! and comment-aware, line-tracked); a frame stack then walks
@@ -440,10 +440,10 @@ fn bgp_stmt(model: &mut Model, acc: &mut BgpAcc, line: usize, text: &str) {
             format!("{}: rr client", scope(acc)),
             "set route_reflector_client = true on the neighbor by hand (iBGP only)",
         ),
-        ["rs", "client"] => skip(
+        ["rs", "client"] | ["rs", "client", "on"] => skip(
             model,
             line,
-            format!("{}: rs client", scope(acc)),
+            format!("{}: {text}", scope(acc)),
             "set route_server_client = true on the neighbor by hand",
         ),
         _ => skip(
@@ -468,6 +468,14 @@ fn channel_stmt(model: &mut Model, stack: &mut [Frame], ipv6: bool, line: usize,
     match words.as_slice() {
         // Accept-everything matches rustbgpd's default (no policy = accept).
         ["import", "all"] | ["export", "all"] => {}
+        [direction @ ("import" | "export"), "table", "on"] => skip(
+            model,
+            line,
+            format!("{acc_scope}: {text}"),
+            format!(
+                "BIRD retained {direction} table is operational state; no rustbgpd policy translation is needed"
+            ),
+        ),
         ["import", "limit", value, ..] => {
             if let Ok(limit) = value.parse::<u32>() {
                 if let Some(Frame::Bgp(acc)) =

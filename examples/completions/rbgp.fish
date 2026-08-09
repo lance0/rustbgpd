@@ -77,7 +77,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -f -a "history" -d 'List retained config-history rows (newest first)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -f -a "rollback" -d 'Roll back to an eligible config snapshot (Junos `rollback N`)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -f -a "effective" -d 'Dump the daemon\'s effective running config (defaults resolved)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -f -a "import" -d 'Import a BIRD 2 / FRR / GoBGP config into a rustbgpd config.toml'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -f -a "import" -d 'Import a BIRD 2/3 / FRR / GoBGP config into a rustbgpd config.toml'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -l from-file -d 'Hidden compatibility alias for the positional `CANDIDATE`' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -157,7 +157,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "history" -d 'List retained config-history rows (newest first)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "rollback" -d 'Roll back to an eligible config snapshot (Junos `rollback N`)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "effective" -d 'Dump the daemon\'s effective running config (defaults resolved)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "import" -d 'Import a BIRD 2 / FRR / GoBGP config into a rustbgpd config.toml'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "import" -d 'Import a BIRD 2/3 / FRR / GoBGP config into a rustbgpd config.toml'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l compare -d 'Compare this peer\'s live update-group membership with another configured peer without exposing internal group identifiers' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1147,7 +1147,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "history" -d 'List retained config-history rows (newest first)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "rollback" -d 'Roll back to an eligible config snapshot (Junos `rollback N`)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "effective" -d 'Dump the daemon\'s effective running config (defaults resolved)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "import" -d 'Import a BIRD 2 / FRR / GoBGP config into a rustbgpd config.toml'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "import" -d 'Import a BIRD 2/3 / FRR / GoBGP config into a rustbgpd config.toml'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "add" -d 'Add a new neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "delete" -d 'Delete this neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "enable" -d 'Enable this neighbor'

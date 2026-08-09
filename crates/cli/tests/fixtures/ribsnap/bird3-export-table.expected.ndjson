@@ -1,0 +1,3 @@
+{"record":"header","schema":"rbgp-ribsnap/1","source":"bird2-export/1 view=adj-rib-out-capture bird-3.3.1-export-table","generation":1}
+{"record":"route","peer":"10.92.6.13","peer_asn":64502,"prefix":"203.0.113.0/24","origin":0,"as_path":[64501],"next_hop":"10.92.6.11","med":120,"communities":["64501:111"],"large_communities":["64501:92:6"]}
+{"record":"trailer","routes":1}
