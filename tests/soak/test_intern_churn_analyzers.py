@@ -333,6 +333,14 @@ run_apply_cycle 1
                 result = self.bash("run-soak-hot-reload.sh", f"MODE={mode}\n{body}")
                 self.assertEqual(result.returncode, code, result.stderr)
 
+    def test_hot_runner_uses_positional_config_candidates(self):
+        # Load-bearing: restoring either runner call to the retired alias
+        # makes this structural fence red before a multi-hour soak starts.
+        source = (HERE / "run-soak-hot-reload.sh").read_text()
+        self.assertNotIn("--from-file", source)
+        self.assertIn("config plan \\\n        /tmp/candidate.toml -j)", source)
+        self.assertIn("config apply \\\n        /tmp/candidate.toml", source)
+
     def test_injection_mutates_counts_only_after_commands_succeed(self):
         body = r'''
 CHURN_BATCH=1; LIVE_SET_FILE=$(mktemp); echo 1 >"$LIVE_SET_FILE"

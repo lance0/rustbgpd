@@ -126,6 +126,32 @@ fn rbgp_json(grpc_addr: &str, args: &[&str]) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).expect("rbgp JSON output must parse")
 }
 
+#[test]
+fn actual_binary_rejects_retired_config_from_file_aliases() {
+    // Load-bearing: restoring any hidden alias makes the real parser accept
+    // that invocation, so its exit/stderr assertions go red before connect.
+    for args in [
+        vec!["config", "diff", "--from-file", "candidate.toml"],
+        vec!["config", "plan", "--from-file", "candidate.toml"],
+        vec![
+            "config",
+            "apply",
+            "--from-file",
+            "candidate.toml",
+            "--expected-runtime-snapshot-token",
+            "kv1:old:1",
+        ],
+    ] {
+        let output = rbgp("http://127.0.0.1:1", &args);
+        assert_eq!(output.status.code(), Some(2), "args: {args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--from-file'"),
+            "args: {args:?}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 fn wait_until_serving(grpc_addr: &str, daemon: &mut Daemon) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
@@ -327,13 +353,7 @@ impl Lab {
     fn apply_plain(&self, candidate: &Path) {
         let plan = rbgp_json(
             &self.grpc_addr,
-            &[
-                "--json",
-                "config",
-                "plan",
-                "--from-file",
-                candidate.to_str().unwrap(),
-            ],
+            &["--json", "config", "plan", candidate.to_str().unwrap()],
         );
         let token = plan["runtime_snapshot_token"].as_str().unwrap();
         let output = rbgp(
@@ -342,7 +362,6 @@ impl Lab {
                 "--json",
                 "config",
                 "apply",
-                "--from-file",
                 candidate.to_str().unwrap(),
                 "--expected-runtime-snapshot-token",
                 token,
@@ -366,7 +385,6 @@ impl Lab {
                 "--json",
                 "config",
                 "plan",
-                "--from-file",
                 self.candidate_path.to_str().unwrap(),
             ],
         );
@@ -393,7 +411,6 @@ impl Lab {
                 "--json",
                 "config",
                 "apply",
-                "--from-file",
                 self.candidate_path.to_str().unwrap(),
                 "--expected-runtime-snapshot-token",
                 token,
@@ -480,12 +497,7 @@ fn streamed_confirmed_apply_above_eight_mib_aborts_to_previous_config() {
     );
     let human_plan = rbgp(
         &lab.grpc_addr,
-        &[
-            "config",
-            "plan",
-            "--from-file",
-            lab.candidate_path.to_str().unwrap(),
-        ],
+        &["config", "plan", lab.candidate_path.to_str().unwrap()],
     );
     assert_eq!(human_plan.status.code(), Some(2));
     let human_stdout = String::from_utf8(human_plan.stdout).unwrap();
@@ -538,7 +550,6 @@ fn unsafe_fixed_raw_slot_refuses_before_real_binary_apply() {
             "--json",
             "config",
             "plan",
-            "--from-file",
             lab.candidate_path.to_str().unwrap(),
         ],
     );
@@ -550,7 +561,6 @@ fn unsafe_fixed_raw_slot_refuses_before_real_binary_apply() {
             "--json",
             "config",
             "apply",
-            "--from-file",
             lab.candidate_path.to_str().unwrap(),
             "--expected-runtime-snapshot-token",
             token,
@@ -814,7 +824,6 @@ fn v2_history_survives_restart_and_restores_after_source_verification() {
             "--json",
             "config",
             "plan",
-            "--from-file",
             lab.candidate_path.to_str().unwrap(),
         ],
     );
@@ -826,7 +835,6 @@ fn v2_history_survives_restart_and_restores_after_source_verification() {
             "--json",
             "config",
             "apply",
-            "--from-file",
             lab.candidate_path.to_str().unwrap(),
             "--expected-runtime-snapshot-token",
             token,

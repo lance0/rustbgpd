@@ -1371,16 +1371,12 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__config__subcmd__apply)
-            opts="-s -j -h --from-file --expected-runtime-snapshot-token --plan-token --client-request-id --comment --confirm-id --confirm-timeout --addr --token-file --json --no-color --help"
+            opts="-s -j -h --expected-runtime-snapshot-token --plan-token --client-request-id --comment --confirm-id --confirm-timeout --addr --token-file --json --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --from-file)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
                 --expected-runtime-snapshot-token)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -1451,16 +1447,12 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__config__subcmd__diff)
-            opts="-s -j -h --from-file --addr --token-file --json --no-color --help"
+            opts="-s -j -h --addr --token-file --json --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --from-file)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
                 --addr)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -1735,16 +1727,12 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__config__subcmd__plan)
-            opts="-s -j -h --from-file --expected-runtime-snapshot-token --addr --token-file --json --no-color --help"
+            opts="-s -j -h --expected-runtime-snapshot-token --addr --token-file --json --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --from-file)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
                 --expected-runtime-snapshot-token)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0

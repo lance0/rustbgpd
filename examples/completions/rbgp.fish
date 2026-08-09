@@ -79,20 +79,17 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -f -a "effective" -d 'Dump the daemon\'s effective running config (defaults resolved)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -f -a "import" -d 'Import a BIRD 2/3 / FRR / GoBGP config into a rustbgpd config.toml'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -l from-file -d 'Hidden compatibility alias for the positional `CANDIDATE`' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -l from-file -d 'Hidden compatibility alias for the positional `CANDIDATE`' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -l expected-runtime-snapshot-token -d 'Optional runtime snapshot token to check while planning' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l from-file -d 'Hidden compatibility alias for the positional `CANDIDATE`' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l expected-runtime-snapshot-token -d 'Runtime snapshot token returned by config plan' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l plan-token -d 'Ephemeral token returned by a streamed config plan' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l client-request-id -d 'Optional audit/correlation identifier' -r

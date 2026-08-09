@@ -68,7 +68,6 @@ _arguments "${_arguments_options[@]}" : \
         case $line[1] in
             (diff)
 _arguments "${_arguments_options[@]}" : \
-'()--from-file=[Hidden compatibility alias for the positional \`CANDIDATE\`]:PATH:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -77,12 +76,11 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
-'::candidate -- Candidate TOML file to validate and compare:_default' \
+':candidate -- Candidate TOML file to validate and compare:_default' \
 && ret=0
 ;;
 (plan)
 _arguments "${_arguments_options[@]}" : \
-'()--from-file=[Hidden compatibility alias for the positional \`CANDIDATE\`]:PATH:_default' \
 '--expected-runtime-snapshot-token=[Optional runtime snapshot token to check while planning]:TOKEN:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -92,12 +90,11 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
-'::candidate -- Candidate TOML file to validate and classify:_default' \
+':candidate -- Candidate TOML file to validate and classify:_default' \
 && ret=0
 ;;
 (apply)
 _arguments "${_arguments_options[@]}" : \
-'()--from-file=[Hidden compatibility alias for the positional \`CANDIDATE\`]:PATH:_default' \
 '--expected-runtime-snapshot-token=[Runtime snapshot token returned by config plan]:TOKEN:_default' \
 '--plan-token=[Ephemeral token returned by a streamed config plan]:TOKEN:_default' \
 '--client-request-id=[Optional audit/correlation identifier]:ID:_default' \
@@ -112,7 +109,7 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
-'::candidate -- Candidate TOML file to validate and commit:_default' \
+':candidate -- Candidate TOML file to validate and commit:_default' \
 && ret=0
 ;;
 (confirm)
