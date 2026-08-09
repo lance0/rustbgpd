@@ -75,7 +75,7 @@ as inventory history).
 | # | Item | What it preserves | Cost of keeping | Classification | Removal mechanics |
 |---|------|-------------------|-----------------|----------------|-------------------|
 | A1 | `AddNeighborRequest.config` legacy carrier — field 1 outside the oneof-shaped pair (`proto/rustbgpd.proto`), kept by ADR-0118 when `NeighborCreateIntent` became the presence-aware create path. `rbgp` already sends `intent` (`crates/cli/src/commands/neighbor.rs`). | Pre-ADR-0118 gRPC clients that populate the bare `config` field. | Dual-carrier validation ("exactly one carrier") on every create. | deprecate → v0.65 | Reserve field 1; collapse to `intent` only; `AddNeighbor` is in the pinned NeighborService message graph (`docs/v1-stable-surface.json`) → blessed-surface re-bless; CHANGELOG migration (populate `intent`). |
-| A2 | `PathsLimitState.effective_send_max` raw cap (`proto/rustbgpd.proto`), superseded by the presence-aware `effective_send_limit`; "preserved for rolling compatibility". | New clients reading pre-`effective_send_limit` daemons; old clients reading the raw field. | One conflated field (0 vs UINT32_MAX sentinel encoding) plus the client-side fallback read. | deprecate → v0.65 (slipped from v0.64) | Paths-Limit is Experimental and outside v1 (`docs/v1-stable-contract.md` role matrix), so no bless needed; reserve the field, drop the CLI fallback read, CHANGELOG note. |
+| A2 | `PathsLimitState.effective_send_max` raw cap (`proto/rustbgpd.proto`), superseded by the presence-aware `effective_send_limit`. | New clients reading pre-`effective_send_limit` daemons; old clients reading the raw field. | One conflated field (0 vs UINT32_MAX sentinel encoding) plus the client-side fallback read. | removed (v0.65) | Paths-Limit is Experimental and outside v1 (`docs/v1-stable-contract.md` role matrix). Field number/name 5 are reserved, the CLI fallback and JSON raw key are gone, and field 6 alone carries inactive (absent), unlimited (zero), or finite states. |
 | A3 | `RouteEvent.event_id` back-compat mirror of the envelope event id (`proto/rustbgpd.proto`, `crates/api/src/event_service/cursor.rs`), kept "for route-only consumers". | Route-only event consumers that never read the `BgpEvent` envelope id. | Duplicate id on every route event; a documented invariant that the two must mirror. | deprecate → v0.65 | RibService/EventService message graphs are pinned (`docs/v1-stable-surface.json`) → blessed-surface re-bless; reserve the field; CHANGELOG migration (read the envelope id). |
 | A4 | Legacy `bgp_otc_routes_blocked_total{peer,reason}` counter and `otc_routes_blocked` scalar, named "the compatibility surfaces" alongside `OtcRouteBlockedEvent` (`proto/rustbgpd.proto`). | Existing dashboards/alerts on the counter. | One counter family; metrics are the intended observation surface. | keep | Events complement, not replace, the counter; renaming metrics has its own cost (cf. the `bgp_aspa_records` rename cycle in v0.51.0). |
 
@@ -101,9 +101,9 @@ as inventory history).
 - The three-minor / N-1 lifetime policies convert future removals from
   per-item debates into scheduled cleanups.
 - The former open calls are closed: unary Plan/Apply remains permanent, and
-  the hidden `--from-file` aliases were removed for v0.65. D1, D3, and A2
-  carry an explicit v0.65 deadline after missing v0.64 rather than silently
-  slipping.
+  the hidden `--from-file` aliases and A2 raw Paths-Limit sentinel were removed
+  for v0.65. D1 and D3 carry an explicit v0.65 deadline after missing v0.64
+  rather than silently slipping.
 - Scheduled removals (C1, A1, A3) touch the blessed v1 surface; each needs
   the re-bless procedure and a CHANGELOG migration note, which this ADR's
   mechanics columns pre-write.

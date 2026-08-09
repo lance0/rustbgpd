@@ -363,11 +363,10 @@ retained for the daemon lifetime with reason `all_eor`, `all_excluded`, or
 `timer`, so an operator can distinguish complete convergence from timer-driven
 release.
 
-`NeighborState.paths_limits` is sorted by numeric AFI then SAFI. Legacy field
-`effective_send_max` retains raw semantics (`UINT32_MAX` unlimited, zero
-inactive). Optional `effective_send_limit` is the normalized view: presence
-means active, with zero unlimited and non-zero finite; absence means inactive.
-New clients fall back to the legacy field when reading an older server.
+`NeighborState.paths_limits` is sorted by numeric AFI then SAFI. Optional
+`effective_send_limit` is presence-aware: presence means active, with zero
+unlimited and non-zero finite; absence means inactive. The superseded raw
+sentinel field number and name (`effective_send_max`, field 5) are reserved.
 
 `NeighborState.slow_peer` is `true` while the peer is flagged slow: the
 session is Established and alive but its outbound queue has stayed above

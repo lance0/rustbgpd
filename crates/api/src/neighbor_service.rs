@@ -721,7 +721,6 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
                     .find_map(|(candidate, value)| (candidate == family).then_some(*value));
                 let effective_send_limit =
                     effective.map(|value| if value == u32::MAX { 0 } else { value });
-                let effective_send_max = effective.unwrap_or(0);
                 let configured_receive_max = if locally_configured {
                     u32::from(info.paths_limit_receive_max)
                 } else {
@@ -743,7 +742,6 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
                         configured_receive_max,
                         advertised_receive_max: advertised,
                         received_receive_max: received,
-                        effective_send_max,
                         effective_send_limit,
                     }
                 })
@@ -2201,7 +2199,16 @@ mod tests {
         assert!(source.contains("EffectiveDistributionMode effective_distribution_mode = 30;"));
         assert!(source.contains("repeated SelectionDeferralFamilyState selection_deferral = 31;"));
         assert!(source.contains("message SelectionDeferralFamilyState {"));
-        assert!(source.contains("optional uint32 effective_send_limit = 6;"));
+        let paths_limit = source
+            .split_once("message PathsLimitState {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(paths_limit.contains("reserved 5;"));
+        assert!(paths_limit.contains("reserved \"effective_send_max\";"));
+        assert!(paths_limit.contains("optional uint32 effective_send_limit = 6;"));
         assert!(source.contains("optional uint32 max_prefix_restart_seconds = 19;"));
         assert!(source.contains("string max_prefix_action = 38;"));
         assert!(source.contains("optional uint64 max_prefix_restart_remaining_millis = 39;"));
@@ -3935,7 +3942,7 @@ mod tests {
     }
 
     #[test]
-    fn paths_limit_output_is_numeric_ordered_and_normalizes_active_unlimited() {
+    fn paths_limit_output_is_numeric_ordered_and_presence_aware() {
         let mut info = peer_info("10.0.0.1".parse().unwrap());
         info.families = vec![(Afi::Ipv6, Safi::Unicast), (Afi::Ipv4, Safi::Unicast)];
         info.paths_limit_receive_max = 3;
@@ -3957,11 +3964,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["ipv4_unicast", "ipv6_unicast", "L2Vpn_Evpn"]
         );
-        assert_eq!(paths[0].effective_send_max, u32::MAX);
+        // Load-bearing: changing the projection's inactive/unlimited/finite
+        // mapping makes one of these three presence-aware assertions red.
         assert_eq!(paths[0].effective_send_limit, Some(0));
-        assert_eq!(paths[1].effective_send_max, 2);
         assert_eq!(paths[1].effective_send_limit, Some(2));
-        assert_eq!(paths[2].effective_send_max, 0);
         assert_eq!(paths[2].effective_send_limit, None);
         assert_eq!(paths[2].configured_receive_max, 0);
         assert_eq!(paths[2].advertised_receive_max, 0);

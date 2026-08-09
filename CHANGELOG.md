@@ -22,6 +22,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- Experimental Paths-Limit state no longer emits the ambiguous raw
+  `effective_send_max` sentinel. Protobuf clients must read optional
+  `effective_send_limit` (absent = inactive, zero = unlimited, non-zero =
+  finite); neighbor JSON retains `effective_send_active` with the same
+  optional normalized limit.
 - `rbgp config diff`, `config plan`, and `config apply` no longer accept the
   hidden `--from-file PATH` compatibility alias. Pass the candidate TOML as
   the positional `CANDIDATE` argument instead, for example
