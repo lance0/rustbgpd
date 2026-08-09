@@ -826,36 +826,131 @@ bytes). The JSON fields preserve `false` as an explicit negotiated result and
 omit values an older daemon did not expose; a missing live-session snapshot is
 reported separately by `negotiation_available`.
 
-## Upgrade & state migration
+## Package upgrade and rollback
 
-### Routine upgrade (no schema change)
+This is the canonical procedure for the release `.deb` and `.rpm` packages.
+The package scripts create the service user and run `systemctl daemon-reload`;
+they deliberately do **not** stop, start, or restart rustbgpd. An operator must
+therefore own the graceful stop and the verification that follows it.
+
+### Upgrade
+
+1. Read the target release's CHANGELOG section and verify the downloaded
+   package against its release checksum. Config compatibility is not assumed
+   across minor releases.
+2. Extract the package into a temporary directory and run the **new** binary's
+   strict check against the configuration that the service will use:
+
+   ```sh
+   candidate_pkg=/path/to/rustbgpd_X.Y.Z_amd64.deb # or the .rpm
+   candidate_root=$(mktemp -d)
+   chmod 0755 "$candidate_root"
+
+   case "$candidate_pkg" in
+     *.deb) dpkg-deb --extract "$candidate_pkg" "$candidate_root" ;;
+     *.rpm) rpm2cpio "$candidate_pkg" |
+              (cd "$candidate_root" && cpio --quiet -id --no-absolute-filenames) ;;
+     *) echo "expected a .deb or .rpm" >&2; exit 2 ;;
+   esac
+
+   sudo -u rustbgpd \
+     "$candidate_root/usr/bin/rustbgpd" --check --strict \
+     /etc/rustbgpd/config.toml
+   ```
+
+   Fix every error before proceeding. There is no in-place schema migration
+   tool; make release-note field renames in the config by hand, then repeat the
+   candidate check.
+   This check validates candidate config bytes only: it does **not** inspect
+   `runtime_state_dir` or config-adjacent commit-confirm authority.
+
+   Before installing v0.65, use the still-running v0.64.0 daemon to run
+   `rbgp config status` and confirm or abort every pending transaction. A
+   locator-free `commit-confirm-journal.json` or a retired v2
+   `*.commit-confirm-locator.json` must be recovered with exactly rustbgpd
+   v0.64.0. Do not proceed while either artifact is present or inaccessible;
+   delete one only after proving the transaction terminal and the current
+   config intended. v0.65 otherwise refuses boot and leaves the authority
+   untouched.
+3. Stop the running daemon cleanly, then confirm it is down:
+
+   ```sh
+   sudo systemctl stop rustbgpd
+   systemctl is-active rustbgpd # expected: inactive
+   ```
+
+   The coordinated stop writes the GR restart marker. With GR enabled, the new
+   process can advertise `R=1` while sessions rebuild, but it advertises
+   `forwarding_preserved = false`; use a drained route-server pair when traffic
+   continuity matters.
+4. Install the already-checked package:
+
+   ```sh
+   sudo apt-get install -y "$candidate_pkg" # Debian / Ubuntu
+   sudo dnf install -y "$candidate_pkg"     # RHEL / Rocky / Alma
+   ```
+
+   Use the command for the host's package manager, not both. The package marks
+   `/etc/rustbgpd/config.toml` as `config|noreplace`: a locally modified config
+   stays in place. Inspect any replacement candidate reported by the package
+   manager before starting (normally `.dpkg-dist` or `.rpmnew`):
+
+   ```sh
+   sudo find /etc/rustbgpd -maxdepth 1 -type f \
+     \( -name '*.dpkg-dist' -o -name '*.rpmnew' \) -print
+   sudo -u rustbgpd /usr/bin/rustbgpd --check --strict \
+     /etc/rustbgpd/config.toml
+   ```
+
+5. Start and verify the installed version and its operator surfaces:
+
+   ```sh
+   sudo systemctl start rustbgpd
+   sudo systemctl --no-pager --full status rustbgpd
+   /usr/bin/rustbgpd --version
+   sudo -u rustbgpd rbgp health
+   sudo -u rustbgpd rbgp summary
+   ```
+
+   Confirm the reported version is the package you selected and wait for every
+   expected session to return to `Established`; `systemd` active alone does not
+   prove routing convergence.
+
+### Rollback
+
+A rollback is another compatibility migration, not merely a package command.
+Read the target version's release notes. Extract the old package as above and
+run its `rustbgpd --check --strict` against the intended rollback config before
+stopping the current daemon. If the old binary rejects the current config,
+restore a version-controlled config known to that release, preflight that exact
+file with the old binary, and install it only after the stop.
+
+Before downgrading, run `rbgp config status` and finish a pending confirmed
+transaction with `rbgp config confirm <id>` or `rbgp config abort <id>`. Do not
+delete a live locator to force the downgrade. Once the transaction is terminal,
+verify that the config-adjacent `*.commit-confirm-locator.json` and the retired
+locator-free `commit-confirm-journal.json` are absent. The fixed v3 raw prior
+and metadata may remain after a warning-only cleanup failure: once locator
+absence is verified they are non-authoritative, and rustbgpd v0.64.0 ignores
+those v3-only names. If the target predates v2 history, move the complete
+`config-history/` directory aside; do not let an old reader interpret a newer
+record layout.
+
+Then stop cleanly and install the selected older package:
 
 ```sh
+previous_pkg=/path/to/rustbgpd_W.X.Y_amd64.deb # or the .rpm
 sudo systemctl stop rustbgpd
-sudo install -m 0755 /tmp/rustbgpd-vX.Y.Z /usr/local/bin/rustbgpd
-sudo systemctl start rustbgpd
+sudo apt-get install -y --allow-downgrades "$previous_pkg" # Debian / Ubuntu
+sudo dnf install -y "$previous_pkg"                       # RHEL / Rocky / Alma
 ```
 
-GR is on by default; after a coordinated shutdown rustbgpd advertises `R=1`
-on the next OPEN. A GR-aware peer may retain eligible routes while sessions
-rebuild, but rustbgpd advertises `forwarding_preserved = false`: this is not a
-guarantee of forwarding continuity, and the peer may withdraw or replace routes
-until normal convergence.
-
-### Schema migration
-
-TOML format is **not frozen** between minor versions while rustbgpd is
-public alpha. Before upgrading across a minor version:
-
-1. Read the CHANGELOG entry for the target version. Breaking config
-   changes are called out under `### Changed` / `### Removed`.
-2. Build the new binary or pull the new container image.
-3. Run `rustbgpd --check /etc/rustbgpd/config.toml` against the **new**
-   binary. Fix any errors before swapping.
-4. Swap and start.
-
-There is no in-place schema migration tool. If the CHANGELOG describes
-a field rename, edit the config file by hand.
+Inspect any `.dpkg-dist`/`.rpmnew`, install the preflighted compatible config,
+then repeat the start and verification commands from the upgrade procedure.
+A binary that predates GR marker v3 rejects the v3 marker and cold-starts
+without restarting-speaker mode. Do not count on peer route retention across
+that boundary; drain the route-server member of a redundant pair first when
+continuity matters.
 
 ### Persistent state on disk
 
@@ -888,8 +983,9 @@ fail closed. Locator unlink plus parent `fsync` is terminal; only subsequent
 verified metadata/raw cleanup and pending-directory `fsync` are warning-only.
 
 Production reads and writes v3. Retired v1/v2 authority refuses boot untouched;
-finish it before upgrade or recover with rustbgpd v0.64.0. Before downgrade, finish or
-abort v3 and never delete its live locator manually.
+finish it before upgrade or recover with rustbgpd v0.64.0. Offline `--check`
+does not inspect this runtime state. Before downgrade, finish or abort v3 and
+never delete its live locator manually.
 
 Routing state is **not restored**. The optional shutdown checkpoint contains
 only eligible post-import-policy Adj-RIB-In views for future use; Loc-RIB,
