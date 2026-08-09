@@ -85,15 +85,28 @@ mkdir -p "$pkgroot/etc/rustbgpd"
 # Swap the dev-paths comment paragraph for a package-accurate one, then
 # point the runtime state at the production directory. The implicit gRPC UDS
 # follows runtime_state_dir, so it needs no independent rewrite or drift fence.
-sed -e '/^# For local development/,/^# systemd unit (examples\/systemd\/)/c\
+# The paragraph ends at the blank line before [global]; the range ends there
+# rather than on a closing comment line, which reflows without warning.
+sed -e '/^# For local development/,/^$/c\
 # Installed by the rustbgpd package. State lives in /var/lib/rustbgpd,\
-# created and owned by the systemd unit (StateDirectory=rustbgpd).' \
+# created and owned by the systemd unit (StateDirectory=rustbgpd).\
+' \
     -e 's|/tmp/rustbgpd|/var/lib/rustbgpd|g' \
     examples/minimal/config.toml > "$pkgroot/etc/rustbgpd/config.toml"
 if grep -q '/tmp/rustbgpd' "$pkgroot/etc/rustbgpd/config.toml"; then
     echo "error: dev path survived the config skeleton rewrite" >&2
     exit 1
 fi
+# A drifted range anchor deletes to end of file rather than failing, and the
+# dev-path check above then passes because the path went with it. Assert the
+# config body positively instead.
+for required in '^\[global\]$' '^\[\[neighbors\]\]$' '^\[policy\]$' \
+        '^runtime_state_dir = "/var/lib/rustbgpd"$'; do
+    grep -Eq "$required" "$pkgroot/etc/rustbgpd/config.toml" || {
+        echo "error: config skeleton rewrite consumed ${required}; update this script" >&2
+        exit 1
+    }
+done
 
 # Man pages (gzipped per packaging convention) + completions.
 install -D -m 0644 "$staging/share/man/man1/rbgp.1" "$pkgroot/usr/share/man/man1/rbgp.1"

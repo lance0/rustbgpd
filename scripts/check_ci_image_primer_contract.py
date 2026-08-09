@@ -204,7 +204,15 @@ def check(root: Path) -> list[str]:
     action = (
         root / ".github" / "actions" / "setup-dataplane-host" / "action.yml"
     ).read_text()
-    build = action.split("- name: Build rustbgpd:dev", 1)[-1]
+    # split(...)[-1] returns the whole file when the step name drifts, which
+    # turns every seam check below into a file-wide search that passes
+    # vacuously. Scope the region only once the anchor is known to be present.
+    build_step = "- name: Build rustbgpd:dev"
+    if build_step not in action:
+        errors.append(
+            f"setup-dataplane-host: build step name drifted from {build_step!r}"
+        )
+    build = action.split(build_step, 1)[-1] if build_step in action else ""
     if BUILDX not in action:
         errors.append(f"setup-dataplane-host: consumer missing {BUILDX}")
     for seam in (

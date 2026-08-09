@@ -17,11 +17,38 @@ sys.path.insert(0, str(HERE))
 
 import classify_dhat  # noqa: E402
 
+# The summary block is the one embedded Python the runner invokes outside any
+# shell function, so its own invocation line is the anchor.
+SUMMARY_HEREDOC = "python3 - \"$OUT\" <<'PY'"
+
+
+def runner_script() -> tuple[Path, str]:
+    runner = HERE.parents[2] / "docs" / "perf" / "run-explain-cache-variant.sh"
+    return runner, runner.read_text(encoding="utf-8")
+
+
+def require_anchor(script: str, marker: str, runner: Path) -> None:
+    """Fail with the fix, not a bare ``substring not found``.
+
+    These tests locate embedded Python by the shell code around it. Anchor on
+    a function definition or the ``python3`` invocation line -- never on
+    comment prose, which gets reworded and silently stops matching.
+    """
+    if marker in script:
+        return
+    raise AssertionError(
+        f"anchor {marker!r} no longer appears in {runner}. This test extracts "
+        "embedded Python by the shell code around it; update the anchor to "
+        "match the renamed shell code. Do not re-anchor on comment prose -- "
+        "prose gets reworded and takes the test red with it."
+    )
+
 
 class ClassifierFixtures(unittest.TestCase):
     def runner_embedded_python(self, marker: str) -> str:
-        runner = HERE.parents[2] / "docs" / "perf" / "run-explain-cache-variant.sh"
-        script = runner.read_text(encoding="utf-8")
+        """Extract the ``<<'PY'`` heredoc that follows ``marker`` in the runner."""
+        runner, script = runner_script()
+        require_anchor(script, marker, runner)
         start = script.index(marker)
         body_start = script.index("<<'PY'\n", start) + len("<<'PY'\n")
         body_end = script.index("\nPY\n", body_start)
@@ -278,15 +305,7 @@ class ClassifierFixtures(unittest.TestCase):
         self.assertIn("stripped release profile", result.stderr)
 
     def test_explain_cache_peak_uses_daemon_vmhwm_not_sampled_tree_max(self) -> None:
-        runner = HERE.parents[2] / "docs" / "perf" / "run-explain-cache-variant.sh"
-        marker = (
-            "# Summary: steady = median of post-convergence samples; "
-            "peak = daemon kernel VmHWM.\n"
-        )
-        script = runner.read_text(encoding="utf-8")
-        summary = script.split(marker, 1)[1].split("\nPY\n", 1)[0]
-        self.assertTrue(summary.startswith("python3 - \"$OUT\" <<'PY'\n"))
-        python = summary.split("\n", 1)[1]
+        python = self.runner_embedded_python(SUMMARY_HEREDOC)
 
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory)
@@ -363,9 +382,7 @@ class ClassifierFixtures(unittest.TestCase):
     def run_settled_metrics_validator(
         self, fixture: str, *, dhat: int = 0
     ) -> subprocess.CompletedProcess[str]:
-        python = self.runner_embedded_python(
-            "# LAN-630 settled-state gates: missing metrics are failures, never zero."
-        )
+        python = self.runner_embedded_python("validate_settled_metrics()")
         with tempfile.TemporaryDirectory() as directory:
             metrics = Path(directory) / "metrics.prom"
             metrics.write_text(fixture, encoding="utf-8")
@@ -492,7 +509,8 @@ class ClassifierFixtures(unittest.TestCase):
         required = gate_start + gate.index(
             '[[ -f "$OUT/dhat-heap.json" && -s "$OUT/dhat-heap.json" ]] || {'
         )
-        summary = script.index("# Summary: steady = median")
+        require_anchor(script, SUMMARY_HEREDOC, runner)
+        summary = script.index(SUMMARY_HEREDOC)
         success = script.index("printf 'status=success\\n'")
         self.assertLess(required, summary)
         self.assertLess(required, success)
