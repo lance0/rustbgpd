@@ -13316,6 +13316,135 @@ fn persisted_config_sorts_every_hash_map_and_round_trips_to_a_fixpoint() {
     assert_eq!(statements[1].action, "deny");
 }
 
+#[test]
+fn bounded_persistence_matches_oracle_for_every_statement_lane_and_boundary() {
+    use sha2::{Digest as _, Sha256};
+
+    let mut config = persistence_order_fixture(true, 0);
+    let mut statement = parse_schema_only(&format!(
+        "{}\n[policy.definitions.seed]\n[[policy.definitions.seed.statements]]\n\
+         action = \"permit\"\nprefix = \"2001:db8::/32\"\nge = 48\n\
+         match_community = [\"65001:7\"]\nset_community_add = [\"NO_EXPORT\"]\n\
+         [policy.definitions.seed.statements.set_as_path_prepend]\nasn = 65001\ncount = 2\n",
+        valid_toml()
+    ))
+    .unwrap()
+    .policy
+    .definitions
+    .remove("seed")
+    .unwrap()
+    .statements
+    .remove(0);
+    statement.set_med = Some(0);
+
+    config.neighbors[0].import_policy = vec![statement.clone()];
+    config.neighbors[0].export_policy = vec![statement.clone(); 256];
+    config.peer_groups.insert(
+        "plain".to_string(),
+        PeerGroupConfig {
+            import_policy: vec![statement.clone(); 257],
+            ..PeerGroupConfig::default()
+        },
+    );
+    config.peer_groups.insert(
+        "dotted.key \"雪\"".to_string(),
+        PeerGroupConfig {
+            export_policy: vec![statement.clone()],
+            ..PeerGroupConfig::default()
+        },
+    );
+    config.policy.definitions.insert(
+        "quoted.\"policy\".雪".to_string(),
+        NamedPolicyConfig {
+            default_action: "deny".to_string(),
+            statements: vec![statement],
+        },
+    );
+
+    let original = config.clone();
+    let oracle = persisted_config_document(&config).unwrap();
+    let (bounded, stats) = super::canonical::render_document_bounded(&mut config).unwrap();
+    assert_eq!(config, original, "the RAII guard must restore every lane");
+    assert_eq!(bounded, oracle);
+    assert_eq!(
+        Sha256::digest(bounded.as_bytes()),
+        Sha256::digest(oracle.as_bytes())
+    );
+    assert_eq!(stats.neighbor_import_lanes, 1);
+    assert_eq!(stats.neighbor_export_lanes, 1);
+    assert_eq!(stats.peer_group_import_lanes, 1);
+    assert_eq!(stats.peer_group_export_lanes, 1);
+    assert_eq!(stats.named_policy_lanes, 1);
+    assert_eq!(stats.statements, 516);
+    assert_eq!(stats.max_chunk_statements, 256);
+    assert!(stats.max_chunk_bytes > 0);
+    assert_eq!(bounded.matches(PERSISTED_CONFIG_HEADER).count(), 1);
+    let reloaded: Config = toml::from_str(&bounded).unwrap();
+    assert_eq!(persisted_config_document(&reloaded).unwrap(), bounded);
+}
+
+#[test]
+fn bounded_persistence_error_restores_exact_config_and_token_body() {
+    let mut config = persistence_order_fixture(false, 2);
+    config.neighbors[0].import_policy = config.policy.definitions["zeta"].statements.clone();
+    let original = config.clone();
+    let error = super::canonical::render_document_bounded_with_test_hook(&mut config, |phase| {
+        if phase == "before-statement-chunk" {
+            Err(<toml::ser::Error as serde::ser::Error>::custom(
+                "injected bounded-writer failure",
+            ))
+        } else {
+            Ok(())
+        }
+    })
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("injected bounded-writer failure")
+    );
+    assert_eq!(config, original);
+
+    let key = RuntimeSnapshotKey::random();
+    let context = [7_u8; 8];
+    let document = persisted_config_document_bounded(&mut config).unwrap();
+    assert_eq!(
+        key.token_with_normalized_document(&document, &context)
+            .unwrap(),
+        key.token_with_context(&config, &context).unwrap()
+    );
+    assert_eq!(config, original);
+    assert!(
+        key.token_with_normalized_document("config_epoch = 1\n", &context)
+            .unwrap_err()
+            .contains("maintenance header")
+    );
+}
+
+#[test]
+fn production_persisted_document_roster_uses_only_the_bounded_writer() {
+    for (name, source, expected) in [
+        ("source_provenance", include_str!("source_provenance.rs"), 5),
+        (
+            "confirm_journal_v3",
+            include_str!("../confirm_journal/v3.rs"),
+            2,
+        ),
+        (
+            "peer_manager_reconcile",
+            include_str!("../peer_manager/reconcile.rs"),
+            1,
+        ),
+    ] {
+        assert_eq!(
+            source.matches("persisted_config_document_bounded").count(),
+            expected,
+            "{name}"
+        );
+        assert!(!source.contains("persisted_config_document("), "{name}");
+    }
+}
+
 /// Every canonical sink materializes the effective epoch and policy through
 /// one borrowed renderer, while the accepted boot file stays byte-identical.
 /// Bypassing the renderer at any sink makes an equality/presence assertion red.
@@ -13422,8 +13551,8 @@ fn rfc8212_transaction_materialization_requires_real_mutation_and_exact_posture(
 
 /// Structural companion to the release HWM receipt: the runtime A/B alone
 /// cannot detect adding the same internal deep clone to both arms. This pins
-/// every large projection field as borrowed, the one allowed small Global
-/// clone, and direct serialization (no whole-tree `toml::Value`).
+/// every large projection field as borrowed, only small Global/map-key clones,
+/// and direct serialization (no whole-tree `toml::Value`).
 #[test]
 fn canonical_projection_borrows_every_large_config_field() {
     let source = include_str!("canonical.rs");
@@ -13442,7 +13571,8 @@ fn canonical_projection_borrows_every_large_config_field() {
     ] {
         assert!(source.contains(field), "canonical projection lost {field}");
     }
-    assert_eq!(source.matches(".clone()").count(), 1, "{source}");
+    assert_eq!(source.matches("name.clone()").count(), 3, "{source}");
+    assert_eq!(source.matches(".clone()").count(), 4, "{source}");
     assert!(source.contains("let mut canonical_global = global.clone()"));
     assert!(!source.contains("toml::Value::try_from"), "{source}");
     assert!(source.contains("toml::to_string_pretty(&CanonicalConfig::from(config))"));
@@ -13644,6 +13774,182 @@ fn persisted_config_release_scale_probe() {
     let (owned, owned_sha256) = read(owned_file.path());
     assert_persistence_probe_receipts(&direct, &sorted);
     assert_borrowed_persistence_probe_receipts(&borrowed, &borrowed_sha256, &owned, &owned_sha256);
+}
+
+#[derive(Debug)]
+struct BoundedWriterRow {
+    attempt: usize,
+    arm: String,
+    bytes: usize,
+    sha256: String,
+    elapsed_ns: u128,
+    baseline_hwm: usize,
+    peak_hwm: usize,
+    growth: usize,
+    statements: usize,
+    max_chunk: usize,
+}
+
+fn verify_bounded_writer_receipt(source: &str) {
+    const MIB: usize = 1024 * 1024;
+    const HEADER: &str = "attempt\tpair\tslot\tarm\tdocument_bytes\tsha256\telapsed_ns\tbaseline_hwm_bytes\tpeak_hwm_bytes\tgrowth_bytes\tstatements\tmax_chunk_statements";
+    let mut lines = source.lines();
+    assert_eq!(lines.next(), Some(HEADER));
+    let rows: Vec<_> = lines
+        .map(|line| {
+            let fields: Vec<_> = line.split('\t').collect();
+            assert_eq!(fields.len(), 12);
+            let number = |index: usize| fields[index].parse::<usize>().unwrap();
+            BoundedWriterRow {
+                attempt: number(0),
+                arm: fields[3].to_string(),
+                bytes: number(4),
+                sha256: fields[5].to_string(),
+                elapsed_ns: fields[6].parse().unwrap(),
+                baseline_hwm: number(7),
+                peak_hwm: number(8),
+                growth: number(9),
+                statements: number(10),
+                max_chunk: number(11),
+            }
+        })
+        .collect();
+    assert_eq!(rows.len(), 6);
+    let order = [
+        "legacy", "bounded", "bounded", "legacy", "legacy", "bounded",
+    ];
+    let first = &rows[0];
+    for (index, row) in rows.iter().enumerate() {
+        assert_eq!(row.attempt, index + 1);
+        assert_eq!(row.arm, order[index]);
+        assert_eq!((row.bytes, &row.sha256), (first.bytes, &first.sha256));
+        assert_eq!(row.sha256.len(), 64);
+        assert!(row.elapsed_ns > 0 && row.baseline_hwm > 0 && row.peak_hwm > 0);
+        assert_eq!(row.peak_hwm.saturating_sub(row.baseline_hwm), row.growth);
+        if row.arm == "bounded" {
+            assert_eq!((row.statements, row.max_chunk), (3_200_000, 256));
+        } else {
+            assert_eq!((row.statements, row.max_chunk), (0, 0));
+        }
+    }
+    let pairs = [(0, 1), (3, 2), (4, 5)];
+    let mut legacy_times = Vec::new();
+    let mut bounded_times = Vec::new();
+    for (legacy_index, bounded_index) in pairs {
+        let legacy = &rows[legacy_index];
+        let bounded = &rows[bounded_index];
+        let cap = (legacy.growth * 60 / 100).min(first.bytes * 3 + 64 * MIB);
+        assert!(
+            bounded.growth <= cap,
+            "bounded={bounded:?} legacy={legacy:?}"
+        );
+        assert!(bounded.elapsed_ns <= legacy.elapsed_ns * 3 / 2);
+        legacy_times.push(legacy.elapsed_ns);
+        bounded_times.push(bounded.elapsed_ns);
+    }
+    legacy_times.sort_unstable();
+    bounded_times.sort_unstable();
+    assert!(bounded_times[1] <= legacy_times[1] * 5 / 4);
+}
+
+#[test]
+fn bounded_writer_candidate_receipt_is_load_bearing() {
+    let receipt = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/docs/perf/artifacts/persisted-config-serialization-2026-08/candidate.tsv"
+    ));
+    verify_bounded_writer_receipt(receipt);
+    let invalid = receipt.replacen("\t256\n", "\t257\n", 1);
+    assert!(std::panic::catch_unwind(|| verify_bounded_writer_receipt(&invalid)).is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "release-only six-child 3.2M-statement bounded-writer A/B"]
+fn bounded_writer_release_probe() {
+    use sha2::{Digest as _, Sha256};
+    use std::{fmt::Write as _, process::Command, time::Instant};
+
+    const ARM: &str = "RUSTBGPD_BOUNDED_WRITER_ARM";
+    const ATTEMPT: &str = "RUSTBGPD_BOUNDED_WRITER_ATTEMPT";
+    const RECEIPT: &str = "RUSTBGPD_BOUNDED_WRITER_RECEIPT";
+    assert!(
+        !std::hint::black_box(cfg!(debug_assertions)),
+        "run with --release"
+    );
+    if let (Ok(arm), Ok(attempt), Ok(receipt)) = (
+        std::env::var(ARM),
+        std::env::var(ATTEMPT),
+        std::env::var(RECEIPT),
+    ) {
+        let mut config = persistence_probe_fixture();
+        let baseline = linux_vm_hwm_bytes();
+        let started = Instant::now();
+        let (document, stats) = match arm.as_str() {
+            "legacy" => (
+                persisted_config_document(&config).unwrap(),
+                super::canonical::BoundedRenderStats::default(),
+            ),
+            "bounded" => super::canonical::render_document_bounded(&mut config).unwrap(),
+            other => panic!("unknown bounded-writer arm {other}"),
+        };
+        let elapsed = started.elapsed().as_nanos();
+        let peak = linux_vm_hwm_bytes();
+        let sha = Sha256::digest(document.as_bytes()).iter().fold(
+            String::with_capacity(64),
+            |mut out, byte| {
+                write!(&mut out, "{byte:02x}").unwrap();
+                out
+            },
+        );
+        fs::write(
+            receipt,
+            format!(
+                "{}\t{}\t{}\t{arm}\t{}\t{sha}\t{elapsed}\t{baseline}\t{peak}\t{}\t{}\t{}\n",
+                attempt,
+                attempt.parse::<usize>().unwrap().div_ceil(2),
+                (attempt.parse::<usize>().unwrap() - 1) % 2 + 1,
+                document.len(),
+                peak.saturating_sub(baseline),
+                stats.statements,
+                stats.max_chunk_statements,
+            ),
+        )
+        .unwrap();
+        return;
+    }
+    let executable = std::env::current_exe().unwrap();
+    let mut output = String::from(
+        "attempt\tpair\tslot\tarm\tdocument_bytes\tsha256\telapsed_ns\tbaseline_hwm_bytes\tpeak_hwm_bytes\tgrowth_bytes\tstatements\tmax_chunk_statements\n",
+    );
+    for (index, arm) in [
+        "legacy", "bounded", "bounded", "legacy", "legacy", "bounded",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let receipt = NamedTempFile::new().unwrap();
+        assert!(
+            Command::new(&executable)
+                .args([
+                    "config::tests::bounded_writer_release_probe",
+                    "--ignored",
+                    "--exact",
+                    "--nocapture"
+                ])
+                .env(ARM, arm)
+                .env(ATTEMPT, (index + 1).to_string())
+                .env(RECEIPT, receipt.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        output.push_str(&fs::read_to_string(receipt.path()).unwrap());
+    }
+    verify_bounded_writer_receipt(&output);
+    let output_path = std::env::var("RUSTBGPD_BOUNDED_WRITER_OUTPUT")
+        .expect("RUSTBGPD_BOUNDED_WRITER_OUTPUT is required");
+    retain_persistence_phase_receipt(Path::new(&output_path), &output);
 }
 
 #[derive(Clone, Debug)]

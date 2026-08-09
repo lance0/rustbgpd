@@ -11,6 +11,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Persisted config normalization now serializes large policy-statement lanes in
+  bounded borrowed chunks, preserving exact bytes while sharply reducing peak
+  memory on the retained 3.2-million-statement receipt.
 - Root `config_epoch = 1|2` and lossless RFC 8212 boolean presence now prepare
   the secure-default migration without changing route behavior. Epoch-less and
   epoch-1 omission remain permissive; before activation, epoch 2 requires an

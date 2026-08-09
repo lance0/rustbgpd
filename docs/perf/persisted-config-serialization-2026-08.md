@@ -11,3 +11,9 @@ It retained 326.6 MiB and raised peak VmHWM by 127.2-129.3 MiB in all three: **G
 
 Linux [documents `/proc` RSS accounting](https://docs.kernel.org/filesystems/proc.html) as asynchronous and imprecise. Raw VmHWM dipped 2.69-2.99 MiB (<0.11%) after graph drop; the verifier allows at most 4 MiB, compares final peak with the maximum prior reading, and requires phased/production peaks within 64 MiB.
 This is one synthetic host shape, not a daemon RSS or throughput claim. Raw rows and verifier are in the [artifact directory](artifacts/persisted-config-serialization-2026-08/).
+
+## Bounded-writer result
+
+The follow-up on `f02d8a9ac2fced902095f384942b4bde8b5fca71` ran the same shape in legacy/bounded AB/BA/AB order. Both arms produced the same 342,422,071 bytes and SHA-256 above. The bounded writer moved statement lanes out under an RAII guard, serialized at most 256 borrowed statements per chunk, and retained one header-bearing document.
+
+Legacy serialization added 1,608.9-1,610.0 MB VmHWM; bounded serialization added 411.3-412.2 MB, a 74% reduction. Bounded elapsed time was 1.57-1.59s versus 2.35-2.36s. All pairwise memory caps and the 1.25x median/1.5x pair latency guards passed; exact rows are in `candidate.tsv`.

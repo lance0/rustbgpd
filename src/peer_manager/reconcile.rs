@@ -146,7 +146,7 @@ impl PeerManager {
             &mut candidate,
         );
         self.finish_config_transaction_plan(
-            &candidate,
+            &mut candidate,
             materialization.as_ref(),
             live_snapshot,
             live_snapshot_identity,
@@ -222,7 +222,7 @@ impl PeerManager {
 
     fn finish_config_transaction_plan(
         &self,
-        candidate: &Config,
+        candidate: &mut Config,
         materialization: Option<&crate::config::ConfigDiff>,
         live_snapshot: rustbgpd_rib::UpdateGroupSnapshot,
         live_snapshot_identity: [u8; 8],
@@ -238,16 +238,6 @@ impl PeerManager {
                     RuntimeConfigTransactionPlanError::Internal(message)
                 }
             })?;
-        // Token the resulting live config would carry once this candidate is
-        // committed. The apply path returns it so a client can chain a follow-up
-        // apply without re-planning; computing it here keeps every token under
-        // the peer-manager's key. For the v1 single-family surface the committed
-        // state equals the candidate (full-snapshot families) or differs only in
-        // the one staged family (FIB), which the candidate already reflects.
-        let post_commit_runtime_snapshot_token = self
-            .snapshot_key
-            .token_with_context(candidate, &live_snapshot_identity)
-            .map_err(RuntimeConfigTransactionPlanError::Internal)?;
         let committed_diff = crate::config::diff_config(&self.current_config, candidate);
         let operational_diff = materialization.unwrap_or(&committed_diff);
         let classification = crate::config::classify_config_transaction_v1(operational_diff);
@@ -274,16 +264,29 @@ impl PeerManager {
                 "The RFC 8212 tuple is materialized to its exact unchanged effective posture.\n",
             );
         }
-        let committed_candidate = if status == RuntimeConfigTransactionStatus::Committable {
-            Some(
-                crate::config::persisted_config_document(candidate)
-                    .map(rustbgpd_api::peer_types::RuntimeConfigTransactionCandidate::new)
-                    .map_err(|error| {
-                        RuntimeConfigTransactionPlanError::Internal(error.to_string())
-                    })?,
+        // A committable candidate is bounded-rendered exactly once. Its token
+        // hashes the canonical body slice from those exact bytes (excluding the
+        // maintenance header), preserving the live kv2 token contract without
+        // a second whole-config serialization.
+        let (post_commit_runtime_snapshot_token, committed_candidate) = if status
+            == RuntimeConfigTransactionStatus::Committable
+        {
+            let normalized = crate::config::persisted_config_document_bounded(candidate)
+                .map_err(|error| RuntimeConfigTransactionPlanError::Internal(error.to_string()))?;
+            let token = self
+                .snapshot_key
+                .token_with_normalized_document(&normalized, &live_snapshot_identity)
+                .map_err(RuntimeConfigTransactionPlanError::Internal)?;
+            (
+                token,
+                Some(rustbgpd_api::peer_types::RuntimeConfigTransactionCandidate::new(normalized)),
             )
         } else {
-            None
+            let token = self
+                .snapshot_key
+                .token_with_context(candidate, &live_snapshot_identity)
+                .map_err(RuntimeConfigTransactionPlanError::Internal)?;
+            (token, None)
         };
 
         Ok(RuntimeConfigTransactionPlan {
