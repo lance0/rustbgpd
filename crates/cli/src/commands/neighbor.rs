@@ -1112,7 +1112,6 @@ fn add_neighbor_request(address: &str, opts: AddNeighborOpts) -> AddNeighborRequ
         paths_limit_receive_max: 0,
     });
     AddNeighborRequest {
-        config: None,
         intent: Some(NeighborCreateIntent {
             config: Some(NeighborConfig {
                 address,
@@ -1152,20 +1151,9 @@ pub async fn add(
 ) -> Result<(), CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    if let Err(status) = client
+    client
         .add_neighbor(add_neighbor_request(address, opts))
-        .await
-    {
-        if status.code() == tonic::Code::InvalidArgument && status.message() == "config is required"
-        {
-            return Err(CliError::Rpc(
-                "daemon does not support presence-aware neighbor creation; \
-                 upgrade rustbgpd before adding this neighbor"
-                    .into(),
-            ));
-        }
-        return Err(status.into());
-    }
+        .await?;
     output::print_result(
         json,
         "add_neighbor",
@@ -1918,15 +1906,14 @@ mod tests {
 
     #[tokio::test]
     async fn add_always_sends_wrapper_only_with_a_present_empty_mask() {
-        // Load-bearing: restoring legacy config, dual-carrier transmission,
-        // or an absent mask changes the captured request and makes this red.
+        // Load-bearing: omitting the intent or its mask changes the captured
+        // request and makes this red.
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
         add(connection, "fe80::2%eth0", base_add_opts(), true)
             .await
             .unwrap();
         let request = server.state.last_add_neighbor.lock().await.clone().unwrap();
-        assert!(request.config.is_none());
         let intent = request.intent.unwrap();
         assert_eq!(intent.override_mask.unwrap().paths, Vec::<String>::new());
         let config = intent.config.unwrap();
@@ -1979,62 +1966,6 @@ mod tests {
                 assert_eq!(actual, value, "{field} did not preserve {value}");
             }
         }
-    }
-
-    #[tokio::test]
-    async fn add_maps_only_the_exact_old_server_error_without_retrying() {
-        // Load-bearing: changing the exact message match, adding a fallback,
-        // or issuing a mutation probe changes the error/call/request evidence.
-        let old = spawn_mock_server(None).await;
-        *old.state.add_neighbor_error.lock().await =
-            Some((tonic::Code::InvalidArgument, "config is required".into()));
-        let error = add(
-            connect(&old.addr, None).await.unwrap(),
-            "10.0.0.2",
-            base_add_opts(),
-            true,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "daemon does not support presence-aware neighbor creation; \
-             upgrade rustbgpd before adding this neighbor"
-        );
-        assert_eq!(
-            old.state
-                .add_neighbor_calls
-                .load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
-        let captured = old.state.last_add_neighbor.lock().await.clone().unwrap();
-        assert!(captured.config.is_none());
-        assert!(captured.intent.is_some());
-
-        let current = spawn_mock_server(None).await;
-        *current.state.add_neighbor_error.lock().await = Some((
-            tonic::Code::InvalidArgument,
-            "effective per_client_best requires route_server_client".into(),
-        ));
-        let error = add(
-            connect(&current.addr, None).await.unwrap(),
-            "10.0.0.2",
-            base_add_opts(),
-            true,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "invalid argument: effective per_client_best requires route_server_client"
-        );
-        assert_eq!(
-            current
-                .state
-                .add_neighbor_calls
-                .load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
     }
 
     /// Load-bearing human empty-state proof: removing the conditional range

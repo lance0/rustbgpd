@@ -59,7 +59,7 @@ shot() {
         0)
             grpcurl -plaintext -import-path . -proto "$PROTO" \
                 -H "$GRPC_AUTH_HEADER" \
-                -d "{\"config\":{\"address\":\"$ip\",\"remote_asn\":65999,\"families\":[\"ipv4_unicast\"]}}" \
+                -d "{\"intent\":{\"config\":{\"address\":\"$ip\",\"remote_asn\":65999,\"families\":[\"ipv4_unicast\"]},\"overrideMask\":{\"paths\":[\"families\"]}}}" \
                 "$GRPC_ADDR" rustbgpd.v1.NeighborService/AddNeighbor 2>&1 \
                 | head -1 >>"$DRIVER_LOG"
             ;;

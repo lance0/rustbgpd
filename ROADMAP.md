@@ -1739,8 +1739,8 @@ branch is between features.
   ceremony made unnecessary by #1429 — landed in v0.63.0 (#1435).
   The frozen legacy commit-confirm/history readers and v2 authority reader
   and the dead `enforcement = "legacy"` enum variant were removed during v0.65
-  development. The remaining batch includes the `rbgp rib diff` older-daemon
-  fallbacks and `AddNeighborRequest.config`. The three hidden
+  development. The `rbgp rib diff` older-daemon fallbacks and
+  `AddNeighborRequest.config` were also removed during v0.65 development. The three hidden
   `--from-file` aliases on `config diff|plan|apply` and the raw Paths-Limit cap
   were removed during v0.65 development. Unary
   Plan/Apply is retained permanently as the small-candidate path; streaming

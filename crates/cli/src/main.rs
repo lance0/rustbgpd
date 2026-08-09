@@ -3973,7 +3973,6 @@ mod tests {
                 .await
                 .unwrap();
             let request = server.state.last_add_neighbor.lock().await.clone().unwrap();
-            assert!(request.config.is_none(), "{flag} used the legacy carrier");
             let intent = request.intent.unwrap();
             assert_eq!(intent.override_mask.unwrap().paths, [path], "{flag}");
             let config = intent.config.unwrap();
@@ -4052,7 +4051,6 @@ mod tests {
                 .await
                 .unwrap();
             let request = server.state.last_add_neighbor.lock().await.clone().unwrap();
-            assert!(request.config.is_none());
             let intent = request.intent.unwrap();
             assert_eq!(
                 intent.override_mask.unwrap().paths,
@@ -5973,6 +5971,53 @@ mod tests {
                 panic!("retired --from-file alias parsed");
             };
             assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
+    }
+
+    #[test]
+    fn tracked_add_neighbor_payload_sources_are_intent_only() {
+        const SOURCES: [(&str, &str); 5] = [
+            ("docs/API.md", r#"-d '{"intent"#),
+            ("docs/INTEROP.md", r#"-d '{"intent"#),
+            ("tests/chaos/chaos-grpc-churn.sh", r#"-d "{\"intent\""#),
+            ("tests/interop/scripts/test-m4-frr.sh", r#"-d "{\"intent\""#),
+            (
+                "tests/interop/scripts/test-m44-grpc-tier-authz.sh",
+                r#"add_neighbor='{"intent"#,
+            ),
+        ];
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let found = std::process::Command::new("git")
+            .args([
+                "grep",
+                "-l",
+                "NeighborService/AddNeighbor",
+                "--",
+                "*.md",
+                "*.sh",
+            ])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(found.status.success());
+        assert_eq!(String::from_utf8(found.stdout).unwrap().lines().count(), 5);
+        for (rel, intent) in SOURCES {
+            let source = std::fs::read_to_string(root.join(rel)).unwrap();
+            let mask = match rel {
+                "docs/API.md" | "docs/INTEROP.md" => r#""paths": []"#,
+                "tests/chaos/chaos-grpc-churn.sh" => r#"\"paths\":[\"families\"]"#,
+                "tests/interop/scripts/test-m4-frr.sh" => r#"\"paths\": []"#,
+                _ => r#""paths":[]"#,
+            };
+            let expected_masks = if rel == "docs/API.md" { 2 } else { 1 };
+            assert_eq!(source.matches(mask).count(), expected_masks, "{rel}");
+            assert!(
+                source.contains("NeighborService/AddNeighbor") && source.contains(intent),
+                "{rel}"
+            );
+            assert!(!source.contains(r#"-d '{"config"#), "{rel}");
+            assert!(!source.contains(r#"-d "{\"config\""#), "{rel}");
+            assert!(!source.contains(r#"add_neighbor='{"config"#), "{rel}");
         }
     }
 

@@ -3,9 +3,16 @@
 **Status:** Accepted — fully shipped
 **Date:** 2026-07-29
 
-> **Server and CLI tranches shipped.** The daemon preserves the wrapper and
-> `rbgp neighbor add` sends it exclusively with explicit negative forms and a
-> fail-closed old-server diagnostic.
+> **The v0.62 server and CLI tranches shipped.** The daemon accepted the
+> wrapper and `rbgp neighbor add` sent it exclusively with explicit negative
+> forms and a fail-closed old-server diagnostic.
+
+> **v0.65 compatibility closure.** The decision and rolling matrix below
+> record the additive v0.62 transition. v0.65 reserves field 1/name `config`
+> and requires field-2 `intent`, its inner config, and its mask. A former
+> top-level config must move under `intent`; an empty present mask preserves
+> the no-override case. A v0.64 intent client works with a v0.65 server, and a
+> v0.65 client works with a v0.64 server.
 
 ## Context
 
@@ -313,6 +320,6 @@ This decision does not implement:
 - a broad peer-group or tri-state config redesign;
 - one-off fixes for individual route-server or route-reflector flags.
 
-The API/configuration docs and v1 stable-surface digest describe the reviewed
-additive graph. CLI help, completions, and examples describe the shipped
-presence-aware client; ROADMAP state is intentionally unchanged.
+The API/configuration docs and v1 stable-surface digest describe the current
+graph. CLI help, completions, and examples describe the shipped
+presence-aware client; ADR-0122 records the later legacy-carrier retirement.

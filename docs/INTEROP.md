@@ -857,7 +857,7 @@ returns 9.
 ```sh
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -H "authorization: Bearer $TOKEN" \
-  -d '{"config": {"address": "10.0.18.2", "remote_asn": 65018, "description": "frr-09-dynamic"}}' \
+  -d '{"intent": {"config": {"address": "10.0.18.2", "remote_asn": 65018, "description": "frr-09-dynamic"}, "overrideMask": {"paths": []}}}' \
   <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.NeighborService/AddNeighbor
 ```
 

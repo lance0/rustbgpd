@@ -904,9 +904,9 @@ message DeleteDynamicNeighborRequest {
 message DeleteDynamicNeighborResponse {}
 
 message AddNeighborRequest {
-  // Legacy payload. Remains field 1 and outside a oneof for wire compatibility.
-  NeighborConfig config = 1;
-  // Presence-aware create payload. New servers require exactly one carrier.
+  reserved 1;
+  reserved "config";
+  // Presence-aware create payload. Required by v0.65 and newer servers.
   NeighborCreateIntent intent = 2;
 }
 

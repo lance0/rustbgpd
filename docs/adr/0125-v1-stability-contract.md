@@ -143,8 +143,8 @@ history readers are removed. Unary Plan/Apply
 remains the permanent small-candidate path. The hidden `--from-file`
 compatibility aliases on
 `config diff`, `config plan`, and `config apply` were removed during v0.65
-development. Current state: L1, A2, D1, and D3 are complete; the remaining
-v0.65 removals still must land.
+development. L1, L3, A1, A2, C1, D1, and D3 are complete; the scheduled
+v0.65 removals are finished.
 
 **E5 — RFC 8212 secure default (DR4).** Opt-in enforcement is shipped and
 receipted (ADR-0112, M95). ADR-0119's config-epoch representation and
