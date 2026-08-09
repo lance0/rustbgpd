@@ -5364,3 +5364,132 @@ fn per_client_best_groups_are_excluded_from_clean_transition_inventory() {
         );
     }
 }
+
+/// [`route`] plus one standard community — the smallest wire-form
+/// difference between a source and a destination staged entry, and,
+/// with a control-space value, an RFC 7947 tag for [`RS_ASN`].
+fn route_with_comm(p: Prefix, src: IpAddr, comm: u32) -> Route {
+    let mut route = route(p, src);
+    let mut attrs = (*route.attributes).clone();
+    attrs.push(PathAttribute::Communities(vec![comm]));
+    route.attributes = Arc::new(attrs);
+    route
+}
+
+/// [`announce_delta`] for a caller-built route (which carries its own
+/// prefix and source), so the source attrs match the staged entry.
+fn announce_route_delta(new: Route) -> GroupDelta {
+    let source_attrs = capture_source_attrs(&new);
+    GroupDelta {
+        prefix: new.prefix,
+        path_id: 0,
+        new: Some((new, None)),
+        old_source: None,
+        policy_label: None,
+        source_attrs,
+        lane: None,
+    }
+}
+
+/// A group whose table holds exactly the given staged entries.
+fn group_with(deltas: &[GroupDelta]) -> GroupRibOut {
+    let mut group = empty_group();
+    for delta in deltas {
+        group.apply_delta(delta);
+    }
+    group
+}
+
+const CLEAN_SOURCE: usize = 1;
+const CLEAN_DESTINATION: usize = 2;
+
+/// Run one inventory chunk over `keys` against the manager's current
+/// group tables.
+fn extend_inventory(m: &RibManager, keys: &[(Prefix, u32)], rs_asns: &[u32]) -> Option<()> {
+    let mut inventory = CleanPolicyTransitionInventoryBuilder::default();
+    m.extend_clean_policy_transition_inventory(
+        CLEAN_SOURCE,
+        CLEAN_DESTINATION,
+        keys,
+        rs_asns,
+        &mut inventory,
+    )
+}
+
+fn inventory_manager(source: GroupRibOut, destination: GroupRibOut) -> RibManager {
+    let mut m = staging_manager();
+    m.group_ribs.insert(CLEAN_SOURCE, source);
+    m.group_ribs.insert(CLEAN_DESTINATION, destination);
+    m
+}
+
+/// Degradation paths of the clean-transition inventory walk, each of
+/// which hands the whole cohort back to the authoritative per-peer
+/// machinery: a source flip under the snapshot, and an RFC 7947
+/// control-form community in the delta. Both are asserted against the
+/// accepting shape so the `None` is attributable to the tested term
+/// and not to the wire-form change that carries it.
+#[test]
+fn clean_transition_inventory_degrades_on_source_flip_and_control_tag() {
+    // Control-space for RS_ASN: administrator 0 (`0:TARGET_ASN`, the
+    // "do not announce to TARGET_ASN" form).
+    const TAGGED_COMM: u32 = TARGET_ASN;
+    // Administrator is neither 0 nor RS_ASN nor the RFC 1997
+    // well-known space: a pure wire-form change, no per-target
+    // divergence.
+    const PLAIN_COMM: u32 = (64513 << 16) | 7;
+    let keys = [(prefix(1), 0)];
+    let staged = |src, comm: Option<u32>| match comm {
+        Some(comm) => group_with(&[announce_route_delta(route_with_comm(prefix(1), src, comm))]),
+        None => group_with(&[announce_delta(prefix(1), src, None)]),
+    };
+
+    let m = inventory_manager(staged(OTHER1, None), staged(OTHER2, None));
+    assert!(
+        extend_inventory(&m, &keys, &[]).is_none(),
+        "a source flip under the snapshot degrades the cohort"
+    );
+
+    let m = inventory_manager(staged(OTHER1, None), staged(OTHER1, Some(PLAIN_COMM)));
+    assert!(
+        extend_inventory(&m, &keys, &[RS_ASN]).is_some(),
+        "the same-source wire-form change alone stays on the shared path"
+    );
+
+    let m = inventory_manager(staged(OTHER1, None), staged(OTHER1, Some(TAGGED_COMM)));
+    assert!(
+        extend_inventory(&m, &keys, &[RS_ASN]).is_none(),
+        "a control-form community in the delta degrades the cohort"
+    );
+    assert!(
+        extend_inventory(&m, &keys, &[]).is_some(),
+        "with no rs-control ASN in the cohort the same delta stays shared"
+    );
+}
+
+/// Table drift on either side between the snapshot and the walk:
+/// a key the snapshot recorded is gone, so the inventory can no
+/// longer describe the old-to-new wire delta and degrades.
+#[test]
+fn clean_transition_inventory_degrades_on_table_drift() {
+    let keys = [(prefix(1), 0)];
+    let staged = || group_with(&[announce_delta(prefix(1), OTHER1, None)]);
+
+    let m = inventory_manager(staged(), group_with(&[]));
+    assert!(
+        extend_inventory(&m, &keys, &[]).is_none(),
+        "the destination no longer stages the snapshot key"
+    );
+
+    let m = inventory_manager(group_with(&[]), staged());
+    assert!(
+        extend_inventory(&m, &keys, &[]).is_none(),
+        "the source no longer stages the snapshot key"
+    );
+
+    let m = inventory_manager(staged(), staged());
+    assert!(
+        extend_inventory(&m, &keys, &[]).is_some(),
+        "an undrifted pair completes the chunk"
+    );
+}

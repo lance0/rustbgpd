@@ -1325,7 +1325,7 @@ impl RibManager {
                     if let Some(prepared) = self.prepared_destination.take()
                         && prepared != destination
                     {
-                        self.discard_uncommitted_policy_transition_group(prepared);
+                        let _ = self.discard_uncommitted_policy_transition_group(prepared);
                     }
                     pending.phase = Some(CleanPolicyTransitionPhase::StageDestination {
                         source,
@@ -2943,7 +2943,7 @@ impl RibManager {
         // (The peer manager awaits the prepare reply before sending the
         // transition, so this is a belt-and-braces guard.)
         if let Some(prestage) = self.pending_destination_prestage.take() {
-            self.discard_uncommitted_policy_transition_group(prestage.destination);
+            let _ = self.discard_uncommitted_policy_transition_group(prestage.destination);
         }
         self.metrics.set_rib_policy_transition_in_progress(true);
         self.pending_clean_policy_transition =
@@ -3034,7 +3034,7 @@ impl RibManager {
         // A still-running destination preparation cannot be trusted
         // mid-walk (same guard as the cohort transition command).
         if let Some(prestage) = self.pending_destination_prestage.take() {
-            self.discard_uncommitted_policy_transition_group(prestage.destination);
+            let _ = self.discard_uncommitted_policy_transition_group(prestage.destination);
         }
 
         let mut present: Vec<PeerExportPolicyReplacement> = Vec::with_capacity(replacements.len());
@@ -3228,7 +3228,7 @@ impl RibManager {
         if let Some(prepared) = self.prepared_destination.take()
             && prepared != destination
         {
-            self.discard_uncommitted_policy_transition_group(prepared);
+            let _ = self.discard_uncommitted_policy_transition_group(prepared);
         }
         let Some(&exemplar) = members.first() else {
             return false;
@@ -3540,12 +3540,12 @@ impl RibManager {
         // cohort never arrived) is discarded before a new one begins;
         // the record must only ever name the latest staged group.
         if let Some(stale) = self.prepared_destination.take() {
-            self.discard_uncommitted_policy_transition_group(stale);
+            let _ = self.discard_uncommitted_policy_transition_group(stale);
         }
         // A leftover unowned group under this id may be partially staged
         // from an aborted attempt; recreate it deterministically. An OWNED
         // group is maintained by definition — nothing to stage.
-        self.discard_uncommitted_policy_transition_group(destination);
+        let _ = self.discard_uncommitted_policy_transition_group(destination);
         match self.begin_policy_transition_group(destination, peer, export_policy) {
             super::update_groups::PolicyTransitionGroupStart::Maintained => {
                 let _ = reply.send(Ok(()));
@@ -3576,7 +3576,7 @@ impl RibManager {
         else {
             return;
         };
-        self.discard_uncommitted_policy_transition_group(gid);
+        let _ = self.discard_uncommitted_policy_transition_group(gid);
         if let Some(reply) = prestage.reply {
             let _ = reply.send(Err(
                 "prepared destination group adopted by a membership change; preparation discarded"
@@ -3644,10 +3644,10 @@ impl RibManager {
     /// adopted destination has members and stays.
     pub(super) fn discard_prepared_export_destination(&mut self) {
         if let Some(prestage) = self.pending_destination_prestage.take() {
-            self.discard_uncommitted_policy_transition_group(prestage.destination);
+            let _ = self.discard_uncommitted_policy_transition_group(prestage.destination);
         }
         if let Some(prepared) = self.prepared_destination.take() {
-            self.discard_uncommitted_policy_transition_group(prepared);
+            let _ = self.discard_uncommitted_policy_transition_group(prepared);
         }
     }
 
