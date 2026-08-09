@@ -22,6 +22,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- `security.grpc.enforcement` now accepts only `"tier"`; the dead `"legacy"`
+  enum variant and validation branch are gone. An exact retired
+  `[security.grpc].enforcement = "legacy"` value still gets the paste-ready
+  migration diagnostic after typed loading fails; unrelated or malformed
+  TOML keeps its ordinary diagnostic.
 - Legacy TOML config-history rows and v1/v2 commit-confirm readers are retired.
   V2 JSON stays active; old TOML is ignored and retained. Finish old confirmed
   transactions before upgrade. Retired authority makes v0.65 refuse untouched:

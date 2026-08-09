@@ -320,7 +320,7 @@ fn check_strict_fails_on_a_validation_origin_warning() {
 
 /// Legacy gRPC enforcement was removed in v0.63.0: `--check` (strict or
 /// not) fails at load with the one-shot migration message. Restoring the
-/// old validation acceptance makes this red.
+/// typed enum bypasses the post-deserialize pointer and makes this red.
 #[test]
 fn check_rejects_legacy_grpc_enforcement() {
     for args in [&["--check"][..], &["--check", "--strict"][..]] {

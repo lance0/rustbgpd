@@ -1197,11 +1197,6 @@
     "GrpcEnforcementConfig": {
       "oneOf": [
         {
-          "description": "Deprecated: the pre-v0.24.0 mode that skipped per-principal\nrole ceilings was removed in v0.63.0. The value still parses\n(the v1 config surface keeps the variant) but validation\nrejects it at boot, `--check`, and reload with the migration\nsteps. Local-only deployments can delete the whole\n`[security.grpc]` block instead — an owner-only UDS socket\nauthorizes its clients as the implicit `local-operator`.",
-          "type": "string",
-          "const": "legacy"
-        },
-        {
           "description": "Enforce per-principal role ceilings in addition to listener\n`max_tier` caps. **Default since v0.24.0** and the only mode\nsince v0.63.0. Deployments whose listeners have no role\nidentity fail validation at startup with a message pointing\nat the migration checklist in `docs/CONFIGURATION.md`.",
           "type": "string",
           "const": "tier"
@@ -1229,7 +1224,7 @@
       "type": "object",
       "properties": {
         "enforcement": {
-          "description": "Role-enforcement mode. `\"tier\"` (the default) is the only mode\nthat boots; `\"legacy\"` still parses but is rejected at\nvalidation since v0.63.0.",
+          "description": "Role-enforcement mode. `\"tier\"` is the only accepted mode.\nThe loader gives the removed `\"legacy\"` value an actionable\nmigration diagnostic after typed deserialization rejects it.",
           "$ref": "#/$defs/GrpcEnforcementConfig",
           "default": "tier"
         },

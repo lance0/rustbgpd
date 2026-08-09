@@ -16,9 +16,9 @@ use super::schema::{
     ManagedVxlanNetdevConfig,
 };
 use super::{
-    Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig, GrpcEnforcementConfig,
-    InboundAdmissionConfig, Neighbor, PeerGroupConfig, SecurityConfig, TcpAoConfig,
-    TcpAoKeyringConfig, dynamic_prefixes_intersect, is_unicast_nonzero_mac, parse_mac_address,
+    Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig, InboundAdmissionConfig, Neighbor,
+    PeerGroupConfig, SecurityConfig, TcpAoConfig, TcpAoKeyringConfig, dynamic_prefixes_intersect,
+    is_unicast_nonzero_mac, parse_mac_address,
 };
 
 /// Canonical key for a dynamic-neighbor prefix: the network address with all
@@ -2740,35 +2740,6 @@ fn validate_grpc_security(security: &SecurityConfig) -> Result<(), ConfigError> 
     reason = "one linear diagnosis pass per listener kind plus message assembly"
 )]
 fn validate_grpc_tier_enforcement(config: &Config) -> Result<(), ConfigError> {
-    // `enforcement = "legacy"` is rejected outright: the runtime path it
-    // selected (role ceilings recorded but never enforced) was removed in
-    // v0.63.0 as an explicit owner decision under the pre-1.0 stability
-    // posture, ahead of the sunset window docs/API.md once projected. The
-    // enum variant survives only so the v1 config surface stays parseable.
-    if config.security.grpc.enforcement == GrpcEnforcementConfig::Legacy {
-        return Err(ConfigError::InvalidGrpcConfig {
-            reason: "security.grpc.enforcement = \"legacy\" was removed in v0.63.0 and no \
-                     longer boots:\n  \
-                     1. legacy mode recorded [security.grpc.roles] as audit context but \
-                     enforced nothing; that runtime path no longer exists, so there is \
-                     nothing to opt back into\n  \
-                     2. if your clients are local (rbgp over a UDS socket, including the \
-                     implicit default at <runtime_state_dir>/grpc.sock), tier enforcement \
-                     needs no configuration at all — the owner-only socket authorizes them \
-                     as the implicit \"local-operator\": simply delete the whole \
-                     [security.grpc] block\n  \
-                     3. a listener with a declared principal keeps working under tier with \
-                     a role entry; keep this instead:\n\
-                     [security.grpc]\n\
-                     enforcement = \"tier\"\n\
-                     \n\
-                     [security.grpc.roles]\n\
-                     \"<your-principal>\" = \"operator\"\n\
-                     (migration: docs/CONFIGURATION.md [security.grpc]; removal decision: \
-                     docs/adr/0064-grpc-authorization.md)"
-                .to_string(),
-        });
-    }
     let telemetry = &config.global.telemetry;
     let tcp = telemetry.grpc_tcp.as_ref().filter(|cfg| cfg.enabled);
     let uds = telemetry.grpc_uds.as_ref().filter(|cfg| cfg.enabled);

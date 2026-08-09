@@ -646,12 +646,12 @@ the handler runs, in addition to listener `max_tier` caps; a declared
 principal without a matching `[security.grpc.roles]` entry fails validation at
 startup, while owner-only UDS listeners with no principal need no roles block
 at all (implicit `local-operator`). The former `"legacy"` migration mode was
-removed in v0.63.0: the value still parses but is rejected at boot,
-`--check`, and reload with a message carrying the migration steps.
+removed at runtime in v0.63.0 and from the typed schema in v0.65. The loader
+recognizes only that exact retired value and returns the migration steps.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `enforcement` | string | no | `"tier"` | ADR-0064 enforcement mode. `"tier"` (default since v0.24.0, the only mode since v0.63.0) enforces per-principal role ceilings in addition to listener `max_tier` caps. `"legacy"` was removed in v0.63.0 and is rejected at validation |
+| `enforcement` | string | no | `"tier"` | ADR-0064 enforcement mode. `"tier"` (default since v0.24.0, the only mode since v0.63.0) enforces per-principal role ceilings in addition to listener `max_tier` caps. The typed schema accepts no other value; exact retired `"legacy"` gets a migration diagnostic |
 
 `[security.grpc.roles]` maps an authenticated principal string to one of the
 built-in roles:
@@ -691,8 +691,9 @@ that only use an owner-only UDS socket (including the implicit default)
 boot without any staging via the implicit `local-operator` identity.
 Already-staged operators see no behavior change.
 
-**`enforcement = "legacy"` was removed in v0.63.0** and is rejected at boot,
-`--check`, and reload. Earlier editions of this document projected a
+**`enforcement = "legacy"` was removed in v0.63.0** and left the typed schema
+in v0.65. Boot, `--check`, and reload still return its paste-ready migration
+diagnostic. Earlier editions of this document projected a
 two-minor/90-day floor (≈2026-10-09) as the earliest *eligibility* for
 removal; that guidance is superseded — the removal landed earlier as an
 explicit owner decision under the project's pre-1.0 alpha stability posture,

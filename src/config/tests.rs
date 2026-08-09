@@ -1970,16 +1970,19 @@ fn grpc_listener_max_tier_can_be_stricter_than_access_mode() {
 
 #[test]
 fn explicit_legacy_grpc_enforcement_is_rejected() {
-    // v0.63.0 removed the legacy runtime path outright: the value still
-    // parses (the v1 surface keeps the variant) but validation rejects it
-    // on every load path — boot, `--check`, and reload all route through
-    // here. Restoring the old acceptance makes this red.
+    // Load-bearing: restoring the enum variant bypasses the post-deserialize
+    // migration detector and makes this config load; removing the exact-path
+    // detector replaces the paste-ready guidance with a generic enum error.
     let toml_str = format!(
         "{}\n[security.grpc]\nenforcement = \"legacy\"\n\n[security.grpc.roles]\n\"operator.example\" = \"operator\"\n",
         valid_toml_no_grpc_security()
     );
     let err = Config::load_toml_with_diagnostics(&toml_str, "legacy removal")
         .expect_err("legacy enforcement must fail validation");
+    assert!(
+        err.starts_with("error: security.grpc.enforcement"),
+        "migration guidance must retain the standard diagnostic heading: {err}"
+    );
     assert!(
         err.contains("security.grpc.enforcement = \"legacy\" was removed in v0.63.0"),
         "rejection must name the removal decision: {err}"
@@ -2000,6 +2003,47 @@ fn explicit_legacy_grpc_enforcement_is_rejected() {
         err.contains("docs/CONFIGURATION.md") && err.contains("docs/adr/0064"),
         "rejection must cite the migration references: {err}"
     );
+}
+
+#[test]
+fn legacy_grpc_migration_detection_is_semantic_and_fail_closed() {
+    let base = valid_toml_no_grpc_security();
+    Config::load_toml_with_diagnostics(
+        &format!("{base}\n# [security.grpc]\n# enforcement = \"legacy\"\n"),
+        "legacy comment control",
+    )
+    .expect("a comment must not trigger retired-value detection");
+
+    for (name, suffix, ordinary_needle) in [
+        (
+            "unrelated table",
+            "[unrelated]\nenforcement = \"legacy\"\n",
+            "unknown field `unrelated`",
+        ),
+        (
+            "unrelated string",
+            "migration_note = 'security.grpc.enforcement = \"legacy\"'\n",
+            "unknown field `migration_note`",
+        ),
+        (
+            "bogus enum",
+            "[security.grpc]\nenforcement = \"bogus\"\n",
+            "unknown variant `bogus`",
+        ),
+        (
+            "malformed toml",
+            "[security.grpc\nenforcement = \"legacy\"\n",
+            "unclosed table",
+        ),
+    ] {
+        let error = Config::load_toml_with_diagnostics(&format!("{base}\n{suffix}"), name)
+            .expect_err("invalid control must retain its ordinary diagnostic");
+        assert!(error.contains(ordinary_needle), "{name}: {error}");
+        assert!(
+            !error.contains("was removed in v0.63.0"),
+            "{name} falsely triggered the legacy migration pointer: {error}"
+        );
+    }
 }
 
 #[test]
@@ -17491,24 +17535,25 @@ fn config_loader_has_no_test_only_legacy_bypass() {
         !source.contains("test_only_inject_legacy_grpc_security"),
         "production loader source must not contain a test-only auth seam"
     );
-    // The loader itself never branches on Legacy: the only production code
-    // that selects it is the v0.63.0 removal rejection in `validation.rs`.
     assert_eq!(
-        source.matches("GrpcEnforcementConfig::Legacy").count(),
+        include_str!("schema.rs").matches("Legacy,").count(),
         0,
-        "the config loader must not select Legacy"
-    );
-    assert_eq!(
-        source.matches(r#"enforcement = \"legacy\""#).count(),
-        0,
-        "the config loader must not name a Legacy setting"
+        "the typed config schema must not accept Legacy"
     );
     assert_eq!(
         include_str!("validation.rs")
             .matches("GrpcEnforcementConfig::Legacy")
             .count(),
-        1,
-        "only the removal rejection may select Legacy"
+        0,
+        "validation must not retain a dead typed Legacy branch"
+    );
+    assert!(
+        source.contains("LEGACY_GRPC_ENFORCEMENT_MIGRATION")
+            && source.contains("let document: toml::Value = toml::from_str(content).ok()?")
+            && source.contains(".get(\"security\")?")
+            && source.contains(".get(\"grpc\")?")
+            && source.contains(".get(\"enforcement\")?"),
+        "the production loader must keep the exact semantic migration detector"
     );
 }
 

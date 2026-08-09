@@ -67,8 +67,9 @@ Preferred posture:
   unsafe or overlong cert values fall back to `mtls-unresolved` rather than
   entering structured logs verbatim.
   Roles authorize or deny calls by method tier unconditionally: the former
-  Legacy migration mode (roles as audit context only) was removed in v0.63.0
-  and its config value is rejected at validation.
+  Legacy migration mode (roles as audit context only) was removed in v0.63.0;
+  v0.65 accepts only `tier` in the typed schema and gives the exact retired
+  value an actionable load diagnostic.
 - Listener `max_tier` caps are enforced now and should be used to bound remote
   TCP listeners to the smallest required method tier. `access_mode =
   "read_only"` remains a compatibility ceiling equivalent to
@@ -472,8 +473,9 @@ the roadmap:
   (`security.grpc.enforcement = "tier"`, default since v0.24.0, mandatory
   since v0.63.0) layered on listener `access_mode` (`read_only` vs
   `read_write`) and `max_tier` caps.
-  `enforcement = "legacy"` was removed in v0.63.0: validation rejects it at
-  boot, `--check`, and reload. Earlier editions of this document stated a
+  `enforcement = "legacy"` was removed in v0.63.0 and from the typed schema in
+  v0.65. Boot, `--check`, and reload retain its exact migration diagnostic.
+  Earlier editions of this document stated a
   two-minor/90-day floor (≈2026-10-09) as removal *eligibility*; that
   guidance is superseded — the removal landed earlier as an explicit owner
   decision under the pre-1.0 alpha stability posture, once the implicit

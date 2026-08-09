@@ -170,11 +170,11 @@ impl Config {
         let mut config: Config = match toml::from_str(content) {
             Ok(c) => c,
             Err(e) => {
-                // Retired keys reject as unknown fields; replace the bare
-                // serde diagnostic with a migration pointer when one is
-                // responsible for the failure.
+                // Retired config syntax fails typed deserialization. Replace
+                // the bare serde diagnostic with a migration pointer when the
+                // exact semantic path is responsible for the failure.
                 if let Some(migration) = retired_key_error(content) {
-                    return Err(migration);
+                    return Err(format!("error: {migration}"));
                 }
                 let error = ConfigError::Parse(e);
                 return Err(diagnostic::render_diagnostic(content, source_name, &error)
@@ -1360,15 +1360,29 @@ const TRANSACTION_SESSION_RESHAPE_SECTION: &str = "effective neighbor session re
 const TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION: &str =
     "[policy] external inputs (rpol_files / datasets; deploy files and apply via SIGHUP reload)";
 
-/// Detect a retired config key in a TOML document that failed typed
+/// Detect retired config syntax in a TOML document that failed typed
 /// deserialization and return its time-bounded migration pointer.
 ///
-/// There are currently no active pointers. Keep this insertion seam so a
-/// future removal can add one without disturbing the ordinary diagnostic
-/// path; retired-key pointers live for the window set by ADR-0122 and then
-/// return to the generic unknown-field error.
-fn retired_key_error(_content: &str) -> Option<String> {
-    None
+const LEGACY_GRPC_ENFORCEMENT_MIGRATION: &str = "security.grpc.enforcement = \"legacy\" was removed in v0.63.0 and no longer boots:\n  \
+1. legacy mode recorded [security.grpc.roles] as audit context but enforced nothing; that runtime path no longer exists, so there is nothing to opt back into\n  \
+2. if your clients are local (rbgp over a UDS socket, including the implicit default at <runtime_state_dir>/grpc.sock), tier enforcement needs no configuration at all — the owner-only socket authorizes them as the implicit \"local-operator\": simply delete the whole [security.grpc] block\n  \
+3. a listener with a declared principal keeps working under tier with a role entry; keep this instead:\n\
+[security.grpc]\n\
+enforcement = \"tier\"\n\
+\n\
+[security.grpc.roles]\n\
+\"<your-principal>\" = \"operator\"\n\
+(migration: docs/CONFIGURATION.md [security.grpc]; removal decision: docs/adr/0064-grpc-authorization.md)";
+
+fn retired_key_error(content: &str) -> Option<String> {
+    let document: toml::Value = toml::from_str(content).ok()?;
+    (document
+        .get("security")?
+        .get("grpc")?
+        .get("enforcement")?
+        .as_str()?
+        == "legacy")
+        .then(|| LEGACY_GRPC_ENFORCEMENT_MIGRATION.to_string())
 }
 
 fn effective_grpc_max_tier(
