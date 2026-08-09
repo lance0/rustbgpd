@@ -239,13 +239,14 @@ that are stood up once at startup. Two flags are hot-pluggable.
 
 | Field | Class | Notes |
 |---|---|---|
+| root `config_epoch` | restart-required | ADR-0119 semantic epoch. Omission means epoch 1. A SIGHUP reports and pins raw/effective/source drift with the RFC 8212 boolean tuple. Before secure-default activation, epoch 2 with an omitted boolean is rejected at parse/validation time. |
 | `asn` | restart-required | Identity. |
 | `router_id` | restart-required | Identity. Advertised in every OPEN. |
 | `listen_port` | restart-required | The listen socket is created at startup. |
 | `cluster_id` | restart-required | RFC 4456 cluster identity; affects every iBGP advertisement. |
 | `honor_graceful_shutdown` | live | Hot-applied by `reload.rs`. Re-evaluates the GShut LOCAL_PREF de-preference against existing Adj-RIB-In on toggle. |
 | `honor_blackhole` | live (with FIB-discard caveat) | Hot-applied when `[global] install_blackhole_discard` is false. When the FIB-discard reconciler is configured (`install_blackhole_discard = true` and the FIB table is set up), `honor_blackhole` is **restart-required** — toggling it would change the discard-spawn-gate decision made at startup. Logged as `ERROR` during reload in that case. |
-| `ebgp_requires_policy` | restart-required | ADR-0112 RFC 8212 enforcement mode. Pinned to the startup value by `reload.rs`: a SIGHUP reports the changed candidate as restart-required (`[global].ebgp_requires_policy` is named in `--diff` and in the v1 transaction rejection) and logs an `ERROR`, but the running import/export treatment of every eBGP session stays at the startup value. |
+| `ebgp_requires_policy` | restart-required | ADR-0112/0119 RFC 8212 enforcement mode and raw-presence verdict. Pinned with `config_epoch` as one startup tuple: a SIGHUP reports value or representation drift in `--diff` and the v1 transaction rejection, logs an `ERROR`, and keeps the running import/export treatment and source verdict at startup. |
 | `install_blackhole_discard` | restart-required | The RFC 7999 kernel-discard reconciler spawns once at startup. |
 | `allow_blackhole_broad_prefixes` | restart-required | Same — feeds the discard-spawn gate. |
 | `multipath_relax` | restart-required | RIB best-path tie-break behavior; reconciling mid-flight would require an Adj-RIB-Out rebuild. |

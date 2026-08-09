@@ -1,6 +1,6 @@
 # ADR-0119: RFC 8212 secure-default config epoch
 
-**Status:** Accepted (representation and proof-gated activation; implementation pending)
+**Status:** Accepted (representation shipped; activation proof-gated)
 **Date:** 2026-07-29
 **Decision recorded:** 2026-08-08
 
@@ -21,6 +21,12 @@ activation. This ADR defines that representation and its diagnostics, and
 authorizes activation only after the production-mutation proof gate below is
 complete. Acceptance itself does not change route handling, activate a new
 default, or supersede ADR-0112 and its M95 real-session receipt.
+
+The representation tranche is implemented: typed raw epoch/boolean presence,
+the pre-activation epoch-2 rejection, full-tuple diff/reload pinning, and the
+shared borrowed canonical renderer have landed. The advisory, runtime-mutation
+materialization-transition planning/receipt proof, migration/downgrade tooling,
+M95 extension, and activation are still gated by the proof plan below.
 
 ## Decision
 

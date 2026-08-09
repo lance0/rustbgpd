@@ -1,3 +1,4 @@
+mod canonical;
 pub mod diagnostic;
 mod parse;
 pub mod profiles;
@@ -1871,12 +1872,16 @@ pub struct ConfigDiff {
     /// gate.
     pub honor_blackhole_changed: bool,
     pub global_changed: bool,
+    /// Root epoch raw/effective/source tuple changed.
+    pub config_epoch_changed: bool,
+    pub config_epoch: Option<Rfc8212EpochChange>,
     /// `[global] ebgp_requires_policy` changed. Already covered by the coarse
     /// `global_changed` restart bucket; tracked separately so receipts can name
     /// the field instead of only the section. ADR-0112 requires the RFC 8212
     /// enforcement mode to be named explicitly, because the running mode stays
     /// at its startup value while the on-disk candidate reads differently.
     pub ebgp_requires_policy_changed: bool,
+    pub ebgp_requires_policy: Option<Rfc8212PolicyChange>,
     pub rpki_changed: bool,
     pub bmp_changed: bool,
     /// `[gnmi_dialout]` changed. Reload-applied: the dial-out manager
@@ -1985,6 +1990,32 @@ pub struct ConfigDiff {
     /// that specific shape through the EVPN runtime coordinator or must
     /// leave it restart-required.
     pub evpn_runtime_change_class: EvpnRuntimeChangeClass,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct Rfc8212EpochState {
+    pub raw: Option<ConfigEpoch>,
+    pub effective: ConfigEpoch,
+    pub source: ConfigEpochSource,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct Rfc8212PolicyState {
+    pub raw: Option<bool>,
+    pub effective: bool,
+    pub source: Rfc8212PolicySource,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct Rfc8212EpochChange {
+    pub before: Rfc8212EpochState,
+    pub after: Rfc8212EpochState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct Rfc8212PolicyChange {
+    pub before: Rfc8212PolicyState,
+    pub after: Rfc8212PolicyState,
 }
 
 /// Static SIGHUP classification for EVPN runtime table edits.
@@ -2165,6 +2196,8 @@ impl ConfigDiff {
     /// Changes that require a full daemon restart.
     pub fn has_restart_required_changes(&self) -> bool {
         self.global_changed
+            || self.config_epoch_changed
+            || self.ebgp_requires_policy_changed
             || self.rpki_changed
             || self.bmp_changed
             || self.mrt_changed
@@ -2364,16 +2397,10 @@ impl RuntimeSnapshotKey {
     /// Keyed token additionally bound to a canonical live-runtime context.
     pub fn token_with_context(&self, config: &Config, context: &[u8]) -> Result<String, String> {
         use std::hash::{BuildHasher, Hasher};
-        // Canonical because `toml::Value::Table` is `BTreeMap`-backed (keys
-        // sorted) unless toml's `preserve_order` feature is enabled, which it is
-        // not here. That makes the token independent of `HashMap` insertion
-        // order for map-valued config (peer_groups, roles, policy definitions,
-        // neighbor_sets). If `preserve_order` is ever turned on, this token
-        // would silently become order-dependent — re-establish canonicalization
-        // (e.g. sort) before doing so.
-        let canonical = toml::Value::try_from(config)
-            .map_err(|error| format!("failed to canonicalize runtime config snapshot: {error}"))?;
-        let normalized = toml::to_string_pretty(&canonical)
+        // The shared borrowed projection uses explicit sorted serializers for
+        // every HashMap-valued config field, making this token independent of
+        // insertion order without cloning the large policy/map graph.
+        let normalized = canonical::render(config)
             .map_err(|error| format!("failed to serialize runtime config snapshot: {error}"))?;
         let mut hasher = self.0.build_hasher();
         hasher.write(normalized.as_bytes());
@@ -2439,7 +2466,7 @@ pub const PERSISTED_CONFIG_HEADER: &str = "\
 pub fn persisted_config_document(config: &Config) -> Result<String, toml::ser::Error> {
     Ok(format!(
         "{PERSISTED_CONFIG_HEADER}\n{}",
-        toml::to_string_pretty(config)?
+        canonical::render(config)?
     ))
 }
 
@@ -2649,13 +2676,11 @@ impl Config {
     }
 
     /// Deterministic TOML rendering of [`Config::effective_redacted`].
-    /// Canonicalized through `toml::Value` (BTreeMap-backed, keys
-    /// sorted) exactly like the runtime snapshot token, so the output
-    /// is stable across `HashMap` iteration orders.
+    /// Canonicalized through the shared borrowed projection exactly like the
+    /// runtime snapshot token, so the output is stable across `HashMap`
+    /// iteration orders without a second large config clone.
     pub fn effective_redacted_toml(&self) -> Result<String, String> {
-        let canonical = toml::Value::try_from(self.effective_redacted())
-            .map_err(|error| format!("failed to canonicalize effective config: {error}"))?;
-        toml::to_string_pretty(&canonical)
+        canonical::render(&self.effective_redacted())
             .map_err(|error| format!("failed to serialize effective config: {error}"))
     }
 }
@@ -2804,6 +2829,11 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
 
     if diff.global_changed {
         class.restart_required_sections.push("[global]".to_string());
+    }
+    if diff.config_epoch_changed {
+        class
+            .restart_required_sections
+            .push("config_epoch".to_string());
     }
     if diff.ebgp_requires_policy_changed {
         // ADR-0112: name the RFC 8212 enforcement mode, not just `[global]`.
@@ -3006,6 +3036,8 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
         "has_informational_changes": diff.has_informational_changes(),
         "has_any_changes": diff.has_any_changes(),
         "evpn_runtime_change_class": diff.evpn_runtime_change_class,
+        "config_epoch": &diff.config_epoch,
+        "ebgp_requires_policy": &diff.ebgp_requires_policy,
         "summary": {
             "neighbors_added": diff.neighbors.added.len(),
             "neighbors_changed": diff.neighbors.changed.len(),
@@ -3040,6 +3072,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
         },
         "restart_required": {
             "global_changed": diff.global_changed,
+            "config_epoch_changed": diff.config_epoch_changed,
             "ebgp_requires_policy_changed": diff.ebgp_requires_policy_changed,
             "rpki_changed": diff.rpki_changed,
             "bmp_changed": diff.bmp_changed,
@@ -3285,6 +3318,9 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     if diff.global_changed {
         restart_sections.push("[global]");
     }
+    if diff.config_epoch_changed {
+        restart_sections.push("config_epoch");
+    }
     if diff.ebgp_requires_policy_changed {
         restart_sections
             .push("[global].ebgp_requires_policy (RFC 8212 enforcement mode; running value stays at the startup value)");
@@ -3345,6 +3381,30 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     }
     if !restart_sections.is_empty() {
         let _ = writeln!(out, "{}", style.restart_header);
+        if let Some(change) = diff.config_epoch {
+            let _ = writeln!(
+                out,
+                "config_epoch: raw={} effective={} source={} -> raw={} effective={} source={}",
+                format_epoch_raw(change.before.raw),
+                change.before.effective.value(),
+                format_epoch_source(change.before.source),
+                format_epoch_raw(change.after.raw),
+                change.after.effective.value(),
+                format_epoch_source(change.after.source),
+            );
+        }
+        if let Some(change) = diff.ebgp_requires_policy {
+            let _ = writeln!(
+                out,
+                "[global].ebgp_requires_policy: raw={} effective={} source={} -> raw={} effective={} source={}",
+                format_policy_raw(change.before.raw),
+                change.before.effective,
+                format_policy_source(change.before.source),
+                format_policy_raw(change.after.raw),
+                change.after.effective,
+                format_policy_source(change.after.source),
+            );
+        }
         for section in &restart_sections {
             let _ = writeln!(out, "  {} {section} changed", style.restart_marker);
         }
@@ -3359,12 +3419,68 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     out
 }
 
+fn format_epoch_raw(value: Option<ConfigEpoch>) -> String {
+    value.map_or_else(
+        || "<omitted>".to_string(),
+        |epoch| epoch.value().to_string(),
+    )
+}
+
+fn format_policy_raw(value: Option<bool>) -> String {
+    value.map_or_else(|| "<omitted>".to_string(), |enabled| enabled.to_string())
+}
+
+const fn format_epoch_source(source: ConfigEpochSource) -> &'static str {
+    match source {
+        ConfigEpochSource::Omitted => "omitted",
+        ConfigEpochSource::Explicit => "explicit",
+    }
+}
+
+const fn format_policy_source(source: Rfc8212PolicySource) -> &'static str {
+    match source {
+        Rfc8212PolicySource::LegacyOmission => "legacy_omission",
+        Rfc8212PolicySource::ExplicitFalse => "explicit_false",
+        Rfc8212PolicySource::ExplicitTrue => "explicit_true",
+    }
+}
+
 /// Compare two full configurations and return a structured diff.
 #[expect(
     clippy::too_many_lines,
     reason = "one flag computation per config section, kept together with the struct literal"
 )]
 pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
+    let old_rfc8212 = old.rfc8212_posture();
+    let new_rfc8212 = new.rfc8212_posture();
+    let old_epoch = Rfc8212EpochState {
+        raw: old_rfc8212.config_epoch_raw,
+        effective: old_rfc8212.config_epoch_effective,
+        source: old_rfc8212.config_epoch_source,
+    };
+    let new_epoch = Rfc8212EpochState {
+        raw: new_rfc8212.config_epoch_raw,
+        effective: new_rfc8212.config_epoch_effective,
+        source: new_rfc8212.config_epoch_source,
+    };
+    let old_policy = Rfc8212PolicyState {
+        raw: old_rfc8212.policy_raw,
+        effective: old_rfc8212.policy_effective,
+        source: old_rfc8212.policy_source,
+    };
+    let new_policy = Rfc8212PolicyState {
+        raw: new_rfc8212.policy_raw,
+        effective: new_rfc8212.policy_effective,
+        source: new_rfc8212.policy_source,
+    };
+    let config_epoch = (old_epoch != new_epoch).then_some(Rfc8212EpochChange {
+        before: old_epoch,
+        after: new_epoch,
+    });
+    let ebgp_requires_policy = (old_policy != new_policy).then_some(Rfc8212PolicyChange {
+        before: old_policy,
+        after: new_policy,
+    });
     let neighbor_tcp_ao_changed = neighbor_tcp_ao_restart_required_changed(old, new);
     let dynamic_neighbor_tcp_ao_changed =
         dynamic_neighbor_tcp_ao_restart_required_changed(old, new);
@@ -3452,8 +3568,10 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         honor_blackhole_changed: old.global.honor_blackhole != new.global.honor_blackhole
             && !blackhole_fib_discard_changed,
         global_changed: global_restart_required_changed(old, new),
-        ebgp_requires_policy_changed: old.global.ebgp_requires_policy
-            != new.global.ebgp_requires_policy,
+        config_epoch_changed: config_epoch.is_some(),
+        config_epoch,
+        ebgp_requires_policy_changed: ebgp_requires_policy.is_some(),
+        ebgp_requires_policy,
         rpki_changed: old.rpki != new.rpki,
         bmp_changed: old.bmp != new.bmp,
         gnmi_dialout_changed: old.gnmi_dialout != new.gnmi_dialout,
@@ -4197,20 +4315,17 @@ pub(crate) fn pin_bfd_startup_only_runtime(new_config: &mut Config, current: &Co
     true
 }
 
-/// Pin `[global] ebgp_requires_policy` to the live snapshot. ADR-0112 makes the
-/// RFC 8212 enforcement mode restart-required: policy resolution consults it
-/// every time a peer's effective import/export chains are recomputed, so an
-/// unpinned SIGHUP would flip both directions on every EBGP session at once. A
-/// reload still *reports* the on-disk candidate through `ConfigDiff`; the
-/// running snapshot keeps the startup value until the daemon restarts. Returns
-/// whether anything was pinned.
-pub(crate) fn pin_ebgp_requires_policy_startup_only(
-    new_config: &mut Config,
-    current: &Config,
-) -> bool {
-    if new_config.global.ebgp_requires_policy == current.global.ebgp_requires_policy {
+/// Pin the full RFC 8212 epoch/raw/source/effective tuple to the live snapshot.
+/// ADR-0112/0119 make this posture restart-required: policy resolution consults
+/// it every time a peer's effective chains are recomputed, so an unpinned
+/// SIGHUP could change behavior or erase source intent. A reload still reports
+/// the on-disk candidate through `ConfigDiff`; the running snapshot keeps the
+/// startup tuple until restart. Returns whether anything was pinned.
+pub(crate) fn pin_rfc8212_posture_startup_only(new_config: &mut Config, current: &Config) -> bool {
+    if new_config.rfc8212_posture() == current.rfc8212_posture() {
         return false;
     }
+    new_config.config_epoch = current.config_epoch;
     new_config.global.ebgp_requires_policy = current.global.ebgp_requires_policy;
     true
 }

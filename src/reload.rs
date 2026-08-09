@@ -1760,12 +1760,12 @@ pub(crate) async fn reload_config_with_tcp_ao(
         );
         new_config.global.dynamic_neighbor_limit = current.global.dynamic_neighbor_limit;
     }
-    if config::pin_ebgp_requires_policy_startup_only(&mut new_config, current) {
+    if config::pin_rfc8212_posture_startup_only(&mut new_config, current) {
         error!(
-            "[global].ebgp_requires_policy differs from the live config: the ADR-0112 \
-             RFC 8212 enforcement mode is read once at startup. Restart rustbgpd to \
-             change it. The running import/export treatment of every EBGP session is \
-             kept at its startup value for this reload."
+            "config_epoch or [global].ebgp_requires_policy differs from the live config: \
+             the ADR-0112/0119 RFC 8212 posture is read once at startup. Restart rustbgpd \
+             to change it. The complete running epoch/policy tuple is kept at its startup \
+             value for this reload."
         );
     }
     if config::pin_bfd_startup_only_runtime(&mut new_config, current) {
@@ -8548,11 +8548,11 @@ remote_asn = 65002
         let (runtime, disk) = reload_then_persist_policy_after_desired_refresh(&new_toml).await;
 
         assert!(
-            !runtime.global.ebgp_requires_policy,
+            !runtime.rfc8212_posture().policy_effective,
             "runtime must stay pinned to the live startup value"
         );
         assert!(
-            disk.global.ebgp_requires_policy,
+            disk.rfc8212_posture().policy_effective,
             "desired/disk snapshot must reflect the operator's opt-in"
         );
     }

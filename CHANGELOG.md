@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Root `config_epoch = 1|2` and lossless RFC 8212 boolean presence now prepare
+  the secure-default migration without changing route behavior. Epoch-less and
+  epoch-1 omission remain permissive; before activation, epoch 2 requires an
+  explicit `[global].ebgp_requires_policy = true|false`. Durable/effective
+  renderings materialize the effective epoch (omission becomes epoch 1;
+  explicit epoch 2 remains epoch 2) and boolean, while boot and
+  runtime-candidate inputs retain their raw representation.
 - `birdwatcher-adapter` now accepts strict `unix:///absolute/path` daemon
   endpoints plus TCP, preserves lazy 502 recovery, and ships in native packages
   and the production container alongside release tarballs (LAN-925).

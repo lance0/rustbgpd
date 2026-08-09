@@ -279,6 +279,9 @@ impl Config {
         reason = "validation keeps related operator diagnostics in one ordered pass"
     )]
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+        if self.rfc8212_posture().requires_explicit_policy {
+            return Err(ConfigError::Rfc8212Epoch2PolicyOmission);
+        }
         if self.global.asn == 0 {
             return Err(ConfigError::InvalidLocalAsn {
                 value: self.global.asn,

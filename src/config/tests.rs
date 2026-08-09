@@ -7235,26 +7235,92 @@ fn inbound_admission_defaults_off_and_validates_bounds() {
     );
 }
 
-/// ADR-0112: the RFC 8212 enforcement mode is opt-in and off by default, so an
-/// existing deployment keeps permit-all EBGP behavior without editing anything.
+fn rfc8212_representation_toml(epoch: Option<&str>, policy: Option<bool>) -> String {
+    let source = policy.map_or_else(
+        || valid_toml().to_string(),
+        |enabled| {
+            valid_toml().replace(
+                "listen_port = 179",
+                &format!("listen_port = 179\nebgp_requires_policy = {enabled}"),
+            )
+        },
+    );
+    epoch.map_or(source.clone(), |epoch| {
+        format!("config_epoch = {epoch}\n{source}")
+    })
+}
+
+/// ADR-0119 pre-activation matrix. Removing either raw `Option`, collapsing
+/// omission into false before posture derivation, or changing any accepted
+/// epoch/value cell makes at least one exact tuple red.
 #[test]
-fn ebgp_requires_policy_defaults_off_and_parses() {
-    let default = parse(valid_toml()).unwrap();
-    assert!(
-        !default.global.ebgp_requires_policy,
-        "RFC 8212 enforcement must be opt-in"
+fn rfc8212_epoch_and_policy_presence_matrix_is_lossless_without_flipping_default() {
+    for (epoch, epoch_raw, epoch_effective, epoch_source) in [
+        (None, None, ConfigEpoch::V1, ConfigEpochSource::Omitted),
+        (
+            Some("1"),
+            Some(ConfigEpoch::V1),
+            ConfigEpoch::V1,
+            ConfigEpochSource::Explicit,
+        ),
+        (
+            Some("2"),
+            Some(ConfigEpoch::V2),
+            ConfigEpoch::V2,
+            ConfigEpochSource::Explicit,
+        ),
+    ] {
+        for (raw, effective, source) in [
+            (Some(false), false, Rfc8212PolicySource::ExplicitFalse),
+            (Some(true), true, Rfc8212PolicySource::ExplicitTrue),
+        ] {
+            let config = parse(&rfc8212_representation_toml(epoch, raw)).unwrap();
+            let posture = config.rfc8212_posture();
+            assert_eq!(posture.config_epoch_raw, epoch_raw);
+            assert_eq!(posture.config_epoch_effective, epoch_effective);
+            assert_eq!(posture.config_epoch_source, epoch_source);
+            assert_eq!(posture.policy_raw, raw);
+            assert_eq!(posture.policy_effective, effective);
+            assert_eq!(posture.policy_source, source);
+            assert!(!posture.requires_explicit_policy);
+        }
+    }
+
+    for epoch in [None, Some("1")] {
+        let posture = parse(&rfc8212_representation_toml(epoch, None))
+            .unwrap()
+            .rfc8212_posture();
+        assert_eq!(posture.policy_raw, None);
+        assert!(!posture.policy_effective);
+        assert_eq!(posture.policy_source, Rfc8212PolicySource::LegacyOmission);
+    }
+}
+
+#[test]
+fn rfc8212_epoch_two_omission_and_invalid_epochs_fail_closed() {
+    const EXACT: &str = "config_epoch = 2 requires [global].ebgp_requires_policy = true or [global].ebgp_requires_policy = false before secure-default activation; add one explicit assignment";
+    let source = rfc8212_representation_toml(Some("2"), None);
+    assert_eq!(parse(&source).unwrap_err().to_string(), EXACT);
+    let schema_only = parse_schema_only(&source).unwrap();
+    assert!(schema_only.rfc8212_posture().requires_explicit_policy);
+    assert_eq!(
+        persisted_config_document(&schema_only)
+            .unwrap_err()
+            .to_string(),
+        EXACT
     );
 
-    let enabled = parse(&ebgp_requires_policy_toml()).unwrap();
-    assert!(enabled.global.ebgp_requires_policy);
+    for invalid in ["0", "-1", "3", "1.5", "\"2\""] {
+        let error = parse(&rfc8212_representation_toml(Some(invalid), Some(false)))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("config_epoch"), "{invalid}: {error}");
+    }
 }
 
 /// `valid_toml()` with `ebgp_requires_policy = true` inside `[global]`.
 fn ebgp_requires_policy_toml() -> String {
-    valid_toml().replace(
-        "listen_port = 179",
-        "listen_port = 179\nebgp_requires_policy = true",
-    )
+    rfc8212_representation_toml(None, Some(true))
 }
 
 /// ADR-0112 restart pinning. Changing only `[global] ebgp_requires_policy` must
@@ -7281,6 +7347,11 @@ fn ebgp_requires_policy_diff_is_restart_required_named_and_pinned() {
         json["restart_required"]["ebgp_requires_policy_changed"],
         true
     );
+    assert_eq!(
+        json["ebgp_requires_policy"]["before"]["raw"],
+        serde_json::Value::Null
+    );
+    assert_eq!(json["ebgp_requires_policy"]["after"]["raw"], true);
 
     let text = super::format_config_diff_with_style(&diff, &super::ConfigDiffTextStyle::default());
     assert!(text.contains("[global].ebgp_requires_policy"), "{text}");
@@ -7296,12 +7367,9 @@ fn ebgp_requires_policy_diff_is_restart_required_named_and_pinned() {
 
     // SIGHUP pins the running value back to the live snapshot.
     let mut runtime = new.clone();
-    assert!(super::pin_ebgp_requires_policy_startup_only(
-        &mut runtime,
-        &old
-    ));
+    assert!(super::pin_rfc8212_posture_startup_only(&mut runtime, &old));
     assert!(
-        !runtime.global.ebgp_requires_policy,
+        !runtime.rfc8212_posture().policy_effective,
         "the running enforcement mode stays at the startup value until restart"
     );
     let repinned = super::diff_config(&old, &runtime);
@@ -7309,18 +7377,56 @@ fn ebgp_requires_policy_diff_is_restart_required_named_and_pinned() {
     assert!(!repinned.global_changed);
 
     // Idempotent: nothing to pin once the candidate already matches.
-    assert!(!super::pin_ebgp_requires_policy_startup_only(
-        &mut runtime,
-        &old
-    ));
+    assert!(!super::pin_rfc8212_posture_startup_only(&mut runtime, &old));
 
     // Disabling an enabled mode is pinned the same way.
     let mut downgrade = old.clone();
-    assert!(super::pin_ebgp_requires_policy_startup_only(
+    assert!(super::pin_rfc8212_posture_startup_only(
         &mut downgrade,
         &new
     ));
-    assert!(downgrade.global.ebgp_requires_policy);
+    assert!(downgrade.rfc8212_posture().policy_effective);
+}
+
+/// Representation-only changes are still restart-required and survive both
+/// text/JSON rendering. Pinning must restore the complete raw tuple, not just
+/// its equal effective false value.
+#[test]
+fn rfc8212_representation_only_diff_and_pin_cover_the_complete_raw_tuple() {
+    let old = parse(valid_toml()).unwrap();
+    let explicit = parse(&rfc8212_representation_toml(Some("1"), Some(false))).unwrap();
+    let diff = super::diff_config(&old, &explicit);
+    assert!(diff.config_epoch_changed);
+    assert!(diff.ebgp_requires_policy_changed);
+    assert!(diff.has_restart_required_changes());
+    let json = super::config_diff_json_value(&diff);
+    assert_eq!(
+        json["config_epoch"]["before"]["raw"],
+        serde_json::Value::Null
+    );
+    assert_eq!(json["config_epoch"]["after"]["raw"], 1);
+    assert_eq!(json["ebgp_requires_policy"]["before"]["effective"], false);
+    assert_eq!(json["ebgp_requires_policy"]["after"]["effective"], false);
+    let text = super::format_config_diff(&diff);
+    assert!(text.contains("config_epoch: raw=<omitted> effective=1 source=omitted -> raw=1 effective=1 source=explicit"), "{text}");
+    assert!(text.contains("[global].ebgp_requires_policy: raw=<omitted> effective=false source=legacy_omission -> raw=false effective=false source=explicit_false"), "{text}");
+
+    let class = super::classify_config_transaction_v1(&diff);
+    assert!(
+        class
+            .restart_required_sections
+            .contains(&"config_epoch".to_string())
+    );
+    assert!(
+        class
+            .restart_required_sections
+            .contains(&"[global].ebgp_requires_policy".to_string())
+    );
+
+    let mut running = explicit;
+    assert!(super::pin_rfc8212_posture_startup_only(&mut running, &old));
+    assert_eq!(running.rfc8212_posture(), old.rfc8212_posture());
+    assert!(!super::diff_config(&old, &running).has_any_changes());
 }
 
 #[test]
@@ -13210,6 +13316,65 @@ fn persisted_config_sorts_every_hash_map_and_round_trips_to_a_fixpoint() {
     assert_eq!(statements[1].action, "deny");
 }
 
+/// Every canonical sink materializes the effective epoch and policy through
+/// one borrowed renderer, while the accepted boot file stays byte-identical.
+/// Bypassing the renderer at any sink makes an equality/presence assertion red.
+#[test]
+fn rfc8212_canonical_sinks_materialize_without_rewriting_boot_input() {
+    let raw_source = tier_authorized_uds_test_config(valid_toml());
+    let file = NamedTempFile::new().unwrap();
+    fs::write(file.path(), &raw_source).unwrap();
+    let raw = Config::load_with_diagnostics(file.path().to_str().unwrap()).unwrap();
+    assert_eq!(fs::read_to_string(file.path()).unwrap(), raw_source);
+    assert_eq!(raw.config_epoch, None);
+    assert_eq!(raw.global.ebgp_requires_policy, None);
+
+    let explicit = parse(&rfc8212_representation_toml(Some("1"), Some(false))).unwrap();
+    let persisted = persisted_config_document(&raw).unwrap();
+    assert!(persisted.contains("config_epoch = 1"), "{persisted}");
+    assert!(
+        persisted.contains("ebgp_requires_policy = false"),
+        "{persisted}"
+    );
+    let reloaded = Config::load_toml_with_diagnostics(&persisted, "canonical persisted").unwrap();
+    assert_eq!(persisted_config_document(&reloaded).unwrap(), persisted);
+
+    let key = RuntimeSnapshotKey::random();
+    assert_eq!(key.token(&raw).unwrap(), key.token(&explicit).unwrap());
+    assert_eq!(
+        raw.effective_redacted_toml().unwrap(),
+        explicit.effective_redacted_toml().unwrap()
+    );
+}
+
+/// Structural companion to the release HWM receipt: the runtime A/B alone
+/// cannot detect adding the same internal deep clone to both arms. This pins
+/// every large projection field as borrowed, the one allowed small Global
+/// clone, and direct serialization (no whole-tree `toml::Value`).
+#[test]
+fn canonical_projection_borrows_every_large_config_field() {
+    let source = include_str!("canonical.rs");
+    for field in [
+        "security: &'a SecurityConfig",
+        "neighbors: &'a [Neighbor]",
+        "peer_groups: &'a std::collections::HashMap",
+        "policy: &'a PolicyConfig",
+        "dynamic_neighbors: &'a [DynamicNeighborConfig]",
+        "evpn_instances: &'a [EvpnInstanceConfig]",
+        "ethernet_segments: &'a [EthernetSegmentConfig]",
+        "evpn_ip_vrfs: &'a [EvpnIpVrfConfig]",
+        "fib_tables: &'a [FibTableConfig]",
+        "managed_netdevs: &'a ManagedNetdevsConfig",
+        "bfd_profiles: &'a [BfdProfileConfig]",
+    ] {
+        assert!(source.contains(field), "canonical projection lost {field}");
+    }
+    assert_eq!(source.matches(".clone()").count(), 1, "{source}");
+    assert!(source.contains("let mut canonical_global = global.clone()"));
+    assert!(!source.contains("toml::Value::try_from"), "{source}");
+    assert!(source.contains("toml::to_string_pretty(&CanonicalConfig::from(config))"));
+}
+
 #[cfg(target_os = "linux")]
 fn linux_vm_hwm_bytes() -> usize {
     fs::read_to_string("/proc/self/status")
@@ -13245,30 +13410,47 @@ fn persistence_probe_fixture() -> Config {
 
 #[cfg(target_os = "linux")]
 fn run_persistence_probe_child(arm: &str, receipt: &Path) {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
     use std::time::Instant;
 
     let config = persistence_probe_fixture();
     let baseline = linux_vm_hwm_bytes();
     let started = Instant::now();
-    assert!(matches!(arm, "direct" | "sorted"));
-    let rendered = persisted_config_document(&config).unwrap();
+    assert!(matches!(arm, "direct" | "sorted" | "borrowed" | "owned"));
+    let owned = (arm == "owned").then(|| config.clone());
+    let rendered = persisted_config_document(owned.as_ref().unwrap_or(&config)).unwrap();
+    std::hint::black_box(&owned);
     let elapsed = started.elapsed().as_nanos();
     let direct_maps =
         super::schema::PERSISTENCE_PROBE_DIRECT_MAPS.swap(0, std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(direct_maps == 0, arm == "sorted");
+    assert_eq!(direct_maps > 0, arm == "direct");
     let peak = linux_vm_hwm_bytes();
     let growth = peak.saturating_sub(baseline);
     let bytes = rendered.len();
-    let round_tripped: Config = toml::from_str(&rendered).unwrap();
+    let sha256 = Sha256::digest(rendered.as_bytes()).iter().fold(
+        String::with_capacity(64),
+        |mut hex, byte| {
+            write!(&mut hex, "{byte:02x}").unwrap();
+            hex
+        },
+    );
+    let mut round_tripped: Config = toml::from_str(&rendered).unwrap();
     drop(rendered);
+    round_tripped.config_epoch = None;
+    round_tripped.global.ebgp_requires_policy = None;
     assert_eq!(round_tripped, config);
     fs::write(
         receipt,
-        format!("{bytes},{elapsed},{baseline},{peak},{growth}"),
+        format!(
+            "{bytes},{elapsed},{baseline},{peak},{growth},{},{}",
+            usize::from(owned.is_some()),
+            sha256
+        ),
     )
     .unwrap();
     eprintln!(
-        "arm={arm} bytes={bytes} elapsed_ns={elapsed} baseline={baseline} peak={peak} growth={growth}"
+        "arm={arm} bytes={bytes} sha256={sha256} elapsed_ns={elapsed} baseline={baseline} peak={peak} growth={growth}"
     );
 }
 
@@ -13285,6 +13467,26 @@ fn assert_persistence_probe_receipts(direct: &[u128], sorted: &[u128]) {
 }
 
 #[cfg(target_os = "linux")]
+fn assert_borrowed_persistence_probe_receipts(
+    borrowed: &[u128],
+    borrowed_sha256: &str,
+    owned: &[u128],
+    owned_sha256: &str,
+) {
+    const MIB: u128 = 1024 * 1024;
+
+    assert_eq!(borrowed[0], owned[0]);
+    assert_eq!(borrowed_sha256, owned_sha256);
+    assert_eq!(borrowed[5], 0);
+    assert_eq!(owned[5], 1);
+    let clone_cost_floor = (borrowed[4] / 10).max(128 * MIB);
+    assert!(
+        owned[4] >= borrowed[4] + clone_cost_floor,
+        "borrowed projection lost its material HWM advantage: borrowed={borrowed:?} owned={owned:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 fn persistence_probe_comparison_rejects_vacuous_sorted_hwm() {
     // Load-bearing: replacing the two per-arm growth assertions with `||`
@@ -13293,6 +13495,19 @@ fn persistence_probe_comparison_rejects_vacuous_sorted_hwm() {
     let sorted = [342_422_054, 2_500_000_000, 0, 0, 0];
     assert!(
         std::panic::catch_unwind(|| assert_persistence_probe_receipts(&direct, &sorted)).is_err()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn persistence_probe_comparison_rejects_owned_sized_borrowed_projection() {
+    let borrowed = [342_422_054, 2_500_000_000, 0, 0, 1_740_000_000, 0];
+    let owned = [342_422_054, 2_500_000_000, 0, 0, 1_740_000_000, 1];
+    assert!(
+        std::panic::catch_unwind(|| {
+            assert_borrowed_persistence_probe_receipts(&borrowed, "same", &owned, "same");
+        })
+        .is_err()
     );
 }
 
@@ -13316,7 +13531,14 @@ fn persisted_config_release_scale_probe() {
     let executable = std::env::current_exe().unwrap();
     let direct_file = NamedTempFile::new().unwrap();
     let sorted_file = NamedTempFile::new().unwrap();
-    for (arm, receipt) in [("direct", &direct_file), ("sorted", &sorted_file)] {
+    let borrowed_file = NamedTempFile::new().unwrap();
+    let owned_file = NamedTempFile::new().unwrap();
+    for (arm, receipt) in [
+        ("direct", &direct_file),
+        ("sorted", &sorted_file),
+        ("borrowed", &borrowed_file),
+        ("owned", &owned_file),
+    ] {
         assert!(
             Command::new(&executable)
                 .args([
@@ -13332,16 +13554,23 @@ fn persisted_config_release_scale_probe() {
                 .success()
         );
     }
-    let read = |path: &Path| -> Vec<u128> {
-        fs::read_to_string(path)
-            .unwrap()
-            .split(',')
-            .map(|value| value.parse().unwrap())
-            .collect()
+    let read = |path: &Path| -> (Vec<u128>, String) {
+        let receipt = fs::read_to_string(path).unwrap();
+        let (numbers, sha256) = receipt.rsplit_once(',').unwrap();
+        (
+            numbers
+                .split(',')
+                .map(|value| value.parse().unwrap())
+                .collect(),
+            sha256.to_string(),
+        )
     };
-    let direct = read(direct_file.path());
-    let sorted = read(sorted_file.path());
+    let (direct, _) = read(direct_file.path());
+    let (sorted, _) = read(sorted_file.path());
+    let (borrowed, borrowed_sha256) = read(borrowed_file.path());
+    let (owned, owned_sha256) = read(owned_file.path());
     assert_persistence_probe_receipts(&direct, &sorted);
+    assert_borrowed_persistence_probe_receipts(&borrowed, &borrowed_sha256, &owned, &owned_sha256);
 }
 
 /// The maintenance header belongs to files the daemon writes, and nowhere
@@ -13417,10 +13646,12 @@ set_community_remove = []
     ] {
         assert!(!compact.contains(field), "{field} leaked into:\n{compact}");
     }
+    let compact_reloaded =
+        Config::load_toml_with_diagnostics(&compact, "compacted persisted config").unwrap();
     assert_eq!(
-        Config::load_toml_with_diagnostics(&compact, "compacted persisted config").unwrap(),
-        config,
-        "old explicit-empty input and compact output must decode identically"
+        persisted_config_document(&compact_reloaded).unwrap(),
+        compact,
+        "old explicit-empty input must reach the canonical fixpoint"
     );
 
     let populated = parse(&format!(
@@ -13440,9 +13671,11 @@ set_community_remove = ["BLACKHOLE"]
     assert!(populated_toml.contains("match_community = [\"65001:100\"]"));
     assert!(populated_toml.contains("set_community_add = [\"NO_EXPORT\"]"));
     assert!(populated_toml.contains("set_community_remove = [\"BLACKHOLE\"]"));
+    let populated_reloaded =
+        Config::load_toml_with_diagnostics(&populated_toml, "populated persisted config").unwrap();
     assert_eq!(
-        Config::load_toml_with_diagnostics(&populated_toml, "populated persisted config").unwrap(),
-        populated
+        persisted_config_document(&populated_reloaded).unwrap(),
+        populated_toml
     );
 }
 
@@ -17572,6 +17805,36 @@ fn config_json_schema_committed_copy_is_fresh() {
         generated, committed,
         "docs/rustbgpd.schema.json is stale — regenerate with `cargo run --bin rustbgpd -- \
          --dump-config-schema > docs/rustbgpd.schema.json` (or rerun this test with BLESS=1)"
+    );
+}
+
+/// The raw RFC 8212 fields must remain optional in input without advertising
+/// JSON `null` as a valid TOML value. Reverting `schemars(with = ...)` exposes
+/// nullable `Option` schemas; dropping either explicit default makes this red.
+#[test]
+fn rfc8212_schema_preserves_optional_non_null_defaults() {
+    let schema: serde_json::Value = serde_json::from_str(&config_json_schema()).unwrap();
+    let epoch = &schema["properties"]["config_epoch"];
+    let policy = &schema["$defs"]["Global"]["properties"]["ebgp_requires_policy"];
+    assert!(
+        !schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&"config_epoch".into())
+    );
+    assert!(
+        !schema["$defs"]["Global"]["required"]
+            .as_array()
+            .is_some_and(|required| required.contains(&"ebgp_requires_policy".into()))
+    );
+    assert_eq!(epoch["default"], 1);
+    assert_eq!(policy["type"], "boolean");
+    assert_eq!(policy["default"], false);
+    assert!(!epoch.to_string().contains("null"), "{epoch}");
+    assert!(!policy.to_string().contains("null"), "{policy}");
+    assert_eq!(
+        schema["$defs"]["ConfigEpoch"]["enum"],
+        serde_json::json!([1, 2])
     );
 }
 

@@ -24,7 +24,10 @@ pub(super) const BGP_PORT: u16 = 179;
 pub(super) static PERSISTENCE_PROBE_DIRECT_MAPS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-fn serialize_sorted_hash_map<K, V, S>(map: &HashMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+pub(super) fn serialize_sorted_hash_map<K, V, S>(
+    map: &HashMap<K, V>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
     K: Ord + Serialize,
     V: Serialize,
@@ -54,6 +57,15 @@ where
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Configuration semantics epoch. Omission permanently means epoch 1;
+    /// only explicit integer values 1 and 2 are accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "ConfigEpoch", extend("default" = 1))]
+    #[expect(
+        clippy::struct_field_names,
+        reason = "config_epoch is the ADR-0119 operator-facing root key"
+    )]
+    pub config_epoch: Option<ConfigEpoch>,
     /// Daemon-wide BGP settings (ASN, router ID, listeners, telemetry).
     pub global: Global,
     /// Security policy and authorization configuration. Empty by
@@ -155,6 +167,123 @@ pub struct Config {
     /// Path of the config file (populated by `Config::load`, not serialized).
     #[serde(skip)]
     pub file_path: Option<PathBuf>,
+}
+
+/// Versioned configuration-semantics boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConfigEpoch {
+    /// Legacy semantics, including omitted RFC 8212 enforcement.
+    V1,
+    /// Secure-default representation; activation is separately gated.
+    V2,
+}
+
+impl ConfigEpoch {
+    /// Stable numeric representation written to TOML and JSON Schema.
+    #[must_use]
+    pub const fn value(self) -> u8 {
+        match self {
+            Self::V1 => 1,
+            Self::V2 => 2,
+        }
+    }
+}
+
+impl Serialize for ConfigEpoch {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u8(self.value())
+    }
+}
+
+impl<'de> Deserialize<'de> for ConfigEpoch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match i64::deserialize(deserializer)? {
+            1 => Ok(Self::V1),
+            2 => Ok(Self::V2),
+            value => Err(serde::de::Error::custom(format!(
+                "invalid config_epoch {value}: expected integer 1 or 2"
+            ))),
+        }
+    }
+}
+
+impl JsonSchema for ConfigEpoch {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("ConfigEpoch")
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        schemars::json_schema!({
+            "type": "integer",
+            "enum": [1, 2]
+        })
+    }
+}
+
+/// Whether the root config epoch was present in the operator input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigEpochSource {
+    Omitted,
+    Explicit,
+}
+
+/// Why the effective RFC 8212 enforcement value has its current value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Rfc8212PolicySource {
+    LegacyOmission,
+    ExplicitFalse,
+    ExplicitTrue,
+}
+
+/// Lossless RFC 8212 representation derived from one raw config snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rfc8212Posture {
+    pub config_epoch_raw: Option<ConfigEpoch>,
+    pub config_epoch_effective: ConfigEpoch,
+    pub config_epoch_source: ConfigEpochSource,
+    pub policy_raw: Option<bool>,
+    pub policy_effective: bool,
+    pub policy_source: Rfc8212PolicySource,
+    pub requires_explicit_policy: bool,
+}
+
+impl Config {
+    /// Derive the complete pre-activation RFC 8212 posture without erasing raw
+    /// presence. Epoch-2 omission is rejected by validation before use.
+    #[must_use]
+    pub const fn rfc8212_posture(&self) -> Rfc8212Posture {
+        let config_epoch_effective = match self.config_epoch {
+            Some(epoch) => epoch,
+            None => ConfigEpoch::V1,
+        };
+        let config_epoch_source = match self.config_epoch {
+            Some(_) => ConfigEpochSource::Explicit,
+            None => ConfigEpochSource::Omitted,
+        };
+        let (policy_effective, policy_source) = match self.global.ebgp_requires_policy {
+            Some(true) => (true, Rfc8212PolicySource::ExplicitTrue),
+            Some(false) => (false, Rfc8212PolicySource::ExplicitFalse),
+            None => (false, Rfc8212PolicySource::LegacyOmission),
+        };
+        Rfc8212Posture {
+            config_epoch_raw: self.config_epoch,
+            config_epoch_effective,
+            config_epoch_source,
+            policy_raw: self.global.ebgp_requires_policy,
+            policy_effective,
+            policy_source,
+            requires_explicit_policy: matches!(config_epoch_effective, ConfigEpoch::V2)
+                && self.global.ebgp_requires_policy.is_none(),
+        }
+    }
 }
 
 /// Per-source inbound connection admission rate limiting (ADR-0120).
@@ -685,8 +814,11 @@ pub struct Global {
     #[serde(default)]
     pub allow_blackhole_broad_prefixes: bool,
     /// Require explicit operator import/export policy on EBGP sessions
-    /// (RFC 8212). Off by default, which preserves the historical treatment of
-    /// an EBGP session with no resolved policy chain as permit-all.
+    /// (RFC 8212). Raw omission is retained for `config_epoch`; epoch-less and
+    /// epoch-1 omission remain effective false, preserving the historical
+    /// treatment of an EBGP session with no resolved policy chain as
+    /// permit-all. Before secure-default activation, epoch 2 requires an
+    /// explicit true or false value.
     ///
     /// **Restart-required.** The enforcement mode is read once at startup and
     /// pinned across SIGHUP: a reload reports a changed value as
@@ -716,8 +848,9 @@ pub struct Global {
     /// annotates the deciding statement rather than reporting a plain
     /// operator deny. `rbgp doctor` raises `peer.<address>.rfc8212_policy`,
     /// naming the direction that is missing a policy.
-    #[serde(default)]
-    pub ebgp_requires_policy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "bool", extend("default" = false))]
+    pub ebgp_requires_policy: Option<bool>,
     /// Publish one durable, daemon-private MRT warm-cache checkpoint during
     /// coordinated shutdown. Off by default. This tranche only publishes the
     /// checkpoint and a generation-bound restart marker; boot never loads or
@@ -2476,6 +2609,10 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("failed to parse TOML: {0}")]
     Parse(#[from] toml::de::Error),
+    #[error(
+        "config_epoch = 2 requires [global].ebgp_requires_policy = true or [global].ebgp_requires_policy = false before secure-default activation; add one explicit assignment"
+    )]
+    Rfc8212Epoch2PolicyOmission,
     #[error("invalid local ASN {value}: AS 0 is reserved (RFC 7607 section 2)")]
     InvalidLocalAsn { value: u32 },
     #[error("invalid router_id {value:?}: {reason}")]

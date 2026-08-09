@@ -255,8 +255,10 @@ impl PeerManager {
         let Some(managed) = self.peers.get(peer) else {
             return;
         };
-        let (import, export) =
-            rfc8212_statuses(managed, self.current_config.global.ebgp_requires_policy);
+        let (import, export) = rfc8212_statuses(
+            managed,
+            self.current_config.rfc8212_posture().policy_effective,
+        );
         self.metrics.set_rfc8212_missing_policy(
             &peer.address.to_string(),
             import == Rfc8212PolicyStatus::Missing,
@@ -410,7 +412,7 @@ impl PeerManager {
             peer,
             managed,
             session_state.as_ref(),
-            self.current_config.global.ebgp_requires_policy,
+            self.current_config.rfc8212_posture().policy_effective,
         );
         if let Some(latch) = self.max_prefix_latches.get(peer) {
             info.last_error.clone_from(&latch.error);
@@ -448,7 +450,7 @@ impl PeerManager {
                 peer,
                 managed,
                 session_state,
-                self.current_config.global.ebgp_requires_policy,
+                self.current_config.rfc8212_posture().policy_effective,
             );
             if let Some(latch) = self.max_prefix_latches.get(peer) {
                 info.last_error.clone_from(&latch.error);

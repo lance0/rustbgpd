@@ -123,6 +123,28 @@ positive + negative test fixture under `src/test/rustbgpd/`.)
 
 ---
 
+## `config_epoch`
+
+`config_epoch` is an optional integer at the document root, before any TOML
+table. Omission permanently means epoch 1; the only accepted explicit values
+are `1` and `2`. It records config semantics for a later RFC 8212
+secure-default activation and does not infer intent from file age or release.
+
+The current pre-activation behavior does not flip the default: epoch-less and
+epoch-1 omission of `[global].ebgp_requires_policy` remain effective `false`.
+Epoch 2 currently requires the boolean to be written explicitly as `true` or
+`false`; omission fails `--check`, startup, reload, and transaction validation
+with the exact edit required. Explicit booleans retain their value in either
+epoch.
+
+Daemon-written canonical config, applied history, runtime snapshot tokens, and
+effective config output materialize the effective epoch plus the effective
+boolean: omission becomes `config_epoch = 1`, while an explicit epoch 2 remains
+`config_epoch = 2`. Merely booting an epoch-less operator file does not rewrite
+its bytes.
+
+---
+
 ## `[global]`
 
 Required. Defines the local BGP speaker identity.
@@ -141,7 +163,7 @@ Required. Defines the local BGP speaker identity.
 | `honor_blackhole`   | bool   | no       | `false`              | Enable RFC 7999 receiver scoping on EBGP imports — see below |
 | `install_blackhole_discard` | bool | no | `false`              | Install kernel blackhole routes for accepted RFC 7999 host routes — see below |
 | `allow_blackhole_broad_prefixes` | bool | no | `false`           | Permit non-host BLACKHOLE discard installs when the FIB slice is enabled |
-| `ebgp_requires_policy` | bool | no       | `false`              | RFC 8212: require explicit operator import/export policy on eBGP sessions; a direction without one runs a reserved internal deny. **Restart-required** — see below |
+| `ebgp_requires_policy` | bool | no       | `false`              | RFC 8212: require explicit operator import/export policy on eBGP sessions; raw omission is retained for `config_epoch`, while epoch-less/epoch-1 omission remains effective false. **Restart-required** — see below |
 | `multipath_relax`   | bool   | no       | `false`              | ADR-0066 multipath-relax: group unicast ECMP candidates by `AS_PATH` *length* instead of an exact `AS_PATH` match (FRR's `bgp bestpath as-path multipath-relax`). Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
 | `link_bandwidth_weighted` | bool | no   | `false`              | ADR-0068 weighted multipath: weight unicast ECMP next-hops by the lowest finite nonnegative RFC 10005 Link Bandwidth value when the whole equal-cost group carries a positive one; zero, missing, or unusable values fall back to equal cost. Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
 
@@ -493,15 +515,17 @@ actor-fenced export replacement as any other export edit, so removing the last
 explicit export policy withdraws what was advertised before the edit reports
 success.
 
-The knob is deliberately restart-required rather than hot-applied. Enabling it
+The complete `config_epoch` / raw boolean tuple is deliberately
+restart-required rather than hot-applied. Enabling it
 flips both directions on every eBGP session at once, and recovering a peer's
 Adj-RIB-In afterwards depends on negotiated Route Refresh, so a fleet-wide
 transition must not hide inside a SIGHUP. A reload that changes the field logs
 an `ERROR`, keeps the running value at the startup value, and reports the
 candidate as restart-required; `rustbgpd --diff` and the v1 runtime
-configuration transaction both name `[global].ebgp_requires_policy` rather than
-only the `[global]` section. The v1 transaction rejects such a candidate outright
-instead of persisting or partly adopting it.
+configuration transaction name representation-only epoch/presence changes as
+well as `[global].ebgp_requires_policy`, rather than only the `[global]`
+section. The v1 transaction rejects such a candidate outright instead of
+persisting or partly adopting it.
 
 ---
 
