@@ -1,6 +1,6 @@
 # Grouped withdrawal fanout receipt (July 2026)
 
-Status: **MEASURED BASELINE** (LAN-671) at exact commit
+Status: **MEASURED BASELINE** at exact commit
 `f55d6c5f1a300b0b2c5a8797469165eb1351e62c`. This is an absolute,
 measurement-only baseline. It has no optimization, control, before/after
 comparison, delta, regression, or end-to-end network claim.

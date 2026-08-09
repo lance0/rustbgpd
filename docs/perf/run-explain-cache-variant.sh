@@ -216,7 +216,7 @@ PY
 
 validate_settled_metrics() {
     local metrics=$1
-    # LAN-630 settled-state gates: missing metrics are failures, never zero.
+    # Settled-state gates: missing metrics are failures, never zero.
     python3 - "$metrics" "$PEERS" "$DHAT" <<'PY'
 import math
 import pathlib

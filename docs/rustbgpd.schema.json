@@ -459,7 +459,7 @@
       ]
     },
     "DatasetFileConfig": {
-      "description": "One `[policy.datasets.<name>]` binding (LAN-305).",
+      "description": "One `[policy.datasets.<name>]` binding.",
       "type": "object",
       "properties": {
         "path": {
@@ -1089,7 +1089,7 @@
       ]
     },
     "GnmiDialoutConfig": {
-      "description": "gNMI dial-out streaming telemetry (LAN-471): the daemon connects OUT\nto each configured collector and pushes the same `SubscribeResponse`\nstream a dial-in `gnmi.gNMI/Subscribe` STREAM subscription would\nproduce. Reload-applied: SIGHUP starts/stops/redials targets in place.",
+      "description": "gNMI dial-out streaming telemetry: the daemon connects OUT\nto each configured collector and pushes the same `SubscribeResponse`\nstream a dial-in `gnmi.gNMI/Subscribe` STREAM subscription would\nproduce. Reload-applied: SIGHUP starts/stops/redials targets in place.",
       "type": "object",
       "properties": {
         "targets": {
@@ -2565,7 +2565,7 @@
       "type": "object",
       "properties": {
         "datasets": {
-          "description": "External dataset file bindings (LAN-305): `[policy.datasets.<name>]`\nmaps each `dataset` declared in an `.rpol` file to the snapshot\nfile its content loads from. Every declared dataset needs an\nentry and every entry needs a declaration — both directions are\nload errors. Relative paths resolve against the config file's\ndirectory and are rewritten absolute at load, like `rpol_files`.",
+          "description": "External dataset file bindings: `[policy.datasets.<name>]`\nmaps each `dataset` declared in an `.rpol` file to the snapshot\nfile its content loads from. Every declared dataset needs an\nentry and every entry needs a declaration — both directions are\nload errors. Relative paths resolve against the config file's\ndirectory and are rewritten absolute at load, like `rpol_files`.",
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/DatasetFileConfig"
@@ -2613,7 +2613,7 @@
           "default": {}
         },
         "reject_retention": {
-          "description": "Rejected-route retention tuning for the looking-glass\nfiltered-route surface (LAN-472). Diagnostic retention only —\ndoes not affect which routes are accepted.",
+          "description": "Rejected-route retention tuning for the looking-glass\nfiltered-route surface. Diagnostic retention only —\ndoes not affect which routes are accepted.",
           "$ref": "#/$defs/PolicyRejectRetentionConfig",
           "default": {
             "capacity": 1024,
@@ -2636,7 +2636,7 @@
           "minimum": 0
         },
         "rpol_roots": {
-          "description": "Additional policy roots for `.rpol` `import` resolution\n(LAN-300). Imports resolve against the importing file's\ndirectory first, then these directories in order, and the\nresolved file must stay inside the main file's directory or one\nof these roots. Relative entries resolve against the config\nfile's directory and are rewritten absolute at load, like\n`rpol_files`.",
+          "description": "Additional policy roots for `.rpol` `import` resolution.\nImports resolve against the importing file's\ndirectory first, then these directories in order, and the\nresolved file must stay inside the main file's directory or one\nof these roots. Relative entries resolve against the config\nfile's directory and are rewritten absolute at load, like\n`rpol_files`.",
           "type": "array",
           "default": [],
           "items": {
@@ -2666,7 +2666,7 @@
       "additionalProperties": false
     },
     "PolicyRejectRetentionConfig": {
-      "description": "Tuning for the per-session rejected-route retention store that backs\n`rbgp rib received <peer> --rejected` /\n`PolicyService.ListRejectedRoutes` (LAN-472) — the looking-glass\nfiltered-route surface.\n\nLike `[policy.explain]`, this is **diagnostic retention**, not\npolicy evaluation behaviour: shrinking or disabling the store\nchanges only what the reject surface can answer, never which routes\nthe import path admits.",
+      "description": "Tuning for the per-session rejected-route retention store that backs\n`rbgp rib received <peer> --rejected` /\n`PolicyService.ListRejectedRoutes` — the looking-glass\nfiltered-route surface.\n\nLike `[policy.explain]`, this is **diagnostic retention**, not\npolicy evaluation behaviour: shrinking or disabling the store\nchanges only what the reject surface can answer, never which routes\nthe import path admits.",
       "type": "object",
       "properties": {
         "capacity": {

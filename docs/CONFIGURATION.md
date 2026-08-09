@@ -2050,7 +2050,7 @@ the actor-owned membership registry is keyed by address only. Inspect each
 scoped peer's `Update Group` line separately instead.
 
 See [ADR-0098](adr/0098-update-groups.md),
-[ADR-0099](adr/0099-update-groups-v2.md), and LAN-456 /
+[ADR-0099](adr/0099-update-groups-v2.md), and
 [#1041](https://github.com/lance0/rustbgpd/pull/1041) for the live, ID-free
 comparison design.
 
@@ -2382,7 +2382,7 @@ Test `.rpol` policies without touching the daemon
 blocks locally) or against the daemon's live RIB read-only
 (`rbgp policy test` — see [`rpol-language.md`](rpol-language.md)).
 
-### External policy datasets (`[policy.datasets]`, LAN-305)
+### External policy datasets (`[policy.datasets]`)
 
 Each `dataset` declared in a loaded `.rpol` file binds to a snapshot
 file here:

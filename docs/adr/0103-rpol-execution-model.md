@@ -4,12 +4,12 @@
 **Date:** 2026-07-09
 
 **Scope:** the gating decisions for every deep rpol extension — typed
-arithmetic (LAN-299), lexical bindings and route-local mutation
-(LAN-302), bounded loops and collection iteration (LAN-303), pure user
-functions (LAN-304), modules and imports (LAN-300), a metered runtime
-(LAN-301), and external datasets with a possible host-function/WASM
-escape hatch (LAN-305). None of those slices start until this ADR's
-contracts are accepted; each slice cites the decision it implements.
+arithmetic, lexical bindings and route-local mutation, bounded loops
+and collection iteration, pure user functions, modules and imports, a
+metered runtime, and external datasets with a possible
+host-function/WASM escape hatch. None of those slices start until this
+ADR's contracts are accepted; each slice cites the decision it
+implements.
 
 ## Context
 
@@ -63,10 +63,10 @@ Existing bounds this ADR builds on (and must not contradict):
 
 ## Decision 1 — Extend the typed tree-walk IR; bytecode stays deferred
 
-The execution model for all of LAN-299/302/303/304/300 is **the
-existing tree-walk over an extended typed IR**. A compact bytecode
-runtime is not built now; it remains a deferred, measured upgrade
-behind an explicit re-entry gate. This is a first-class outcome, not a
+The execution model for arithmetic, bindings, loops, functions, and
+modules is **the existing tree-walk over an extended typed IR**. A
+compact bytecode runtime is not built now; it remains a deferred,
+measured upgrade behind an explicit re-entry gate. This is a first-class outcome, not a
 compromise: the benchmark below shows dispatch is not where policy
 evaluation cost lives, and the tree-walk IR is the representation three
 of the four consumers diff, render, and analyze directly.
@@ -126,8 +126,8 @@ Two findings decide the question:
    steps (Decision 3), a strict subset of per-instruction metering, so
    this is an upper bound and V1-shaped programs pay zero. Metering
    therefore does not need bytecode to be cheap; **the fuel/step
-   budget lands on the tree-walk**, and LAN-301 is re-scoped
-   accordingly (see the implementation plan).
+   budget lands on the tree-walk**, and the metered-runtime slice is
+   re-scoped accordingly (see the implementation plan).
 
 **Bytecode re-entry gate:** build the compact bytecode tier only when a
 profile of a real workload shows chain-walk dispatch (not set probes)
@@ -139,12 +139,12 @@ counters, and the `requires_*` analyses, and the bytecode program is a
 derived, cache-like artifact regenerated from it. No consumer may ever
 observe bytecode.
 
-### Re-measurement addendum — 2026-07-10, post-slice-6 (LAN-301)
+### Re-measurement addendum — 2026-07-10, post-metered-runtime slice
 
 The Decision 1 benches re-run against the completed evaluator — every
 program slice landed since the original receipt (arithmetic, bindings,
 loops, functions, modules, datasets, fuel at back-edges, per-walk
-dataset pinning). Same bench targets plus the LAN-303 loop shape and a
+dataset pinning). Same bench targets plus the bounded-loop shape and a
 new fn-heavy arm (`cargo bench -p rustbgpd-policy --bench
 policy_eval`). Conditions: 64-core x86-64 box, otherwise quiet (load
 average < 2, no concurrent workspace builds), `--noplot`, three full
@@ -160,10 +160,10 @@ machine); the ratios are the signal.
 | AS-path regex evaluated / short-circuit skipped | 69 / 20 |
 | Community scan evaluated / skipped | 29 / 20 |
 | 1,000-prefix list as IR terms / as one indexed set probe | 4,409 / 28 (**156×**) |
-| Constant actions / arithmetic actions (LAN-299) | 44 / 80 |
-| Community scrub: set probe / per-element fueled loop (LAN-303) | 28 / 73 (~4.5 ns per element incl. fuel) |
-| Damping via `fn` (3 call sites) / hand-inlined `let`s (LAN-304) | 152 / 105 (~15 ns/call — argument-bind slot writes, no frames) |
-| 50k-ASN set probe / dataset probe with per-walk pin (LAN-305) | 20–25 / 28–34 |
+| Constant actions / arithmetic actions | 44 / 80 |
+| Community scrub: set probe / per-element fueled loop | 28 / 73 (~4.5 ns per element incl. fuel) |
+| Damping via `fn` (3 call sites) / hand-inlined `let`s | 152 / 105 (~15 ns/call — argument-bind slot writes, no frames) |
+| 50k-ASN set probe / dataset probe with per-walk pin | 20–25 / 28–34 |
 
 **Gate verdict: the re-entry condition does not fire.** Chain-walk
 dispatch is still a ~11 ns/statement marginal term, and match data
@@ -186,18 +186,18 @@ term).
 - **`u32` remains the only arithmetic type.** Policy parameters are
   `u32` today, and every numeric attribute the language touches
   (`local-pref`, `med`, ASN, path length) is `u32`-shaped. Arithmetic
-  (`+ - * / %`, LAN-299) is **checked**: overflow, underflow, and
+  (`+ - * / %`) is **checked**: overflow, underflow, and
   division/modulo by zero are *evaluation errors* (Decision 4), never
   traps — the SIGFPE class is unrepresentable. No floats, no signed
   integers, no bigints.
-- First-class values (bindable by LAN-302 `let`): `u32`, `bool`,
+- First-class values (bindable by `let`): `u32`, `bool`,
   IP address, prefix, the three community kinds, the RPKI/ASPA/
   route-type enums, strings (literals only — no string operations),
   and **immutable collection views** (e.g. `route.communities`) which
-  can be iterated (LAN-303) and probed but not constructed, stored, or
+  can be iterated and probed but not constructed, stored, or
   returned.
 - **All values are immutable.** There is no assignment to a binding
-  and no mutable collection. Route-local "mutation" (LAN-302) is
+  and no mutable collection. Route-local "mutation" is
   exactly today's model: `set`/`add`/`remove`/`prepend` **stage** into
   `RouteModifications`, which callers apply only after a successful
   complete walk. Reads during evaluation see the route as it arrived
@@ -206,7 +206,7 @@ term).
   If read-back semantics are ever demanded, they are a separate ADR —
   they break memoization (`ExportMemo` memoizes on source-attr
   identity + modifications) and are excluded here.
-- User functions (LAN-304) are **pure, terminating, non-recursive**
+- User functions are **pure, terminating, non-recursive**
   expressions over these values: no side effects, call graph is a DAG
   (the apply precedent), fully inlined at compile time. They are *not*
   total — checked arithmetic inside a function body can raise an
@@ -324,7 +324,7 @@ these rules keep it meaningful as lowering gets more aggressive:
 1. **Lowering is deterministic.** Identical source (and arguments)
    must produce structurally equal `CompiledChain`s: stable term
    ordering, stable And-child cost-sort, deterministic set/regex
-   interning order, and — new with LAN-304/300 — deterministic
+   interning order, and — new with inlining and modules — deterministic
    function-inlining and module-resolution order. No iteration over
    unordered maps may influence emitted IR. (Violation cost: every
    SIGHUP reload of an unchanged file diffs as "moved" and triggers a
@@ -333,14 +333,14 @@ these rules keep it meaningful as lowering gets more aggressive:
    split naming (`<term>.<n>`) is the pattern: lowering may split a
    source term into several IR terms with derived names, but the
    mapping is a pure function of the source. Function inlining
-   (LAN-304) follows the apply precedent: the inlined body becomes
+   follows the apply precedent: the inlined body becomes
    guard/action content *inside* the calling term — it never
    introduces, removes, or renames top-level terms.
-3. **Data diffs as data.** External dataset snapshots (LAN-305), like
+3. **Data diffs as data.** External dataset snapshots, like
    set tables today, live outside the expression tree and diff
    independently: a dataset content change refreshes exactly the peers
    whose chains reference it, without the program diffing as changed.
-   Module boundaries (LAN-300) dissolve at compile time — the resolved
+   Module boundaries dissolve at compile time — the resolved
    chain is the identity; moving a definition between modules without
    changing the resolved content is a no-op diff (the same rule as
    `RpolPolicySet` excluding file paths from equality).
@@ -404,9 +404,9 @@ adding a second mechanism:
 
 1. **Compile all-or-nothing** (existing): any diagnostic in any file
    of the candidate registry rejects the whole reload; the running
-   generation is untouched. Modules (LAN-300) compile as one unit — a
+   generation is untouched. Modules compile as one unit — a
    broken import anywhere rejects the unit.
-2. **Ack-gated snapshot absorption** (existing, LAN-284): the reload
+2. **Ack-gated snapshot absorption** (existing): the reload
    adopts the candidate `RpolPolicySet` into its working config only
    after the peer manager acks the sync; a rejected candidate is never
    visible to new sessions.
@@ -420,7 +420,7 @@ adding a second mechanism:
 4. **Commit-confirmed / boot-revert** (existing, ADR-0076): policy
    rides the whole-config journal; no policy-specific revert path is
    added.
-5. **New — dataset snapshot generations (LAN-305):** each external
+5. **New — dataset snapshot generations:** each external
    dataset is an immutable `Arc` snapshot with a monotonically
    increasing generation, swapped atomically in a registry. Rules:
    - **Per-walk pinning:** an evaluation resolves each referenced
@@ -442,7 +442,7 @@ adding a second mechanism:
 
 ## Decision 9 — External data yes, external code no
 
-LAN-305's escape-hatch question gets the maximum-skepticism treatment
+The escape-hatch question gets the maximum-skepticism treatment
 it asks for. **The recommendation is: external data snapshots without
 external code.** No WASM tier, no host-function registry, no in-process
 plugin surface in the policy hot path.
@@ -490,7 +490,7 @@ by itself, a need.
 
 Ranked by blast radius × likelihood:
 
-1. **External code in the hot path (LAN-305 hatch).** Daemon crash,
+1. **External code in the hot path (the dataset hatch).** Daemon crash,
    session-task hang past hold timers, unauditable effects, JIT/runtime
    CVE surface, 25–250× marshalling floor. *Disposition: rejected
    (Decision 9); datasets-without-code instead.*
@@ -531,36 +531,36 @@ Each slice is independently shippable, lands its own tests, and cites
 the decision it implements. Order is chosen so every slice rides rails
 the previous one built.
 
-1. **LAN-299 — typed arithmetic.** `u32` checked ops; whitespace-
+1. **Typed arithmetic.** `u32` checked ops; whitespace-
    disambiguated `-` (Decision 2.1); the evaluation-error rails
    everything else reuses: error node semantics, uniform Deny,
    `bgp_policy_eval_errors_total`, explain/trace error rendering
    (Decision 4). Smallest language change, largest contract
    installation.
-2. **LAN-302 — lexical bindings and route-local mutation.** Statement-
+2. **Lexical bindings and route-local mutation.** Statement-
    initial contextual `let`; static slot allocation (`MAX_LOCALS`,
    frame budget); immutable values; mutation stays staged
    `RouteModifications` (Decision 2, "no read-back").
-3. **LAN-303 — bounded loops and collection iteration.** Static
+3. **Bounded loops and collection iteration.** Static
    iteration bounds in the cost DP; first runtime fuel (back-edge
    decrements) and the scratch arena (Decision 3); collection views
    over route attributes.
-4. **LAN-304 — pure user functions.** Top-level contextual `fn`; call
+4. **Pure user functions.** Top-level contextual `fn`; call
    DAG with `MAX_CALL_DEPTH` in the same DP as apply; full inlining
    preserving term identity (Decisions 5.2, 6.1); `requires_*`
    analyses across inlined bodies.
-5. **LAN-300 — modules and imports.** Import DAG, one namespace after
+5. **Modules and imports.** Import DAG, one namespace after
    resolution, compile-as-one-unit reload semantics (Decision 8.1);
    resolved-content chain identity so refactors diff as no-ops
    (Decision 5.3). No IR change.
-6. **LAN-301 — metered runtime, re-scoped.** The metering itself lands
+6. **Metered runtime, re-scoped.** The metering itself lands
    in slices 3–4 on the tree-walk; this slice completes the
    operator surface (error counters/labels finalized, explain error
    traces, `rbgp policy stats` exposure, soak/fuzz coverage of budget
    exhaustion) and **re-runs the Decision 1 benchmark against the
    then-current IR**. The compact bytecode interpreter is built only
    if the re-entry gate fires, and then strictly below the IR.
-7. **LAN-305 — external datasets.** Snapshot registry with generations,
+7. **External datasets.** Snapshot registry with generations,
    per-walk pinning, `requires_dataset` scoping, typed dataset kinds
    (prefix/ASN/community tags first); **no host-function/WASM tier**
    (Decision 9).
@@ -577,7 +577,7 @@ the previous one built.
 - The four IR consumers (diff, explain, counters, `requires_*`) remain
   correct by contract, not by luck; every slice's review checklist
   includes Decisions 5 and 6 explicitly.
-- Saying no to external code narrows LAN-305 to a data-plumbing
+- Saying no to external code narrows external datasets to a data-plumbing
   feature with a well-worn in-tree pattern, and pushes exotic
   computation to where it can crash without taking sessions down.
 - The bytecode question is settled by receipt, not taste, and stays

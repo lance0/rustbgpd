@@ -21,7 +21,7 @@ next-hop set from the PEs advertising matching EAD-per-ES and EAD-per-EVI state.
 For RT-5 in rustbgpd's Linux/VXLAN dataplane, that means a route-level ECMP
 next-hop set through one L3VXLAN device plus a shared Router-MAC L3VXLAN FDB
 resolution object. A duplicate single-destination FDB row is not sufficient:
-LAN-70's real-kernel proof showed that duplicate single-dst FDB rows for one
+A real-kernel mechanism proof showed that duplicate single-dst FDB rows for one
 Router MAC collapse to one destination, while a VRF-table multipath route and an
 L3VXLAN FDB nexthop-group both work.
 
@@ -162,12 +162,13 @@ the proof, but it is no longer the roadmap completion gate for this receive arc.
 
 - The all-active ESI receive work gets its own review boundary rather than
   expanding ADR-0087 past its GW-IP/origination title.
-- LAN-70 is now explicitly classified as a mechanism receipt, not a product
-  feature. It proves Linux can host the route/FDB shape this ADR requires.
+- The kernel-mechanism proof is explicitly classified as a mechanism
+  receipt, not a product feature. It proves Linux can host the route/FDB
+  shape this ADR requires.
 - The implementation is intentionally sliced: projection/model substrate first,
   L3 ownership substrate second, then the production L3 writer that owns route
   ECMP plus L3VXLAN FDB-NHG together.
-- LAN-76 is the same-host production writer receipt. It proves a real
+- The production L3 writer carries its own same-host receipt. It proves a real
   `ReconcileActor<LinuxDataplane>` can install and withdraw the route ECMP,
   per-VTEP L3 neighbors, L3-tagged FDB-NHG members, and Router-MAC `nhid` FDB
   row against a Linux kernel.

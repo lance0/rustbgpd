@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-07-14
-**Amended:** 2026-08-04 (LAN-886) — pre-commit phases carry a 60-second
+**Amended:** 2026-08-04 — pre-commit phases carry a 60-second
 aggregate ownership budget (twice the 30-second readiness stall bound): a
 transition still short of `CommitMembers` at that age hands the cohort to
 the authoritative per-peer path fail-closed, because every other pre-commit
@@ -334,7 +334,7 @@ semantics for both newly created and already-maintained destinations.
   a terminal commit batch whose global dirty/force retry tail is data-
   dependent, a single-cohort partition, and a sequential authoritative
   remainder. The member commit/flush loop itself is bounded to eight members
-  per poll (LAN-447).
+  per poll.
 - The measured completion win is retained together with its measured delivery-
   gap regression. Neither the ADR nor the microbenchmark receipts turn that
   regression into a success claim.

@@ -4,7 +4,7 @@
 
 Accepted
 
-> **Update (LAN-336):** the per-`AdjRibIn` intern table described below was
+> **Update:** the per-`AdjRibIn` intern table described below was
 > replaced by a single daemon-wide cross-peer table owned by the RIB manager
 > (`crates/rib/src/attr_intern.rs`). The interning mechanics (content-hash
 > lookup, `Arc` strong-count GC) are unchanged; only the scope moved from

@@ -1,6 +1,7 @@
 # Lean daemon build-flavor measurement (July 2026)
 
-LAN-548 tests whether rustbgpd should ship one additional lean daemon flavor.
+This receipt tests whether rustbgpd should ship one additional lean daemon
+flavor.
 The sealed result is NO-GO for both individual candidates, so the combined
 candidate was not eligible and rustbgpd continues to ship one daemon artifact.
 This receipt does not ship the prototype features.

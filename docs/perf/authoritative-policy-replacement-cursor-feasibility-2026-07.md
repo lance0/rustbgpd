@@ -9,7 +9,7 @@ and no production behavior changed.
 
 This is an algorithmic feasibility receipt, not a throughput or latency claim.
 It records source topology, compiler results, and exact visit counts. No soak or
-LAN-333 campaign was run.
+reload-stall campaign was run.
 
 ## Frozen baseline and constraints
 

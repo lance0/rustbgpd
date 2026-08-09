@@ -94,7 +94,7 @@ Add-Path send, so mitigation (b) existed; the gap was (a).
    **emit-time filter** `pass_m(route)` = f(route communities, member
    ASN), exactly like the VPN RT filter, which keeps the whole
    steering fleet in one group — **delivered** for RFC 7947 §2.3.2 /
-   RFC 8195 control communities (LAN-474): routes are classified at
+   RFC 8195 control communities: routes are classified at
    emit by a cheap control-form predicate (exactly the scrub domain),
    untagged routes ride the shared group emission byte-identically,
    and tagged routes diverge per target at the emit seams (matrix
@@ -154,7 +154,7 @@ Add-Path send, so mitigation (b) existed; the gap was (a).
   to modes).
 - Deferral register: per-client Loc-RIBs — rejected permanently;
   community-steering emit-time filter — **delivered** (Decision 3;
-  LAN-474 route-granular control-community divergence at the group
+  route-granular control-community divergence at the group
   emit seams);
   peer-parameterized policy matchers — rejected (superseded by the
   emit-time filter); default-on mitigation — deferred pending soak

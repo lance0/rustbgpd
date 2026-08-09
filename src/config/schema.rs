@@ -595,7 +595,7 @@ pub enum BmpMonitorView {
     LocRib,
 }
 
-/// gNMI dial-out streaming telemetry (LAN-471): the daemon connects OUT
+/// gNMI dial-out streaming telemetry: the daemon connects OUT
 /// to each configured collector and pushes the same `SubscribeResponse`
 /// stream a dial-in `gnmi.gNMI/Subscribe` STREAM subscription would
 /// produce. Reload-applied: SIGHUP starts/stops/redials targets in place.
@@ -1720,7 +1720,7 @@ pub struct PolicyConfig {
     #[serde(default)]
     pub explain: PolicyExplainConfig,
     /// Rejected-route retention tuning for the looking-glass
-    /// filtered-route surface (LAN-472). Diagnostic retention only —
+    /// filtered-route surface. Diagnostic retention only —
     /// does not affect which routes are accepted.
     #[serde(default)]
     pub reject_retention: PolicyRejectRetentionConfig,
@@ -1735,8 +1735,8 @@ pub struct PolicyConfig {
     /// (`"customer-in(200)"`).
     #[serde(default)]
     pub rpol_files: Vec<String>,
-    /// Additional policy roots for `.rpol` `import` resolution
-    /// (LAN-300). Imports resolve against the importing file's
+    /// Additional policy roots for `.rpol` `import` resolution.
+    /// Imports resolve against the importing file's
     /// directory first, then these directories in order, and the
     /// resolved file must stay inside the main file's directory or one
     /// of these roots. Relative entries resolve against the config
@@ -1766,7 +1766,7 @@ pub struct PolicyConfig {
     /// reload as a no-op.
     #[serde(skip)]
     pub rpol: rustbgpd_policy::rpol::RpolPolicySet,
-    /// External dataset file bindings (LAN-305): `[policy.datasets.<name>]`
+    /// External dataset file bindings: `[policy.datasets.<name>]`
     /// maps each `dataset` declared in an `.rpol` file to the snapshot
     /// file its content loads from. Every declared dataset needs an
     /// entry and every entry needs a declaration — both directions are
@@ -1815,7 +1815,7 @@ impl Default for PolicyConfig {
     }
 }
 
-/// One `[policy.datasets.<name>]` binding (LAN-305).
+/// One `[policy.datasets.<name>]` binding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DatasetFileConfig {
@@ -1826,7 +1826,7 @@ pub struct DatasetFileConfig {
     pub path: String,
 }
 
-/// Load-time dataset observations (LAN-305). Deliberately **excluded
+/// Load-time dataset observations. Deliberately **excluded
 /// from config equality**: these are events about one load, not
 /// configuration identity — two configs differing only here are the
 /// same config.
@@ -1907,7 +1907,7 @@ impl Default for PolicyExplainConfig {
 
 /// Tuning for the per-session rejected-route retention store that backs
 /// `rbgp rib received <peer> --rejected` /
-/// `PolicyService.ListRejectedRoutes` (LAN-472) — the looking-glass
+/// `PolicyService.ListRejectedRoutes` — the looking-glass
 /// filtered-route surface.
 ///
 /// Like `[policy.explain]`, this is **diagnostic retention**, not

@@ -31,6 +31,13 @@ All PRs must pass (enforced by CI in `.github/workflows/ci.yml`):
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 
+Documentation changes additionally pass
+`python3 scripts/check_public_tracker_ids.py`, enforced by
+`.github/workflows/public-docs-contract.yml` because the main lane ignores
+Markdown. Published docs name the thing directly, link the ADR, or cite the
+GitHub PR number — never a private issue-tracker ID an external reader
+cannot resolve.
+
 ### Replaying update-group faults
 
 The PR-sized parameterized fixed-scenario corpus compares the grouped manager

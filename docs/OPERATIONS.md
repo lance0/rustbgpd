@@ -1882,7 +1882,7 @@ there is no per-peer or per-group override.
   `peers × (154 KiB + min(cache_size, prefixes per peer) × 587 B)`. See
   [`CONFIGURATION.md`](CONFIGURATION.md#import-decision-explain-policyexplain).
 
-### Answer a member's "why is my route filtered?" (LAN-472)
+### Answer a member's "why is my route filtered?"
 
 The enumeration complement to `policy explain`: when a route-server
 member calls asking why their prefix isn't in the RS — and neither of
