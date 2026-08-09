@@ -146,7 +146,8 @@ feed.20260703.120001.123456789.mrt.gz
 **Looking glass (optional):** for status, peer, accepted-route,
 filtered-route, and noexport views in an Alice-LG-style frontend, run the
 [`examples/birdwatcher-adapter/`](../../examples/birdwatcher-adapter/)
-against a gRPC TCP listener. (The in-daemon
+against the local Unix socket, or use its dedicated authenticated `observer`
+listener pattern for least privilege. (The in-daemon
 `[global.telemetry.looking_glass]` server has been removed.) The filtered
 view is served from `PolicyService.ListRejectedRoutes` with structured
 reject reasons; the noexport view diffs the Loc-RIB best set against the

@@ -44,7 +44,7 @@ use rustbgpd_api::proto;
 use serde_json::Value;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::service::{Interceptor, interceptor::InterceptedService};
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Status};
 use tracing::{error, info};
 
@@ -54,7 +54,7 @@ use tracing::{error, info};
     about = "Birdwatcher-shaped status, peer, accepted-route, filtered-route, and noexport REST subset, served from rustbgpd's gRPC API"
 )]
 struct Args {
-    /// rustbgpd gRPC endpoint, e.g. `http://127.0.0.1:50051`.
+    /// rustbgpd gRPC endpoint: `http://host:port` or `unix:///absolute/path`.
     #[arg(long, env = "BIRDWATCHER_ADAPTER_GRPC_ADDR")]
     grpc_addr: String,
 
@@ -126,6 +126,71 @@ fn load_bearer_authorization(
 
 type Upstream = InterceptedService<Channel, BearerInterceptor>;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DaemonEndpoint {
+    Tcp(String),
+    Uds(PathBuf),
+}
+
+impl DaemonEndpoint {
+    fn channel_uri(&self) -> String {
+        match self {
+            Self::Tcp(uri) => uri.clone(),
+            Self::Uds(path) => format!("unix://{}", path.display()),
+        }
+    }
+}
+
+/// Parse the adapter's two endpoint families: complete HTTP(S) TCP endpoints
+/// and an absolute Unix-domain socket path. Tonic's lazy channel
+/// owns the actual connector and retries it on later requests, which lets the
+/// adapter start before either endpoint exists.
+fn parse_daemon_endpoint(addr: &str) -> Result<DaemonEndpoint, std::io::Error> {
+    if let Some(path) = addr.strip_prefix("unix://") {
+        if path.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid gRPC endpoint: unix:// path must not be empty",
+            ));
+        }
+        let path = PathBuf::from(path);
+        if !path.is_absolute() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid gRPC endpoint: Unix socket path must be absolute: {}",
+                    path.display()
+                ),
+            ));
+        }
+        return Ok(DaemonEndpoint::Uds(path));
+    }
+
+    if addr.starts_with("unix:") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid gRPC endpoint: use unix:///absolute/path",
+        ));
+    }
+
+    if !(addr.starts_with("http://") || addr.starts_with("https://")) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid gRPC endpoint: expected http://, https://, or unix:///absolute/path",
+        ));
+    }
+
+    // Preserve the existing TCP contract: callers supply a complete HTTP(S)
+    // URI and tonic remains the authority for URI validation.
+    Endpoint::from_shared(addr.to_string()).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid gRPC endpoint: {error}"),
+        )
+    })?;
+    Ok(DaemonEndpoint::Tcp(addr.to_string()))
+}
+
 /// Shared state: one multiplexed, optionally authenticated gRPC service;
 /// per-request clients are cheap clones of it.
 #[derive(Clone)]
@@ -145,10 +210,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
 
+    let endpoint = parse_daemon_endpoint(&args.grpc_addr)?;
     info!(grpc_addr = %args.grpc_addr, "connecting to rustbgpd");
     // `connect_lazy` so the adapter can start before/independently of
     // the daemon; requests fail with 502 until the daemon is reachable.
-    let channel = Channel::from_shared(args.grpc_addr.clone())?.connect_lazy();
+    let channel = Endpoint::from_shared(endpoint.channel_uri())?.connect_lazy();
     let authorization = load_bearer_authorization(args.grpc_token_file.as_deref())?;
     let upstream = InterceptedService::new(channel, BearerInterceptor { authorization });
     let state = AppState { upstream };
@@ -912,6 +978,37 @@ mod tests {
             token_arg.get_env(),
             Some(std::ffi::OsStr::new("BIRDWATCHER_ADAPTER_GRPC_TOKEN_FILE"))
         );
+    }
+
+    #[test]
+    fn daemon_endpoint_accepts_tcp_and_absolute_unix_socket() {
+        assert_eq!(
+            parse_daemon_endpoint("http://127.0.0.1:50051").unwrap(),
+            DaemonEndpoint::Tcp("http://127.0.0.1:50051".into())
+        );
+        assert_eq!(
+            parse_daemon_endpoint("unix:///run/rustbgpd/grpc.sock").unwrap(),
+            DaemonEndpoint::Uds(PathBuf::from("/run/rustbgpd/grpc.sock"))
+        );
+    }
+
+    #[test]
+    fn daemon_endpoint_rejects_invalid_targets() {
+        for (endpoint, expected) in [
+            ("unix://", "unix:// path must not be empty"),
+            (
+                "unix://run/rustbgpd/grpc.sock",
+                "Unix socket path must be absolute: run/rustbgpd/grpc.sock",
+            ),
+            ("unix:grpc.sock", "use unix:///absolute/path"),
+            (
+                "ftp://127.0.0.1:50051",
+                "expected http://, https://, or unix:///absolute/path",
+            ),
+        ] {
+            let error = parse_daemon_endpoint(endpoint).unwrap_err().to_string();
+            assert!(error.contains(expected), "{endpoint}: {error}");
+        }
     }
 
     #[test]

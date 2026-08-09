@@ -38,8 +38,9 @@ note.
 Tagged releases publish `rustbgpd-linux-amd64.tar.gz` and
 `rustbgpd-linux-arm64.tar.gz` under
 [GitHub Releases](https://github.com/lance0/rustbgpd/releases). Each
-ships `rustbgpd` (the daemon), `rbgp` (the CLI), and
-`rs-config-render` (the route-server config renderer), plus man pages
+ships `rustbgpd` (the daemon), `rbgp` (the CLI),
+`rs-config-render` (the route-server config renderer), and
+`birdwatcher-adapter` (the Alice-LG shim), plus man pages
 and shell completions under `share/`:
 
 ```
@@ -77,7 +78,7 @@ curl -fLO \
 awk -v file="$TARBALL" '$2 == file || $2 == "./" file { print }' \
   "checksums-${SUFFIX}.txt" | sha256sum -c -
 tar -xzf "$TARBALL"
-sudo install -m 0755 rustbgpd rbgp rs-config-render /usr/local/bin/
+sudo install -m 0755 rustbgpd rbgp rs-config-render birdwatcher-adapter /usr/local/bin/
 sudo install -m 0644 share/man/man1/rbgp.1 /usr/local/share/man/man1/
 sudo install -m 0644 share/man/man8/rustbgpd.8 /usr/local/share/man/man8/
 sudo install -m 0644 share/completions/rbgp.bash \
@@ -144,8 +145,8 @@ sudo dnf install -y \
 ```
 
 <!-- release-install-contract:native-package:start -->
-The package installs the three binaries (`rustbgpd`, `rbgp`, and
-`rs-config-render`) to `/usr/bin`, the hardened
+The package installs the four binaries (`rustbgpd`, `rbgp`,
+`rs-config-render`, and `birdwatcher-adapter`) to `/usr/bin`, the hardened
 systemd unit (see [systemd](#systemd) below — same unit, `ExecStart`
 pointed at `/usr/bin`), man pages and shell completions, and creates
 the `rustbgpd` system user (imperatively at install time, plus a
@@ -225,12 +226,12 @@ metrics do not drift across versions.
 sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
 git clone https://github.com/lance0/rustbgpd
 cd rustbgpd
-# Builds exactly what a deployment ships: the daemon, the rbgp CLI, and
-# the route-server config renderer. (`--workspace` would also build
+# Builds exactly what a deployment ships: daemon, rbgp, the route-server
+# config renderer, and Birdwatcher adapter. (`--workspace` would also build
 # dev/bench helpers you don't need.)
-cargo build --release -p rustbgpd -p rustbgpctl -p rs-config-render
+cargo build --release -p rustbgpd -p rustbgpctl -p rs-config-render -p birdwatcher-adapter
 sudo install -m 0755 \
-  target/release/rustbgpd target/release/rbgp target/release/rs-config-render \
+  target/release/{rustbgpd,rbgp,rs-config-render,birdwatcher-adapter} \
   /usr/local/bin/
 ```
 
@@ -256,10 +257,10 @@ substitute the major-minor tag of the series you standardize on:
 docker pull ghcr.io/lance0/rustbgpd:latest
 ```
 
-The published image is the Dockerfile's default `runtime` target:
-lean, daemon + `rbgp` only, running as a nonroot `rustbgpd` user. No
-dev/test/bench helpers are included. `rs-config-render` is deliberately
-left out too: the IXP refresh loop is a host-side cron job that runs
+The published image is the Dockerfile's default `runtime` target: a lean daemon
+with `rbgp` and `birdwatcher-adapter`, running as a nonroot `rustbgpd` user. No
+dev/test/bench helpers are included. `rs-config-render` is deliberately left
+out too: the IXP refresh loop is a host-side cron job that runs
 `arouteserver` and the renderer next to each other and hands the daemon a
 finished config directory, so the renderer belongs on the host, not in the
 daemon's image. Install it from the tarball. If you'd rather build the
@@ -277,6 +278,32 @@ and the soak harnesses run against:
 ```sh
 docker build --target dev -t rustbgpd:dev .
 ```
+
+### Birdwatcher adapter
+
+<!-- release-install-contract:birdwatcher-production:start -->
+Native packages install `birdwatcher-adapter` at
+`/usr/bin/birdwatcher-adapter`; the production container installs it at
+`/usr/local/bin/birdwatcher-adapter`. For a same-host deployment, point it at
+the daemon's absolute Unix socket and run it under a supervisor as the
+`rustbgpd` user:
+
+```sh
+sudo -u rustbgpd birdwatcher-adapter \
+  --grpc-addr unix:///var/lib/rustbgpd/grpc.sock \
+  --listen 127.0.0.1:8080
+```
+
+TCP remains supported with `--grpc-addr http://127.0.0.1:50051`. The adapter
+may start before the daemon/socket: REST requests return `502 Bad Gateway`
+while gRPC is unavailable and recover without restart. No service unit is
+installed; use the supervisor and lifecycle policy appropriate for
+the Alice-LG deployment. See the
+[adapter README](../examples/birdwatcher-adapter/README.md) for bearer-token
+and endpoint details. This convenient owner-only socket authenticates as the
+operator-tier `local-operator`; use a dedicated token-authenticated listener
+mapped to `observer` when least privilege is required.
+<!-- release-install-contract:birdwatcher-production:end -->
 
 ## systemd
 

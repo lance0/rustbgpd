@@ -18,7 +18,7 @@ curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/${TARBALL
 curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/checksums-${SUFFIX}.txt"
 awk -v file="$TARBALL" '$2 == file || $2 == "./" file { print }' "checksums-${SUFFIX}.txt" | sha256sum -c -
 tar -xzf "$TARBALL"
-sudo install -m 0755 rustbgpd rbgp rs-config-render /usr/local/bin/
+sudo install -m 0755 rustbgpd rbgp rs-config-render birdwatcher-adapter /usr/local/bin/
 
 sudo useradd --system --home-dir /var/lib/rustbgpd \
   --shell /usr/sbin/nologin rustbgpd 2>/dev/null || true
@@ -39,7 +39,7 @@ rustbgpd --version && rbgp --version
 ```
 <!-- release-install-contract:tarball:end -->
 
-The third binary, `rs-config-render`, is the
+`rs-config-render` is the
 [IXP route-server config renderer](../tools/rs-config-render/README.md);
 nothing below uses it, but it is in the same archive, so install it here
 rather than hunting for it the day you stand up a route server. The
@@ -154,6 +154,29 @@ curl -fsS http://127.0.0.1:9179/readyz
 
 With the systemd unit, the default CLI address is already
 `unix:///var/lib/rustbgpd/grpc.sock`.
+
+### Optional: serve the Birdwatcher REST subset
+
+<!-- release-install-contract:birdwatcher-production:start -->
+Release tarballs, native `.deb`/`.rpm` packages, and the production container
+include `birdwatcher-adapter`. A package install can serve Alice-LG from the
+daemon's local socket without exposing gRPC on TCP:
+
+```bash
+sudo -u rustbgpd birdwatcher-adapter \
+  --grpc-addr unix:///var/lib/rustbgpd/grpc.sock \
+  --listen 127.0.0.1:8080
+```
+
+Use `--grpc-addr http://127.0.0.1:50051` for a configured TCP listener. The
+adapter may start before rustbgpd: requests return `502 Bad Gateway` until the
+daemon/socket is available, then recover without restarting the adapter. The
+release does not install a service unit for it; supervise it with the rest of
+the Alice-LG deployment. Full endpoint and token guidance is in the
+[adapter README](../examples/birdwatcher-adapter/README.md). The default socket
+grants operator-tier `local-operator`; use its dedicated authenticated
+`observer` listener pattern for least privilege.
+<!-- release-install-contract:birdwatcher-production:end -->
 
 ## 5. Operate
 
