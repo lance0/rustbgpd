@@ -16,7 +16,7 @@ move with it.
 2. **Validation**
    - Add validation in `src/config/validation.rs` for ranges, mutually exclusive
      fields, unsupported combinations, and ownership boundaries.
-   - Add a negative test in `src/config/tests.rs` that proves bad input is
+   - Add a negative test in `src/config/tests/mod.rs` that proves bad input is
      rejected with an operator-actionable error.
 
 3. **Reload / transaction class**
@@ -25,7 +25,7 @@ move with it.
    - Update `docs/reload-matrix.md`.
    - If the field is on `Neighbor` or `PeerGroupConfig`, update
      `RELOAD_MATRIX_NEIGHBOR_FIELDS` or `RELOAD_MATRIX_PEER_GROUP_FIELDS` in
-     `src/config/tests.rs`. Those tests intentionally fail when a field is
+     `src/config/tests/mod.rs`. Those tests intentionally fail when a field is
      accepted by the schema but missing from the reload matrix.
    - For load-bearing live-vs-restart claims, extend
      `reload_matrix_pins_load_bearing_field_classes`.

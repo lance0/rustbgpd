@@ -223,11 +223,11 @@ fn shared_test_only_operator_auth_is_tier_valid_and_wired() {
     for (label, source) in [
         (
             "M1 ordinary interop",
-            include_str!("../../tests/interop/configs/rustbgpd-m1-frr.toml"),
+            include_str!("../../../tests/interop/configs/rustbgpd-m1-frr.toml"),
         ),
         (
             "Docker Compose quick-start",
-            include_str!("../../examples/docker-compose/rustbgpd.toml"),
+            include_str!("../../../examples/docker-compose/rustbgpd.toml"),
         ),
     ] {
         assert!(
@@ -267,7 +267,7 @@ fn shared_test_only_operator_auth_is_tier_valid_and_wired() {
     }
 
     let m1_topology: serde_yaml::Value =
-        serde_yaml::from_str(include_str!("../../tests/interop/m1-frr.clab.yml"))
+        serde_yaml::from_str(include_str!("../../../tests/interop/m1-frr.clab.yml"))
             .expect("M1 topology must be YAML");
     let m1_binds = m1_topology["topology"]["nodes"]["rustbgpd"]["binds"]
         .as_sequence()
@@ -283,7 +283,7 @@ fn shared_test_only_operator_auth_is_tier_valid_and_wired() {
     );
 
     let compose: serde_yaml::Value = serde_yaml::from_str(include_str!(
-        "../../examples/docker-compose/docker-compose.yml"
+        "../../../examples/docker-compose/docker-compose.yml"
     ))
     .expect("Docker Compose quick-start must be YAML");
     let compose_service = &compose["services"]["rustbgpd"];
@@ -305,7 +305,7 @@ fn shared_test_only_operator_auth_is_tier_valid_and_wired() {
         "Compose must inject the shared token path into in-container rbgp"
     );
 
-    let m1_driver = include_str!("../../tests/interop/scripts/test-m1-frr.sh");
+    let m1_driver = include_str!("../../../tests/interop/scripts/test-m1-frr.sh");
     assert!(
         m1_driver.contains("INTEROP_TEST_OPERATOR_AUTH=1"),
         "M1 must opt into shared test-only grpcurl authentication"
@@ -13424,15 +13424,19 @@ fn bounded_persistence_error_restores_exact_config_and_token_body() {
 #[test]
 fn production_persisted_document_roster_uses_only_the_bounded_writer() {
     for (name, source, expected) in [
-        ("source_provenance", include_str!("source_provenance.rs"), 5),
+        (
+            "source_provenance",
+            include_str!("../source_provenance.rs"),
+            5,
+        ),
         (
             "confirm_journal_v3",
-            include_str!("../confirm_journal/v3.rs"),
+            include_str!("../../confirm_journal/v3.rs"),
             2,
         ),
         (
             "peer_manager_reconcile",
-            include_str!("../peer_manager/reconcile.rs"),
+            include_str!("../../peer_manager/reconcile.rs"),
             1,
         ),
     ] {
@@ -13555,7 +13559,7 @@ fn rfc8212_transaction_materialization_requires_real_mutation_and_exact_posture(
 /// and direct serialization (no whole-tree `toml::Value`).
 #[test]
 fn canonical_projection_borrows_every_large_config_field() {
-    let source = include_str!("canonical.rs");
+    let source = include_str!("../canonical.rs");
     for field in [
         "security: &'a SecurityConfig",
         "neighbors: &'a [Neighbor]",
@@ -15234,7 +15238,7 @@ fn m49_interop_configs_describe_preference_df_with_dont_preempt() {
     // 200, non-revertive) both run highest-preference. Guards the smoke against
     // drift in the configs or the DF config surface.
     let pe1 = parse_with_shared_test_grpc_token(include_str!(
-        "../../tests/interop/configs/rustbgpd-m49-pe1.toml"
+        "../../../tests/interop/configs/rustbgpd-m49-pe1.toml"
     ))
     .unwrap();
     let s1 = pe1.resolve_ethernet_segments().unwrap();
@@ -15243,7 +15247,7 @@ fn m49_interop_configs_describe_preference_df_with_dont_preempt() {
     assert!(!s1[0].df_dont_preempt);
 
     let pe2 = parse_with_shared_test_grpc_token(include_str!(
-        "../../tests/interop/configs/rustbgpd-m49-pe2.toml"
+        "../../../tests/interop/configs/rustbgpd-m49-pe2.toml"
     ))
     .unwrap();
     let s2 = pe2.resolve_ethernet_segments().unwrap();
@@ -15259,7 +15263,7 @@ fn m51_interop_config_describes_non_strict_bfd_with_fast_profile() {
     // Guards the smoke against drift in the config or the BFD config surface —
     // the whole point of M51 is that a BFD-down failover beats the hold timer.
     let config = parse_with_shared_test_grpc_token(include_str!(
-        "../../tests/interop/configs/rustbgpd-m51-bfd.toml"
+        "../../../tests/interop/configs/rustbgpd-m51-bfd.toml"
     ))
     .unwrap();
     let profile = &config.bfd_profiles[0];
@@ -15287,7 +15291,7 @@ fn m52_interop_config_enables_multipath_relax_with_mixed_asns() {
     // smoke is that only multipath-relax co-installs the equal-length,
     // different-AS paths.
     let config = parse_with_shared_test_grpc_token(include_str!(
-        "../../tests/interop/configs/rustbgpd-m52-fib-ecmp-relax.toml"
+        "../../../tests/interop/configs/rustbgpd-m52-fib-ecmp-relax.toml"
     ))
     .unwrap();
     assert!(config.global.multipath_relax);
@@ -15302,7 +15306,7 @@ fn m55_interop_config_pins_role_matrix_and_strict_neighbor() {
     // incompatible Provider/Provider pair, one strict-role/no-remote-role peer,
     // and one raw Customer fixture for deliberate OTC leak injection.
     let config = parse_with_shared_test_grpc_token(include_str!(
-        "../../tests/interop/configs/rustbgpd-m55-bgp-roles-otc.toml"
+        "../../../tests/interop/configs/rustbgpd-m55-bgp-roles-otc.toml"
     ))
     .unwrap();
     let roles: Vec<(String, u32, Option<BgpRole>, Option<bool>)> = config
@@ -16326,7 +16330,7 @@ fn reload_matrix_documents_every_neighbor_field() {
         assert!(
             section.contains(&needle),
             "Neighbor field {needle} is in RELOAD_MATRIX_NEIGHBOR_FIELDS \
-             (src/config/tests.rs) but absent from docs/reload-matrix.md. \
+             (src/config/tests/mod.rs) but absent from docs/reload-matrix.md. \
              Either add a row for it in the [[neighbors]] section of the \
              matrix, or remove the entry from the list."
         );
@@ -16346,7 +16350,7 @@ fn reload_matrix_documents_every_peer_group_field() {
         assert!(
             section.contains(&needle),
             "PeerGroupConfig field {needle} is in \
-             RELOAD_MATRIX_PEER_GROUP_FIELDS (src/config/tests.rs) but \
+             RELOAD_MATRIX_PEER_GROUP_FIELDS (src/config/tests/mod.rs) but \
              absent from docs/reload-matrix.md. Either add a row for it \
              in the [[peer_groups]] section of the matrix, or remove the \
              entry from the list."
@@ -18518,8 +18522,8 @@ fn staged_dataset_loader_preserves_default_tier_validation() {
 
 #[test]
 fn config_loader_has_no_test_only_legacy_bypass() {
-    let source = include_str!("mod.rs");
-    let (_, parse_source) = include_str!("tests.rs")
+    let source = include_str!("../mod.rs");
+    let (_, parse_source) = include_str!("mod.rs")
         .split_once("fn parse(toml_str")
         .unwrap();
     let (parse_source, _) = parse_source.split_once("#[test]").unwrap();
@@ -18532,12 +18536,12 @@ fn config_loader_has_no_test_only_legacy_bypass() {
         "production loader source must not contain a test-only auth seam"
     );
     assert_eq!(
-        include_str!("schema.rs").matches("Legacy,").count(),
+        include_str!("../schema.rs").matches("Legacy,").count(),
         0,
         "the typed config schema must not accept Legacy"
     );
     assert_eq!(
-        include_str!("validation.rs")
+        include_str!("../validation.rs")
             .matches("GrpcEnforcementConfig::Legacy")
             .count(),
         0,
