@@ -26,6 +26,20 @@ EXPORT = "cache-to: type=gha,scope=rustbgpd-dev,mode=max,ignore-error=true"
 CHECKOUT = "uses: actions/checkout@v7"
 BUILDX = "uses: docker/setup-buildx-action@v4"
 BUILD_PUSH = "uses: docker/build-push-action@v7"
+CLASSIFIER_NEEDS = "needs: classify_changes"
+CLASSIFIER_IF = "if: needs.classify_changes.outputs.run_labs == 'true'"
+CLASSIFIER_SEAMS = (
+    "    runs-on: ubuntu-latest",
+    "    timeout-minutes: 1",
+    "      run_labs: ${{ steps.classify.outputs.run_labs }}",
+    "      - uses: actions/checkout@v7",
+    "          fetch-depth: 0",
+    "        id: classify",
+    "          EVENT_NAME: ${{ github.event_name }}",
+    "          BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+    "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+    "        run: python3 scripts/classify_heavy_ci_paths.py",
+)
 GOBGP_VERSION = "3.37.0"
 GOBGP_CHECKSUMS = {
     "amd64": "e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522",
@@ -50,7 +64,7 @@ CALL_HASHES = {
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 77,
+        "actions/checkout@v7": 79,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95": 2,
@@ -83,6 +97,10 @@ def _jobs(text: str) -> dict[str, str]:
     }
 
 
+def _has_line(block: str, line: str) -> bool:
+    return re.search(rf"(?m)^{re.escape(line)}$", block) is not None
+
+
 def check(root: Path) -> list[str]:
     errors: list[str] = []
     workflow_dir = root / ".github" / "workflows"
@@ -105,10 +123,25 @@ def check(root: Path) -> list[str]:
         ("kernel-dataplane.yml", KERNEL, True),
     ):
         jobs = _jobs(texts[name])
-        expected = ["prime_dev_image", *roster] + (["netns"] if setup else [])
+        expected = ["classify_changes", "prime_dev_image", *roster] + (
+            ["netns"] if setup else []
+        )
         if list(jobs) != expected:
             errors.append(f"{name}: exact job roster/order drifted")
+        classifier = jobs.get("classify_changes", "")
+        kind = "interop" if name == "interop.yml" else "kernel"
+        if not _has_line(classifier, f"    name: Classify {kind} heavy-lab paths"):
+            errors.append(f"{name}: classifier check name drifted")
+        for seam in CLASSIFIER_SEAMS:
+            if not _has_line(classifier, seam):
+                errors.append(f"{name}: classifier missing {seam}")
+        for forbidden in ("continue-on-error:", "if:"):
+            if re.search(rf"(?m)^ +{re.escape(forbidden)}", classifier):
+                errors.append(f"{name}: classifier permits active {forbidden}")
         primer = jobs.get("prime_dev_image", "")
+        for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
+            if not _has_line(primer, f"    {seam}"):
+                errors.append(f"{name}: primer missing job-level {seam}")
         for seam in (
             "timeout-minutes: 30",
             PRIMER_GROUP,
@@ -153,8 +186,19 @@ def check(root: Path) -> list[str]:
         )
         if _hash(calls) != CALL_HASHES[name]:
             errors.append(f"{name}: existing test/setup calls drifted")
+    interop_classifier = _jobs(texts["interop.yml"]).get("classify_changes", "")
     kernel_jobs = _jobs(texts["kernel-dataplane.yml"])
-    if "needs: prime_dev_image" in kernel_jobs.get("netns", ""):
+    interop_classifier = interop_classifier.replace("interop heavy-lab", "heavy-lab")
+    kernel_classifier = kernel_jobs.get("classify_changes", "").replace(
+        "kernel heavy-lab", "heavy-lab"
+    )
+    if interop_classifier != kernel_classifier:
+        errors.append("heavy workflows must share an identical classifier job")
+    netns = kernel_jobs.get("netns", "")
+    for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
+        if not _has_line(netns, f"    {seam}"):
+            errors.append(f"kernel-dataplane.yml:netns missing job-level {seam}")
+    if "needs: prime_dev_image" in netns:
         errors.append("kernel-dataplane.yml:netns must remain independent")
 
     action = (
