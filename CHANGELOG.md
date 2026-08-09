@@ -22,6 +22,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- `rbgp rib diff advertised` now requires `page_version` on every live page
+  and uses `med_attr` as the sole MED-presence authority. Daemons through
+  v0.62 now fail with upgrade guidance instead of using the single-peer and
+  bare-MED fallbacks; BIRD, GoBGP, and MRT snapshots preserve explicit MED 0.
 - `security.grpc.enforcement` now accepts only `"tier"`; the dead `"legacy"`
   enum variant and validation branch are gone. An exact retired
   `[security.grpc].enforcement = "legacy"` value still gets the paste-ready

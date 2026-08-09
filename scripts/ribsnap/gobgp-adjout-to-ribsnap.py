@@ -21,8 +21,7 @@ Honesty notes (see docs/ribdiff.md for the adapter matrix):
   - Extended communities (attr type 16) are rendered structurally and
     cannot be reconstructed into raw 8-octet values without guessing;
     they are skipped with a note on stderr.
-  - MED 0 is omitted like an absent MED (the consumer's documented
-    normalization).
+  - The type-4 MED attribute is presence-aware; an explicit 0 is preserved.
 
 Exit codes: 0 snapshot on stdout; 2 refused (unexpected structure or
 malformed JSON), nothing on stdout.
@@ -78,8 +77,7 @@ def convert_entry(prefix, entry, args):
         elif kind == NEXT_HOP_ATTR:
             route["next_hop"] = attr["nexthop"]
         elif kind == MED_ATTR:
-            if attr["metric"]:  # MED 0 omitted like absent (consumer contract)
-                route["med"] = attr["metric"]
+            route["med"] = attr["metric"]
         elif kind == LOCAL_PREF_ATTR:
             route["local_pref"] = attr["value"]
         elif kind == COMMUNITIES_ATTR:

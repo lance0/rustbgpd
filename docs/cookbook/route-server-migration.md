@@ -327,7 +327,7 @@ Prerequisites and limitations:
   never fabricated). Toward `route-server-client` members there is no
   prepend or rewrite, so member-learned routes compare fully.
 - FRR emits `metric: 0` whether MED was absent or zero; both convert to
-  an omitted `med` (matching the diff's documented MED conflation).
+  an omitted `med` because the incumbent source cannot distinguish them.
 - `extendedCommunity` is rendered symbolically and skipped (stderr
   note).
 
@@ -431,10 +431,9 @@ prefixes with MED 55 and community 65003:99 toward the route server at
 diff advertised: incumbent "frr-advertised/1 view=adj-rib-out-capture m83-frr-member" (generation 7) vs rustbgpd-grpc (adj-rib-out, advertised)
 schema rbgp-ribdiff/1; normalization v1; ignored attributes: as_path, next_hop
 live-source notes:
-  - med: the daemon proto carries MED as a bare integer, so MED-absent and MED 0 are indistinguishable over gRPC; live med=0 is compared as absent (snapshot producers should omit `med` when it is zero or absent)
   - as_path: the daemon proto exposes a flattened ASN list, so AS_PATH is compared as a single AS_SEQUENCE on both sides; AS_SET structure is not compared
   - unknown attributes: path attributes outside the typed set (origin, as_path, next_hop, med, local_pref, communities, extended/large communities) are not visible over gRPC and are not compared
-  - generation: route-page tokens are process-local, bound to the exact RPC scope and canonical filters, and fenced by a conservative Received/Best/Advertised scope-class generation; the adapter keeps scope and filters stable, while any same-class mid-walk mutation (including an unrelated peer) aborts the listing and requires a restart; the API still exposes no numeric RIB generation, so the snapshot header's generation is adopted for the live side
+  - generation: the route-page epoch/generation pair is a process-local consistency fence, compared only across live pages and peers; it is not a RIB snapshot generation and is never compared with the producer-local snapshot header generation
 verdict: in_sync
 per-peer summary:
   10.83.3.1 AS65500 ipv4_unicast: matched 3, incumbent-only 0, rustbgpd-only 0, attribute-changed 0, multiplicity-changed 0

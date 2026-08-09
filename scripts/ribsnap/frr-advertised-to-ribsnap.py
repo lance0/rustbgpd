@@ -34,9 +34,8 @@ Honesty notes (see docs/ribdiff.md for the adapter matrix):
   - `extendedCommunity` is rendered symbolically and cannot be
     reconstructed into raw 8-octet values; it is skipped with a note on
     stderr.
-  - MED 0 (`metric: 0`) is omitted like an absent MED (the consumer's
-    documented normalization) — FRR emits `metric` even when no MED was
-    set, so 0 and absent are already conflated at the source.
+  - MED 0 (`metric: 0`) is omitted: FRR emits `metric` even when no MED was
+    set, so explicit zero and absence are already conflated at the source.
 
 Exit codes: 0 snapshot on stdout; 2 refused (summary-form input,
 unexpected structure, or malformed JSON), nothing on stdout.
@@ -92,7 +91,7 @@ def convert_path(prefix, path, args):
         if ip and ip not in ("0.0.0.0", "::"):
             route["next_hop"] = ip
     med = path.get("metric")
-    if med:  # MED 0 is omitted like absent (consumer contract)
+    if med:  # FRR's source view conflates MED 0 with absence.
         route["med"] = med
     local_pref = path.get("locPrf")
     if local_pref is not None:

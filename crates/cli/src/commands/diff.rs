@@ -72,25 +72,6 @@ const LIVE_SOURCE_NOTES: &[&str] = &[
      never compared with the producer-local snapshot header generation",
 ];
 
-/// MED-conflation caveat, emitted only when the daemon never populated
-/// `med_attr` in the run (an older daemon whose bare `med` field cannot
-/// distinguish absent from 0). Daemons that populate `med_attr` are
-/// compared exactly (absent = absent, 0 = 0) and need no caveat.
-const MED_CONFLATION_NOTE: &str = "med: this daemon carries MED as a bare integer only \
-     (no med_attr), so MED-absent and MED 0 are indistinguishable over gRPC; live med=0 \
-     is compared as absent (snapshot producers should omit `med` when it is zero or absent)";
-
-/// The live-source notes for one run: the MED-conflation caveat is
-/// version-conditional, the rest are structural.
-fn live_source_notes(med_attr_seen: bool) -> Vec<&'static str> {
-    let mut notes = Vec::with_capacity(LIVE_SOURCE_NOTES.len() + 1);
-    if !med_attr_seen {
-        notes.push(MED_CONFLATION_NOTE);
-    }
-    notes.extend_from_slice(LIVE_SOURCE_NOTES);
-    notes
-}
-
 /// Requested page size — matches the server's per-page cap.
 const ROUTE_PAGE_SIZE: u32 = 1000;
 
@@ -250,19 +231,13 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
 
     let mut rib_client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    // True once any live route carries `med_attr` — the daemon is
-    // MED-absence-aware and the MED-conflation caveat does not apply.
-    let mut med_attr_seen = false;
     let mut live_capture = LiveCaptureState {
         // One process-local route-page fence spans the entire live capture.
-        // The nested option distinguishes "no page observed yet" from an
-        // older daemon that omitted the additive page_version field.
         expected_page_version: None,
         // The operator-selected live-row ceiling is global across every peer,
         // not reset for each independently constructed per-peer RouteSet.
         returned_rows: 0,
         max_routes: opts.max_routes,
-        requested_peer_count: requested.len(),
     };
 
     let mut report = DiffReport {
@@ -351,7 +326,7 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
             },
             limits,
         );
-        med_attr_seen |= fetch_advertised_into(
+        fetch_advertised_into(
             &mut rib_client,
             &peer_id,
             &mut live,
@@ -385,14 +360,14 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
         Verdict::Divergent => EXIT_DIVERGENT,
         Verdict::Incomparable => EXIT_INCOMPARABLE,
     };
-    let notes = live_source_notes(med_attr_seen);
+    let notes = LIVE_SOURCE_NOTES;
     let rendered = if opts.json {
-        render_json(&report, &ignored, &notes, &peer_filter.scoped_labels)?
+        render_json(&report, &ignored, notes, &peer_filter.scoped_labels)?
     } else {
         render_human(
             &report,
             &ignored,
-            &notes,
+            notes,
             opts.detail,
             &peer_filter.scoped_labels,
         )
@@ -874,10 +849,9 @@ fn as_path_segment(asns: &[u32]) -> Vec<AsPathSegment> {
 // ---------------------------------------------------------------------------
 
 struct LiveCaptureState {
-    expected_page_version: Option<Option<(u64, u64)>>,
+    expected_page_version: Option<(u64, u64)>,
     returned_rows: usize,
     max_routes: usize,
-    requested_peer_count: usize,
 }
 
 /// Walk every page of `ListAdvertisedRoutes` for one peer, inserting into
@@ -891,10 +865,6 @@ struct LiveCaptureState {
 /// - the fetched route count must equal the server's `total_count`;
 /// - `--max-routes` is enforced before each page is buffered into the set;
 /// - every RPC await is bounded by the shared deadline.
-///
-/// Returns whether any fetched route carried `med_attr` (a
-/// MED-absence-aware daemon); the MED-conflation caveat is dropped
-/// from the report notes for such runs.
 async fn fetch_advertised_into(
     client: &mut RibClient,
     peer: &PeerId,
@@ -903,7 +873,7 @@ async fn fetch_advertised_into(
     ignored: &[String],
     capture: &mut LiveCaptureState,
     deadline: Instant,
-) -> Result<bool, CliError> {
+) -> Result<(), CliError> {
     let peer_addr = peer.address;
     let mut req = ListRoutesRequest {
         neighbor_address: peer_addr.to_string(),
@@ -920,7 +890,6 @@ async fn fetch_advertised_into(
     let mut seen_tokens: HashSet<String> = HashSet::new();
     let mut fetched: u64 = 0;
     let mut expected_total: Option<u64> = None;
-    let mut med_attr_seen = false;
     loop {
         let operation = format!("fetching advertised routes for peer {peer_addr}");
         let resp = with_remaining_budget(
@@ -935,7 +904,6 @@ async fn fetch_advertised_into(
             resp.page_version
                 .as_ref()
                 .map(|version| (version.epoch, version.generation)),
-            capture.requested_peer_count,
             peer_addr,
         )?;
         match expected_total {
@@ -961,7 +929,6 @@ async fn fetch_advertised_into(
         capture.returned_rows += resp.routes.len();
         fetched += resp.routes.len() as u64;
         for route in &resp.routes {
-            med_attr_seen |= route.med_attr.is_some();
             let (family, nlri, path) = convert_live_route(route)
                 .map_err(|msg| op(format!("daemon returned an unusable route: {msg}")))?;
             if !family_retained(family, family_filter) {
@@ -991,7 +958,7 @@ async fn fetch_advertised_into(
              routes but the server reported total_count {total}; refusing to compare"
         )));
     }
-    Ok(med_attr_seen)
+    Ok(())
 }
 
 /// Select the narrowest server-side family request that exactly represents
@@ -1006,41 +973,28 @@ fn requested_afi_safi(family_filter: &[FamilyId]) -> i32 {
 }
 
 /// Hold one advertised-route response version across every page and peer in
-/// the capture. Absence is tolerated only for a one-peer walk against an
-/// older daemon; present/absent mixing and value changes always fail closed.
+/// the capture. Missing or changed versions always fail closed.
 fn observe_page_version(
-    expected: &mut Option<Option<(u64, u64)>>,
+    expected: &mut Option<(u64, u64)>,
     actual: Option<(u64, u64)>,
-    requested_peer_count: usize,
     peer_addr: IpAddr,
 ) -> Result<(), CliError> {
+    let actual = actual.ok_or_else(|| {
+        op(format!(
+            "advertised route page_version is missing at peer {peer_addr}; this daemon is too \
+             old for a consistency-fenced diff — upgrade the rustbgpd daemon to v0.63.0 or \
+             newer and retry"
+        ))
+    })?;
     match *expected {
         None => {
-            if actual.is_none() && requested_peer_count != 1 {
-                return Err(op(format!(
-                    "advertised listings for {requested_peer_count} requested peers omit \
-                     page_version; an older daemon can be compared safely only when exactly \
-                     one deduplicated peer is requested"
-                )));
-            }
             *expected = Some(actual);
             Ok(())
         }
-        Some(Some(version)) if actual == Some(version) => Ok(()),
-        Some(None) if actual.is_none() => Ok(()),
-        Some(Some(version)) => match actual {
-            Some(changed) => Err(op(format!(
-                "advertised route page_version changed during the live capture at peer \
-                 {peer_addr} ({version:?} -> {changed:?}); refusing a mixed-version comparison"
-            ))),
-            None => Err(op(format!(
-                "advertised route page_version presence changed during the live capture at \
-                 peer {peer_addr}; refusing mixed present/absent responses"
-            ))),
-        },
-        Some(None) => Err(op(format!(
-            "advertised route page_version presence changed during the live capture at peer \
-             {peer_addr}; refusing mixed present/absent responses"
+        Some(version) if actual == version => Ok(()),
+        Some(version) => Err(op(format!(
+            "advertised route page_version changed during the live capture at peer \
+             {peer_addr} ({version:?} -> {actual:?}); refusing a mixed-version comparison"
         ))),
     }
 }
@@ -1068,11 +1022,8 @@ fn convert_live_route(route: &Route) -> Result<(FamilyId, Nlri, RoutePath), Stri
         origin: Some(origin),
         as_path: as_path_segment(&route.as_path),
         next_hop,
-        // `med_attr` is the honest optional field (absent = absent,
-        // 0 = 0). Older daemons only carry the bare u32 where absent
-        // and 0 are indistinguishable, so 0 maps to absent (see
-        // MED_CONFLATION_NOTE).
-        med: route.med_attr.or((route.med != 0).then_some(route.med)),
+        // `med_attr` is authoritative: absent = absent and 0 = 0.
+        med: route.med_attr,
         // local_pref_attr is the honest optional field; the bare
         // `local_pref` is the effective (defaulted) value.
         local_pref: route.local_pref_attr,
@@ -1521,6 +1472,7 @@ mod tests {
             origin: 0,
             as_path: vec![65001],
             med,
+            med_attr: (med != 0).then_some(med),
             communities: vec![(64501 << 16) | 100],
             ..Default::default()
         }
@@ -1720,9 +1672,9 @@ mod tests {
     }
 
     /// Load-bearing presence proof: accepting a missing version after a
-    /// present one in `observe_page_version` makes this rejection red.
+    /// present one makes this rejection red.
     #[tokio::test]
-    async fn mixed_page_version_presence_exits_two() {
+    async fn missing_later_page_version_requires_daemon_upgrade() {
         let file = snapshot_file(&many_route_lines(2));
         let server = server_with_pages(vec![
             page(vec![live_route("10.0.0.0", 0)], "p1", 2),
@@ -1732,42 +1684,31 @@ mod tests {
 
         let err = run_against(&server, &opts(file.path())).await.unwrap_err();
         assert!(
-            err.to_string().contains("mixed present/absent"),
+            err.to_string().contains("page_version is missing")
+                && err
+                    .to_string()
+                    .contains("upgrade the rustbgpd daemon to v0.63.0 or newer"),
             "unexpected error: {err}"
         );
     }
 
-    /// Load-bearing compatibility proof: rejecting all absent versions makes
-    /// the deduplicated one-peer case red; allowing them for multiple peers
-    /// makes the second assertion red.
+    /// Load-bearing first-page proof: restoring the single-peer legacy
+    /// tolerance makes this fail-closed upgrade guidance disappear.
     #[tokio::test]
-    async fn legacy_page_versions_require_exactly_one_deduplicated_peer() {
-        let one_file = snapshot_file(&[
+    async fn missing_first_page_version_requires_daemon_upgrade() {
+        let file = snapshot_file(&[
             header_line(),
             route_line("10.0.0.0/24", None),
             trailer_line(1),
         ]);
-        let one_server =
+        let server =
             server_with_pages(vec![legacy_page(vec![live_route("10.0.0.0", 0)], "", 1)]).await;
-        let mut duplicated = opts(one_file.path());
-        duplicated.peers = vec![PEER.to_string(), PEER.to_string()];
-        let (rendered, code) = run_against(&one_server, &duplicated).await.unwrap();
-        assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
-
-        let multi_file = snapshot_file(&[header_line(), trailer_line(0)]);
-        let multi_server = spawn_mock_server(None).await;
-        *multi_server.state.list_neighbors_response.lock().await =
-            vec![neighbor(PEER, PEER_ASN), neighbor(PEER_TWO, PEER_TWO_ASN)];
-        *multi_server.state.list_route_pages.lock().await = vec![
-            legacy_page(vec![live_route("10.0.0.0", 0)], "", 1),
-            legacy_page(vec![live_route("10.0.1.0", 0)], "", 1),
-        ];
-        let mut multi = opts(multi_file.path());
-        multi.peers = vec![PEER.to_string(), PEER_TWO.to_string()];
-        let err = run_against(&multi_server, &multi).await.unwrap_err();
+        let err = run_against(&server, &opts(file.path())).await.unwrap_err();
         assert!(
-            err.to_string()
-                .contains("only when exactly one deduplicated peer is requested"),
+            err.to_string().contains("page_version is missing")
+                && err
+                    .to_string()
+                    .contains("upgrade the rustbgpd daemon to v0.63.0 or newer"),
             "unexpected error: {err}"
         );
     }
@@ -2294,25 +2235,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_med_zero_compares_as_absent() {
-        // The documented live-source MED conflation: snapshot omits med,
-        // daemon reports med=0 — in sync.
-        let file = snapshot_file(&[
-            header_line(),
-            route_line("10.0.0.0/24", None),
-            trailer_line(1),
-        ]);
-        let server = server_with_pages(vec![page(vec![live_route("10.0.0.0", 0)], "", 1)]).await;
-        let (rendered, code) = run_against(&server, &opts(file.path())).await.unwrap();
-        assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
-    }
-
-    #[tokio::test]
-    async fn med_attr_compares_exactly_and_drops_conflation_caveat() {
-        // A MED-absence-aware daemon (med_attr populated): explicit
-        // MED 0 stays 0 and absent stays absent, so a snapshot carrying
-        // explicit med:0 diffs clean against a live med=0 — and the
-        // MED-conflation caveat disappears from the report notes.
+    async fn med_attr_zero_and_absence_compare_exactly() {
+        // Load-bearing: falling back to bare `med` makes the absent route
+        // diverge, while dropping `med_attr` loses the explicit zero.
         let file = snapshot_file(&[
             header_line(),
             route_line("10.0.0.0/24", Some(0)),
@@ -2322,7 +2247,7 @@ mod tests {
         let server = server_with_pages(vec![page(
             vec![
                 live_route_with_med_attr("10.0.0.0", 0, Some(0)),
-                live_route_with_med_attr("10.0.1.0", 0, None),
+                live_route_with_med_attr("10.0.1.0", 99, None),
             ],
             "",
             2,
@@ -2338,33 +2263,30 @@ mod tests {
             notes
                 .iter()
                 .all(|n| !n.as_str().unwrap().starts_with("med:")),
-            "MED caveat should be dropped when med_attr is present: {notes:?}"
+            "the retired MED caveat returned: {notes:?}"
         );
         assert!(!notes.is_empty(), "structural notes remain");
     }
 
+    /// Load-bearing authority proof: restoring `route.med` as a fallback
+    /// makes the route compare in sync and this exact delta disappears.
     #[tokio::test]
-    async fn med_attr_missing_keeps_fallback_mapping_and_caveat() {
-        // Older daemon (med_attr populated nowhere): live med=0 still
-        // maps to absent and the MED-conflation caveat stays in the
-        // report notes.
+    async fn versioned_bare_med_is_not_a_presence_fallback() {
         let file = snapshot_file(&[
             header_line(),
-            route_line("10.0.0.0/24", None),
+            route_line("10.0.0.0/24", Some(55)),
             trailer_line(1),
         ]);
-        let server = server_with_pages(vec![page(vec![live_route("10.0.0.0", 0)], "", 1)]).await;
-        let mut json_opts = opts(file.path());
-        json_opts.json = true;
-        let (rendered, code) = run_against(&server, &json_opts).await.unwrap();
-        assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
-        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
-        let notes = value["live_source_notes"].as_array().unwrap();
+        let bare_med = server_proto::Route {
+            med_attr: None,
+            ..live_route("10.0.0.0", 55)
+        };
+        let server = server_with_pages(vec![page(vec![bare_med], "", 1)]).await;
+        let (rendered, code) = run_against(&server, &opts(file.path())).await.unwrap();
+        assert_eq!(code, EXIT_DIVERGENT, "output was:\n{rendered}");
         assert!(
-            notes
-                .iter()
-                .any(|n| n.as_str().unwrap().starts_with("med:")),
-            "MED caveat should be kept for daemons without med_attr: {notes:?}"
+            rendered.contains("med: 55 -> null"),
+            "output was:\n{rendered}"
         );
     }
 
@@ -2551,7 +2473,10 @@ mod tests {
                 .join(name)
         }
 
-        fn converter_output(converter: &Converter) -> std::process::Output {
+        fn converter_output_for_path(
+            converter: &Converter,
+            input: &std::path::Path,
+        ) -> std::process::Output {
             let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../scripts/ribsnap")
                 .join(converter.script);
@@ -2561,9 +2486,42 @@ mod tests {
                 .args(["--peer-asn", &converter.peer_asn.to_string()])
                 .args(["--source", converter.source])
                 .args(["--generation", converter.generation])
-                .arg(fixture_path(converter.raw_fixture))
+                .arg(input)
                 .output()
                 .expect("python3 must be runnable for the adapter golden tests")
+        }
+
+        fn converter_output(converter: &Converter) -> std::process::Output {
+            converter_output_for_path(converter, &fixture_path(converter.raw_fixture))
+        }
+
+        fn converter_route_from_text(converter: &Converter, input: &str) -> serde_json::Value {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            file.write_all(input.as_bytes()).unwrap();
+            let output = converter_output_for_path(converter, file.path());
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            serde_json::from_slice(output.stdout.split(|byte| *byte == b'\n').nth(1).unwrap())
+                .unwrap()
+        }
+
+        /// BIRD and GoBGP expose MED presence, so removing either producer's
+        /// unconditional assignment makes one of these explicit-zero rows red.
+        #[test]
+        fn presence_aware_adapters_preserve_explicit_med_zero() {
+            let bird = converter_route_from_text(
+                &BIRD3,
+                "BIRD 3.3.1 ready.\n203.0.113.0/24 [source 01:00:00] * (0) [AS64501i]\n\tbgp_med: 0\n",
+            );
+            let gobgp = converter_route_from_text(
+                &GOBGP,
+                r#"{"203.0.113.0/24":[{"attrs":[{"type":4,"metric":0}]}]}"#,
+            );
+            assert_eq!(bird["med"], 0);
+            assert_eq!(gobgp["med"], 0);
         }
 
         /// Converter stdout must match the golden byte for byte and the
@@ -2655,6 +2613,7 @@ mod tests {
                 wire_route("100.70.0.0", 24, "10.83.1.2", vec![65001]),
                 server_proto::Route {
                     med: 120,
+                    med_attr: Some(120),
                     communities: vec![(65001 << 16) | 111],
                     large_communities: vec!["65001:1:1".to_string()],
                     ..wire_route("203.0.113.0", 24, "10.83.1.2", vec![65001])
@@ -2676,6 +2635,7 @@ mod tests {
             check_golden(&BIRD3);
             let routes = vec![server_proto::Route {
                 med: 120,
+                med_attr: Some(120),
                 communities: vec![(64501 << 16) | 111],
                 large_communities: vec!["64501:92:6".to_string()],
                 ..wire_route("203.0.113.0", 24, "10.92.6.11", vec![64501])
@@ -2704,6 +2664,7 @@ mod tests {
                 .into_iter()
                 .map(|p| server_proto::Route {
                     med: 55,
+                    med_attr: Some(55),
                     communities: vec![(65003 << 16) | 99],
                     ..wire_route(p, 24, "10.83.3.2", vec![65003])
                 })
@@ -2727,6 +2688,7 @@ mod tests {
                 wire_route("100.65.0.0", 24, "10.83.2.2", vec![65002]),
                 server_proto::Route {
                     med: 77,
+                    med_attr: Some(77),
                     communities: vec![(65002 << 16) | 222],
                     large_communities: vec!["65002:2:2".to_string()],
                     ..wire_route("100.66.0.0", 24, "10.83.2.2", vec![65002])
@@ -2748,6 +2710,7 @@ mod tests {
             let routes = vec![
                 server_proto::Route {
                     med: 92,
+                    med_attr: Some(92),
                     communities: vec![(64501 << 16) | 92],
                     large_communities: vec!["64501:92:4".to_string()],
                     ..wire_route("198.51.100.0", 24, "192.0.2.12", vec![64501])
@@ -2755,6 +2718,7 @@ mod tests {
                 wire_route("203.0.113.0", 24, "192.0.2.13", vec![64502]),
                 server_proto::Route {
                     med: 192,
+                    med_attr: Some(192),
                     communities: vec![(64501 << 16) | 192],
                     large_communities: vec!["64501:92:6".to_string()],
                     ..wire_route("2001:db8:9201::", 48, "2001:db8:92::12", vec![64501])
@@ -2813,6 +2777,7 @@ mod tests {
                 .into_iter()
                 .map(|p| server_proto::Route {
                     med: 55,
+                    med_attr: Some(55),
                     communities: vec![(65003 << 16) | 99],
                     ..wire_route(p, 24, "10.83.3.2", vec![65003])
                 })
@@ -2887,6 +2852,7 @@ mod tests {
                     origin: 0,
                     as_path: vec![65001, 65002],
                     med: 120,
+                    med_attr: Some(120),
                     local_pref_attr: Some(100),
                     communities: vec![(65001 << 16) | 111],
                     extended_communities: vec![0x0002_FDE9_0000_006F],
@@ -2931,6 +2897,7 @@ mod tests {
                     origin: 0,
                     as_path: vec![65500, 64999],
                     med: 121,
+                    med_attr: Some(121),
                     communities: vec![(65500 << 16) | 100],
                     path_id: 1,
                     ..Default::default()
@@ -2961,6 +2928,7 @@ mod tests {
                     origin: 0,
                     as_path: vec![65500, 64997],
                     med: 51,
+                    med_attr: Some(51),
                     ..Default::default()
                 },
             ];
@@ -3020,6 +2988,7 @@ mod tests {
             // A real attribute delta (MED drift on the v6 route).
             let mut truth = from_bmp_wire_truth();
             truth[1][1].med = 999;
+            truth[1][1].med_attr = Some(999);
             let server = from_bmp_server(truth).await;
             let mut opts = opts(&golden);
             opts.ignore_attributes = vec!["unknown".to_string()];
