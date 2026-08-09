@@ -7204,7 +7204,7 @@ async fn outbound_root_cause_survives_writer_exit() {
 /// one of these production-source inventory counts.
 #[test]
 fn outbound_out_of_resources_sites_have_specific_cause_inventory() {
-    let source = include_str!("outbound.rs");
+    let source = include_str!("../outbound.rs");
     let production = source
         .split_once("\n#[cfg(test)]\nmod tests")
         .expect("outbound module keeps production before tests")
