@@ -200,6 +200,7 @@ serde_yaml.workspace = true
 tempfile.workspace = true
 tower.workspace = true
 criterion.workspace = true
+tikv-jemalloc-ctl.workspace = true
 # Drives the gRPC services directly (Request/Status/Code) in the tests that
 # prove a rejected mutation leaves no observable trace.
 tonic.workspace = true
