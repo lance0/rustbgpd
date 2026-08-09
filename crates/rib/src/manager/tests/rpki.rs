@@ -115,10 +115,36 @@ fn aspa_cache_update_emits_one_bounded_completion_event() {
         },
     ]));
     tracing::subscriber::with_default(Capture(StdArc::clone(&captured)), || {
+        // Sibling tests in this module drive the same completion callsite
+        // through `manager.run()` on tokio workers that have no subscriber
+        // installed. Whichever thread wins a callsite's one-shot registration
+        // decides its cached `Interest`, and a no-subscriber thread caches
+        // `Interest::never()` for it process-wide; a scoped subscriber does
+        // not invalidate that cache, so the measured call below can be
+        // dropped on the macro's cached-interest fast path before any
+        // subscriber sees it. Warm the callsite on a throwaway manager, then
+        // re-register it against this subscriber — a callsite registers once,
+        // so the measured call cannot lose that race afterwards.
+        let (_warm_tx, warm_rx) = mpsc::channel(1);
+        let mut warm = RibManager::new(warm_rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        warm.handle_aspa_cache_update(Arc::clone(&table));
+        tracing::callsite::rebuild_interest_cache();
+        captured.lock().unwrap().clear();
+
         manager.handle_aspa_cache_update(table);
     });
 
-    let events = captured.lock().unwrap();
+    // Count *the* completion event, not this thread's global event volume.
+    let all = captured.lock().unwrap();
+    let events: Vec<&Fields> = all
+        .iter()
+        .filter(|fields| {
+            fields
+                .0
+                .get("message")
+                .is_some_and(|message| message == "ASPA cache update re-validation complete")
+        })
+        .collect();
     assert_eq!(events.len(), 1);
     let fields = &events[0].0;
     for (name, value) in [
