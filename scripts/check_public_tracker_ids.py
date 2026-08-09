@@ -23,6 +23,7 @@ by editing this guard.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 import sys
@@ -54,6 +55,8 @@ SKIPPED_SUFFIXES = frozenset({".gz", ".png", ".svg", ".zst", ".bin"})
 TRACKER_ID = re.compile(r"\bLAN-\d+\b")
 
 SEAL_NAME = "SHA256SUMS"
+SEAL_ROOT = Path("docs/perf/artifacts")
+SEAL_LINE = re.compile(r"([0-9a-f]{64})  (.+)")
 
 
 class TrackerIdGuardError(RuntimeError):
@@ -80,25 +83,108 @@ def tracked_files() -> list[Path]:
     return paths
 
 
-def sealed_paths(paths: list[Path]) -> set[str]:
-    """Return every repository-relative path pinned by a tracked SHA256SUMS."""
-    sealed: set[str] = set()
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sealed_paths(paths: list[Path], root: Path | None = None) -> set[str]:
+    """Verify tracked receipt manifests and return their sealed paths."""
+    root = (root or ROOT).resolve()
+    tracked: dict[str, Path] = {}
     for path in paths:
-        if path.name != SEAL_NAME:
-            continue
         try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        for line in text.splitlines():
-            _, separator, name = line.partition("  ")
-            if not separator:
-                continue
-            entry = (path.parent / name.strip()).resolve()
+            relative = path.relative_to(root).as_posix()
+        except ValueError as error:
+            raise TrackerIdGuardError(
+                f"tracked path escapes the repository root: {path}"
+            ) from error
+        tracked[relative] = path
+
+    manifests = [
+        path
+        for relative, path in tracked.items()
+        if path.name == SEAL_NAME
+        and Path(relative).is_relative_to(SEAL_ROOT)
+    ]
+    if not manifests:
+        raise TrackerIdGuardError(
+            "no tracked performance-receipt SHA256SUMS manifests were found"
+        )
+
+    sealed: set[str] = set()
+    for manifest in sorted(manifests):
+        if manifest.is_symlink():
+            raise TrackerIdGuardError(f"seal {manifest} is a symlink")
+        try:
+            lines = manifest.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as error:
+            raise TrackerIdGuardError(f"cannot read seal {manifest}: {error}") from error
+        if not lines:
+            raise TrackerIdGuardError(f"seal {manifest} is empty")
+
+        receipt_root = manifest.parent.resolve()
+        manifest_entries: set[str] = set()
+        for line_number, line in enumerate(lines, start=1):
+            match = SEAL_LINE.fullmatch(line)
+            if match is None:
+                raise TrackerIdGuardError(
+                    f"{manifest}:{line_number} is not lowercase SHA-256, two spaces, "
+                    "and a filename"
+                )
+            expected, name = match.groups()
+            name_path = Path(name)
+            if name_path.is_absolute() or ".." in name_path.parts:
+                raise TrackerIdGuardError(
+                    f"{manifest}:{line_number} entry {name!r} escapes its receipt root"
+                )
+            entry = manifest.parent / name_path
             try:
-                sealed.add(entry.relative_to(ROOT).as_posix())
-            except ValueError:
-                continue
+                resolved = entry.resolve(strict=True)
+                resolved.relative_to(receipt_root)
+                relative = entry.relative_to(root).as_posix()
+            except (OSError, ValueError) as error:
+                raise TrackerIdGuardError(
+                    f"{manifest}:{line_number} entry {name!r} is missing or escapes "
+                    "its receipt root"
+                ) from error
+            cursor = manifest.parent
+            for part in name_path.parts:
+                if part == ".":
+                    continue
+                cursor /= part
+                if cursor.is_symlink():
+                    raise TrackerIdGuardError(
+                        f"{manifest}:{line_number} entry {name!r} is a symlink"
+                    )
+            if relative not in tracked:
+                raise TrackerIdGuardError(
+                    f"{manifest}:{line_number} entry {name!r} is not tracked"
+                )
+            if not resolved.is_file():
+                raise TrackerIdGuardError(
+                    f"{manifest}:{line_number} entry {name!r} is not a regular file"
+                )
+            if relative in manifest_entries:
+                raise TrackerIdGuardError(
+                    f"{manifest}:{line_number} duplicates entry {name!r}"
+                )
+            manifest_entries.add(relative)
+            try:
+                actual = _sha256(resolved)
+            except OSError as error:
+                raise TrackerIdGuardError(
+                    f"cannot hash {manifest}:{line_number} entry {name!r}: {error}"
+                ) from error
+            if actual != expected:
+                raise TrackerIdGuardError(
+                    f"{manifest}:{line_number} entry {name!r} has SHA-256 {actual}, "
+                    f"expected {expected}"
+                )
+            sealed.add(relative)
     return sealed
 
 
