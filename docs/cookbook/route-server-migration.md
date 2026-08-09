@@ -1,14 +1,14 @@
 # Route-server migration notes
 
-This page maps common FRR, BIRD, and ARouteServer route-server concepts to
-rustbgpd's config and verification surfaces. Structure is mechanical now —
-policy is not: `rbgp config import` translates the structural subset of a
-BIRD 2/3, FRR, or GoBGP config and refuses to guess at anything else, so use
-the importer for the skeleton, this page for the policy concepts it lists as
-untranslated, then run the shadow trial from the route-server cookbook
-before carrying production traffic.
+This page maps common FRR, BIRD, OpenBGPD, and ARouteServer route-server
+concepts to rustbgpd's config and verification surfaces. Structure is
+mechanical for BIRD 2/3, FRR, and GoBGP: `rbgp config import` translates their
+supported structural subset and refuses to guess at anything else. There is
+**no OpenBGPD importer**; use the manual mapping below. In every case, hand-map
+untranslated policy and run the shadow trial before carrying production
+traffic.
 
-## The mechanical first step
+## The mechanical first step (BIRD, FRR, and GoBGP)
 
 ```bash
 # 1. Translate the structure; the report lists every warning and stanza that
@@ -57,6 +57,10 @@ named by standalone `include` statements. Flatten every referenced file into
 one source before importing. Standalone `include` statements that remain are
 reported with their source line and make the translated skeleton exit 2 for
 operator review.
+
+Do not pass an OpenBGPD `bgpd.conf` under another `--format`: its grammar and
+semantics are not supported. Start with the baseline below and migrate each
+peer and policy explicitly.
 
 ## Baseline rustbgpd shape
 
@@ -188,6 +192,32 @@ Notes:
 - BIRD filter functions map best to `.rpol` named policies and parameterized
   policies. Keep prefix/community data in named sets so `rbgp policy check` and
   `rbgp policy test` can validate changes before reload.
+
+## OpenBGPD
+
+OpenBGPD route-server deployments commonly combine global
+[`transparent-as yes`][openbgpd-transparent-as] with per-neighbor policy and,
+where path hiding must be mitigated,
+[`rde evaluate all`][openbgpd-rde-evaluate]. Map those concepts as follows:
+
+- The closest mapping for transparent route-server export is
+  `route_server_client = true` on each member; also set
+  `role = "route_server"` so RFC 9234 role negotiation is explicit.
+  The flags are not a complete policy conversion. One important
+  non-equivalence is `NO_ADVERTISE`: OpenBGPD's `transparent-as` disables its
+  automatic well-known-community filtering, while rustbgpd always enforces
+  RFC 1997 `NO_ADVERTISE`. Audit any site policy that expected that community
+  to pass through the incumbent.
+- Map inbound and outbound rules to `import_policy_chain` and
+  `export_policy_chain`; translate the policy itself by hand to `.rpol`.
+- `rde evaluate all` maps to `per_client_best = true` for a member that cannot
+  receive Add-Path. Prefer negotiated Add-Path where the member supports it.
+- Translate authentication, timers, max-prefix limits, and address-family
+  enablement peer by peer. The importer cannot inventory or warn about omitted
+  OpenBGPD-only settings for you.
+
+Validate the completed config with `rustbgpd --check --strict`, then compare
+each member's post-filter view manually as described below.
 
 ## ARouteServer
 
@@ -321,6 +351,28 @@ Prerequisites and limitations:
 - Extended communities are rendered structurally and skipped (stderr
   note).
 
+### OpenBGPD (manual post-filter view)
+
+OpenBGPD's documented [`show rib out`][openbgpd-bgpctl-out] view of the
+filtered routes sent to one neighbor is:
+
+```sh
+bgpctl show rib out neighbor <member-ip> detail
+```
+
+Inspect this per member during the shadow trial. rustbgpd does not ship a
+`bgpctl` output adapter, so this text cannot be passed directly to `rbgp diff
+advertised` and must not be relabeled as an `rbgp-ribsnap/1` snapshot.
+
+OpenBGPD's generic [`dump table-v2`][openbgpd-dump] is a dump of a named RIB,
+not proof of a per-member post-policy Adj-RIB-Out. Likewise, neighbor-scoped
+[`dump updates out`][openbgpd-neighbor-dump] records ongoing BGP activity after
+capture starts; it is not a complete point-in-time advertised snapshot.
+Neither source satisfies
+`--view adj-rib-out-capture` on its own. Use the manual `bgpctl` view, or an
+independently captured source that can genuinely attest to the MRT/BMP
+post-policy boundaries below.
+
 ### MRT dumps
 
 If the incumbent's advertised view exists as an MRT `TABLE_DUMP_V2`
@@ -421,7 +473,9 @@ cutover blockers.
 
    Then run the systematic per-member advertised-view diff: export the
    incumbent's advertised routes to an `rbgp-ribsnap/1` NDJSON snapshot
-   with the bundled adapters (below; format details in
+   with a bundled BIRD/FRR/GoBGP adapter (below; OpenBGPD is manual unless an
+   independently captured MRT/BMP source satisfies the stated boundary;
+   format details in
    [`docs/ribdiff.md`](../ribdiff.md)) and compare it against the live
    Adj-RIB-Out:
 
@@ -443,3 +497,9 @@ cutover blockers.
 
 6. Cut member sessions in small batches. Keep the incumbent read-only during the
    first batch so advertised-view diffs remain available.
+
+[openbgpd-bgpctl-out]: https://man.openbsd.org/OpenBSD-7.7/bgpctl.8#out
+[openbgpd-dump]: https://man.openbsd.org/OpenBSD-7.7/bgpd.conf.5#dump
+[openbgpd-neighbor-dump]: https://man.openbsd.org/OpenBSD-7.7/bgpd.conf.5#dump~3
+[openbgpd-rde-evaluate]: https://man.openbsd.org/OpenBSD-7.7/bgpd.conf.5#rde
+[openbgpd-transparent-as]: https://man.openbsd.org/OpenBSD-7.7/bgpd.conf.5#transparent-as

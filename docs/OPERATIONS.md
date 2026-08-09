@@ -551,18 +551,26 @@ keeps its comments; SIGHUP alone never writes the file.
 
 ## Upgrading
 
-1. Build the new version: `cargo build --release`
-2. Stop the daemon: `systemctl stop rustbgpd` (or `rbgp shutdown`)
-3. Replace the binary at `/usr/local/bin/rustbgpd`
-4. Start: `systemctl start rustbgpd`
+For native `.deb` and `.rpm` installs, follow the canonical
+[package upgrade and rollback procedure](deployment.md#package-upgrade-and-rollback).
+It preflights the candidate binary against the live configuration **before**
+the stop, stops rustbgpd cleanly so the restart marker is written, checks the
+package manager's preserved-config files, and verifies the restarted daemon.
+The package hooks do not stop or restart a running service.
 
-When Graceful Restart is enabled (the default), the coordinated shutdown in
-step 2 writes a GR restart marker. On step 4, the daemon advertises `R=1` to
-static peers, asking them to retain our routes while we reconnect. The restart
-window is the largest `gr_restart_time` among all GR-enabled peers.
-rustbgpd still advertises `forwarding_preserved = false`; use a drained
-route-server pair or another traffic-shift procedure when forwarding
-continuity matters.
+Before installing v0.65, finish any pending confirmed transaction and clear
+retired v1/v2 authority. The candidate binary's `--check` validates the config
+only; it cannot inspect `runtime_state_dir` or config-adjacent commit-confirm
+authority. If retired authority remains or is inaccessible, recover it with
+exactly rustbgpd v0.64.0. Delete it only after proving the transaction is
+terminal and the current config is intended.
+
+When Graceful Restart is enabled (the default), a coordinated stop writes a GR
+restart marker. On the next start, the daemon advertises `R=1` to static peers,
+asking them to retain eligible routes while sessions rebuild. rustbgpd still
+advertises `forwarding_preserved = false`; this is not a continuity guarantee.
+Use a drained route-server pair or another traffic-shift procedure when
+forwarding continuity matters.
 
 In a matching domain, marker v3 makes the shutdown-to-startup deadline
 resistant to discontinuous `CLOCK_REALTIME` steps and includes suspend time
@@ -570,11 +578,9 @@ before the new process resolves it. The daemon then uses its normal
 process-local monotonic timer for the remaining live window; it does not claim
 suspend-inclusive timing after startup.
 
-Rolling back to a binary that predates marker v3 is a cold-start compatibility
-event: that binary rejects the v3 marker and starts without restarting-speaker
-mode. This does not guarantee a traffic blackhole; impact depends on peer and
-topology behavior. Operators requiring continuity should still use the drained
-route-server-pair procedure below.
+Rolling back across the marker-v3 or commit-confirm-v3 boundaries needs the
+state checks in the canonical procedure. A pre-marker-v3 binary rejects a v3
+marker and cold-starts without restarting-speaker mode.
 
 For zero-downtime upgrades in a route-server pair, drain traffic to the
 standby, upgrade, then swap.

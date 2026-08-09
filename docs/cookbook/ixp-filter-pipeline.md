@@ -28,9 +28,9 @@ rbgp verification  +  Alice-LG via the birdwatcher adapter
 
 This recipe assumes the [route-server cookbook](route-server.md)
 shapes: transparent `route_server_client` sessions, RFC 9234
-`route_server` role, per-client best-path. Migration mapping from an
-existing BIRD/OpenBGPD deployment is in
-[route-server-migration.md](route-server-migration.md).
+`route_server` role, per-client best-path. Migration mapping from an existing
+BIRD/OpenBGPD deployment—including the manual OpenBGPD advertised-view
+boundary—is in [route-server-migration.md](route-server-migration.md).
 
 ## 1. Generate the resolved member data
 
