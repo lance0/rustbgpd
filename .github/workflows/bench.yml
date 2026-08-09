@@ -83,7 +83,11 @@ jobs:
     # noisy for these numbers and cannot provide the CPU pinning /
     # governor posture this workflow assumes.
     runs-on: [self-hosted, rustbgpd-bench]
-    timeout-minutes: 120
+    # Same runner and same harness as bench-nightly.yml, so the same ceiling
+    # applies: an unfiltered `rib_ops` half-run is ~14.3 min at steady state,
+    # which puts the default 3 attempts near 96 min and a 4-attempt dispatch
+    # past the old 120-minute cap. See bench-nightly.yml for the measurement.
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v7

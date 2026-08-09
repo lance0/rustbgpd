@@ -58,7 +58,15 @@ jobs:
     # Defensive: never run on a fork that inherits the runner registration.
     if: github.repository == 'lance0/rustbgpd'
     runs-on: [self-hosted, rustbgpd-bench]
-    timeout-minutes: 120
+    # Sized against the measured `rib_ops` matrix, not guessed. Four attempts
+    # are eight half-runs: ~19.5 min each for the two that pay cold
+    # compilation and ~14.3 min at steady state, so a full comparison needs
+    # ~127 min. The previous 120 was set when `rib_ops` had 10 bench sites;
+    # #1374 took it to 15 (35 of the 53 measured rows are the `attr_*`
+    # groups). Runs only began cancelling once v0.63.0 was tagged and the
+    # baseline side inherited those rows too — before that the cheaper
+    # baseline half kept the total under the cap.
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v7
