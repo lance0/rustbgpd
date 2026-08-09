@@ -1741,13 +1741,16 @@ branch is between features.
   The v0.64 removals did not land and are now part of the v0.65 batch:
   frozen legacy commit-confirm/history readers, the dead
   `enforcement = "legacy"` enum variant, the `rbgp rib diff`
-  older-daemon fallbacks, `AddNeighborRequest.config`,
-  and `RouteEvent.event_id`. The three hidden `--from-file` aliases on
-  `config diff|plan|apply` and the raw Paths-Limit cap were removed during
-  v0.65 development. Unary
+  older-daemon fallbacks, and `AddNeighborRequest.config`. The three hidden
+  `--from-file` aliases on `config diff|plan|apply` and the raw Paths-Limit cap
+  were removed during v0.65 development. Unary
   Plan/Apply is retained permanently as the small-candidate path; streaming
-  remains additive and outside the initial v1 freeze. New compat retentions
-  add a row to the ADR in the PR that introduces them.
+  remains additive and outside the initial v1 freeze. `RouteEvent.event_id`
+  is also retained: it is the sole process-local, restart-reset cursor on bare
+  route-event surfaces and drives `rbgp events watch --backfill` history/live
+  dedup; only durable `SubscribeFromEvent` makes `BgpEvent.event_id`
+  authoritative. New
+  compat retentions add a row to the ADR in the PR that introduces them.
 
 - [x] **Legacy GR/LLGR RFC gaps in unicast/FlowSpec/EVPN — RESOLVED.**
   The RR families (VPN/BGP-LS/RTC, #636–#638) implement the strict
