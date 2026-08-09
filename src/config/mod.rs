@@ -2396,12 +2396,35 @@ impl RuntimeSnapshotKey {
 
     /// Keyed token additionally bound to a canonical live-runtime context.
     pub fn token_with_context(&self, config: &Config, context: &[u8]) -> Result<String, String> {
-        use std::hash::{BuildHasher, Hasher};
         // The shared borrowed projection uses explicit sorted serializers for
         // every HashMap-valued config field, making this token independent of
         // insertion order without cloning the large policy/map graph.
         let normalized = canonical::render(config)
             .map_err(|error| format!("failed to serialize runtime config snapshot: {error}"))?;
+        Ok(self.token_for_canonical_body(&normalized, context))
+    }
+
+    /// Token a persisted candidate without serializing it a second time.
+    ///
+    /// Snapshot tokens historically hash the canonical TOML body, not the
+    /// maintenance header. Reusing the verified body slice keeps a planned
+    /// post-commit token identical to the next live-runtime token.
+    pub(crate) fn token_with_normalized_document(
+        &self,
+        normalized_document: &str,
+        context: &[u8],
+    ) -> Result<String, String> {
+        let body = normalized_document
+            .strip_prefix(PERSISTED_CONFIG_HEADER)
+            .and_then(|document| document.strip_prefix('\n'))
+            .ok_or_else(|| {
+                "normalized config document is missing the maintenance header".to_string()
+            })?;
+        Ok(self.token_for_canonical_body(body, context))
+    }
+
+    fn token_for_canonical_body(&self, normalized: &str, context: &[u8]) -> String {
+        use std::hash::{BuildHasher, Hasher};
         let mut hasher = self.0.build_hasher();
         hasher.write(normalized.as_bytes());
         hasher.write_usize(context.len());
@@ -2414,9 +2437,9 @@ impl RuntimeSnapshotKey {
         // minted by this same in-process key, so the keyed digest alone is
         // the change detector.
         if context.is_empty() {
-            Ok(format!("kv1:{digest:016x}"))
+            format!("kv1:{digest:016x}")
         } else {
-            Ok(format!("kv2:{digest:016x}:{}", context.len()))
+            format!("kv2:{digest:016x}:{}", context.len())
         }
     }
 }
@@ -2463,11 +2486,20 @@ pub const PERSISTED_CONFIG_HEADER: &str = "\
 /// # Errors
 ///
 /// Returns the TOML serialization error.
-pub fn persisted_config_document(config: &Config) -> Result<String, toml::ser::Error> {
+#[cfg(test)]
+pub(crate) fn persisted_config_document(config: &Config) -> Result<String, toml::ser::Error> {
     Ok(format!(
         "{PERSISTED_CONFIG_HEADER}\n{}",
         canonical::render(config)?
     ))
+}
+
+/// Render the exact persisted document while bounding statement-serialization
+/// memory and retaining just one header-bearing String.
+pub(crate) fn persisted_config_document_bounded(
+    config: &mut Config,
+) -> Result<String, toml::ser::Error> {
+    canonical::render_document_bounded(config).map(|(document, _)| document)
 }
 
 impl Config {

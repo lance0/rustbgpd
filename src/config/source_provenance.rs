@@ -12,7 +12,7 @@ use rustbgpd_policy::datasets::{DatasetFileFingerprint, DatasetKind};
 use rustbgpd_policy::rpol::RpolFile;
 use sha2::{Digest, Sha256};
 
-use super::{Config, DatasetBindMode, persisted_config_document};
+use super::{Config, DatasetBindMode, persisted_config_document_bounded};
 
 const SOURCE_DIGEST_DOMAIN: &[u8] = b"rustbgpd.config-source.v2\0";
 
@@ -179,7 +179,7 @@ pub(crate) fn lossless_path_bytes(path: &Path) -> (&'static [u8], Vec<u8>) {
 
 pub(crate) struct AcceptedConfigSnapshot {
     config: Arc<Config>,
-    normalized_toml: Arc<str>,
+    normalized_toml: Arc<String>,
     manifest: SourceManifest,
     sha256: [u8; 32],
     source_sha256: [u8; 32],
@@ -217,9 +217,10 @@ impl AcceptedConfigSnapshot {
         config.file_path = Some(config_path.to_path_buf());
         after_capture();
         config.policy.dataset_bindings = config.policy.dataset_bindings.detached_clone();
-        let normalized_toml: Arc<str> = persisted_config_document(&config)
-            .map_err(|error| format!("failed to normalize retained config: {error}"))?
-            .into();
+        let normalized_toml = Arc::new(
+            persisted_config_document_bounded(&mut config)
+                .map_err(|error| format!("failed to normalize retained config: {error}"))?,
+        );
         let sha256 = Sha256::digest(normalized_toml.as_bytes()).into();
         let manifest = capture.finish(sha256);
         let source_sha256 = manifest.source_sha256();
@@ -292,9 +293,10 @@ impl AcceptedConfigSnapshot {
         after_capture();
         config.policy.dataset_bindings = config.policy.dataset_bindings.detached_clone();
 
-        let normalized_toml: Arc<str> = persisted_config_document(&config)
-            .map_err(|error| format!("failed to normalize accepted config: {error}"))?
-            .into();
+        let normalized_toml = Arc::new(
+            persisted_config_document_bounded(&mut config)
+                .map_err(|error| format!("failed to normalize accepted config: {error}"))?,
+        );
         let sha256 = Sha256::digest(normalized_toml.as_bytes()).into();
         let manifest = capture.finish(sha256);
         let source_sha256 = manifest.source_sha256();
@@ -310,9 +312,10 @@ impl AcceptedConfigSnapshot {
     pub(crate) fn derive_config(&self, mut config: Config) -> Result<Arc<Self>, String> {
         self.require_same_external_roster(&config)?;
         config.policy.dataset_bindings = config.policy.dataset_bindings.detached_clone();
-        let normalized_toml: Arc<str> = persisted_config_document(&config)
-            .map_err(|error| format!("failed to normalize accepted config: {error}"))?
-            .into();
+        let normalized_toml = Arc::new(
+            persisted_config_document_bounded(&mut config)
+                .map_err(|error| format!("failed to normalize accepted config: {error}"))?,
+        );
         let sha256 = Sha256::digest(normalized_toml.as_bytes()).into();
         let mut manifest = self.manifest.clone();
         manifest.toml_sha256 = sha256;
@@ -406,8 +409,8 @@ impl AcceptedConfigSnapshot {
     }
 
     #[cfg(test)]
-    pub(crate) fn from_config_for_test(config: Config) -> Arc<Self> {
-        let normalized_toml: Arc<str> = persisted_config_document(&config).unwrap().into();
+    pub(crate) fn from_config_for_test(mut config: Config) -> Arc<Self> {
+        let normalized_toml = Arc::new(persisted_config_document_bounded(&mut config).unwrap());
         let sha256 = Sha256::digest(normalized_toml.as_bytes()).into();
         let manifest = SourceCapture::default().finish(sha256);
         Arc::new(Self {
@@ -430,7 +433,7 @@ impl AcceptedConfigSnapshot {
     }
 
     pub(crate) fn normalized_toml(&self) -> &str {
-        &self.normalized_toml
+        self.normalized_toml.as_str()
     }
 
     pub(crate) fn source_manifest(&self) -> &SourceManifest {

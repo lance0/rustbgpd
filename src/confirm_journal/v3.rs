@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::config::{AcceptedConfigSnapshot, Config, persisted_config_document};
+use crate::config::{AcceptedConfigSnapshot, Config, persisted_config_document_bounded};
 use crate::config_history;
 use crate::config_history::v2::{self as history_v2, LosslessPath, Manifest};
 
@@ -1037,9 +1037,9 @@ fn cleanup_locator_absent_residue_pinned(pending: &Arc<Directory>) -> io::Result
                 Err(error) => return Err(error),
             };
             let raw_toml = std::str::from_utf8(&bytes).map_err(invalid)?;
-            let config =
+            let mut config =
                 Config::load_toml_with_diagnostics(raw_toml, "v3 raw residue").map_err(invalid)?;
-            let normalized = persisted_config_document(&config).map_err(invalid)?;
+            let normalized = persisted_config_document_bounded(&mut config).map_err(invalid)?;
             if normalized.as_bytes() != bytes {
                 return Err(invalid("raw residue is not normalized TOML"));
             }
