@@ -3639,7 +3639,18 @@ mod tests {
         assert!(!this_surface.contains(legacy_variant));
         assert_eq!(this_surface.matches(transaction_helper).count(), 13);
 
-        let peer_manager_tests = include_str!("peer_manager/tests.rs");
+        // The peer-manager test surface is a directory module, so the scan
+        // concatenates every sibling rather than one file.
+        let mut peer_manager_tests = String::new();
+        for entry in std::fs::read_dir(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/peer_manager/tests"
+        ))
+        .unwrap()
+        {
+            peer_manager_tests.push_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap());
+        }
+        let peer_manager_tests = peer_manager_tests.as_str();
         assert!(!peer_manager_tests.contains(legacy_toml));
         assert!(!peer_manager_tests.contains(legacy_variant));
         assert_eq!(peer_manager_tests.matches(helper).count(), 5);
