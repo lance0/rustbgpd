@@ -366,11 +366,12 @@ new AFI/SAFI and EVPN dataplane expansion.
   What tagging v1.0 means — the frozen surfaces, evidence bar, and post-1.0
   deprecation policy — is accepted in
   [ADR-0125](docs/adr/0125-v1-stability-contract.md). The remaining hard gates
-  are execution, not design: one external shadow pilot, exactly two ≥24 h
-  RS/RR soak receipts, the v0.65 compatibility-debt batch, proof-gated RFC
-  8212 epoch-2 activation, the latest-1.x security-support row, and the final
-  upgrade-chain extension. The comparative IRR-scale gate is already
-  satisfied.
+  are execution, not design: exactly two ≥24 h RS/RR soak receipts, the
+  v0.65 compatibility-debt batch, proof-gated RFC 8212 epoch-2 activation,
+  the latest-1.x security-support row, and the final upgrade-chain
+  extension. The external shadow pilot is advisory since the 2026-08-08
+  DR1 revision — actively pursued, disclosed if absent at tag time, not
+  blocking. The comparative IRR-scale gate is already satisfied.
 - **Make changed-policy reload the primary performance program.** The corrected
   700-client × 400,400-route mixed run is now measured: shared cohort work cuts
   median completion p50 116.185x and median completion maximum 149.261x, while

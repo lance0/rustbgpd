@@ -3,6 +3,8 @@
 **Status:** Accepted (tagging remains evidence-gated; no tag is scheduled)
 **Date:** 2026-08-04
 **Decision recorded:** 2026-08-08
+**Amended:** 2026-08-08 (DR1 revised: the external pilot is advisory
+evidence, not a hard tagging gate)
 
 ## Decisions recorded
 
@@ -11,7 +13,7 @@ is expanded in the section named in the last column.
 
 | # | Decision | Recorded outcome | Where |
 |---|----------|---------------------|-------|
-| DR1 | Is at least one external pilot's incorporated feedback a hard tagging gate? | Yes. One external shadow pilot is a hard tag gate: two weekly checkpoints at the pilot's normal refresh cadence, a final semantic diff and support bundle, and a tested rollback. Incorporated feedback may be an explicit no-change finding, but it must be recorded. | Evidence bar E1 |
+| DR1 | Is at least one external pilot's incorporated feedback a hard tagging gate? | No (owner revision, same day as the initial yes). An external shadow pilot remains the strongest single piece of evidence and stays actively pursued — two weekly checkpoints, final semantic diff and support bundle, tested rollback, recorded feedback or explicit no-change finding — but it does not block the tag. If no pilot has completed when the remaining bars are green, the tag proceeds and the evidence summary discloses the pilot's absence plainly. | Evidence bar E1 |
 | DR2 | How many archived soak receipts at RS/RR flagship shapes gate the tag? | Exactly two receipts, each at least 24 hours. Together they must cover route-server and route-reflector flagship shapes, a real SIGHUP file reload, and a max-prefix trip followed by timed restart. | Evidence bar E2 |
 | DR3 | Does the tag require a comparative IRR-scale reload row against BIRD and OpenBGPD, or is the existing IXP matrix sufficient? | Yes, and the gate is satisfied by the published four-root IRR-scale comparison against BIRD 3.3.1 and OpenBGPD 9.1. | Evidence bar E3 |
 | DR4 | RFC 8212 secure-by-default: activate per ADR-0119, or record a decision not to flip the default in 1.0? | Activate only the `config_epoch = 2` plus omitted-boolean cell after ADR-0119's representation and production-mutation proofs land. Epoch-less and epoch-1 omission remain permissive forever; explicit booleans retain their value. | Evidence bar E5 |
@@ -110,6 +112,10 @@ explicit no-change finding. Current state: zero external pilots; the tooling
 (semantic diff engine, `rbgp diff`, incumbent adapters, cookbook) is complete
 and unused in anger. This is the single largest gap between the receipts
 culture and a 1.0 claim: every existing receipt is self-generated.
+Revision (2026-08-08): E1 is advisory, not gating — see the DR1 row. The
+pilot remains the highest-value outstanding evidence and the adoption
+program continues to pursue it; a tag cut without it must disclose that
+every receipt behind the contract is self-generated.
 
 **E2 — Soak receipts at flagship RS/RR shapes (DR2).** Exactly two archived
 receipts of at least 24 hours each against the precommitted acceptance gates
@@ -188,7 +194,7 @@ The actionable backlog seed: criterion → current state → what closes it.
 
 | Criterion | Current state | Closes the gap |
 |-----------|---------------|----------------|
-| E1 external pilot | Zero pilots; cookbook + tooling shipped, unused externally | Two weekly external shadow checkpoints at normal refresh cadence; archive final semantic diff, support bundle, tested rollback, and incorporated feedback or explicit no-change finding |
+| E1 external pilot | Zero pilots; cookbook + tooling shipped, unused externally | Advisory since the 2026-08-08 DR1 revision — pursue per the shadow-pilot cookbook (weekly checkpoints, semantic diff, support bundle, tested rollback, recorded feedback); absence is disclosed at tag time, not blocking |
 | E2 RS/RR soaks | Archived soaks are EVPN-shaped; eight precommitted gates uninjected | Archive exactly two receipts of at least 24 h that collectively cover flagship RS/RR, real SIGHUP reload, and max-prefix trip/timed restart |
 | E3 comparative IRR row | **Satisfied:** four-root same-harness comparison against BIRD and OpenBGPD publishes wins and losses | Keep the published receipt linked from the evidence index |
 | E4 debt schedule | Decisions recorded; v0.64 removals slipped into the v0.65 batch | Land the complete v0.65 removal batch before the tag |
