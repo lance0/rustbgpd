@@ -363,10 +363,14 @@ new AFI/SAFI and EVPN dataplane expansion.
   transactions, BMP/MRT/events, and the already-proven RR/controller-feed
   families. Keep its stability, migration, deprecation, and compatibility
   rules current while EVPN VTEP/IRB remains alpha and outside this contract.
-  What tagging v1.0 would mean — the frozen surfaces, the evidence bar, and
-  the post-1.0 deprecation policy — is drafted for decision in
-  [ADR-0125](docs/adr/0125-v1-stability-contract.md) (Proposed), with the
-  open owner calls in its decisions-required table.
+  What tagging v1.0 means — the frozen surfaces, evidence bar, and post-1.0
+  deprecation policy — is accepted in
+  [ADR-0125](docs/adr/0125-v1-stability-contract.md). The remaining hard gates
+  are execution, not design: one external shadow pilot, exactly two ≥24 h
+  RS/RR soak receipts, the v0.65 compatibility-debt batch, proof-gated RFC
+  8212 epoch-2 activation, the latest-1.x security-support row, and the final
+  upgrade-chain extension. The comparative IRR-scale gate is already
+  satisfied.
 - **Make changed-policy reload the primary performance program.** The corrected
   700-client × 400,400-route mixed run is now measured: shared cohort work cuts
   median completion p50 116.185x and median completion maximum 149.261x, while
@@ -429,9 +433,10 @@ new AFI/SAFI and EVPN dataplane expansion.
   importer are shipped, and the shadow-pilot cookbook
   ([docs/cookbook/route-server-shadow-pilot.md](docs/cookbook/route-server-shadow-pilot.md),
   #1331) now documents the standing non-authoritative deployment end to end —
-  the tooling side is done. The remaining adoption gate is only a real
-  sanitized shadow run with explained differences and an operator-readable
-  rollback record.
+  the tooling side is done. The remaining adoption gate is ADR-0125 E1: one
+  external pilot with two weekly checkpoints at its normal refresh cadence,
+  then a final semantic diff and support bundle, tested rollback, and recorded
+  incorporated feedback or explicit no-change finding.
 - **Tighten lifecycle security without reopening scope.** Preserve the shipped
   unprivileged base service and opt-in dataplane capability profile. The typed
   API-error migration is complete (#898 closed the last API-visible stringly
@@ -529,10 +534,11 @@ Details in the "Recently shipped" section below and ADR-0097.
 - **RFC 8212 secure-by-default.** Opt-in enforcement
   (`ebgp_requires_policy`, ADR-0112) is shipped and receipted; the
   config-epoch representation contract that makes a default flip safe is
-  specified in ADR-0119 (Proposed — the representation itself is not yet
-  implemented). Activation is an explicit owner decision plus the
-  production-mutation proofs ADR-0119 enumerates — proposed for the next
-  release, not scheduled. Neither incumbent daemon defaults it.
+  accepted in ADR-0119 but not yet implemented. ADR-0125 authorizes activation
+  after every named production-mutation proof passes; activation changes only
+  epoch-2 omission to effective `true`. Epoch-less and epoch-1 omission stay
+  permissive, and explicit booleans keep their value. This remains
+  evidence-gated, not release-date-triggered.
 - **Trust/adoption hygiene sweep** (all small): keep the cargo-fuzz / OSS-Fuzz
   onboarding and per-RFC receipts/conformance page current, and keep the
   published Grafana dashboard aligned with the shipped metrics. The secure
@@ -565,8 +571,9 @@ Details in the "Recently shipped" section below and ADR-0097.
   surface). The [1,000-peer route-server receipt](docs/perf/route-server-1000-2026-07.md)
   now retains real-daemon 400k-route/reload/readiness evidence. The
   shadow-pilot cookbook (#1331) is shipped; remaining demand-shaped work is
-  only a real sanitized shadow run with explained differences and an
-  operator-readable rollback record.
+  the ADR-0125 E1 external pilot: two weekly checkpoints, a final semantic
+  diff and support bundle, tested rollback, and a recorded feedback or
+  explicit no-change outcome.
 - **RFC 9857 SR Policy state in BGP-LS** (receive/reflect/API) — ADR-0116
   records a bounded fit for the controller-feed / RR niche, but feature code is
   a no-go until a named controller demand supplies a real producer, consumer,
@@ -586,9 +593,11 @@ is complete: filtered-route views from `PolicyService.ListRejectedRoutes`
 (reject reasons mapped to large communities under `64496:65520:*`) and
 noexport views from the export-explain surface (`64496:65521:*`). With the
 shadow-pilot cookbook shipped (#1331), the next useful work is executing that
-cookbook: a real sanitized shadow run using the shipped `rbgp diff` against an
-incumbent's MRT/BMP feed, with explained differences and an operator-readable
-rollback record; the 1,000-peer route-server scale receipt
+cookbook under ADR-0125 E1: an external pilot using the shipped `rbgp diff`
+against an incumbent's MRT/BMP feed for two weekly checkpoints at its normal
+refresh cadence, followed by the final semantic diff and support bundle,
+tested rollback, and a recorded feedback or explicit no-change outcome; the
+1,000-peer route-server scale receipt
 is [retained](docs/perf/route-server-1000-2026-07.md). The ARouteServer target
 ships as `tools/rs-config-render`. The current external adapter already serves
 the Birdwatcher-shaped status, peer, accepted-route, and filtered-route subset.
@@ -1717,22 +1726,26 @@ an ADR "Deferred" section that points back here. Tightened, not dropped.
 ## Engineering velocity / tech debt
 
 Cross-cutting cleanups that don't move user-facing capability on their own but
-lower the cost of every future PR. None block a release — grab one when your
+lower the cost of every future PR. None block a v0.x release; ADR-0122's
+accepted v0.65 batch is an explicit v1.0 tag gate. Grab another item when your
 branch is between features.
 
-- [ ] **Compatibility-debt removal schedule (ADR-0122).**
+- [ ] **Compatibility-debt removal schedule (ADR-0122, Accepted).**
   [docs/adr/0122-compatibility-debt-inventory.md](docs/adr/0122-compatibility-debt-inventory.md)
   is the single inventory of retained compat shims under the alpha
   posture, grouped by surface with per-item removal releases and
   mechanics. The remove-now items — the two v0.51.0 retired-key
   migration pointers and the redundant example-config UDS authorization
   ceremony made unnecessary by #1429 — landed in v0.63.0 (#1435).
-  Remaining scheduled: the dead
-  `enforcement = "legacy"` enum variant, the `rbgp rib diff`
-  older-daemon fallbacks, and three superseded proto fields. Two calls
-  are owner-gated there (legacy config-history reader EOL, unary vs
-  streaming Plan/Apply fate); new compat retentions add a row to the
-  ADR in the PR that introduces them.
+  The v0.64 removals did not land and are now part of the v0.65 batch:
+  frozen legacy commit-confirm/history readers, the Paths-Limit raw cap,
+  the dead `enforcement = "legacy"` enum variant, the `rbgp rib diff`
+  older-daemon fallbacks, `AddNeighborRequest.config`,
+  `RouteEvent.event_id`, and the three hidden `--from-file` aliases on
+  `config diff|plan|apply`. Unary Plan/Apply is retained permanently as the
+  small-candidate path; streaming remains additive and outside the initial v1
+  freeze. New compat retentions add a row to the ADR in the PR that introduces
+  them.
 
 - [x] **Legacy GR/LLGR RFC gaps in unicast/FlowSpec/EVPN — RESOLVED.**
   The RR families (VPN/BGP-LS/RTC, #636–#638) implement the strict

@@ -11,6 +11,9 @@ against the generated JSON Schema, its RPC and top-level request/response
 signatures against the protobuf, its RPC membership against the authorization
 inventory, its CLI paths against the Clap tree, and its consecutive-release
 upgrade receipt. A surface absent from that file is outside the v1 promise.
+[ADR-0125](adr/0125-v1-stability-contract.md) defines the accepted evidence bar
+for turning this narrow promise into a v1.0 tag; acceptance schedules no tag
+and freezes nothing beyond the inventory until that evidence is complete.
 
 ## Role matrix
 
@@ -107,9 +110,11 @@ and series.
 
 Breaking changes to the inventoried surface require a new contract major, a
 CHANGELOG entry, a migration guide, and a consecutive-release fixture accepted
-by the new release. A deprecation remains available for at least two minor
-releases and 90 days, whichever is longer. Migration support covers the current
-and immediately previous minor release.
+by the new release. Once v1.0 is tagged, an inventoried surface deprecated in 1.x
+remains functional for the rest of 1.x and is removable no earlier than 2.0.
+Migration compatibility covers the current and immediately previous minor
+release. Security fixes support the latest 1.x release; that is a separate
+promise and does not extend migration compatibility into security support.
 
 ## Mutation and reload model
 
@@ -124,6 +129,12 @@ The canonical live-mutation path is:
 lifecycle. Mutation-specific RPCs may remain for focused automation, but they
 do not bypass validation, persistence, or the daemon's single-writer planning
 boundary.
+
+Unary `PlanConfigTransaction` / `ApplyConfigTransaction` is the permanent
+small-candidate path and remains in the frozen inventory. Streaming Plan/Apply,
+`ListConfigHistory`, and `RollbackConfigTransaction` remain outside the initial
+v1 inventory; production use does not promote them implicitly. Each may be
+added deliberately in a later 1.x minor through the inventory review.
 
 SIGHUP remains the file-driven compatibility/reconcile path. It uses the same
 planner for supported changes, but it is not a general atomic compound-mutation
@@ -182,6 +193,9 @@ cargo test -p rustbgpctl v1_stable_cli_command_inventory_matches_clap_tree
 cargo test -p rustbgpd v1_stable_v0_50_route_server_fixture_parses
 cargo test -p rustbgpd v1_stable_v0_51_route_server_fixture_parses
 cargo test -p rustbgpd v1_stable_v0_60_route_server_fixture_parses
+cargo test -p rustbgpd v1_stable_v0_61_route_server_fixture_parses
+cargo test -p rustbgpd v1_stable_v0_62_route_server_fixture_parses
+cargo test -p rustbgpd v1_stable_v0_63_route_server_fixture_parses
 cargo test -p rustbgpd v1_stable_effective_defaults_match_runtime_resolution
 ```
 
