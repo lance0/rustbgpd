@@ -4,6 +4,9 @@
 **Implementation:** v2 history restore and provenance-bearing commit-confirm v2 shipped
 **Date:** 2026-08-01
 
+**v0.65 amendment:** v2 history stays active; legacy TOML is ignored/retained.
+V1/v2 authority readers are removed, so §10 is historical.
+
 ## Context
 
 Before v2 activation, applied-config history retained one normalized TOML
@@ -277,8 +280,7 @@ logs do not expose the manifest or paths.
 ### 8. Rollback verifies once under the coordinator lock
 
 The restore model is active. Unreadable rows refuse under the coordinator lock;
-legacy rows declaring external inputs refuse without external file access.
-Verified v2 restore follows the ordered steps below.
+verified v2 restore follows the ordered steps below.
 
 `rollback N` resolves and reads the exact entry while holding the existing
 runtime-config coordinator lock. For v2 it then:
@@ -317,25 +319,19 @@ transaction with unchanged external inputs remains committable because it
 does not adopt the full candidate snapshot. Provenance support neither rejects
 those cases nor widens the exception to another executor family.
 
-### 9. Legacy compatibility and additive API
+### 9. Retired legacy rows and additive API
 
-A readable legacy entry has provenance status `LEGACY_TOML_ONLY`. Rollback is
-allowed only when its parsed TOML references no rpol units or datasets. A
-legacy entry with external references fails closed with that status and an
-actionable message; it is never reread and blessed as v2. History files are
-never backfilled or rewritten in place.
+Since v0.65, legacy TOML entries are ignored, retained byte-for-byte, and never
+listed, decoded, evicted, or used for rollback. There is no backfill.
 
 `ConfigHistoryEntry` adds `source_sha256` and a provenance-status enum with
 exact values `CONFIG_HISTORY_PROVENANCE_STATUS_UNSPECIFIED = 0`,
 `CONFIG_HISTORY_PROVENANCE_STATUS_RECORDED = 1`,
 `CONFIG_HISTORY_PROVENANCE_STATUS_LEGACY_TOML_ONLY = 2`, and
 `CONFIG_HISTORY_PROVENANCE_STATUS_UNREADABLE = 3`. Existing `sha256` is preserved.
-Valid v2 rows report `RECORDED`; legacy rows leave `source_sha256` empty;
-unreadable rows expose no unverified source digest. A new client reading an old
-server therefore sees `UNSPECIFIED`, never a false `RECORDED`; an old client
-reading a new server ignores the additive fields. Human CLI and JSON output add
-these fields without renaming or removing any existing field, and render
-`UNSPECIFIED` as unknown rather than inferring provenance.
+Valid v2 rows report `RECORDED`; unreadable rows expose no unverified source
+digest. Enum value 2 remains receive-only so an N-1 server can still render
+`LEGACY_TOML_ONLY`; a v0.65 server never emits it.
 
 `RECORDED` means the envelope contains valid, internally verified provenance;
 it does not promise that a rollback is currently possible. A successful
@@ -683,16 +679,8 @@ identity contract.
 
 ## Current validation gate
 
-V2 recording, immutable accepted-source capture, mixed listing, additive API
-status/digests, filesystem hardening, verified v2 history restore, and
-provenance-bearing commit-confirm v2 are shipped with executable destructive
-proofs. The production writer emits only v2 pending state. Locator-free v1
-state remains a fail-closed compatibility lane; a live v1 transaction must
-terminate before upgrade, and v2 never converts or dual-writes it. The
-locator/journal publication order, exact caps and canonical
-encoding, descriptor-relative filesystem checks, six-state boot matrix,
-same-object live rollback, boot-before-candidate restore, terminal locator
-ordering, and post-terminal warning-only residue cleanup remain regression
-gates. Documentation-only design changes have no executable red proof.
+V2 history and verified restore remain shipped. V3 is the sole commit-confirm
+authority; retired artifacts fail untouched, including before coexisting v3
+mutation. Documentation-only design changes have no executable red proof.
 Documentation consistency, source-contract review, link and terminology
 checks, and `git diff --check` remain part of every tranche.

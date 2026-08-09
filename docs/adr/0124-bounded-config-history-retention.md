@@ -18,10 +18,10 @@ limit. Streaming Plan/Apply admits a candidate up to 384 MiB. Commit-confirm
 v3 can separately retain a raw normalized prior snapshot up to 384 MiB so a
 restart can revert an unconfirmed transaction. The name "v3" in that journal
 is not a config-history generation: it has different files, authority,
-lifecycle, and recovery obligations. Shipped config history recognizes only
-legacy v1 TOML and v2 JSON rows.
+lifecycle, and recovery obligations. Shipped config history recognizes v2 JSON
+rows; retired legacy TOML files are ignored and retained since v0.65.
 
-The current mixed-history scan also decodes every recognized final file before
+The current v2-history scan also decodes every recognized final file before
 sorting it. The writer normally maintains the 20-row cap, but a damaged,
 manually copied, or older over-cap directory can make a read allocate for more
 than 20 envelopes before anything rejects or repairs it. Adding another row
@@ -35,14 +35,13 @@ typical configuration size:
 
 | Claim | Shipped source | Contract |
 |---|---|---|
-| Shared history depth is 20 rows | `src/config_history.rs` (`HISTORY_LIMIT`) | Legacy and v2 finals share one sequence namespace and one newest-first limit. |
-| Legacy payload cap is 10 MiB | `src/config_history.rs` (`MAX_ENTRY_BYTES`) | A larger legacy final is unreadable. |
+| Shared history depth is 20 rows | `src/config_history.rs` (`HISTORY_LIMIT`) | Active v2 finals share one sequence namespace and one newest-first limit. |
 | V2 normalized-TOML cap is 10 MiB | `src/config_history/v2.rs` (`MAX_TOML`) and `record_accepted` in `src/config_history.rs` | A newly accepted larger snapshot is skipped before the history writer mutates the directory. |
 | V2 manifest cap is 16 MiB | `src/config_history/v2.rs` (`MAX_MANIFEST`, enforced by `validate_manifest`) | The canonical serialized external-source manifest is bounded independently of its item-count and text-field limits. |
 | V2 envelope cap is 32 MiB | `src/config_history/v2.rs` (`MAX_ENVELOPE`) | Metadata and normalized TOML together must fit the encoded-envelope bound. |
 | Streamed candidate cap is 384 MiB | `crates/api/src/config_service/stream.rs` (`MAX_CANDIDATE_BYTES`) | The transaction ingress may accept a config far larger than history v2. |
 | Commit-confirm v3 raw-prior cap is 384 MiB | `src/confirm_journal/v3.rs` (`MAX_RAW_BYTES`) | This is restart-revert authority, not config history. `src/confirm_journal.rs` and `src/confirm_journal/v3.rs` keep the journal generations separate from `src/config_history`. |
-| History currently has only v1/v2 formats | `StoredFormat`, `parse_mixed_name`, and `open_and_decode` in `src/config_history/v2.rs` | Recognized finals are legacy `*.toml` or `v2-*.json`; rollback payloads are legacy or v2. |
+| History currently has only v2 active rows | `parse_v2_name` and `open_and_decode` in `src/config_history/v2.rs` | Recognized finals are `v2-*.json`; legacy TOML files are foreign retained files. |
 | Listing decodes before enforcing a count | `scan_pinned` in `src/config_history/v2.rs` | The directory loop calls `open_and_decode` for each recognized final and only sorts afterwards. |
 | History recording is best effort | `record_history` in `src/config_persister.rs` | A recording failure warns but does not undo an already accepted durable config. |
 
@@ -73,8 +72,8 @@ The following calls are made here and are not deferred to the implementation:
    effort, as it is today.
 2. Introduce a prospective config-history v3 metadata envelope for normalized
    snapshots **strictly larger than** 10 MiB. Exactly 10 MiB remains eligible
-   for v2. V1 and v2 behavior otherwise stays unchanged.
-3. Keep v1, v2, and v3 in the same 20-row sequence and index chronology. There
+   for v2. V2 behavior otherwise stays unchanged.
+3. Keep v2 and v3 in the same 20-row sequence and index chronology. There
    is no second metadata ring and no increase to total retained finals.
 4. Make v3 rows permanently metadata-only and rollback-ineligible. Hashes are
    evidence of accepted identity, not a promise that the omitted bytes can be
@@ -107,7 +106,7 @@ The canonical v3 JSON envelope contains exactly these semantic fields:
 | Field | Meaning |
 |---|---|
 | `version` | Integer `3`. This versions config history only. |
-| `sequence` | Shared monotonic v1/v2/v3 sequence number. |
+| `sequence` | Shared monotonic v2/v3 sequence number. |
 | `timestamp_unix_seconds` | Recording time, matching the final filename. |
 | `normalized_toml_bytes` | Exact byte length of the accepted normalized TOML. |
 | `sha256` | SHA-256 of those normalized TOML bytes. |
@@ -127,7 +126,7 @@ the implementation must not substitute unbounded debug output.
 
 V3 deduplication examines only the newest row, and only when that row is a
 verified metadata-only v3 row. It then compares `sha256`, `source_sha256`, and
-`normalized_toml_bytes`. An unreadable or v1/v2 newest row never deduplicates a
+`normalized_toml_bytes`. An unreadable or v2 newest row never deduplicates a
 new v3 record by looking farther back. A byte-identical accepted source
 generation does not grow history. A change to either normalized TOML or any
 accepted external source creates a new row even when the redacted summary is
@@ -144,7 +143,7 @@ must not infer identity only from that filename.
 
 Listing uses one pinned directory descriptor and exactly two logical passes:
 
-1. Enumerate names, recognize v1/v2/v3 **finals** without opening or decoding
+1. Enumerate names, recognize v2/v3 **finals** without opening or decoding
    their contents, and collect at most 20 exact names. If a 21st recognized
    final is observed, reject the whole listing as unsafe before any final is
    decoded. Duplicate sequences and unreadable files still count; stages and
@@ -200,12 +199,12 @@ deliberately not retained those bytes.
 | V3 rename publishes a complete final but final directory sync fails | Accepted config remains authoritative; recording warns; the complete final may be visible and is revalidated normally | The row's verified status controls rollback refusal | Never a torn final; the next writer/list sees either the old roster or the complete new final |
 | Crash leaves a v3 stage | Stage is ignored by listing and safely removed by the writer | N/A | No final chronology row until publish completed |
 | At most 20 finals, but a v3 row is corrupt, non-canonical, unsafe, or digest-mismatched | Row is `UNREADABLE`; no unverified hashes/summary are exposed | `FAILED_PRECONDITION` under existing unreadable-row rule | None |
-| A final name is swapped during the decode pass | The decoder uses one descriptor-relative, no-follow open and records that object's identity; an unsafe or mismatched target is `UNREADABLE`, and a post-open rename cannot change the bytes being verified | A selected v3 row refuses from its verified listed status without payload access; a selected payload-bearing v1/v2 row must reopen the recorded identity | None |
-| A final is replaced after listing but before a payload-bearing rollback reopens it | The listed metadata remains tied to the originally decoded object; the v1/v2 reopen identity check rejects the replacement | V1/v2 returns `FAILED_PRECONDITION` (`entry became unavailable or unsafe`) before payload use; v3 always refuses earlier without reopening | None |
-| Duplicate sequence among at most 20 mixed finals | Every colliding row is `UNREADABLE`, as today | `FAILED_PRECONDITION` | None |
-| More than 20 recognized mixed finals | Listing rejects before decoding any final; rollback's list step fails closed | `FAILED_PRECONDITION` | Read path does not repair; writer may repair name-first |
+| A final name is swapped during the decode pass | The decoder uses one descriptor-relative, no-follow open and records that object's identity; an unsafe or mismatched target is `UNREADABLE`, and a post-open rename cannot change the bytes being verified | A selected v3 row refuses from its verified listed status without payload access; a selected payload-bearing v2 row must reopen the recorded identity | None |
+| A final is replaced after listing but before a payload-bearing rollback reopens it | The listed metadata remains tied to the originally decoded object; the v2 reopen identity check rejects the replacement | V2 returns `FAILED_PRECONDITION` (`entry became unavailable or unsafe`) before payload use; v3 always refuses earlier without reopening | None |
+| Duplicate sequence among at most 20 active v2/v3 finals | Every colliding row is `UNREADABLE`, as today | `FAILED_PRECONDITION` | None |
+| More than 20 recognized active finals | Listing rejects before decoding any final; rollback's list step fails closed | `FAILED_PRECONDITION` | Read path does not repair; writer may repair name-first |
 | External source changes after a v3 row was recorded | Stored source hash remains historical evidence only | Always `FAILED_PRECONDITION`; no source reopen | None |
-| Upgrade finds existing v1/v2 rows | Mixed list and rollback semantics remain unchanged | Existing v1/v2 rules | No backfill or rewrite |
+| Upgrade finds existing v2 rows and retired TOML files | V2 list/rollback semantics remain unchanged; retired files stay ignored | Existing v2 rules | No backfill or rewrite |
 | Writable downgrade encounters a v3 final | Unsupported after v3 publication: the older binary ignores v3 and may expose stale rows or reuse its sequence; stop the daemon and preserve the directory for the new binary or move the complete history directory aside before starting the old binary | No v3 restore path; re-upgrade refuses duplicate sequences or an over-cap roster rather than blessing the collision | An old writer can add colliding v1/v2 rows if the operator violates the move-aside rule; there is no down-conversion |
 
 For `ListConfigHistory`, an over-cap roster remains the existing
@@ -217,12 +216,12 @@ For rollback, the same condition is deliberately the stable
 
 1. **Codec and store.** Add a history-v3 codec with canonical/size validation,
    accepted-snapshot summary construction, shared sequence allocation,
-   newest-row dedup within the mixed-generation chronology, name-first
+   newest-row dedup within the active chronology, name-first
    eviction, and the existing atomic
    owner-private publication boundary. Return the successful eviction count to
    the existing event/metrics observability path. Select v2 versus v3 only
    after checking the normalized byte length and before any eviction.
-2. **Bounded mixed scan.** Split filename collection from payload decoding,
+2. **Bounded scan.** Split filename collection from payload decoding,
    add v3 recognition, and freeze the reject-before-decode 21st-final rule.
    Keep pinned-object, mode/owner, digest, duplicate-sequence, and concurrent
    replacement checks.
@@ -230,8 +229,8 @@ For rollback, the same condition is deliberately the stable
    fields, render them in human/JSON listings, and add the explicit
    `FAILED_PRECONDITION` rollback branch before payload access.
 4. **Executable proof.** Add boundary tests at 10 MiB and 10 MiB + 1 byte,
-   canonical 64 KiB limits, 20-row mixed eviction, 20-v3 1.25 MiB budgeting,
-   mixed-generation ordering and newest-row dedup, crash points, corrupt v3
+   canonical 64 KiB limits, 20-row active eviction, 20-v3 1.25 MiB budgeting,
+   cross-generation ordering and newest-row dedup, crash points, corrupt v3
    rows, duplicate
    sequences, and a 21-final fixture proving zero payload opens/decodes. A
    mutation-proven rollback test must show that a selected v3 row reaches no
@@ -240,9 +239,9 @@ For rollback, the same condition is deliberately the stable
    operations, deployment, security, and release documentation to describe
    metadata-only rows. Do not claim large-config rollback.
 
-No phase performs a v1/v2 rewrite or backfill. A large accepted generation that
-predates activation remains absent; fabricating its metadata from the current
-file would falsely attribute time and sequence identity.
+No phase rewrites or backfills v2 or retired TOML files. A large accepted
+generation that predates activation remains absent; fabricating its metadata
+from the current file would falsely attribute time and sequence identity.
 
 ## Alternatives considered
 
@@ -293,7 +292,7 @@ Rejected as a category error despite the shared generation number.
 
 - After implementation, a successful oversized apply can no longer disappear
   from the last-20 accepted-config chronology solely because of its size.
-- Mixed history stays bounded by count before decode and by bytes per format.
+- Active history stays bounded by count before decode and by bytes per format.
   Twenty v3 finals consume at most 1.25 MiB encoded.
 - A large row is observable but not restorable. Operators must keep their own
   source-controlled config and external policy data; the hashes help identify
@@ -302,7 +301,7 @@ Rejected as a category error despite the shared generation number.
   share one honest recency window. This is intentional.
 - Hashes reveal equality across generations, as existing history hashes do,
   but v3 adds no raw secret-bearing config or external-source paths.
-- V1/v2 compatibility and rollback remain intact. The new protobuf fields are
+- V2 compatibility and rollback remain intact. The new protobuf fields are
   additive. Existing `rbgp` clients render an unrecognized status value as
   `unknown`; no client may infer rollback eligibility from non-empty hashes.
 - A malformed over-cap directory fails closed without first paying its payload
@@ -324,7 +323,7 @@ change to implemented.
   commit-confirm
 - [ADR-0121](0121-config-history-external-policy-provenance.md), v2 history
   source identity and restore
-- `src/config_history.rs` and `src/config_history/v2.rs`, shipped mixed history
+- `src/config_history.rs` and `src/config_history/v2.rs`, shipped v2 history
 - `src/config_persister.rs`, best-effort recording boundary
 - `src/confirm_journal.rs` and `src/confirm_journal/v3.rs`, separate
   commit-confirm recovery generations

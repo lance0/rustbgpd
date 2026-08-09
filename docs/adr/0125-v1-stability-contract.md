@@ -138,14 +138,13 @@ win; it is indexed in `docs/RECEIPTS.md` and
 `docs/perf/irr-reload-comparison-2026-08.md`.
 
 **E4 — Compatibility debt executed (DR5).** The ADR-0122 scheduled removals
-land before the tag. The v0.64 deadline was missed for the frozen v1/v2
-commit-confirm and legacy-history readers; those join the existing v0.65
-batch. The Paths-Limit raw-cap field has been removed. Unary Plan/Apply
+land before the tag. L1, A2, and the frozen v1/v2 commit-confirm plus legacy
+history readers are removed. Unary Plan/Apply
 remains the permanent small-candidate path. The hidden `--from-file`
 compatibility aliases on
 `config diff`, `config plan`, and `config apply` were removed during v0.65
-development. Current state: L1 and A2 are complete; the rest of the v0.65
-removals remain to land.
+development. Current state: L1, A2, D1, and D3 are complete; the remaining
+v0.65 removals still must land.
 
 **E5 — RFC 8212 secure default (DR4).** Opt-in enforcement is shipped and
 receipted (ADR-0112, M95). ADR-0119's config-epoch representation and
@@ -198,7 +197,7 @@ The actionable backlog seed: criterion → current state → what closes it.
 | E1 external pilot | Zero pilots; cookbook + tooling shipped, unused externally | Advisory since the 2026-08-08 DR1 revision — pursue per the shadow-pilot cookbook (weekly checkpoints, semantic diff, support bundle, tested rollback, recorded feedback); absence is disclosed at tag time, not blocking |
 | E2 RS/RR soaks | Archived soaks are EVPN-shaped; eight precommitted gates uninjected | Archive exactly two receipts of at least 24 h that collectively cover flagship RS/RR, real SIGHUP reload, and max-prefix trip/timed restart |
 | E3 comparative IRR row | **Satisfied:** four-root same-harness comparison against BIRD and OpenBGPD publishes wins and losses | Keep the published receipt linked from the evidence index |
-| E4 debt schedule | L1 and A2 are complete; the v0.64 removals and remaining v0.65 items are still open | Land the rest of the v0.65 removal batch before the tag |
+| E4 debt schedule | L1, A2, D1, and D3 are complete; remaining v0.65 items are open | Land the rest of the v0.65 removal batch before the tag |
 | E5 RFC 8212 | Activation authorized; ADR-0119 representation and proofs unimplemented | Land the representation and every named production-mutation proof; activate only epoch-2 omission |
 | E6 security posture | Fuzz/audit/reporting in place | SECURITY.md 1.x supported-versions row; keep artifact build floor |
 | E7 upgrade chain | Chain contiguous through the current anchor | Extend to the v1.0 anchor at tag time (existing process) |

@@ -152,20 +152,19 @@ service ConfigService {
   // secret-bearing config cannot silently boot as-is.
   rpc GetEffectiveConfig(GetEffectiveConfigRequest) returns (GetEffectiveConfigResponse);
 
-  // List the daemon's bounded mixed-generation config history (newest row
-  // first; index 0 may be recorded, legacy, or unreadable). The response
+  // List the daemon's bounded v2 config history (newest row first; index 0 may
+  // be recorded or unreadable). Retired TOML rows are ignored and retained. The response
   // carries timestamps, verified hashes, provenance status, and one-line
   // summaries only — never config document contents. Every verified row hashes
   // normalized TOML; v2 rows also hash the canonical accepted .rpol/dataset
   // source identity, but do not archive those external bytes.
   rpc ListConfigHistory(ListConfigHistoryRequest) returns (ListConfigHistoryResponse);
 
-  // Roll back to an eligible legacy or provenance-verified v2 row (index >= 1). The daemon
+  // Roll back to a provenance-verified v2 row (index >= 1). The daemon
   // resolves it server-side and routes it through the exact same transaction
   // executor as ApplyConfigTransaction — same plan/impact classification,
-  // receipts, and optional confirmed-commit window when neither the running nor
-  // target config declares external inputs. Unreadable rows and v2 provenance
-  // mismatches fail closed.
+  // receipts, and optional confirmed-commit window. Unreadable rows and
+  // provenance mismatches fail closed; retired TOML rows are ineligible.
   rpc RollbackConfigTransaction(RollbackConfigTransactionRequest) returns (ConfigTransactionApplyResponse);
 }
 
@@ -209,8 +208,8 @@ message RollbackConfigTransactionRequest {
   // Optional optimistic-concurrency token from PlanConfigTransaction /
   // ListConfigHistory-time planning. Empty skips the stale-snapshot guard —
   // the candidate is resolved server-side from history, not supplied by the
-  // caller. Legacy rows declaring external inputs are refused. V2 rows retain
-  // source identity and restore only after live inputs reproduce it exactly.
+  // caller. Retired TOML rows are ineligible. V2 rows retain source identity
+  // and restore only after live inputs reproduce it exactly.
   string expected_runtime_snapshot_token = 2;
   // Optional audit/correlation identifier supplied by automation.
   string client_request_id = 3;

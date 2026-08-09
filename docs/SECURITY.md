@@ -343,10 +343,8 @@ deadline expires.
 
 ## Recorded config history confidentiality
 
-`<runtime_state_dir>/config-history/` (legacy TOML plus v2 JSON), the fixed v3
-raw prior, and frozen v1/v2 `commit-confirm-journal.json` contain normalized
-TOML. They can
-include TCP-MD5 passwords, TCP-AO keys, API credentials, and other secrets;
+V2 JSON history, ignored retained TOML, the v3 raw prior, and retired v1/v2
+`commit-confirm-journal.json` contain normalized TOML with credentials/keys;
 redacted history/status output does not make these files safe to publish. The
 fixed `commit-confirm-v3-metadata.json` and config-adjacent
 `commit-confirm-locator.json` contain no raw TOML but remain confidential
@@ -356,19 +354,15 @@ files are owner-only (`0600`) under the documented private-parent policy.
 Production publishes raw prior, then metadata, then the locator as sole boot
 authority. Durable locator unlink and parent `fsync` is terminal; only later
 verified exact metadata/raw cleanup and pending-directory `fsync` are
-warning-only. Frozen v2-locator and
-locator-free v1 readers remain for compatibility and never receive new writes.
-V2 config-history semantics are unchanged: external-source identity is hashed,
-not archived, so rollback requires one detached load to reproduce the recorded
-TOML, manifest, and source digest exactly. Unreadable rows and legacy rows with
-external declarations fail closed. Keep `runtime_state_dir` and backups on
-owner-controlled local storage as secret-bearing configuration, not telemetry.
+warning-only. Retired authority refuses untouched; v3 is the sole reader/writer.
+V2 history does not archive sources; rollback must reproduce their identity.
+Keep owner-controlled local storage as secret-bearing configuration, not telemetry.
 
 `ListConfigHistory` exposes explicit provenance status without inferring trust
 from a readable file or filename digest. Its additive config-source digest is
 defined over the normalized-TOML digest plus the canonical accepted rpol/dataset
-source roster. New rows are `RECORDED`; retained legacy rows remain
-`LEGACY_TOML_ONLY` with an empty config-source digest. Unreadable rows
+source roster. New rows are `RECORDED`; enum value `LEGACY_TOML_ONLY` is
+receive-only for an N-1 server and is never emitted by v0.65. Unreadable rows
 return `UNREADABLE`, empty TOML and source digests, and a constant summary so
 paths, filenames, raw errors, and unverified digest claims do not cross the API
 boundary.

@@ -22,6 +22,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- Legacy TOML config-history rows and v1/v2 commit-confirm readers are retired.
+  V2 JSON stays active; old TOML is ignored and retained. Finish old confirmed
+  transactions before upgrade. Retired authority makes v0.65 refuse untouched:
+  recover with rustbgpd v0.64.0, or delete only after proving it terminal and intended.
 - Experimental Paths-Limit state no longer emits the ambiguous raw
   `effective_send_max` sentinel. Protobuf clients must read optional
   `effective_send_limit` (absent = inactive, zero = unlimited, non-zero =

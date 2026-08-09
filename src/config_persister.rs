@@ -629,10 +629,7 @@ remote_asn = 65002
         assert_eq!(entries.len(), 2);
         let read_v2 = |row: &crate::config_history::v2::StoredRow| {
             let crate::config_history::v2::StoredPayload::V2(envelope) =
-                crate::config_history::v2::read_mixed(&history, row).unwrap()
-            else {
-                panic!("persister history rows must be v2");
-            };
+                crate::config_history::v2::read_mixed(&history, row).unwrap();
             envelope.normalized_toml
         };
         assert_eq!(
@@ -683,10 +680,7 @@ remote_asn = 65002
         let entries = crate::config_history::v2::scan_mixed(&history).unwrap();
         assert_eq!(entries.len(), 2);
         let crate::config_history::v2::StoredPayload::V2(newest) =
-            crate::config_history::v2::read_mixed(&history, &entries[0]).unwrap()
-        else {
-            panic!("refreshed history row must be v2");
-        };
+            crate::config_history::v2::read_mixed(&history, &entries[0]).unwrap();
         assert_eq!(
             newest.normalized_toml,
             persisted_config_document(&refreshed).unwrap()
@@ -931,7 +925,7 @@ log_format = "json"
     /// the writer's 0700 tightening, or making the reader chmod turns one of
     /// the pre-run mode/row assertions red.
     #[test]
-    fn constructor_tightens_legacy_directory_and_records_exact_v2_boot_snapshot() {
+    fn constructor_tightens_history_directory_and_retains_ignored_toml() {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
         let dir = tempfile::tempdir().unwrap();
@@ -939,7 +933,9 @@ log_format = "json"
         let history = crate::config_history::history_dir(&state_dir);
         std::fs::create_dir_all(&history).unwrap();
         std::fs::set_permissions(&history, std::fs::Permissions::from_mode(0o755)).unwrap();
-        crate::config_history::record(&history, "[global]\nasn = 64512\n").unwrap();
+        let retired = history.join(format!("0000000001-1-{}.toml", "0".repeat(64)));
+        let retired_bytes = b"retired history bytes";
+        std::fs::write(&retired, retired_bytes).unwrap();
         assert!(
             crate::config_history::list_mixed(&history).is_err(),
             "the reader must not chmod a legacy directory"
@@ -958,21 +954,15 @@ log_format = "json"
 
         assert_eq!(std::fs::metadata(&history).unwrap().mode() & 0o777, 0o700);
         let rows = crate::config_history::v2::scan_mixed(&history).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert!(
-            rows.iter().any(|row| {
-                row.status == crate::config_history::v2::StoredStatus::LegacyTomlOnly
-            })
+        assert_eq!(rows.len(), 1);
+        assert_eq!(std::fs::read(retired).unwrap(), retired_bytes);
+        let recorded = &rows[0];
+        assert_eq!(
+            recorded.status,
+            crate::config_history::v2::StoredStatus::Recorded
         );
-        let recorded = rows
-            .iter()
-            .find(|row| row.status == crate::config_history::v2::StoredStatus::Recorded)
-            .unwrap();
         let crate::config_history::v2::StoredPayload::V2(envelope) =
-            crate::config_history::v2::read_mixed(&history, recorded).unwrap()
-        else {
-            panic!("recorded row must decode as v2");
-        };
+            crate::config_history::v2::read_mixed(&history, recorded).unwrap();
         assert_eq!(envelope.normalized_toml.as_bytes(), exact);
     }
 

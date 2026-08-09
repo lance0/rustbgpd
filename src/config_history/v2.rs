@@ -103,7 +103,6 @@ fn record_v2_with(
     }
     if let Some(newest) = rows.first()
         && newest.status == StoredStatus::Recorded
-        && newest.format == StoredFormat::V2
         && open_and_decode(&directory, newest, true).is_ok_and(|(payload, _)| {
             matches!(payload, StoredPayload::V2(envelope)
                 if envelope.normalized_toml.as_bytes() == normalized_toml.as_bytes()
@@ -298,26 +297,17 @@ fn metadata_at(directory: &File, name: &OsStr) -> io::Result<AtMetadata> {
 fn parse_stage_name(name: &OsStr) -> Option<ParsedName> {
     let text = name.to_str()?;
     let final_name = text.strip_prefix('.')?.strip_suffix(".tmp")?;
-    let parsed = parse_mixed_name(OsStr::new(final_name))?;
-    (parsed.format == StoredFormat::V2).then_some(parsed)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StoredFormat {
-    Legacy,
-    V2,
+    parse_v2_name(OsStr::new(final_name))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StoredStatus {
-    LegacyTomlOnly,
     Recorded,
     Unreadable,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct StoredRow {
-    pub(super) format: StoredFormat,
     pub(super) index: usize,
     pub(super) filename: OsString,
     pub(super) sequence: u64,
@@ -334,18 +324,17 @@ type EntryIdentity = (u64, u64, u64, i64, i64);
 
 #[derive(Debug)]
 pub(crate) enum StoredPayload {
-    Legacy(String),
     V2(Envelope),
 }
 
 struct ParsedName {
-    format: StoredFormat,
     sequence: u64,
     timestamp: u64,
     digest: [u8; 32],
 }
 
-/// Scan both generations without exposing v2 entries to the legacy rollback API.
+/// Scan active v2 entries. Retired TOML entries are foreign files: they are
+/// ignored and retained rather than decoded, indexed, or evicted.
 pub(crate) fn scan_mixed(dir: &Path) -> io::Result<Vec<StoredRow>> {
     let directory = match open_directory(dir) {
         Ok(file) => file,
@@ -364,12 +353,11 @@ fn scan_pinned(directory: &File, display_path: &Path) -> io::Result<Vec<StoredRo
     for item in entries.iter() {
         let item = item.map_err(errno)?;
         let filename = OsString::from_vec(item.file_name().to_bytes().to_vec());
-        let Some(parsed) = parse_mixed_name(&filename) else {
+        let Some(parsed) = parse_v2_name(&filename) else {
             continue;
         };
         let path = display_path.join(&filename);
         let mut row = StoredRow {
-            format: parsed.format,
             index: 0,
             filename,
             sequence: parsed.sequence,
@@ -384,11 +372,6 @@ fn scan_pinned(directory: &File, display_path: &Path) -> io::Result<Vec<StoredRo
         if let Ok((payload, identity)) = open_and_decode(directory, &row, false) {
             row.identity = Some(identity);
             match payload {
-                StoredPayload::Legacy(bytes) => {
-                    row.status = StoredStatus::LegacyTomlOnly;
-                    row.verified_sha256 = Some(Sha256::digest(&bytes).into());
-                    row.redacted_summary = Some(super::summarize(&bytes));
-                }
                 StoredPayload::V2(envelope) => {
                     row.status = StoredStatus::Recorded;
                     row.verified_sha256 = Some(envelope.sha256);
@@ -499,48 +482,26 @@ fn open_and_decode(
         metadata.ctime(),
         metadata.ctime_nsec(),
     );
-    let cap = cap_for_format(row.format);
     let checked = CheckedMetadata {
         regular: metadata.is_file(),
         uid: metadata.uid(),
         mode: metadata.mode(),
         len: metadata.len(),
     };
-    let bytes = read_bounded(file, checked, geteuid().as_raw(), cap)?;
-    match row.format {
-        StoredFormat::Legacy => {
-            let digest: [u8; 32] = Sha256::digest(&bytes).into();
-            let parsed = parse_mixed_name(&row.filename)
-                .ok_or_else(|| invalid("legacy config history filename changed"))?;
-            if digest != parsed.digest || require_digest && row.verified_sha256 != Some(digest) {
-                return Err(invalid("legacy config history digest changed"));
-            }
-            let text = String::from_utf8(bytes).map_err(invalid)?;
-            Ok((StoredPayload::Legacy(text), identity))
-        }
-        StoredFormat::V2 => {
-            let envelope = decode_envelope(&bytes)?;
-            let parsed = parse_mixed_name(&row.filename)
-                .ok_or_else(|| invalid("v2 config history filename changed"))?;
-            if envelope.sequence != parsed.sequence
-                || envelope.timestamp_unix_seconds != parsed.timestamp
-                || envelope.source_sha256 != parsed.digest
-                || require_digest
-                    && (row.verified_sha256 != Some(envelope.sha256)
-                        || row.verified_source_sha256 != Some(envelope.source_sha256))
-            {
-                return Err(invalid("v2 config history filename/envelope mismatch"));
-            }
-            Ok((StoredPayload::V2(envelope), identity))
-        }
+    let bytes = read_bounded(file, checked, geteuid().as_raw(), MAX_ENVELOPE as u64)?;
+    let envelope = decode_envelope(&bytes)?;
+    let parsed = parse_v2_name(&row.filename)
+        .ok_or_else(|| invalid("v2 config history filename changed"))?;
+    if envelope.sequence != parsed.sequence
+        || envelope.timestamp_unix_seconds != parsed.timestamp
+        || envelope.source_sha256 != parsed.digest
+        || require_digest
+            && (row.verified_sha256 != Some(envelope.sha256)
+                || row.verified_source_sha256 != Some(envelope.source_sha256))
+    {
+        return Err(invalid("v2 config history filename/envelope mismatch"));
     }
-}
-
-const fn cap_for_format(format: StoredFormat) -> u64 {
-    match format {
-        StoredFormat::Legacy => super::MAX_ENTRY_BYTES,
-        StoredFormat::V2 => MAX_ENVELOPE as u64,
-    }
+    Ok((StoredPayload::V2(envelope), identity))
 }
 
 #[derive(Clone, Copy)]
@@ -572,16 +533,8 @@ fn read_bounded(
     Ok(bytes)
 }
 
-fn parse_mixed_name(name: &OsStr) -> Option<ParsedName> {
+fn parse_v2_name(name: &OsStr) -> Option<ParsedName> {
     let name = name.to_str()?;
-    if let Some((sequence, timestamp, digest)) = super::parse_entry_name(name) {
-        return Some(ParsedName {
-            format: StoredFormat::Legacy,
-            sequence,
-            timestamp,
-            digest: decode_digest(&digest)?,
-        });
-    }
     let stem = name.strip_prefix("v2-")?.strip_suffix(".json")?;
     let mut parts = stem.split('-');
     let sequence_text = parts.next()?;
@@ -596,7 +549,6 @@ fn parse_mixed_name(name: &OsStr) -> Option<ParsedName> {
         return None;
     }
     Some(ParsedName {
-        format: StoredFormat::V2,
         sequence: sequence_text.parse().ok()?,
         timestamp: timestamp_text.parse().ok()?,
         digest: decode_digest(digest_text)?,
@@ -951,11 +903,7 @@ mod tests {
     }
 
     fn recorded_rows(dir: &Path) -> Vec<StoredRow> {
-        scan_mixed(dir)
-            .unwrap()
-            .into_iter()
-            .filter(|row| row.format == StoredFormat::V2)
-            .collect()
+        scan_mixed(dir).unwrap()
     }
 
     fn assert_error(result: io::Result<impl Sized>, text: &str) {
@@ -1421,32 +1369,28 @@ mod tests {
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), before);
     }
 
-    /// LOAD-BEARING BREAK: pathname enumeration after pinning can pair decoy
-    /// names with opens against a different directory authority.
+    /// LOAD-BEARING BREAK: pinned enumeration must stay on the original descriptor.
     #[test]
     fn pinned_scan_enumerates_the_pinned_descriptor_after_path_replacement() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("history");
         fs::create_dir(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-        let old = b"old";
-        let old_name = format!("1-1-{}.toml", encode_hex(&Sha256::digest(old)));
-        write_private(&path.join(&old_name), old);
+        let mut envelope = sample();
+        envelope.sequence = 1;
+        let old_name = v2_name(&envelope);
+        write_v2(&path, &envelope);
         let pinned = open_directory(&path).unwrap();
         let moved = root.path().join("moved");
         fs::rename(&path, &moved).unwrap();
         fs::create_dir(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-        let decoy = b"decoy";
-        write_private(
-            &path.join(format!("2-1-{}.toml", encode_hex(&Sha256::digest(decoy)))),
-            decoy,
-        );
+        envelope.sequence = 2;
+        write_v2(&path, &envelope);
         let rows = scan_pinned(&pinned, &path).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].filename, old_name.as_str());
-        assert_eq!(rows[0].status, StoredStatus::LegacyTomlOnly);
-        assert_eq!(rows[0].verified_sha256, Some(Sha256::digest(old).into()));
+        assert_eq!(rows[0].status, StoredStatus::Recorded);
     }
 
     #[test]
@@ -1467,94 +1411,22 @@ mod tests {
         assert!(scan_mixed(&link).is_err());
     }
 
-    /// LOAD-BEARING BREAK: sequence-only unstable sorting or format grouping
-    /// changes the deterministic mixed-history index assignment.
+    /// LOAD-BEARING BREAK: duplicate active sequences must poison every member.
     #[test]
-    fn mixed_order_is_sequence_then_raw_basename() {
+    fn every_duplicate_v2_sequence_member_is_poisoned() {
         let dir = tempfile::tempdir().unwrap();
-        let legacy = b"legacy";
-        let hash = encode_hex(&Sha256::digest(legacy));
-        write_private(&dir.path().join(format!("7-8-{hash}.toml")), legacy);
         let mut envelope = sample();
-        envelope.sequence = 9;
-        envelope.timestamp_unix_seconds = 10;
+        envelope.sequence = 42;
+        envelope.timestamp_unix_seconds = 20;
         write_v2(dir.path(), &envelope);
-        envelope.sequence = 7;
-        envelope.timestamp_unix_seconds = 11;
+        envelope.timestamp_unix_seconds = 21;
         write_v2(dir.path(), &envelope);
-
         let rows = scan_mixed(dir.path()).unwrap();
-        assert_eq!(
-            rows.iter().map(|r| r.sequence).collect::<Vec<_>>(),
-            [9, 7, 7]
-        );
-        assert!(rows[1].filename.as_bytes() < rows[2].filename.as_bytes());
-        assert!(
-            rows[1..]
-                .iter()
-                .all(|r| r.status == StoredStatus::Unreadable)
-        );
-        assert!(rows[1..].iter().all(|r| r.verified_sha256.is_none()));
-    }
-
-    /// LOAD-BEARING BREAK: poisoning only the later duplicate leaves an
-    /// ambiguous rollback identity eligible in legacy/v2 and same-format pairs.
-    #[test]
-    fn every_duplicate_sequence_member_is_poisoned() {
-        for formats in [(false, false), (false, true), (true, true)] {
-            let dir = tempfile::tempdir().unwrap();
-            for (offset, is_v2) in [formats.0, formats.1].into_iter().enumerate() {
-                if is_v2 {
-                    let mut envelope = sample();
-                    envelope.sequence = 42;
-                    envelope.timestamp_unix_seconds += offset as u64;
-                    write_v2(dir.path(), &envelope);
-                } else {
-                    let bytes = format!("legacy-{offset}");
-                    let hash = encode_hex(&Sha256::digest(bytes.as_bytes()));
-                    write_private(
-                        &dir.path().join(format!("42-{}-{hash}.toml", 20 + offset)),
-                        bytes.as_bytes(),
-                    );
-                }
-            }
-            let rows = scan_mixed(dir.path()).unwrap();
-            assert_eq!(rows.len(), 2);
-            assert!(rows.iter().all(|r| r.status == StoredStatus::Unreadable));
-            assert!(rows.iter().all(|r| r.verified_sha256.is_none()));
-            for row in &rows {
-                fs::remove_file(&row.path).unwrap();
-                assert_error(read_mixed(dir.path(), row), "not readable");
-            }
-        }
-    }
-
-    /// LOAD-BEARING BREAK: digest-based deduplication wrongly poisons distinct
-    /// sequence identities carrying the same verified bytes.
-    #[test]
-    fn equal_digest_at_distinct_sequences_remains_valid() {
-        let dir = tempfile::tempdir().unwrap();
-        let bytes = b"same";
-        let hash = encode_hex(&Sha256::digest(bytes));
-        for sequence in [1, 2] {
-            write_private(&dir.path().join(format!("{sequence}-1-{hash}.toml")), bytes);
-        }
-        let rows = scan_mixed(dir.path()).unwrap();
+        assert_eq!(rows.len(), 2);
         assert!(
             rows.iter()
-                .all(|r| r.status == StoredStatus::LegacyTomlOnly)
+                .all(|row| row.status == StoredStatus::Unreadable)
         );
-    }
-
-    #[test]
-    fn matching_digest_invalid_utf8_legacy_is_unreadable() {
-        let dir = tempfile::tempdir().unwrap();
-        let bytes = [0xff];
-        let name = format!("1-1-{}.toml", encode_hex(&Sha256::digest(bytes)));
-        write_private(&dir.path().join(name), &bytes);
-        let row = scan_mixed(dir.path()).unwrap().remove(0);
-        assert_eq!(row.status, StoredStatus::Unreadable);
-        assert!(row.verified_sha256.is_none());
     }
 
     /// LOAD-BEARING BREAK: trusting any filename identity or allowing codec
@@ -1640,36 +1512,6 @@ mod tests {
         }
     }
 
-    /// LOAD-BEARING BREAK: following links, accepting public modes, or opening
-    /// FIFOs without `O_NONBLOCK` can disclose data or hang the daemon.
-    #[test]
-    fn unsafe_entry_types_and_modes_are_unreadable() {
-        use nix::sys::stat::Mode;
-        use nix::unistd::mkfifo;
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
-        let dir = tempfile::tempdir().unwrap();
-        let bytes = b"legacy";
-        let hash = encode_hex(&Sha256::digest(bytes));
-        let target = dir.path().join("target");
-        write_private(&target, bytes);
-        let regular = dir.path().join(format!("1-1-{hash}.toml"));
-        write_private(&regular, bytes);
-        fs::set_permissions(&regular, fs::Permissions::from_mode(0o644)).unwrap();
-        let link = dir.path().join(format!("2-1-{hash}.toml"));
-        symlink(&target, link).unwrap();
-        let fifo = dir.path().join(format!("3-1-{hash}.toml"));
-        mkfifo(&fifo, Mode::from_bits_truncate(0o600)).unwrap();
-        symlink(
-            dir.path().join("absent"),
-            dir.path().join(format!("4-1-{hash}.toml")),
-        )
-        .unwrap();
-        let rows = scan_mixed(dir.path()).unwrap();
-        assert_eq!(rows.len(), 4);
-        assert!(rows.iter().all(|r| r.status == StoredStatus::Unreadable));
-    }
-
     struct PanicReader;
     impl Read for PanicReader {
         fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
@@ -1716,8 +1558,42 @@ mod tests {
         let mut reader = CountingReader(0);
         assert_error(read_bounded(&mut reader, safe(10), 9, 10), "changed size");
         assert_eq!(reader.0, 11);
-        assert_eq!(cap_for_format(StoredFormat::Legacy), 10 * 1024 * 1024);
-        assert_eq!(cap_for_format(StoredFormat::V2), 32 * 1024 * 1024);
+    }
+
+    /// LOAD-BEARING BREAK: following links, accepting public modes, or opening
+    /// FIFOs without `O_NONBLOCK` can disclose data or hang the daemon.
+    #[test]
+    fn unsafe_active_v2_entry_types_and_modes_are_unreadable() {
+        use nix::sys::stat::Mode;
+        use nix::unistd::mkfifo;
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir().unwrap();
+        let named = |sequence| {
+            let mut envelope = sample();
+            envelope.sequence = sequence;
+            (v2_name(&envelope), encode_envelope(&envelope).unwrap())
+        };
+        let (regular_name, regular_bytes) = named(1);
+        let regular = dir.path().join(regular_name);
+        write_private(&regular, &regular_bytes);
+        fs::set_permissions(&regular, fs::Permissions::from_mode(0o644)).unwrap();
+        let target = dir.path().join("target");
+        write_private(&target, b"target");
+        symlink(&target, dir.path().join(named(2).0)).unwrap();
+        mkfifo(
+            &dir.path().join(named(3).0),
+            Mode::from_bits_truncate(0o600),
+        )
+        .unwrap();
+        symlink(dir.path().join("absent"), dir.path().join(named(4).0)).unwrap();
+
+        let rows = scan_mixed(dir.path()).unwrap();
+        assert_eq!(rows.len(), 4);
+        assert!(
+            rows.iter()
+                .all(|row| row.status == StoredStatus::Unreadable)
+        );
     }
 
     type SnapshotItem = (OsString, u8, u32, u32, u32, u64, u64, u64, Vec<u8>);
@@ -1814,20 +1690,6 @@ mod tests {
         assert_error(read_mixed(dir.path(), &row), "not readable");
     }
 
-    /// LOAD-BEARING BREAK: wiring exact v2 finals into the legacy list makes
-    /// JSON bytes reachable by the current String rollback path.
-    #[test]
-    fn v2_remains_invisible_to_public_legacy_reader() {
-        let dir = tempfile::tempdir().unwrap();
-        let toml = "asn = 64512\n";
-        assert!(record_v2(dir.path(), toml, manifest_for(toml)).unwrap());
-        assert!(super::super::list(dir.path()).unwrap().is_empty());
-        assert_eq!(
-            super::super::read_entry(dir.path(), 0).unwrap_err().kind(),
-            io::ErrorKind::NotFound
-        );
-    }
-
     /// LOAD-BEARING BREAK: failing to assign unique contiguous sequences or
     /// changing the retention bound leaves the wrong 20 logical rows.
     #[test]
@@ -1852,8 +1714,8 @@ mod tests {
         assert!(rows.iter().all(|row| row.status == StoredStatus::Recorded));
     }
 
-    /// LOAD-BEARING BREAK: comparing TOML without the complete manifest, or
-    /// accepting a legacy/corrupt newest row, loses a distinct source snapshot.
+    /// LOAD-BEARING BREAK: TOML-only comparison or accepting a corrupt newest
+    /// v2 row loses a distinct source snapshot.
     #[test]
     fn writer_dedupe_requires_exact_toml_manifest_and_valid_v2_newest() {
         let root = tempfile::tempdir().unwrap();
@@ -2277,26 +2139,26 @@ mod tests {
         assert_eq!(observed, [WriteStep::Pinned, WriteStep::Publish]);
     }
 
-    /// LOAD-BEARING BREAK: sequence selection that ignores either generation
-    /// can reuse an identity; wrapping at `u64::MAX` silently poisons history.
+    /// LOAD-BEARING BREAK: retired TOML must not affect active sequencing or
+    /// eviction, while an active maximum sequence must still fail closed.
     #[test]
-    fn writer_mixed_sequence_and_overflow_are_strict() {
+    fn writer_ignores_retired_toml_and_active_overflow_is_strict() {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("history");
         fs::create_dir(&dir).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
-        let bytes = b"legacy";
-        let digest = encode_hex(&Sha256::digest(bytes));
-        write_private(&dir.join(format!("8-1-{digest}.toml")), bytes);
+        let retired = dir.join(format!("8-1-{}.toml", "0".repeat(64)));
+        write_private(&retired, b"retired");
         assert!(record_v2(&dir, "x = 1\n", manifest_for("x = 1\n")).unwrap());
-        assert_eq!(recorded_rows(&dir)[0].sequence, 9);
+        assert_eq!(recorded_rows(&dir)[0].sequence, 1);
+        assert_eq!(fs::read(&retired).unwrap(), b"retired");
 
         let overflow = root.path().join("overflow");
         fs::create_dir(&overflow).unwrap();
         fs::set_permissions(&overflow, fs::Permissions::from_mode(0o700)).unwrap();
         write_private(
-            &overflow.join(format!("{}-1-{digest}.toml", u64::MAX)),
-            bytes,
+            &overflow.join(format!("v2-{}-1-{}.json", u64::MAX, "0".repeat(64))),
+            b"corrupt",
         );
         assert_error(
             record_v2(&overflow, "x = 1\n", manifest_for("x = 1\n")),
@@ -2320,8 +2182,11 @@ mod tests {
                 b"corrupt",
             );
         }
-        // A second recognized final with sequence 21 poisons both duplicates.
-        write_private(&dir.join(format!("21-1-{}.toml", "0".repeat(64))), b"bad");
+        // A second recognized v2 final with sequence 21 poisons both duplicates.
+        write_private(
+            &dir.join(format!("v2-{:020}-2-{}.json", 21, "1".repeat(64))),
+            b"bad",
+        );
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(record_v2(&dir, "x = 1\n", manifest_for("x = 1\n")).unwrap());
         assert_eq!(fs::metadata(&dir).unwrap().mode() & 0o7777, 0o700);
@@ -2330,8 +2195,7 @@ mod tests {
     }
 
     /// LOAD-BEARING BREAK: a duplicate or unknown-version newest row cannot be
-    /// treated as a valid v2 dedupe target, including writable downgrade where
-    /// a legacy writer reuses a sequence already occupied by v2.
+    /// treated as a valid v2 dedupe target.
     #[test]
     fn writer_refuses_duplicate_and_unknown_newest_dedupe() {
         let root = tempfile::tempdir().unwrap();
@@ -2339,11 +2203,10 @@ mod tests {
 
         let duplicate = root.path().join("duplicate");
         record_v2(&duplicate, toml, manifest_for(toml)).unwrap();
-        let digest = encode_hex(&Sha256::digest(toml.as_bytes()));
-        write_private(
-            &duplicate.join(format!("1-1-{digest}.toml")),
-            toml.as_bytes(),
-        );
+        let mut duplicate_envelope = sample();
+        duplicate_envelope.sequence = 1;
+        duplicate_envelope.timestamp_unix_seconds = 1;
+        write_v2(&duplicate, &duplicate_envelope);
         let poisoned = scan_mixed(&duplicate).unwrap();
         assert_eq!(poisoned.len(), 2);
         assert!(
@@ -2357,7 +2220,7 @@ mod tests {
         let unknown = root.path().join("unknown");
         record_v2(&unknown, toml, manifest_for(toml)).unwrap();
         let row = recorded_rows(&unknown).remove(0);
-        let parsed = parse_mixed_name(&row.filename).unwrap();
+        let parsed = parse_v2_name(&row.filename).unwrap();
         let manifest = manifest_for(toml);
         let aligned = Envelope {
             version: VERSION,

@@ -29,6 +29,8 @@ const MAX_METADATA_BYTES: usize = 34 * 1024 * 1024;
 const MAX_LOCATOR_BYTES: usize = 512 * 1024;
 const MAX_PATH_BYTES: usize = 64 * 1024;
 const LOCATOR_SUFFIX: &str = ".commit-confirm-locator.json";
+const RETIRED_V2_LOCATOR: &str = "retired v2 commit-confirm locator";
+const RETIRED_LOCATOR_FREE_AUTHORITY: &str = "retired locator-free commit-confirm authority exists; recover it with rustbgpd v0.64.0, or delete it only after proving the transaction is terminal and the current config is intended; the artifact was left untouched";
 pub(crate) const RAW_FILE_NAME: &str = "commit-confirm-v3-prior.toml";
 pub(crate) const METADATA_FILE_NAME: &str = "commit-confirm-v3-metadata.json";
 
@@ -79,10 +81,17 @@ impl LaunchIdentity {
         PathBuf::from(OsString::from_vec(bytes))
     }
 
-    /// Inspect v3 before candidate access. A missing locator or canonical v2
-    /// locator returns `Ok(None)` so the frozen compatibility lane can run.
+    /// Inspect v3 before candidate access. A retired v2 locator is refused
+    /// untouched so an N-1 daemon can perform the only supported recovery.
     pub(crate) fn boot_revert_check(&self) -> Result<Option<BootRevert>, String> {
         self.boot_revert_check_io().map_err(|error| {
+            let message = error.to_string();
+            if message == RETIRED_V2_LOCATOR {
+                return "retired v2 commit-confirm authority exists; recover it with rustbgpd v0.64.0, or delete the locator only after proving the transaction is terminal and the current config is intended; the artifact was left untouched".to_string();
+            }
+            if message == RETIRED_LOCATOR_FREE_AUTHORITY {
+                return RETIRED_LOCATOR_FREE_AUTHORITY.to_string();
+            }
             format!(
                 "v3 commit-confirm boot authority is invalid or unavailable ({:?}); inspect the config-adjacent locator and fixed owner-only pending files",
                 error.kind()
@@ -105,7 +114,7 @@ impl LaunchIdentity {
         locator.directory.validate_private()?;
         let (locator_bytes, locator_identity) = locator.read_bounded(MAX_LOCATOR_BYTES)?;
         if locator_bytes.starts_with(b"{\"version\":2,") {
-            return Ok(None);
+            return Err(invalid(RETIRED_V2_LOCATOR));
         }
         let locator_wire = decode_locator(&locator_bytes)?;
 
@@ -138,6 +147,11 @@ impl LaunchIdentity {
         let accepted = AcceptedConfigSnapshot::load_retained(raw_toml, &recorded_target)
             .map_err(|_| invalid("journaled prior sources are unavailable or changed"))?;
         verify_snapshot(&accepted, raw_toml, &metadata_wire)?;
+
+        super::refuse_retired_journal(&super::journal_path(
+            &accepted.config_ref().runtime_state_dir(),
+        ))
+        .map_err(|_| invalid(RETIRED_LOCATOR_FREE_AUTHORITY))?;
 
         // Nothing above this point may touch the candidate or backup slot.
         let backup_name = append_name(&target.name, b".unconfirmed")?;
@@ -1355,16 +1369,18 @@ mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
-    fn config_toml(asn: u32) -> String {
+    fn config_toml(asn: u32, state: &Path) -> String {
         tier_authorized_uds_test_config(&format!(
             r#"
 [global]
 asn = {asn}
 router_id = "192.0.2.1"
 listen_port = 0
+runtime_state_dir = {state:?}
 [global.telemetry]
 log_format = "json"
-"#
+"#,
+            state = state.display().to_string(),
         ))
     }
 
@@ -1385,7 +1401,8 @@ log_format = "json"
         fs::create_dir(&state).unwrap();
         private(&state);
         let config = root.path().join("rustbgpd.toml");
-        let parsed = Config::load_toml_with_diagnostics(&config_toml(64_512), "prior").unwrap();
+        let parsed =
+            Config::load_toml_with_diagnostics(&config_toml(64_512, &state), "prior").unwrap();
         let prior = AcceptedConfigSnapshot::from_config_for_test(parsed);
         fs::write(&config, prior.normalized_toml()).unwrap();
         let launch = LaunchIdentity::resolve(&config).unwrap();
@@ -1729,29 +1746,73 @@ log_format = "json"
     }
 
     #[test]
-    fn v3_dispatch_preserves_frozen_v1_and_v2_authority() {
-        // V1 bytes remain untouched without a locator.
-        let v1_fixture = fixture();
-        let legacy = v1_fixture
-            .state
-            .join(crate::confirm_journal::JOURNAL_FILE_NAME);
-        fs::write(
-            &legacy,
-            b"{\"confirm_id\":\"v1\",\"deadline_unix_seconds\":9,\"rollback_toml\":\"x\"}",
-        )
-        .unwrap();
-        assert!(v1_fixture.launch.boot_revert_check().unwrap().is_none());
-        assert!(legacy.exists());
+    fn canonical_v2_locator_is_refused_untouched_before_candidate_mutation() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-        // A canonical v2 locator is handed to the frozen v2 reader unchanged.
-        let v2_fixture = fixture();
-        let v2_journal = v2_fixture
-            .state
-            .join(crate::confirm_journal::JOURNAL_FILE_NAME);
-        let v2 = crate::confirm_journal::v2::LaunchIdentity::resolve(&v2_fixture.config).unwrap();
-        v2.publish(&v2_journal, "v2", 9, &v2_fixture.prior).unwrap();
-        assert!(v2_fixture.launch.boot_revert_check().unwrap().is_none());
-        fs::write(&v2_fixture.config, b"v2 candidate").unwrap();
-        assert!(v2.boot_revert_check().unwrap().is_some());
+        let fixture = fixture();
+        let locator = fixture.launch.locator_path();
+        let locator_bytes = b"{\"version\":2,\"confirm_id\":\"pending\"}\n";
+        fs::write(&locator, locator_bytes).unwrap();
+        fs::set_permissions(&locator, fs::Permissions::from_mode(0o600)).unwrap();
+        let config_before = fs::read(&fixture.config).unwrap();
+        let metadata_before = fs::metadata(&locator).unwrap();
+
+        let Err(error) = fixture.launch.boot_revert_check() else {
+            panic!("retired v2 locator must be refused");
+        };
+
+        assert!(error.contains("rustbgpd v0.64.0"), "{error}");
+        assert!(error.contains("left untouched"), "{error}");
+        assert_eq!(fs::read(&locator).unwrap(), locator_bytes);
+        assert_eq!(fs::read(&fixture.config).unwrap(), config_before);
+        let metadata_after = fs::metadata(&locator).unwrap();
+        assert_eq!(
+            (metadata_before.dev(), metadata_before.ino()),
+            (metadata_after.dev(), metadata_after.ino())
+        );
+    }
+
+    #[test]
+    fn v3_and_locator_free_authority_coexistence_is_refused_untouched() {
+        // Red proof: removing the guard consumes v3 despite retired authority.
+        let fixture = fixture();
+        fixture
+            .launch
+            .publish(&fixture.state, "v3-pending", 9, &fixture.prior)
+            .unwrap();
+        let retired = super::super::journal_path(&fixture.state);
+        fs::write(&retired, b"retired pending authority\n").unwrap();
+        fs::set_permissions(&retired, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&fixture.config, b"unconfirmed candidate\n").unwrap();
+        let paths = [
+            fixture.config.clone(),
+            fixture.launch.locator_path(),
+            fixture.raw.clone(),
+            fixture.metadata.clone(),
+            retired,
+        ];
+        let before = paths
+            .iter()
+            .map(|path| fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+
+        let Err(error) = fixture.launch.boot_revert_check() else {
+            panic!("coexisting retired authority must block v3 recovery");
+        };
+
+        assert!(error.contains("rustbgpd v0.64.0"), "{error}");
+        assert!(error.contains("left untouched"), "{error}");
+        assert!(
+            !error.contains(&fixture.state.display().to_string()),
+            "{error}"
+        );
+        assert_eq!(
+            paths
+                .iter()
+                .map(|path| fs::read(path).unwrap())
+                .collect::<Vec<_>>(),
+            before
+        );
+        assert!(!fixture.config.with_extension("toml.unconfirmed").exists());
     }
 }
