@@ -149,9 +149,29 @@ permissions:
   contents: read
 
 jobs:
+  classify_changes:
+    name: Classify interop heavy-lab paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      run_labs: ${{ steps.classify.outputs.run_labs }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Classify complete pull-request diff
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/classify_heavy_ci_paths.py
+
   # Warm one fixed-scope cache per source SHA; jobs still build and load their
   # own image, falling back to an uncached build if the cache is unavailable.
   prime_dev_image:
+    needs: classify_changes
+    if: needs.classify_changes.outputs.run_labs == 'true'
     name: Prime rustbgpd:dev build cache
     runs-on: ubuntu-latest
     timeout-minutes: 30
