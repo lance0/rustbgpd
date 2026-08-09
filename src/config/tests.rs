@@ -13573,6 +13573,390 @@ fn persisted_config_release_scale_probe() {
     assert_borrowed_persistence_probe_receipts(&borrowed, &borrowed_sha256, &owned, &owned_sha256);
 }
 
+#[derive(Clone, Debug)]
+struct PersistencePhaseRow {
+    attempt: usize,
+    pair: usize,
+    slot: usize,
+    arm: String,
+    phase: String,
+    policy_definitions: usize,
+    statements: usize,
+    total: usize,
+    bytes: usize,
+    sha256: String,
+    elapsed_ns: u128,
+    allocated: usize,
+    resident: usize,
+    rss: usize,
+    hwm: usize,
+}
+
+#[cfg(all(target_os = "linux", feature = "jemalloc"))]
+fn persistence_phase_memory() -> (usize, usize, usize, usize) {
+    use tikv_jemalloc_ctl::{epoch, stats};
+    epoch::advance().unwrap();
+    let status = fs::read_to_string("/proc/self/status").unwrap();
+    let read = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|line| line.split_whitespace().next())
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap()
+            * 1024
+    };
+    (
+        stats::allocated::read().unwrap(),
+        stats::resident::read().unwrap(),
+        read("VmRSS:"),
+        read("VmHWM:"),
+    )
+}
+
+#[cfg(all(target_os = "linux", feature = "jemalloc"))]
+fn run_persistence_phase_child(arm: &str, attempt: usize, receipt: &Path) {
+    use sha2::{Digest as _, Sha256};
+    use std::{fmt::Write as _, time::Instant};
+
+    let config = persistence_probe_fixture();
+    let started = Instant::now();
+    let mut snapshots = Vec::new();
+    let mut observe = |phase: &'static str| {
+        snapshots.push((
+            phase,
+            started.elapsed().as_nanos(),
+            persistence_phase_memory(),
+        ));
+    };
+    observe("fixture-built");
+    let document = match arm {
+        "production" => {
+            let document = persisted_config_document(&config).unwrap();
+            observe("production-complete");
+            document
+        }
+        "phased" => {
+            let rendered =
+                super::canonical::render_with_phase_observer(&config, &mut observe).unwrap();
+            let document = format!("{PERSISTED_CONFIG_HEADER}\n{rendered}");
+            std::hint::black_box((&rendered, &document));
+            observe("header-appended");
+            assert_eq!(document, persisted_config_document(&config).unwrap());
+            document
+        }
+        other => panic!("unknown persistence phase arm {other}"),
+    };
+    let sha256 = Sha256::digest(document.as_bytes()).iter().fold(
+        String::with_capacity(64),
+        |mut out, byte| {
+            write!(&mut out, "{byte:02x}").unwrap();
+            out
+        },
+    );
+    let mut out = String::new();
+    for (phase, elapsed_ns, (allocated, resident, rss, hwm)) in snapshots {
+        writeln!(
+            out,
+            "{attempt}\t{}\t{}\t{arm}\t{phase}\t320\t10000\t3200000\t{}\t{sha256}\t{elapsed_ns}\t{allocated}\t{resident}\t{rss}\t{hwm}",
+            attempt.div_ceil(2),
+            ((attempt - 1) % 2) + 1,
+            document.len(),
+        )
+        .unwrap();
+    }
+    fs::write(receipt, out).unwrap();
+}
+
+fn parse_persistence_phase_receipt(source: &str) -> Vec<PersistencePhaseRow> {
+    const HEADER: &str = "attempt\tpair\tslot_in_pair\tarm\tphase\tpolicy_definitions\tstatements_per_definition\ttotal_statements\tdocument_bytes\tsha256\telapsed_ns\tjemalloc_allocated_bytes\tjemalloc_resident_bytes\tvmrss_bytes\tvmhwm_bytes";
+    let mut lines = source.lines();
+    assert_eq!(lines.next(), Some(HEADER));
+    lines
+        .map(|line| {
+            let fields: Vec<_> = line.split('\t').collect();
+            assert_eq!(fields.len(), 15, "malformed receipt row: {line}");
+            let number = |index: usize| fields[index].parse::<usize>().unwrap();
+            let row = PersistencePhaseRow {
+                attempt: number(0),
+                pair: number(1),
+                slot: number(2),
+                arm: fields[3].to_string(),
+                phase: fields[4].to_string(),
+                policy_definitions: number(5),
+                statements: number(6),
+                total: number(7),
+                bytes: number(8),
+                sha256: fields[9].to_string(),
+                elapsed_ns: fields[10].parse().unwrap(),
+                allocated: number(11),
+                resident: number(12),
+                rss: number(13),
+                hwm: number(14),
+            };
+            assert!(row.elapsed_ns > 0 && row.allocated > 0 && row.resident > 0);
+            assert!(row.rss > 0 && row.hwm > 0);
+            assert!(row.bytes > 0);
+            assert!(
+                row.sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            );
+            row
+        })
+        .collect()
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum PersistencePhaseDecision {
+    Go,
+    NoGo,
+    Inconclusive,
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "single verifier owns the phase roster and decision boundary"
+)]
+fn verify_persistence_phase_receipt(source: &str) -> PersistencePhaseDecision {
+    const MIB: usize = 1024 * 1024;
+    const HWM_ACCOUNTING_JITTER: usize = 4 * MIB;
+    let rows = parse_persistence_phase_receipt(source);
+    assert_eq!(rows.len(), 21);
+    assert!(rows.iter().all(|row| (1..=6).contains(&row.attempt)));
+    let order = [
+        "production",
+        "phased",
+        "phased",
+        "production",
+        "production",
+        "phased",
+    ];
+    let first = rows.first().unwrap();
+    for attempt in 1..=6 {
+        let attempt_rows: Vec<_> = rows.iter().filter(|row| row.attempt == attempt).collect();
+        let phases: Vec<_> = attempt_rows.iter().map(|row| row.phase.as_str()).collect();
+        let expected = if order[attempt - 1] == "production" {
+            vec!["fixture-built", "production-complete"]
+        } else {
+            vec![
+                "fixture-built",
+                "graph-built",
+                "rendered-with-graph",
+                "graph-dropped",
+                "header-appended",
+            ]
+        };
+        assert_eq!(phases, expected, "attempt {attempt} phase roster");
+        for pair in attempt_rows.windows(2) {
+            assert!(pair[0].elapsed_ns < pair[1].elapsed_ns);
+            assert!(pair[0].hwm.saturating_sub(pair[1].hwm) <= HWM_ACCOUNTING_JITTER);
+        }
+        for row in attempt_rows {
+            assert_eq!(
+                (row.pair, row.slot, row.arm.as_str()),
+                (
+                    attempt.div_ceil(2),
+                    ((attempt - 1) % 2) + 1,
+                    order[attempt - 1]
+                )
+            );
+            assert_eq!(
+                (row.policy_definitions, row.statements, row.total),
+                (320, 10_000, 3_200_000)
+            );
+            assert_eq!(
+                (row.bytes, row.sha256.as_str()),
+                (first.bytes, first.sha256.as_str())
+            );
+            assert_eq!(row.sha256.len(), 64);
+        }
+    }
+    assert_eq!(rows.iter().map(|row| row.attempt).max(), Some(6));
+    let mut material_pairs = 0;
+    let mut noisy_pairs = 0;
+    for pair in 1..=3 {
+        let production_fixture = rows
+            .iter()
+            .find(|row| row.pair == pair && row.arm == "production" && row.phase == "fixture-built")
+            .unwrap();
+        let production_complete = rows
+            .iter()
+            .find(|row| row.pair == pair && row.phase == "production-complete")
+            .unwrap();
+        let phased = |phase| {
+            rows.iter()
+                .find(|row| row.pair == pair && row.arm == "phased" && row.phase == phase)
+                .unwrap()
+        };
+        let graph = phased("graph-dropped");
+        let header = phased("header-appended");
+        let phased_fixture = phased("fixture-built");
+        let live_floor = (first.bytes / 4).max(128 * MIB);
+        assert!(
+            header.allocated.saturating_sub(graph.allocated) >= live_floor,
+            "pair {pair} did not retain both rendered documents"
+        );
+        let resident_floor = (first.bytes / 10).max(64 * MIB);
+        let prior_hwm = rows
+            .iter()
+            .filter(|row| row.pair == pair && row.arm == "phased" && row.phase != "header-appended")
+            .map(|row| row.hwm)
+            .max()
+            .unwrap();
+        let peak_delta = header.hwm.saturating_sub(prior_hwm);
+        let live_delta = header
+            .resident
+            .saturating_sub(graph.resident)
+            .max(header.rss.saturating_sub(graph.rss));
+        material_pairs += usize::from(peak_delta >= resident_floor || live_delta >= resident_floor);
+        assert!(production_complete.hwm.abs_diff(header.hwm) <= 64 * MIB);
+        let fixture_noise_floor = (first.bytes / 20).max(16 * MIB);
+        noisy_pairs += usize::from(
+            production_fixture
+                .allocated
+                .abs_diff(phased_fixture.allocated)
+                > fixture_noise_floor,
+        );
+    }
+    if noisy_pairs > 0 {
+        PersistencePhaseDecision::Inconclusive
+    } else if material_pairs >= 2 {
+        PersistencePhaseDecision::Go
+    } else {
+        PersistencePhaseDecision::NoGo
+    }
+}
+
+fn retain_persistence_phase_receipt(path: &Path, source: &str) {
+    assert!(
+        !path.exists(),
+        "refusing existing receipt {}",
+        path.display()
+    );
+    fs::write(path, source).unwrap();
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
+}
+
+#[test]
+fn persisted_config_phase_receipt_is_load_bearing() {
+    let control = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/docs/perf/artifacts/persisted-config-serialization-2026-08/control.tsv"
+    ));
+    assert_eq!(
+        verify_persistence_phase_receipt(control),
+        PersistencePhaseDecision::Go
+    );
+    let edited = |edit: fn(&mut Vec<Vec<String>>)| {
+        let mut rows: Vec<_> = control
+            .lines()
+            .map(|line| line.split('\t').map(str::to_owned).collect())
+            .collect();
+        edit(&mut rows);
+        rows.into_iter()
+            .map(|row| row.join("\t"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let invalid = |edit| {
+        let source = edited(edit);
+        assert!(std::panic::catch_unwind(|| verify_persistence_phase_receipt(&source)).is_err());
+    };
+    invalid(|rows| {
+        rows.remove(4);
+    });
+    invalid(|rows| rows[1][10] = "0".into());
+    invalid(|rows| rows[1][5] = "319".into());
+    invalid(|rows| rows.retain(|row| row[0] != "6"));
+    invalid(|rows| rows[1][9] = "0".repeat(64));
+    let no_go = edited(|rows| {
+        for (production, rendered, graph, header) in
+            [(2, 5, 6, 7), (14, 10, 11, 12), (16, 19, 20, 21)]
+        {
+            let resident = rows[graph][12].clone();
+            let rss = rows[graph][13].clone();
+            let peak = rows[rendered][14].clone();
+            rows[header][12] = resident;
+            rows[header][13] = rss;
+            rows[header][14] = peak.clone();
+            rows[production][14] = peak;
+        }
+    });
+    assert_eq!(
+        verify_persistence_phase_receipt(&no_go),
+        PersistencePhaseDecision::NoGo
+    );
+    let noisy = edited(|rows| rows[3][11] = "1400000000".into());
+    assert_eq!(
+        verify_persistence_phase_receipt(&noisy),
+        PersistencePhaseDecision::Inconclusive
+    );
+    let dir = tempfile::tempdir().unwrap();
+    retain_persistence_phase_receipt(&dir.path().join("receipt.tsv"), control);
+}
+
+#[cfg(all(target_os = "linux", feature = "jemalloc"))]
+#[test]
+#[ignore = "release-only six-child 3.2M-statement phase attribution"]
+fn persisted_config_phase_attribution_release_probe() {
+    use std::process::Command;
+    const ARM: &str = "RUSTBGPD_PERSISTENCE_PHASE_ARM";
+    const ATTEMPT: &str = "RUSTBGPD_PERSISTENCE_PHASE_ATTEMPT";
+    const RECEIPT: &str = "RUSTBGPD_PERSISTENCE_PHASE_RECEIPT";
+    assert!(
+        !std::hint::black_box(cfg!(debug_assertions)),
+        "run with --release"
+    );
+    if let (Ok(arm), Ok(attempt), Ok(receipt)) = (
+        std::env::var(ARM),
+        std::env::var(ATTEMPT),
+        std::env::var(RECEIPT),
+    ) {
+        run_persistence_phase_child(&arm, attempt.parse().unwrap(), Path::new(&receipt));
+        return;
+    }
+    let executable = std::env::current_exe().unwrap();
+    let mut output = format!(
+        "{}\n",
+        "attempt\tpair\tslot_in_pair\tarm\tphase\tpolicy_definitions\tstatements_per_definition\ttotal_statements\tdocument_bytes\tsha256\telapsed_ns\tjemalloc_allocated_bytes\tjemalloc_resident_bytes\tvmrss_bytes\tvmhwm_bytes"
+    );
+    for (index, arm) in [
+        "production",
+        "phased",
+        "phased",
+        "production",
+        "production",
+        "phased",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let receipt = NamedTempFile::new().unwrap();
+        assert!(
+            Command::new(&executable)
+                .args([
+                    "config::tests::persisted_config_phase_attribution_release_probe",
+                    "--ignored",
+                    "--exact",
+                    "--nocapture"
+                ])
+                .env(ARM, arm)
+                .env(ATTEMPT, (index + 1).to_string())
+                .env(RECEIPT, receipt.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        output.push_str(&fs::read_to_string(receipt.path()).unwrap());
+    }
+    let output_path = std::env::var("RUSTBGPD_PERSISTENCE_PHASE_OUTPUT")
+        .expect("RUSTBGPD_PERSISTENCE_PHASE_OUTPUT is required");
+    let output_path = Path::new(&output_path);
+    retain_persistence_phase_receipt(output_path, &output);
+    eprintln!("decision={:?}", verify_persistence_phase_receipt(&output));
+}
+
 /// The maintenance header belongs to files the daemon writes, and nowhere
 /// else. Two neighbouring canonical renderings sit right next to the persist
 /// path and must stay clean of it: the commit-confirm snapshot token and the

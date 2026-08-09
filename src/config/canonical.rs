@@ -99,3 +99,28 @@ pub(super) fn render(config: &Config) -> Result<String, toml::ser::Error> {
     }
     toml::to_string_pretty(&CanonicalConfig::from(config))
 }
+
+/// Test-only decomposition of [`render`] at the TOML ownership boundaries.
+/// The observer runs while the serializer's table graph and then its rendered
+/// string are still live, so a release child can attribute their memory.
+#[cfg(all(test, target_os = "linux", feature = "jemalloc"))]
+pub(super) fn render_with_phase_observer(
+    config: &Config,
+    mut observe: impl FnMut(&'static str),
+) -> Result<String, toml::ser::Error> {
+    let posture = config.rfc8212_posture();
+    if posture.requires_explicit_policy {
+        return Err(serde::ser::Error::custom(
+            ConfigError::Rfc8212Epoch2PolicyOmission,
+        ));
+    }
+    let canonical = CanonicalConfig::from(config);
+    let mut graph = toml::ser::Buffer::new();
+    canonical.serialize(toml::ser::Serializer::pretty(&mut graph))?;
+    observe("graph-built");
+    let rendered = graph.to_string();
+    observe("rendered-with-graph");
+    drop(graph);
+    observe("graph-dropped");
+    Ok(rendered)
+}
