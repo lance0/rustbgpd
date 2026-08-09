@@ -2959,6 +2959,17 @@ async fn run<T>(
     launch_identity: confirm_journal::v3::LaunchIdentity,
     profiler: Option<T>,
 ) -> bool {
+    // Install every Unix signal handler before startup can bind or spawn an
+    // externally reachable service. Signals delivered during startup remain
+    // pending until the select loop begins instead of taking their default
+    // process action in that window.
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .unwrap_or_else(|e| fatal_startup_error("failed to register SIGINT handler", e));
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .unwrap_or_else(|e| fatal_startup_error("failed to register SIGTERM handler", e));
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .unwrap_or_else(|e| fatal_startup_error("failed to register SIGHUP handler", e));
+
     let mut config = accepted.config();
     // Snapshot the gRPC listener config as it was at process start.
     // The live TCP/UDS listeners bind once and are not rebuilt on
@@ -4909,12 +4920,6 @@ async fn run<T>(
         Err(reason) => error!(error = %reason, "invalid [gnmi_dialout] section; dial-out disabled"),
     }
 
-    // Signal handlers (unix-only, which is our target)
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .unwrap_or_else(|e| fatal_startup_error("failed to register SIGTERM handler", e));
-    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .unwrap_or_else(|e| fatal_startup_error("failed to register SIGHUP handler", e));
-
     // Wait for shutdown signal: SIGINT, SIGTERM, Shutdown RPC, unexpected gRPC exit, or SIGHUP
     //
     // SIGHUP runs `reload_config` on a dedicated tokio task so the
@@ -4937,11 +4942,8 @@ async fn run<T>(
     let mut grpc_server_failed = false;
     loop {
         tokio::select! {
-            result = tokio::signal::ctrl_c() => {
-                match result {
-                    Ok(()) => info!("received SIGINT"),
-                    Err(e) => error!(error = %e, "failed to listen for SIGINT"),
-                }
+            _ = sigint.recv() => {
+                info!("received SIGINT");
                 break;
             }
             _ = sigterm.recv() => {
@@ -5588,6 +5590,54 @@ mod tests {
         assert!(post_registration_barrier < listener_run_spawn);
         assert!(accept_forwarding_loop < metrics_startup);
         assert!(listener_run_spawn < metrics_startup);
+    }
+
+    #[test]
+    fn signal_handlers_are_registered_before_external_reachability() {
+        // Load-bearing startup-order proof: moving any registration below an
+        // externally reachable boundary or restoring lazy ctrl_c() makes this
+        // test fail without depending on a scheduler race.
+        let source = include_str!("main.rs");
+        let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
+        let run = production
+            .split_once("async fn run<T>(")
+            .expect("daemon run function must remain explicit")
+            .1;
+        let config_snapshot = run
+            .find("let mut config = accepted.config();")
+            .expect("runtime config snapshot must remain explicit");
+        let registrations = [
+            "SignalKind::interrupt()",
+            "SignalKind::terminate()",
+            "SignalKind::hangup()",
+        ];
+        let reachability_boundaries = [
+            "let mut grpc_handle = tokio::spawn(async move {",
+            "BgpListener::bind_dual_with_options(",
+            "metrics_server::MetricsListener::bind(",
+            "rustbgpd_api::gnmi_dialout::DialoutManager::new(",
+        ];
+
+        for registration in registrations {
+            let position = run
+                .find(registration)
+                .unwrap_or_else(|| panic!("missing early signal registration: {registration}"));
+            assert!(
+                position < config_snapshot,
+                "{registration} is not registered first"
+            );
+            for boundary in reachability_boundaries {
+                let boundary_position = run
+                    .find(boundary)
+                    .unwrap_or_else(|| panic!("missing external boundary: {boundary}"));
+                assert!(
+                    position < boundary_position,
+                    "{registration} follows external boundary {boundary}"
+                );
+            }
+        }
+        assert!(run.contains("_ = sigint.recv() => {"));
+        assert!(!run.contains("tokio::signal::ctrl_c()"));
     }
 
     #[test]
