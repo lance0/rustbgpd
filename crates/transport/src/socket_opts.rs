@@ -3299,7 +3299,10 @@ pub(crate) fn set_gtsm_outbound(socket: &Socket, is_v4: bool) -> io::Result<()> 
 pub fn set_gtsm(_socket: &Socket, _remote: SocketAddr) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "GTSM / TTL security is only supported on Linux",
+        "ttl_security (GTSM / TTL security, RFC 5082) requires Linux: this platform has no \
+         IP_MINTTL / IPV6_MINHOPCOUNT equivalent, so inbound TTL enforcement cannot be \
+         installed. This is a platform limitation, not a config error. Remove ttl_security \
+         from the neighbor config, or run rustbgpd on Linux",
     ))
 }
 

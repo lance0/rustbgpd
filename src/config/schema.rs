@@ -2610,7 +2610,7 @@ pub enum ConfigError {
     #[error("failed to parse TOML: {0}")]
     Parse(#[from] toml::de::Error),
     #[error(
-        "config_epoch = 2 requires [global].ebgp_requires_policy = true or [global].ebgp_requires_policy = false before secure-default activation; add one explicit assignment"
+        "config_epoch = 2 requires [global].ebgp_requires_policy = true or [global].ebgp_requires_policy = false: the RFC 8212 secure default is not activated yet (ADR-0119 gates activation on its production-mutation proofs), so epoch 2 does not infer the omitted value. This is a pending activation, not a misconfiguration; add one explicit assignment"
     )]
     Rfc8212Epoch2PolicyOmission,
     #[error("invalid local ASN {value}: AS 0 is reserved (RFC 7607 section 2)")]

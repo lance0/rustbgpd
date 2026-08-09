@@ -71,10 +71,11 @@ change only the epoch-2/omitted cell from rejected to effective `true`.
 Before activation, the epoch-2 omission diagnostic is exactly:
 
 ```text
-config_epoch = 2 requires [global].ebgp_requires_policy = true or [global].ebgp_requires_policy = false before secure-default activation; add one explicit assignment
+config_epoch = 2 requires [global].ebgp_requires_policy = true or [global].ebgp_requires_policy = false: the RFC 8212 secure default is not activated yet (ADR-0119 gates activation on its production-mutation proofs), so epoch 2 does not infer the omitted value. This is a pending activation, not a misconfiguration; add one explicit assignment
 ```
 
-The diagnostic points at the absent/required field and rejects startup,
+The diagnostic points at the absent/required field, states that the rejection is
+the pending activation gate rather than an operator mistake, and rejects startup,
 `--check`, SIGHUP candidates, gRPC transactions, gNMI-generated candidates,
 history rollback, and generated/imported output validation alike.
 

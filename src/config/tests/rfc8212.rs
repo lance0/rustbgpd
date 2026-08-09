@@ -48,7 +48,7 @@ fn rfc8212_epoch_and_policy_presence_matrix_is_lossless_without_flipping_default
 
 #[test]
 fn rfc8212_epoch_two_omission_and_invalid_epochs_fail_closed() {
-    const EXACT: &str = "config_epoch = 2 requires [global].ebgp_requires_policy = true or [global].ebgp_requires_policy = false before secure-default activation; add one explicit assignment";
+    const EXACT: &str = "config_epoch = 2 requires [global].ebgp_requires_policy = true or [global].ebgp_requires_policy = false: the RFC 8212 secure default is not activated yet (ADR-0119 gates activation on its production-mutation proofs), so epoch 2 does not infer the omitted value. This is a pending activation, not a misconfiguration; add one explicit assignment";
     let source = rfc8212_representation_toml(Some("2"), None);
     assert_eq!(parse(&source).unwrap_err().to_string(), EXACT);
     let schema_only = parse_schema_only(&source).unwrap();
