@@ -640,17 +640,23 @@ mod tests {
             ..rustbgpd_rib::UpdateGroupImpactPlan::default()
         };
         let expected = update_group_impact_to_proto(impact.clone());
-        let response = transaction_plan_to_proto(RuntimeConfigTransactionPlan {
+        let plan = RuntimeConfigTransactionPlan {
             status: RuntimeConfigTransactionStatus::Committable,
             runtime_snapshot_token: "before".to_string(),
             post_commit_runtime_snapshot_token: "after".to_string(),
+            committed_candidate: Some(crate::peer_types::RuntimeConfigTransactionCandidate::new(
+                "tcp_ao_key = \"transaction-secret\"".to_string(),
+            )),
             diff: sample_runtime_diff(),
             supported_sections: vec!["[policy]".to_string()],
             unsupported_sections: vec![],
             restart_required_sections: vec![],
             human_text: String::new(),
             update_group_impact: impact,
-        });
+        };
+        let debug = format!("{plan:?}");
+        assert!(!debug.contains("transaction-secret") && debug.contains("<redacted>"));
+        let response = transaction_plan_to_proto(plan);
         assert_eq!(response.update_group_impact, Some(expected));
     }
 
@@ -676,6 +682,7 @@ mod tests {
                 status: RuntimeConfigTransactionStatus::Committable,
                 runtime_snapshot_token: "kv1:abc:9".to_string(),
                 post_commit_runtime_snapshot_token: "kv1:def:10".to_string(),
+                committed_candidate: None,
                 diff: sample_runtime_diff(),
                 supported_sections: vec!["[[fib_tables]]".to_string()],
                 unsupported_sections: Vec::new(),
@@ -770,6 +777,7 @@ mod tests {
                 status: RuntimeConfigTransactionStatus::Noop,
                 runtime_snapshot_token: "kv1:abc:9".to_string(),
                 post_commit_runtime_snapshot_token: "kv1:abc:9".to_string(),
+                committed_candidate: None,
                 diff: RuntimeConfigDiff {
                     has_actionable_changes: false,
                     has_reload_applied_changes: false,

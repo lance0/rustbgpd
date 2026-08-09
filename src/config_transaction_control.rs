@@ -29,7 +29,7 @@ use crate::config::{
     diff_neighbors,
 };
 use crate::fib_table_control::{
-    FibTableControlDeps, commit_fib_tables_locked, runtime_unavailable_error,
+    FibTableControlDeps, read_current_tables, replace_tables, runtime_unavailable_error,
 };
 use crate::gnmi_set_bridge;
 use crate::peer_manager::InternalCommand;
@@ -311,9 +311,14 @@ impl ConfigTransactionController {
         } else if let Some(preloaded) = preloaded {
             self.reject_if_pending("ConfigService.RollbackConfigTransaction")
                 .await?;
-            apply_config_transaction_locked_with_preloaded(&self.deps, request, Some(preloaded))
-                .await
-                .map_err(|failure| failure.error)
+            apply_config_transaction_locked_with_preloaded(
+                &self.deps,
+                request,
+                Some(preloaded),
+                self.peer_mgr_internal_tx.as_ref(),
+            )
+            .await
+            .map_err(|failure| failure.error)
         } else {
             self.apply_locked(request, None).await
         }
@@ -558,9 +563,13 @@ impl ConfigTransactionController {
                 // and the candidate was just built from the live runtime
                 // snapshot. Let the shared apply executor do the single
                 // authoritative plan.
-                apply_config_transaction_locked(&self.deps, request)
-                    .await
-                    .map_err(|failure| apply_error_to_gnmi_set_error(failure.error))?
+                apply_config_transaction_locked(
+                    &self.deps,
+                    request,
+                    self.peer_mgr_internal_tx.as_ref(),
+                )
+                .await
+                .map_err(|failure| apply_error_to_gnmi_set_error(failure.error))?
             };
             gnmi_set_outcome_from_apply_response(response)
         });
@@ -593,7 +602,7 @@ impl ConfigTransactionController {
         } else {
             self.reject_if_pending("ConfigService.ApplyConfigTransaction")
                 .await?;
-            apply_config_transaction_locked(&self.deps, request)
+            apply_config_transaction_locked(&self.deps, request, self.peer_mgr_internal_tx.as_ref())
                 .await
                 .map_err(|failure| failure.error)
         }
@@ -699,7 +708,10 @@ impl ConfigTransactionController {
         };
 
         let mut response = match apply_config_transaction_locked_with_preloaded(
-            &self.deps, request, preloaded,
+            &self.deps,
+            request,
+            preloaded,
+            self.peer_mgr_internal_tx.as_ref(),
         )
         .await
         {
@@ -1381,6 +1393,7 @@ impl ConfigTransactionController {
             &self.deps,
             request,
             Some((plan, Arc::clone(prior))),
+            self.peer_mgr_internal_tx.as_ref(),
         )
         .await;
         let response = result
@@ -1710,7 +1723,7 @@ async fn apply_config_transaction(
 
     let join = tokio::spawn(async move {
         let _guard = deps.lock.lock().await;
-        apply_config_transaction_locked(&deps, request)
+        apply_config_transaction_locked(&deps, request, None)
             .await
             .map_err(|failure| failure.error)
     });
@@ -1722,11 +1735,32 @@ async fn apply_config_transaction(
     })?
 }
 
+#[cfg(test)]
+async fn apply_config_transaction_with_internal(
+    deps: Arc<FibTableControlDeps>,
+    request: proto::ApplyConfigTransactionRequest,
+    peer_mgr_internal_tx: mpsc::UnboundedSender<InternalCommand>,
+) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+    validate_apply_request(&request)?;
+    let join = tokio::spawn(async move {
+        let _guard = deps.lock.lock().await;
+        apply_config_transaction_locked(&deps, request, Some(&peer_mgr_internal_tx))
+            .await
+            .map_err(|failure| failure.error)
+    });
+    join.await.map_err(|_| {
+        ConfigTransactionApplyError::Internal(
+            "config transaction apply task did not complete".to_string(),
+        )
+    })?
+}
+
 async fn apply_config_transaction_locked(
     deps: &FibTableControlDeps,
     request: proto::ApplyConfigTransactionRequest,
+    peer_mgr_internal_tx: Option<&mpsc::UnboundedSender<InternalCommand>>,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
-    apply_config_transaction_locked_with_preloaded(deps, request, None).await
+    apply_config_transaction_locked_with_preloaded(deps, request, None, peer_mgr_internal_tx).await
 }
 
 async fn apply_config_transaction_locked_with_preloaded(
@@ -1736,6 +1770,7 @@ async fn apply_config_transaction_locked_with_preloaded(
         rustbgpd_api::peer_types::RuntimeConfigTransactionPlan,
         Arc<AcceptedConfigSnapshot>,
     )>,
+    peer_mgr_internal_tx: Option<&mpsc::UnboundedSender<InternalCommand>>,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     let plan = match &preloaded {
         Some((plan, _)) => plan.clone(),
@@ -1772,13 +1807,33 @@ async fn apply_config_transaction_locked_with_preloaded(
         return Ok(rejected_response(plan.runtime_snapshot_token));
     };
 
+    let committed_candidate_toml = plan
+        .committed_candidate
+        .clone()
+        .ok_or_else(|| {
+            ConfigTransactionApplyError::Internal(
+                "committable config transaction plan omitted its candidate".to_string(),
+            )
+        })?
+        .into_inner();
     let candidate = match preloaded {
-        Some((_, snapshot)) => snapshot.config(),
+        Some((_, snapshot)) => {
+            let representation: Config =
+                toml::from_str(&committed_candidate_toml).map_err(|error| {
+                    ConfigTransactionApplyError::Internal(format!(
+                        "planned config transaction candidate became invalid: {error}"
+                    ))
+                })?;
+            let mut candidate = snapshot.config();
+            candidate.config_epoch = representation.config_epoch;
+            candidate.global.ebgp_requires_policy = representation.global.ebgp_requires_policy;
+            candidate
+        }
         None => Config::load_toml_with_diagnostics(
-            &request.candidate_toml,
-            "candidate config transaction",
+            &committed_candidate_toml,
+            "planned config transaction candidate",
         )
-        .map_err(ConfigTransactionApplyError::InvalidArgument)?,
+        .map_err(ConfigTransactionApplyError::Internal)?,
     };
     let config_tx = deps.config_tx.clone().ok_or_else(|| {
         ConfigTransactionApplyError::FailedPrecondition(
@@ -1791,12 +1846,13 @@ async fn apply_config_transaction_locked_with_preloaded(
     // key); the apply path can't recompute a key-consistent token itself.
     let post_commit_runtime_snapshot_token = plan.post_commit_runtime_snapshot_token;
     let update_group_impact = rustbgpd_api::update_group_impact_to_proto(plan.update_group_impact);
-    let committed_candidate_toml = request.candidate_toml.clone();
+    let authoritative_candidate_toml = committed_candidate_toml.clone();
     let mut response = commit_apply_family(
         deps,
+        peer_mgr_internal_tx,
         &config_tx,
         family,
-        request.candidate_toml,
+        committed_candidate_toml,
         candidate,
         plan.supported_sections,
         post_commit_runtime_snapshot_token,
@@ -1804,8 +1860,12 @@ async fn apply_config_transaction_locked_with_preloaded(
     )
     .await?;
     if family == ApplyFamily::LivePolicyImpact {
-        let authoritative =
-            plan_candidate(&deps.peer_mgr_tx, committed_candidate_toml, String::new()).await?;
+        let authoritative = plan_candidate(
+            &deps.peer_mgr_tx,
+            authoritative_candidate_toml,
+            String::new(),
+        )
+        .await?;
         response.runtime_snapshot_token = authoritative.runtime_snapshot_token;
     }
     Ok(response)
@@ -1817,6 +1877,7 @@ async fn apply_config_transaction_locked_with_preloaded(
 )]
 async fn commit_apply_family(
     deps: &FibTableControlDeps,
+    peer_mgr_internal_tx: Option<&mpsc::UnboundedSender<InternalCommand>>,
     config_tx: &mpsc::Sender<ConfigEvent>,
     family: ApplyFamily,
     candidate_toml: String,
@@ -1839,6 +1900,7 @@ async fn commit_apply_family(
     // future by that snapshot.
     let committed = Box::pin(commit_apply_family_inner(
         deps,
+        peer_mgr_internal_tx,
         config_tx,
         family,
         candidate_toml,
@@ -1917,6 +1979,7 @@ async fn finish_outbound_prefix_limit_transaction(
 )]
 async fn commit_apply_family_inner(
     deps: &FibTableControlDeps,
+    peer_mgr_internal_tx: Option<&mpsc::UnboundedSender<InternalCommand>>,
     config_tx: &mpsc::Sender<ConfigEvent>,
     family: ApplyFamily,
     candidate_toml: String,
@@ -1929,8 +1992,10 @@ async fn commit_apply_family_inner(
         ApplyFamily::FibTables => {
             commit_fib_transaction(
                 deps,
+                peer_mgr_internal_tx,
                 config_tx,
-                &candidate,
+                candidate_toml,
+                candidate,
                 post_commit_runtime_snapshot_token,
                 update_group_impact,
             )
@@ -2021,34 +2086,148 @@ async fn commit_apply_family_inner(
 
 async fn commit_fib_transaction(
     deps: &FibTableControlDeps,
+    peer_mgr_internal_tx: Option<&mpsc::UnboundedSender<InternalCommand>>,
     config_tx: &mpsc::Sender<ConfigEvent>,
-    candidate: &Config,
+    candidate_toml: String,
+    candidate: Config,
     post_commit_runtime_snapshot_token: String,
     update_group_impact: proto::UpdateGroupImpactPlan,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     let fib_cmd_tx = deps.fib_cmd_tx.clone().ok_or_else(|| {
         fib_error_to_apply_error(runtime_unavailable_error(!deps.startup_tables.is_empty()))
     })?;
-    let response = commit_fib_tables_locked(
-        &fib_cmd_tx,
-        &deps.peer_mgr_tx,
-        config_tx,
-        candidate.fib_tables.clone(),
+    let Some(peer_mgr_internal_tx) = peer_mgr_internal_tx else {
+        return Err(ConfigTransactionApplyError::Unavailable(
+            "FIB config-transaction snapshot staging is unavailable".to_string(),
+        )
+        .into());
+    };
+
+    let permit = reserve_persist_permit(config_tx).await?;
+    let previous_tables = read_current_tables(
+        Some(&fib_cmd_tx),
+        rustbgpd_api::rib_service::FibTableControlError::Internal,
     )
     .await
-    .map_err(|failure| ApplyFailure {
-        error: fib_error_to_apply_error(failure.error),
-        ambiguous: failure.ambiguous,
-    })?;
+    .map_err(fib_error_to_apply_error)?
+    .unwrap_or_default();
+    let staged_tables = candidate.fib_tables.clone();
+    let previous = stage_preloaded_config_snapshot(peer_mgr_internal_tx, candidate).await?;
+    if let Err(error) = replace_tables(&fib_cmd_tx, staged_tables.clone()).await {
+        return Err(restore_preloaded_snapshot_after_error(
+            peer_mgr_internal_tx,
+            previous,
+            fib_error_to_apply_error(error).into(),
+        )
+        .await);
+    }
+    if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+        return Err(rollback_fib_transaction_after_error(
+            &fib_cmd_tx,
+            peer_mgr_internal_tx,
+            previous_tables,
+            previous,
+            failure,
+        )
+        .await);
+    }
+    commit_config_snapshot_stage(&deps.peer_mgr_tx)
+        .await
+        .map_err(ApplyFailure::ambiguous)?;
     Ok(committable_response(
         post_commit_runtime_snapshot_token,
         vec![FIB_SECTION.to_string()],
         format!(
             "Committed [[fib_tables]] transaction.\n{} table(s) active.\n",
-            response.tables.len()
+            staged_tables.len()
         ),
         Some(update_group_impact),
     ))
+}
+
+async fn stage_preloaded_config_snapshot(
+    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    candidate: Config,
+) -> Result<Box<Config>, ApplyFailure> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_internal_tx
+        .send(InternalCommand::StageTransactionConfig {
+            candidate: Box::new(candidate),
+            reply: reply_tx,
+        })
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
+        })?;
+    reply_rx
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable(
+                "peer manager dropped config transaction snapshot stage reply".to_string(),
+            )
+        })?
+        .map_err(|error| ConfigTransactionApplyError::InvalidArgument(error).into())
+}
+
+async fn restore_preloaded_config_snapshot(
+    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    previous: Box<Config>,
+) -> Result<(), ConfigTransactionApplyError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_internal_tx
+        .send(InternalCommand::RestoreTransactionConfig {
+            previous,
+            reply: reply_tx,
+        })
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable(
+                "peer manager is unavailable during config transaction rollback".to_string(),
+            )
+        })?;
+    reply_rx.await.map_err(|_| {
+        ConfigTransactionApplyError::Unavailable(
+            "peer manager dropped config transaction snapshot rollback reply".to_string(),
+        )
+    })
+}
+
+async fn restore_preloaded_snapshot_after_error(
+    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    previous: Box<Config>,
+    original: ApplyFailure,
+) -> ApplyFailure {
+    match restore_preloaded_config_snapshot(peer_mgr_internal_tx, previous).await {
+        Ok(()) => original,
+        Err(rollback) => ApplyFailure::ambiguous(ConfigTransactionApplyError::Internal(format!(
+            "{}; config snapshot rollback failed: {rollback}",
+            original.error
+        ))),
+    }
+}
+
+async fn rollback_fib_transaction_after_error(
+    fib_cmd_tx: &mpsc::Sender<crate::fib_runtime::FibRuntimeCommand>,
+    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    previous_tables: Vec<crate::config::FibTableConfig>,
+    previous: Box<Config>,
+    original: ApplyFailure,
+) -> ApplyFailure {
+    let runtime_rollback = replace_tables(fib_cmd_tx, previous_tables).await;
+    let snapshot_rollback = restore_preloaded_config_snapshot(peer_mgr_internal_tx, previous).await;
+    match (runtime_rollback, snapshot_rollback) {
+        (Ok(()), Ok(())) => original,
+        (runtime, snapshot) => {
+            ApplyFailure::ambiguous(ConfigTransactionApplyError::Internal(format!(
+                "{}; FIB transaction rollback failed; runtime: {}; snapshot: {}",
+                original.error,
+                runtime
+                    .err()
+                    .map_or_else(|| "ok".to_string(), |error| error.to_string()),
+                snapshot
+                    .err()
+                    .map_or_else(|| "ok".to_string(), |error| error.to_string()),
+            )))
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3418,8 +3597,8 @@ mod tests {
         assert_tier_authorized_test_config, tier_authorized_uds_test_config,
     };
     use rustbgpd_api::peer_types::{
-        FibTableSnapshot, RuntimeConfigDiff, RuntimeConfigTransactionPlan,
-        RuntimeConfigTransactionPlanError,
+        FibTableSnapshot, RuntimeConfigDiff, RuntimeConfigTransactionCandidate,
+        RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError,
     };
     use rustbgpd_api::rib_service::FibTableControlError;
     use rustbgpd_policy::PolicyAction;
@@ -3502,6 +3681,11 @@ remote_asn = 65002
             "confirmed rollback must bind one accepted provenance generation"
         );
         assert!(!production.contains("use crate::reload::runtime_config_snapshot;"));
+        let apply = production
+            .rsplit_once("let committed_candidate_toml")
+            .unwrap()
+            .1;
+        assert!(!apply.contains("request.candidate_toml"));
 
         let reload = include_str!("reload.rs");
         let legacy = reload
@@ -3790,6 +3974,17 @@ ttl_security = true
             maximum_paths_ebgp: table.maximum_paths_ebgp,
             maximum_paths_ibgp: table.maximum_paths_ibgp,
         }
+    }
+
+    fn fib_config(table: &FibTableConfig) -> Config {
+        Config::load_toml_with_diagnostics(
+            &base_toml(&format!(
+                "[[fib_tables]]\nname = {:?}\ntable_id = {}\nmetric = {}\nfamilies = [\"ipv4_unicast\"]\n",
+                table.name, table.table_id, table.metric
+            )),
+            "FIB transaction fixture",
+        )
+        .unwrap()
     }
 
     fn peer_config_from_toml(toml: &str, address: &str) -> PeerManagerNeighborConfig {
@@ -4149,6 +4344,7 @@ peer_group = "edge"
             status,
             runtime_snapshot_token: "kv1:old:1".to_string(),
             post_commit_runtime_snapshot_token: "kv1:new:2".to_string(),
+            committed_candidate: None,
             diff: diff(),
             supported_sections,
             unsupported_sections: Vec::new(),
@@ -4158,6 +4354,26 @@ peer_group = "edge"
         }
     }
 
+    fn attach_committed_candidate(
+        mut plan: RuntimeConfigTransactionPlan,
+        candidate_toml: &str,
+    ) -> RuntimeConfigTransactionPlan {
+        if plan.status == RuntimeConfigTransactionStatus::Committable
+            && plan.committed_candidate.is_none()
+        {
+            let candidate = Config::load_toml_with_diagnostics(
+                candidate_toml,
+                "fake transaction planner candidate",
+            )
+            .expect("fake planner candidate must load");
+            plan.committed_candidate = Some(RuntimeConfigTransactionCandidate::new(
+                crate::config::persisted_config_document(&candidate)
+                    .expect("fake planner candidate must serialize"),
+            ));
+        }
+        plan
+    }
+
     async fn fake_peer_manager(
         mut rx: mpsc::Receiver<PeerManagerCommand>,
         plan: RuntimeConfigTransactionPlan,
@@ -4165,8 +4381,15 @@ peer_group = "edge"
     ) {
         while let Some(cmd) = rx.recv().await {
             match cmd {
-                PeerManagerCommand::PlanConfigTransaction { reply, .. } => {
-                    let _ = reply.send(Ok(plan.clone()));
+                PeerManagerCommand::PlanConfigTransaction {
+                    candidate_toml,
+                    reply,
+                    ..
+                } => {
+                    let _ = reply.send(Ok(attach_committed_candidate(
+                        plan.clone(),
+                        &candidate_toml,
+                    )));
                 }
                 PeerManagerCommand::StageFibTables { tables, reply } => {
                     *staged.lock().await = tables;
@@ -4174,6 +4397,9 @@ peer_group = "edge"
                 }
                 PeerManagerCommand::SetFibTablesSnapshot { tables, reply } => {
                     *staged.lock().await = tables;
+                    let _ = reply.send(());
+                }
+                PeerManagerCommand::CommitConfigSnapshotStage { reply } => {
                     let _ = reply.send(());
                 }
                 _ => panic!("unexpected peer-manager command in config transaction test"),
@@ -4198,6 +4424,25 @@ peer_group = "edge"
                     }
                     let _ = reply.send(result);
                 }
+            }
+        }
+    }
+
+    async fn fake_transaction_snapshot_manager(
+        mut rx: mpsc::UnboundedReceiver<InternalCommand>,
+        current: Arc<Mutex<Config>>,
+    ) {
+        while let Some(command) = rx.recv().await {
+            match command {
+                InternalCommand::StageTransactionConfig { candidate, reply } => {
+                    let previous = std::mem::replace(&mut *current.lock().await, *candidate);
+                    let _ = reply.send(Ok(Box::new(previous)));
+                }
+                InternalCommand::RestoreTransactionConfig { previous, reply } => {
+                    *current.lock().await = *previous;
+                    let _ = reply.send(());
+                }
+                _ => panic!("unexpected internal command in transaction snapshot fake"),
             }
         }
     }
@@ -4230,8 +4475,15 @@ peer_group = "edge"
     ) {
         while let Some(cmd) = rx.recv().await {
             match cmd {
-                PeerManagerCommand::PlanConfigTransaction { reply, .. } => {
-                    let _ = reply.send(Ok(plan.clone()));
+                PeerManagerCommand::PlanConfigTransaction {
+                    candidate_toml,
+                    reply,
+                    ..
+                } => {
+                    let _ = reply.send(Ok(attach_committed_candidate(
+                        plan.clone(),
+                        &candidate_toml,
+                    )));
                 }
                 PeerManagerCommand::StageConfigSnapshot {
                     candidate_toml,
@@ -4358,13 +4610,17 @@ peer_group = "edge"
     ) {
         while let Some(cmd) = rx.recv().await {
             match cmd {
-                PeerManagerCommand::PlanConfigTransaction { reply, .. } => {
+                PeerManagerCommand::PlanConfigTransaction {
+                    candidate_toml,
+                    reply,
+                    ..
+                } => {
                     let plan = plans
                         .lock()
                         .await
                         .pop_front()
                         .expect("test queued too few transaction plans");
-                    let _ = reply.send(Ok(plan));
+                    let _ = reply.send(Ok(attach_committed_candidate(plan, &candidate_toml)));
                 }
                 PeerManagerCommand::StageConfigSnapshot {
                     candidate_toml,
@@ -4410,8 +4666,15 @@ peer_group = "edge"
     ) {
         while let Some(cmd) = rx.recv().await {
             match cmd {
-                PeerManagerCommand::PlanConfigTransaction { reply, .. } => {
-                    let _ = reply.send(Ok(plan.clone()));
+                PeerManagerCommand::PlanConfigTransaction {
+                    candidate_toml,
+                    reply,
+                    ..
+                } => {
+                    let _ = reply.send(Ok(attach_committed_candidate(
+                        plan.clone(),
+                        &candidate_toml,
+                    )));
                 }
                 PeerManagerCommand::StageConfigSnapshot {
                     candidate_toml,
@@ -4740,11 +5003,11 @@ peer_group = "{group}"
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 PeerManagerCommand::PlanConfigTransaction {
+                    candidate_toml,
                     expected_runtime_snapshot_token,
                     reply,
-                    ..
                 } => {
-                    let mut response = plan.clone();
+                    let mut response = attach_committed_candidate(plan.clone(), &candidate_toml);
                     if plan_calls > 0 {
                         response.runtime_snapshot_token =
                             plan.post_commit_runtime_snapshot_token.clone();
@@ -4988,7 +5251,7 @@ remote_asn = 65010
             proto::ConfigTransactionPlanStatus::Committable as i32
         );
         assert_eq!(response.committed_sections, vec!["[[dynamic_neighbors]]"]);
-        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
     }
 
     async fn ack_config_transaction_commits(mut config_rx: mpsc::Receiver<ConfigEvent>) {
@@ -5031,8 +5294,15 @@ remote_asn = 65010
     ) {
         while let Some(cmd) = rx.recv().await {
             match cmd {
-                PeerManagerCommand::PlanConfigTransaction { reply, .. } => {
-                    let _ = reply.send(Ok(plan.clone()));
+                PeerManagerCommand::PlanConfigTransaction {
+                    candidate_toml,
+                    reply,
+                    ..
+                } => {
+                    let _ = reply.send(Ok(attach_committed_candidate(
+                        plan.clone(),
+                        &candidate_toml,
+                    )));
                 }
                 PeerManagerCommand::StageConfigSnapshot {
                     candidate_toml,
@@ -5150,7 +5420,7 @@ remote_asn = 65010
             proto::ConfigTransactionConfirmationStatus::Pending as i32
         );
         assert_eq!(confirmation.confirm_id, "deploy-1");
-        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
         (controller, snapshot_toml, ack_task)
     }
 
@@ -5191,10 +5461,19 @@ remote_asn = 65010
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             while let Some(command) = internal_rx.recv().await {
-                let InternalCommand::PlanAcceptedSnapshot { reply, .. } = command else {
+                let InternalCommand::PlanAcceptedSnapshot {
+                    snapshot, reply, ..
+                } = command
+                else {
                     panic!("rollback planner received an unexpected reload command");
                 };
-                let _ = reply.send(Ok(response.clone()));
+                let candidate_toml =
+                    crate::config::persisted_config_document(snapshot.config_ref())
+                        .expect("preloaded fake planner candidate must serialize");
+                let _ = reply.send(Ok(attach_committed_candidate(
+                    response.clone(),
+                    &candidate_toml,
+                )));
             }
         });
         controller.with_preloaded_planner(internal_tx)
@@ -5507,8 +5786,15 @@ remote_asn = 65010
                                 rpol: runtime_rpol.clone(),
                             }));
                     }
-                    PeerManagerCommand::PlanConfigTransaction { reply, .. } => {
-                        let _ = reply.send(Ok(plan.clone()));
+                    PeerManagerCommand::PlanConfigTransaction {
+                        candidate_toml,
+                        reply,
+                        ..
+                    } => {
+                        let _ = reply.send(Ok(attach_committed_candidate(
+                            plan.clone(),
+                            &candidate_toml,
+                        )));
                     }
                     _ => panic!("unexpected peer-manager command in v3 external fence harness"),
                 }
@@ -5653,6 +5939,7 @@ families = ["ipv4_unicast"]
         std::fs::write(&config_path, &previous_toml).unwrap();
         let accepted = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
         let runtime_rpol_files = accepted.config_ref().policy.rpol_files.clone();
+        let runtime_config = Arc::new(Mutex::new(accepted.config_ref().clone()));
         let (_accepted_tx, accepted_rx) = watch::channel(accepted);
 
         let original = table("edge", 1000);
@@ -5675,11 +5962,17 @@ families = ["ipv4_unicast"]
                                 rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
                             }));
                     }
-                    PeerManagerCommand::PlanConfigTransaction { reply, .. } => {
-                        let _ = reply.send(Ok(plan(
+                    PeerManagerCommand::PlanConfigTransaction {
+                        candidate_toml,
+                        reply,
+                        ..
+                    } => {
+                        let response = plan(
                             RuntimeConfigTransactionStatus::Committable,
                             vec!["[[fib_tables]]".to_string()],
-                        )));
+                        );
+                        let _ =
+                            reply.send(Ok(attach_committed_candidate(response, &candidate_toml)));
                     }
                     PeerManagerCommand::StageFibTables { tables, reply } => {
                         *staged.lock().await = tables;
@@ -5689,6 +5982,9 @@ families = ["ipv4_unicast"]
                         *staged.lock().await = tables;
                         let _ = reply.send(());
                     }
+                    PeerManagerCommand::CommitConfigSnapshotStage { reply } => {
+                        let _ = reply.send(());
+                    }
                     _ => panic!("unexpected peer-manager command in v3 FIB harness"),
                 }
             }
@@ -5696,26 +5992,42 @@ families = ["ipv4_unicast"]
 
         let seen_preloaded = Arc::new(Mutex::new(None));
         let seen = seen_preloaded.clone();
+        let current = runtime_config.clone();
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             while let Some(command) = internal_rx.recv().await {
-                let InternalCommand::PlanAcceptedSnapshot {
-                    snapshot,
-                    expected_runtime_snapshot_token,
-                    reply,
-                } = command
-                else {
-                    panic!("unexpected private command in v3 FIB harness");
-                };
-                *seen.lock().await = Some(snapshot);
-                let mut response = plan(
-                    RuntimeConfigTransactionStatus::Committable,
-                    vec!["[[fib_tables]]".to_string()],
-                );
-                response.runtime_snapshot_token =
-                    expected_runtime_snapshot_token.unwrap_or_else(|| "kv1:new:2".to_string());
-                response.post_commit_runtime_snapshot_token = "kv1:rollback:3".to_string();
-                let _ = reply.send(Ok(response));
+                match command {
+                    InternalCommand::PlanAcceptedSnapshot {
+                        snapshot,
+                        expected_runtime_snapshot_token,
+                        reply,
+                    } => {
+                        let candidate_toml =
+                            crate::config::persisted_config_document(snapshot.config_ref())
+                                .expect("v3 FIB fake planner candidate must serialize");
+                        *seen.lock().await = Some(snapshot);
+                        let mut response = plan(
+                            RuntimeConfigTransactionStatus::Committable,
+                            vec!["[[fib_tables]]".to_string()],
+                        );
+                        response.runtime_snapshot_token = expected_runtime_snapshot_token
+                            .unwrap_or_else(|| "kv1:new:2".to_string());
+                        response.post_commit_runtime_snapshot_token = "kv1:rollback:3".to_string();
+                        let _ =
+                            reply.send(Ok(attach_committed_candidate(response, &candidate_toml)));
+                    }
+                    InternalCommand::StageTransactionConfig { candidate, reply } => {
+                        let previous = std::mem::replace(&mut *current.lock().await, *candidate);
+                        let _ = reply.send(Ok(Box::new(previous)));
+                    }
+                    InternalCommand::RestoreTransactionConfig { previous, reply } => {
+                        *current.lock().await = *previous;
+                        let _ = reply.send(());
+                    }
+                    InternalCommand::ReplaceConfigSnapshot { .. } => {
+                        panic!("unexpected private command in v3 FIB harness")
+                    }
+                }
             }
         });
 
@@ -7074,7 +7386,7 @@ default_action = "permit"
                 "[peer_groups] catalog",
             ]
         );
-        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
         assert!(response.human_text.contains("catalog-only"));
     }
 
@@ -7193,7 +7505,7 @@ default_action = "permit"
             response.committed_sections,
             vec!["[policy] definitions", "[policy] live impact"]
         );
-        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
         assert!(response.human_text.contains("live policy-impact"));
         assert_eq!(response.runtime_snapshot_token, "kv1:new:2");
         let chained = plan_candidate(
@@ -7271,7 +7583,7 @@ default_action = "permit"
             response.committed_sections,
             vec!["[policy] definitions", "[policy] live impact"]
         );
-        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
         assert!(response.human_text.contains("1 live session"));
         let calls = apply_calls.lock().await;
         assert_eq!(calls.len(), 1);
@@ -7338,7 +7650,7 @@ default_action = "permit"
                 "effective neighbor session reshape",
             ]
         );
-        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
         assert!(response.human_text.contains("1 live session"));
         let peers = peers.lock().await;
         assert_eq!(peers.len(), 1);
@@ -7399,7 +7711,7 @@ default_action = "permit"
             response.committed_sections,
             vec!["[[neighbors]] modify", "effective neighbor session reshape"]
         );
-        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
         let peers = peers.lock().await;
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].peer_group.as_deref(), Some("core"));
@@ -7451,7 +7763,7 @@ default_action = "permit"
             response.status,
             proto::ConfigTransactionPlanStatus::Committable as i32
         );
-        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
         // No static members: the reshape fan-out reconfigures nothing.
         assert!(peers.lock().await.is_empty());
         let bounce_calls = bounce_calls.lock().await;
@@ -7577,7 +7889,7 @@ default_action = "permit"
             response.status,
             proto::ConfigTransactionPlanStatus::Committable as i32
         );
-        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
         let bounce_calls = bounce_calls.lock().await;
         assert_eq!(bounce_calls.len(), 1, "{bounce_calls:?}");
         assert_eq!(bounce_calls[0].len(), 1);
@@ -7631,7 +7943,7 @@ default_action = "permit"
             response.status,
             proto::ConfigTransactionPlanStatus::Committable as i32
         );
-        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
         {
             let peers = peers.lock().await;
             assert_eq!(peers.len(), 1);
@@ -8732,7 +9044,7 @@ remote_asn = 65003
             proto::ConfigTransactionPlanStatus::Committable as i32
         );
         assert_eq!(response.committed_sections, vec!["[[neighbors]] modify"]);
-        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
         let peers = peers.lock().await;
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].address.to_string(), "10.0.0.2");
@@ -8853,6 +9165,12 @@ remote_asn = 65004
         let replacement = table("core", 1001);
         let fib_state = Arc::new(Mutex::new(vec![original.clone()]));
         let staged = Arc::new(Mutex::new(vec![snapshot(&original)]));
+        let current = Arc::new(Mutex::new(fib_config(&original)));
+        let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+        tokio::spawn(fake_transaction_snapshot_manager(
+            internal_rx,
+            current.clone(),
+        ));
 
         let (fib_tx, fib_rx) = mpsc::channel(8);
         tokio::spawn(fake_fib_actor(fib_rx, fib_state.clone(), None));
@@ -8867,19 +9185,24 @@ remote_asn = 65004
         ));
         let (config_tx, mut config_rx) = mpsc::channel(8);
         tokio::spawn(async move {
-            if let Some(rustbgpd_api::peer_types::ConfigEvent::FibTablesReplaced {
-                tables,
+            if let Some(rustbgpd_api::peer_types::ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
                 ack: Some(ack),
             }) = config_rx.recv().await
             {
-                assert_eq!(tables.len(), 1);
-                assert_eq!(tables[0].name, "core");
+                assert!(candidate_toml.contains("config_epoch = 1"));
+                assert!(candidate_toml.contains("name = \"core\""));
                 ack.accept().await;
             }
         });
 
-        let response = apply_config_transaction(
-            deps(Some(fib_tx), peer_tx, Some(config_tx), vec![original]),
+        let response = apply_config_transaction_with_internal(
+            deps(
+                Some(fib_tx),
+                peer_tx,
+                Some(config_tx),
+                vec![original.clone()],
+            ),
             proto::ApplyConfigTransactionRequest {
                 candidate_toml: base_toml(
                     r#"
@@ -8896,6 +9219,7 @@ families = ["ipv4_unicast"]
                 confirm_id: String::new(),
                 confirm_timeout_seconds: 0,
             },
+            internal_tx,
         )
         .await
         .unwrap();
@@ -8907,7 +9231,8 @@ families = ["ipv4_unicast"]
         assert_eq!(response.committed_sections, vec!["[[fib_tables]]"]);
         assert!(response.runtime_snapshot_token.starts_with("kv1:"));
         assert_eq!(*fib_state.lock().await, vec![replacement.clone()]);
-        assert_eq!(*staged.lock().await, vec![snapshot(&replacement)]);
+        assert_eq!(current.lock().await.fib_tables, vec![replacement]);
+        assert_eq!(*staged.lock().await, vec![snapshot(&original)]);
     }
 
     #[tokio::test]
@@ -8915,6 +9240,13 @@ families = ["ipv4_unicast"]
         let original = table("edge", 1000);
         let fib_state = Arc::new(Mutex::new(vec![original.clone()]));
         let staged = Arc::new(Mutex::new(vec![snapshot(&original)]));
+        let prior = fib_config(&original);
+        let current = Arc::new(Mutex::new(prior.clone()));
+        let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+        tokio::spawn(fake_transaction_snapshot_manager(
+            internal_rx,
+            current.clone(),
+        ));
 
         let (fib_tx, fib_rx) = mpsc::channel(8);
         tokio::spawn(fake_fib_actor(fib_rx, fib_state.clone(), None));
@@ -8929,7 +9261,7 @@ families = ["ipv4_unicast"]
         ));
         let (config_tx, mut config_rx) = mpsc::channel(8);
         tokio::spawn(async move {
-            if let Some(rustbgpd_api::peer_types::ConfigEvent::FibTablesReplaced {
+            if let Some(rustbgpd_api::peer_types::ConfigEvent::ConfigTransactionCommitted {
                 ack: Some(ack),
                 ..
             }) = config_rx.recv().await
@@ -8938,7 +9270,7 @@ families = ["ipv4_unicast"]
             }
         });
 
-        let err = apply_config_transaction(
+        let err = apply_config_transaction_with_internal(
             deps(
                 Some(fib_tx),
                 peer_tx,
@@ -8961,6 +9293,7 @@ families = ["ipv4_unicast"]
                 confirm_id: String::new(),
                 confirm_timeout_seconds: 0,
             },
+            internal_tx,
         )
         .await
         .unwrap_err();
@@ -8971,6 +9304,106 @@ families = ["ipv4_unicast"]
         );
         assert_eq!(*fib_state.lock().await, vec![original.clone()]);
         assert_eq!(*staged.lock().await, vec![snapshot(&original)]);
+        assert_eq!(*current.lock().await, prior);
+    }
+
+    #[tokio::test]
+    async fn fib_stage_rejection_precedes_reconciler_and_persistence() {
+        let edge = table("edge", 1000);
+        let core = table("core", 1001);
+        let (fib_tx, mut fib_rx) = mpsc::channel(4);
+        let fib_task = tokio::spawn(async move {
+            let Some(FibRuntimeCommand::GetTables { reply }) = fib_rx.recv().await else {
+                panic!("FIB stage ordering must read the prior first");
+            };
+            reply.send(vec![edge]).unwrap();
+            assert!(
+                fib_rx.recv().await.is_none(),
+                "stage rejection must precede ReplaceTables"
+            );
+        });
+        let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let Some(InternalCommand::StageTransactionConfig { reply, .. }) =
+                internal_rx.recv().await
+            else {
+                panic!("transaction must stage its full snapshot");
+            };
+            reply.send(Err("stage rejected".to_string())).unwrap();
+        });
+        let (config_tx, mut config_rx) = mpsc::channel(1);
+        let deps = deps(
+            Some(fib_tx),
+            mpsc::channel(1).0,
+            Some(config_tx.clone()),
+            Vec::new(),
+        );
+        let error = commit_fib_transaction(
+            &deps,
+            Some(&internal_tx),
+            &config_tx,
+            "candidate".to_string(),
+            fib_config(&core),
+            "next".to_string(),
+            proto::UpdateGroupImpactPlan::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error.error,
+            ConfigTransactionApplyError::InvalidArgument(_)
+        ));
+        drop(deps);
+        drop(config_tx);
+        fib_task.await.unwrap();
+        assert!(
+            config_rx.try_recv().is_err(),
+            "rejected stage must not persist"
+        );
+    }
+
+    #[tokio::test]
+    async fn fib_ack_loss_is_ambiguous_but_restores_tables_and_raw_snapshot() {
+        let edge = table("edge", 1000);
+        let core = table("core", 1001);
+        let fib_state = Arc::new(Mutex::new(vec![edge.clone()]));
+        let current = Arc::new(Mutex::new(fib_config(&edge)));
+        let prior = current.lock().await.clone();
+        let (fib_tx, fib_rx) = mpsc::channel(8);
+        tokio::spawn(fake_fib_actor(fib_rx, fib_state.clone(), None));
+        let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+        tokio::spawn(fake_transaction_snapshot_manager(
+            internal_rx,
+            current.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let Some(ConfigEvent::ConfigTransactionCommitted { ack, .. }) = config_rx.recv().await
+            else {
+                panic!("FIB transaction must use the full-config persistence seam")
+            };
+            drop(ack);
+        });
+        let deps = deps(
+            Some(fib_tx),
+            mpsc::channel(1).0,
+            Some(config_tx.clone()),
+            vec![edge.clone()],
+        );
+        let failure = commit_fib_transaction(
+            &deps,
+            Some(&internal_tx),
+            &config_tx,
+            "candidate".to_string(),
+            fib_config(&core),
+            "next".to_string(),
+            proto::UpdateGroupImpactPlan::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(failure.ambiguous);
+        assert_eq!(*fib_state.lock().await, vec![edge]);
+        assert_eq!(*current.lock().await, prior);
     }
 
     #[test]
@@ -9255,6 +9688,12 @@ peer_group = "ge"
             .await
             .expect("real PlanConfigTransaction flow must succeed");
         assert_eq!(planned.status, RuntimeConfigTransactionStatus::Committable);
+        let committed_candidate_toml = planned
+            .committed_candidate
+            .as_ref()
+            .expect("committable plan carries the exact committed candidate")
+            .as_str()
+            .to_string();
         assert_eq!(planned.update_group_impact.entries.len(), 10);
         assert_eq!(
             planned.update_group_impact.rollup,
@@ -9366,7 +9805,7 @@ peer_group = "ge"
         assert_eq!(response.update_group_impact, Some(expected_apply_impact));
         assert_eq!(
             persisted.lock().await.as_deref(),
-            Some(candidate_toml.as_str())
+            Some(committed_candidate_toml.as_str())
         );
 
         let after = query_real_update_group_snapshot(&rib_tx).await;
@@ -9464,9 +9903,9 @@ peer_group = "ge"
             assert_eq!(acks.route_refreshes(), 0, "export-only peer {peer}");
         }
 
-        let replanned = plan_candidate(&peer_tx, candidate_toml, String::new())
+        let replanned = plan_candidate(&peer_tx, committed_candidate_toml, String::new())
             .await
-            .expect("re-plan of committed candidate must succeed");
+            .expect("re-plan of the committed candidate must succeed");
         assert_eq!(replanned.status, RuntimeConfigTransactionStatus::Noop);
         assert_eq!(replanned.update_group_impact.entries.len(), 10);
         assert!(
@@ -9604,6 +10043,12 @@ log_format = "json"
             .await
             .expect("heterogeneous plan must succeed");
         assert_eq!(planned.status, RuntimeConfigTransactionStatus::Committable);
+        let committed_candidate_toml = planned
+            .committed_candidate
+            .as_ref()
+            .expect("committable plan carries the exact committed candidate")
+            .as_str()
+            .to_string();
         let impact = &planned.update_group_impact;
         assert_eq!(impact.entries.len(), 5);
         assert_eq!(
@@ -9715,9 +10160,9 @@ log_format = "json"
             assert_eq!((acks.import_updates(), acks.route_refreshes()), (0, 0));
         }
 
-        let replanned = plan_candidate(&peer_tx, candidate_toml, String::new())
+        let replanned = plan_candidate(&peer_tx, committed_candidate_toml, String::new())
             .await
-            .expect("identical re-plan must succeed");
+            .expect("re-plan of the committed candidate must succeed");
         assert_eq!(replanned.status, RuntimeConfigTransactionStatus::Noop);
         assert!(
             replanned
@@ -9851,13 +10296,20 @@ log_format = "json"
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             while let Some(command) = internal_rx.recv().await {
-                let InternalCommand::PlanAcceptedSnapshot { reply, .. } = command else {
+                let InternalCommand::PlanAcceptedSnapshot {
+                    snapshot, reply, ..
+                } = command
+                else {
                     panic!("rollback planner received unexpected reload command");
                 };
-                let _ = reply.send(Ok(plan(
+                let candidate_toml =
+                    crate::config::persisted_config_document(snapshot.config_ref())
+                        .expect("rollback fake planner candidate must serialize");
+                let response = plan(
                     RuntimeConfigTransactionStatus::Committable,
                     vec!["[[dynamic_neighbors]]".to_string()],
-                )));
+                );
+                let _ = reply.send(Ok(attach_committed_candidate(response, &candidate_toml)));
             }
         });
         let controller = ConfigTransactionController::new_accepted(

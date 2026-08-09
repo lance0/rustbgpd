@@ -859,6 +859,7 @@ mod tests {
             status,
             runtime_snapshot_token: "kv1:runtime:7".to_string(),
             post_commit_runtime_snapshot_token: "kv1:runtime:8".to_string(),
+            committed_candidate: None,
             diff: crate::peer_types::RuntimeConfigDiff {
                 has_actionable_changes: true,
                 has_reload_applied_changes: true,

@@ -1062,7 +1062,8 @@ export_policy_chain = ["dataset-export"]
     let (tx, rx) = mpsc::channel(4);
     let (internal_tx, internal_rx) = mpsc::unbounded_channel();
     let (rib_tx, mut rib_rx) = mpsc::channel(4);
-    let mgr = PeerManager::new_with_config(
+    let raw_prior = current.clone();
+    let mut mgr = PeerManager::new_with_config(
         rx,
         internal_rx,
         65001,
@@ -1076,7 +1077,7 @@ export_policy_chain = ["dataset-export"]
         current,
     );
     let responder = tokio::spawn(async move {
-        for _ in 0..3 {
+        for _ in 0..5 {
             let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
                 panic!("plan snapshot query missing");
             };
@@ -1115,6 +1116,7 @@ export_policy_chain = ["dataset-export"]
     assert_eq!(noop.update_group_impact.rollup.affected_families, 0);
     assert_eq!(noop.update_group_impact.rollup.local_resyncs, 0);
     assert_eq!(noop.update_group_impact.rollup.no_op, 1);
+    assert!(noop.committed_candidate.is_none());
     assert_eq!(
         fib.status,
         rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Committable
@@ -1128,6 +1130,62 @@ export_policy_chain = ["dataset-export"]
     assert_eq!(fib.update_group_impact.rollup.affected_families, 0);
     assert_eq!(fib.update_group_impact.rollup.local_resyncs, 0);
     assert_eq!(fib.update_group_impact.rollup.no_op, 1);
+    assert!(fib.diff.has_informational_changes);
+    assert!(!fib.diff.has_restart_required_changes);
+    assert!(
+        fib.diff
+            .human_text
+            .contains("Informational transaction materialization")
+    );
+    let diff_json: serde_json::Value = serde_json::from_str(&fib.diff.diff_json).unwrap();
+    assert_eq!(diff_json["has_informational_changes"], true);
+    assert_eq!(
+        diff_json["informational"]["rfc8212_materialization"]["route_behavior_changed"],
+        false
+    );
+    let committed = fib
+        .committed_candidate
+        .as_ref()
+        .expect("committable plan must retain one candidate")
+        .as_str();
+    assert!(committed.contains("config_epoch = 1"), "{committed}");
+    assert!(
+        committed.contains("ebgp_requires_policy = false"),
+        "{committed}"
+    );
+    let chained = mgr.plan_config_transaction(committed, None).await.unwrap();
+    assert_eq!(
+        chained.post_commit_runtime_snapshot_token,
+        fib.post_commit_runtime_snapshot_token
+    );
+
+    // After materialization, trusted rollback must carry the live tuple
+    // without losing the accepted raw prior's FIB/source state.
+    mgr.current_config.config_epoch = Some(crate::config::ConfigEpoch::V1);
+    mgr.current_config.global.ebgp_requires_policy = Some(false);
+    mgr.current_config.fib_tables[0].metric = 201;
+    let mut rollback_prior = raw_prior.clone();
+    let rollback = mgr
+        .plan_preloaded_config_transaction(&mut rollback_prior, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        rollback.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Committable
+    );
+    assert_eq!(rollback.supported_sections, vec!["[[fib_tables]]"]);
+    assert_eq!(
+        rollback_prior.config_epoch,
+        Some(crate::config::ConfigEpoch::V1)
+    );
+    assert_eq!(rollback_prior.global.ebgp_requires_policy, Some(false));
+    assert_eq!(rollback_prior.fib_tables[0].metric, 200);
+    assert_eq!(
+        rollback_prior.policy.rpol_files,
+        raw_prior.policy.rpol_files
+    );
+    assert_eq!(rollback_prior.policy.datasets, raw_prior.policy.datasets);
+    mgr.current_config = raw_prior;
 
     // Capture one accepted candidate, then remove both external sources before
     // the real actor consumes the private command. Any planner reparse or
@@ -1154,6 +1212,7 @@ export_policy_chain = ["dataset-export"]
     );
     assert_eq!(preloaded.supported_sections, vec!["[[fib_tables]]"]);
     assert_eq!(preloaded.update_group_impact.rollup.no_op, 1);
+    assert!(preloaded.committed_candidate.is_some());
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     task.await.unwrap();
     responder.await.unwrap();
@@ -1941,6 +2000,80 @@ async fn replace_config_snapshot_rebuilds_dynamic_range_matcher() {
     assert_eq!(ranges[0].peer_group, "ix-members");
     assert_eq!(ranges[0].remote_asn, 65010);
 
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn transaction_fib_stage_overlays_only_tables_and_posture_and_restores_raw_prior() {
+    let (tx, rx) = mpsc::channel(8);
+    let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    let mut live = make_dynamic_manager_config();
+    live.policy.rpol_files = vec!["live-source.rpol".to_string()];
+    live.fib_tables = vec![crate::test_support::basic_fib_table("edge", 1000)];
+    let mut candidate = live.clone();
+    candidate.global.asn = 64512;
+    candidate.policy.rpol_files = vec!["candidate-source.rpol".to_string()];
+    candidate.config_epoch = Some(crate::config::ConfigEpoch::V1);
+    candidate.global.ebgp_requires_policy = Some(false);
+    candidate.fib_tables[0].name = "core".to_string();
+    candidate.fib_tables[0].table_id = 1001;
+
+    let manager = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        live.clone(),
+    );
+    let handle = tokio::spawn(manager.run());
+    let (stage_tx, stage_rx) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::StageTransactionConfig {
+            candidate: Box::new(candidate),
+            reply: stage_tx,
+        })
+        .unwrap();
+    let previous = stage_rx.await.unwrap().unwrap();
+    assert_eq!(previous.config_epoch, None);
+    assert_eq!(previous.global.ebgp_requires_policy, None);
+    assert_eq!(previous.fib_tables[0].name, "edge");
+
+    let (snapshot_tx, snapshot_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::RuntimeConfigSnapshot { reply: snapshot_tx })
+        .await
+        .unwrap();
+    let staged: Config = toml::from_str(&snapshot_rx.await.unwrap().unwrap().toml).unwrap();
+    assert_eq!(staged.global.asn, live.global.asn);
+    assert_eq!(staged.policy.rpol_files, live.policy.rpol_files);
+    assert_eq!(staged.fib_tables[0].name, "core");
+    assert_eq!(staged.config_epoch, Some(crate::config::ConfigEpoch::V1));
+    assert_eq!(staged.global.ebgp_requires_policy, Some(false));
+
+    let (restore_tx, restore_rx) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::RestoreTransactionConfig {
+            previous,
+            reply: restore_tx,
+        })
+        .unwrap();
+    restore_rx.await.unwrap();
+    let (snapshot_tx, snapshot_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::RuntimeConfigSnapshot { reply: snapshot_tx })
+        .await
+        .unwrap();
+    let restored: Config = toml::from_str(&snapshot_rx.await.unwrap().unwrap().toml).unwrap();
+    assert_eq!(restored.config_epoch, None);
+    assert_eq!(restored.global.ebgp_requires_policy, None);
+    assert_eq!(restored.fib_tables[0].name, "edge");
+    assert_eq!(restored.policy.rpol_files, live.policy.rpol_files);
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     handle.await.unwrap();
 }

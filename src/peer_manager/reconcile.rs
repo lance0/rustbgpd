@@ -127,7 +127,7 @@ impl PeerManager {
             Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")
                 .map_err(RuntimeConfigDiffError::InvalidCandidate)?;
         let diff = crate::config::diff_config(&self.current_config, &candidate);
-        runtime_config_diff_from_config_diff(&diff).map_err(RuntimeConfigDiffError::Internal)
+        runtime_config_diff_from_config_diff(&diff, None).map_err(RuntimeConfigDiffError::Internal)
     }
 
     pub(super) async fn plan_config_transaction(
@@ -138,11 +138,16 @@ impl PeerManager {
         let (live_snapshot, live_snapshot_identity, runtime_snapshot_token) = self
             .config_transaction_plan_context(expected_runtime_snapshot_token)
             .await?;
-        let candidate =
+        let mut candidate =
             Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")
                 .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
+        let materialization = crate::config::materialize_rfc8212_transaction_candidate(
+            &self.current_config,
+            &mut candidate,
+        );
         self.finish_config_transaction_plan(
             &candidate,
+            materialization.as_ref(),
             live_snapshot,
             live_snapshot_identity,
             runtime_snapshot_token,
@@ -151,14 +156,29 @@ impl PeerManager {
 
     pub(super) async fn plan_preloaded_config_transaction(
         &self,
-        candidate: &Config,
+        candidate: &mut Config,
         expected_runtime_snapshot_token: Option<&str>,
     ) -> Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError> {
         let (live_snapshot, live_snapshot_identity, runtime_snapshot_token) = self
             .config_transaction_plan_context(expected_runtime_snapshot_token)
             .await?;
+        // A retained snapshot is trusted rollback authority. Preserve every
+        // non-tuple field, but carry forward an unchanged live tuple.
+        let live_posture = self.current_config.rfc8212_posture();
+        let candidate_posture = candidate.rfc8212_posture();
+        if live_posture.config_epoch_effective == candidate_posture.config_epoch_effective
+            && live_posture.policy_effective == candidate_posture.policy_effective
+        {
+            candidate.config_epoch = live_posture.config_epoch_raw;
+            candidate.global.ebgp_requires_policy = live_posture.policy_raw;
+        }
+        let materialization = crate::config::materialize_rfc8212_transaction_candidate(
+            &self.current_config,
+            candidate,
+        );
         self.finish_config_transaction_plan(
             candidate,
+            materialization.as_ref(),
             live_snapshot,
             live_snapshot_identity,
             runtime_snapshot_token,
@@ -203,6 +223,7 @@ impl PeerManager {
     fn finish_config_transaction_plan(
         &self,
         candidate: &Config,
+        materialization: Option<&crate::config::ConfigDiff>,
         live_snapshot: rustbgpd_rib::UpdateGroupSnapshot,
         live_snapshot_identity: [u8; 8],
         runtime_snapshot_token: String,
@@ -227,8 +248,9 @@ impl PeerManager {
             .snapshot_key
             .token_with_context(candidate, &live_snapshot_identity)
             .map_err(RuntimeConfigTransactionPlanError::Internal)?;
-        let diff = crate::config::diff_config(&self.current_config, candidate);
-        let classification = crate::config::classify_config_transaction_v1(&diff);
+        let committed_diff = crate::config::diff_config(&self.current_config, candidate);
+        let operational_diff = materialization.unwrap_or(&committed_diff);
+        let classification = crate::config::classify_config_transaction_v1(operational_diff);
         let status = if classification.is_noop() {
             RuntimeConfigTransactionStatus::Noop
         } else if classification.is_committable() {
@@ -236,19 +258,39 @@ impl PeerManager {
         } else {
             RuntimeConfigTransactionStatus::Rejected
         };
-        let diff = runtime_config_diff_from_config_diff(&diff)
-            .map_err(RuntimeConfigTransactionPlanError::Internal)?;
-        let human_text = format_transaction_plan_text(
+        let diff = runtime_config_diff_from_config_diff(
+            operational_diff,
+            materialization.map(|_| &committed_diff),
+        )
+        .map_err(RuntimeConfigTransactionPlanError::Internal)?;
+        let mut human_text = format_transaction_plan_text(
             status,
             &classification.supported_sections,
             &classification.unsupported_sections,
             &classification.restart_required_sections,
         );
+        if materialization.is_some() {
+            human_text.push_str(
+                "The RFC 8212 tuple is materialized to its exact unchanged effective posture.\n",
+            );
+        }
+        let committed_candidate = if status == RuntimeConfigTransactionStatus::Committable {
+            Some(
+                crate::config::persisted_config_document(candidate)
+                    .map(rustbgpd_api::peer_types::RuntimeConfigTransactionCandidate::new)
+                    .map_err(|error| {
+                        RuntimeConfigTransactionPlanError::Internal(error.to_string())
+                    })?,
+            )
+        } else {
+            None
+        };
 
         Ok(RuntimeConfigTransactionPlan {
             status,
             runtime_snapshot_token,
             post_commit_runtime_snapshot_token,
+            committed_candidate,
             diff,
             supported_sections: classification.supported_sections,
             unsupported_sections: classification.unsupported_sections,
@@ -291,16 +333,37 @@ impl PeerManager {
 
 fn runtime_config_diff_from_config_diff(
     diff: &crate::config::ConfigDiff,
+    materialized: Option<&crate::config::ConfigDiff>,
 ) -> Result<RuntimeConfigDiff, String> {
-    let diff_json = serde_json::to_string_pretty(&crate::config::config_diff_json_value(diff))
+    let mut diff_value = crate::config::config_diff_json_value(diff);
+    if let Some(materialized) = materialized {
+        diff_value["has_informational_changes"] = serde_json::Value::Bool(true);
+        diff_value["config_epoch"] = serde_json::to_value(materialized.config_epoch)
+            .map_err(|error| format!("failed to serialize config epoch change: {error}"))?;
+        diff_value["ebgp_requires_policy"] =
+            serde_json::to_value(materialized.ebgp_requires_policy)
+                .map_err(|error| format!("failed to serialize RFC 8212 policy change: {error}"))?;
+        diff_value["informational"]["rfc8212_materialization"] = serde_json::json!({
+            "config_epoch": &materialized.config_epoch,
+            "ebgp_requires_policy": &materialized.ebgp_requires_policy,
+            "route_behavior_changed": false,
+        });
+    }
+    let diff_json = serde_json::to_string_pretty(&diff_value)
         .map_err(|error| format!("failed to serialize config diff: {error}"))?;
+    let mut human_text = crate::config::format_config_diff(diff);
+    if let Some(materialized) = materialized {
+        human_text.push_str(&crate::config::format_rfc8212_transaction_materialization(
+            materialized,
+        ));
+    }
     Ok(RuntimeConfigDiff {
         has_actionable_changes: diff.has_actionable_changes(),
         has_reload_applied_changes: diff.has_reload_applied_changes(),
         has_restart_required_changes: diff.has_restart_required_changes(),
-        has_informational_changes: diff.has_informational_changes(),
+        has_informational_changes: materialized.is_some() || diff.has_informational_changes(),
         has_any_changes: diff.has_any_changes(),
-        human_text: crate::config::format_config_diff(diff),
+        human_text,
         diff_json,
     })
 }

@@ -87,23 +87,13 @@ pub struct FibTableControlDeps {
     pub config_history_dir: Option<std::path::PathBuf>,
 }
 
-/// FIB commit failure carrying whether the commit's completion state is
-/// provably clean (LAN-277, mirrors `ApplyFailure` in
-/// `config_transaction_control`). `ambiguous == true` when the persistence
-/// acknowledgement was lost or a rollback component failed — the confirmed
-/// config-transaction path must then retain its revert journal. Targeted FIB
-/// CRUD strips the flag.
 pub(crate) struct FibCommitFailure {
     pub(crate) error: FibTableControlError,
-    pub(crate) ambiguous: bool,
 }
 
 impl From<FibTableControlError> for FibCommitFailure {
     fn from(error: FibTableControlError) -> Self {
-        Self {
-            error,
-            ambiguous: false,
-        }
+        Self { error }
     }
 }
 
@@ -282,7 +272,6 @@ pub(crate) async fn commit_fib_tables_locked(
             error: FibTableControlError::Internal(
                 "config bridge dropped FIB-table persistence acknowledgement".to_string(),
             ),
-            ambiguous: true,
         });
     };
     if let Err(error) = persist_result {
@@ -304,7 +293,7 @@ pub(crate) async fn commit_fib_tables_locked(
 
 /// Read the reconciler's current table set. `Ok(None)` means no reconciler is
 /// running (used by `List` to report `runtime_available = false`).
-async fn read_current_tables(
+pub(crate) async fn read_current_tables(
     fib_cmd_tx: Option<&mpsc::Sender<FibRuntimeCommand>>,
     actor_error: fn(String) -> FibTableControlError,
 ) -> Result<Option<Vec<FibTableConfig>>, FibTableControlError> {
@@ -455,7 +444,6 @@ fn combine_fib_rollback_errors(
     }
     FibCommitFailure {
         error: FibTableControlError::Internal(message),
-        ambiguous: true,
     }
 }
 
@@ -474,7 +462,7 @@ async fn reserve_persist_permit(
         })
 }
 
-async fn replace_tables(
+pub(crate) async fn replace_tables(
     fib_cmd_tx: &mpsc::Sender<FibRuntimeCommand>,
     tables: Vec<FibTableConfig>,
 ) -> Result<(), FibTableControlError> {
