@@ -774,9 +774,9 @@ current peer-group before starting the session. Omitted inheritable fields
 retain their unset/inherit semantics across canonical persistence and in the
 actor snapshot; canonical TOML may render empty-list sentinels such as
 `families = []`. Masked `false`, non-empty family replacement, and an atomic
-disabled Add-Path block remain explicit across restart. Wrapper-only requests
-require an inner config and FieldMask, and the server rejects both/neither
-carriers and invalid masks before mutation.
+disabled Add-Path block remain explicit across restart. Requests require the
+intent, inner config, and FieldMask; field 1/name `config` are reserved, and
+missing components or invalid masks are rejected before mutation.
 
 The bundled `rbgp neighbor add` command sends only the presence-aware wrapper,
 including an empty mask when every inheritable option is omitted. Its explicit

@@ -83,7 +83,6 @@ pub(crate) fn parse_families_proto(families: &[String]) -> Result<Vec<(Afi, Safi
     reason = "service fields intentionally keep neighbor/control-plane nouns explicit"
 )]
 pub struct NeighborService {
-    local_asn: u32,
     access_mode: AccessMode,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -119,7 +118,7 @@ impl NeighborService {
     /// The daemon wires the same lock into SIGHUP reload and FIB-table CRUD so
     /// persisted runtime mutations cannot interleave with a TOML reload.
     pub fn with_runtime_config_lock(
-        local_asn: u32,
+        _local_asn: u32,
         access_mode: AccessMode,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         rib_tx: mpsc::Sender<RibUpdate>,
@@ -128,7 +127,6 @@ impl NeighborService {
         config_mutation_gate: Option<ConfigMutationGateFn>,
     ) -> Self {
         Self {
-            local_asn,
             access_mode,
             peer_mgr_tx,
             rib_tx,
@@ -339,19 +337,6 @@ async fn add_dynamic_range(
     })
     .await?
     .map_err(dynamic_range_error_status)
-}
-
-async fn add_static_peer(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    config: PeerManagerNeighborConfig,
-) -> Result<(), Status> {
-    peer_manager_request(peer_mgr_tx, |reply| PeerManagerCommand::AddPeer {
-        config,
-        sync_config_snapshot: true,
-        reply,
-    })
-    .await?
-    .map_err(peer_lifecycle_error_status)
 }
 
 async fn add_presence_aware_peer(
@@ -1010,10 +995,6 @@ fn peer_key(address: &str, interface: &str) -> Result<PeerKey, Status> {
 
 #[tonic::async_trait]
 impl proto::neighbor_service_server::NeighborService for NeighborService {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "gRPC add maps the public proto surface into the peer-manager command"
-    )]
     async fn add_neighbor(
         &self,
         request: Request<proto::AddNeighborRequest>,
@@ -1022,240 +1003,13 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let config = match (req.config, req.intent) {
-            (Some(config), None) => config,
-            (None, Some(intent)) => return self.add_presence_aware_neighbor(intent).await,
-            (Some(_), Some(_)) | (None, None) => {
-                return Err(Status::invalid_argument(
-                    "exactly one of config or intent is required",
-                ));
-            }
-        };
-
-        let address: IpAddr = config
-            .address
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
-
-        if config.remote_asn == 0 {
-            return Err(Status::invalid_argument("remote_asn must be > 0"));
-        }
-
-        if config.hold_time > 0 && config.hold_time < 3 {
-            return Err(Status::invalid_argument("hold_time must be 0 or >= 3"));
-        }
-        if let Some(minimum) = config.min_hold_time
-            && (minimum < 3 || minimum > u32::from(u16::MAX))
-        {
-            return Err(Status::invalid_argument(
-                "min_hold_time must be between 3 and 65535",
-            ));
-        }
-        // RFC 9687 §4.4 parity with the config path: a non-zero send
-        // hold time must exceed the effective hold time (0 = disabled,
-        // unset = derived default). hold_time 0 here means "use the
-        // default" (see the Some/None mapping below), so validate
-        // against what the peer manager will actually apply.
-        if let Some(value) = config.send_hold_time
-            && value != 0
-        {
-            // Unset hold_time falls back to the daemon default the peer
-            // manager applies (single source of truth in the fsm crate).
-            let effective_hold_time = if config.hold_time > 0 {
-                config.hold_time
-            } else {
-                u32::from(rustbgpd_fsm::DEFAULT_HOLD_TIME)
-            };
-            if value <= effective_hold_time {
-                return Err(Status::invalid_argument(format!(
-                    "invalid send_hold_time {value}: must be 0 (disabled) or greater than \
-                     hold_time {effective_hold_time} (RFC 9687 §4.4)"
-                )));
-            }
-        }
-        let interface = (!config.interface.trim().is_empty()).then(|| config.interface.clone());
-        match (is_ipv6_link_local(address), interface.as_ref()) {
-            (true, None) => {
-                return Err(Status::invalid_argument(
-                    "interface is required for IPv6 link-local neighbors",
-                ));
-            }
-            (false, Some(_)) => {
-                return Err(Status::invalid_argument(
-                    "interface is only valid for IPv6 link-local neighbors",
-                ));
-            }
-            _ => {}
-        }
-
-        let families = parse_families_proto(&config.families)?;
-        let required_families = if config.required_families.is_empty() {
-            Vec::new()
-        } else {
-            parse_families_proto(&config.required_families)?
-        };
-        if let Some(missing) = required_families
-            .iter()
-            .find(|family| !families.contains(family))
-        {
-            return Err(Status::invalid_argument(format!(
-                "required family {missing:?} is not in families"
-            )));
-        }
-        let remove_private_as = parse_remove_private_as_proto(&config.remove_private_as)?;
-        let local_role = parse_bgp_role_proto(&config.role)?;
-        let paths_limit_receive_max = u16::try_from(config.paths_limit_receive_max)
-            .map_err(|_| Status::invalid_argument("paths_limit_receive_max must be <= 65535"))?;
-        if remove_private_as != RemovePrivateAs::Disabled && config.remote_asn == self.local_asn {
-            return Err(Status::invalid_argument(format!(
-                "remove_private_as requires eBGP (remote_asn {} == local asn {})",
-                config.remote_asn, self.local_asn
-            )));
-        }
-        if config.route_server_client && config.remote_asn == self.local_asn {
-            return Err(Status::invalid_argument(format!(
-                "route_server_client requires eBGP (remote_asn {} == local asn {})",
-                config.remote_asn, self.local_asn
-            )));
-        }
-        if config.per_client_best && !config.route_server_client {
-            return Err(Status::invalid_argument(
-                "per_client_best requires route_server_client",
-            ));
-        }
-        if local_role.is_some() && config.remote_asn == self.local_asn {
-            return Err(Status::invalid_argument(format!(
-                "role requires eBGP (remote_asn {} == local asn {})",
-                config.remote_asn, self.local_asn
-            )));
-        }
-        if config.strict_role && local_role.is_none() {
-            return Err(Status::invalid_argument("strict_role requires role"));
-        }
-
-        if config.max_prefix_restart_seconds == Some(0) {
-            return Err(Status::invalid_argument(
-                "max_prefix_restart_seconds must be greater than zero when set",
-            ));
-        }
-        let peer_config = PeerManagerNeighborConfig {
-            address,
-            interface,
-            scope_id: None,
-            remote_asn: config.remote_asn,
-            description: config.description,
-            peer_group: if config.peer_group.trim().is_empty() {
-                None
-            } else {
-                Some(config.peer_group)
-            },
-            hold_time: if config.hold_time > 0 {
-                Some(
-                    u16::try_from(config.hold_time)
-                        .map_err(|_| Status::invalid_argument("hold_time exceeds u16 range"))?,
-                )
-            } else {
-                None
-            },
-            min_hold_time: config
-                .min_hold_time
-                .map(u16::try_from)
-                .transpose()
-                .map_err(|_| Status::invalid_argument("min_hold_time exceeds u16 range"))?,
-            send_hold_time: config.send_hold_time,
-            max_prefixes: if config.max_prefixes > 0 {
-                Some(config.max_prefixes)
-            } else {
-                None
-            },
-            max_prefixes_ipv4: None,
-            max_prefixes_ipv6: None,
-            max_prefix_restart_seconds: config.max_prefix_restart_seconds,
-            md5_password: None,
-            tcp_ao: None,
-            ttl_security: false,
-            families,
-            required_families,
-            graceful_restart: true,
-            gr_restart_time: 120,
-            gr_peer_restart_time_max: 4095,
-            gr_stale_routes_time: 360,
-            llgr_stale_time: 0,
-            gr_restart_eligible: false,
-            local_ipv6_nexthop: None,
-            route_reflector_client: false,
-            // Like route_reflector_client, the ORR vantage is not exposed
-            // on the runtime neighbor-add gRPC surface; configure it via
-            // the static TOML `orr_vantage` knob.
-            orr_vantage: None,
-            route_server_client: config.route_server_client,
-            per_client_best: config.per_client_best,
-            // Not exposed on the runtime neighbor-add gRPC surface:
-            // dynamic peers take the compiled-in detection defaults.
-            // Configure exceptions via the static TOML slow_peer_* knobs.
-            slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,
-            slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,
-            slow_peer_isolation: false,
-            // Not exposed on the runtime neighbor-add gRPC surface
-            // (ADR-0039 precedent): enable ADR-0107 ownership
-            // enforcement via the static TOML `next_hop_ownership` knob.
-            next_hop_ownership_strict_peer: false,
-            // Not exposed on the runtime neighbor-add gRPC surface
-            // (ADR-0039 precedent): dynamic peers take the config-derived
-            // default. Configure exceptions via the static TOML
-            // `interpret_rfc1997` knob.
-            interpret_rfc1997: !config.route_server_client,
-            // Same runtime-surface treatment as `interpret_rfc1997`:
-            // dynamic peers take the config-derived default (control
-            // communities on for route-server clients); configure
-            // exceptions via the static TOML `rs_control_communities`.
-            rs_control_communities: config.route_server_client,
-            remove_private_as,
-            add_path_receive: config.add_path_receive,
-            add_path_send: config.add_path_send,
-            add_path_send_max: config.add_path_send_max,
-            paths_limit_receive_max,
-            local_role,
-            strict_role: config.strict_role,
-            // ORF and IPv6-only peering are not exposed on the runtime
-            // neighbor-add gRPC surface; enable them via the static TOML
-            // `prefix_orf_receive` / `disable_ipv4_unicast` knobs instead.
-            prefix_orf_receive: false,
-            disable_ipv4_unicast: false,
-            import_policy: None,
-            export_policy: None,
-        };
-
-        // Reserve config persistence capacity before mutating runtime state.
-        // This makes AddNeighbor fail-fast when persistence is unavailable.
-        let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
-        let runtime_config_lock = self.runtime_config_lock.clone();
-        let config_mutation_gate = self.config_mutation_gate.clone();
-        let join = tokio::spawn(async move {
-            let _guard = runtime_config_lock.lock().await;
-            check_config_mutation_gate(&config_mutation_gate, "NeighborService.AddNeighbor")
-                .await?;
-
-            // Stage the write first: a session that has already dialed out and
-            // sent an OPEN cannot be un-dialed, so a persistence failure must
-            // be known before the peer exists. Keep the shared runtime-config
-            // lock held across the whole window; otherwise a concurrent SIGHUP
-            // could reload stale disk between the runtime add and the commit.
-            persist_then_apply(
-                persist_permit,
-                |ack| ConfigEvent::NeighborAdded {
-                    config: peer_config.clone(),
-                    ack: Some(ack),
-                },
-                || add_static_peer(&peer_mgr_tx, peer_config.clone()),
+        let intent = req.intent.ok_or_else(|| {
+            Status::invalid_argument(
+                "intent is required; AddNeighborRequest.config was removed in v0.65; populate \
+                 intent.config and intent.override_mask",
             )
-            .await
-        });
-        join.await
-            .map_err(|_| Status::internal("neighbor add task did not complete"))??;
-
-        Ok(Response::new(proto::AddNeighborResponse {}))
+        })?;
+        self.add_presence_aware_neighbor(intent).await
     }
 
     async fn delete_neighbor(
@@ -1703,12 +1457,6 @@ mod tests {
     use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::oneshot;
 
-    fn make_service() -> NeighborService {
-        let (tx, _rx) = mpsc::channel(16);
-        let (rib_tx, _rib_rx) = mpsc::channel(16);
-        NeighborService::new(65001, AccessMode::ReadWrite, tx, rib_tx, None)
-    }
-
     #[derive(Clone, Copy)]
     enum ReadRpc {
         ListNeighbors,
@@ -1952,7 +1700,6 @@ mod tests {
         paths: Option<Vec<&str>>,
     ) -> proto::AddNeighborRequest {
         proto::AddNeighborRequest {
-            config: None,
             intent: Some(proto::NeighborCreateIntent {
                 config,
                 override_mask: paths.map(|paths| prost_types::FieldMask {
@@ -1963,28 +1710,35 @@ mod tests {
     }
 
     #[derive(Clone, PartialEq, Message)]
-    struct FrozenAddNeighborRequest {
+    struct FrozenV064AddNeighborRequest {
+        #[prost(message, optional, tag = "2")]
+        intent: Option<FrozenV064NeighborCreateIntent>,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct FrozenV064NeighborCreateIntent {
+        #[prost(message, optional, tag = "1")]
+        config: Option<FrozenNeighborConfig>,
+        #[prost(message, optional, tag = "2")]
+        override_mask: Option<prost_types::FieldMask>,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct FrozenNeighborConfig {
+        #[prost(string, tag = "1")]
+        address: String,
+        #[prost(uint32, tag = "2")]
+        remote_asn: u32,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct FrozenPreIntentAddNeighborRequest {
         #[prost(message, optional, tag = "1")]
         config: Option<FrozenNeighborConfig>,
     }
 
-    #[derive(Clone, PartialEq, Message)]
-    struct FrozenNeighborConfig {}
-
     #[test]
-    fn frozen_legacy_decoder_skips_presence_wrapper_and_sees_config_absent() {
-        let request = intent_request(
-            Some(proto::NeighborConfig {
-                address: "10.0.0.9".into(),
-                remote_asn: 65009,
-                ..Default::default()
-            }),
-            Some(Vec::new()),
-        );
-        let bytes = request.encode_to_vec();
-        let frozen = FrozenAddNeighborRequest::decode(bytes.as_slice()).unwrap();
-        assert!(frozen.config.is_none());
-
+    fn add_neighbor_proto_reserves_only_the_retired_carrier() {
         let source = include_str!("../../../proto/rustbgpd.proto");
         let request_body = source
             .split_once("message AddNeighborRequest {")
@@ -1993,17 +1747,100 @@ mod tests {
             .split_once('}')
             .unwrap()
             .0;
-        assert!(request_body.contains("NeighborConfig config = 1;"));
-        assert!(request_body.contains("NeighborCreateIntent intent = 2;"));
-        assert!(
-            !request_body
-                .lines()
-                .any(|line| line.trim_start().starts_with("oneof "))
+        let active: Vec<_> = request_body
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+            .collect();
+        assert_eq!(
+            active,
+            [
+                "reserved 1;",
+                "reserved \"config\";",
+                "NeighborCreateIntent intent = 2;",
+            ]
         );
     }
 
     #[tokio::test]
-    async fn create_envelope_rejects_both_neither_and_missing_inner_parts_before_mutation() {
+    async fn frozen_v064_intent_wire_is_accepted_unchanged() {
+        let frozen = FrozenV064AddNeighborRequest {
+            intent: Some(FrozenV064NeighborCreateIntent {
+                config: Some(FrozenNeighborConfig {
+                    address: "10.0.0.9".into(),
+                    remote_asn: 65009,
+                }),
+                override_mask: Some(prost_types::FieldMask::default()),
+            }),
+        };
+        let bytes = frozen.encode_to_vec();
+        let request = proto::AddNeighborRequest::decode(bytes.as_slice()).unwrap();
+        assert_eq!(request.encode_to_vec(), bytes);
+
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let call = tokio::spawn(async move { svc.add_neighbor(Request::new(request)).await });
+        match peer_rx.recv().await.unwrap() {
+            PeerManagerCommand::RuntimeCreatePeer { spec, reply } => {
+                assert_eq!(spec.address.to_string(), "10.0.0.9");
+                assert_eq!(spec.remote_asn, 65009);
+                reply.send(Ok(())).unwrap();
+            }
+            _ => panic!("expected RuntimeCreatePeer"),
+        }
+        call.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn pre_intent_wire_is_refused_after_authorization_and_before_mutation() {
+        let bytes = FrozenPreIntentAddNeighborRequest {
+            config: Some(FrozenNeighborConfig {
+                address: "10.0.0.9".into(),
+                remote_asn: 65009,
+            }),
+        }
+        .encode_to_vec();
+        let request = proto::AddNeighborRequest::decode(bytes.as_slice()).unwrap();
+        assert!(request.intent.is_none());
+
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let (config_tx, mut config_rx) = mpsc::channel(1);
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadOnly,
+            peer_tx,
+            rib_tx,
+            Some(config_tx),
+        );
+        let error = svc
+            .add_neighbor(Request::new(request.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(config_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let (config_tx, mut config_rx) = mpsc::channel(1);
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadWrite,
+            peer_tx,
+            rib_tx,
+            Some(config_tx),
+        );
+        let error = svc.add_neighbor(Request::new(request)).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().contains("config was removed in v0.65"));
+        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(config_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn invalid_intent_fails_before_mutation() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (rib_tx, _rib_rx) = mpsc::channel(1);
         let (config_tx, mut config_rx) = mpsc::channel(4);
@@ -2019,21 +1856,33 @@ mod tests {
             remote_asn: 65009,
             ..Default::default()
         };
+        let mut invalid_asn = config.clone();
+        invalid_asn.remote_asn = 0;
+        let mut invalid_hold_time = config.clone();
+        invalid_hold_time.hold_time = 2;
         let requests = [
-            proto::AddNeighborRequest {
-                config: Some(config.clone()),
-                intent: Some(proto::NeighborCreateIntent {
-                    config: Some(config.clone()),
-                    override_mask: Some(prost_types::FieldMask::default()),
-                }),
-            },
             proto::AddNeighborRequest::default(),
             intent_request(None, Some(Vec::new())),
             intent_request(Some(config), None),
+            intent_request(Some(invalid_asn), Some(Vec::new())),
+            intent_request(Some(invalid_hold_time), Some(Vec::new())),
         ];
-        for request in requests {
-            let error = svc.add_neighbor(Request::new(request)).await.unwrap_err();
+        for (request, expected) in requests.into_iter().zip([
+            "intent is required",
+            "intent.config is required",
+            "intent.override_mask is required",
+            "remote_asn must be > 0",
+            "hold_time must be 0 or >= 3",
+        ]) {
+            let error = tokio::time::timeout(
+                Duration::from_millis(100),
+                svc.add_neighbor(Request::new(request)),
+            )
+            .await
+            .expect("malformed request must fail before actor dispatch")
+            .unwrap_err();
             assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(error.message().contains(expected), "{error}");
             assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
             assert!(matches!(config_rx.try_recv(), Err(TryRecvError::Empty)));
         }
@@ -2380,250 +2229,6 @@ mod tests {
         let err = peer_key("192.0.2.1", "eth0").unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("only valid"));
-    }
-
-    #[tokio::test]
-    async fn add_neighbor_rejects_asn_zero() {
-        let svc = make_service();
-        let req = Request::new(proto::AddNeighborRequest {
-            config: Some(proto::NeighborConfig {
-                address: "10.0.0.2".into(),
-                interface: String::new(),
-                remote_asn: 0,
-                description: String::new(),
-                hold_time: 90,
-                max_prefixes: 0,
-                families: Vec::new(),
-                peer_group: String::new(),
-                remove_private_as: String::new(),
-                ..Default::default()
-            }),
-            intent: None,
-        });
-        let err = svc.add_neighbor(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("remote_asn"));
-    }
-
-    #[tokio::test]
-    async fn add_neighbor_rejects_hold_time_two() {
-        let svc = make_service();
-        let req = Request::new(proto::AddNeighborRequest {
-            config: Some(proto::NeighborConfig {
-                address: "10.0.0.2".into(),
-                interface: String::new(),
-                remote_asn: 65002,
-                description: String::new(),
-                hold_time: 2,
-                max_prefixes: 0,
-                families: Vec::new(),
-                peer_group: String::new(),
-                remove_private_as: String::new(),
-                ..Default::default()
-            }),
-            intent: None,
-        });
-        let err = svc.add_neighbor(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("hold_time"));
-    }
-
-    #[tokio::test]
-    async fn add_neighbor_rejects_required_family_outside_configured_set() {
-        // Load-bearing: removing AddNeighbor's subset check lets this request
-        // reach the peer-manager channel instead of returning InvalidArgument.
-        let svc = make_service();
-        let req = Request::new(proto::AddNeighborRequest {
-            config: Some(proto::NeighborConfig {
-                address: "10.0.0.2".into(),
-                remote_asn: 65002,
-                hold_time: 90,
-                families: vec!["ipv4_unicast".into()],
-                required_families: vec!["ipv6_unicast".into()],
-                ..Default::default()
-            }),
-            intent: None,
-        });
-        let err = svc.add_neighbor(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("required family"));
-    }
-
-    /// RFC 9687 §4.4 parity with the config path: a non-zero
-    /// `send_hold_time` must exceed the effective hold time — both when
-    /// `hold_time` is explicit and when it is the daemon default (90).
-    #[tokio::test]
-    async fn add_neighbor_rejects_send_hold_time_not_above_hold_time() {
-        let svc = make_service();
-        for (hold_time, send_hold_time) in [(90, 90), (0, 90), (120, 100)] {
-            let req = Request::new(proto::AddNeighborRequest {
-                config: Some(proto::NeighborConfig {
-                    address: "10.0.0.2".into(),
-                    remote_asn: 65002,
-                    hold_time,
-                    send_hold_time: Some(send_hold_time),
-                    ..Default::default()
-                }),
-                intent: None,
-            });
-            let err = svc.add_neighbor(req).await.unwrap_err();
-            assert_eq!(err.code(), tonic::Code::InvalidArgument);
-            assert!(
-                err.message().contains("send_hold_time"),
-                "hold {hold_time} / send-hold {send_hold_time}: {}",
-                err.message()
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn add_neighbor_forwards_send_hold_time() {
-        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
-        let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_mgr_tx, rib_tx, None);
-
-        let call = tokio::spawn(async move {
-            svc.add_neighbor(Request::new(proto::AddNeighborRequest {
-                config: Some(proto::NeighborConfig {
-                    address: "10.0.0.2".into(),
-                    remote_asn: 65002,
-                    hold_time: 90,
-                    // 0 = disabled is also valid (config-path parity).
-                    send_hold_time: Some(0),
-                    ..Default::default()
-                }),
-                intent: None,
-            }))
-            .await
-        });
-        match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::AddPeer { config, reply, .. } => {
-                assert_eq!(config.send_hold_time, Some(0));
-                reply.send(Ok(())).unwrap();
-            }
-            _ => panic!("expected AddPeer"),
-        }
-        call.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn add_neighbor_forwards_and_validates_minimum_hold_time() {
-        // Mutation-red: deleting local range validation accepts 2; deleting
-        // the DTO assignment forwards None instead of the inherited-safe 100.
-        let svc = make_service();
-        let err = svc
-            .add_neighbor(Request::new(proto::AddNeighborRequest {
-                config: Some(proto::NeighborConfig {
-                    address: "10.0.0.2".into(),
-                    remote_asn: 65002,
-                    min_hold_time: Some(2),
-                    ..Default::default()
-                }),
-                intent: None,
-            }))
-            .await
-            .unwrap_err();
-        assert!(err.message().contains("min_hold_time"));
-
-        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
-        let (rib_tx, _rib_rx) = mpsc::channel(1);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_mgr_tx, rib_tx, None);
-        let call = tokio::spawn(async move {
-            svc.add_neighbor(Request::new(proto::AddNeighborRequest {
-                config: Some(proto::NeighborConfig {
-                    address: "10.0.0.2".into(),
-                    remote_asn: 65002,
-                    peer_group: "long-hold".into(),
-                    // Zero is the existing API unset sentinel. Do not reject
-                    // before peer-group resolution can supply hold_time=120.
-                    hold_time: 0,
-                    min_hold_time: Some(100),
-                    ..Default::default()
-                }),
-                intent: None,
-            }))
-            .await
-        });
-        match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::AddPeer { config, reply, .. } => {
-                assert_eq!(config.peer_group.as_deref(), Some("long-hold"));
-                assert_eq!(config.min_hold_time, Some(100));
-                reply.send(Ok(())).unwrap();
-            }
-            _ => panic!("expected AddPeer"),
-        }
-        call.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn add_neighbor_rejects_link_local_without_interface() {
-        let svc = make_service();
-        let req = Request::new(proto::AddNeighborRequest {
-            config: Some(proto::NeighborConfig {
-                address: "fe80::1".into(),
-                interface: String::new(),
-                remote_asn: 65002,
-                description: String::new(),
-                hold_time: 90,
-                max_prefixes: 0,
-                families: Vec::new(),
-                peer_group: String::new(),
-                remove_private_as: String::new(),
-                ..Default::default()
-            }),
-            intent: None,
-        });
-        let err = svc.add_neighbor(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("interface"));
-    }
-
-    #[tokio::test]
-    async fn add_neighbor_rejects_numbered_peer_with_interface() {
-        let svc = make_service();
-        let req = Request::new(proto::AddNeighborRequest {
-            config: Some(proto::NeighborConfig {
-                address: "2001:db8::1".into(),
-                interface: "eth0".into(),
-                remote_asn: 65002,
-                description: String::new(),
-                hold_time: 90,
-                max_prefixes: 0,
-                families: Vec::new(),
-                peer_group: String::new(),
-                remove_private_as: String::new(),
-                ..Default::default()
-            }),
-            intent: None,
-        });
-        let err = svc.add_neighbor(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("link-local"));
-    }
-
-    #[tokio::test]
-    async fn add_neighbor_rejected_on_read_only_listener() {
-        let (tx, mut rx) = mpsc::channel(16);
-        let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, AccessMode::ReadOnly, tx, rib_tx, None);
-        let req = Request::new(proto::AddNeighborRequest {
-            config: Some(proto::NeighborConfig {
-                address: "10.0.0.2".into(),
-                interface: String::new(),
-                remote_asn: 65002,
-                description: String::new(),
-                hold_time: 90,
-                max_prefixes: 0,
-                families: Vec::new(),
-                peer_group: String::new(),
-                remove_private_as: String::new(),
-                ..Default::default()
-            }),
-            intent: None,
-        });
-        let err = svc.add_neighbor(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[tokio::test]
@@ -4210,78 +3815,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_neighbor_persists_after_runtime_success() {
-        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
-        let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let (config_tx, mut config_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(
-            65001,
-            AccessMode::ReadWrite,
-            peer_mgr_tx,
-            rib_tx,
-            Some(config_tx),
-        );
-
-        let mut call = tokio::spawn(async move {
-            svc.add_neighbor(Request::new(proto::AddNeighborRequest {
-                config: Some(proto::NeighborConfig {
-                    address: "10.0.0.2".into(),
-                    interface: String::new(),
-                    remote_asn: 65002,
-                    description: "static peer".into(),
-                    hold_time: 90,
-                    max_prefixes: 0,
-                    families: vec!["ipv4_unicast".into()],
-                    required_families: vec!["ipv4_unicast".into()],
-                    peer_group: String::new(),
-                    remove_private_as: String::new(),
-                    ..Default::default()
-                }),
-                intent: None,
-            }))
-            .await
-        });
-
-        // The config write is staged BEFORE the peer exists.
-        let staged = match config_rx.recv().await.unwrap() {
-            ConfigEvent::NeighborAdded { config, ack } => {
-                assert_eq!(config.address.to_string(), "10.0.0.2");
-                assert_eq!(config.required_families, vec![(Afi::Ipv4, Safi::Unicast)]);
-                assert!(
-                    matches!(peer_mgr_rx.try_recv(), Err(TryRecvError::Empty)),
-                    "no runtime mutation may be issued before the write is staged"
-                );
-                ack.unwrap()
-            }
-            _ => panic!("expected NeighborAdded"),
-        };
-        let staged = tokio::spawn(staged.accept());
-
-        match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::AddPeer {
-                config,
-                sync_config_snapshot,
-                reply,
-            } => {
-                assert_eq!(config.address.to_string(), "10.0.0.2");
-                assert_eq!(config.remote_asn, 65002);
-                assert_eq!(config.required_families, vec![(Afi::Ipv4, Safi::Unicast)]);
-                assert!(sync_config_snapshot);
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(20), &mut call)
-                        .await
-                        .is_err(),
-                    "call must wait for the staged write to be committed"
-                );
-                reply.send(Ok(())).unwrap();
-            }
-            _ => panic!("expected AddPeer"),
-        }
-        assert!(staged.await.unwrap(), "the staged write must be committed");
-        call.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
     async fn presence_create_stages_identical_raw_spec_before_actor_apply_and_commit() {
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(4);
         let (rib_tx, _rib_rx) = mpsc::channel(1);
@@ -4335,59 +3868,6 @@ mod tests {
         }
         assert!(staged.await.unwrap());
         call.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn add_neighbor_persist_failure_creates_no_peer() {
-        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
-        let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let (config_tx, mut config_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(
-            65001,
-            AccessMode::ReadWrite,
-            peer_mgr_tx,
-            rib_tx,
-            Some(config_tx),
-        );
-
-        let call = tokio::spawn(async move {
-            svc.add_neighbor(Request::new(proto::AddNeighborRequest {
-                config: Some(proto::NeighborConfig {
-                    address: "10.0.0.2".into(),
-                    interface: String::new(),
-                    remote_asn: 65002,
-                    description: "static peer".into(),
-                    hold_time: 90,
-                    max_prefixes: 0,
-                    families: vec!["ipv4_unicast".into()],
-                    peer_group: String::new(),
-                    remove_private_as: String::new(),
-                    ..Default::default()
-                }),
-                intent: None,
-            }))
-            .await
-        });
-
-        match config_rx.recv().await.unwrap() {
-            ConfigEvent::NeighborAdded { ack, .. } => {
-                ack.unwrap().fail_write("disk full");
-            }
-            _ => panic!("expected NeighborAdded"),
-        }
-
-        let err = call.await.unwrap().unwrap_err();
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-        assert!(err.message().contains("config persistence failed"));
-        // No session was ever created, so there is nothing to compensate for:
-        // the peer manager saw no command at all.
-        assert!(
-            matches!(
-                peer_mgr_rx.try_recv(),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected)
-            ),
-            "a rejected add must not touch the peer manager"
-        );
     }
 
     #[tokio::test]
@@ -4506,8 +3986,8 @@ mod tests {
             Some(config_tx),
         );
 
-        let req = Request::new(proto::AddNeighborRequest {
-            config: Some(proto::NeighborConfig {
+        let req = Request::new(intent_request(
+            Some(proto::NeighborConfig {
                 address: "10.0.0.2".into(),
                 interface: String::new(),
                 remote_asn: 65002,
@@ -4519,8 +3999,8 @@ mod tests {
                 remove_private_as: String::new(),
                 ..Default::default()
             }),
-            intent: None,
-        });
+            Some(Vec::new()),
+        ));
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unavailable);
         assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
@@ -4547,123 +4027,5 @@ mod tests {
         let err = svc.delete_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unavailable);
         assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
-    }
-
-    #[tokio::test]
-    async fn add_neighbor_rejects_invalid_remove_private_as() {
-        let svc = make_service();
-        let req = Request::new(proto::AddNeighborRequest {
-            config: Some(proto::NeighborConfig {
-                address: "10.0.0.2".into(),
-                interface: String::new(),
-                remote_asn: 65002,
-                description: String::new(),
-                hold_time: 90,
-                max_prefixes: 0,
-                families: Vec::new(),
-                peer_group: String::new(),
-                remove_private_as: "bogus".into(),
-                ..Default::default()
-            }),
-            intent: None,
-        });
-        let err = svc.add_neighbor(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("remove_private_as"));
-    }
-
-    #[tokio::test]
-    async fn add_neighbor_rejects_remove_private_as_on_ibgp() {
-        let svc = make_service();
-        let req = Request::new(proto::AddNeighborRequest {
-            config: Some(proto::NeighborConfig {
-                address: "10.0.0.2".into(),
-                interface: String::new(),
-                remote_asn: 65001,
-                description: String::new(),
-                hold_time: 90,
-                max_prefixes: 0,
-                families: Vec::new(),
-                peer_group: String::new(),
-                remove_private_as: "all".into(),
-                ..Default::default()
-            }),
-            intent: None,
-        });
-        let err = svc.add_neighbor(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("requires eBGP"));
-    }
-
-    #[tokio::test]
-    async fn add_neighbor_rejects_route_server_client_on_ibgp() {
-        let svc = make_service();
-        let req = Request::new(proto::AddNeighborRequest {
-            config: Some(proto::NeighborConfig {
-                address: "10.0.0.2".into(),
-                interface: String::new(),
-                remote_asn: 65001,
-                description: String::new(),
-                hold_time: 90,
-                max_prefixes: 0,
-                families: Vec::new(),
-                peer_group: String::new(),
-                remove_private_as: String::new(),
-                route_server_client: true,
-                ..Default::default()
-            }),
-            intent: None,
-        });
-        let err = svc.add_neighbor(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("route_server_client"));
-    }
-
-    #[tokio::test]
-    async fn add_neighbor_rejects_role_on_ibgp() {
-        let svc = make_service();
-        let req = Request::new(proto::AddNeighborRequest {
-            config: Some(proto::NeighborConfig {
-                address: "10.0.0.2".into(),
-                interface: String::new(),
-                remote_asn: 65001,
-                description: String::new(),
-                hold_time: 90,
-                max_prefixes: 0,
-                families: Vec::new(),
-                peer_group: String::new(),
-                remove_private_as: String::new(),
-                role: "peer".into(),
-                ..Default::default()
-            }),
-            intent: None,
-        });
-        let err = svc.add_neighbor(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("role"));
-    }
-
-    #[tokio::test]
-    async fn add_neighbor_rejects_strict_role_without_role() {
-        let svc = make_service();
-        let req = Request::new(proto::AddNeighborRequest {
-            config: Some(proto::NeighborConfig {
-                address: "10.0.0.2".into(),
-                interface: String::new(),
-                remote_asn: 65002,
-                description: String::new(),
-                hold_time: 90,
-                max_prefixes: 0,
-                families: Vec::new(),
-                peer_group: String::new(),
-                remove_private_as: String::new(),
-                strict_role: true,
-                ..Default::default()
-            }),
-            intent: None,
-        });
-        let err = svc.add_neighbor(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("strict_role"));
     }
 }

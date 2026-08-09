@@ -22,6 +22,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- `NeighborService.AddNeighbor` now requires field-2 `intent` with its inner
+  config and mask. Field 1/name `config` are reserved; custom clients must
+  move the former top-level config under `intent` and mask each selected
+  supported override (an empty present mask means no overrides).
 - `rbgp rib diff advertised` now requires `page_version` on every live page
   and uses `med_attr` as the sole MED-presence authority. Daemons through
   v0.62 now fail with upgrade guidance instead of using the single-peer and

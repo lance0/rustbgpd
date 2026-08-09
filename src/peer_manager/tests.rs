@@ -21790,25 +21790,16 @@ hold_time = 90
     }
 
     async fn add_neighbor(&self, address: &str, remote_asn: u32) -> Result<(), tonic::Status> {
-        use rustbgpd_api::proto::neighbor_service_server::NeighborService as _;
-
-        tokio::time::timeout(
-            Duration::from_secs(10),
-            self.service.add_neighbor(tonic::Request::new(
-                rustbgpd_api::proto::AddNeighborRequest {
-                    config: Some(rustbgpd_api::proto::NeighborConfig {
-                        address: address.to_string(),
-                        remote_asn,
-                        hold_time: 90,
-                        ..Default::default()
-                    }),
-                    intent: None,
-                },
-            )),
+        self.add_presence_neighbor(
+            rustbgpd_api::proto::NeighborConfig {
+                address: address.to_string(),
+                remote_asn,
+                hold_time: 90,
+                ..Default::default()
+            },
+            &[],
         )
         .await
-        .expect("add_neighbor must answer, not hang")
-        .map(|_| ())
     }
 
     #[expect(
@@ -21832,7 +21823,6 @@ hold_time = 90
             Duration::from_secs(10),
             self.service.add_neighbor(tonic::Request::new(
                 rustbgpd_api::proto::AddNeighborRequest {
-                    config: None,
                     intent: Some(intent),
                 },
             )),

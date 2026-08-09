@@ -142,7 +142,7 @@ main() {
     resolve_grpc_addr
     start_rustbgpd_mtls
 
-    local add_neighbor='{"config":{"address":"10.0.0.3","remote_asn":65003,"hold_time":90}}'
+    local add_neighbor='{"intent":{"config":{"address":"10.0.0.3","remote_asn":65003,"hold_time":90},"overrideMask":{"paths":[]}}}'
 
     # observer: sensitive_read allowed, mutating denied.
     assert_allowed "observer CAN ListReceivedRoutes (sensitive_read)" \

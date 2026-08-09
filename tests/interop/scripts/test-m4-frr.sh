@@ -31,7 +31,7 @@ grpc_list_neighbors() {
 
 grpc_add_neighbor() {
     local addr=$1 asn=$2 desc=$3
-    grpc -d "{\"config\": {\"address\": \"$addr\", \"remote_asn\": $asn, \"description\": \"$desc\"}}" \
+    grpc -d "{\"intent\": {\"config\": {\"address\": \"$addr\", \"remote_asn\": $asn, \"description\": \"$desc\"}, \"overrideMask\": {\"paths\": []}}}" \
         rustbgpd.v1.NeighborService/AddNeighbor
 }
 
