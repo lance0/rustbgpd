@@ -5161,7 +5161,12 @@ remote_asn = 65010
         let expected =
             Config::load_toml_with_diagnostics(expected_toml, "expected runtime snapshot")
                 .expect("expected snapshot must parse");
-        assert_eq!(snapshot, expected);
+        // Durable snapshots materialize the effective epoch/policy; compare the
+        // complete canonical fixpoint rather than raw Option presence.
+        assert_eq!(
+            crate::config::persisted_config_document(&snapshot).unwrap(),
+            crate::config::persisted_config_document(&expected).unwrap(),
+        );
     }
 
     fn with_v3_test_authority(

@@ -432,6 +432,7 @@ impl PeerManager {
             bmp_tx,
             None, // no RPKI validation in tests
             Config {
+                config_epoch: None,
                 global: crate::config::Global {
                     asn: local_asn,
                     router_id: router_id.to_string(),
@@ -452,7 +453,7 @@ impl PeerManager {
                     link_bandwidth_weighted: false,
                     install_blackhole_discard: false,
                     allow_blackhole_broad_prefixes: false,
-                    ebgp_requires_policy: false,
+                    ebgp_requires_policy: None,
                     warm_cache_checkpoint_on_shutdown: false,
                 },
                 // PeerManager::new constructs an in-memory baseline

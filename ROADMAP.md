@@ -533,12 +533,13 @@ Details in the "Recently shipped" section below and ADR-0097.
 
 - **RFC 8212 secure-by-default.** Opt-in enforcement
   (`ebgp_requires_policy`, ADR-0112) is shipped and receipted; the
-  config-epoch representation contract that makes a default flip safe is
-  accepted in ADR-0119 but not yet implemented. ADR-0125 authorizes activation
-  after every named production-mutation proof passes; activation changes only
-  epoch-2 omission to effective `true`. Epoch-less and epoch-1 omission stay
-  permissive, and explicit booleans keep their value. This remains
-  evidence-gated, not release-date-triggered.
+  typed config-epoch/raw-presence representation, pre-activation rejection,
+  full-tuple restart pin, and allocation-safe canonical rendering are shipped.
+  ADR-0125 authorizes activation only after ADR-0119's remaining mutation and
+  interop proofs pass; activation changes only epoch-2 omission to effective
+  `true`. Epoch-less and epoch-1 omission stay permissive, and explicit
+  booleans keep their value. This remains evidence-gated, not
+  release-date-triggered.
 - **Trust/adoption hygiene sweep** (all small): keep the cargo-fuzz / OSS-Fuzz
   onboarding and per-RFC receipts/conformance page current, and keep the
   published Grafana dashboard aligned with the shipped metrics. The secure

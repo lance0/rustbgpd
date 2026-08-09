@@ -1242,6 +1242,7 @@ fn make_dynamic_manager_config() -> Config {
     );
 
     let config = Config {
+        config_epoch: None,
         global: crate::config::Global {
             asn: 65001,
             router_id: "10.0.0.1".to_string(),
@@ -1270,7 +1271,7 @@ fn make_dynamic_manager_config() -> Config {
             link_bandwidth_weighted: false,
             install_blackhole_discard: false,
             allow_blackhole_broad_prefixes: false,
-            ebgp_requires_policy: false,
+            ebgp_requires_policy: None,
             warm_cache_checkpoint_on_shutdown: false,
         },
         security: crate::config::SecurityConfig {
@@ -1983,6 +1984,11 @@ async fn stage_config_snapshot_rebuilds_matcher_and_returns_previous_toml() {
     .await
     .unwrap();
     let previous_toml = reply_rx.await.unwrap().unwrap();
+    assert!(!previous_toml.contains("config_epoch"), "{previous_toml}");
+    assert!(
+        !previous_toml.contains("ebgp_requires_policy"),
+        "{previous_toml}"
+    );
     let previous = Config::load_toml_with_diagnostics(&previous_toml, "previous snapshot").unwrap();
     assert_eq!(previous.dynamic_neighbors[0].prefix, "127.0.0.0/8");
 
@@ -2168,8 +2174,12 @@ async fn runtime_config_snapshot_returns_current_staged_config() {
         .await
         .unwrap();
     let snapshot_toml = reply_rx.await.unwrap().unwrap();
+    assert!(!snapshot_toml.toml.contains("config_epoch"));
+    assert!(!snapshot_toml.toml.contains("ebgp_requires_policy"));
     let snapshot =
         Config::load_toml_with_diagnostics(&snapshot_toml.toml, "runtime snapshot").unwrap();
+    assert_eq!(snapshot.config_epoch, None);
+    assert_eq!(snapshot.global.ebgp_requires_policy, None);
     assert_eq!(snapshot.dynamic_neighbors.len(), 1);
     assert_eq!(snapshot.dynamic_neighbors[0].prefix, "10.30.0.0/16");
     assert_eq!(snapshot.dynamic_neighbors[0].remote_asn, 65030);
@@ -21185,7 +21195,7 @@ async fn rfc8212_pinned_dynamic_child_keeps_deny_across_chain_reresolution() {
         None,
     );
     let mut config = make_dynamic_manager_config();
-    config.global.ebgp_requires_policy = true;
+    config.global.ebgp_requires_policy = Some(true);
     mgr.current_config = config;
 
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
@@ -21253,7 +21263,7 @@ fn rfc8212_status_manager() -> (PeerManager, mpsc::Receiver<RibUpdate>) {
         None,
     );
     let mut config = make_dynamic_manager_config();
-    config.global.ebgp_requires_policy = true;
+    config.global.ebgp_requires_policy = Some(true);
     // The running config says every neighbor inherits an explicit operator
     // chain. Nothing in the status derivation may consult it.
     config.policy.import_chain = vec!["operator-import".to_string()];

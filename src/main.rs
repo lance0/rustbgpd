@@ -1980,7 +1980,7 @@ fn warn_unpoliced_ebgp(config: &Config) -> usize {
         );
     }
     body.push('\n');
-    if config.global.ebgp_requires_policy {
+    if config.rfc8212_posture().policy_effective {
         body.push_str(
             "[global] ebgp_requires_policy = true, so every direction listed above runs the\n\
              RFC 8212 reserved deny: the session establishes and then carries no routes in\n\
@@ -3157,6 +3157,7 @@ async fn run<T>(
     // canonically and takes any banner the operator wrote with it — the log
     // is then the only place the posture is still stated.
     let unpoliced_ebgp = config.unpoliced_ebgp_boundaries();
+    let ebgp_requires_policy = config.rfc8212_posture().policy_effective;
     if !unpoliced_ebgp.is_empty() {
         let dynamic_ranges = unpoliced_ebgp
             .iter()
@@ -3166,9 +3167,9 @@ async fn run<T>(
             let unpoliced_ebgp = unpoliced_ebgp.len();
             tracing::warn!(
                 neighbors = unpoliced_ebgp,
-                ebgp_requires_policy = config.global.ebgp_requires_policy,
+                ebgp_requires_policy,
                 "eBGP policy posture: {unpoliced_ebgp} neighbor(s) resolve no explicit policy — {}",
-                if config.global.ebgp_requires_policy {
+                if ebgp_requires_policy {
                     "those directions carry no routes (RFC 8212 reserved deny)"
                 } else {
                     "those directions are unfiltered (permit all)"
@@ -3177,7 +3178,7 @@ async fn run<T>(
         } else {
             let policy_boundaries = unpoliced_ebgp.len();
             let neighbors = policy_boundaries - dynamic_ranges;
-            let consequence = if config.global.ebgp_requires_policy {
+            let consequence = if ebgp_requires_policy {
                 "those directions carry no routes (RFC 8212 reserved deny)"
             } else {
                 "those directions are unfiltered (permit all)"
@@ -3186,7 +3187,7 @@ async fn run<T>(
                 policy_boundaries,
                 neighbors,
                 dynamic_ranges,
-                ebgp_requires_policy = config.global.ebgp_requires_policy,
+                ebgp_requires_policy,
                 "eBGP policy posture: configured boundaries resolving no explicit policy: {policy_boundaries} — {consequence}"
             );
         }
@@ -7183,6 +7184,7 @@ peer_group = "plain"
     )]
     fn max_gr_restart_time_uses_largest_enabled_peer() {
         let config = crate::config::Config {
+            config_epoch: None,
             global: crate::config::Global {
                 asn: 65001,
                 router_id: "10.0.0.1".to_string(),
@@ -7203,7 +7205,7 @@ peer_group = "plain"
                 link_bandwidth_weighted: false,
                 install_blackhole_discard: false,
                 allow_blackhole_broad_prefixes: false,
-                ebgp_requires_policy: false,
+                ebgp_requires_policy: None,
                 warm_cache_checkpoint_on_shutdown: false,
             },
             security: crate::config::SecurityConfig::default(),

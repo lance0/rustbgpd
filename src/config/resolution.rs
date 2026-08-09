@@ -543,7 +543,7 @@ impl Config {
         // accepted through such a range external after OPEN overwrote the
         // sentinel with a learned ASN.
         let external = external_pinned || self.rfc8212_external_asn(neighbor.remote_asn);
-        let enforced = self.global.ebgp_requires_policy && external;
+        let enforced = self.rfc8212_posture().policy_effective && external;
         // Substituting the whole direction (rather than prepending) keeps the
         // reserved deny unambiguous: nothing an operator can name or configure
         // is left in a denied direction, and the implicit GSHUT/BLACKHOLE
