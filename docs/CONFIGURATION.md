@@ -1573,11 +1573,11 @@ ignored. Because the draft expired without IETF adoption, deploy this only
 after confirming peer support. `rbgp neighbor <address>` reports configured,
 advertised, received, and effective values per family in stable numeric
 AFI/SAFI order. Effective send renders as `inactive`, `unlimited`, or a finite
-cap; JSON preserves raw `effective_send_max` and adds
-`effective_send_active` plus optional normalized `effective_send_limit` so zero
-is never ambiguous.
-The protobuf preserves the legacy raw `effective_send_max` sentinel for rolling
-clients and adds optional `effective_send_limit` as the normalized active view.
+cap. JSON pairs `effective_send_active` with optional `effective_send_limit`;
+protobuf uses the same encoding: absent is inactive, present zero is active and
+unlimited, and present non-zero is active with that finite limit.
+Clients that still read the removed raw `effective_send_max` field must upgrade
+to the presence-aware field.
 
 **Multi-path send (route server mode):** When `send = true`, the RIB
 distributes multiple candidate paths per prefix to this peer, sorted by

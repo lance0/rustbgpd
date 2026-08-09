@@ -537,12 +537,10 @@ message PathsLimitState {
   uint32 configured_receive_max = 2;
   uint32 advertised_receive_max = 3;
   uint32 received_receive_max = 4;
-  // Legacy raw effective send cap: 0 = inactive, UINT32_MAX = unlimited,
-  // any other value = finite. Preserved for rolling compatibility.
-  uint32 effective_send_max = 5;
+  reserved 5;
+  reserved "effective_send_max";
   // Normalized effective send cap. Presence means Add-Path send is active:
-  // 0 = unlimited, non-zero = finite. Absence means inactive. New clients
-  // fall back to effective_send_max when reading an older server.
+  // 0 = unlimited, non-zero = finite. Absence means inactive.
   optional uint32 effective_send_limit = 6;
 }
 

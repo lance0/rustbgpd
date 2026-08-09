@@ -420,23 +420,7 @@ pub async fn show(
             add_path_receive: cfg.map(|c| c.add_path_receive).unwrap_or(false),
             add_path_send: cfg.map(|c| c.add_path_send).unwrap_or(false),
             add_path_send_max: cfg.map(|c| c.add_path_send_max).unwrap_or(0),
-            paths_limits: n
-                .paths_limits
-                .iter()
-                .map(|limit| {
-                    let (effective_send_active, effective_send_max) =
-                        normalized_effective_send(limit);
-                    JsonPathsLimit {
-                        family: limit.family.clone(),
-                        configured_receive_max: limit.configured_receive_max,
-                        advertised_receive_max: limit.advertised_receive_max,
-                        received_receive_max: limit.received_receive_max,
-                        effective_send_max: limit.effective_send_max,
-                        effective_send_limit: effective_send_active.then_some(effective_send_max),
-                        effective_send_active,
-                    }
-                })
-                .collect(),
+            paths_limits: n.paths_limits.iter().map(json_paths_limit).collect(),
             role: cfg.map(|c| c.role.clone()).unwrap_or_default(),
             strict_role: cfg.map(|c| c.strict_role).unwrap_or(false),
             remote_role: n.remote_role.clone(),
@@ -609,9 +593,7 @@ pub async fn show(
             println!("Add-Path Send Max:     {add_path_send_max}");
         }
         for limit in &n.paths_limits {
-            let (effective_send_active, effective_send_max) = normalized_effective_send(limit);
-            let effective_send =
-                paths_limit_effective_send_label(effective_send_active, effective_send_max);
+            let effective_send = paths_limit_effective_send_label(limit.effective_send_limit);
             println!(
                 "Paths-Limit {}: configured={} advertised={} received={} effective-send={}",
                 limit.family,
@@ -1050,24 +1032,22 @@ fn effective_distribution_mode_label(
     }
 }
 
-fn paths_limit_effective_send_label(active: bool, max: u32) -> String {
-    if !active {
-        "inactive".to_string()
-    } else if max == 0 {
-        "unlimited".to_string()
-    } else {
-        max.to_string()
+fn paths_limit_effective_send_label(limit: Option<u32>) -> String {
+    match limit {
+        None => "inactive".to_string(),
+        Some(0) => "unlimited".to_string(),
+        Some(finite) => finite.to_string(),
     }
 }
 
-fn normalized_effective_send(limit: &crate::proto::PathsLimitState) -> (bool, u32) {
-    if let Some(normalized) = limit.effective_send_limit {
-        return (true, normalized);
-    }
-    match limit.effective_send_max {
-        0 => (false, 0),
-        u32::MAX => (true, 0),
-        finite => (true, finite),
+fn json_paths_limit(limit: &crate::proto::PathsLimitState) -> JsonPathsLimit {
+    JsonPathsLimit {
+        family: limit.family.clone(),
+        configured_receive_max: limit.configured_receive_max,
+        advertised_receive_max: limit.advertised_receive_max,
+        received_receive_max: limit.received_receive_max,
+        effective_send_limit: limit.effective_send_limit,
+        effective_send_active: limit.effective_send_limit.is_some(),
     }
 }
 
@@ -1546,9 +1526,36 @@ mod tests {
 
     #[test]
     fn paths_limit_effective_send_distinguishes_inactive_and_unlimited() {
-        assert_eq!(paths_limit_effective_send_label(false, 0), "inactive");
-        assert_eq!(paths_limit_effective_send_label(true, 0), "unlimited");
-        assert_eq!(paths_limit_effective_send_label(true, 4), "4");
+        // Load-bearing: collapsing absent and present-zero, or interpreting a
+        // finite value as a sentinel, changes an operator-facing label.
+        assert_eq!(paths_limit_effective_send_label(None), "inactive");
+        assert_eq!(paths_limit_effective_send_label(Some(0)), "unlimited");
+        assert_eq!(paths_limit_effective_send_label(Some(4)), "4");
+    }
+
+    #[test]
+    fn paths_limit_json_projection_is_presence_aware() {
+        let row = |limit| crate::proto::PathsLimitState {
+            effective_send_limit: limit,
+            ..Default::default()
+        };
+
+        // Load-bearing: deriving activity from a numeric sentinel instead of
+        // field-6 presence makes at least one exact pair red.
+        for (limit, expected) in [
+            (None, (false, None)),
+            (Some(0), (true, Some(0))),
+            (Some(4), (true, Some(4))),
+        ] {
+            let projected = json_paths_limit(&row(limit));
+            assert_eq!(
+                (
+                    projected.effective_send_active,
+                    projected.effective_send_limit
+                ),
+                expected
+            );
+        }
     }
 
     /// Load-bearing: inversion or collapsing rolling-upgrade absence into
@@ -1887,25 +1894,6 @@ mod tests {
         labels!(comparison_verdict_label; V::Unknown => "unknown", V::Private => "private", V::Shared => "shared", V::Separate => "separate", V::Unspecified => "unknown", i32::MAX => "unknown");
         labels!(comparison_membership_label; M::Unknown => "unknown", M::Grouped => "grouped", M::PolicyPeerContext => "policy_peer_context", M::AddPathSend => "add_path_send", M::PerClientBest => "per_client_best", M::OrrVantage => "orr_vantage", M::OrfInstalled => "orf_installed", M::SlowPeer => "slow_peer", M::Unspecified => "unknown", i32::MAX => "unknown");
         labels!(comparison_difference_label; D::ExportPolicy => "export_policy", D::SessionKind => "session_kind", D::RouteReflectorClient => "route_reflector_client", D::LocalRole => "local_role", D::Rfc1997Mode => "rfc1997_mode", D::NegotiatedFamilies => "negotiated_families", D::LlgrFamilies => "llgr_families", D::Unspecified => "unknown", i32::MAX => "unknown");
-    }
-
-    #[test]
-    fn paths_limit_new_and_legacy_servers_normalize_bidirectionally() {
-        let row = |raw, normalized| crate::proto::PathsLimitState {
-            effective_send_max: raw,
-            effective_send_limit: normalized,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            normalized_effective_send(&row(u32::MAX, Some(0))),
-            (true, 0)
-        );
-        assert_eq!(normalized_effective_send(&row(4, Some(4))), (true, 4));
-        assert_eq!(normalized_effective_send(&row(0, None)), (false, 0));
-        assert_eq!(normalized_effective_send(&row(u32::MAX, None)), (true, 0));
-        assert_eq!(normalized_effective_send(&row(3, None)), (true, 3));
-        assert_eq!(normalized_effective_send(&row(0, Some(0))), (true, 0));
     }
 
     fn base_add_opts() -> AddNeighborOpts {

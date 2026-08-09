@@ -139,18 +139,18 @@ frr_caps_are_exact() {
 }
 
 rust_caps_are_exact() {
+    # Load-bearing: exact object equality goes red if the removed raw sentinel
+    # key returns or the live finite field-6 values change.
     rbgp neighbor "$SINK_ADDR" -j 2>/dev/null | jq -e '
         .add_path_send == true and .add_path_receive == true
         and .add_path_send_max == 4
         and (.paths_limits | sort_by(.family)) == [
             {"family":"ipv4_unicast","configured_receive_max":7,
              "advertised_receive_max":7,"received_receive_max":2,
-             "effective_send_max":2,"effective_send_limit":2,
-             "effective_send_active":true},
+             "effective_send_limit":2,"effective_send_active":true},
             {"family":"ipv6_unicast","configured_receive_max":7,
              "advertised_receive_max":7,"received_receive_max":3,
-             "effective_send_max":3,"effective_send_limit":3,
-             "effective_send_active":true}
+             "effective_send_limit":3,"effective_send_active":true}
         ]
     ' >/dev/null
 }
