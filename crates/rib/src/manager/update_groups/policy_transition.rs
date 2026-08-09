@@ -5,6 +5,21 @@ use super::{
     PolicyChain, PolicyTransitionGroupStart, Prefix, RibManager, Route, UpdateGroupClassification,
     classify_update_group, routes_equal, source_control_input,
 };
+use tracing::debug;
+
+/// One `None` arm of the clean-transition inventory walk. Every arm
+/// degrades the WHOLE cohort back to the authoritative per-peer path,
+/// so name the group pair and the term that fired: a degraded cohort
+/// is otherwise indistinguishable in the log from one that never
+/// qualified for the fast path at all.
+fn inventory_degraded(source: usize, destination: usize, key: Option<(Prefix, u32)>, term: &str) {
+    debug!(
+        source,
+        destination,
+        ?key,
+        "clean transition inventory degraded: {term}"
+    );
+}
 
 impl RibManager {
     /// Snapshot route identities for the strict clean transition inventory.
@@ -63,8 +78,14 @@ impl RibManager {
         inventory: &mut CleanPolicyTransitionInventoryBuilder,
     ) -> Option<()> {
         use crate::manager::distribution::rs_control::rs_control_route_tagged;
-        let old = self.group_ribs.get(&source)?;
-        let new = self.group_ribs.get(&destination)?;
+        let Some(old) = self.group_ribs.get(&source) else {
+            inventory_degraded(source, destination, None, "source group missing");
+            return None;
+        };
+        let Some(new) = self.group_ribs.get(&destination) else {
+            inventory_degraded(source, destination, None, "destination group missing");
+            return None;
+        };
         // Fold permit counts per chunk keyed by borrowed labels, then merge
         // into the owned builder maps once: the per-route path used to clone
         // the `Option<String>` label twice per route, which dominated this
@@ -79,10 +100,17 @@ impl RibManager {
         // touch the maps once per flip instead of twice per route.
         let mut run: Option<(IpAddr, Option<&str>, u64)> = None;
         for &(prefix, path_id) in keys {
-            let route = new.table.get(&prefix, path_id)?;
             let key = (prefix, path_id);
-            let prior = old.table.get(&prefix, path_id)?;
+            let Some(route) = new.table.get(&prefix, path_id) else {
+                inventory_degraded(source, destination, Some(key), "destination table drift");
+                return None;
+            };
+            let Some(prior) = old.table.get(&prefix, path_id) else {
+                inventory_degraded(source, destination, Some(key), "source table drift");
+                return None;
+            };
             if prior.peer != route.peer {
+                inventory_degraded(source, destination, Some(key), "source flip");
                 return None;
             }
             let next_hop = new.nh_override(key);
@@ -99,6 +127,7 @@ impl RibManager {
                             || rs_control_route_tagged(new_communities, new_large, rs_asn)
                     });
                     if tagged {
+                        inventory_degraded(source, destination, Some(key), "rs-control tag");
                         return None;
                     }
                 }
@@ -370,6 +399,12 @@ impl RibManager {
 
     /// Remove a partially or fully staged, still-unowned destination before
     /// the caller hands the transition back to the authoritative per-peer path.
+    ///
+    /// `false` means the group had members and was therefore KEPT — it is
+    /// now an owned, maintained group, not a leak. Callers that can only
+    /// reach this with a group they created must treat `false` as an error;
+    /// callers cleaning up a possibly-adopted prestage discard it explicitly.
+    #[must_use = "false leaves the group in place; a caller that created it must treat that as an error"]
     pub(in crate::manager) fn discard_uncommitted_policy_transition_group(
         &mut self,
         gid: usize,

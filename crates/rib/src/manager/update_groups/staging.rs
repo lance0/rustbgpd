@@ -1,11 +1,26 @@
 use super::{
-    GroupDelta, GroupStageOutput, HashMap, HashSet, IpAddr, LaneDelta, NextHopAction, PolicyAction,
-    PolicyChain, PolicyFilteredRouteKey, PolicyLabel, Prefix, RibManager, Route, RunnerUp,
-    VpnDenialRecord, VpnGroupDelta, VpnGroupStageOutput, VpnRibRoute, VpnRibRouteKey, VpnRouteKey,
-    capture_source_attrs, routes_equal, source_control_input,
+    GroupDelta, GroupRibOut, GroupStageOutput, HashMap, HashSet, IpAddr, LaneDelta, NextHopAction,
+    PolicyAction, PolicyChain, PolicyFilteredRouteKey, PolicyLabel, Prefix, RibManager, Route,
+    RunnerUp, VpnDenialRecord, VpnGroupDelta, VpnGroupStageOutput, VpnRibRoute, VpnRibRouteKey,
+    VpnRouteKey, capture_source_attrs, routes_equal, source_control_input,
 };
 
 impl RibManager {
+    /// The group a staging pass read at its top, for the commit block
+    /// at its bottom. `&mut self` held across the whole pass is the
+    /// only thing that makes this lookup infallible; a future
+    /// re-entrant (async) staging pass would break that exclusivity
+    /// silently, so assert the invariant rather than only unwrap it.
+    fn staged_group_mut(&mut self, gid: usize) -> &mut GroupRibOut {
+        debug_assert!(
+            self.group_ribs.contains_key(&gid),
+            "staging exclusivity: group {gid} read at the top of the pass must still exist at commit"
+        );
+        self.group_ribs
+            .get_mut(&gid)
+            .expect("group staged above still exists")
+    }
+
     /// Run the shared staging pass for every live group over the pass's
     /// changed prefixes. Deltas are committed to the group tables here;
     /// the per-peer loop emits them per member via the source-flip
@@ -296,10 +311,7 @@ impl RibManager {
                 labeled_filtered.extend(filtered.drain(..).map(|key| (key, label.clone())));
             }
         }
-        let group = self
-            .group_ribs
-            .get_mut(&gid)
-            .expect("group staged above still exists");
+        let group = self.staged_group_mut(gid);
         for delta in &out.deltas {
             group.apply_delta(delta);
         }
@@ -474,10 +486,7 @@ impl RibManager {
                 }
             }
         }
-        let group = self
-            .group_ribs
-            .get_mut(&gid)
-            .expect("group staged above still exists");
+        let group = self.staged_group_mut(gid);
         for delta in &out.deltas {
             group.apply_vpn_delta(delta);
         }
