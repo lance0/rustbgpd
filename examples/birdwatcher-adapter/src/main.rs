@@ -228,8 +228,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/routes/noexport/{id}", get(routes_noexport))
         .with_state(state);
 
-    info!(addr = %args.listen, "starting Birdwatcher-shaped looking glass subset");
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
+    // Log the address actually bound rather than the one requested: with a
+    // `:0` port the two differ, and only the bound one is reachable.
+    let addr = listener.local_addr().unwrap_or(args.listen);
+    info!(%addr, "starting Birdwatcher-shaped looking glass subset");
     axum::serve(listener, app).await?;
     Ok(())
 }

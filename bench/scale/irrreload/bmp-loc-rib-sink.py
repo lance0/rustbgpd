@@ -55,8 +55,11 @@ def parse_listen(value: str) -> tuple[str, int]:
         parsed_port = int(port)
     except ValueError as error:
         raise argparse.ArgumentTypeError("listen port must be numeric") from error
-    if not 1 <= parsed_port <= 65535:
-        raise argparse.ArgumentTypeError("listen port must be in 1..65535")
+    # Port 0 lets the sink pick its own port and report it in the
+    # "listening" marker, so a caller never has to reserve one by binding
+    # and releasing it — that reserves nothing and loses races.
+    if not 0 <= parsed_port <= 65535:
+        raise argparse.ArgumentTypeError("listen port must be in 0..65535")
     return host, parsed_port
 
 
@@ -478,7 +481,8 @@ def run_sink(args: argparse.Namespace) -> int:
             server.bind(args.listen)
             server.listen(1)
             server.settimeout(1)
-            atomic_text(output / "listening", "ready\n")
+            bound_host, bound_port = server.getsockname()[:2]
+            atomic_text(output / "listening", f"{bound_host}:{bound_port}\n")
             while True:
                 if time.monotonic() >= deadline:
                     raise ReceiptError("timed out waiting for sole BMP connection")
@@ -715,12 +719,12 @@ def self_test() -> int:
             finally:
                 receiver.close()
                 sender.close()
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
-                reservation.bind(("127.0.0.1", 0))
-                port = reservation.getsockname()[1]
+            # Let the sink bind its own port and report it: binding
+            # 127.0.0.1:0 here and closing it reserves nothing, so a
+            # parallel binder can take the port before the sink starts.
             command = [
                 sys.executable, str(pathlib.Path(__file__).resolve()),
-                "--listen", f"127.0.0.1:{port}", "--output-dir", str(output),
+                "--listen", "127.0.0.1:0", "--output-dir", str(output),
                 "--start-file", str(start_file), "--stop-file", str(stop_file),
                 "--total-prefixes", "2", "--timeout", "5",
             ]
@@ -743,7 +747,8 @@ def self_test() -> int:
 
             try:
                 wait_for_sink(output / "listening")
-                client = socket.create_connection(("127.0.0.1", port), timeout=1)
+                host, _, port = (output / "listening").read_text().strip().rpartition(":")
+                client = socket.create_connection((host, int(port)), timeout=1)
                 start_file.write_text("start\n")
                 frames = [init, sample_peer_up(peer_type=0), sample_peer_up(), sample_per_peer(1)]
                 frames.append(sample_rm(sample_update(announced="20.0.0.0/24")))
