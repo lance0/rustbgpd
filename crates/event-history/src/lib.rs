@@ -933,6 +933,10 @@ impl EventHistoryManager {
             let result = match tokio::time::timeout_at(deadline, &mut actor).await {
                 Ok(result) => result,
                 Err(_) => {
+                    #[cfg(test)]
+                    self.shutdown_progress
+                        .deadline_expiries
+                        .fetch_add(1, Ordering::AcqRel);
                     actor.abort();
                     actor.await
                 }
@@ -976,6 +980,13 @@ struct ShutdownProgress {
     accepted_complete: AtomicBool,
     #[cfg(test)]
     loss_latches: AtomicU64,
+    /// Times shutdown fell back to the shared deadline instead of
+    /// finishing on its own. Counts both arms of that race: the actor's
+    /// drain loop timing out on `rx.recv`, and the manager timing out on
+    /// the actor and aborting it. Lets tests assert a finite queue drains
+    /// on channel closure without timing the drain with a stopwatch.
+    #[cfg(test)]
+    deadline_expiries: AtomicU64,
 }
 
 fn record_shutdown_loss(
@@ -1090,7 +1101,13 @@ async fn run_actor(
                         receive_event(env, &mut buffer, &queue_depths, config.metrics.as_ref())
                     }
                     Ok(None) => accepted_drained = true,
-                    Err(_) => break,
+                    Err(_) => {
+                        #[cfg(test)]
+                        shutdown_progress
+                            .deadline_expiries
+                            .fetch_add(1, Ordering::AcqRel);
+                        break;
+                    }
                 }
             }
         } else {
@@ -1317,6 +1334,11 @@ mod tests {
     use super::*;
     use storage::TestStoreOp::{Append, Flush, Shutdown};
 
+    /// Hang preventer, not a timing property. Every assertion below is on
+    /// observed state, never on how long something took, so this only has
+    /// to be large enough that a loaded box never reaches it.
+    const TEST_BACKSTOP: Duration = Duration::from_secs(60);
+
     fn test_config(path: PathBuf, batch_size: usize) -> EventHistoryConfig {
         EventHistoryConfig {
             path,
@@ -1343,7 +1365,7 @@ mod tests {
     }
 
     async fn wait_for_store(store: &storage::StoreHandle, op: storage::TestStoreOp) {
-        tokio::time::timeout(Duration::from_secs(1), store.test_wait_for_send(op))
+        tokio::time::timeout(TEST_BACKSTOP, store.test_wait_for_send(op))
             .await
             .expect("storage request backstop elapsed");
     }
@@ -1364,7 +1386,7 @@ mod tests {
             .sender()
             .try_send(event(Category::Route, 1))
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(1), losses.changed())
+        tokio::time::timeout(TEST_BACKSTOP, losses.changed())
             .await
             .expect("append-error loss generation backstop elapsed")
             .unwrap();
@@ -1378,13 +1400,17 @@ mod tests {
     #[tokio::test]
     async fn shutdown_drains_every_accepted_event_with_live_sender() {
         // Load-bearing breaks: the old batch_size*2 cap loses five events;
-        // omitting receiver close exceeds the one-second backstop.
+        // omitting the receiver close leaves the drain with nothing to end
+        // it but the shared deadline, which the expiry count catches on
+        // either arm of that race — without timing the drain, so a slow
+        // box cannot fail a correct drain.
         let dir = tempfile::tempdir().unwrap();
         let manager = EventHistoryManager::start(test_config(dir.path().join("events.db"), 4))
             .await
             .unwrap();
         let sender = manager.sender();
         let state = manager.state();
+        let progress = Arc::clone(&manager.shutdown_progress);
         let queue_depths = Arc::clone(&manager.sender.queue_depths);
         let mut committed = manager.subscribe();
         let categories = Category::ALL;
@@ -1397,9 +1423,14 @@ mod tests {
                 .unwrap();
         }
 
-        tokio::time::timeout(Duration::from_secs(1), manager.shutdown())
+        tokio::time::timeout(TEST_BACKSTOP, manager.shutdown())
             .await
-            .expect("finite accepted queue did not drain within the aggregate bound");
+            .expect("shutdown never returned");
+        assert_eq!(
+            progress.deadline_expiries.load(Ordering::Acquire),
+            0,
+            "a finite accepted queue must drain on channel closure, not on the shutdown deadline"
+        );
         assert_eq!(state.latest_event_id(), 13);
         for expected in 0..13 {
             let observed = committed.try_recv().unwrap();
@@ -1440,9 +1471,9 @@ mod tests {
         let shutdown = tokio::spawn(manager.shutdown());
         tokio::task::yield_now().await;
         store.test_release(Append);
-        tokio::time::timeout(Duration::from_secs(6), shutdown)
+        tokio::time::timeout(TEST_BACKSTOP, shutdown)
             .await
-            .expect("submitted append was not continued within the shutdown bound")
+            .expect("shutdown never returned")
             .unwrap();
 
         assert_eq!(store.test_append_calls(), 1);
@@ -1533,7 +1564,7 @@ mod tests {
                 store.test_pause_after_send(Flush);
             }
             manager.sender().try_send(event(Category::Bfd, 3)).unwrap();
-            tokio::time::timeout(Duration::from_secs(1), committed.recv())
+            tokio::time::timeout(TEST_BACKSTOP, committed.recv())
                 .await
                 .expect("committed event backstop elapsed")
                 .unwrap();
