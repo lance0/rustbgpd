@@ -28,8 +28,7 @@ Honesty notes (see docs/ribdiff.md for the adapter matrix):
   - BGP.ext_community is rendered symbolically by birdc and cannot be
     reconstructed into raw 8-octet values without guessing; it is
     skipped with a note on stderr.
-  - MED 0 is omitted like an absent MED (the consumer's documented
-    normalization).
+  - BGP.med is presence-aware; an explicit MED 0 is preserved.
 
 Exit codes: 0 snapshot on stdout; 2 refused (unrecognized/malformed
 input), nothing on stdout.
@@ -93,8 +92,7 @@ def parse_attr(route, key, value, line_no):
         route["next_hop"] = value.split()[0]
     elif key == "BGP.med":
         med = parse_int(value, key, line_no)
-        if med != 0:  # MED 0 is omitted like absent (consumer contract)
-            route["med"] = med
+        route["med"] = med
     elif key == "BGP.local_pref":
         route["local_pref"] = parse_int(value, key, line_no)
     elif key == "BGP.community":

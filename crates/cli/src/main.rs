@@ -992,11 +992,6 @@ enum DiffAction {
     /// per peer/family/NLRI; RFC 7911 path IDs are never compared) and
     /// fail-closed: equality is never asserted from incomplete, truncated,
     /// over-limit, or drifting input.
-    ///
-    /// Live-source limitation: when a daemon response carries no optional
-    /// MED-presence markers, MED-absent and MED 0 cannot be distinguished;
-    /// that compatibility caveat is reported in the diff output only when
-    /// encountered at runtime.
     #[command(after_help = "Exit codes:\n  \
         0  complete inputs, no semantic differences\n  \
         1  complete inputs, differences found\n  \
@@ -3516,7 +3511,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_advertised_help_describes_aggregate_live_deadline_and_conditional_med_caveat() {
+    fn diff_advertised_help_describes_aggregate_live_deadline_without_retired_med_caveat() {
         let mut command = cli_command(BINARY_NAME);
         let advertised = command
             .find_subcommand_mut("diff")
@@ -3538,14 +3533,14 @@ mod tests {
             !normalized.contains("daemon proto carries MED as a bare integer"),
             "stale unconditional MED limitation returned: {help}"
         );
-        // Red proof: restoring the old unconditional claim makes this fail,
-        // while the replacement must retain the runtime compatibility caveat.
+        // Red proof: restoring the retired compatibility paragraph makes
+        // generated help (and checked-in completions) fail this assertion.
         assert!(
-            normalized.contains(
+            !normalized.contains(
                 "when a daemon response carries no optional MED-presence markers, MED-absent \
                  and MED 0 cannot be distinguished"
             ),
-            "conditional MED caveat was absent: {help}"
+            "retired MED caveat returned: {help}"
         );
     }
 

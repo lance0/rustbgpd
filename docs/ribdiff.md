@@ -56,16 +56,11 @@ compared (they are retained for diagnostics). Communities are compared
 order-insensitively; duplicate identical paths are a multiplicity
 difference, not equality. Divergence classes: `incumbent_only`,
 `rustbgpd_only`, `attribute_changed`, `multiplicity_changed`.
+MED uses the presence-aware `med_attr` field: absent and explicit zero are
+distinct; the deprecated bare integer is never a presence fallback.
 
 Live-source limitations (also printed in every report):
 
-- **MED** (older daemons only): daemons that populate the `med_attr`
-  proto field are compared exactly — MED-absent and MED 0 are distinct —
-  and no MED note appears in the report. Older daemons carry MED as a
-  bare integer only, where absent and 0 are indistinguishable over gRPC:
-  their live `med=0` is compared as absent (and the report says so);
-  snapshot producers targeting them should omit `med` when it is zero or
-  absent, or pass `--ignore-attribute med`.
 - **AS_PATH**: compared as a single flattened `AS_SEQUENCE` on both sides
   (the proto exposes a flat ASN list); `AS_SET` structure is not compared.
 - **Unknown attributes**: path attributes outside the typed set are not
@@ -77,9 +72,10 @@ Live-source limitations (also printed in every report):
   `page_version.generation` with the producer-local `rbgp-ribsnap/1` header
   generation. The header value remains the report's live-side generation only
   to preserve the `rbgp-ribdiff/1` report schema; it does not validate the live
-  capture. Opaque continuation tokens still bind the RPC scope and canonical
-  filters and abort on a mid-walk mutation, while per-page `total_count` checks
-  remain defense in depth.
+  capture. Every page must carry `page_version`; a missing value refuses the
+  comparison with daemon-upgrade guidance. Opaque continuation tokens still
+  bind the RPC scope and canonical filters and abort on a mid-walk mutation,
+  while per-page `total_count` checks remain defense in depth.
 
 ## Fail-closed behaviors
 
@@ -91,11 +87,10 @@ Live-source limitations (also printed in every report):
   attribute must not silently compare as absent), as are blank lines,
   records after the trailer, and conflicting ASNs for one peer (exit 2).
 - Live pagination refuses repeated or non-advancing page tokens (the same
-  page twice), a changed `page_version`, mixed present/absent versions,
+  page twice), a missing or changed `page_version`,
   `total_count` drift between pages, and a fetched count that differs from the
-  server's `total_count` (exit 2). An older daemon whose every response omits
-  `page_version` is supported only when the deduplicated request selects
-  exactly one peer; multi-peer legacy captures are incomparable (exit 2).
+  server's `total_count` (exit 2). A daemon that omits the version is too old
+  for a consistency-fenced diff; upgrade rustbgpd to v0.63.0 or newer.
 - `--max-routes` and `--max-input-bytes` are enforced before buffering,
   on both sides (exit 2). The live route ceiling is one aggregate count across
   all returned rows from all requested peers, including defensively discarded
@@ -144,9 +139,7 @@ duplicates; multiplicity is compared):
 - `as_path`: flat ASN list (compared as one `AS_SEQUENCE`). Omit or `[]`
   for an empty path.
 - `med`, `local_pref`: omit when the attribute is absent — absent and 0
-  are distinct in the comparison (when targeting an older daemon without
-  `med_attr`, also omit `med` when it is zero — see the MED live-source
-  note above).
+  are distinct in the comparison.
 - `communities`: `"ASN:value"` strings (well-known aliases like
   `NO_EXPORT` accepted) or raw u32 values.
 - `extended_communities`: raw 8-octet values as unsigned integers
@@ -194,8 +187,8 @@ for member, routes in export_routes():          # your incumbent's export
         rec = {"record": "route", "peer": member.ip, "peer_asn": member.asn,
                "prefix": r.prefix, "origin": r.origin, "as_path": r.as_path,
                "next_hop": r.next_hop, "communities": r.communities}
-        if r.med is not None:                    # omit MED 0 too for older
-            rec["med"] = r.med                   # daemons (see note above)
+        if r.med is not None:
+            rec["med"] = r.med                   # preserve explicit zero
         if r.local_pref is not None:
             rec["local_pref"] = r.local_pref
         emit(rec)
@@ -231,10 +224,9 @@ the incumbent side. Common rules:
   omitted, never defaulted. Attribute kinds a source renders only
   symbolically (BIRD/FRR/GoBGP extended communities) are skipped with a
   note on stderr — compare with `--ignore-attribute extended_communities`.
-- **MED 0 is omitted** like an absent MED, matching the historical live
-  MED conflation. Against a daemon that populates `med_attr`, an
-  explicit live MED 0 therefore reports as a MED difference — pass
-  `--ignore-attribute med` until the adapter contracts are revised.
+- **MED presence:** BIRD, GoBGP, and MRT inputs distinguish absence from an
+  explicit zero and preserve both. FRR's detail JSON emits `metric: 0` for
+  both cases, so that adapter alone omits zero rather than invent presence.
 
 | Adapter | Capture command (verified against) | Form |
 |---------|-------------------------------------|------|

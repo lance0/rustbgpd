@@ -182,11 +182,7 @@ pub(crate) fn route_record_json(
     if let Some(next_hop) = route.next_hop {
         object.insert("next_hop".into(), next_hop.to_string().into());
     }
-    // MED 0 is omitted like an absent MED: the consumer's live side
-    // cannot distinguish them (documented in docs/ribdiff.md).
-    if let Some(med) = route.med
-        && med != 0
-    {
+    if let Some(med) = route.med {
         object.insert("med".into(), med.into());
     }
     if let Some(local_pref) = route.local_pref {
@@ -668,6 +664,25 @@ mod tests {
             EXIT_OK
         );
         assert_eq!(bytes, snapshot.as_bytes());
+    }
+
+    /// Load-bearing: restoring the old `med != 0` emitter filter removes the
+    /// attribute that the MRT parser decoded as explicitly present.
+    #[test]
+    fn mrt_adapter_preserves_explicit_med_zero() {
+        let mut attrs = attr(attr_type::ORIGIN, &[0]);
+        attrs.extend_from_slice(&attr(attr_type::NEXT_HOP, &[192, 0, 2, 1]));
+        attrs.extend_from_slice(&attr(attr_type::MULTI_EXIT_DISC, &0_u32.to_be_bytes()));
+        let dump = write_dump(&mrt_record(
+            RIB_IPV4_UNICAST,
+            &rib_payload(24, &[203, 0, 113], &[(None, attrs)]),
+        ));
+        let rendered = run(&opts(dump.path(), "adj-rib-out-capture")).unwrap();
+        let route = rendered.lines().nth(1).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(route).unwrap()["med"],
+            0
+        );
     }
 
     struct FailAfter {
