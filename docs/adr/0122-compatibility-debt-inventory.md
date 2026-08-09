@@ -20,7 +20,7 @@ This ADR is the single inventory of that debt and its removal schedule.
 Nothing is removed by this ADR; each scheduled entry lands as its own PR
 against the release named here. ADR-0125 records the remaining owner outcomes:
 unary Plan/Apply stays as a permanent small-candidate path, and the three
-hidden `--from-file` aliases are scheduled for v0.65 removal.
+hidden `--from-file` aliases were removed in the v0.65 development cycle.
 
 Not listed, by deliberate judgment: protocol-mandated compatibility (RFC 6793
 AS4 compat attributes, RFC 8277 §2.4 compatibility field, RFC 5925 TCP-AO
@@ -65,7 +65,7 @@ as inventory history).
 
 | # | Item | What it preserves | Cost of keeping | Classification | Removal mechanics |
 |---|------|-------------------|-----------------|----------------|-------------------|
-| L1 | Hidden `--from-file` compatibility aliases on `config diff` / `config plan` / `config apply` (`crates/cli/src/main.rs`), kept when LAN-329 made file arguments positional. The conventions comment pledges they "must never be removed" in the same file. | Old scripts invoking the pre-LAN-329 flag spelling. | Three hidden args + `candidate_file()` merge helper; near zero. The real debt is the "never" pledge, which contradicts the alpha posture. | deprecate → v0.65 | Delete the three hidden args + helper, regenerate checked-in shell completions, reword the conventions comment, and add a CHANGELOG migration note naming the positional spelling. |
+| L1 | Hidden `--from-file` compatibility aliases on `config diff` / `config plan` / `config apply` (`crates/cli/src/main.rs`), kept when LAN-329 made file arguments positional. The conventions comment pledged they "must never be removed" in the same file. | Old scripts invoking the pre-LAN-329 flag spelling. | Three hidden args + `candidate_file()` merge helper; near zero. The real debt was the "never" pledge, which contradicted the alpha posture. | removed (v0.65) | The three hidden args and helper were deleted, first-party callers and checked-in shell completions were migrated, and the CHANGELOG names the positional `CANDIDATE` spelling. The unrelated JSON CRUD `--from-file` flags remain. |
 | L2 | Visible aliases `--peer` (for `--neighbor`) and `--asn` (for `--remote-asn`) throughout `crates/cli/src/main.rs`. | Both product-language spellings, by design (LAN-329 conventions block). | Zero; clap renders them in help. | keep | Canonical convention, not a shim. |
 | L3 | `rbgp rib diff` older-daemon fallbacks from #1367: single-peer tolerance for daemons that omit `page_version` (`observe_page_version`, `crates/cli/src/commands/diff.rs`) and the MED 0-maps-to-absent fallback for daemons without `med_attr` (including the caveat machinery in the same file). | Version-less legacy path: diffing against a ≤v0.62 daemon that predates the fenced advertised-RIB pages. | A fallback state machine, mixed present/absent fail-closed arms, and a caveat surface — the largest single compat structure in the CLI. | deprecate → v0.65 | Fail closed on any response omitting `page_version` (message: upgrade the daemon); delete the single-peer tolerance + `med_attr` fallback + caveat; CHANGELOG note. Rolling-upgrade policy above (N-1) makes v0.65 the earliest release whose N-1 daemon always emits both fields. |
 | L4 | Assorted CLI rolling-upgrade fallbacks for absent additive fields: the `neighbor_source_label` "range unavailable" arm (`crates/cli/src/output.rs`) and max-prefix action absence handling (`crates/cli/src/commands/neighbor.rs`). | `rbgp` from HEAD reading the previous minor's daemon during an upgrade. | Small, individually tested branches. | keep (policy-bounded) | Governed by the N-1 rule: each branch is prunable once its emitting release is two minors old; no per-branch decision needed. |
@@ -101,8 +101,9 @@ as inventory history).
 - The three-minor / N-1 lifetime policies convert future removals from
   per-item debates into scheduled cleanups.
 - The former open calls are closed: unary Plan/Apply remains permanent, and
-  the hidden `--from-file` aliases leave in v0.65. D1, D3, and A2 carry an
-  explicit v0.65 deadline after missing v0.64 rather than silently slipping.
+  the hidden `--from-file` aliases were removed for v0.65. D1, D3, and A2
+  carry an explicit v0.65 deadline after missing v0.64 rather than silently
+  slipping.
 - Scheduled removals (C1, A1, A3) touch the blessed v1 surface; each needs
   the re-bless procedure and a CHANGELOG migration note, which this ADR's
   mechanics columns pre-write.

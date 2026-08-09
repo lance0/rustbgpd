@@ -36,10 +36,11 @@ const BINARY_NAME: &str = "rbgp";
 //   keep it positional.
 // - ASNs: a remote AS flag is `--remote-asn` (visible alias
 //   `--asn`); an unqualified "ASN" in output means the local AS.
-// - File arguments are positional (`policy check FILE`, `policy fmt
-//   FILE...`, `config diff [CANDIDATE]`), never new `--from-file`
-//   flags. Existing `--from-file` spellings stay as hidden
-//   compatibility aliases and must never be removed.
+// - TOML and policy-program file arguments are positional (`policy check
+//   FILE`, `policy fmt FILE...`, `config diff CANDIDATE`), never
+//   `--from-file` flags. The JSON CRUD commands (`policy set`,
+//   `neighbor-set set`, and `peer-group set`) retain their established
+//   `--from-file` spelling.
 // - `-j`/`--json` purity: JSON goes to stdout and carries the
 //   complete result. A command where `-j` provably has no effect
 //   (`metrics`, `top`) warns once on stderr instead of silently
@@ -416,12 +417,8 @@ enum ConfigAction {
         2  changes present")]
     Diff {
         /// Candidate TOML file to validate and compare
-        #[arg(value_name = "CANDIDATE", required_unless_present = "from_file")]
-        candidate: Option<String>,
-
-        /// Hidden compatibility alias for the positional `CANDIDATE`
-        #[arg(long, value_name = "PATH", hide = true, conflicts_with = "candidate")]
-        from_file: Option<String>,
+        #[arg(value_name = "CANDIDATE")]
+        candidate: String,
     },
 
     /// Validate and classify a candidate transaction without mutation
@@ -434,12 +431,8 @@ enum ConfigAction {
         2  changes present (plan is committable or rejected)")]
     Plan {
         /// Candidate TOML file to validate and classify
-        #[arg(value_name = "CANDIDATE", required_unless_present = "from_file")]
-        candidate: Option<String>,
-
-        /// Hidden compatibility alias for the positional `CANDIDATE`
-        #[arg(long, value_name = "PATH", hide = true, conflicts_with = "candidate")]
-        from_file: Option<String>,
+        #[arg(value_name = "CANDIDATE")]
+        candidate: String,
 
         /// Optional runtime snapshot token to check while planning
         #[arg(long, value_name = "TOKEN")]
@@ -449,12 +442,8 @@ enum ConfigAction {
     /// Commit a previously planned candidate transaction
     Apply {
         /// Candidate TOML file to validate and commit
-        #[arg(value_name = "CANDIDATE", required_unless_present = "from_file")]
-        candidate: Option<String>,
-
-        /// Hidden compatibility alias for the positional `CANDIDATE`
-        #[arg(long, value_name = "PATH", hide = true, conflicts_with = "candidate")]
-        from_file: Option<String>,
+        #[arg(value_name = "CANDIDATE")]
+        candidate: String,
 
         /// Runtime snapshot token returned by config plan
         #[arg(long, value_name = "TOKEN")]
@@ -1998,16 +1987,6 @@ fn render_subcommand_sections(
     Ok(())
 }
 
-/// Resolve the `config diff|plan|apply` candidate path from either the
-/// positional CANDIDATE or the hidden `--from-file` compatibility
-/// alias. Clap guarantees exactly one is present
-/// (`required_unless_present` + `conflicts_with`).
-fn candidate_file(candidate: Option<String>, from_file: Option<String>) -> String {
-    candidate
-        .or(from_file)
-        .expect("clap requires CANDIDATE or --from-file")
-}
-
 fn flush_stdout_result<W: std::io::Write + ?Sized>(
     writer: &mut W,
     result: Result<i32, CliError>,
@@ -2218,24 +2197,18 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         },
 
         Command::Config { action } => match action {
-            ConfigAction::Diff {
-                candidate,
-                from_file,
-            } => {
-                let from_file = candidate_file(candidate, from_file);
-                let has_changes = commands::config::diff(connection, &from_file, json).await?;
+            ConfigAction::Diff { candidate } => {
+                let has_changes = commands::config::diff(connection, &candidate, json).await?;
                 let code = commands::config::change_status_exit_code(has_changes);
                 std::process::exit(flush_stdout_result(&mut std::io::stdout(), Ok(code))?);
             }
             ConfigAction::Plan {
                 candidate,
-                from_file,
                 expected_runtime_snapshot_token,
             } => {
-                let from_file = candidate_file(candidate, from_file);
                 let has_changes = commands::config::plan(
                     connection,
-                    &from_file,
+                    &candidate,
                     expected_runtime_snapshot_token.as_deref(),
                     json,
                 )
@@ -2245,7 +2218,6 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             }
             ConfigAction::Apply {
                 candidate,
-                from_file,
                 expected_runtime_snapshot_token,
                 plan_token,
                 client_request_id,
@@ -2253,11 +2225,10 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 confirm_id,
                 confirm_timeout_seconds,
             } => {
-                let from_file = candidate_file(candidate, from_file);
                 commands::config::apply(
                     connection,
                     commands::config::ApplyOptions {
-                        from_file: &from_file,
+                        from_file: &candidate,
                         expected_runtime_snapshot_token: &expected_runtime_snapshot_token,
                         plan_token: plan_token.as_deref(),
                         client_request_id: client_request_id.as_deref(),
@@ -3667,7 +3638,6 @@ mod tests {
             "rbgp",
             "config",
             "apply",
-            "--from-file",
             "candidate.toml",
             "--expected-runtime-snapshot-token",
             "kv1:old:1",
@@ -3698,7 +3668,6 @@ mod tests {
             "rbgp",
             "config",
             "apply",
-            "--from-file",
             "candidate.toml",
             "--expected-runtime-snapshot-token",
             "kv1:old:1",
@@ -5969,86 +5938,47 @@ mod tests {
         }
     }
 
-    /// LAN-329 file-arg convention: the candidate is positional;
-    /// `--from-file` still parses as a hidden compatibility alias, and
-    /// giving both is rejected.
+    /// ADR-0122 L1: config candidates are positional, while JSON CRUD keeps
+    /// its separate `--from-file` contract.
     #[test]
-    fn config_candidate_is_positional_with_from_file_alias() {
-        let cli = Cli::try_parse_from(["rbgp", "config", "diff", "candidate.toml"]).unwrap();
-        let Command::Config {
-            action:
-                ConfigAction::Diff {
-                    candidate,
-                    from_file,
-                },
-        } = cli.command
-        else {
-            panic!("expected Config Diff");
-        };
-        assert_eq!(candidate.as_deref(), Some("candidate.toml"));
-        assert!(from_file.is_none());
-
-        let cli = Cli::try_parse_from(["rbgp", "config", "diff", "--from-file", "candidate.toml"])
-            .unwrap();
-        let Command::Config {
-            action:
-                ConfigAction::Diff {
-                    candidate,
-                    from_file,
-                },
-        } = cli.command
-        else {
-            panic!("expected Config Diff");
-        };
-        assert!(candidate.is_none());
-        assert_eq!(
-            candidate_file(candidate, from_file),
-            "candidate.toml".to_string()
-        );
-
-        // Neither → missing required argument; both → conflict.
-        assert!(Cli::try_parse_from(["rbgp", "config", "diff"]).is_err());
-        assert!(
-            Cli::try_parse_from([
+    fn config_candidate_is_positional_and_rejects_retired_alias() {
+        // Load-bearing: removing a positional CANDIDATE makes one of these
+        // parse checks red; restoring any retired alias makes the matching
+        // UnknownArgument check below red.
+        for args in [
+            vec!["rbgp", "config", "diff", "candidate.toml"],
+            vec!["rbgp", "config", "plan", "candidate.toml"],
+            vec![
                 "rbgp",
                 "config",
-                "diff",
+                "apply",
                 "candidate.toml",
-                "--from-file",
-                "other.toml"
-            ])
-            .is_err()
-        );
+                "--expected-runtime-snapshot-token",
+                "kv1:old:1",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
 
-        // `plan` and `apply` share the same shape.
-        let cli = Cli::try_parse_from(["rbgp", "config", "plan", "candidate.toml"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Config {
-                action: ConfigAction::Plan {
-                    candidate: Some(_),
-                    ..
-                }
-            }
-        ));
-        let cli = Cli::try_parse_from([
-            "rbgp",
-            "config",
-            "apply",
-            "candidate.toml",
-            "--expected-runtime-snapshot-token",
-            "kv1:old:1",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Config {
-                action: ConfigAction::Apply {
-                    candidate: Some(_),
-                    ..
-                }
-            }
-        ));
+        assert!(Cli::try_parse_from(["rbgp", "config", "diff"]).is_err());
+        for args in [
+            vec!["rbgp", "config", "diff", "--from-file", "candidate.toml"],
+            vec!["rbgp", "config", "plan", "--from-file", "candidate.toml"],
+            vec![
+                "rbgp",
+                "config",
+                "apply",
+                "--from-file",
+                "candidate.toml",
+                "--expected-runtime-snapshot-token",
+                "kv1:old:1",
+            ],
+        ] {
+            let Err(error) = Cli::try_parse_from(args) else {
+                panic!("retired --from-file alias parsed");
+            };
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
     }
 
     #[test]

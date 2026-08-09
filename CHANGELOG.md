@@ -20,6 +20,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `/usr/share/doc/rustbgpd/monitoring/` after a `.deb`/`.rpm` install; the
   canonical dashboard and rule files remain the packaging sources (LAN-928).
 
+### Removed
+
+- `rbgp config diff`, `config plan`, and `config apply` no longer accept the
+  hidden `--from-file PATH` compatibility alias. Pass the candidate TOML as
+  the positional `CANDIDATE` argument instead, for example
+  `rbgp config plan candidate.toml`. The unrelated JSON CRUD commands
+  `policy set`, `neighbor-set set`, and `peer-group set` retain their
+  established `--from-file` flag.
+
 ### Fixed
 
 - BIRD 3.3.1 migrations now retain lowercase `bgp_*` attributes from a

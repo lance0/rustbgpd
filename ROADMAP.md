@@ -367,8 +367,8 @@ new AFI/SAFI and EVPN dataplane expansion.
   deprecation policy — is accepted in
   [ADR-0125](docs/adr/0125-v1-stability-contract.md). The remaining hard gates
   are execution, not design: exactly two ≥24 h RS/RR soak receipts, the
-  v0.65 compatibility-debt batch, proof-gated RFC 8212 epoch-2 activation,
-  the latest-1.x security-support row, and the final upgrade-chain
+  remaining v0.65 compatibility-debt batch, proof-gated RFC 8212 epoch-2
+  activation, the latest-1.x security-support row, and the final upgrade-chain
   extension. The external shadow pilot is advisory since the 2026-08-08
   DR1 revision — actively pursued, disclosed if absent at tag time, not
   blocking. The comparative IRR-scale gate is already satisfied.
@@ -1742,11 +1742,11 @@ branch is between features.
   frozen legacy commit-confirm/history readers, the Paths-Limit raw cap,
   the dead `enforcement = "legacy"` enum variant, the `rbgp rib diff`
   older-daemon fallbacks, `AddNeighborRequest.config`,
-  `RouteEvent.event_id`, and the three hidden `--from-file` aliases on
-  `config diff|plan|apply`. Unary Plan/Apply is retained permanently as the
-  small-candidate path; streaming remains additive and outside the initial v1
-  freeze. New compat retentions add a row to the ADR in the PR that introduces
-  them.
+  and `RouteEvent.event_id`. The three hidden `--from-file` aliases on
+  `config diff|plan|apply` were removed during v0.65 development. Unary
+  Plan/Apply is retained permanently as the small-candidate path; streaming
+  remains additive and outside the initial v1 freeze. New compat retentions
+  add a row to the ADR in the PR that introduces them.
 
 - [x] **Legacy GR/LLGR RFC gaps in unicast/FlowSpec/EVPN — RESOLVED.**
   The RR families (VPN/BGP-LS/RTC, #636–#638) implement the strict

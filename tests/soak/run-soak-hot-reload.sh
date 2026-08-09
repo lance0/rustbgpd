@@ -194,7 +194,7 @@ plan_and_extract_token() {
     local output status
     set +e
     output=$(docker exec "$RUSTBGPD" rbgp -s "$GRPC_ADDR" config plan \
-        --from-file /tmp/candidate.toml -j)
+        /tmp/candidate.toml -j)
     status=$?
     set -e
     case "$status" in 0|2) ;; *) return "$status";; esac
@@ -213,7 +213,7 @@ run_apply_cycle() {
     local cycle=${1:?}
     write_candidate_toml "$cycle"
     cycle_log "cycle $cycle: writing candidate TOML"
-    # Copy candidate into the container (rbgp reads from_file locally).
+    # Copy candidate into the container (rbgp reads the candidate locally).
     docker cp "$CANDIDATE_TOML" "$RUSTBGPD:/tmp/candidate.toml" >/dev/null
     local token
     token=$(plan_and_extract_token)
@@ -223,7 +223,7 @@ run_apply_cycle() {
     fi
     cycle_log "cycle $cycle: token=$token, applying"
     docker exec "$RUSTBGPD" rbgp -s "$GRPC_ADDR" config apply \
-        --from-file /tmp/candidate.toml \
+        /tmp/candidate.toml \
         --expected-runtime-snapshot-token "$token" -j >/dev/null 2>&1 || {
         cycle_log "cycle $cycle: apply failed"
         return 1

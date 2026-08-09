@@ -17,7 +17,7 @@ is expanded in the section named in the last column.
 | DR2 | How many archived soak receipts at RS/RR flagship shapes gate the tag? | Exactly two receipts, each at least 24 hours. Together they must cover route-server and route-reflector flagship shapes, a real SIGHUP file reload, and a max-prefix trip followed by timed restart. | Evidence bar E2 |
 | DR3 | Does the tag require a comparative IRR-scale reload row against BIRD and OpenBGPD, or is the existing IXP matrix sufficient? | Yes, and the gate is satisfied by the published four-root IRR-scale comparison against BIRD 3.3.1 and OpenBGPD 9.1. | Evidence bar E3 |
 | DR4 | RFC 8212 secure-by-default: activate per ADR-0119, or record a decision not to flip the default in 1.0? | Activate only the `config_epoch = 2` plus omitted-boolean cell after ADR-0119's representation and production-mutation proofs land. Epoch-less and epoch-1 omission remain permissive forever; explicit booleans retain their value. | Evidence bar E5 |
-| DR5 | ADR-0122 open items: D2 (unary vs streaming Plan/Apply) and L1 (`--from-file` pledge) | Unary Plan/Apply is the permanent small-candidate path. Remove the hidden `--from-file` aliases from `config diff`, `config plan`, and `config apply` in v0.65. | Evidence bar E4 |
+| DR5 | ADR-0122 open items: D2 (unary vs streaming Plan/Apply) and L1 (`--from-file` pledge) | Unary Plan/Apply is the permanent small-candidate path. The hidden `--from-file` aliases were removed from `config diff`, `config plan`, and `config apply` during v0.65 development. | Evidence bar E4 |
 | DR6 | Are streaming Plan/Apply, `ListConfigHistory`, and `RollbackConfigTransaction` re-blessed into the frozen inventory at 1.0? | No. They remain outside the initial frozen inventory and may be added deliberately in a later 1.x minor. | Freeze scope |
 | DR7 | Post-1.0 removal floor for inventoried surface | An inventoried surface deprecated in 1.x remains functional throughout 1.x and is removable no earlier than 2.0. | Deprecation policy |
 | DR8 | Supported-versions window after 1.0 (SECURITY.md currently says "0.x") | Security fixes support the latest 1.x release. N-1 is a separate migration-compatibility promise, not a security-support promise. | Deprecation policy |
@@ -142,9 +142,9 @@ land before the tag. The v0.64 deadline was missed for the frozen v1/v2
 commit-confirm and legacy-history readers and the Paths-Limit raw-cap field;
 those join the existing v0.65 batch. Unary Plan/Apply remains the permanent
 small-candidate path. The hidden `--from-file` compatibility aliases on
-`config diff`, `config plan`, and `config apply` are scheduled for v0.65.
-Current state: inventory and decisions complete; the v0.65 removals remain to
-land.
+`config diff`, `config plan`, and `config apply` were removed during v0.65
+development. Current state: L1 is complete; the rest of the v0.65 removals
+remain to land.
 
 **E5 — RFC 8212 secure default (DR4).** Opt-in enforcement is shipped and
 receipted (ADR-0112, M95). ADR-0119's config-epoch representation and
@@ -197,7 +197,7 @@ The actionable backlog seed: criterion → current state → what closes it.
 | E1 external pilot | Zero pilots; cookbook + tooling shipped, unused externally | Advisory since the 2026-08-08 DR1 revision — pursue per the shadow-pilot cookbook (weekly checkpoints, semantic diff, support bundle, tested rollback, recorded feedback); absence is disclosed at tag time, not blocking |
 | E2 RS/RR soaks | Archived soaks are EVPN-shaped; eight precommitted gates uninjected | Archive exactly two receipts of at least 24 h that collectively cover flagship RS/RR, real SIGHUP reload, and max-prefix trip/timed restart |
 | E3 comparative IRR row | **Satisfied:** four-root same-harness comparison against BIRD and OpenBGPD publishes wins and losses | Keep the published receipt linked from the evidence index |
-| E4 debt schedule | Decisions recorded; v0.64 removals slipped into the v0.65 batch | Land the complete v0.65 removal batch before the tag |
+| E4 debt schedule | L1 is complete; the v0.64 removals and remaining v0.65 items are still open | Land the rest of the v0.65 removal batch before the tag |
 | E5 RFC 8212 | Activation authorized; ADR-0119 representation and proofs unimplemented | Land the representation and every named production-mutation proof; activate only epoch-2 omission |
 | E6 security posture | Fuzz/audit/reporting in place | SECURITY.md 1.x supported-versions row; keep artifact build floor |
 | E7 upgrade chain | Chain contiguous through the current anchor | Extend to the v1.0 anchor at tag time (existing process) |
