@@ -4267,6 +4267,11 @@ mod tests {
     /// so a connection it accepted on the listen port lingers in
     /// `FIN_WAIT`/`TIME_WAIT` while the next generation binds. Without
     /// `SO_REUSEADDR` on both generations that bind fails `EADDRINUSE`.
+    ///
+    /// Rebinding the released address is the behaviour under test, so the
+    /// port cannot be held across the gap the way the reserve-then-serve
+    /// tests elsewhere hold theirs (LAN-941); the exposure is the three
+    /// synchronous drops below, with no await or sleep between them.
     #[tokio::test]
     async fn bind_socket2_listener_rebinds_over_a_lingering_accepted_connection() {
         let options = ListenerSocketOptions::default();

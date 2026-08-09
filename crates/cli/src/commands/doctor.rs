@@ -3293,7 +3293,11 @@ paths = ["x"]
 
     #[test]
     fn listener_test_bind_maps_bind_errors_to_advice() {
-        // Free port: bindable.
+        // Free port: bindable. The port has to be genuinely released —
+        // `listener_bind_check` is itself the binder, so holding it would
+        // test the opposite branch. That leaves the one window this file
+        // cannot close (LAN-941): the two statements between the release
+        // and the check, with no await or sleep between them.
         let free = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap().port()
