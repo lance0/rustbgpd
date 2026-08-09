@@ -9,15 +9,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_release_install_contract as contract
 ROOT = Path(__file__).resolve().parents[1]
 INPUTS = (
+    "Cargo.toml",
+    "Cargo.lock",
+    "Dockerfile",
+    "README.md",
+    "docs/cookbook/ixp-filter-pipeline.md",
+    "docs/cookbook/monitoring-feed.md",
     ".github/workflows/release-install-contract.yml",
     ".github/workflows/release.yml",
     "packaging/nfpm.yaml",
+    "scripts/build-packages.sh",
     "docs/deployment.md",
     "docs/QUICKSTART.md",
     "docs/grafana/rustbgpd-overview.json",
+    "examples/birdwatcher-adapter/Cargo.toml",
+    "examples/birdwatcher-adapter/src/main.rs",
     "examples/birdwatcher-adapter/README.md",
     "examples/prometheus/rustbgpd-alerts.yml",
     "examples/prometheus/rustbgpd-alerts_test.yml",
+    "tests/birdwatcher_adapter_smoke.rs",
 )
 
 class ReleaseInstallContractTest(unittest.TestCase):
@@ -136,23 +146,68 @@ class ReleaseInstallContractTest(unittest.TestCase):
         )
         self.assertTrue(any("birdwatcher" in error for error in errors), errors)
 
-    def test_adapter_in_native_inventory_fails(self) -> None:
-        root = self.fixture()
-        path = root / "packaging/nfpm.yaml"
-        path.write_text(
-            path.read_text()
-            + "\n  - src: synthetic/birdwatcher-adapter\n"
-            + "    dst: /usr/bin/birdwatcher-adapter\n"
+    def test_removed_adapter_from_native_inventory_fails(self) -> None:
+        errors = self.mutate(
+            self.fixture(),
+            "packaging/nfpm.yaml",
+            "dst: /usr/bin/birdwatcher-adapter",
+            "dst: /usr/bin/removed-birdwatcher-adapter",
         )
-        errors = contract.check(root)
         self.assertTrue(any("/usr/bin payload" in error for error in errors), errors)
 
-    def test_fourth_documented_native_binary_fails(self) -> None:
+    def test_fifth_documented_native_binary_fails(self) -> None:
         errors = self.mutate(
-            self.fixture(), "docs/deployment.md", "`rs-config-render`) to", "`rs-config-render`, `extra`) to"
+            self.fixture(),
+            "docs/deployment.md",
+            "`birdwatcher-adapter`) to",
+            "`birdwatcher-adapter`, `extra`) to",
         )
         self.assertTrue(any("documented native binaries" in error for error in errors), errors)
 
+    def test_removed_adapter_from_container_fails(self) -> None:
+        errors = self.mutate(
+            self.fixture(),
+            "Dockerfile",
+            "COPY --from=builder-release /out/birdwatcher-adapter /usr/local/bin/birdwatcher-adapter",
+            "COPY --from=builder-release /out/birdwatcher-adapter /tmp/birdwatcher-adapter",
+        )
+        self.assertTrue(any("production container" in error for error in errors), errors)
+
+    def test_removed_adapter_from_quickstart_fails(self) -> None:
+        errors = self.mutate(
+            self.fixture(),
+            "docs/QUICKSTART.md",
+            "unix:///var/lib/rustbgpd/grpc.sock",
+            "unix:///var/lib/rustbgpd/removed.sock",
+        )
+        self.assertTrue(any("birdwatcher production" in error for error in errors), errors)
+
+    def test_removed_adapter_from_root_install_fails(self) -> None:
+        errors = self.mutate(
+            self.fixture(),
+            "README.md",
+            "rs-config-render birdwatcher-adapter /usr/local/bin/",
+            "rs-config-render /usr/local/bin/",
+        )
+        self.assertTrue(any("canonical install" in error for error in errors), errors)
+
+    def test_removed_adapter_workflow_enrollment_fails(self) -> None:
+        errors = self.mutate(
+            self.fixture(),
+            ".github/workflows/release-install-contract.yml",
+            "- Dockerfile",
+            "- removed.Dockerfile",
+        )
+        self.assertTrue(any("enrollment for Dockerfile" in error for error in errors), errors)
+
+    def test_stdout_rpm_extraction_regression_fails(self) -> None:
+        errors = self.mutate(
+            self.fixture(),
+            ".github/workflows/release-install-contract.yml",
+            "cpio --quiet -id --no-absolute-filenames --directory=extracted/rpm",
+            "cpio --quiet -i --to-stdout",
+        )
+        self.assertTrue(any("contract workflow" in error for error in errors), errors)
 
 if __name__ == "__main__":
     unittest.main()

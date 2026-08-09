@@ -17,28 +17,30 @@ is a permanent source of misunderstanding, so the birdwatcher surface
 lives here as a maintained adapter instead.
 
 <!-- release-install-contract:birdwatcher-boundary:start -->
-The `birdwatcher-adapter` binary is included in release tarballs. It is
-excluded from the default `cargo build`, native `.deb`/`.rpm` packages, and
-container images; build it from a source checkout with `--workspace` or an
-explicit `-p birdwatcher-adapter`.
+The `birdwatcher-adapter` binary is included in release tarballs and also in:
+
+- native `.deb`/`.rpm` packages; and
+- the production container image.
+
+It remains excluded from the default source-checkout `cargo build`; build it
+with `--workspace` or an explicit `-p birdwatcher-adapter`.
 <!-- release-install-contract:birdwatcher-boundary:end -->
 
 ## Build + run
 
 ```sh
 cargo run --release -p birdwatcher-adapter -- \
-    --grpc-addr http://127.0.0.1:50051 \
-    --grpc-token-file /run/secrets/rustbgpd-token \
+    --grpc-addr unix:///var/lib/rustbgpd/grpc.sock \
     --listen 0.0.0.0:8080
 ```
 
 Flags (also settable via env):
 
-| Flag                | Env                                   | Default          | Meaning                                      |
-|---------------------|---------------------------------------|------------------|----------------------------------------------|
-| `--grpc-addr`       | `BIRDWATCHER_ADAPTER_GRPC_ADDR`       | (required)       | rustbgpd gRPC endpoint (TCP)                 |
-| `--grpc-token-file` | `BIRDWATCHER_ADAPTER_GRPC_TOKEN_FILE` | (unset)          | Optional rustbgpd bearer-token file          |
-| `--listen`          | `BIRDWATCHER_ADAPTER_LISTEN`          | `127.0.0.1:8080` | REST listen address                          |
+| Flag | Env | Default | Meaning |
+|---|---|---|---|
+| `--grpc-addr` | `BIRDWATCHER_ADAPTER_GRPC_ADDR` | (required) | rustbgpd gRPC endpoint (`http[s]://` or `unix:///absolute/path`) |
+| `--grpc-token-file` | `BIRDWATCHER_ADAPTER_GRPC_TOKEN_FILE` | (unset) | Optional rustbgpd bearer-token file |
+| `--listen` | `BIRDWATCHER_ADAPTER_LISTEN` | `127.0.0.1:8080` | REST listen address |
 
 The command-line token path takes precedence over the environment variable.
 The adapter reads it once at startup, trims trailing whitespace, and rejects
@@ -46,11 +48,29 @@ empty token files or values that are not valid ASCII gRPC metadata without
 logging the token. Omitting it preserves unauthenticated compatibility for a
 daemon listener that permits it.
 
-The daemon needs a gRPC TCP listener the adapter can reach
-(`[global.telemetry.grpc_tcp]`); read-only access is sufficient —
-every RPC the adapter calls is a read. For a bearer-protected Tier listener,
-set its stable `principal` to an `observer` (or stronger) role and pass the
-matching token file to the adapter.
+The adapter may start before the daemon or Unix socket exists. Its REST
+requests return `502 Bad Gateway` while the gRPC endpoint is unavailable and
+recover on later requests without an adapter restart.
+
+Every adapter RPC is a read, but the convenient owner-only default socket
+authenticates its clients as operator-tier `local-operator`. Run the adapter as
+the `rustbgpd` user and use `unix:///var/lib/rustbgpd/grpc.sock` only when that
+broader local trust is acceptable. For least privilege, give the adapter a
+dedicated loopback listener mapped to `observer`:
+
+```toml
+[security.grpc]
+enforcement = "tier"
+[security.grpc.roles]
+"rustbgpd://observer/birdwatcher" = "observer"
+[global.telemetry.grpc_tcp]
+address = "127.0.0.1:50051"
+token_file = "/run/secrets/rustbgpd-birdwatcher-token"
+principal = "rustbgpd://observer/birdwatcher"
+```
+
+Then pass that address and the same `token_file` to the adapter. Expose the TCP
+listener beyond loopback only with the mTLS controls in `docs/SECURITY.md`.
 
 ## Endpoint → gRPC mapping
 

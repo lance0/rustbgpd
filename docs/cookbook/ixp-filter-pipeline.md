@@ -235,11 +235,13 @@ carries the mapping table and a ready Alice-LG config snippet.
 
 ```bash
 cargo run --release -p birdwatcher-adapter -- \
-    --grpc-addr http://127.0.0.1:50051 \
+    --grpc-addr unix:///var/lib/rustbgpd/grpc.sock \
     --listen 0.0.0.0:8080
 ```
 
-The adapter needs a (read-only) gRPC TCP listener on the daemon, and
+The owner-only socket is convenient but grants operator-tier `local-operator`;
+the adapter README shows a dedicated token-authenticated `observer` listener
+for least privilege. The adapter also needs
 `[policy.reject_retention]` enabled for the filtered view. The noexport
 view is served from the export-explain surface (best-routes-minus-
 advertised, one export-ladder dry run per suppressed prefix). Honest

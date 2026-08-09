@@ -4,8 +4,9 @@
 //! (The adapter replaced the removed in-daemon looking glass server;
 //! this test pins the REST surface operators migrate to.)
 //!
-//! Spawns one rustbgpd (gRPC TCP enabled) and one birdwatcher-adapter
-//! pointed at that gRPC endpoint, then fetches `/status`,
+//! Starts one birdwatcher-adapter against an absent gRPC Unix socket,
+//! observes its `502 Bad Gateway`, then starts rustbgpd without restarting
+//! the adapter and fetches `/status`,
 //! `/protocols/bgp`, and `/routes/peer/{peer}` and asserts the
 //! response shapes.
 //!
@@ -94,10 +95,10 @@ fn get_json(port: u16, path: &str, context: &str) -> serde_json::Value {
         .unwrap_or_else(|e| panic!("{context}: GET {path} body is not JSON ({e}): {body}"))
 }
 
-fn wait_for_http(port: u16, path: &str, proc_: &mut Proc) {
+fn wait_for_http_status(port: u16, path: &str, expected: u16, proc_: &mut Proc) {
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
-        if matches!(http_get(port, path), Some((200, _))) {
+        if matches!(http_get(port, path), Some((status, _)) if status == expected) {
             return;
         }
         if let Ok(Some(status)) = proc_.child.try_wait() {
@@ -110,10 +111,14 @@ fn wait_for_http(port: u16, path: &str, proc_: &mut Proc) {
         thread::sleep(Duration::from_millis(100));
     }
     panic!(
-        "{} did not serve {path} within timeout\nstderr:\n{}",
+        "{} did not serve {path} with HTTP {expected} within timeout\nstderr:\n{}",
         proc_.name,
         proc_.stderr()
     );
+}
+
+fn wait_for_http(port: u16, path: &str, proc_: &mut Proc) {
+    wait_for_http_status(port, path, 200, proc_);
 }
 
 /// Wait until `port` accepts a TCP connection (daemon gRPC readiness).
@@ -143,14 +148,17 @@ fn wait_for_tcp(port: u16, proc_: &mut Proc) -> Result<(), std::process::ExitSta
 /// before the daemon binds it; the daemon treats the lost gRPC bind as a
 /// component failure and exits non-zero. Retry the whole spawn with
 /// fresh ports (bounded) instead of failing the test on that race.
-/// Returns the daemon plus the ports and token path the rest of the test
-/// needs.
-fn spawn_daemon_listening(dir: &Path) -> (Proc, u16, u16, PathBuf) {
+/// Returns the daemon plus the TCP gRPC and BGP ports the rest of the test
+/// needs; the adapter still talks to `grpc_socket`.
+fn spawn_daemon_listening(dir: &Path, grpc_socket: &Path, token_path: &Path) -> (Proc, u16, u16) {
     const ATTEMPTS: u32 = 3;
     for attempt in 1..=ATTEMPTS {
         let grpc_port = free_port();
         let bgp_port = free_port();
-        let (config_path, token_path) = write_config(dir, grpc_port, bgp_port);
+        if grpc_socket.exists() {
+            std::fs::remove_file(grpc_socket).expect("remove stale test gRPC socket");
+        }
+        let config_path = write_config(dir, grpc_port, bgp_port, grpc_socket, token_path);
         let daemon_stdout = dir.join("rustbgpd.stdout.log");
         let daemon_stderr = dir.join("rustbgpd.stderr.log");
         let mut daemon = Proc {
@@ -168,7 +176,7 @@ fn spawn_daemon_listening(dir: &Path) -> (Proc, u16, u16, PathBuf) {
             stderr_path: daemon_stderr,
         };
         match wait_for_tcp(grpc_port, &mut daemon) {
-            Ok(()) => return (daemon, grpc_port, bgp_port, token_path),
+            Ok(()) => return (daemon, grpc_port, bgp_port),
             Err(status) if attempt < ATTEMPTS => eprintln!(
                 "rustbgpd exited before listening on {grpc_port} (attempt {attempt}): \
                  {status}; retrying with fresh ports"
@@ -226,11 +234,15 @@ fn wait_for_unauthenticated_get_global(port: u16, proc_: &mut Proc) {
     );
 }
 
-fn write_config(dir: &Path, grpc_port: u16, bgp_port: u16) -> (PathBuf, PathBuf) {
+fn write_config(
+    dir: &Path,
+    grpc_port: u16,
+    bgp_port: u16,
+    grpc_socket: &Path,
+    token_path: &Path,
+) -> PathBuf {
     let runtime_dir = dir.join("runtime");
     std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
-    let token_path = dir.join("grpc-token");
-    std::fs::write(&token_path, "birdwatcher-smoke-token\n").expect("write test token");
     let config_path = dir.join("rustbgpd.toml");
     let config = format!(
         r#"
@@ -254,6 +266,12 @@ address = "127.0.0.1:{grpc_port}"
 token_file = "{token_path}"
 principal = "rustbgpd://observer/birdwatcher-test"
 
+[global.telemetry.grpc_uds]
+path = "{grpc_socket}"
+mode = 0o600
+token_file = "{token_path}"
+principal = "rustbgpd://observer/birdwatcher-test"
+
 [[neighbors]]
 address = "192.0.2.10"
 remote_asn = 65010
@@ -273,6 +291,7 @@ description = "receiver peer"
 graceful_restart = false
 "#,
         runtime_dir = runtime_dir.display(),
+        grpc_socket = grpc_socket.display(),
         token_path = token_path.display()
     );
     let parsed: toml::Value = toml::from_str(&config).expect("test config must parse");
@@ -297,12 +316,20 @@ graceful_restart = false
         Some(principal)
     );
     assert_eq!(
+        parsed["global"]["telemetry"]["grpc_uds"]["path"].as_str(),
+        Some(grpc_socket.to_str().expect("UTF-8 test socket path"))
+    );
+    assert_eq!(
+        parsed["global"]["telemetry"]["grpc_uds"]["principal"].as_str(),
+        Some(principal)
+    );
+    assert_eq!(
         parsed["security"]["grpc"]["roles"][principal].as_str(),
         Some("observer"),
         "mutation proof: adapter smoke must pin the least-privilege observer role"
     );
     std::fs::write(&config_path, config).expect("write test config");
-    (config_path, token_path)
+    config_path
 }
 
 /// Minimal BGP speaker: connect to the daemon's listen port, complete
@@ -431,13 +458,11 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
         .expect("make temp dir private");
     let adapter_port = free_port();
+    let grpc_socket = temp.path().join("rustbgpd.grpc.sock");
+    let token_path = temp.path().join("grpc-token");
+    std::fs::write(&token_path, "birdwatcher-smoke-token\n").expect("write test token");
 
-    // Spawn the daemon (serves gRPC). Structured logs go to stdout,
-    // the banner to stderr.
-    let (mut daemon, grpc_port, bgp_port, token_path) = spawn_daemon_listening(temp.path());
-    wait_for_unauthenticated_get_global(grpc_port, &mut daemon);
-
-    // Spawn the adapter against the daemon's gRPC endpoint. Built via
+    // Spawn the adapter before its Unix socket exists. Built via
     // `cargo run` (same fallback pattern the rbgp test helper uses) —
     // the workspace build has usually compiled it already.
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
@@ -446,7 +471,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         child: Command::new(cargo)
             .args(["run", "--quiet", "-p", "birdwatcher-adapter", "--"])
             .arg("--grpc-addr")
-            .arg(format!("http://127.0.0.1:{grpc_port}"))
+            .arg(format!("unix://{}", grpc_socket.display()))
             .arg("--grpc-token-file")
             .arg(&token_path)
             .arg("--listen")
@@ -460,7 +485,22 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         name: "birdwatcher-adapter",
         stderr_path: adapter_stderr,
     };
+    let adapter_pid = adapter.child.id();
+    wait_for_http_status(adapter_port, "/status", 502, &mut adapter);
+
+    // Now start the daemon. The adapter's lazy UDS channel must reconnect on
+    // a later request; replacing the adapter would make the PID assertion red.
+    // A parallel TCP listener retains the smoke's explicit unauthenticated
+    // rejection probe while the adapter itself uses only the UDS.
+    let (mut daemon, grpc_port, bgp_port) =
+        spawn_daemon_listening(temp.path(), &grpc_socket, &token_path);
+    wait_for_unauthenticated_get_global(grpc_port, &mut daemon);
     wait_for_http(adapter_port, "/status", &mut adapter);
+    assert_eq!(
+        adapter.child.id(),
+        adapter_pid,
+        "adapter must recover in place"
+    );
 
     // /status — birdwatcher envelope with the api block and a status
     // object carrying the clock fields.

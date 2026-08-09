@@ -26,6 +26,26 @@ MONITORING_PAYLOADS = (
     ),
 )
 
+BIRDWATCHER_WORKFLOW_INPUTS = (
+    "Cargo.toml",
+    "Cargo.lock",
+    "Dockerfile",
+    "README.md",
+    "docs/cookbook/ixp-filter-pipeline.md",
+    "docs/cookbook/monitoring-feed.md",
+    "examples/birdwatcher-adapter/Cargo.toml",
+    "examples/birdwatcher-adapter/src/main.rs",
+    "examples/birdwatcher-adapter/README.md",
+    "tests/birdwatcher_adapter_smoke.rs",
+    "packaging/nfpm.yaml",
+    "scripts/build-packages.sh",
+    "scripts/check_release_install_contract.py",
+    "scripts/test_check_release_install_contract.py",
+    "docs/deployment.md",
+    "docs/QUICKSTART.md",
+    ".github/workflows/release-install-contract.yml",
+)
+
 
 def marked(text: str, name: str, label: str) -> str:
     start = f"<!-- release-install-contract:{name}:start -->"
@@ -95,9 +115,38 @@ def check(root: Path) -> list[str]:
 
         nfpm = read("packaging/nfpm.yaml")
         native_bins = set(re.findall(r"(?m)^\s+dst: (/usr/bin/[^\s]+)\s*$", nfpm))
-        expected = {"/usr/bin/rustbgpd", "/usr/bin/rbgp", "/usr/bin/rs-config-render"}
+        expected = {
+            "/usr/bin/rustbgpd",
+            "/usr/bin/rbgp",
+            "/usr/bin/rs-config-render",
+            "/usr/bin/birdwatcher-adapter",
+        }
         if native_bins != expected:
             errors.append(f"packaging/nfpm.yaml: /usr/bin payload {sorted(native_bins)!r}")
+        package_builder = read("scripts/build-packages.sh")
+        require(
+            errors,
+            "native package builder",
+            package_builder,
+            (
+                "for f in rustbgpd rbgp rs-config-render birdwatcher-adapter",
+                'install -D -m 0755 "$staging/birdwatcher-adapter" '
+                '"$pkgroot/usr/bin/birdwatcher-adapter"',
+            ),
+        )
+
+        dockerfile = read("Dockerfile")
+        require(
+            errors,
+            "production container",
+            dockerfile,
+            (
+                "-p rustbgpd -p rustbgpctl -p birdwatcher-adapter",
+                "cp target/release/birdwatcher-adapter /out/",
+                "COPY --from=builder-release /out/birdwatcher-adapter "
+                "/usr/local/bin/birdwatcher-adapter",
+            ),
+        )
         native_files = set(
             re.findall(
                 r"(?m)^[ \t]+- src: ([^ \t\r\n]+)\r?\n"
@@ -136,6 +185,7 @@ def check(root: Path) -> list[str]:
                     "share/systemd/rustbgpd.service",
                     "share/systemd/rustbgpd-dataplane.conf",
                     "rustbgpd --init-config edge --stdout",
+                    "rustbgpd rbgp rs-config-render birdwatcher-adapter",
                 ),
             )
             if "examples/systemd/" in tarball:
@@ -151,6 +201,37 @@ def check(root: Path) -> list[str]:
                 )
                 + monitoring_names,
             )
+            birdwatcher = marked(doc, "birdwatcher-production", path)
+            require(
+                errors,
+                f"{path} birdwatcher production region",
+                birdwatcher,
+                (
+                    "birdwatcher-adapter",
+                    "unix:///var/lib/rustbgpd/grpc.sock",
+                    "http://127.0.0.1:50051",
+                    "502 Bad Gateway",
+                    "without restart",
+                    "service unit",
+                ),
+            )
+
+        root_install = marked(read("README.md"), "root-install", "README.md")
+        require(
+            errors,
+            "README.md canonical install",
+            root_install,
+            (
+                "rustbgpd rbgp rs-config-render birdwatcher-adapter",
+                "-p rs-config-render -p birdwatcher-adapter",
+                "daemon + rbgp + birdwatcher-adapter",
+            ),
+        )
+        for path, tokens in (
+            ("docs/cookbook/ixp-filter-pipeline.md", ("unix:///var/lib/rustbgpd/grpc.sock", "operator-tier", "`observer`")),
+            ("docs/cookbook/monitoring-feed.md", ("local Unix socket", "`observer`")),
+        ):
+            require(errors, f"{path} Birdwatcher transport", read(path), tokens)
 
         contract_workflow = read(".github/workflows/release-install-contract.yml")
         for source, _, _ in MONITORING_PAYLOADS:
@@ -159,6 +240,26 @@ def check(root: Path) -> list[str]:
                     ".github/workflows/release-install-contract.yml: expected pull/push "
                     f"enrollment for {source}"
                 )
+        for source in BIRDWATCHER_WORKFLOW_INPUTS:
+            if contract_workflow.count(f"- {source}") != 2:
+                errors.append(
+                    ".github/workflows/release-install-contract.yml: expected pull/push "
+                    f"enrollment for {source}"
+                )
+        require(
+            errors,
+            "release install contract workflow",
+            contract_workflow,
+            (
+                "cargo test -p birdwatcher-adapter",
+                "cargo test --test birdwatcher_adapter_smoke",
+                "scripts/build-packages.sh staging amd64",
+                "test -s extracted/deb/usr/bin/birdwatcher-adapter",
+                "test -s extracted/rpm/usr/bin/birdwatcher-adapter",
+                "cpio --quiet -id --no-absolute-filenames --directory=extracted/rpm",
+                "--entrypoint birdwatcher-adapter",
+            ),
+        )
 
         deployment = read("docs/deployment.md")
         native = marked(deployment, "native-package", "docs/deployment.md")
@@ -168,9 +269,12 @@ def check(root: Path) -> list[str]:
             native,
             ("/usr/share/doc/rustbgpd/monitoring/",),
         )
-        sentence = re.search(r"installs the three binaries \((.*?)\) to `/usr/bin`", " ".join(native.split()))
+        sentence = re.search(
+            r"installs the four binaries \((.*?)\) to `/usr/bin`",
+            " ".join(native.split()),
+        )
         documented = re.findall(r"`([^`]+)`", sentence.group(1)) if sentence else []
-        if documented != ["rustbgpd", "rbgp", "rs-config-render"]:
+        if documented != ["rustbgpd", "rbgp", "rs-config-render", "birdwatcher-adapter"]:
             errors.append(f"docs/deployment.md: documented native binaries {documented!r}")
         source = marked(deployment, "source-checkout", "docs/deployment.md")
         require(
@@ -191,9 +295,9 @@ def check(root: Path) -> list[str]:
             adapter,
             (
                 "included in release tarballs",
-                "excluded from the default `cargo build`",
                 "native `.deb`/`.rpm` packages",
-                "container images",
+                "production container image",
+                "excluded from the default source-checkout `cargo build`",
             ),
         )
     except (OSError, ValueError) as error:

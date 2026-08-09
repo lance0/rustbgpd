@@ -17,9 +17,10 @@ homepage: https://github.com/lance0/rustbgpd
 license: MIT OR Apache-2.0
 description: |
   BGP daemon with route-reflector and route-server support.
-  Ships the rustbgpd daemon, the rbgp CLI, and the rs-config-render
-  route-server config renderer, plus a hardened systemd unit and a
-  starter configuration at /etc/rustbgpd/config.toml.
+  Ships the rustbgpd daemon, the rbgp CLI, the rs-config-render
+  route-server config renderer, and the Birdwatcher adapter, plus a
+  hardened systemd unit and a starter configuration at
+  /etc/rustbgpd/config.toml.
 
 scripts:
   preinstall: packaging/preinstall.sh
@@ -33,6 +34,8 @@ contents:
     dst: /usr/bin/rbgp
   - src: ${PKGROOT}/usr/bin/rs-config-render
     dst: /usr/bin/rs-config-render
+  - src: ${PKGROOT}/usr/bin/birdwatcher-adapter
+    dst: /usr/bin/birdwatcher-adapter
 
   # systemd unit (ExecStart rewritten to /usr/bin by the build script)
   # + declarative service user.

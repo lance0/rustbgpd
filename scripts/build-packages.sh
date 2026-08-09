@@ -4,7 +4,7 @@
 # Usage: scripts/build-packages.sh <staging-dir> <deb-arch> <version> <out-dir> [nfpm-binary]
 #
 #   staging-dir  the release.yml tarball staging tree: rustbgpd, rbgp,
-#                rs-config-render at the top level, man pages and
+#                rs-config-render, birdwatcher-adapter at the top level, man pages and
 #                completions under share/ (see the "Package binaries"
 #                step in .github/workflows/release.yml)
 #   deb-arch     amd64 | arm64
@@ -38,7 +38,7 @@ case "$arch" in
     *) echo "error: deb-arch must be amd64 or arm64, got '$arch'" >&2; exit 2 ;;
 esac
 
-for f in rustbgpd rbgp rs-config-render \
+for f in rustbgpd rbgp rs-config-render birdwatcher-adapter \
          share/man/man1/rbgp.1 share/man/man8/rustbgpd.8 \
          share/completions/rbgp.bash share/completions/rbgp.zsh \
          share/completions/rbgp.fish; do
@@ -54,6 +54,7 @@ trap 'rm -rf "$pkgroot"' EXIT
 install -D -m 0755 "$staging/rustbgpd" "$pkgroot/usr/bin/rustbgpd"
 install -D -m 0755 "$staging/rbgp" "$pkgroot/usr/bin/rbgp"
 install -D -m 0755 "$staging/rs-config-render" "$pkgroot/usr/bin/rs-config-render"
+install -D -m 0755 "$staging/birdwatcher-adapter" "$pkgroot/usr/bin/birdwatcher-adapter"
 
 # systemd unit: packages install binaries to /usr/bin, the example unit
 # points at /usr/local/bin (the tarball install path).

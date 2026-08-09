@@ -11,6 +11,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `birdwatcher-adapter` now accepts strict `unix:///absolute/path` daemon
+  endpoints plus TCP, preserves lazy 502 recovery, and ships in native packages
+  and the production container alongside release tarballs (LAN-925).
 - Release tarballs and native packages now include the version-matched Grafana
   dashboard, Prometheus alert rules, and promtool test suite. Find them under
   `share/monitoring/` in the archive or

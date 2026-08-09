@@ -3,28 +3,48 @@ name: Release install contract
 on:
   pull_request:
     paths:
+      - Cargo.toml
+      - Cargo.lock
+      - Dockerfile
+      - README.md
       - docs/deployment.md
       - docs/QUICKSTART.md
       - docs/grafana/rustbgpd-overview.json
+      - docs/cookbook/ixp-filter-pipeline.md
+      - docs/cookbook/monitoring-feed.md
+      - examples/birdwatcher-adapter/Cargo.toml
+      - examples/birdwatcher-adapter/src/main.rs
       - examples/birdwatcher-adapter/README.md
       - examples/prometheus/rustbgpd-alerts.yml
       - examples/prometheus/rustbgpd-alerts_test.yml
+      - tests/birdwatcher_adapter_smoke.rs
       - .github/workflows/release.yml
       - packaging/nfpm.yaml
+      - scripts/build-packages.sh
       - scripts/check_release_install_contract.py
       - scripts/test_check_release_install_contract.py
       - .github/workflows/release-install-contract.yml
   push:
     branches: [main]
     paths:
+      - Cargo.toml
+      - Cargo.lock
+      - Dockerfile
+      - README.md
       - docs/deployment.md
       - docs/QUICKSTART.md
       - docs/grafana/rustbgpd-overview.json
+      - docs/cookbook/ixp-filter-pipeline.md
+      - docs/cookbook/monitoring-feed.md
+      - examples/birdwatcher-adapter/Cargo.toml
+      - examples/birdwatcher-adapter/src/main.rs
       - examples/birdwatcher-adapter/README.md
       - examples/prometheus/rustbgpd-alerts.yml
       - examples/prometheus/rustbgpd-alerts_test.yml
+      - tests/birdwatcher_adapter_smoke.rs
       - .github/workflows/release.yml
       - packaging/nfpm.yaml
+      - scripts/build-packages.sh
       - scripts/check_release_install_contract.py
       - scripts/test_check_release_install_contract.py
       - .github/workflows/release-install-contract.yml
@@ -33,10 +53,68 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
+        with:
+          toolchain: stable
+      - uses: ./.github/actions/install-protobuf
+      - uses: Swatinem/rust-cache@v2
       - name: Test release install contract
         run: python3 scripts/test_check_release_install_contract.py
       - name: Check repository release install contract
         run: python3 scripts/check_release_install_contract.py
+      - name: Test Birdwatcher endpoint parser
+        run: cargo test -p birdwatcher-adapter
+      - name: Test Birdwatcher UDS startup and recovery
+        run: cargo test --test birdwatcher_adapter_smoke
+      - name: Build native package inputs
+        run: |
+          set -euo pipefail
+          cargo build --profile ci \
+            -p rustbgpd -p rustbgpctl -p rs-config-render -p birdwatcher-adapter
+          mkdir -p staging/share/man/man1 staging/share/man/man8 staging/share/completions
+          cp target/ci/rustbgpd target/ci/rbgp target/ci/rs-config-render \
+            target/ci/birdwatcher-adapter staging/
+          target/ci/rbgp man > staging/share/man/man1/rbgp.1
+          target/ci/rustbgpd --man > staging/share/man/man8/rustbgpd.8
+          for shell in bash zsh fish; do
+            target/ci/rbgp completions "$shell" > "staging/share/completions/rbgp.$shell"
+          done
+      - name: Build real deb and RPM packages
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y cpio rpm2cpio
+          curl -sSfL -o /tmp/nfpm.tgz \
+            https://github.com/goreleaser/nfpm/releases/download/v2.47.0/nfpm_2.47.0_Linux_x86_64.tar.gz
+          echo "0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783  /tmp/nfpm.tgz" | sha256sum -c
+          tar -C /tmp -xzf /tmp/nfpm.tgz nfpm
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          scripts/build-packages.sh staging amd64 "$version" dist /tmp/nfpm
+      - name: Assert real native package payloads
+        run: |
+          set -euo pipefail
+          deb="$(find dist -maxdepth 1 -name '*.deb' -print -quit)"
+          rpm="$(find dist -maxdepth 1 -name '*.rpm' -print -quit)"
+          test -n "$deb" && test -n "$rpm"
+          mkdir -p extracted/deb extracted/rpm
+          dpkg-deb -x "$deb" extracted/deb
+          rpm="$(realpath "$rpm")"
+          set +o pipefail
+          rpm2cpio "$rpm" | cpio --quiet -id --no-absolute-filenames --directory=extracted/rpm
+          set -o pipefail
+          test -s extracted/deb/usr/bin/birdwatcher-adapter
+          test -s extracted/rpm/usr/bin/birdwatcher-adapter
+      - uses: docker/setup-buildx-action@v4
+      - name: Build production runtime image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:release-install-contract
+          cache-from: type=gha,scope=release-install-contract
+          cache-to: type=gha,mode=max,scope=release-install-contract
+      - name: Assert production image runs the adapter
+        run: docker run --rm --entrypoint birdwatcher-adapter rustbgpd:release-install-contract --help

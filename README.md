@@ -219,6 +219,7 @@ with FRR, BIRD, GoBGP, and OpenBGPd.
 Every tagged release ships static-named per-arch tarballs, so
 `releases/latest/download/` always fetches the current version:
 
+<!-- release-install-contract:root-install:start -->
 ```bash
 SUFFIX=linux-amd64   # or linux-arm64
 TARBALL="rustbgpd-${SUFFIX}.tar.gz"
@@ -226,12 +227,13 @@ curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/${TARBALL
 curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/checksums-${SUFFIX}.txt"
 awk -v file="$TARBALL" '$2 == file || $2 == "./" file { print }' "checksums-${SUFFIX}.txt" | sha256sum -c -
 tar -xzf "$TARBALL"
-sudo install -m 0755 rustbgpd rbgp rs-config-render /usr/local/bin/
+sudo install -m 0755 rustbgpd rbgp rs-config-render birdwatcher-adapter /usr/local/bin/
 ```
 
-Three binaries: the daemon, the `rbgp` CLI, and `rs-config-render` (the
+Four binaries: the daemon, the `rbgp` CLI, `rs-config-render` (the
 [IXP route-server config renderer](tools/rs-config-render/README.md) —
-harmless if you don't run one). The tarball also carries man pages and
+harmless if you don't run one), and the optional Alice-LG
+`birdwatcher-adapter`. The tarball also carries man pages and
 bash/zsh/fish completions under `share/` — the
 [install walkthrough](docs/deployment.md#install) covers installing those
 and pinning a specific version.
@@ -241,9 +243,9 @@ and pinning a specific version.
 ```bash
 # Prerequisites: Rust 1.95+, protobuf-compiler
 sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
-cargo build --release -p rustbgpd -p rustbgpctl -p rs-config-render
+cargo build --release -p rustbgpd -p rustbgpctl -p rs-config-render -p birdwatcher-adapter
 
-# Binaries are at target/release/{rustbgpd,rbgp,rs-config-render}
+# Binaries are at target/release/{rustbgpd,rbgp,rs-config-render,birdwatcher-adapter}
 ```
 
 ### Docker
@@ -252,9 +254,10 @@ Release images are published to GHCR (versioned tags, e.g.
 `ghcr.io/lance0/rustbgpd:0.61.0`), or build locally:
 
 ```bash
-docker build -t rustbgpd .                    # lean runtime: daemon + rbgp, nonroot
+docker build -t rustbgpd .                    # daemon + rbgp + birdwatcher-adapter, nonroot
 docker build --target dev -t rustbgpd:dev .   # dev/interop image (lab helpers, root)
 ```
+<!-- release-install-contract:root-install:end -->
 
 ## Quick start (bare metal)
 
