@@ -8788,7 +8788,7 @@ async fn new_peer_provisioning_seeds_truth_before_start_and_never_post_zeros() {
 
 #[test]
 fn static_add_routes_start_through_truth_provisioning_before_install() {
-    let source = include_str!("lifecycle.rs");
+    let source = include_str!("../lifecycle.rs");
     let body = source
         .split_once("pub(super) async fn add_peer_with_admin_state")
         .unwrap()
@@ -8806,7 +8806,7 @@ fn static_add_routes_start_through_truth_provisioning_before_install() {
 
 #[test]
 fn fresh_dynamic_accept_routes_start_through_truth_provisioning_before_install() {
-    let source = include_str!("inbound.rs");
+    let source = include_str!("../inbound.rs");
     let body = source
         .split_once("pub(super) async fn handle_inbound")
         .unwrap()
@@ -8858,7 +8858,7 @@ async fn failed_start_exact_reaps_provisional_truth_and_preserves_scoped_sibling
         );
     }
 
-    let source = include_str!("lifecycle.rs");
+    let source = include_str!("../lifecycle.rs");
     let body = source
         .split_once("pub(super) async fn provision_new_peer_session")
         .unwrap()
@@ -9170,7 +9170,7 @@ async fn peer_presence_reconfigure_keeps_admin_event_but_stays_presence_silent()
 
 #[test]
 fn peer_presence_source_ordering_contracts() {
-    let lifecycle = include_str!("lifecycle.rs");
+    let lifecycle = include_str!("../lifecycle.rs");
     let public_add = lifecycle
         .split_once("pub(super) async fn add_peer(")
         .unwrap()
@@ -9213,7 +9213,7 @@ fn peer_presence_source_ordering_contracts() {
     );
     assert!(!deletion.contains("PeerRemoved"));
 
-    let publisher = include_str!("events.rs")
+    let publisher = include_str!("../events.rs")
         .split_once("pub(super) fn publish_session_event")
         .unwrap()
         .1
