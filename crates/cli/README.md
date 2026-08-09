@@ -37,7 +37,7 @@ rbgp config effective                       # dump running post-defaults config 
 rbgp config history                         # list applied config transactions
 rbgp config rollback <n>                    # roll back to a prior history entry (1 = previous applied config)
 
-# Translate a BIRD 2 / FRR / GoBGP config (local, no daemon; policy is
+# Translate a BIRD 2/3 / FRR / GoBGP config (local, no daemon; policy is
 # never translated — skipped constructs are reported with line numbers
 # for hand-translation to .rpol). Exit codes: 0 clean, 1 error,
 # 2 translated with warnings/skips, 3 refused.

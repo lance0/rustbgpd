@@ -1,5 +1,5 @@
 //! `rbgp config import` — a deliberately bounded structural importer
-//! for BIRD 2, FRR (vtysh running-config style), and GoBGP TOML
+//! for BIRD 2/3, FRR (vtysh running-config style), and GoBGP TOML
 //! configurations.
 //!
 //! The importer translates only the structural subset every BGP daemon
@@ -51,7 +51,7 @@ pub enum SourceFormat {
 impl SourceFormat {
     pub fn name(self) -> &'static str {
         match self {
-            SourceFormat::Bird => "BIRD 2",
+            SourceFormat::Bird => "BIRD 2/3",
             SourceFormat::Frr => "FRR",
             SourceFormat::Gobgp => "GoBGP",
         }
@@ -273,7 +273,7 @@ pub fn detect_format(path: &str, contents: &str) -> Result<SourceFormat, ImportE
         return Ok(SourceFormat::Bird);
     }
     Err(ImportError::Format(format!(
-        "{path} does not look like BIRD 2 (`protocol bgp`), FRR (`router bgp`), or GoBGP \
+        "{path} does not look like BIRD 2/3 (`protocol bgp`), FRR (`router bgp`), or GoBGP \
          TOML (`[global.config]`); pass --format to force one"
     )))
 }

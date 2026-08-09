@@ -448,7 +448,7 @@ incumbents fills gaps the daemons leave open — native JSON output for
 with a list of regex-based parser projects standing in for it, and BIRD
 still has no JSON CLI output (see API & Programmability above). rustbgpd
 ships JSON CLI output, a gRPC API, and `rbgp config import` — a bounded
-BIRD 2 / FRR / GoBGP structural importer that translates the mechanical
+BIRD 2/3 / FRR / GoBGP structural importer that translates the mechanical
 subset (AS, router-id, neighbors, peer groups, families, timers,
 max-prefix) and fail-stops with a line-numbered report of every policy
 construct left for hand-translation to `.rpol`.

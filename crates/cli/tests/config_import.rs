@@ -7,6 +7,7 @@
 use rustbgpctl::importer::{ImportError, SourceFormat, detect_format, import_source, run_import};
 
 const BIRD: &str = include_str!("fixtures/import/bird.conf");
+const BIRD3: &str = include_str!("fixtures/import/bird3.conf");
 const BIRD_INCLUDES: &str = include_str!("fixtures/import/bird-includes.conf");
 const FRR: &str = include_str!("fixtures/import/frr.conf");
 const GOBGP: &str = include_str!("fixtures/import/gobgp.toml");
@@ -30,6 +31,35 @@ fn bird_golden_translation() {
         imported.config_toml,
         include_str!("fixtures/import/expected-bird.toml")
     );
+}
+
+#[test]
+fn bird3_golden_translation_and_operational_guidance() {
+    let imported = import_source(SourceFormat::Bird, "bird3.conf", BIRD3).expect("translates");
+    assert_eq!(
+        imported.config_toml,
+        include_str!("fixtures/import/expected-bird3.toml")
+    );
+    assert_eq!(imported.report.source_format, "BIRD 2/3");
+    for (line, stanza) in [(11, "rs client on"), (24, "rs client on")] {
+        let skip = imported
+            .report
+            .skipped
+            .iter()
+            .find(|skip| skip.line == Some(line) && skip.stanza.ends_with(stanza))
+            .unwrap_or_else(|| panic!("missing line {line} {stanza:?}"));
+        assert!(skip.guidance.contains("route_server_client = true"));
+    }
+    for (line, stanza) in [(14, "import table on"), (28, "export table on")] {
+        let skip = imported
+            .report
+            .skipped
+            .iter()
+            .find(|skip| skip.line == Some(line) && skip.stanza.ends_with(stanza))
+            .unwrap_or_else(|| panic!("missing line {line} {stanza:?}"));
+        assert!(skip.guidance.contains("operational state"));
+        assert!(!skip.guidance.contains(".rpol"));
+    }
 }
 
 #[test]

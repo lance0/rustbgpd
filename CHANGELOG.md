@@ -22,6 +22,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- BIRD 3.3.1 migrations now retain lowercase `bgp_*` attributes from a
+  channel's retained export table instead of silently dropping them. The
+  structural importer also identifies BIRD 2/3 input and gives actionable
+  guidance for `rs client on` and import/export table retention.
 - Passive-open GTSM sessions now send the listener's SYN-ACK with IPv4 TTL or
   IPv6 Hop Limit 255. Previously the peer-specific receive threshold was
   installed only after `accept()`, so conformant peers could reject the

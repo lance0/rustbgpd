@@ -558,7 +558,7 @@ enum ConfigAction {
     /// rendering; the default output is TOML.
     Effective,
 
-    /// Import a BIRD 2 / FRR / GoBGP config into a rustbgpd config.toml
+    /// Import a BIRD 2/3 / FRR / GoBGP config into a rustbgpd config.toml
     ///
     /// Deliberately bounded structural importer: translates local AS,
     /// router-id, neighbors (address, remote AS, description), peer
@@ -577,7 +577,7 @@ enum ConfigAction {
         2  translated with warnings or skips (config written; review the report)\n  \
         3  refused (no translatable BGP structure in the source)")]
     Import {
-        /// Source config: BIRD 2 (.conf), FRR running-config (.conf), or GoBGP (.toml)
+        /// Source config: BIRD 2/3 (.conf), FRR running-config (.conf), or GoBGP (.toml)
         #[arg(value_name = "SOURCE")]
         source: String,
 

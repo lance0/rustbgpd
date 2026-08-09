@@ -240,11 +240,12 @@ the incumbent side. Common rules:
 |---------|-------------------------------------|------|
 | `from-mrt/1` | `rbgp diff snapshot from-mrt <file> --view adj-rib-out-capture --peer <ip> --peer-asn <asn>` (RFC 6396 `TABLE_DUMP_V2`, RFC 8050 Add-Path subtypes) | in-binary subcommand |
 | `from-bmp/1` | `rbgp diff snapshot from-bmp <capture> [--peer <ip>]` (RFC 7854 BMP v3 byte stream carrying the RFC 8671 post-policy Adj-RIB-Out view, O=1/L=1) | in-binary subcommand |
-| `bird2-export/1` | `birdc show route export <member-proto> all` (BIRD 2.0.12) | [`scripts/ribsnap/bird2-export-to-ribsnap.py`](../scripts/ribsnap/bird2-export-to-ribsnap.py) |
+| `bird2-export/1` | `birdc show route export <member-proto> all` (BIRD 2.0.12); `birdc show route export table <channel> all` (BIRD 3.3.1) | [`scripts/ribsnap/bird2-export-to-ribsnap.py`](../scripts/ribsnap/bird2-export-to-ribsnap.py) |
 | `frr-advertised/1` | `vtysh -c "show ip bgp neighbor <ip> advertised-routes detail json"` (FRR 10.3.1) | [`scripts/ribsnap/frr-advertised-to-ribsnap.py`](../scripts/ribsnap/frr-advertised-to-ribsnap.py) |
 | `gobgp-adjout/1` | `gobgp neighbor <ip> adj-out -j` (GoBGP 3.37.0, 4.7.0) | [`scripts/ribsnap/gobgp-adjout-to-ribsnap.py`](../scripts/ribsnap/gobgp-adjout-to-ribsnap.py) |
 
-The converters are stdlib-only Python 3; all take
+`bird2-export/1` remains the stable legacy source identifier for both BIRD
+versions. The converters are stdlib-only Python 3; all take
 `--peer <ip> --peer-asn <asn> [--source <label>] [--generation <n>]` and
 read the capture from a file argument or stdin. Exit codes: 0 snapshot
 on stdout, 2 refused. Per-incumbent capture prerequisites, view
@@ -341,13 +342,19 @@ any refuses the conversion.
 
 Each converter is pinned by golden tests in `cargo test -p rustbgpctl`
 (`commands::diff::tests::adapters`): a raw capture taken from a real
-container (the M83 route-server multi-stack lab: BIRD 2.0.12,
-FRR 10.3.1, GoBGP 3.37.0) must convert byte-for-byte to its checked-in
+container must convert byte-for-byte to its checked-in
 `.expected.ndjson`, parse as a complete snapshot, and diff clean against
 the same capture's wire-truth values. An upstream output-format change
-breaks these tests first. The fixture-refresh procedure (redeploy the
-lab, recapture, re-run the converters with `BLESS=1`) is documented in
-the test module. The from-bmp golden is built synthetically instead,
+breaks these tests first. The M83 refresh covers BIRD 2.0.12, FRR 10.3.1,
+and GoBGP 3.37.0. The separate BIRD 3.3.1 recipe uses its upstream tag at
+commit `695c7b74`: source AS64501 (`10.92.6.11`) advertises
+`203.0.113.0/24` with MED 120, community `64501:111`, and large community
+`64501:92:6` through the RS fixture
+[`bird3.conf`](../crates/cli/tests/fixtures/import/bird3.conf) (AS65500,
+`10.92.6.12`) to target AS64502 (`10.92.6.13`). After both protocols are
+Established, capture `show route export table target_member.ipv4 all`.
+The full commands and fixture-refresh arguments are in the test module.
+The from-bmp golden is built synthetically instead,
 framed by the daemon's own RFC-pinned BMP encoder (an M83 capture would
 carry rustbgpd's own view, not an incumbent's), and its end-to-end
 tests prove capture → canonical records → in-sync, divergent, and
