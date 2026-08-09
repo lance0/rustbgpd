@@ -288,8 +288,7 @@ it. Before downgrade, both the v2 locator and locator-free v2 journal residue
 must be absent; v2 config history separately requires its complete directory
 to be moved aside.
 
-The later disk-backed v3 implementation supersedes only v2's pending-authority
-storage. Production writes v3 raw prior, compact metadata, and a config-adjacent
-locator; v1 and v2 remain frozen recovery readers. The live confirmation-window
-and unconditional boot-revert decisions above apply unchanged across all three
-storage formats.
+V3 later superseded v2 pending authority. Since v0.65, production reads/writes
+only v3. Retired authority refuses untouched with rustbgpd v0.64.0 recovery guidance.
+The live window and v3 boot revert remain unchanged; v1/v2 prose above records
+the historical migration path.

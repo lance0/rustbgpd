@@ -491,11 +491,11 @@ enum ConfigAction {
 
     /// List retained config-history rows (newest first)
     ///
-    /// The daemon keeps a bounded mixed-generation history under its runtime
-    /// state directory. Each line shows the index (0 = newest config-history
-    /// row), timestamp, content hash, provenance status, and one-line summary.
-    /// Restore an eligible legacy or provenance-verified v2 row with
-    /// `config rollback N`; unreadable rows are refused.
+    /// The daemon keeps bounded v2 history under its runtime state directory.
+    /// Each line shows the index (0 = newest config-history row), timestamp,
+    /// content hash, provenance status, and one-line summary. Restore a
+    /// provenance-verified row with `config rollback N`; unreadable rows are
+    /// refused. Retired TOML rows are ignored and retained.
     History,
 
     /// Roll back to an eligible config snapshot (Junos `rollback N`)

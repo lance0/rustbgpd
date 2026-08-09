@@ -212,18 +212,17 @@ Levenshtein machinery as the `.rpol` suggestions (LAN-481);
 ~~config version history + `rollback N`~~ **Shipped (#1016):** retained applied
 versions and rollback share the same transaction/validation path, completing
 the check/compare/confirm/rollback workflow for TOML-complete snapshots
-(LAN-483). ADR-0121 provenance recording and mixed legacy/v2 listing are
-**shipped**, including exact v2 external-source verification and restore.
+(LAN-483). ADR-0121 v2 provenance recording, exact external-source
+verification, and restore are **shipped**. Since v0.65, legacy TOML history is
+ignored and retained rather than listed or restored.
 **Shipped (LAN-798):** commit-confirm v2 now journals that same immutable prior
 snapshot behind a config-adjacent locator. Crash boot restore verifies and
 directly adopts the accepted prior snapshot; live abort and timeout reuse the
 same prior object through the normal planner and apply path. Locator removal is
-the durable terminal point. The locator-free v1 lane is fail-closed upgrade
-compatibility: a live v1 transaction must terminate before upgrade, and v2
-never converts or dual-writes it. Downgrade requires both the v2 locator and
-locator-free v2 journal residue to be absent, plus the separate v2-history
-move-aside procedure. Provenance is audit and verification evidence, not
-authority to adopt external-policy state. #1370 fences every full-snapshot
+the durable terminal point. V3 is now the sole commit-confirm authority;
+retired v1/v2 artifacts fail boot untouched with rustbgpd v0.64.0 recovery guidance.
+Provenance is audit and verification evidence, not authority to adopt
+external-policy state. #1370 fences every full-snapshot
 external-input rollback; its only exceptions remain a true no-op and a targeted
 pure-`[[fib_tables]]` transaction whose external inputs are unchanged;
 ~~a bounded
@@ -1738,8 +1737,8 @@ branch is between features.
   mechanics. The remove-now items — the two v0.51.0 retired-key
   migration pointers and the redundant example-config UDS authorization
   ceremony made unnecessary by #1429 — landed in v0.63.0 (#1435).
-  The v0.64 removals did not land and are now part of the v0.65 batch:
-  frozen legacy commit-confirm/history readers, the dead
+  The frozen legacy commit-confirm/history readers and v2 authority reader
+  were removed during v0.65 development. The remaining batch includes the dead
   `enforcement = "legacy"` enum variant, the `rbgp rib diff`
   older-daemon fallbacks, and `AddNeighborRequest.config`. The three hidden
   `--from-file` aliases on `config diff|plan|apply` and the raw Paths-Limit cap

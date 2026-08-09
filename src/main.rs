@@ -2576,32 +2576,25 @@ fn main() -> ExitCode {
         process::exit(1);
     }
 
-    // The v2/v3 locator is config-adjacent and must be resolved before a real
+    // The v3 locator is config-adjacent and must be resolved before a real
     // daemon boot opens, sizes, or parses the candidate.  One-shot validation
     // and diff modes remain read-only and therefore do not inspect or consume
     // pending commit-confirm state.
-    let launch_identities = if !check_only && diff_path.is_none() {
-        let v2 = confirm_journal::v2::LaunchIdentity::resolve(Path::new(&config_path))
+    let launch_identity = if !check_only && diff_path.is_none() {
+        let identity = confirm_journal::v3::LaunchIdentity::resolve(Path::new(&config_path))
             .unwrap_or_else(|error| {
                 eprintln!(
                     "error: invalid launch config identity for commit-confirm authority: {error}"
                 );
                 process::exit(1);
             });
-        let v3 = confirm_journal::v3::LaunchIdentity::resolve(Path::new(&config_path))
-            .unwrap_or_else(|error| {
-                eprintln!(
-                    "error: invalid launch config identity for commit-confirm authority: {error}"
-                );
-                process::exit(1);
-            });
-        Some((v2, v3))
+        Some(identity)
     } else {
         None
     };
     let mut boot_revert_notice = None;
-    let mut accepted = if let Some((v2_identity, v3_identity)) = &launch_identities {
-        match v3_identity.boot_revert_check() {
+    let accepted = if let Some(identity) = &launch_identity {
+        match identity.boot_revert_check() {
             Ok(Some(revert)) => {
                 boot_revert_notice = Some(confirm_journal::BootRevertNotice {
                     confirm_id: revert.notice.confirm_id,
@@ -2612,36 +2605,17 @@ fn main() -> ExitCode {
                 });
                 revert.accepted
             }
-            Ok(None) => match v2_identity.boot_revert_check() {
-                Ok(Some(revert)) => {
-                    boot_revert_notice = Some(confirm_journal::BootRevertNotice {
-                        confirm_id: revert.notice.confirm_id,
-                        backup_path: PathBuf::new(),
-                        rollback_failed: revert.notice.rollback_failed,
-                        redact_paths: true,
-                        journal_cleanup_failed: revert.notice.journal_cleanup_failed,
-                    });
-                    revert.accepted
-                }
-                Ok(None) => match AcceptedConfigSnapshot::load(Path::new(&config_path), None) {
-                    Ok(snapshot) => Arc::new(snapshot),
-                    Err(diagnostic) => {
-                        eprintln!("{diagnostic}");
-                        process::exit(1);
-                    }
-                },
-                Err(message) => {
-                    eprintln!(
-                        "error: {message}; locator: {}",
-                        v2_identity.locator_path().display()
-                    );
+            Ok(None) => match AcceptedConfigSnapshot::load(Path::new(&config_path), None) {
+                Ok(snapshot) => Arc::new(snapshot),
+                Err(diagnostic) => {
+                    eprintln!("{diagnostic}");
                     process::exit(1);
                 }
             },
             Err(message) => {
                 eprintln!(
                     "error: {message}; locator: {}",
-                    v3_identity.locator_path().display()
+                    identity.locator_path().display()
                 );
                 process::exit(1);
             }
@@ -2655,7 +2629,7 @@ fn main() -> ExitCode {
             }
         }
     };
-    let mut config = accepted.config();
+    let config = accepted.config();
 
     if check_only {
         // The summary line is the only thing some operators read. When
@@ -2719,37 +2693,15 @@ fn main() -> ExitCode {
         return ExitCode::from(u8::from(diff.has_actionable_changes()));
     }
 
-    // Durable commit-confirm (ADR-0076 Decision 6): if the last run stopped
-    // inside a commit-confirmed window, an unconfirmed revert journal exists
-    // and the on-disk config is the unconfirmed candidate. Revert BEFORE the
-    // daemon adopts it — otherwise a config bad enough to crash the daemon
-    // would become permanent via the crash ("confirmed-by-restart"). A
-    // journal that exists but cannot drive a revert refuses boot (fail
-    // closed). Runs only for real daemon startup: --check/--diff returned
-    // above and must never mutate config files.
-    if boot_revert_notice.is_none() {
-        boot_revert_notice = match confirm_journal::boot_revert_check(
+    // V1/v2 locator-free authority is receive-retired in v0.65. Refuse it
+    // untouched: only an N-1 daemon can decide whether it should revert.
+    if boot_revert_notice.is_none()
+        && let Err(message) = confirm_journal::refuse_retired_journal(
             &confirm_journal::journal_path(&config.runtime_state_dir()),
-            Path::new(&config_path),
-        ) {
-            Ok(None) => None,
-            Ok(Some(revert)) => {
-                drop(revert.config);
-                accepted = match AcceptedConfigSnapshot::load(Path::new(&config_path), None) {
-                    Ok(snapshot) => Arc::new(snapshot),
-                    Err(diagnostic) => {
-                        eprintln!("{diagnostic}");
-                        process::exit(1);
-                    }
-                };
-                config = accepted.config();
-                Some(revert.notice)
-            }
-            Err(message) => {
-                eprintln!("error: {message}");
-                process::exit(1);
-            }
-        };
+        )
+    {
+        eprintln!("error: {message}");
+        process::exit(1);
     }
 
     let log_directives = config.per_peer_log_directives();
@@ -2783,9 +2735,7 @@ fn main() -> ExitCode {
     let grpc_server_failed = rt.block_on(run(
         accepted,
         boot_revert_notice,
-        launch_identities
-            .expect("daemon boot resolved launch config identity")
-            .1,
+        launch_identity.expect("daemon boot resolved launch config identity"),
         profiler,
     ));
     shutdown_daemon_runtime(rt);
@@ -3298,9 +3248,8 @@ async fn run<T>(
                 "commit-confirm boot revert reached durable terminal locator removal, but exact pending residue cleanup failed"
             );
         }
-        // A `BootRevertNotice` exists only after the revert is terminal. V1
-        // still requires journal consumption; v2/v3 become terminal at durable
-        // locator absence and report later pending cleanup as a warning.
+        // V3 reports a notice only after durable locator removal; later exact
+        // residue cleanup is warning-only.
         metrics.record_config_transaction_lifecycle("boot_revert", "success");
     }
     let router_id: Ipv4Addr = config.global.router_id.parse().unwrap_or_else(|e| {

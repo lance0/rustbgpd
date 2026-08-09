@@ -447,15 +447,13 @@ retain tonic's 4 MiB decode default.
 | `AbortConfigTransaction` | Abort a pending confirmed transaction and roll back immediately |
 | `GetConfigTransactionStatus` | Return redacted confirmed-transaction lifecycle state |
 | `GetEffectiveConfig` | Return the effective running config as normalized TOML — defaults resolved, selected default-empty policy lists omitted, secrets redacted (`rbgp config effective`) |
-| `ListConfigHistory` | List the bounded mixed-generation config history — newest row at index 0, then older entries; per-entry timestamp, normalized-TOML SHA-256, config-source SHA-256 over that TOML digest plus the canonical accepted rpol/dataset source roster, provenance status, and one-line summary; never config documents (`rbgp config history`). Valid v2 rows are `RECORDED`; retained legacy rows are `LEGACY_TOML_ONLY` with no source digest; corrupt or duplicate-sequence rows are `UNREADABLE` with both digests empty. |
-| `RollbackConfigTransaction` | Restore an eligible legacy TOML-only or provenance-verified v2 row through the same transaction executor as apply — same plan/impact classification and receipts (`rbgp config rollback N`). Unreadable rows and v2 provenance mismatches fail closed before planning or mutation. |
+| `ListConfigHistory` | List bounded v2 config history — newest row at index 0, then older entries; per-entry timestamp, normalized-TOML SHA-256, config-source SHA-256 over that TOML digest plus the canonical accepted rpol/dataset source roster, provenance status, and one-line summary; never config documents (`rbgp config history`). Valid rows are `RECORDED`; corrupt or duplicate-sequence rows are `UNREADABLE` with both digests empty. Retired TOML files are ignored and retained. |
+| `RollbackConfigTransaction` | Restore a provenance-verified v2 row through the same transaction executor as apply — same plan/impact classification and receipts (`rbgp config rollback N`). Unreadable rows and provenance mismatches fail closed before planning or mutation. |
 
-Legacy and v2 rows share one newest-first index; index 0 is not necessarily the
-running or currently persisted config. Legacy rows cover normalized TOML only.
-V2 rows hash the accepted external-source identity, but do not archive the
+Index 0 is not necessarily the running or currently persisted config. V2 rows
+hash the accepted external-source identity, but do not archive the
 `.rpol` or dataset bytes. Rollback performs one detached load and requires the
 normalized TOML, complete manifest, and source digest to match exactly.
-Legacy rows that declare external inputs remain ineligible.
 
 `DiffRuntimeConfigResponse` contains boolean summary fields, a
 plain-text `human_text` rendering, and `diff_json` using the
@@ -583,12 +581,9 @@ Confirm and successful rollback become terminal only after locator unlink and
 parent-directory `fsync`. Subsequent verified exact metadata/raw cleanup and
 pending-directory `fsync` are warning-only; locator-free residue cannot re-arm
 the transaction.
-Production writes v3; the v2 locator and locator-free v1 formats are frozen
-compatibility readers without conversion or dual-write. Finish a live v1/v2
-transaction before upgrade. Before downgrade, finish or abort v3 rather than
-deleting a live locator; only after terminal cleanup verify v3 and v2 pending
-state is absent. `GetConfigTransactionStatus` reports the pending transaction
-or last terminal lifecycle result.
+Production reads and writes v3 authority only. A v2 locator or locator-free
+v1/v2 journal makes v0.65 refuse untouched. Recover with rustbgpd v0.64.0, or delete only
+after proving it terminal and intended. Status reports pending/terminal state.
 A failed abort/auto-revert rollback is not terminal: the transaction stays
 pending with an `ABORT_FAILED`/`AUTO_REVERT_FAILED` status and the mutation
 fence stays closed until the abort is retried successfully, the candidate is

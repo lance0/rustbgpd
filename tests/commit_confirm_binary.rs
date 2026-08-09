@@ -10,12 +10,12 @@
 //! - confirm + SIGKILL → the new config is retained and no v3 pending files
 //!   remain;
 //! - in-process timeout auto-revert → all v3 pending files are consumed;
-//! - an upgrade with v2 authority pending → startup dispatches v2 before
-//!   loading the unconfirmed candidate;
+//! - an upgrade with retired v2 authority pending → startup refuses it
+//!   untouched before loading the unconfirmed candidate;
 //! - v2 history survives restart and restores only after source verification
 //!   is available;
-//! - a torn legacy journal with no v2 locator → boot still refuses, naming
-//!   both legacy files.
+//! - any locator-free retired journal → boot refuses with N-1 recovery
+//!   guidance and leaves the evidence untouched.
 
 use std::fs::File;
 use std::os::unix::ffi::OsStrExt as _;
@@ -701,9 +701,10 @@ fn in_process_timeout_auto_revert_consumes_journal() {
 }
 
 #[test]
-fn real_binary_boot_dispatches_v2_authority_before_candidate_load() {
-    // Destructive proof: deleting or reordering main's v3-then-v2 fallback
-    // boots the dynamic-neighbor candidate instead of restoring this prior.
+fn real_binary_refuses_v2_authority_untouched_before_candidate_load() {
+    // Destructive proof: restoring v2 dispatch mutates/removes the authority;
+    // ignoring it boots the candidate. Both break the exact refusal and
+    // byte-identical evidence assertions below.
     let temp = tempfile::tempdir().expect("failed to create temp dir");
     let lab = lab(temp.path());
     let daemon = lab.spawn("prior.stderr.log");
@@ -726,31 +727,36 @@ fn real_binary_boot_dispatches_v2_authority_before_candidate_load() {
 
     std::fs::copy(&lab.candidate_path, &lab.config_path).unwrap();
     write_v2_pending_authority(&lab, &envelope, "upgrade-v2");
-    let mut daemon = lab.spawn("revert.stderr.log");
-    assert!(!lab.locator_path.exists() && !lab.journal_path.exists());
-    assert!(
-        !std::fs::read_to_string(&lab.config_path)
-            .unwrap()
-            .contains("192.0.2.0/24")
-    );
-    let backup = std::fs::read_to_string(lab.dir.join("rustbgpd.toml.unconfirmed")).unwrap();
-    assert!(backup.contains("192.0.2.0/24"));
-    let ranges = rbgp_json(&lab.grpc_addr, &["--json", "dynamic-neighbor", "list"]);
-    assert_eq!(ranges.as_array().map(Vec::len), Some(0));
-    assert!(daemon.stderr().contains("upgrade-v2"));
-    daemon.assert_still_running();
+    std::fs::write(&lab.config_path, "invalid candidate = [").unwrap();
+    let locator_before = std::fs::read(&lab.locator_path).unwrap();
+    let journal_before = std::fs::read(&lab.journal_path).unwrap();
+    let candidate_before = std::fs::read(&lab.config_path).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
+        .arg(&lab.config_path)
+        .output()
+        .expect("failed to spawn rustbgpd binary");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for needle in [
+        "retired v2 commit-confirm authority",
+        "rustbgpd v0.64.0",
+        "left untouched",
+    ] {
+        assert!(stderr.contains(needle), "missing {needle:?}:\n{stderr}");
+    }
+    assert_eq!(std::fs::read(&lab.locator_path).unwrap(), locator_before);
+    assert_eq!(std::fs::read(&lab.journal_path).unwrap(), journal_before);
+    assert_eq!(std::fs::read(&lab.config_path).unwrap(), candidate_before);
+    assert!(!lab.dir.join("rustbgpd.toml.unconfirmed").exists());
 }
 
 #[test]
-fn torn_journal_refuses_boot_naming_both_files() {
+fn locator_free_retired_journal_refuses_boot_untouched() {
     let temp = tempfile::tempdir().expect("failed to create temp dir");
     let lab = lab(temp.path());
-    // Causal destructive-red proof for the retained compatibility lane: if
-    // locator absence stops dispatching v1, this truncated legacy journal no
-    // longer produces the exact fail-closed refusal below.
-    // Truncated mid-JSON, as a crash during a non-atomic write would leave.
-    std::fs::write(&lab.journal_path, "{\"confirm_id\": \"deploy-1\", \"dead")
-        .expect("failed to write torn journal");
+    // Any occupant may be pending authority; v0.65 never parses or removes it.
+    let retired = "{\"confirm_id\": \"deploy-1\", \"dead";
+    std::fs::write(&lab.journal_path, retired).expect("failed to write torn journal");
 
     let output = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
         .arg(&lab.config_path)
@@ -765,7 +771,9 @@ fn torn_journal_refuses_boot_naming_both_files() {
     for needle in [
         "refusing to boot",
         &*lab.journal_path.to_string_lossy(),
-        &*lab.config_path.to_string_lossy(),
+        "rustbgpd v0.64.0",
+        "delete it only after proving",
+        "left untouched",
     ] {
         assert!(
             stderr.contains(needle),
@@ -773,7 +781,7 @@ fn torn_journal_refuses_boot_naming_both_files() {
         );
     }
     // Fail closed: nothing touched.
-    assert!(lab.journal_path.exists());
+    assert_eq!(std::fs::read_to_string(&lab.journal_path).unwrap(), retired);
     assert!(
         std::fs::read_to_string(&lab.config_path)
             .unwrap()

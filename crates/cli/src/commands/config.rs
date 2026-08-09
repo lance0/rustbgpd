@@ -582,9 +582,9 @@ pub async fn status(connection: Connection, json: bool) -> Result<(), CliError> 
     Ok(())
 }
 
-/// List the daemon's bounded mixed-generation config history: index,
-/// timestamp, content hash, provenance status, and a one-line summary per
-/// retained row (never config document contents).
+/// List bounded v2 config history: index, timestamp, content hash, provenance
+/// status, and a one-line summary per retained row (never document contents).
+/// Retired TOML rows are ignored and retained.
 pub async fn history(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -601,9 +601,9 @@ pub async fn history(connection: Connection, json: bool) -> Result<(), CliError>
     Ok(())
 }
 
-/// Junos-style `rollback N`: the daemon resolves an eligible legacy or
-/// provenance-verified v2 history row and routes it through the same
-/// transaction path as apply with the same receipts.
+/// Junos-style `rollback N`: the daemon resolves a provenance-verified v2 row
+/// and routes it through the same transaction path as apply with the same
+/// receipts. Retired TOML rows are ineligible.
 pub async fn rollback(
     connection: Connection,
     options: RollbackOptions<'_>,

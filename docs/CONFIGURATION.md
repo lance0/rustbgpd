@@ -3282,13 +3282,10 @@ daemon-owned real parents that are not group- or world-writable. Locator
 absence carries no authority and does not impose this storage policy on an
 ordinary launch path.
 
-Production writes v3 only. Startup retains the frozen v2 locator reader and the
-locator-free v1 fail-closed reader without conversion or dual-write. Finish or
-abort a live v1/v2 transaction before upgrade. Before downgrade, finish or
-abort v3, then ensure the locator and both fixed v3 residue files are absent;
-also ensure any v2 locator or locator-free v2 journal residue is absent. V2
-config history separately requires moving the complete history directory
-aside.
+Production reads and writes v3 authority only. Before v0.65, finish every v1/v2
+transaction. Retired authority makes boot refuse untouched; recover with rustbgpd v0.64.0
+or delete only after proving it terminal/intended. Retired TOML history is
+ignored/retained; v2 JSON remains listable and restorable.
 See `docs/OPERATIONS.md` (config transactions) for the boot-revert and storage
 semantics.
 

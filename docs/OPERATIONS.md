@@ -248,15 +248,9 @@ paths; failure there is a warning and locator-free residue cannot re-arm the
 transaction. A later confirmed apply removes only verified residue at those
 two fixed v3 names.
 
-Production writes v3 only. Startup checks v3 first, delegates a canonical v2
-locator unchanged to the frozen v2 recovery reader, then retains the
-locator-free v1 fail-closed reader; it does not convert or dual-write either
-legacy format. A live v1 or v2 transaction must terminate before upgrade.
-Before downgrade or starting an older binary, finish or abort any pending v3
-transaction; do not remove its locator by hand. After it is terminal, ensure
-the locator and both fixed v3 residue files are absent. Also ensure the frozen
-v2 locator and locator-free v2 journal residue are absent, and separately move
-the complete v2 config-history directory aside before the older binary starts.
+Production reads and writes v3 only. Retired authority makes v0.65 refuse
+untouched. Finish before upgrade, recover with rustbgpd v0.64.0, or delete only after
+proving it terminal/intended. Never delete a live v3 locator.
 
 The boot-revert save-aside moves the unconfirmed candidate to
 `<config>.unconfirmed` with an atomic hard-link + unlink, so it never clobbers
@@ -292,10 +286,8 @@ For operators coming from Junos, the four verbs map directly:
 
 The daemon retains a bounded, best-effort history of up to 20 recognized rows
 under `<runtime_state_dir>/config-history/`. A new valid v2 row is suppressed
-only when its normalized TOML and complete source manifest exactly match the
-newest valid v2 row; legacy, unreadable, and duplicate-sequence rows still
-count toward the bound. Transaction applies
-and gRPC neighbor/FIB/policy CRUD record after their durable write. Boot and
+when TOML/manifest match the newest v2; unreadable/duplicates count, while old
+TOML is ignored/retained. Transactions and gRPC CRUD record after writes. Boot and
 successful SIGHUP reload also record the canonical validated snapshot on a
 best-effort basis; SIGHUP does not rewrite the operator's file. History
 survives restarts:
@@ -306,32 +298,30 @@ rbgp config history
 rbgp -j config history
 
 # Restore an eligible row selected from the listing
-LEGACY_INDEX=3
-rbgp config rollback "$LEGACY_INDEX"
+HISTORY_INDEX=3
+rbgp config rollback "$HISTORY_INDEX"
 
 # A cautious rollback: auto-reverts the rollback itself unless confirmed
-rbgp config rollback "$LEGACY_INDEX" --confirm-id undo-1 --confirm-timeout 120
+rbgp config rollback "$HISTORY_INDEX" --confirm-id undo-1 --confirm-timeout 120
 rbgp config confirm undo-1
 ```
 
 `config history` lists index, timestamp, normalized-TOML content hash,
 provenance status, and—when recorded—a config-source hash over that TOML digest
 plus the canonical accepted rpol/dataset source roster. It also shows a one-line
-summary per entry, never config document contents. New owner-private JSON rows
-are `recorded`; older TOML rows are `legacy_toml_only`, while corrupt or
-duplicate-sequence rows are `unreadable` with both digests withheld. Both
-generations share one newest-first index.
+summary per entry, never config document contents. Valid v2 rows are `recorded`;
+corrupt or duplicate-sequence rows are `unreadable` with both digests withheld.
 Index 0 means the newest config-history row, not
 necessarily the running or currently persisted config. `config rollback N`
-accepts legacy rows without external declarations and v2 rows only when one
-detached load exactly reproduces recorded TOML, manifest, and source digests;
-unreadable or mismatched rows fail closed before planning or mutation. An eligible
+accepts v2 only when one load reproduces TOML/manifest/source digests;
+unreadable/mismatched rows fail closed before mutation. An eligible
 row is routed through the **same transaction path as
 `config apply`**: the same plan classification, the same reload-impact and
 update-group annotations, and the same receipts. Confirmed rollback remains
 subject to that planner: full-snapshot external-policy adoption is still
 fenced, while an unchanged-external-input pure-`[[fib_tables]]` rollback can
-use the provenance-bearing v2 journal and exact accepted prior snapshot.
+carry the provenance-verified v2 history row's exact accepted prior snapshot
+through v3 authority.
 There is no second apply engine —
 a rollback whose entry contains sections the transaction executor cannot
 commit live (for example restart-required `[global]` fields) is rejected
@@ -342,9 +332,7 @@ Each retained row includes the normalized-TOML digest. V2 rows also hash the
 canonical accepted `.rpol` and dataset source roster, lengths, and content
 digests, but do not archive those external bytes. V2 rollback performs one
 detached load and requires the live sources to reproduce that identity exactly.
-Legacy rows retain only TOML and remain
-subject to the transaction executor's existing external-input fence. Keep the
-operator-authored TOML, `.rpol` graph, and datasets under version control or
+Keep the operator-authored TOML, `.rpol` graph, and datasets under version control or
 another coordinated deployment system.
 
 Do not use native config apply/rollback or gNMI Set for a full-candidate change
