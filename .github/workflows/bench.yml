@@ -134,6 +134,12 @@ jobs:
           if [ "$REQUIRE_PERFORMANCE" = "true" ]; then
             args+=(--require-performance)
           fi
+          if [ "$PACKAGE" = "rustbgpd-rib" ] && [ "$BENCH" = "rib_ops" ]; then
+            args+=(
+              --harness-ref HEAD
+              --harness-path crates/rib/benches/rib_ops.rs
+            )
+          fi
           bench/compare-criterion.sh "${args[@]}"
 
       - name: Publish summary

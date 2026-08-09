@@ -327,7 +327,8 @@ jobs:
           # renderer, so make that prerequisite explicit on a clean runner.
           cargo build -p rs-config-render
           cargo test --test reloadstall_scenario_emitted_check
-          bash -n bench/compare-criterion.sh
+          bash -n bench/compare-criterion.sh bench/tests/test-compare-criterion-harness.sh
+          shellcheck bench/compare-criterion.sh bench/tests/test-compare-criterion-harness.sh
           shellcheck bench/smoke-benches.sh
           bash -n bench/scale/route-server-1000/run-receipt.sh
           bash -n bench/scale/outbound-prefix-limits/run-receipt.sh
@@ -354,6 +355,7 @@ jobs:
           bash bench/tests/test-route-server-1000-receipt.sh
           bash bench/tests/test-vpn-query-receipt.sh
           bash bench/tests/test-vpn-query-campaign.sh
+          bash bench/tests/test-compare-criterion-harness.sh
           bash -n bench/scale/compare-rrharness.sh
           bash bench/tests/test-rrharness-driver.sh
           python3 -m unittest discover \

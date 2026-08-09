@@ -15,6 +15,9 @@ Options:
   --bench NAME            Criterion bench target (default: rib_ops)
   --features LIST         Cargo feature list forwarded to both refs
   --filter TEXT           Criterion benchmark filter, for example adj_rib_in_insert
+  --harness-ref REF       Git ref supplying one benchmark source file to both sides
+  --harness-path PATH     Repository-relative */benches/*.rs file paired with
+                          --harness-ref; both installed copies are verified
   --core CPU              CPU core passed to taskset -c (default: 0)
   --attempts N            Number of A/B attempts with alternating order to
                           dampen base/head cache-warming bias (default: 1).
@@ -74,6 +77,8 @@ package="rustbgpd-rib"
 bench_name="rib_ops"
 filter=""
 features=""
+harness_ref=""
+harness_path=""
 core="0"
 attempts=1
 out_root="target/bench-compare"
@@ -111,6 +116,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --features)
       features="${2:?missing value for --features}"
+      shift 2
+      ;;
+    --harness-ref)
+      harness_ref="${2:?missing value for --harness-ref}"
+      shift 2
+      ;;
+    --harness-path)
+      harness_path="${2:?missing value for --harness-path}"
       shift 2
       ;;
     --core)
@@ -188,6 +201,54 @@ head_sha="$(git rev-parse --verify "${head_ref}^{commit}")"
 base_short="$(git rev-parse --short=12 "$base_sha")"
 head_short="$(git rev-parse --short=12 "$head_sha")"
 
+if [[ -n $harness_ref || -n $harness_path ]]; then
+  harness_enabled=1
+  [[ -n $harness_ref && -n $harness_path ]] || {
+    echo "error: --harness-ref and --harness-path must be provided together" >&2
+    exit 2
+  }
+  [[ $harness_path =~ ^([A-Za-z0-9._+@-]+/)*benches/[A-Za-z0-9._+@-]+\.rs$ \
+    && "/${harness_path}/" != *"/../"* \
+    && "/${harness_path}/" != *"/./"* ]] || {
+    echo "error: --harness-path must be a safe repository-relative */benches/*.rs path" >&2
+    exit 2
+  }
+  command -v sha256sum >/dev/null 2>&1 || {
+    echo "error: sha256sum not found; required for fixed-harness verification" >&2
+    exit 1
+  }
+  harness_sha="$(git rev-parse --verify "${harness_ref}^{commit}")"
+  harness_object="${harness_sha}:${harness_path}"
+  [[ $(git cat-file -t "$harness_object" 2>/dev/null) == blob ]] || {
+    echo "error: fixed harness is not a blob at ${harness_ref}:${harness_path}" >&2
+    exit 2
+  }
+  harness_mode="$(git ls-tree "$harness_sha" -- "$harness_path" | awk '{print $1}')"
+  [[ $harness_mode == 100644 || $harness_mode == 100755 ]] || {
+    echo "error: fixed harness must be a regular git file at ${harness_ref}:${harness_path}" >&2
+    exit 2
+  }
+  harness_blob="$(git rev-parse "$harness_object")"
+  harness_sha256="$(git cat-file blob "$harness_object" | sha256sum | awk '{print $1}')"
+else
+  harness_enabled=0
+  harness_sha=""
+  harness_object=""
+  harness_mode=""
+  harness_blob=""
+  harness_sha256=""
+fi
+base_original_harness_blob=""
+base_original_harness_sha256=""
+base_installed_harness_blob=""
+base_installed_harness_sha256=""
+base_harness_overlay=""
+head_original_harness_blob=""
+head_original_harness_sha256=""
+head_installed_harness_blob=""
+head_installed_harness_sha256=""
+head_harness_overlay=""
+
 if [[ -n $lan395_gate_out ]]; then
   [[ $package == rustbgpd-transport \
     && $bench_name == fanout \
@@ -200,8 +261,10 @@ if [[ -n $lan395_gate_out ]]; then
     && $fail_on_regression == 0 \
     && $regression_threshold_pct == 3 \
     && $regression_max_stddev_pct == 10 \
-    && $verdict_min_attempts == 3 ]] || {
+    && $verdict_min_attempts == 3 \
+    && $harness_enabled == 0 ]] || {
     echo "error: --lan395-gate-out requires rustbgpd-transport/fanout, filter distribute_fanout, feature bench-internals, two attempts on CPU 5, taskset, --require-performance, and the default generic verdict settings" >&2
+    echo "       fixed-harness overlays are not permitted in LAN-395 exact mode" >&2
     exit 2
   }
   [[ ! -e $lan395_gate_out && ! -L $lan395_gate_out ]] || {
@@ -334,6 +397,67 @@ echo "Creating detached worktrees under ${run_dir}"
 git worktree add --detach "$base_dir" "$base_sha" >/dev/null
 git worktree add --detach "$head_dir" "$head_sha" >/dev/null
 
+install_fixed_harness() {
+  local worktree="$1"
+  local source_sha="$2"
+  local side="$3"
+  local source_object="${source_sha}:${harness_path}"
+  local original_blob="missing"
+  local original_sha256="missing"
+  local installed_blob
+  local installed_sha256
+  local overlay
+  local status_file="${run_dir}/.${side}-harness-status"
+  local -a dirty=()
+
+  if git cat-file -e "$source_object" 2>/dev/null; then
+    [[ $(git cat-file -t "$source_object") == blob ]] || {
+      echo "error: ${side} harness path is not a blob at ${source_object}" >&2
+      exit 1
+    }
+    original_blob="$(git rev-parse "$source_object")"
+    original_sha256="$(git cat-file blob "$source_object" | sha256sum | awk '{print $1}')"
+  fi
+
+  GIT_LITERAL_PATHSPECS=1 git -C "$worktree" \
+    checkout "$harness_sha" -- "$harness_path"
+  installed_blob="$(git -C "$worktree" hash-object -- "$harness_path")"
+  installed_sha256="$(sha256sum "${worktree}/${harness_path}" | awk '{print $1}')"
+  [[ $installed_blob == "$harness_blob" && $installed_sha256 == "$harness_sha256" ]] || {
+    echo "error: ${side} fixed harness differs from selected ${harness_object}" >&2
+    exit 1
+  }
+
+  if ! git -C "$worktree" status --porcelain=v1 -z --untracked-files=all \
+    >"$status_file"; then
+    rm -f "$status_file"
+    echo "error: cannot inspect ${side} fixed-harness overlay" >&2
+    exit 1
+  fi
+  mapfile -d '' -t dirty <"$status_file"
+  rm -f "$status_file"
+  if (( ${#dirty[@]} == 0 )); then
+    overlay="clean"
+  elif (( ${#dirty[@]} == 1 )) && [[ ${dirty[0]:3} == "$harness_path" ]]; then
+    overlay="overlaid"
+  else
+    echo "error: ${side} fixed-harness overlay dirtied unexpected paths:" >&2
+    printf '  %s\n' "${dirty[@]}" >&2
+    exit 1
+  fi
+
+  printf -v "${side}_original_harness_blob" '%s' "$original_blob"
+  printf -v "${side}_original_harness_sha256" '%s' "$original_sha256"
+  printf -v "${side}_installed_harness_blob" '%s' "$installed_blob"
+  printf -v "${side}_installed_harness_sha256" '%s' "$installed_sha256"
+  printf -v "${side}_harness_overlay" '%s' "$overlay"
+}
+
+if [[ -n $harness_ref ]]; then
+  install_fixed_harness "$base_dir" "$base_sha" base
+  install_fixed_harness "$head_dir" "$head_sha" head
+fi
+
 write_metadata() {
   {
     echo "run_id=${run_id}"
@@ -356,6 +480,24 @@ write_metadata() {
     echo "base_target_dir=${base_target_dir}"
     echo "head_target_dir=${head_target_dir}"
     echo "criterion_dir=${criterion_home}"
+    echo
+    echo "harness_enabled=${harness_enabled}"
+    echo "harness_ref=${harness_ref}"
+    echo "harness_path=${harness_path}"
+    echo "harness_sha=${harness_sha}"
+    echo "harness_mode=${harness_mode}"
+    echo "harness_blob=${harness_blob}"
+    echo "harness_sha256=${harness_sha256}"
+    echo "base_original_harness_blob=${base_original_harness_blob}"
+    echo "base_original_harness_sha256=${base_original_harness_sha256}"
+    echo "base_installed_harness_blob=${base_installed_harness_blob}"
+    echo "base_installed_harness_sha256=${base_installed_harness_sha256}"
+    echo "base_harness_overlay=${base_harness_overlay}"
+    echo "head_original_harness_blob=${head_original_harness_blob}"
+    echo "head_original_harness_sha256=${head_original_harness_sha256}"
+    echo "head_installed_harness_blob=${head_installed_harness_blob}"
+    echo "head_installed_harness_sha256=${head_installed_harness_sha256}"
+    echo "head_harness_overlay=${head_harness_overlay}"
     echo
     uname -a
     echo

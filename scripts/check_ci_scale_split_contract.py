@@ -22,12 +22,12 @@ PERMISSION_HASH = "9691400b3b1036bcdfe724926816dbe71b0aa22ed9b5eb89627e2eeb75079
 JOB_HASHES = {
     "core": "4eb93b493beb95530d53b696901b0d4ee03c880fd3499fece71ec133e39d621b",
     "core_tests": "a600b370f7ad23208c65872684eba87f037b245d6074336626ca4175deca1e2f",
-    "scale_receipts": "2fef431828f2dc4dd879a10774752be598082a91435356771a5f61a3caaf9bd5",
+    "scale_receipts": "18b47124c6a93c50e44f385eb762b41493fb33fd3ea251ac952b3bb3a46d5639",
     "check": "cfc655ca80392ab0699390b461e5e8e9b41410cc724201aafe75ae6da7d83213",
     "msrv": "273de02a6a1e67e17913b50023326214261b8f4d6399f8f8867188e7e3d2acb9",
     "evpn_bum_filter_kernel": "d427ed2c650d619d926cad0a4cbb6b558dd013ace9b18ba48757be529420863a",
 }
-COMMAND_BODY_HASH = "9e3c949873c8c0872a1a5403b69300c3a5306025af3cf893782ff1d60a1a2b2f"
+COMMAND_BODY_HASH = "81b47dcabf6ee4349b09c070932176004a517f692506544a12eb0c28b56f12f3"
 STEP_NAME = "Check standalone scale harnesses and receipt classifiers"
 CHECKOUT = "uses: actions/checkout@v7"
 TOOLCHAIN = (
