@@ -64,5 +64,5 @@ pub use session::import_decision_cache::{
 // binary layers (PeerManagerCommand reply, PolicyService mapping).
 pub use session::rejected_routes::{RejectedRouteEntry, RejectedRoutesReply};
 pub use socket_opts::{
-    TcpAoInfoSnapshot, TcpAoKeyState, TcpAoSupport, probe_tcp_ao_support, set_tcp_md5sig,
+    TcpAoInfoSnapshot, TcpAoKeyState, TcpAoSupport, probe_tcp_ao_support, set_gtsm, set_tcp_md5sig,
 };

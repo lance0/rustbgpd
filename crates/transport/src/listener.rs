@@ -1900,6 +1900,15 @@ impl BgpListener {
         // its family's desired subset. A key whose family has no bound
         // socket is unreachable by definition (that family accepts no
         // inbound connections at all) and is skipped.
+        // Raise every required outbound hop value before mutating any MD5
+        // inventory, so an option failure leaves the current keys intact.
+        for family in &self.listeners {
+            enable_listener_gtsm_outbound(
+                &socket2::SockRef::from(&family.socket),
+                family.is_v4,
+                &ttl_security,
+            )?;
+        }
         for family in &self.listeners {
             let current: Vec<Md5ListenerKey> = self
                 .md5_keys
@@ -2711,6 +2720,7 @@ where
         install_listener_md5_key(&socket, key)?;
         debug!(peer = %key.peer, prefix_len = key.prefix_len, "TCP MD5 listener key configured");
     }
+    enable_listener_gtsm_outbound(&socket, addr.is_ipv4(), &options.ttl_security)?;
     socket.listen(DEFAULT_LISTEN_BACKLOG)?;
     socket.set_nonblocking(true)?;
 
@@ -2782,6 +2792,29 @@ fn apply_md5_inventory(
         }
     }
     Ok(())
+}
+
+fn enable_listener_gtsm_outbound(
+    socket: &Socket,
+    is_v4: bool,
+    policies: &[TtlSecurityListenerPolicy],
+) -> std::io::Result<()> {
+    if listener_gtsm_outbound_required(is_v4, policies) {
+        crate::socket_opts::set_gtsm_outbound(socket, is_v4).map_err(|error| {
+            let family = if is_v4 { "IPv4" } else { "IPv6" };
+            std::io::Error::new(
+                error.kind(),
+                format!("failed to set {family} listener outbound GTSM TTL/Hop Limit 255: {error}"),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn listener_gtsm_outbound_required(is_v4: bool, policies: &[TtlSecurityListenerPolicy]) -> bool {
+    policies
+        .iter()
+        .any(|policy| policy.enforce && policy.peer.is_ipv4() == is_v4)
 }
 
 fn validate_listener_tcp_ao_capacity(options: &ListenerSocketOptions) -> std::io::Result<()> {
@@ -2877,6 +2910,77 @@ mod tests {
             accept_error_class(&std::io::Error::other("synthetic")),
             AcceptErrorClass::Transient
         );
+    }
+
+    #[test]
+    fn listener_gtsm_outbound_policy_is_enforcing_and_family_scoped() {
+        let policies = [
+            TtlSecurityListenerPolicy {
+                owner: TcpAoListenerOwnerKind::Static,
+                peer: "192.0.2.1".parse().unwrap(),
+                prefix_len: 32,
+                enforce: false,
+            },
+            TtlSecurityListenerPolicy {
+                owner: TcpAoListenerOwnerKind::Dynamic,
+                peer: "2001:db8::".parse().unwrap(),
+                prefix_len: 32,
+                enforce: true,
+            },
+        ];
+
+        assert!(!listener_gtsm_outbound_required(true, &policies));
+        assert!(listener_gtsm_outbound_required(false, &policies));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn gtsm_option_failure_precedes_all_live_md5_mutation() {
+        let options = ListenerSocketOptions::default();
+        let v4_socket = bind_socket2_listener("127.0.0.1:0".parse().unwrap(), &options).unwrap();
+        let v4_addr = v4_socket.local_addr().unwrap();
+        let wrong_family_socket =
+            bind_socket2_listener("127.0.0.1:0".parse().unwrap(), &options).unwrap();
+        let (accept_tx, _accept_rx) = mpsc::channel(1);
+        let mut listener = BgpListener::from_sockets(
+            vec![
+                FamilyListener {
+                    is_v4: true,
+                    socket: v4_socket,
+                },
+                FamilyListener {
+                    is_v4: false,
+                    socket: wrong_family_socket,
+                },
+            ],
+            accept_tx,
+            options,
+        );
+
+        let error = listener
+            .replace_inbound_auth(
+                vec![Md5ListenerKey {
+                    peer: "127.0.0.1".parse().unwrap(),
+                    prefix_len: 32,
+                    password: "must-not-be-installed".into(),
+                }],
+                vec![TtlSecurityListenerPolicy {
+                    owner: TcpAoListenerOwnerKind::Static,
+                    peer: "::1".parse().unwrap(),
+                    prefix_len: 128,
+                    enforce: true,
+                }],
+            )
+            .expect_err("IPv6 hop-limit option on an IPv4 test socket must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to set IPv6 listener outbound GTSM TTL/Hop Limit 255"),
+            "unexpected error: {error}"
+        );
+
+        std::net::TcpStream::connect_timeout(&v4_addr, std::time::Duration::from_secs(1))
+            .expect("GTSM option failure must leave the IPv4 listener without the desired MD5 key");
     }
 
     fn tcp_ao_config() -> TcpAoKeyring {
