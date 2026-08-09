@@ -30,8 +30,9 @@ this inventory before the handler runs, and applies two checks in order:
    role sits below the method tier is denied (`role_tier_denied`).
    This check is unconditional: `"tier"` has been the default since
    v0.24.0 and is the only mode since v0.63.0, when
-   `enforcement = "legacy"` (roles as audit context only) was removed and
-   became a validation rejection. Earlier editions of this document stated
+   `enforcement = "legacy"` (roles as audit context only) was removed; v0.65
+   removed its typed enum variant while retaining exact migration guidance.
+   Earlier editions of this document stated
    a two-minor/90-day floor (≈2026-10-09) as removal *eligibility*; that
    guidance is superseded by the explicit owner decision to remove the mode
    under the pre-1.0 alpha stability posture — see `docs/API.md` for the
@@ -316,7 +317,7 @@ specific method if the model warrants it.
    release. That opt-in path shipped as slice-5a, and the production
    default flipped to `tier` in v0.24.0.
    Current status: the Legacy migration mode completed its purpose and was
-   removed in v0.63.0; the config value is rejected at validation.
+   removed in v0.63.0; v0.65 typed config accepts only `tier`.
 7. **Audit logging.** The runtime now emits tier-decision logs and the
    low-cardinality `bgp_grpc_authz_decisions_total` metric for every RPC;
    listener `max_tier` denials use the bounded

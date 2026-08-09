@@ -5,8 +5,8 @@
 //! `AccessMode` checks in `server.rs`, per-listener `max_tier`
 //! ceilings in `authz_runtime`, and ADR-0064 per-principal role
 //! ceilings — unconditionally: the pre-v0.24.0 "legacy" mode that
-//! skipped role ceilings was removed, and config validation rejects
-//! `enforcement = "legacy"` outright.
+//! skipped role ceilings was removed. Typed config accepts only `tier`;
+//! the exact retired value gets a migration diagnostic during loading.
 
 /// Authorization tier assigned to one gRPC method.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

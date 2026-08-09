@@ -451,11 +451,12 @@ proto credential markers remain deferred.
 ## Status addendum (2026-08-03): legacy mode removed in v0.63.0
 
 The `enforcement = "legacy"` migration mode described above completed its
-purpose and was removed as a functioning mode in v0.63.0. The value still
-parses (the v1 config surface keeps the enum variant) but validation rejects
-it at boot, `--check`, and reload with a one-shot migration message; the
-runtime no longer carries the roles-as-audit-context-only path, so tier role
-ceilings are enforced unconditionally.
+purpose and was removed as a functioning mode in v0.63.0. V0.65 removed the
+dead typed enum variant; only an exact semantic
+`[security.grpc].enforcement = "legacy"` value gets the one-shot migration
+message after typed deserialization fails. The runtime no longer carries the
+roles-as-audit-context-only path, so tier role ceilings are enforced
+unconditionally.
 
 Earlier sunset language in this repository projected a two-minor/90-day floor
 (≈2026-10-09) as the earliest *eligibility* for removal. The removal landed

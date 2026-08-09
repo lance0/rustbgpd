@@ -341,9 +341,9 @@ pub struct SecurityConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GrpcSecurityConfig {
-    /// Role-enforcement mode. `"tier"` (the default) is the only mode
-    /// that boots; `"legacy"` still parses but is rejected at
-    /// validation since v0.63.0.
+    /// Role-enforcement mode. `"tier"` is the only accepted mode.
+    /// The loader gives the removed `"legacy"` value an actionable
+    /// migration diagnostic after typed deserialization rejects it.
     #[serde(default)]
     pub enforcement: GrpcEnforcementConfig,
     /// Per-principal role assignments (principal name -> role).
@@ -354,14 +354,6 @@ pub struct GrpcSecurityConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GrpcEnforcementConfig {
-    /// Deprecated: the pre-v0.24.0 mode that skipped per-principal
-    /// role ceilings was removed in v0.63.0. The value still parses
-    /// (the v1 config surface keeps the variant) but validation
-    /// rejects it at boot, `--check`, and reload with the migration
-    /// steps. Local-only deployments can delete the whole
-    /// `[security.grpc]` block instead — an owner-only UDS socket
-    /// authorizes its clients as the implicit `local-operator`.
-    Legacy,
     /// Enforce per-principal role ceilings in addition to listener
     /// `max_tier` caps. **Default since v0.24.0** and the only mode
     /// since v0.63.0. Deployments whose listeners have no role

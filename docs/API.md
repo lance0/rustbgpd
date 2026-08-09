@@ -180,8 +180,9 @@ owner-only, so its clients are authorized as the implicit
 whose only management surface is a local socket needs no `[security.grpc]`
 block at all. Only group/world-accessible UDS sockets require an explicit
 `principal` mapped in `[security.grpc.roles]`.
-`enforcement = "legacy"` was removed in v0.63.0 and is rejected at
-validation. Earlier editions of this document projected a two-minor/90-day
+`enforcement = "legacy"` was removed in v0.63.0 and from the typed schema in
+v0.65; the exact retired value still receives a migration diagnostic. Earlier
+editions of this document projected a two-minor/90-day
 compatibility floor (approximately 2026-10-09) as the earliest *eligibility*
 for removal; that guidance is superseded. The removal landed earlier as an
 explicit owner decision under the project's pre-1.0 alpha stability posture
@@ -2378,7 +2379,7 @@ would return.
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d @ localhost:50051 rustbgpd.v1.EvpnService/ApplyEvpnRuntime <<'JSON'
 {
-  "candidate_toml": "[global]\nasn = 65000\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n[global.telemetry]\nlog_format = \"json\"\n\n[security.grpc]\nenforcement = \"legacy\"\n\n[[evpn_instances]]\nvni = 100\nrd = \"65000:100\"\nroute_targets = [\"65000:100\"]\nlocal_vtep_ip = \"10.0.0.1\"\n",
+  "candidate_toml": "[global]\nasn = 65000\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n[global.telemetry]\nlog_format = \"json\"\n\n[security.grpc]\nenforcement = \"tier\"\n\n[[evpn_instances]]\nvni = 100\nrd = \"65000:100\"\nroute_targets = [\"65000:100\"]\nlocal_vtep_ip = \"10.0.0.1\"\n",
   "validate_only": true
 }
 JSON

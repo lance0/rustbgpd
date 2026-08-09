@@ -371,7 +371,7 @@ SIGHUP outcomes.
 
 | Field | Class | Notes |
 |---|---|---|
-| `[security.grpc] enforcement` | restart-required | `tier` vs `legacy` mode, consumed by the gRPC interceptor at server bind time. |
+| `[security.grpc] enforcement` | restart-required | `tier` is the sole typed value, consumed by the gRPC interceptor at server bind time. Retired `legacy` is invalid config and receives migration guidance rather than a runtime class. |
 | `[security.grpc.roles]` | restart-required | Principal → role (`observer` / `automation` / `operator`) map read at bind. The per-method tier matrix is compiled into `crates/api/src/authz.rs` and is not runtime-configurable. |
 
 ## `[event_history]` (ADR-0072)

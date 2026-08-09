@@ -90,7 +90,7 @@
       {"definition": "BgpRoleConfig", "schema_sha256": "33acb141838f6612e3cff7273c7936e30683836d7ef8b56d09012215f745f183"},
       {"definition": "BmpMonitorView", "schema_sha256": "dec0dcdce7c5514ca4be543940f036bbe33e9223f12404ca66fc5d82b552ba16"},
       {"definition": "GrpcAccessModeConfig", "schema_sha256": "83c96eb88d57e5c0b689443bb415086df4ed403fae8e5ccc77a5dd0fe7b7c577"},
-      {"definition": "GrpcEnforcementConfig", "schema_sha256": "415423dc03b1b0cf515a7b36391a6d6062ad3464e350c1937cec95989668a754"},
+      {"definition": "GrpcEnforcementConfig", "schema_sha256": "191a2c9e85eefb3a60509df99e81edc496c422170b0bbd24961d9030de42f588"},
       {"definition": "GrpcMaxTierConfig", "schema_sha256": "244b9b776ca119f3c7af0e3fcfafac568318e3d830a9086e5de9646b923b83c8"},
       {"definition": "GrpcRoleConfig", "schema_sha256": "46719dcd128578a3754ea0bfcce98b7cbfb1c361aa941edacaf7fc4d2ac528a5"}
     ],
