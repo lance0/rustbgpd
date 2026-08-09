@@ -99,10 +99,11 @@ name: Interop
 #     digest-pinned) and a raw byte sink with tshark 4.4 pcap
 #     dissection for the v4 frames. 50 assertions; the wall time is
 #     dominated by the 60 s stats cadence.
-#   - M25 (~10 s test): TCP MD5 (RFC 2385) + GTSM / TTL security
-#     (RFC 5082). Two FRR peers — one over MD5, one over GTSM —
-#     prove both auth/integrity mechanisms hold a session and
-#     deliver routes. Catches transport-layer regressions.
+#   - M25 (~45 s test): TCP MD5 (RFC 2385) + GTSM / TTL security
+#     (RFC 5082). Two static FRR peers cover MD5 and GTSM separately;
+#     a third FRR peer active-opens over IPv6 into a dynamic range
+#     requiring both, including wrong-MD5 and missing-GTSM negative
+#     phases. Catches active- and accepted-socket transport regressions.
 #
 # EVPN + SIGHUP tier:
 #   - M29 (~10 s test): control-plane sanity — session Established

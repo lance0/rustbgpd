@@ -155,7 +155,7 @@ the protected BIRD TCP-AO smoke and M73 BGP-LS receipt).
 | GoBGP ×2 | 3.37.0 | `tests/interop/m82-evpn-bundle-synthetic-gobgp.clab.yml` | Tested (M82) | ADR-0092 EVPN VLAN-Aware Bundle (non-zero Ethernet Tag) reflection — GoBGP-synthetic slice | Three-node iBGP topology: GoBGP source -> rustbgpd RR -> GoBGP sink, all negotiating `l2vpn-evpn`. The source originates the RFC 7432 §6.3 bundle route shape — one EVI (RD 65000:100, RT 65000:100) with two bridge domains under distinct non-zero Ethernet Tags (10 → VNI 10010, 20 → VNI 10020) including **the SAME MAC address under both tags** — as Type 2 MAC/IP + Type 3 IMET routes. 26/26: the RR keys the same (RD, MAC) under two tags as **two distinct RIB entries** (no (VNI, MAC) collapse) with the tags surfaced via `rbgp evpn`; distinct per-tag IMET entries; the sink receives all four routes with ORIGINATOR_ID / CLUSTER_LIST and **tag-verbatim NLRIs** (RD admin/assigned, 4-byte Ethernet Tag, MAC, IP, label all field-equal on the sink's re-decoded NLRI); withdrawing the tag-10 Type 2 removes exactly that entry everywhere (the tag-20 twin and both IMETs survive); the RR touches no dataplane. **Hosted CI** in `.github/workflows/interop.yml`. | Stock `gobgp:interop` image |
 | **Nokia SR Linux** + GoBGP | 25.10.1 + 3.37.0 | `tests/interop/m82-evpn-bundle-srlinux.clab.yml` | Tested (M82, local lab) | ADR-0092 EVPN VLAN-Aware Bundle vendor ground truth — **rustbgpd's first vendor-NOS interop receipt** | Four-node topology: SR Linux VTEP -> rustbgpd RR -> GoBGP sink (+ an access-side link partner). SR Linux runs two mac-vrf bridge domains in its VLAN-aware-bundle control-plane interoperability mode (`protocols bgp-evpn bgp-instance 1 routes bridge-table vlan-aware-bundle-eth-tag 10 / 20`, shared RT target:65000:100, VNIs 10010/10020, the same static MAC in both bridge domains) and originates real vendor Type 3 IMET + Type 2 MAC routes with non-zero Ethernet Tags. 20/20: session Established; the RR holds per-tag IMET entries and the same MAC keyed under tags 10/20 as distinct entries with per-tag VNI labels; the sink receives all four reflected with ORIGINATOR_ID = SR Linux, CLUSTER_LIST = the RR cluster-id, and tag-verbatim NLRIs; deleting the bd10 static MAC on SR Linux withdraws exactly the tag-10 Type 2 end-to-end. SR Linux quirks: one EVI per mac-vrf enforced (the bundle identity rides the shared RT + eth-tag, per-BD RDs), and the session needs an explicit `transport local-address` or SR Linux sources/accepts only on the system0 address. Local-only (SR Linux image ~750 MB compressed); the CI-gated proof is the synthetic leg above. | `docker pull ghcr.io/nokia/srlinux:latest` |
 | BIRD 2 + GoBGP + FRR + StayRTR | BIRD 2.0.12, GoBGP 3.37.0, FRR 10.3.1, StayRTR | `tests/interop/m83-routeserver-multistack.clab.yml` | Tested (M83) | RFC 7947 route-server profile, multi-stack — the ADR-0101 proof-ladder closer | rustbgpd is the route server (AS 65500) for three member stacks with `route_server_client` + `role = "route_server"` per member, a dedicated reduced IPv4 lab hygiene/ROV projection (`.rpol` + TOML mixed), and a StayRTR RTR fixture. RFC 6598 and TEST-NET-3 remain usable only as deterministic lab probes; M83 does not exercise the public example's dated dual-stack special-purpose snapshot. 46 assertions: **transparency** on all three client views AND at byte level via tshark on the RS↔BIRD link (no 65500 in any AS_PATH segment, NEXT_HOP = originator verbatim, MED + standard/large communities verbatim on the wire); RFC 9234 **OTC** attached toward members (attribute 35 on the wire, `BGP.otc` on BIRD, FRR JSON); **per-member policy views** (a deny chain scoped to one member, `rbgp rib advertised` agreeing per member); **ROV** reject-at-import with `rbgp policy explain` naming the deciding term; the **RFC 7947 §2.3 path-hiding contrast** — the FRR member whose export chain denies the Loc-RIB best receives NOTHING in single-best mode (pinned), receives the runner-up after a live `per_client_best` flip (sed + SIGHUP + session bounce), with `rbgp rib advertised --explain` walking the per-client candidate ladder (“candidate 1 of 2 denied … runner-up advertised”), and the Add-Path member holds BOTH candidate paths; runner-up withdraw converges to nothing; EoR-after-flood ordering; withdraw propagation to both other stacks; session stability through a policy SIGHUP. **Caught product bug pre-CI:** `per_client_best` was dropped at the `build_transport_config` seam (parsed + validated + displayed in docs, never reached the session) — fixed in the same change, unit-pinned. First-AS relaxation per stack recorded in the script header (FRR needs per-neighbor `no enforce-first-as`; BIRD `enforce first as off`; GoBGP has none). **Hosted CI** in `.github/workflows/interop.yml`. | `docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop` (bird2 + tshark); stock `gobgp:interop` |
-| FRR (2x) | 10.3.1 | `tests/interop/m25-md5-gtsm-frr.clab.yml` | Tested (M25) | TCP MD5 + GTSM / TTL security | Two peers: MD5 auth + GTSM separately | — |
+| FRR (3x) | 10.3.1 | `tests/interop/m25-md5-gtsm-frr.clab.yml` | Tested (M25) | TCP MD5 + GTSM / TTL security | Two static peers cover MD5 and GTSM separately; an IPv6 dynamic accepted socket requires both and proves each negative independently | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m26-cease-frr.clab.yml` | Tested (M26) | Cease/Max-Prefixes subcode 1 | max_prefixes=2, FRR sends 3 | Cease/Maximum Number of Prefixes Reached |
 | FRR (2x) + RTR v2 | 10.3.1 | `tests/interop/m27-aspa-rtr2.clab.yml` | Tested (M27) | ASPA/RTR v2: validation states, best-path preference | Python RTR v2 mock server (StayRTR lacks ASPA); 2 FRR peers for best-path tiebreak | — |
 | FRR + RTR v2 | 10.3.1 | `tests/interop/m59-aspa-roles-rtr2.clab.yml` | Tested (M59) | Role-aware ASPA: downstream (customer-cone) verification (draft-ietf-sidrops-aspa-verification-26 §5.5, ADR-0049) | rustbgpd (AS 65001) configures a local BGP Role of `customer` toward the FRR peer (AS 65003, its provider), so routes received from it are verified with the **downstream** procedure rather than upstream (M27 covers the roleless/upstream half). FRR advertises two prefixes with crafted AS_PATHs and the Python RTR v2 mock feeds ASPA records that make one downstream-Valid and one downstream-Invalid: `192.168.20.0/24` `[65003, 65011, 65010]` → an unbroken up-ramp ⇒ `aspaState = valid`; `192.168.21.0/24` `[65003, 65007, 65008]` → neither up- nor down-ramp covers (65008 and 65003 each attest only 65099) ⇒ `aspaState = invalid`. Driver asserts both verdicts via `RibService/ListReceivedRoutes`. Local-only, like M21/M27 (RTR-cache-dependent; not in hosted CI). | — |
@@ -1905,10 +1905,13 @@ types and ordering.
 
 ---
 
-## M25 Test Results (2026-03-15, FRR 10.3.1)
+## M25 Test Results (2026-08-08, FRR 10.3.1)
 
 TCP MD5 authentication (RFC 2385) and GTSM / TTL security (RFC 5082)
-with two separate FRR peers.
+with three separate FRR peers. FRR-A and FRR-B cover active-open MD5 and
+GTSM separately. FRR-C is the only side that can active-open its IPv6 session;
+rustbgpd has no static neighbor for it and must accept it from a dynamic range
+whose peer group requires both MD5 and GTSM.
 
 | Test | Result | Details |
 |------|--------|---------|
@@ -1917,9 +1920,19 @@ with two separate FRR peers.
 | Route received over MD5 session | PASS | 192.168.1.0/24 from FRR-A |
 | GTSM session established | PASS | ttl-security hops 1 on FRR-B |
 | Route received over GTSM session | PASS | 172.16.0.0/16 from FRR-B |
-| Both peers active | PASS | activePeers=2 |
-| Routes from both peers | PASS | totalRoutes=2 |
-| **Total** | **7/7** | |
+| IPv6 dynamic MD5+GTSM session established | PASS | FRR-C active-open to `2001:db8:25::1`; no static rustbgpd neighbor |
+| IPv6 dynamic route received | PASS | 2001:db8:2500::/48 from FRR-C |
+| Dynamic child provenance | PASS | `isDynamic=true`, peer group `ipv6-dynamic-auth` |
+| Dynamic range inventory | PASS | `2001:db8:25::/64`, remote AS 65004 |
+| All peers active | PASS | activePeers=3 |
+| Routes from all peers | PASS | totalRoutes=3 |
+| Wrong IPv6 MD5 rejected | PASS | Session stays down for a 10-second reconnect window |
+| IPv6 MD5 restore established | PASS | Correct password restores the dynamic session |
+| IPv6 MD5 restore route | PASS | 2001:db8:2500::/48 returns |
+| Missing IPv6 GTSM rejected | PASS | Removing FRR TTL security leaves hop limit below rustbgpd's strict 255 minimum |
+| IPv6 GTSM restore established | PASS | `ttl-security hops 1` restores the dynamic session |
+| IPv6 GTSM restore route | PASS | 2001:db8:2500::/48 returns |
+| **Total** | **17/17** | |
 
 ---
 

@@ -50,7 +50,7 @@ id matches the milestone. Full procedures: [`INTEROP.md`](INTEROP.md).
 | M17 | Add-Path (RFC 7911) multi-path send with distinct path ids | FRR 10.3.1 |
 | M22 | FlowSpec inject + distribute + withdraw | FRR 10.3.1 |
 | M24 | BMP Initiation, PeerUp, RouteMonitoring ordering | FRR + BMP receiver |
-| M25 | TCP MD5 authentication + GTSM/TTL security | FRR 10.3.1 ×2 |
+| M25 | TCP MD5 + GTSM/TTL security, including IPv6 dynamic accepted sockets | FRR 10.3.1 ×3 |
 | M29 | EVPN RR capability sanity (RFC 7432) + `ListEvpnRoutes` | FRR 10.3.1 |
 | M30 | EVPN Type 2 MAC reflection end-to-end with kernel VXLAN VTEPs | FRR 10.3.1 ×2 |
 | M34 | SIGHUP policy soft-reset auto-fire | FRR 10.3.1 |

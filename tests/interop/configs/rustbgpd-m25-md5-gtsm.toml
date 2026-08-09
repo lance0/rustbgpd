@@ -28,6 +28,21 @@ description = "frr-b-gtsm"
 hold_time = 90
 ttl_security = true
 
+# Peer C has no static neighbor. FRR-C must active-open into this dynamic
+# range; the accepted IPv6 socket inherits both transport protections.
+[peer_groups.ipv6-dynamic-auth]
+hold_time = 90
+md5_password = "interop-secret-m25-v6"
+ttl_security = true
+families = ["ipv6_unicast"]
+disable_ipv4_unicast = true
+
+[[dynamic_neighbors]]
+prefix = "2001:db8:25::/64"
+peer_group = "ipv6-dynamic-auth"
+remote_asn = 65004
+description = "frr-c-ipv6-dynamic-md5-gtsm"
+
 [security.grpc]
 enforcement = "tier"
 
