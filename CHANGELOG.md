@@ -89,6 +89,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Streamed config Plan/Apply now gives one bounded, nonpreemptive admission
+  waiter to operators and protects operator-issued plan tokens at capacity.
 - `rbgp config import` now retains bare BIRD `ipv4;` and `ipv6;` channel
   declarations and reports `rr client on;` with route-reflector guidance.
 - SIGINT, SIGTERM, and SIGHUP handlers are now registered before gRPC, BGP,

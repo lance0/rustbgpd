@@ -1912,9 +1912,11 @@ mod tests {
             .unwrap()
             .1;
         let positions = [
+            "let role = principal_role(&request)?",
             "if !authenticated_transport",
             "let Some(state) = state.cloned()",
-            "let permit = state.try_admit()?",
+            "let deadline = Instant::now() + state.limits.total_timeout",
+            ".admit(\n            role,\n            deadline,",
             "let mut spool = state.create_spool()?",
         ]
         .map(|needle| handler.find(needle).unwrap());

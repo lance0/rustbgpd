@@ -8,7 +8,7 @@ use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio::time::{Instant, timeout_at};
 use tonic::{Request, Response, Status};
 
-use super::{FRAME_VERSION, StreamPlanState};
+use super::{AdmissionAudit, FRAME_VERSION, StreamPlanState, principal_role};
 use crate::audit::{GrpcAuditHandle, stream_apply_config_transaction_summary};
 use crate::proto;
 use crate::server::{ConfigTransactionApplyFn, validate_config_transaction_apply_metadata};
@@ -52,6 +52,13 @@ impl ApplyAudit {
     }
 }
 
+impl AdmissionAudit for ApplyAudit {
+    fn set_outcome(&mut self, outcome: &'static str) {
+        self.outcome = outcome;
+        self.publish();
+    }
+}
+
 impl Drop for ApplyAudit {
     fn drop(&mut self) {
         if matches!(self.outcome, "admitted" | "receiving" | "handed_off") {
@@ -68,6 +75,7 @@ pub(crate) async fn stream_apply_config_transaction(
     request: Request<tonic::Streaming<proto::StreamApplyConfigTransactionRequest>>,
 ) -> Result<Response<proto::ConfigTransactionApplyResponse>, Status> {
     let mut audit = ApplyAudit::new(request.extensions().get::<GrpcAuditHandle>().cloned());
+    let role = principal_role(&request)?;
     if !authenticated_transport {
         audit.outcome = "unauthenticated_transport";
         return Err(Status::unauthenticated(
@@ -86,8 +94,15 @@ pub(crate) async fn stream_apply_config_transaction(
             "ConfigService.StreamApplyConfigTransaction executor is unavailable",
         ));
     };
-    let permit = state.try_admit()?;
     let deadline = Instant::now() + state.limits.total_timeout;
+    let admission = state
+        .admit(
+            role,
+            deadline,
+            "streamed config apply exceeded total deadline",
+            &mut audit,
+        )
+        .await?;
     let mut stream = request.into_inner();
     let metadata = receive_metadata(&mut stream, deadline, state.limits.idle_timeout).await?;
     let mut apply_request = metadata.request;
@@ -116,7 +131,8 @@ pub(crate) async fn stream_apply_config_transaction(
     tokio::spawn(run_detached_apply(
         transaction_apply,
         apply_request,
-        permit,
+        admission.permit,
+        admission.after_operator_wait,
         audit,
         response_tx,
     ));
@@ -318,6 +334,7 @@ async fn run_detached_apply(
     transaction_apply: ConfigTransactionApplyFn,
     request: proto::ApplyConfigTransactionRequest,
     _permit: OwnedSemaphorePermit,
+    after_operator_wait: bool,
     mut audit: ApplyAudit,
     response_tx: oneshot::Sender<Result<proto::ConfigTransactionApplyResponse, Status>>,
 ) {
@@ -325,7 +342,11 @@ async fn run_detached_apply(
         .await
         .map_err(crate::server::ConfigTransactionApplyError::into_status);
     audit.outcome = if response.is_ok() {
-        "applied"
+        if after_operator_wait {
+            "applied_after_operator_wait"
+        } else {
+            "applied"
+        }
     } else {
         "failed"
     };

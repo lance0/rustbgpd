@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use rcgen::{
@@ -83,6 +83,24 @@ impl Service<Request<Body>> for SummaryService {
             handle.set_summary(GrpcRequestSummary::new("candidate_toml=<redacted>"));
             Ok(Response::new(Body::empty()))
         })
+    }
+}
+
+#[derive(Clone)]
+struct RoleCaptureService(Arc<Mutex<Option<PrincipalRole>>>);
+
+impl Service<Request<Body>> for RoleCaptureService {
+    type Response = Response<Body>;
+    type Error = Infallible;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: Request<Body>) -> Self::Future {
+        *self.0.lock().unwrap() = req.extensions().get::<PrincipalRole>().copied();
+        Box::pin(async { Ok(Response::new(Body::empty())) })
     }
 }
 
@@ -462,7 +480,28 @@ async fn tier_enforcement_allows_observer_sensitive_read() {
     .with_roles(roles(&[("observer.example", PrincipalRole::Observer)]))
     .with_bearer_token(Some("secret"));
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
-    let mut service = layer.layer(EchoService);
+    let captured = Arc::new(Mutex::new(None));
+    let mut service = layer.layer(RoleCaptureService(Arc::clone(&captured)));
+    for request in [
+        Request::builder()
+            .uri("/rustbgpd.v1.ConfigService/DiffRuntimeConfig")
+            .body(Body::empty())
+            .unwrap(),
+        Request::builder()
+            .uri("/rustbgpd.v1.ConfigService/DiffRuntimeConfig")
+            .header("authorization", "Bearer wrong")
+            .body(Body::empty())
+            .unwrap(),
+    ] {
+        let response = service.call(request).await.unwrap();
+        let status = tonic::Status::from_header_map(response.headers()).unwrap();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        assert!(captured.lock().unwrap().is_none());
+    }
+    let failed_text = gather_text(&metrics);
+    assert!(failed_text.contains("result=\"authn_failed\""));
+    assert!(!failed_text.contains("result=\"handler_ok\""));
+
     let request = Request::builder()
         .uri("/rustbgpd.v1.ConfigService/DiffRuntimeConfig")
         .header("authorization", "Bearer secret")
@@ -471,6 +510,7 @@ async fn tier_enforcement_allows_observer_sensitive_read() {
 
     let response = service.call(request).await.unwrap();
     assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(*captured.lock().unwrap(), Some(PrincipalRole::Observer));
 
     let text = gather_text(&metrics);
     assert!(text.contains("result=\"handler_ok\""));
@@ -545,7 +585,8 @@ async fn tier_enforcement_allows_operator_only_for_operator() {
     )
     .with_roles(roles(&[("operator.example", PrincipalRole::Operator)]));
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
-    let mut service = layer.layer(EchoService);
+    let captured = Arc::new(Mutex::new(None));
+    let mut service = layer.layer(RoleCaptureService(Arc::clone(&captured)));
     let request = Request::builder()
         .uri("/rustbgpd.v1.ControlService/Shutdown")
         .body(Body::empty())
@@ -553,6 +594,7 @@ async fn tier_enforcement_allows_operator_only_for_operator() {
 
     let response = service.call(request).await.unwrap();
     assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(*captured.lock().unwrap(), Some(PrincipalRole::Operator));
 
     let text = gather_text(&metrics);
     assert!(text.contains("result=\"handler_ok\""));
@@ -601,7 +643,8 @@ async fn tier_enforcement_authorizes_implicit_local_operator_with_empty_roles() 
     .with_roles(roles(&[]))
     .with_implicit_local_operator();
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
-    let mut service = layer.layer(EchoService);
+    let captured = Arc::new(Mutex::new(None));
+    let mut service = layer.layer(RoleCaptureService(Arc::clone(&captured)));
     let request = Request::builder()
         .uri("/rustbgpd.v1.ControlService/Shutdown")
         .body(Body::empty())
@@ -609,6 +652,7 @@ async fn tier_enforcement_authorizes_implicit_local_operator_with_empty_roles() 
 
     let response = service.call(request).await.unwrap();
     assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(*captured.lock().unwrap(), Some(PrincipalRole::Operator));
 
     let text = gather_text(&metrics);
     assert!(text.contains("result=\"handler_ok\""));
@@ -870,12 +914,26 @@ async fn mtls_principal_resolution_uses_tonic_tls_connect_info_peer_certs() {
         GrpcAuthnKind::Mtls,
         "mtls-unresolved",
     )
+    .with_roles(roles(&[(
+        "rustbgpd://operator/alice",
+        PrincipalRole::Operator,
+    )]))
     .with_mtls_peer_principal();
 
     assert_eq!(
         context.principal_for_extensions(&extensions).as_ref(),
         "rustbgpd://operator/alice"
     );
+    let captured = Arc::new(Mutex::new(None));
+    let layer = GrpcAuthzLayer::new(context, BgpMetrics::new());
+    let mut service = layer.layer(RoleCaptureService(Arc::clone(&captured)));
+    let mut request = Request::builder()
+        .uri("/rustbgpd.v1.ControlService/Shutdown")
+        .body(Body::empty())
+        .unwrap();
+    *request.extensions_mut() = extensions;
+    service.call(request).await.unwrap();
+    assert_eq!(*captured.lock().unwrap(), Some(PrincipalRole::Operator));
 }
 
 #[tokio::test]
