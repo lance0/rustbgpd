@@ -70,27 +70,26 @@ where
         let lookup = audit_lookup_for_path(&path);
         let decision = lookup.decision;
         let principal = self.context.principal_for_extensions(req.extensions());
+        // This layer wraps tonic's per-service interceptor. Authenticate here
+        // before disclosing tier details or forwarding resolved role context;
+        // the inner interceptor remains the handler-boundary guard.
+        if let Some(status) = self
+            .context
+            .bearer_auth_error(req.headers(), req.extensions())
+        {
+            record_audit_decision(
+                &path,
+                &lookup,
+                &self.context,
+                principal.as_ref(),
+                &self.metrics,
+                "authn_failed",
+                None,
+            );
+            let response = status.into_http::<Body>();
+            return Box::pin(async move { Ok(response) });
+        }
         if decision.tier > self.context.max_tier {
-            // This layer wraps tonic's per-service interceptors. For an
-            // over-cap bearer-token request, authenticate first so
-            // invalid callers still receive UNAUTHENTICATED instead of
-            // learning listener tier details via PERMISSION_DENIED.
-            if let Some(status) = self
-                .context
-                .bearer_auth_error(req.headers(), req.extensions())
-            {
-                record_audit_decision(
-                    &path,
-                    &lookup,
-                    &self.context,
-                    principal.as_ref(),
-                    &self.metrics,
-                    "authn_failed",
-                    None,
-                );
-                let response = status.into_http::<Body>();
-                return Box::pin(async move { Ok(response) });
-            }
             record_audit_decision(
                 &path,
                 &lookup,
@@ -112,22 +111,6 @@ where
             return Box::pin(async move { Ok(response) });
         }
         if let Some(denial) = self.context.role_denial(principal.as_ref(), decision.tier) {
-            if let Some(status) = self
-                .context
-                .bearer_auth_error(req.headers(), req.extensions())
-            {
-                record_audit_decision(
-                    &path,
-                    &lookup,
-                    &self.context,
-                    principal.as_ref(),
-                    &self.metrics,
-                    "authn_failed",
-                    None,
-                );
-                let response = status.into_http::<Body>();
-                return Box::pin(async move { Ok(response) });
-            }
             record_audit_decision(
                 &path,
                 &lookup,
@@ -142,7 +125,12 @@ where
                 .into_http::<Body>();
             return Box::pin(async move { Ok(response) });
         }
+        let role = self
+            .context
+            .resolve_role(principal.as_ref())
+            .expect("a request without a resolved role was denied above");
         let audit_handle = GrpcAuditHandle::default();
+        req.extensions_mut().insert(role);
         req.extensions_mut().insert(audit_handle.clone());
         let context = self.context.clone();
         let metrics = self.metrics.clone();

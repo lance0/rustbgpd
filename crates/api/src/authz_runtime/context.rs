@@ -183,7 +183,7 @@ impl GrpcAuthAuditContext {
             .map_or("unmapped", PrincipalRole::as_str)
     }
 
-    fn resolve_role(&self, principal: &str) -> Option<PrincipalRole> {
+    pub(super) fn resolve_role(&self, principal: &str) -> Option<PrincipalRole> {
         // Validation rejects `local-operator` in the roles map, so the
         // implicit fallback can never shadow a declared entry.
         self.roles.get(principal).copied().or_else(|| {

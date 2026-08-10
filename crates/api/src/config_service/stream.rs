@@ -6,7 +6,6 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io;
 use std::os::unix::fs::MetadataExt as _;
-#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -24,6 +23,7 @@ use uuid::Uuid;
 
 use super::{plan_error_to_status, transaction_plan_to_proto};
 use crate::audit::{GrpcAuditHandle, stream_plan_config_transaction_summary};
+use crate::authz::PrincipalRole;
 use crate::peer_types::{PeerManagerCommand, RuntimeConfigTransactionStatus};
 use crate::proto;
 
@@ -60,6 +60,8 @@ impl Default for StreamLimits {
 pub(crate) struct StreamPlanState {
     directory: Arc<File>,
     admission: Arc<Semaphore>,
+    admission_gate: Mutex<()>,
+    operator_waiter: Arc<AtomicBool>,
     tokens: Mutex<VecDeque<PlanTokenBinding>>,
     limits: StreamLimits,
     #[cfg(test)]
@@ -68,10 +70,30 @@ pub(crate) struct StreamPlanState {
 
 struct PlanTokenBinding {
     token: Uuid,
+    issuer_is_operator: bool,
     runtime_snapshot_token: String,
     candidate_sha256: [u8; 32],
     candidate_length: u64,
     expires_at: Instant,
+}
+
+struct StreamAdmission {
+    permit: OwnedSemaphorePermit,
+    after_operator_wait: bool,
+}
+
+struct OperatorWaiterGuard {
+    latch: Arc<AtomicBool>,
+}
+
+impl Drop for OperatorWaiterGuard {
+    fn drop(&mut self) {
+        self.latch.store(false, Ordering::Release);
+    }
+}
+
+trait AdmissionAudit {
+    fn set_outcome(&mut self, outcome: &'static str);
 }
 
 impl StreamPlanState {
@@ -111,6 +133,8 @@ impl StreamPlanState {
         Ok(Arc::new(Self {
             directory: Arc::new(directory),
             admission: Arc::new(Semaphore::new(1)),
+            admission_gate: Mutex::new(()),
+            operator_waiter: Arc::new(AtomicBool::new(false)),
             tokens: Mutex::new(VecDeque::new()),
             limits,
             #[cfg(test)]
@@ -118,14 +142,83 @@ impl StreamPlanState {
         }))
     }
 
+    #[cfg(test)]
     fn try_admit(&self) -> Result<OwnedSemaphorePermit, Status> {
         Arc::clone(&self.admission)
             .try_acquire_owned()
             .map_err(|_| Status::resource_exhausted("another streamed config plan is active"))
     }
 
+    async fn admit<A: AdmissionAudit>(
+        &self,
+        role: PrincipalRole,
+        deadline: Instant,
+        deadline_message: &'static str,
+        audit: &mut A,
+    ) -> Result<StreamAdmission, Status> {
+        let waiter = {
+            let _gate = self
+                .admission_gate
+                .lock()
+                .map_err(|_| Status::internal("streamed config admission state is unavailable"))?;
+            if self.operator_waiter.load(Ordering::Acquire) {
+                let outcome = if role == PrincipalRole::Operator {
+                    "operator_waiter_full"
+                } else {
+                    "admission_busy"
+                };
+                audit.set_outcome(outcome);
+                return Err(Status::resource_exhausted(
+                    "another streamed config plan is active",
+                ));
+            }
+            if let Ok(permit) = Arc::clone(&self.admission).try_acquire_owned() {
+                return Ok(StreamAdmission {
+                    permit,
+                    after_operator_wait: false,
+                });
+            }
+            if role != PrincipalRole::Operator {
+                audit.set_outcome("admission_busy");
+                return Err(Status::resource_exhausted(
+                    "another streamed config plan is active",
+                ));
+            }
+            self.operator_waiter
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .map_err(|_| {
+                    audit.set_outcome("operator_waiter_full");
+                    Status::resource_exhausted("another streamed config plan is active")
+                })?;
+            OperatorWaiterGuard {
+                latch: Arc::clone(&self.operator_waiter),
+            }
+        };
+
+        audit.set_outcome("operator_wait_cancelled");
+        let permit = match timeout_at(deadline, Arc::clone(&self.admission).acquire_owned()).await {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => {
+                return Err(Status::internal(
+                    "streamed config admission state is unavailable",
+                ));
+            }
+            Err(_) => {
+                audit.set_outcome("admission_deadline_exceeded");
+                return Err(Status::deadline_exceeded(deadline_message));
+            }
+        };
+        drop(waiter);
+        audit.set_outcome("admitted");
+        Ok(StreamAdmission {
+            permit,
+            after_operator_wait: true,
+        })
+    }
+
     fn issue_token(
         &self,
+        issuer_role: PrincipalRole,
         runtime_snapshot_token: String,
         candidate_sha256: [u8; 32],
         candidate_length: u64,
@@ -137,11 +230,21 @@ impl StreamPlanState {
             .map_err(|_| Status::internal("streamed config plan-token state is unavailable"))?;
         tokens.retain(|binding| binding.expires_at > now);
         while tokens.len() >= MAX_LIVE_PLAN_TOKENS {
-            tokens.pop_front();
+            let lower = tokens
+                .iter()
+                .position(|binding| !binding.issuer_is_operator);
+            let eviction = lower.or_else(|| (issuer_role == PrincipalRole::Operator).then_some(0));
+            let Some(eviction) = eviction else {
+                return Err(Status::resource_exhausted(
+                    "streamed config plan-token capacity is reserved for operator plans",
+                ));
+            };
+            tokens.remove(eviction);
         }
         let token = Uuid::new_v4();
         tokens.push_back(PlanTokenBinding {
             token,
+            issuer_is_operator: issuer_role == PrincipalRole::Operator,
             runtime_snapshot_token,
             candidate_sha256,
             candidate_length,
@@ -282,6 +385,13 @@ impl StreamAudit {
     }
 }
 
+impl AdmissionAudit for StreamAudit {
+    fn set_outcome(&mut self, outcome: &'static str) {
+        self.outcome = outcome;
+        self.publish();
+    }
+}
+
 impl Drop for StreamAudit {
     fn drop(&mut self) {
         if matches!(self.outcome, "admitted" | "receiving") {
@@ -289,6 +399,14 @@ impl Drop for StreamAudit {
         }
         self.publish();
     }
+}
+
+fn principal_role<T>(request: &Request<T>) -> Result<PrincipalRole, Status> {
+    request
+        .extensions()
+        .get::<PrincipalRole>()
+        .copied()
+        .ok_or_else(|| Status::internal("authenticated principal role context is unavailable"))
 }
 
 #[expect(
@@ -303,6 +421,7 @@ pub(super) async fn stream_plan_config_transaction(
 ) -> Result<Response<proto::StreamPlanConfigTransactionResponse>, Status> {
     let audit_handle = request.extensions().get::<GrpcAuditHandle>().cloned();
     let mut audit = StreamAudit::new(audit_handle);
+    let role = principal_role(&request)?;
     if !authenticated_transport {
         audit.outcome = "unauthenticated_transport";
         return Err(Status::unauthenticated(
@@ -315,8 +434,15 @@ pub(super) async fn stream_plan_config_transaction(
             "streamed config planning storage is unavailable",
         ));
     };
-    let permit = state.try_admit()?;
     let deadline = Instant::now() + state.limits.total_timeout;
+    let admission = state
+        .admit(
+            role,
+            deadline,
+            "streamed config plan exceeded total deadline",
+            &mut audit,
+        )
+        .await?;
     let mut stream = request.into_inner();
 
     let first = next_frame(&mut stream, deadline, state.limits.idle_timeout)
@@ -465,7 +591,9 @@ pub(super) async fn stream_plan_config_transaction(
         candidate_sha256,
         length,
         deadline,
-        permit,
+        admission.permit,
+        admission.after_operator_wait,
+        role,
         audit,
         response_tx,
     ));
@@ -493,6 +621,8 @@ async fn run_detached_plan(
     candidate_length: u64,
     deadline: Instant,
     _permit: OwnedSemaphorePermit,
+    after_operator_wait: bool,
+    issuer_role: PrincipalRole,
     mut audit: StreamAudit,
     response_tx: oneshot::Sender<Result<proto::StreamPlanConfigTransactionResponse, Status>>,
 ) {
@@ -521,6 +651,7 @@ async fn run_detached_plan(
     let response = result.and_then(|plan| {
         let plan_token = if plan.status == RuntimeConfigTransactionStatus::Committable {
             let token = state.issue_token(
+                issuer_role,
                 plan.runtime_snapshot_token.clone(),
                 candidate_sha256,
                 candidate_length,
@@ -536,7 +667,11 @@ async fn run_detached_plan(
         })
     });
     audit.outcome = if response.is_ok() {
-        "planned"
+        if after_operator_wait {
+            "planned_after_operator_wait"
+        } else {
+            "planned"
+        }
     } else {
         "failed"
     };
@@ -903,6 +1038,150 @@ mod tests {
         panic!("condition did not become true");
     }
 
+    #[derive(Clone, Default)]
+    struct TestAdmissionAudit(Arc<Mutex<Option<&'static str>>>);
+
+    impl AdmissionAudit for TestAdmissionAudit {
+        fn set_outcome(&mut self, outcome: &'static str) {
+            *self.0.lock().unwrap() = Some(outcome);
+        }
+    }
+
+    #[test]
+    fn missing_role_context_is_internal_before_stream_resources() {
+        let runtime = TempDir::new().unwrap();
+        let state = state_at(runtime.path(), StreamLimits::default());
+        let error = principal_role(&Request::new(())).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Internal);
+        assert!(state.try_admit().is_ok());
+        assert!(state.tokens.lock().unwrap().is_empty());
+        assert!(spool_is_anonymous(runtime.path()));
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "single paused-time proof covers the waiter latch lifecycle"
+    )]
+    #[tokio::test(start_paused = true)]
+    async fn operator_waiter_is_single_priority_bounded_and_raii_cleared() {
+        let runtime = TempDir::new().unwrap();
+        let state = state_at(
+            runtime.path(),
+            StreamLimits {
+                total_timeout: Duration::from_secs(30),
+                ..StreamLimits::default()
+            },
+        );
+        let held = state.try_admit().unwrap();
+        let first_audit = TestAdmissionAudit::default();
+        let outcome = Arc::clone(&first_audit.0);
+        let first_state = Arc::clone(&state);
+        let first = tokio::spawn(async move {
+            let mut audit = first_audit;
+            first_state
+                .admit(
+                    PrincipalRole::Operator,
+                    Instant::now() + Duration::from_secs(30),
+                    "streamed config plan exceeded total deadline",
+                    &mut audit,
+                )
+                .await
+        });
+        yield_until(|| state.operator_waiter.load(Ordering::Acquire)).await;
+        assert_eq!(*outcome.lock().unwrap(), Some("operator_wait_cancelled"));
+
+        for (role, outcome) in [
+            (PrincipalRole::Observer, "admission_busy"),
+            (PrincipalRole::Automation, "admission_busy"),
+            (PrincipalRole::Operator, "operator_waiter_full"),
+        ] {
+            let mut audit = TestAdmissionAudit::default();
+            let error = state
+                .admit(
+                    role,
+                    Instant::now() + Duration::from_secs(30),
+                    "unused",
+                    &mut audit,
+                )
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+            assert_eq!(*audit.0.lock().unwrap(), Some(outcome));
+        }
+        drop(held);
+        let admitted = first.await.unwrap().unwrap();
+        assert!(admitted.after_operator_wait);
+        drop(admitted);
+
+        let held = state.try_admit().unwrap();
+        let cancel_audit = TestAdmissionAudit::default();
+        let cancel_outcome = Arc::clone(&cancel_audit.0);
+        let cancel_state = Arc::clone(&state);
+        let cancelled = tokio::spawn(async move {
+            let mut audit = cancel_audit;
+            cancel_state
+                .admit(
+                    PrincipalRole::Operator,
+                    Instant::now() + Duration::from_secs(30),
+                    "unused",
+                    &mut audit,
+                )
+                .await
+        });
+        yield_until(|| state.operator_waiter.load(Ordering::Acquire)).await;
+        cancelled.abort();
+        yield_until(|| !state.operator_waiter.load(Ordering::Acquire)).await;
+        assert_eq!(
+            *cancel_outcome.lock().unwrap(),
+            Some("operator_wait_cancelled")
+        );
+
+        let deadline_audit = TestAdmissionAudit::default();
+        let deadline_outcome = Arc::clone(&deadline_audit.0);
+        let deadline_state = Arc::clone(&state);
+        let deadline = tokio::spawn(async move {
+            let mut audit = deadline_audit;
+            deadline_state
+                .admit(
+                    PrincipalRole::Operator,
+                    Instant::now() + Duration::from_secs(30),
+                    "streamed config apply exceeded total deadline",
+                    &mut audit,
+                )
+                .await
+        });
+        yield_until(|| state.operator_waiter.load(Ordering::Acquire)).await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+        let error = deadline.await.unwrap().err().unwrap();
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+        assert_eq!(
+            error.message(),
+            "streamed config apply exceeded total deadline"
+        );
+        assert_eq!(
+            *deadline_outcome.lock().unwrap(),
+            Some("admission_deadline_exceeded")
+        );
+        assert!(!state.operator_waiter.load(Ordering::Acquire));
+        drop(held);
+
+        state.operator_waiter.store(true, Ordering::Release);
+        let mut audit = TestAdmissionAudit::default();
+        let lower = state
+            .admit(
+                PrincipalRole::Observer,
+                Instant::now(),
+                "unused",
+                &mut audit,
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(lower.code(), tonic::Code::ResourceExhausted);
+        state.operator_waiter.store(false, Ordering::Release);
+    }
+
     #[tokio::test]
     async fn authenticated_real_tcp_hands_off_more_than_eight_mib_byte_identically() {
         let runtime = TempDir::new().unwrap();
@@ -981,6 +1260,7 @@ mod tests {
         let tokens = state.tokens.lock().unwrap();
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].token, token);
+        assert!(!tokens[0].issuer_is_operator);
         assert_eq!(tokens[0].runtime_snapshot_token, "kv1:runtime:7");
         assert_eq!(tokens[0].candidate_sha256, Sha256::digest(&candidate)[..]);
         assert_eq!(tokens[0].candidate_length, candidate.len() as u64);
@@ -1034,7 +1314,12 @@ mod tests {
         candidate[..marker.len()].copy_from_slice(marker);
         let digest: [u8; 32] = Sha256::digest(&candidate).into();
         let token = state
-            .issue_token("kv1:runtime:7".to_string(), digest, candidate.len() as u64)
+            .issue_token(
+                PrincipalRole::Observer,
+                "kv1:runtime:7".to_string(),
+                digest,
+                candidate.len() as u64,
+            )
             .unwrap();
         let mut client = listener.client.clone();
         let sent = candidate.clone();
@@ -1284,6 +1569,7 @@ mod tests {
         let candidate = b"abc";
         let token = state
             .issue_token(
+                PrincipalRole::Observer,
                 "kv1:runtime:7".to_string(),
                 Sha256::digest(candidate).into(),
                 candidate.len() as u64,
@@ -1354,6 +1640,7 @@ mod tests {
         let candidate = b"candidate";
         let token = state
             .issue_token(
+                PrincipalRole::Observer,
                 "kv1:runtime:7".to_string(),
                 Sha256::digest(candidate).into(),
                 candidate.len() as u64,
@@ -1446,6 +1733,7 @@ mod tests {
         let candidate = b"abc";
         let token = state
             .issue_token(
+                PrincipalRole::Observer,
                 "kv1:runtime:7".to_string(),
                 Sha256::digest(candidate).into(),
                 candidate.len() as u64,
@@ -1549,6 +1837,7 @@ mod tests {
         let candidate = b"candidate";
         let token = state
             .issue_token(
+                PrincipalRole::Observer,
                 "kv1:runtime:7".to_string(),
                 Sha256::digest(candidate).into(),
                 candidate.len() as u64,
@@ -1653,6 +1942,7 @@ mod tests {
         let candidate = b"candidate";
         let token = state
             .issue_token(
+                PrincipalRole::Observer,
                 "kv1:runtime:7".to_string(),
                 Sha256::digest(candidate).into(),
                 candidate.len() as u64,
@@ -1678,7 +1968,7 @@ mod tests {
             .stream_plan_config_transaction(futures::stream::iter(frames(b"other", None)))
             .await
             .unwrap_err();
-        assert_eq!(blocked_plan.code(), tonic::Code::ResourceExhausted);
+        assert_eq!(blocked_plan.code(), tonic::Code::DeadlineExceeded);
         assert!(peer_rx.try_recv().is_err());
         tokio::time::advance(Duration::from_secs(31)).await;
         let deadline = apply.await.unwrap().unwrap_err();
@@ -1813,6 +2103,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn operator_plan_and_apply_handlers_use_the_single_wait_path() {
+        let runtime = TempDir::new().unwrap();
+        let state = state_at(runtime.path(), StreamLimits::default());
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (hook_tx, mut hook_rx) =
+            mpsc::channel::<(proto::ApplyConfigTransactionRequest, HookReply)>(1);
+        let hook: ConfigTransactionApplyFn = Arc::new(move |request| {
+            let hook_tx = hook_tx.clone();
+            Box::pin(async move {
+                let (reply, receive) = oneshot::channel();
+                hook_tx.send((request, reply)).await.unwrap();
+                receive.await.unwrap()
+            })
+        });
+        let lower = spawn_listener(Arc::clone(&state), peer_tx.clone(), true).await;
+        let operator = spawn_listener_with_apply(
+            Arc::clone(&state),
+            peer_tx,
+            true,
+            Some(hook),
+            AuthTier::OperatorOnly,
+            PrincipalRole::Operator,
+        )
+        .await;
+
+        let mut lower_client = lower.client.clone();
+        let active = tokio::spawn(async move {
+            lower_client
+                .stream_plan_config_transaction(futures::stream::iter(frames(b"lower", None)))
+                .await
+        });
+        let PeerManagerCommand::PlanConfigTransaction { reply, .. } = peer_rx.recv().await.unwrap()
+        else {
+            panic!("unexpected peer-manager command");
+        };
+        let mut operator_client = operator.client.clone();
+        let waiting_plan = tokio::spawn(async move {
+            operator_client
+                .stream_plan_config_transaction(futures::stream::iter(frames(b"operator", None)))
+                .await
+        });
+        yield_until(|| state.operator_waiter.load(Ordering::Acquire)).await;
+        let plan_audit = operator.audit_observer.lock().unwrap().clone().unwrap();
+        reply
+            .send(Ok(sample_plan(RuntimeConfigTransactionStatus::Noop)))
+            .unwrap();
+        active.await.unwrap().unwrap();
+        let PeerManagerCommand::PlanConfigTransaction { reply, .. } = peer_rx.recv().await.unwrap()
+        else {
+            panic!("unexpected peer-manager command");
+        };
+        reply
+            .send(Ok(sample_plan(RuntimeConfigTransactionStatus::Committable)))
+            .unwrap();
+        let planned = waiting_plan.await.unwrap().unwrap().into_inner();
+        assert!(
+            plan_audit
+                .summary()
+                .unwrap()
+                .as_str()
+                .ends_with("outcome=planned_after_operator_wait")
+        );
+
+        let mut lower_client = lower.client.clone();
+        let active = tokio::spawn(async move {
+            lower_client
+                .stream_plan_config_transaction(futures::stream::iter(frames(b"lower", None)))
+                .await
+        });
+        let PeerManagerCommand::PlanConfigTransaction { reply, .. } = peer_rx.recv().await.unwrap()
+        else {
+            panic!("unexpected peer-manager command");
+        };
+        let token = planned.plan_token.unwrap();
+        let mut operator_client = operator.client.clone();
+        let waiting_apply = tokio::spawn(async move {
+            operator_client
+                .stream_apply_config_transaction(futures::stream::iter(apply_frames(
+                    b"operator",
+                    &token,
+                    "kv1:runtime:7",
+                )))
+                .await
+        });
+        yield_until(|| state.operator_waiter.load(Ordering::Acquire)).await;
+        let apply_audit = operator.audit_observer.lock().unwrap().clone().unwrap();
+        reply
+            .send(Ok(sample_plan(RuntimeConfigTransactionStatus::Noop)))
+            .unwrap();
+        active.await.unwrap().unwrap();
+        let (_, reply) = hook_rx.recv().await.unwrap();
+        reply.send(Ok(applied_response())).unwrap();
+        waiting_apply.await.unwrap().unwrap();
+        assert!(
+            apply_audit
+                .summary()
+                .unwrap()
+                .as_str()
+                .ends_with("outcome=applied_after_operator_wait")
+        );
+    }
+
+    #[tokio::test]
     async fn failed_response_delivery_revokes_the_new_plan_token() {
         let runtime = TempDir::new().unwrap();
         let state = state_at(runtime.path(), StreamLimits::default());
@@ -1829,6 +2222,8 @@ mod tests {
             9,
             Instant::now() + Duration::from_mins(1),
             permit,
+            false,
+            PrincipalRole::Observer,
             StreamAudit::new(None),
             response_tx,
         ));
@@ -1963,27 +2358,69 @@ mod tests {
         let runtime = TempDir::new().unwrap();
         let state = state_at(runtime.path(), StreamLimits::default());
         let first = state
-            .issue_token("runtime".to_string(), [1; 32], 1)
+            .issue_token(PrincipalRole::Observer, "runtime".to_string(), [1; 32], 1)
             .unwrap();
         for n in 1_u64..=256 {
             state
-                .issue_token("runtime".to_string(), [2; 32], n)
+                .issue_token(PrincipalRole::Observer, "runtime".to_string(), [2; 32], n)
                 .unwrap();
         }
         assert_eq!(state.tokens.lock().unwrap().len(), 256);
         assert!(!has_token(&state, first));
+
+        let protected = state_at(runtime.path(), StreamLimits::default());
+        let oldest_operator = protected
+            .issue_token(PrincipalRole::Operator, "operator".to_string(), [6; 32], 0)
+            .unwrap();
+        for n in 1_u64..=255 {
+            protected
+                .issue_token(PrincipalRole::Operator, "operator".to_string(), [6; 32], n)
+                .unwrap();
+        }
+        let lower_error = protected
+            .issue_token(PrincipalRole::Observer, "lower".to_string(), [7; 32], 7)
+            .unwrap_err();
+        assert_eq!(lower_error.code(), tonic::Code::ResourceExhausted);
+        assert!(has_token(&protected, oldest_operator));
+        protected
+            .issue_token(PrincipalRole::Operator, "operator".to_string(), [8; 32], 8)
+            .unwrap();
+        assert!(!has_token(&protected, oldest_operator));
+
+        let mixed = state_at(runtime.path(), StreamLimits::default());
+        let protected_operator = mixed
+            .issue_token(PrincipalRole::Operator, "operator".to_string(), [9; 32], 9)
+            .unwrap();
+        let oldest_lower = mixed
+            .issue_token(PrincipalRole::Automation, "lower".to_string(), [10; 32], 10)
+            .unwrap();
+        for n in 2_u64..=255 {
+            mixed
+                .issue_token(PrincipalRole::Observer, "lower".to_string(), [11; 32], n)
+                .unwrap();
+        }
+        mixed
+            .issue_token(
+                PrincipalRole::Operator,
+                "operator".to_string(),
+                [12; 32],
+                12,
+            )
+            .unwrap();
+        assert!(has_token(&mixed, protected_operator));
+        assert!(!has_token(&mixed, oldest_lower));
         let expiry_state = state_at(runtime.path(), StreamLimits::default());
         let expiring = expiry_state
-            .issue_token("expiring".to_string(), [3; 32], 3)
+            .issue_token(PrincipalRole::Observer, "expiring".to_string(), [3; 32], 3)
             .unwrap();
         tokio::time::advance(Duration::from_secs(30 * 60 - 1)).await;
         expiry_state
-            .issue_token("before".to_string(), [4; 32], 4)
+            .issue_token(PrincipalRole::Observer, "before".to_string(), [4; 32], 4)
             .unwrap();
         assert!(has_token(&expiry_state, expiring));
         tokio::time::advance(Duration::from_secs(2)).await;
         expiry_state
-            .issue_token("after".to_string(), [5; 32], 5)
+            .issue_token(PrincipalRole::Observer, "after".to_string(), [5; 32], 5)
             .unwrap();
         assert!(!has_token(&expiry_state, expiring));
 
@@ -2013,7 +2450,12 @@ mod tests {
         let state = state_at(runtime.path(), StreamLimits::default());
         let digest = [7; 32];
         let token = state
-            .issue_token("kv1:runtime:7".to_string(), digest, 7)
+            .issue_token(
+                PrincipalRole::Observer,
+                "kv1:runtime:7".to_string(),
+                digest,
+                7,
+            )
             .unwrap();
         let token_text = token.to_string();
         assert_eq!(

@@ -486,17 +486,25 @@ must appear first and once, followed by zero or more non-empty chunks no larger
 than 1 MiB, then one end frame carrying the exact aggregate length and raw
 32-byte SHA-256, immediately followed by EOF. Aggregate input is capped at
 384 MiB, idle input at 60 seconds, and the whole admission through planner
-reply at 30 minutes. One stream is admitted process-wide across all listeners;
-a concurrent call returns `RESOURCE_EXHAUSTED` without queueing. The listener
-must authenticate clients (mTLS, bearer token, or the owner-only UDS identity).
+reply at 30 minutes. One stream is active process-wide across all listeners.
+When it is busy, exactly one operator Plan or Apply may wait without preemption
+under that request's original 30-minute deadline. Observer/automation Plan,
+a second operator waiter, and lower-role calls while the waiter is registered
+return `RESOURCE_EXHAUSTED`; this is one bounded priority waiter, not a general
+queue. The listener must authenticate clients (mTLS, bearer token, or the
+owner-only UDS identity).
 The owner-only descriptor-relative spool file is unlinked immediately after
 open, before any candidate bytes are accepted, so candidate bytes never survive
 at a pathname. A crash between exclusive creation and unlink can leave an empty
 owner-only stub; unlink failure rejects the request before ingress.
 A `COMMITTABLE` streamed plan additionally carries `plan_token`, a UUIDv4
 bound in memory to the runtime token, candidate digest, and length for 30
-minutes. At most 256 bindings are live and oldest bindings are evicted at the
-cap. `NOOP`, `REJECTED`, and failed plans never issue one. Streamed Apply
+minutes. At most 256 bindings are live. Lower-role issuance evicts the oldest
+lower-role binding and fails with `RESOURCE_EXHAUSTED` if every binding is
+operator-issued; operator issuance evicts the oldest lower-role binding first,
+then the oldest operator binding. Consumption is role-agnostic, so an operator
+may apply an exact binding issued by observer/automation Plan. `NOOP`,
+`REJECTED`, and failed plans never issue one. Streamed Apply
 validates all framing and Apply metadata before atomically consuming the exact
 token/runtime/digest/length binding. A mismatch preserves the token; an
 expired, evicted, or successfully consumed token requires a new plan. After

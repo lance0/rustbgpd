@@ -330,10 +330,13 @@ owner-only (`0600`) and is unlinked immediately after open, before candidate
 bytes are accepted, so candidate bytes never survive at a pathname. A crash
 between exclusive creation and unlink can leave an empty owner-only stub;
 unlink failure disables that request before ingress. The RPC is
-disabled when its authority is unavailable, admits one stream process-wide
-without queueing, and rejects listeners that have neither mTLS/bearer
-authentication nor owner-only UDS authentication before admission or storage
-access. A client disconnect after handoff cannot release the admission slot or
+disabled when its authority is unavailable and admits one active stream
+process-wide. If busy, one nonpreemptive operator Plan or Apply may wait under
+its original 30-minute deadline; lower roles and a second operator waiter fail
+with `RESOURCE_EXHAUSTED`, and lower roles cannot steal a released slot while
+that waiter is registered. This bounded waiter is not a general queue.
+Listeners without mTLS/bearer or owner-only UDS authentication are rejected
+before admission or storage access. A client disconnect after handoff cannot release the admission slot or
 candidate before the existing planner replies or the original 30-minute
 deadline expires. Streamed Apply shares that admission slot and storage,
 requires operator authorization, and consumes a plan token only after the
@@ -341,6 +344,10 @@ runtime token, candidate digest, length, and Apply metadata match. Once
 consumed, its detached guardian retains the existing apply future and admission
 ownership through settlement even if the client disconnects or its response
 deadline expires.
+The shared 256-entry token store protects operator-issued bindings: lower-role
+issuance evicts only the oldest lower-role binding, while operator issuance
+prefers a lower-role victim and otherwise evicts the oldest operator binding.
+Exact binding consumption is role-agnostic.
 
 ## Recorded config history confidentiality
 
