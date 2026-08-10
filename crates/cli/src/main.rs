@@ -417,7 +417,7 @@ enum ConfigAction {
         2  changes present")]
     Diff {
         /// Candidate TOML file to validate and compare
-        #[arg(value_name = "CANDIDATE")]
+        #[arg(value_name = "CANDIDATE", value_hint = clap::ValueHint::FilePath)]
         candidate: String,
     },
 
@@ -431,7 +431,7 @@ enum ConfigAction {
         2  changes present (plan is committable or rejected)")]
     Plan {
         /// Candidate TOML file to validate and classify
-        #[arg(value_name = "CANDIDATE")]
+        #[arg(value_name = "CANDIDATE", value_hint = clap::ValueHint::FilePath)]
         candidate: String,
 
         /// Optional runtime snapshot token to check while planning
@@ -442,7 +442,7 @@ enum ConfigAction {
     /// Commit a previously planned candidate transaction
     Apply {
         /// Candidate TOML file to validate and commit
-        #[arg(value_name = "CANDIDATE")]
+        #[arg(value_name = "CANDIDATE", value_hint = clap::ValueHint::FilePath)]
         candidate: String,
 
         /// Runtime snapshot token returned by config plan
@@ -567,7 +567,7 @@ enum ConfigAction {
         3  refused (no translatable BGP structure in the source)")]
     Import {
         /// Source config: BIRD 2/3 (.conf), FRR running-config (.conf), or GoBGP (.toml)
-        #[arg(value_name = "SOURCE")]
+        #[arg(value_name = "SOURCE", value_hint = clap::ValueHint::FilePath)]
         source: String,
 
         /// Source format (default: auto-detect from content)
@@ -592,6 +592,7 @@ enum PolicyAction {
     /// 3 coverage below --coverage-min.
     Check {
         /// Path to the main `.rpol` file
+        #[arg(value_hint = clap::ValueHint::FilePath)]
         file: String,
         /// Additional policy root for `import` resolution (repeatable;
         /// the main file's directory is always a root) — mirror of the
@@ -635,7 +636,7 @@ enum PolicyAction {
     Fmt {
         /// `.rpol` files to format; `-` reads stdin and writes the
         /// formatted source to stdout (editor integration)
-        #[arg(required = true)]
+        #[arg(required = true, value_hint = clap::ValueHint::FilePath)]
         files: Vec<String>,
         /// Rewrite nothing; print a diff and exit 1 when any file is
         /// not canonically formatted (CI mode)
@@ -650,6 +651,7 @@ enum PolicyAction {
     /// touched. Exit codes: 0 ran, 1 compile diagnostics.
     Test {
         /// Path to the `.rpol` file
+        #[arg(value_hint = clap::ValueHint::FilePath)]
         file: String,
         /// Policy to evaluate: a name, or a call-form with u32
         /// arguments for parameterized policies, e.g. "customer-in(200)"
@@ -1070,6 +1072,7 @@ enum SnapshotAction {
         (nothing emitted)")]
     FromMrt {
         /// Path to the MRT TABLE_DUMP_V2 file
+        #[arg(value_hint = clap::ValueHint::FilePath)]
         file: PathBuf,
 
         /// Attestation of what the dump is: adj-rib-out-capture (a
@@ -1116,6 +1119,7 @@ enum SnapshotAction {
         (nothing emitted)")]
     FromBmp {
         /// Path to the captured BMP byte stream
+        #[arg(value_hint = clap::ValueHint::FilePath)]
         file: PathBuf,
 
         /// Peer address to emit; may be repeated. Omit to emit every
@@ -1881,6 +1885,138 @@ fn parse_cli(binary_name: &'static str) -> Cli {
     Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
 }
 
+#[derive(Debug)]
+struct BashFilePositional {
+    path: Vec<String>,
+    index: usize,
+    repeatable: bool,
+    value_options: Vec<String>,
+}
+
+fn bash_file_positionals(command: &clap::Command) -> Vec<BashFilePositional> {
+    fn visit(command: &clap::Command, path: &mut Vec<String>, found: &mut Vec<BashFilePositional>) {
+        for positional in command
+            .get_positionals()
+            .filter(|arg| arg.get_value_hint() == clap::ValueHint::FilePath)
+        {
+            let mut value_options = Vec::new();
+            for option in command
+                .get_opts()
+                .filter(|arg| arg.get_action().takes_values())
+            {
+                if let Some(longs) = option.get_long_and_visible_aliases() {
+                    value_options.extend(longs.into_iter().map(|name| format!("--{name}")));
+                }
+                if let Some(shorts) = option.get_short_and_visible_aliases() {
+                    value_options.extend(shorts.into_iter().map(|name| format!("-{name}")));
+                }
+            }
+            value_options.sort();
+            value_options.dedup();
+            found.push(BashFilePositional {
+                path: path.clone(),
+                index: positional.get_index().unwrap_or(0),
+                repeatable: matches!(positional.get_action(), &clap::ArgAction::Append),
+                value_options,
+            });
+        }
+        for subcommand in command.get_subcommands() {
+            path.push(subcommand.get_name().to_owned());
+            visit(subcommand, path, found);
+            path.pop();
+        }
+    }
+
+    let mut found = Vec::new();
+    visit(command, &mut Vec::new(), &mut found);
+    found
+}
+
+fn patch_bash_file_positionals(
+    command: &clap::Command,
+    binary_name: &str,
+    raw: Vec<u8>,
+) -> std::io::Result<Vec<u8>> {
+    fn invalid(message: impl Into<String>) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, message.into())
+    }
+    fn unique_offset(haystack: &str, needle: &str, context: &str) -> std::io::Result<usize> {
+        let offsets: Vec<_> = haystack.match_indices(needle).map(|(at, _)| at).collect();
+        match offsets.as_slice() {
+            [at] => Ok(*at),
+            _ => Err(invalid(format!(
+                "expected one raw Bash {context}, found {}",
+                offsets.len()
+            ))),
+        }
+    }
+
+    let mut completion = String::from_utf8(raw)
+        .map_err(|error| invalid(format!("Bash completion was not UTF-8: {error}")))?;
+    for positional in bash_file_positionals(command) {
+        let selector = positional
+            .path
+            .iter()
+            .fold(binary_name.replace('-', "__"), |name, part| {
+                format!("{name}__subcmd__{}", part.replace('-', "__subcmd__"))
+            });
+        let branch_marker = format!("\n        {selector})\n");
+        let context = positional.path.join(" ");
+        let branch_start =
+            unique_offset(&completion, &branch_marker, &format!("{context} branch"))? + 1;
+        let branch_end = completion[branch_start..]
+            .find("\n            ;;\n")
+            .map(|offset| branch_start + offset)
+            .ok_or_else(|| invalid(format!("raw Bash branch for {selector} had no terminator")))?;
+        let file_cword = positional.path.len() + positional.index;
+        let raw_fast_path = format!(
+            r#"            if [[ ${{cur}} == -* || ${{COMP_CWORD}} -eq {file_cword} ]] ; then
+                COMPREPLY=( $(compgen -W "${{opts}}" -- "${{cur}}") )
+                return 0
+            fi"#
+        );
+        let relative_start = unique_offset(
+            &completion[branch_start..branch_end],
+            &raw_fast_path,
+            &format!("{context} positional fast path"),
+        )?;
+        let positional_condition = if positional.repeatable {
+            let guards = positional
+                .value_options
+                .iter()
+                .map(|option| format!(r#""${{prev}}" != "{option}""#))
+                .collect::<Vec<_>>()
+                .join(" && ");
+            if guards.is_empty() {
+                format!("${{COMP_CWORD}} -ge {file_cword}")
+            } else {
+                format!(
+                    "${{COMP_CWORD}} -eq {file_cword} || ( ${{COMP_CWORD}} -gt {file_cword} && {guards} )"
+                )
+            }
+        } else {
+            format!("${{COMP_CWORD}} -eq {file_cword}")
+        };
+        let patched_fast_path = format!(
+            r#"            if [[ ${{cur}} == -* ]] ; then
+                COMPREPLY=( $(compgen -W "${{opts}}" -- "${{cur}}") )
+                return 0
+            elif [[ {positional_condition} ]] ; then
+                local rbgp_old_ifs rbgp_ifs_was_set
+                [ -n "${{IFS+x}}" ] && {{ rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }}
+                IFS=$'\n'
+                COMPREPLY=($(compgen -f -- "${{cur}}"))
+                [ -n "${{rbgp_ifs_was_set+x}}" ] && IFS="$rbgp_old_ifs" || unset IFS
+                if [[ "${{BASH_VERSINFO[0]}}" -ge 4 ]]; then compopt -o filenames; fi
+                return 0
+            fi"#
+        );
+        let start = branch_start + relative_start;
+        completion.replace_range(start..start + raw_fast_path.len(), &patched_fast_path);
+    }
+    Ok(completion.into_bytes())
+}
+
 fn generate_completions(
     shell: Shell,
     binary_name: &'static str,
@@ -1888,7 +2024,13 @@ fn generate_completions(
 ) -> std::io::Result<()> {
     let mut command = cli_command(binary_name);
     command.build();
-    shell.try_generate(&command, output)?;
+    if shell == Shell::Bash {
+        let mut raw = Vec::new();
+        shell.try_generate(&command, &mut raw)?;
+        output.write_all(&patch_bash_file_positionals(&command, binary_name, raw)?)?;
+    } else {
+        shell.try_generate(&command, output)?;
+    }
     output.flush()
 }
 
@@ -3553,6 +3695,118 @@ mod tests {
         assert!(completion.contains("_rbgp()"));
         assert!(completion.contains("cmd=\"rbgp\""));
         assert!(!completion.contains("rustbgpctl"));
+    }
+
+    fn bash_replies(
+        script: &std::path::Path,
+        cwd: &std::path::Path,
+        words: &[&str],
+        unset_ifs: bool,
+    ) -> (bool, Vec<String>) {
+        const HARNESS: &str = r#"
+source "$RBGP_COMPLETION"
+COMP_WORDS=("$@")
+COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
+compopt() { [[ "$1" == "-o" && "$2" == "filenames" ]] && RBGP_FILENAMES=1; builtin compopt "$@" 2>/dev/null || :; }
+if [[ "$RBGP_UNSET_IFS" == 1 ]]; then unset IFS; else rbgp_before_ifs="$IFS"; fi
+_rbgp rbgp "${COMP_WORDS[COMP_CWORD]}" "${COMP_WORDS[COMP_CWORD-1]}"
+if [[ "$RBGP_UNSET_IFS" == 1 ]]; then [[ -z "${IFS+x}" ]] || exit 90; else [[ "$IFS" == "$rbgp_before_ifs" ]] || exit 91; fi
+printf '__FILENAMES__%s\n' "${RBGP_FILENAMES:-0}"
+printf '%s\n' "${COMPREPLY[@]}"
+"#;
+        let output = std::process::Command::new("bash")
+            .args(["--noprofile", "--norc", "-c", HARNESS, "--"])
+            .args(words)
+            .current_dir(cwd)
+            .env("RBGP_COMPLETION", script)
+            .env("RBGP_UNSET_IFS", if unset_ifs { "1" } else { "0" })
+            .output()
+            .expect("bash is available for the Linux completion contract");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let mut lines = stdout.lines().map(str::to_owned);
+        let filenames = lines.next().unwrap().ends_with('1');
+        (filenames, lines.filter(|line| !line.is_empty()).collect())
+    }
+
+    #[test]
+    fn file_path_positional_inventory_matches_the_clap_graph() {
+        let mut command = cli_command(BINARY_NAME);
+        command.build();
+        let found = bash_file_positionals(&command);
+        let mut paths: Vec<_> = found.iter().map(|item| item.path.join(" ")).collect();
+        paths.sort();
+        assert_eq!(
+            paths.join("|"),
+            "config apply|config diff|config import|config plan|diff snapshot from-bmp|diff snapshot from-mrt|policy check|policy fmt|policy test"
+        );
+        assert!(found.iter().all(|item| item.index == 1));
+        assert_eq!(found.iter().filter(|item| item.repeatable).count(), 1);
+    }
+
+    #[test]
+    fn bash_file_positionals_complete_real_paths_without_losing_flags_or_ifs() {
+        let scripts = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        for name in ["lan938 plain", "lan938-prefix", "other"] {
+            std::fs::write(files.path().join(name), []).unwrap();
+        }
+        let mut command = cli_command(BINARY_NAME);
+        command.build();
+        let mut raw = Vec::new();
+        Shell::Bash.try_generate(&command, &mut raw).unwrap();
+        let raw_path = scripts.path().join("raw.bash");
+        std::fs::write(&raw_path, raw).unwrap();
+        let (_, raw_replies) = bash_replies(
+            &raw_path,
+            files.path(),
+            &["rbgp", "config", "diff", "lan938"],
+            false,
+        );
+        assert!(!raw_replies.iter().any(|reply| reply == "lan938 plain"));
+
+        let mut generated = Vec::new();
+        generate_completions(Shell::Bash, BINARY_NAME, &mut generated).unwrap();
+        let generated_path = scripts.path().join("generated.bash");
+        std::fs::write(&generated_path, generated).unwrap();
+        for positional in bash_file_positionals(&command) {
+            for prefix in ["", "lan938"] {
+                let mut words = vec![BINARY_NAME];
+                words.extend(positional.path.iter().map(String::as_str));
+                words.push(prefix);
+                let (filenames, replies) =
+                    bash_replies(&generated_path, files.path(), &words, false);
+                assert!(filenames);
+                assert!(replies.iter().any(|reply| reply == "lan938 plain"));
+            }
+            let mut words = vec![BINARY_NAME];
+            words.extend(positional.path.iter().map(String::as_str));
+            words.push("--h");
+            let (_, replies) = bash_replies(&generated_path, files.path(), &words, false);
+            assert!(replies.iter().any(|reply| reply == "--help"));
+        }
+        let (filenames, replies) = bash_replies(
+            &generated_path,
+            files.path(),
+            &["rbgp", "policy", "fmt", "lan938-prefix", "lan938"],
+            true,
+        );
+        assert!(filenames && replies.iter().any(|reply| reply == "lan938 plain"));
+        let words = [
+            "rbgp",
+            "policy",
+            "fmt",
+            "lan938-prefix",
+            "--token-file",
+            "lan938",
+        ];
+        let (filenames, replies) = bash_replies(&generated_path, files.path(), &words, false);
+        assert!(!filenames);
+        assert!(replies.iter().any(|reply| reply == "lan938-prefix"));
     }
 
     #[test]

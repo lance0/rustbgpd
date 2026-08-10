@@ -1372,8 +1372,16 @@ _rbgp() {
             ;;
         rbgp__subcmd__config__subcmd__apply)
             opts="-s -j -h --expected-runtime-snapshot-token --plan-token --client-request-id --comment --confirm-id --confirm-timeout --addr --token-file --json --no-color --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+            if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            elif [[ ${COMP_CWORD} -eq 3 ]] ; then
+                local rbgp_old_ifs rbgp_ifs_was_set
+                [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
+                IFS=$'\n'
+                COMPREPLY=($(compgen -f -- "${cur}"))
+                [ -n "${rbgp_ifs_was_set+x}" ] && IFS="$rbgp_old_ifs" || unset IFS
+                if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then compopt -o filenames; fi
                 return 0
             fi
             case "${prev}" in
@@ -1448,8 +1456,16 @@ _rbgp() {
             ;;
         rbgp__subcmd__config__subcmd__diff)
             opts="-s -j -h --addr --token-file --json --no-color --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+            if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            elif [[ ${COMP_CWORD} -eq 3 ]] ; then
+                local rbgp_old_ifs rbgp_ifs_was_set
+                [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
+                IFS=$'\n'
+                COMPREPLY=($(compgen -f -- "${cur}"))
+                [ -n "${rbgp_ifs_was_set+x}" ] && IFS="$rbgp_old_ifs" || unset IFS
+                if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then compopt -o filenames; fi
                 return 0
             fi
             case "${prev}" in
@@ -1694,8 +1710,16 @@ _rbgp() {
             ;;
         rbgp__subcmd__config__subcmd__import)
             opts="-s -j -h --format --out --addr --token-file --json --no-color --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+            if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            elif [[ ${COMP_CWORD} -eq 3 ]] ; then
+                local rbgp_old_ifs rbgp_ifs_was_set
+                [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
+                IFS=$'\n'
+                COMPREPLY=($(compgen -f -- "${cur}"))
+                [ -n "${rbgp_ifs_was_set+x}" ] && IFS="$rbgp_old_ifs" || unset IFS
+                if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then compopt -o filenames; fi
                 return 0
             fi
             case "${prev}" in
@@ -1728,8 +1752,16 @@ _rbgp() {
             ;;
         rbgp__subcmd__config__subcmd__plan)
             opts="-s -j -h --expected-runtime-snapshot-token --addr --token-file --json --no-color --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+            if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            elif [[ ${COMP_CWORD} -eq 3 ]] ; then
+                local rbgp_old_ifs rbgp_ifs_was_set
+                [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
+                IFS=$'\n'
+                COMPREPLY=($(compgen -f -- "${cur}"))
+                [ -n "${rbgp_ifs_was_set+x}" ] && IFS="$rbgp_old_ifs" || unset IFS
+                if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then compopt -o filenames; fi
                 return 0
             fi
             case "${prev}" in
@@ -2032,8 +2064,16 @@ _rbgp() {
             ;;
         rbgp__subcmd__diff__subcmd__snapshot__subcmd__from__subcmd__bmp)
             opts="-s -j -h --peer --source --generation --addr --token-file --json --no-color --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+            if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            elif [[ ${COMP_CWORD} -eq 4 ]] ; then
+                local rbgp_old_ifs rbgp_ifs_was_set
+                [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
+                IFS=$'\n'
+                COMPREPLY=($(compgen -f -- "${cur}"))
+                [ -n "${rbgp_ifs_was_set+x}" ] && IFS="$rbgp_old_ifs" || unset IFS
+                if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then compopt -o filenames; fi
                 return 0
             fi
             case "${prev}" in
@@ -2070,8 +2110,16 @@ _rbgp() {
             ;;
         rbgp__subcmd__diff__subcmd__snapshot__subcmd__from__subcmd__mrt)
             opts="-s -j -h --view --peer --peer-asn --source --generation --addr --token-file --json --no-color --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+            if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            elif [[ ${COMP_CWORD} -eq 4 ]] ; then
+                local rbgp_old_ifs rbgp_ifs_was_set
+                [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
+                IFS=$'\n'
+                COMPREPLY=($(compgen -f -- "${cur}"))
+                [ -n "${rbgp_ifs_was_set+x}" ] && IFS="$rbgp_old_ifs" || unset IFS
+                if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then compopt -o filenames; fi
                 return 0
             fi
             case "${prev}" in
@@ -7144,8 +7192,16 @@ _rbgp() {
             ;;
         rbgp__subcmd__policy__subcmd__check)
             opts="-s -j -h --root --max-graph-bytes --list-deps --coverage --coverage-min --addr --token-file --json --no-color --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+            if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            elif [[ ${COMP_CWORD} -eq 3 ]] ; then
+                local rbgp_old_ifs rbgp_ifs_was_set
+                [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
+                IFS=$'\n'
+                COMPREPLY=($(compgen -f -- "${cur}"))
+                [ -n "${rbgp_ifs_was_set+x}" ] && IFS="$rbgp_old_ifs" || unset IFS
+                if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then compopt -o filenames; fi
                 return 0
             fi
             case "${prev}" in
@@ -7250,8 +7306,16 @@ _rbgp() {
             ;;
         rbgp__subcmd__policy__subcmd__fmt)
             opts="-s -j -h --check --addr --token-file --json --no-color --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+            if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            elif [[ ${COMP_CWORD} -eq 3 || ( ${COMP_CWORD} -gt 3 && "${prev}" != "--addr" && "${prev}" != "--token-file" && "${prev}" != "-s" ) ]] ; then
+                local rbgp_old_ifs rbgp_ifs_was_set
+                [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
+                IFS=$'\n'
+                COMPREPLY=($(compgen -f -- "${cur}"))
+                [ -n "${rbgp_ifs_was_set+x}" ] && IFS="$rbgp_old_ifs" || unset IFS
+                if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then compopt -o filenames; fi
                 return 0
             fi
             case "${prev}" in
@@ -7634,8 +7698,16 @@ _rbgp() {
             ;;
         rbgp__subcmd__policy__subcmd__test)
             opts="-a -s -j -h --policy --direction --peer --neighbor --family --limit --show-changes --addr --token-file --json --no-color --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+            if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            elif [[ ${COMP_CWORD} -eq 3 ]] ; then
+                local rbgp_old_ifs rbgp_ifs_was_set
+                [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
+                IFS=$'\n'
+                COMPREPLY=($(compgen -f -- "${cur}"))
+                [ -n "${rbgp_ifs_was_set+x}" ] && IFS="$rbgp_old_ifs" || unset IFS
+                if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then compopt -o filenames; fi
                 return 0
             fi
             case "${prev}" in
