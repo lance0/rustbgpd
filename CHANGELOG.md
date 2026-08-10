@@ -100,8 +100,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Streamed config Plan/Apply now gives one bounded, nonpreemptive admission
-  waiter to operators and protects operator-issued plan tokens at capacity.
+- An RTR cache that rejects a resumed session no longer blanks its RPKI data.
+  A restarted cache answers the Serial Query naming its previous session with
+  an Error Report code 0 ("Corrupt Data") rather than the Cache Reset that
+  8210bis §5.3 specifies for a session it no longer has — StayRTR does exactly
+  this on every restart. That report was classified as fatal, so the cache's
+  VRPs were dropped immediately and RPKI-valid routes read `not_found` until
+  the next successful load, up to a full `retry_interval` (default 600 s)
+  later. A session-identity failure now voids the cache epoch without
+  discarding the data that epoch produced: the client resynchronizes with a
+  Reset Query and keeps serving the held set until the replacement full table
+  lands. The same applies to a locally detected session-ID mismatch. The
+  expire interval is unchanged and remains the only bound on staleness, and
+  Cache Shutdown (code 13) still flushes immediately. Because a flush also
+  reset version negotiation, this additionally stops a v1-only cache from
+  being re-probed with v2 across its own restart.
 - `rbgp config import` now retains bare BIRD `ipv4;` and `ipv6;` channel
   declarations and reports `rr client on;` with route-reflector guidance.
 - SIGINT, SIGTERM, and SIGHUP handlers are now registered before gRPC, BGP,
