@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -24,6 +26,20 @@ CLEAN_LINES = (
     "The LAN party ran until LANE-4 closed.",
     "Milestone M84 covers multi-cache RTR conformance.",
 )
+
+
+def write_fixture(root: Path, relative: str, contents: str | bytes) -> Path:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(contents, str):
+        path.write_text(contents, encoding="utf-8")
+    else:
+        path.write_bytes(contents)
+    return path
+
+
+def digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 class PublicTrackerIdTests(unittest.TestCase):
@@ -71,14 +87,114 @@ class PublicTrackerIdTests(unittest.TestCase):
         # file must never inherit it.
         self.assertNotIn("README.md", sealed)
 
+    def test_nested_seals_and_dot_paths_verify_without_widening_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            readme = write_fixture(
+                root, "docs/perf/artifacts/example/README.md", "sealed\n"
+            )
+            data = write_fixture(
+                root, "docs/perf/artifacts/example/nested/data.tsv", "row\n"
+            )
+            nested = write_fixture(
+                root,
+                "docs/perf/artifacts/example/nested/SHA256SUMS",
+                f"{digest(data)}  data.tsv\n",
+            )
+            manifest = write_fixture(
+                root,
+                "docs/perf/artifacts/example/SHA256SUMS",
+                f"{digest(readme)}  ./README.md\n"
+                f"{digest(nested)}  ./nested/SHA256SUMS\n"
+                f"{digest(data)}  ./nested/data.tsv\n",
+            )
+            public = write_fixture(root, "docs/public.md", "living\n")
+            outside = write_fixture(
+                root, "docs/SHA256SUMS", f"{digest(public)}  public.md\n"
+            )
+            sealed = guard.sealed_paths(
+                [manifest, readme, nested, data, outside, public], root
+            )
+            self.assertIn("docs/perf/artifacts/example/README.md", sealed)
+            self.assertIn("docs/perf/artifacts/example/nested/data.tsv", sealed)
+            self.assertNotIn("docs/public.md", sealed)
+
+    def test_malformed_or_unsafe_seals_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = write_fixture(
+                root, "docs/perf/artifacts/example/README.md", "sealed\n"
+            )
+            outside = write_fixture(root, "docs/perf/artifacts/README.md", "outside\n")
+            checksum = digest(payload)
+            manifest = root / "docs/perf/artifacts/example/SHA256SUMS"
+            cases = {
+                "empty": "",
+                "malformed": f"{checksum} README.md\n",
+                "absolute": f"{checksum}  {payload}\n",
+                "escape": f"{digest(outside)}  ../README.md\n",
+                "duplicate": (
+                    f"{checksum}  README.md\n{checksum}  ./README.md\n"
+                ),
+                "digest mismatch": f"{'0' * 64}  README.md\n",
+            }
+            for label, contents in cases.items():
+                with self.subTest(label=label):
+                    write_fixture(root, manifest.relative_to(root).as_posix(), contents)
+                    with self.assertRaises(guard.TrackerIdGuardError):
+                        guard.sealed_paths([manifest, payload, outside], root)
+
+    def test_missing_untracked_and_symlink_entries_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = write_fixture(
+                root,
+                "docs/perf/artifacts/example/SHA256SUMS",
+                f"{'0' * 64}  missing.txt\n",
+            )
+            with self.assertRaisesRegex(guard.TrackerIdGuardError, "is missing or escapes"):
+                guard.sealed_paths([manifest], root)
+
+            payload = write_fixture(
+                root, "docs/perf/artifacts/example/untracked.txt", "sealed\n"
+            )
+            manifest.write_text(
+                f"{digest(payload)}  untracked.txt\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(guard.TrackerIdGuardError, "not tracked"):
+                guard.sealed_paths([manifest], root)
+
+            target = write_fixture(
+                root, "docs/perf/artifacts/example/target.txt", "sealed\n"
+            )
+            symlink = root / "docs/perf/artifacts/example/link.txt"
+            symlink.symlink_to(target)
+            manifest.write_text(f"{digest(target)}  link.txt\n", encoding="utf-8")
+            with self.assertRaisesRegex(guard.TrackerIdGuardError, "symlink"):
+                guard.sealed_paths([manifest, symlink], root)
+            manifest.unlink()
+            manifest.symlink_to(target)
+            with self.assertRaisesRegex(guard.TrackerIdGuardError, "seal .* is a symlink"):
+                guard.sealed_paths([manifest], root)
+
+    def test_missing_receipt_manifest_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            public = write_fixture(root, "docs/README.md", "living\n")
+            with self.assertRaisesRegex(guard.TrackerIdGuardError, "no tracked"):
+                guard.sealed_paths([public], root)
+
     def test_broken_walk_fails_loudly(self) -> None:
-        original = guard.tracked_files
+        original_tracked = guard.tracked_files
+        original_sealed = guard.sealed_paths
         guard.tracked_files = lambda: [guard.ROOT / "Cargo.toml"]
+        guard.sealed_paths = lambda _paths: set()
         try:
             with self.assertRaisesRegex(guard.TrackerIdGuardError, "walk is broken"):
                 guard.discover_documents()
         finally:
-            guard.tracked_files = original
+            guard.tracked_files = original_tracked
+            guard.sealed_paths = original_sealed
 
     def test_empty_tracked_tree_fails_loudly(self) -> None:
         original = guard.tracked_files
