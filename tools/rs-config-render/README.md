@@ -61,7 +61,7 @@ and against a live run of the pinned arouteserver image by
 
 | File | Contents |
 |---|---|
-| `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"`, strict next-hop ownership, per-family max-prefix ceilings and OpenBGPD-style timed restart, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it); plus `ebgp_requires_policy = true` and a declared transparent (permit-all) export chain, the RFC 7947 posture stated rather than inherited |
+| `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"`, strict next-hop ownership, per-family max-prefix ceilings and OpenBGPD-style timed restart, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it); plus `ebgp_requires_policy = true` and explicit transparent or blackhole-aware export chains |
 | `policy/rs-hygiene.rpol` | Shared import hygiene: reject AS_SET segments (always the first term), invalid/private/reserved ASNs in the path, transit-free and never-via-route-servers ASNs, AS_PATH length cap, bogon and black-list prefixes, prefix-length windows, RPKI origin validation with RFC 8097 tagging |
 | `policy/client-<id>.rpol` | The client's IRR-derived `prefix-set` and origin `asn-set`, one accept term (`route.origin-as in … && route.prefix in …`), and an unconditional reject tail |
 | `render-receipt.json` | Render timestamp, context fingerprint, per-client set cardinalities, max-prefix ceilings and restart seconds, warnings |
@@ -128,11 +128,18 @@ enforcement knobs. `shutdown` emits the positive family ceilings;
 while converting to `u32` seconds. An absent action or zero family limits emit
 neither ceilings nor a restart timer.
 
-The renderer also refuses effective nonzero multihop, RFC 8950 on an
-IPv6 session, and any active IPv4/IPv6 blackhole policy (including a
-matching per-client `announce_to_client` override). Those session and
-propagation semantics are not emitted; warning and continuing would
-silently change the route server's behavior.
+The renderer also refuses effective nonzero multihop and RFC 8950 on an
+IPv6 session. Blackhole policies support `propagate-unchanged` and
+`rewrite-next-hop`. Active-family marked routes must have an IRR-authorized
+origin and fall under a separately widened IRR covering set; this bypasses
+ordinary maximum-length and RPKI rejection only after shared AS-path, bogon,
+and blacklist hygiene. Export policy normalizes standard, large, and extended
+local markers to `BLACKHOLE`, scrubs only those configured local markers,
+honors client-over-general `announce_to_client`, optionally adds `NO_EXPORT`,
+and applies the family-specific rewrite. The emitted global setting is
+`honor_blackhole = false`; the renderer never relies on its implicit
+`NO_ADVERTISE` behavior. Unknown policies, malformed markers, and missing or
+wrong-family rewrite addresses refuse before output.
 
 An empty per-client prefix or origin set aborts the whole render: an
 empty set under the default-reject tail is fail-closed for that client,

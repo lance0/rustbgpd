@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rs-config-render` now translates ARouteServer IPv4/IPv6 blackhole policies
+  into explicit import and per-client export policy. Authorized marked
+  more-specifics use IRR origin plus covering-prefix checks, local marker forms
+  normalize to `BLACKHOLE`, and export handles announce/suppress inheritance,
+  marker scrub, optional `NO_EXPORT`, and next-hop rewrite without enabling the
+  daemon's implicit `NO_ADVERTISE` behavior. Malformed or incomplete settings
+  fail before output. (LAN-924)
 - Epoch-less and explicit epoch-1 RFC 8212 policy omission now raises the
   `rfc8212_secure_default_ready` advisory. It keeps permissive behavior
   unchanged while spelling out the exact epoch-1/false and epoch-2/true edits;
