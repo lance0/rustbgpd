@@ -200,6 +200,15 @@ class ReleaseInstallContractTest(unittest.TestCase):
         )
         self.assertTrue(any("enrollment for Dockerfile" in error for error in errors), errors)
 
+    def test_removed_packaged_config_validation_fails(self) -> None:
+        errors = self.mutate(
+            self.fixture(),
+            ".github/workflows/release-install-contract.yml",
+            '"$tree/usr/bin/rustbgpd" --check "$tree/etc/rustbgpd/config.toml"',
+            'true # config skeleton unvalidated',
+        )
+        self.assertTrue(any("contract workflow" in error for error in errors), errors)
+
     def test_stdout_rpm_extraction_regression_fails(self) -> None:
         errors = self.mutate(
             self.fixture(),
