@@ -137,6 +137,12 @@ Epoch 2 currently requires the boolean to be written explicitly as `true` or
 with the exact edit required. Explicit booleans retain their value in either
 epoch.
 
+Leaving the posture at legacy omission has one operator-visible consequence:
+every `rustbgpd --check` raises the `rfc8212_secure_default_ready` advisory,
+which exits 0 ordinarily and exits 1 under `--strict`. It fires on the
+omission alone, however well policed the config is; writing an explicit epoch
+plus boolean pair clears it.
+
 Daemon-written canonical config, applied history, runtime snapshot tokens, and
 effective config output materialize the effective epoch plus the effective
 boolean: omission becomes `config_epoch = 1`, while an explicit epoch 2 remains
@@ -488,7 +494,10 @@ unfiltered. It stays a warning — a permit-all route server is a legitimate
 configuration — but a check with warnings summarizes as `config VALID, <n>
 WARNINGS — NOT a clean check` rather than `config OK`. The exit code is 0
 either way; add `--strict` (see [deployment.md](deployment.md)) to make any
-warning exit 1 in a CI or deployment gate. `rbgp config import` sets the knob
+warning exit 1 in a CI or deployment gate. A config that omits the knob
+entirely also raises the separate `rfc8212_secure_default_ready` advisory
+described under [`config_epoch`](#config_epoch), which the same `--strict`
+gate counts. `rbgp config import` sets the knob
 in every config it generates,
 since it never translates policy; its report says so. Every shipped starter —
 both `--init-config` profiles and every config under `examples/` — sets it too
@@ -521,12 +530,14 @@ Every affected peer is checked before any peer is modified, and one
 unqualified peer rejects the whole edit:
 
 - an Established peer that never negotiated RFC 2918 Route Refresh is
-  rejected. Clear the session (`rbgp neighbor clear <addr>`) or let it
+  rejected. Bounce the session (`rbgp neighbor <addr> disable --reason
+  "rfc8212 policy transition"` then `rbgp neighbor <addr> enable`) or let it
   reconnect — it relearns everything under the new chain — then reapply.
 - a peer that is down while the RIB still holds its graceful-restart or
   long-lived-graceful-restart stale routes is deferred, so those routes stay
   paired with the verdict they were accepted under. Retry once retention
-  expires, or clear the peer to purge them.
+  expires, or bounce the peer with the same `disable` / `enable` pair to purge
+  them.
 - a peer whose session cannot report its state in time is rejected rather than
   guessed at; retry the edit.
 

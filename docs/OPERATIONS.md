@@ -75,11 +75,22 @@ Prints rustc-style diagnostics on error, or `config OK` on success.
 A valid config can still be worth flagging. When it is, the summary reads
 `config VALID, <n> WARNINGS — NOT a clean check` instead of `config OK`,
 the warnings are framed on stderr above it, and the exit code stays 0 —
-these are things to look at, not failures. Today this means a configured eBGP
-neighbor or dynamic range with no explicit policy in a direction: unfiltered with
-`[global] ebgp_requires_policy` off, carrying no routes in that direction
-with it on. Both are legitimate configurations; neither should reach
-production unnoticed.
+these are things to look at, not failures. Three conditions are counted today:
+
+1. a configured eBGP neighbor or dynamic range with no explicit policy in a
+   direction — unfiltered with `[global] ebgp_requires_policy` off, carrying no
+   routes in that direction with it on;
+2. `rfc8212_secure_default_ready` — the RFC 8212 posture is still inherited
+   from legacy omission. It clears by writing an explicit pair: root
+   `config_epoch = 1` with `[global] ebgp_requires_policy = false`, or
+   `config_epoch = 2` with `ebgp_requires_policy = true`;
+3. `orr_vantage` configured while no neighbor negotiates the `linkstate`
+   family, so the optimal-route-reflection topology feed stays empty.
+
+All are legitimate configurations and none is rejected; none should reach
+production unnoticed. Note that (2) fires on the omission alone, however well
+policed the config is — a `--strict` gate on an epoch-less config exits 1 for
+that reason and no other.
 
 Add `--strict` to make any warning exit 1 instead of 0
 (`rustbgpd --check --strict /etc/rustbgpd/config.toml`) — for CI and
@@ -564,6 +575,13 @@ only; it cannot inspect `runtime_state_dir` or config-adjacent commit-confirm
 authority. If retired authority remains or is inaccessible, recover it with
 exactly rustbgpd v0.64.0. Delete it only after proving the transaction is
 terminal and the current config is intended.
+
+Moving a config between RFC 8212 epochs is a separate, offline step:
+`rustbgpd --migrate-config pin-legacy|prepare-secure|downgrade-v0.64 --offline
+[--dry-run] CONFIG_PATH` rewrites the posture representation in place. Stop or
+quiesce the daemon first — `--offline` is an operator assertion, not a daemon
+probe — and see [`CONFIGURATION.md`](CONFIGURATION.md) → `config_epoch` for
+what each action writes.
 
 When Graceful Restart is enabled (the default), a coordinated stop writes a GR
 restart marker. On the next start, the daemon advertises `R=1` to static peers,

@@ -113,14 +113,19 @@ resolved.
   (resolved).** The confirm timer and the pre-commit rollback snapshot used to
   be held in memory only, so a restart inside the confirm window left the
   already-committed candidate live (confirmed-by-restart) and the auto-revert
-  never fired. The daemon now journals the pre-commit config snapshot to
-  `<runtime_state_dir>/commit-confirm-journal.json` (atomic write) before the
-  candidate commits; a restart that finds an unconfirmed journal reverts to
-  the journaled config at boot — regardless of remaining confirm time, since
+  never fired. The daemon now publishes the pre-commit config snapshot to
+  `<runtime_state_dir>/commit-confirm-v3-prior.toml` plus
+  `commit-confirm-v3-metadata.json`, with the config-adjacent
+  `<config>.commit-confirm-locator.json` as the sole boot authority, before the
+  candidate commits; a restart that finds a live locator reverts to the
+  recorded prior snapshot at boot — regardless of remaining confirm time, since
   the confirming session died with the old process (NETCONF RFC 6241 §8.4
   cancel-on-session-loss semantics) — saving the unconfirmed candidate aside
-  as `<config>.unconfirmed`. A torn or unusable journal refuses boot naming
-  both files. Proven by SIGKILL-mid-window real-binary tests
+  as `<config>.unconfirmed`. Torn or unusable v3 state refuses boot naming the
+  files, as does a retired locator-free
+  `<runtime_state_dir>/commit-confirm-journal.json` or retired v2 locator —
+  each is left untouched, and only rustbgpd v0.64.0 can recover it. Proven by
+  SIGKILL-mid-window real-binary tests
   (`tests/commit_confirm_binary.rs`). See ADR-0076 Decision 6 amendment.
 
 - **Implicit LOCAL_PREF/MED policy defaults (resolved).** Policy matches now

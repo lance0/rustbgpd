@@ -23,6 +23,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with inspect-before-retry guidance.
   (LAN-779)
 
+- `rs-config-render` now accepts confined site-local policy hooks: `--extra-rpol
+  PATH` (repeatable, exact UTF-8 `.rpol` bytes) together with exactly one
+  `--merge-toml PATH` strict hook file. Only `[policy]` and `[[neighbors]]` hook
+  keys are accepted, every hook must name a supplied policy, each final
+  direction chain is unique, and every supplied policy must be used. Imports,
+  datasets, parameters, generated-name collisions, next-hop changes, AS
+  prepends, community removals or variables, and BLACKHOLE-marker synthesis are
+  refused. The whole bundle validates and compiles in memory before the output
+  directory is touched; emitted bytes land as `policy/site-local-NNN.rpol`, and
+  the receipt attests source/emitted/config hashes plus requested and final
+  chains under `site_local`. Generated safety stays final.
 - `rs-config-render` now translates ARouteServer IPv4/IPv6 blackhole policies
   into explicit import and per-client export policy. Authorized marked
   more-specifics use IRR origin plus covering-prefix checks, local marker forms
@@ -62,7 +73,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   config and mask. Field 1/name `config` are reserved; custom clients must
   move the former top-level config under `intent` and mask each selected
   supported override (an empty present mask means no overrides).
-- `rbgp rib diff advertised` now requires `page_version` on every live page
+- `rbgp diff advertised` now requires `page_version` on every live page
   and uses `med_attr` as the sole MED-presence authority. Daemons through
   v0.62 now fail with upgrade guidance instead of using the single-peer and
   bare-MED fallbacks; BIRD, GoBGP, and MRT snapshots preserve explicit MED 0.

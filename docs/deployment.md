@@ -595,11 +595,14 @@ scaling out.
    A check that finds nothing to flag prints `config OK`. A check that
    flags something still exits 0, but the summary reads
    `config VALID, <n> WARNINGS — NOT a clean check` and the warnings are
-   framed on stderr above it. The warning identifies a configured eBGP neighbor
-   or dynamic range with no explicit policy in a direction: unfiltered when
-   `[global] ebgp_requires_policy` is off, and carrying no routes in that
-   direction when it is on. Neither is rejected — a permit-all route
-   server is a legitimate configuration — but neither should reach
+   framed on stderr above it. The warnings identify: a configured eBGP neighbor
+   or dynamic range with no explicit policy in a direction (unfiltered when
+   `[global] ebgp_requires_policy` is off, carrying no routes in that
+   direction when it is on); an RFC 8212 posture still inherited from legacy
+   omission (`rfc8212_secure_default_ready` — set an explicit root
+   `config_epoch` plus `[global] ebgp_requires_policy`); and an `orr_vantage`
+   with no `linkstate`-negotiating neighbor. None is rejected — a permit-all
+   route server is a legitimate configuration — but none should reach
    production unnoticed.
 
 4. **First start.**
@@ -669,6 +672,7 @@ These cover the config lifecycle, from bootstrap to reload:
 | `rustbgpd --init-config <lab\|edge> --stdout` | Print a curated, commented starter TOML to stdout and exit (file output is not yet supported). `lab` is a minimal single-box profile; `edge` is an eBGP edge skeleton with a default-route-dropping import chain and a default-deny export chain to fill in. Both use a mode-`0600` local UDS whose filesystem permissions authenticate access and whose stable `operator` principal is tier-authorized, set `[global] ebgp_requires_policy = true`, and pass `--check --strict` as emitted. Cannot be combined with `--check` / `--diff`. |
 | `rustbgpd --check <file>` | Parse + validate; print `config OK`, `config VALID, <n> WARNINGS — NOT a clean check` (warnings framed on stderr; still exit 0), or a rustc-style diagnostic (exit 1). Does not start the daemon. |
 | `rustbgpd --check --strict <file>` | The same check, but any warning exits 1 instead of 0 — for CI and deployment gates that must not accept a valid-but-risky config. A clean check still exits 0. `--strict` without `--check` is an error (exit 2). |
+| `rustbgpd --migrate-config <pin-legacy\|prepare-secure\|downgrade-v0.64> --offline [--dry-run] <file>` | Rewrite the RFC 8212 posture representation in place, offline (Linux only). `pin-legacy` writes epoch 1 + explicit `false`; `prepare-secure` writes epoch 2 + explicit `true`; `downgrade-v0.64` preserves the effective boolean, removes the epoch, and requires `--validator` naming an exact v0.64.0 binary. `--dry-run` performs the same validation proof and discards the stage. `--offline` is an operator assertion, not a daemon probe — stop or quiesce the daemon first. |
 | `rustbgpd --diff <candidate> [<current>]` | Compare a candidate file against the current on-disk config (`<current>` defaults to `/etc/rustbgpd/config.toml`); print per-section change list with expected reload class. This is a static file-vs-file compare — to compare against the running daemon's view, use `rbgp config diff`. |
 | `systemctl reload rustbgpd` (or `kill -HUP $(pidof rustbgpd)`) | Apply the diff. Live fields hot-apply; restart-required fields are pinned and logged at `ERROR` (the live values are kept). |
 
@@ -858,9 +862,13 @@ therefore own the graceful stop and the verification that follows it.
      /etc/rustbgpd/config.toml
    ```
 
-   Fix every error before proceeding. There is no in-place schema migration
-   tool; make release-note field renames in the config by hand, then repeat the
-   candidate check.
+   Fix every error before proceeding. There is no general schema-migration
+   tool; make release-note field renames by hand, then repeat the candidate
+   check. The one exception is the RFC 8212 posture representation, which
+   `rustbgpd --migrate-config pin-legacy|prepare-secure|downgrade-v0.64
+   --offline [--dry-run] CONFIG_PATH` rewrites in place (see
+   [`CONFIGURATION.md`](CONFIGURATION.md) → `config_epoch`); stop or quiesce
+   the daemon first — `--offline` is an operator assertion, not a daemon probe.
    This check validates candidate config bytes only: it does **not** inspect
    `runtime_state_dir` or config-adjacent commit-confirm authority.
 
@@ -1001,7 +1009,7 @@ operations via gRPC persist back to the config file (see
 
 ## Sample profiles
 
-The repo ships nine config profiles under
+The repo ships ten config profiles under
 [`examples/`](../examples/) covering the standard deployment
 shapes. Pick the closest match, copy, edit:
 
@@ -1009,6 +1017,7 @@ shapes. Pick the closest match, copy, edit:
 |---|---|---|
 | Minimal | [`examples/minimal/config.toml`](../examples/minimal/config.toml) | Single eBGP peer; dev-friendly, state in `/tmp`. |
 | IX route server | [`examples/route-server/config.toml`](../examples/route-server/config.toml) | RPKI, Add-Path, dual-stack, per-member policy chains. |
+| MANRS IXP Action 1 | [`examples/manrs-action1/config.toml`](../examples/manrs-action1/config.toml) | Route server with RPKI-invalid rejection and IRR-derived member filtering; walkthrough in [`cookbook/manrs-ixp-action1.md`](cookbook/manrs-ixp-action1.md). |
 | Fabric edge / Linux FIB | [`examples/linux-edge-fib/config.toml`](../examples/linux-edge-fib/config.toml) | FIB integration on configured unicast tables; ECMP, weighted multipath. |
 | EVPN VTEP leaf | [`examples/evpn-vtep-leaf/config.toml`](../examples/evpn-vtep-leaf/config.toml) | Bidirectional VTEP: kernel FDB → Type 2 origination. |
 | EVPN RR fabric | [`examples/rr-evpn-fabric/config.toml`](../examples/rr-evpn-fabric/config.toml) | Route Reflector mode, stateless EVI (no `[[evpn_instances]]`). |
