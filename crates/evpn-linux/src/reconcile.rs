@@ -2367,9 +2367,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         }
 
         // Drain in dependency order: NHG IDs before per-VTEP members
-        // (Copilot finding — `BTreeSet<u32>` ascending iteration plus
-        // our tag scheme would delete members first and let the
-        // kernel reject the group del with `EINVAL`).
+        // (`BTreeSet<u32>` ascending iteration plus our tag scheme
+        // would delete members first and let the kernel reject the
+        // group del with `EINVAL`).
         let (stale_groups, stale_members): (Vec<u32>, Vec<u32>) = self
             .state
             .adopted_unreferenced

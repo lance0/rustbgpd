@@ -47,14 +47,14 @@ summary, command logs, environment metadata, and raw Criterion artifacts under
 `target/bench-compare/`. Use `--features LIST` when the selected benchmark is
 feature-gated; the same Cargo feature set is applied to both refs.
 
-LAN-395 retained comparisons additionally use `--lan395-gate-out PATH`. That
+Retained fanout comparisons additionally use `--lan395-gate-out PATH`. That
 mode rejects any missing or unexpected fanout row, requires the exact pinned
 two-attempt transport matrix on a performance-governor CPU, applies every
 acceptance threshold, and writes only a checksummed sanitized receipt. Generic
 metadata, logs, absolute paths, and Criterion reports are local diagnostics and
 must not be published.
 
-`route_paging` is a manager-level custom harness for the long-running LAN-391
+`route_paging` is a manager-level custom harness for the long-running
 complete-traversal shape. One harness process runs exactly one scope/route/page
 cell and reports one CSV row plus per-page synchronous handler-boundary
 p50/p99/max. Those page timings include oneshot setup/retrieval around the
@@ -250,9 +250,11 @@ directories.
 
 `compare-rib-memory.sh` runs the ignored high-N RIB structural memory profile
 at two git refs and writes a Markdown summary, CSV, logs, and metadata under
-`target/rib-memory-compare/`. It measures allocator-tracked live heap for three
-RIB shapes: one-peer Adj-RIB-In, two-peer Adj-RIB-In + Loc-RIB, and a
-route-server / route-reflector fanout shape with two Adj-RIB-Out peers.
+`target/rib-memory-compare/`. It measures allocator-tracked live heap for four
+RIB shapes: one-peer Adj-RIB-In (`adj_rib_in`), two-peer Adj-RIB-In + Loc-RIB
+(`full_rib`), the same two-peer shape with a distinct attribute set per prefix
+so attribute interning cannot dedupe (`full_rib_diverse`), and a route-server /
+route-reflector fanout shape with two Adj-RIB-Out peers (`rr_fanout`).
 
 Requirements: `bash`, `git`, `cargo`, and `python3`. The compared refs must
 already include the structured `memory_profile_high_n` harness.

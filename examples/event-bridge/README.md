@@ -28,10 +28,14 @@ operator's preferred sink. The patterns to preserve are:
 
 ## Build + run
 
-The plaintext TCP command below requires an explicitly configured, suitable
-`[global.telemetry.grpc_tcp]` listener. The default API listener is a Unix
-domain socket, but this reference bridge does not implement UDS, bearer-token,
-or mTLS client transports.
+This skeleton opens an unauthenticated plaintext gRPC channel, so it cannot
+connect to a conformant daemon as shipped. `security.grpc.enforcement = "tier"`
+is the only enforcement mode (v0.63.0+), and every legal listener is therefore
+authenticated: an owner-only UDS, a bearer-token TCP listener (`token_file` plus
+`principal`), or native mTLS. Add the matching client transport before running
+this bridge — a `tonic` interceptor setting `authorization: Bearer <token>`, or
+a UDS connector for the default socket. The command below is the shape of the
+invocation, not a runnable one against a stock daemon.
 
 ```sh
 cargo run --release -p event-bridge -- \
