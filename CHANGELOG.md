@@ -66,6 +66,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- SIGINT, SIGTERM, and SIGHUP handlers are now registered before gRPC, BGP,
+  metrics/readiness, or gNMI dial-out can become externally reachable. A
+  SIGTERM delivered during startup is retained for graceful shutdown instead
+  of taking the default process action in that window (LAN-949).
 - BIRD 3.3.1 migrations now retain lowercase `bgp_*` attributes from a
   channel's retained export table instead of silently dropping them. The
   structural importer also identifies BIRD 2/3 input and gives actionable
