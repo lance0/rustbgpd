@@ -59,6 +59,10 @@ ROUTINATOR_IP=""
 STAYRTR_IP=""
 RTRV2_IP=""
 
+# Logged once per v2 probe that a v1-only cache rejects — the only
+# observable signature of a v2 re-probe.
+V1_FALLBACK_MSG="RTR server does not support v2, falling back to v1 (no ASPA)"
+
 # ---------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------
@@ -214,7 +218,7 @@ test_initial_load() {
 test_version_fallback() {
     log "Scenario 4: v2 -> v1 fallback against the v1-only cache"
 
-    wait_log_count "RTR server does not support v2, falling back to v1 (no ASPA)" \
+    wait_log_count "$V1_FALLBACK_MSG" \
         "$STAYRTR_IP" 1 "client took the v1 fallback path for stayrtr"
     wait_log_count "RTR reconnected with fallback version" "$STAYRTR_IP" 1 \
         "client reconnected to stayrtr at the fallback version"
@@ -230,9 +234,15 @@ test_version_fallback() {
 test_v1_cache_restart() {
     log "Scenario 6: stayrtr restart — v1 re-lands within one retry, no flap"
 
-    local pre_full_tables pre_mismatches poll_file="/tmp/m84-v1-restart-poll.$$"
+    local pre_full_tables pre_probes poll_file="/tmp/m84-v1-restart-poll.$$"
     pre_full_tables=$(log_count "RTR full table received" "$STAYRTR_IP")
-    pre_mismatches=$(rlog | grep -cF "RTR version mismatch" || true)
+    # A v2 re-probe against this v1-only cache is observable exactly once
+    # per occurrence, as the fallback logged immediately after it. The
+    # rejection itself is a version-0 Error Report that the version check
+    # rejects before any code is acted on, so it never logs a "version
+    # mismatch" — that string exists only as an error variant no logging
+    # macro emits, and counting it compares 0 to 0.
+    pre_probes=$(log_count "$V1_FALLBACK_MSG" "$STAYRTR_IP")
 
     # Continuously sample the stayrtr-backed route's validation state;
     # any not_found/missing sample is a retention violation.
@@ -257,12 +267,12 @@ test_v1_cache_restart() {
 
     # The wedge signature: repeated v2 probes answered with a version-0
     # Error Report. A fixed client never probes v2 with held v1 data.
-    local post_mismatches
-    post_mismatches=$(rlog | grep -cF "RTR version mismatch" || true)
-    if [ "$post_mismatches" -eq "$pre_mismatches" ]; then
-        ok "no v2 re-probe version mismatch across the restart"
+    local post_probes
+    post_probes=$(log_count "$V1_FALLBACK_MSG" "$STAYRTR_IP")
+    if [ "$post_probes" -eq "$pre_probes" ]; then
+        ok "no v2 re-probe across the restart (v1 fallback count held at $post_probes)"
     else
-        fail "client re-probed v2 across the restart ($((post_mismatches - pre_mismatches)) version mismatches)"
+        fail "client re-probed v2 across the restart ($((post_probes - pre_probes)) extra v1 fallbacks)"
     fi
 
     # Retention: the held entries were never dropped.
@@ -398,7 +408,7 @@ test_serial_regression() {
     # Phase 5: server serial rolls back 4 -> 1 within the same session.
     # The client must reject the regressed EoD and resync once.
     set_rtr_phase 5
-    wait_log_count "RTR End of Data identity mismatch — resynchronizing" \
+    wait_log_count "RTR End of Data serial regression — resynchronizing" \
         "$RTRV2_IP" 1 "client detected the serial regression at EoD"
     wait_log_count "RTR full table received" "$RTRV2_IP" \
         $((pre_full_tables + 1)) "client resynchronized with one Reset Query"
