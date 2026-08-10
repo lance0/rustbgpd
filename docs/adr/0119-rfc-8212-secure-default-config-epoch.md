@@ -22,12 +22,11 @@ authorizes activation only after the production-mutation proof gate below is
 complete. Acceptance itself does not change route handling, activate a new
 default, or supersede ADR-0112 and its M95 real-session receipt.
 
-The representation, transaction-materialization, and legacy-advisory tranches
-are implemented: typed raw presence, pre-activation epoch-2 rejection,
-full-tuple restart pinning, shared canonical rendering, atomic transaction
-planning/receipt proofs, and the human-visible
-`rfc8212_secure_default_ready` warning have landed. Migration/downgrade
-tooling, the M95 extension, and activation remain gated by the proof plan below.
+The representation, transaction-materialization, legacy advisory, and offline
+migration/downgrade tranches are implemented. Migration is an explicit
+Linux-only, in-place operation with source/symlink stale fences, current-loader
+validation, atomic publication, dry-run, and an exact external v0.64.0 loader
+gate for downgrade. The M95 extension and activation remain gated below.
 
 ## Decision
 
@@ -160,21 +159,22 @@ edit, and submit a full candidate. Raw/source may change only through the named
 materialization transition; the gNMI receipt retains and reports both tuples
 rather than losing epoch, raw presence, source, or effective value silently.
 
-The future migration tool requires an explicit operator-selected posture and
+The migration tool requires an explicit operator-selected posture and
 never infers intent from a freshness heuristic. It offers exact edits: pin
 legacy behavior with root `config_epoch = 1` plus
 `[global].ebgp_requires_policy = false`, or prepare the secure epoch with root
 `config_epoch = 2` plus `[global].ebgp_requires_policy = true`. It supports a
-no-write dry run, one atomic file replacement, and validated v0.61 downgrade output.
+no-publish dry run, one atomic file replacement, and validated v0.64 downgrade output.
 
 Starters and foreign-config importers may emit epoch 1; if they emit epoch 2,
 they must write explicit `true`, never false or omission. Operators retain the
 matrix's explicit-false choice. Only epoch-2 generated output must pass
 `rustbgpd --check --strict`; epoch-1 imports may retain independent warnings.
 
-The practical downgrade floor is the epoch-less v0.61 schema. Downgrade output
+The historical downgrade floor remains the epoch-less v0.61 schema. This
+release supports an exact v0.64.0 binary as its N-1 validator. Downgrade output
 first materializes the current effective boolean, then removes `config_epoch`,
-then validates the exact bytes against the v0.61 schema/loader. It refuses a
+then validates the exact bytes against the exact v0.64.0 loader. It refuses a
 target that cannot represent or validate the posture. Downgrade necessarily
 loses epoch/source provenance but never changes effective enforcement.
 

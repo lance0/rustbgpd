@@ -147,6 +147,28 @@ A supported config transaction with a real non-posture mutation atomically mater
 effective posture (for example, omission becomes epoch 1 plus explicit false). Posture-only, effective-value, or partial materialization changes are rejected.
 Boot, SIGHUP, and general diff candidates remain source-preserving; targeted CRUD is unchanged.
 
+Linux operators can make the representation change explicitly, offline and in
+place:
+
+```text
+rustbgpd --migrate-config pin-legacy --offline [--dry-run] CONFIG_PATH
+rustbgpd --migrate-config prepare-secure --offline [--dry-run] CONFIG_PATH
+rustbgpd --migrate-config downgrade-v0.64 --offline [--dry-run] \
+  --validator VALIDATOR_PATH CONFIG_PATH
+```
+
+`pin-legacy` writes epoch 1 and explicit `false`; `prepare-secure` writes epoch
+2 and explicit `true`. Downgrade preserves the currently effective boolean,
+removes the epoch, and requires an exact v0.64.0 binary to accept the staged
+bytes. The tool locks and fingerprints the source and any symlink, validates a
+0600 adjacent stage, preserves the source ownership and mode, then performs one
+rename and directory fsync. Dry-run performs the same validation proof but
+discards the stage. No action searches `PATH`, creates a backup, or contacts a
+running daemon. Explicit relative paths resolve from the invocation directory.
+`--offline` is an operator assertion, not daemon discovery: stop or otherwise
+quiesce the daemon before invoking the tool. The shared stage lock coordinates
+cooperative persistence only and does not make online migration supported.
+
 ---
 
 ## `[global]`

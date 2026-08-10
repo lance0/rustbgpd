@@ -21,6 +21,7 @@ mod bfd_runtime;
 mod blackhole;
 mod config;
 mod config_history;
+mod config_migration;
 mod config_persister;
 mod config_transaction_control;
 mod confirm_journal;
@@ -2282,6 +2283,9 @@ rustbgpd \- API\-first BGP daemon with gRPC control plane
 .SH SYNOPSIS
 .B rustbgpd
 [\fIOPTIONS\fR] [\fICONFIG_PATH\fR]
+.br
+.B rustbgpd --migrate-config
+\fIACTION\fR --offline [--dry-run] [--validator \fIPATH\fR] \fICONFIG_PATH\fR
 .SH DESCRIPTION
 .B rustbgpd
 is a BGP daemon managed through its gRPC API. It loads a TOML
@@ -2297,6 +2301,15 @@ CLI.
 Path to the TOML config file. Defaults to
 \fI/etc/rustbgpd/config.toml\fR.
 .SH OPTIONS
+.TP
+\fB\-\-migrate\-config\fR \fIACTION\fR
+Run an offline, in-place Linux config migration. Actions are
+\fBpin-legacy\fR, \fBprepare-secure\fR, and \fBdowngrade-v0.64\fR.
+Requires \fB--offline\fR and an explicit config path. \fB--dry-run\fR
+performs the complete proof without replacement. Downgrade alone requires
+\fB--validator\fR with an explicit path to exactly rustbgpd v0.64.0.
+The operator must stop or quiesce the daemon first; \fB--offline\fR is an
+assertion, not daemon discovery.
 .TP
 \fB\-\-check\fR
 Validate the config and exit without starting the daemon. A valid
@@ -2392,6 +2405,15 @@ Default configuration file.
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
+    if args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--migrate-config" | "--offline" | "--dry-run" | "--validator"
+        )
+    }) {
+        return config_migration::run(&args);
+    }
+
     // Handle --version / -V before anything else.
     if args.iter().any(|a| a == "--version" || a == "-V") {
         return stdout_exit(write_stdout(|writer| {
@@ -2416,6 +2438,12 @@ fn main() -> ExitCode {
              Arguments:\n  \
                CONFIG_PATH  Path to TOML config file [default: /etc/rustbgpd/config.toml]\n\n\
              Options:\n  \
+               --migrate-config ACTION  Offline in-place migration: pin-legacy,\n                        \
+                                        prepare-secure, or downgrade-v0.64; requires\n                        \
+                                        --offline and an explicit CONFIG_PATH\n  \
+               --offline             Confirm migration runs without a daemon\n  \
+               --dry-run             Prove migration without replacing CONFIG_PATH\n  \
+               --validator PATH      Exact v0.64.0 binary (downgrade-v0.64 only)\n  \
                --check               Validate config and exit without starting the daemon\n  \
                --strict              With --check, exit 1 if anything was warned about (for CI\n                        \
                                      and deployment gates). Rejected without --check\n  \

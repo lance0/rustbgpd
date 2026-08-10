@@ -65,6 +65,11 @@ jobs:
           bash -n .github/scripts/install-grpcurl.sh
           shellcheck .github/scripts/install-grpcurl.sh
           bash .github/scripts/install-grpcurl.sh --self-test
+      - name: Install exact v0.64 config migration validator
+        run: |
+          bash -n .github/scripts/install-rustbgpd-v064-validator.sh
+          shellcheck .github/scripts/install-rustbgpd-v064-validator.sh
+          .github/scripts/install-rustbgpd-v064-validator.sh "$RUNNER_TEMP/rustbgpd-v064"
       - name: Prove CI image-primer contract
         run: |
           python3 -m unittest -v scripts/test_check_ci_image_primer_contract.py
@@ -267,7 +272,11 @@ jobs:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
       - uses: Swatinem/rust-cache@v2
+      - name: Install exact v0.64 config migration validator
+        run: .github/scripts/install-rustbgpd-v064-validator.sh "$RUNNER_TEMP/rustbgpd-v064"
       - run: cargo test --workspace
+        env:
+          RUSTBGPD_V064_VALIDATOR: ${{ runner.temp }}/rustbgpd-v064/rustbgpd-v0.64.0
       - run: cargo doc --workspace --lib --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"

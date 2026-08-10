@@ -6,7 +6,7 @@ pub(crate) mod v3;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 /// Journal file name under `runtime_state_dir`.
@@ -69,23 +69,89 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// This is what lets runtime config mutations reserve their on-disk write
 /// *before* touching a live BGP session: a staging failure has changed
 /// nothing anywhere, and discarding costs nothing.
+#[derive(Debug)]
 pub(crate) struct StagedWrite {
     tmp: PathBuf,
     target: PathBuf,
+    file: File,
+    tmp_dev: u64,
+    tmp_ino: u64,
 }
 
 impl StagedWrite {
+    /// Filesystem path of the unpublished, fsynced payload.
+    pub(crate) fn path(&self) -> &Path {
+        &self.tmp
+    }
+
+    /// Apply migration-only ownership and mode after payload validation.
+    pub(crate) fn preserve_metadata(&mut self, uid: u32, gid: u32, mode: u32) -> io::Result<()> {
+        #[cfg(debug_assertions)]
+        if std::env::var("RUSTBGPD_TEST_MIGRATION_METADATA_FAILURE").as_deref() == Ok("chown") {
+            return Err(io::Error::other("injected metadata preservation failure"));
+        }
+        std::os::unix::fs::fchown(&self.file, Some(uid), Some(gid))?;
+        #[cfg(debug_assertions)]
+        if std::env::var("RUSTBGPD_TEST_MIGRATION_METADATA_FAILURE").as_deref() == Ok("chmod") {
+            return Err(io::Error::other("injected metadata preservation failure"));
+        }
+        self.file
+            .set_permissions(fs::Permissions::from_mode(mode & 0o7777))?;
+        #[cfg(debug_assertions)]
+        if std::env::var("RUSTBGPD_TEST_MIGRATION_METADATA_FAILURE").as_deref() == Ok("fsync") {
+            return Err(io::Error::other("injected metadata preservation failure"));
+        }
+        self.file.sync_all()
+    }
+
     /// Publish the staged bytes: rename into place and fsync the directory.
     pub(crate) fn commit(mut self) -> io::Result<()> {
-        let result = commit_staged(&self.tmp, &self.target)
-            .map_err(|error| name_write_failure(&self.target, &error));
-        if result.is_ok() {
-            // The rename consumed the temp file. Clear the path so `Drop`
-            // cannot remove a live file a later stage re-creates under the
-            // same name.
-            self.tmp = PathBuf::new();
+        self.file.sync_all()?;
+        self.publish()
+    }
+
+    /// Re-run a caller-owned stale-source fence immediately before publish.
+    pub(crate) fn commit_if(mut self, fence: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+        self.file.sync_all()?;
+        fence().map_err(|error| name_write_failure(&self.target, &error))?;
+        self.publish()
+    }
+
+    fn publish(&mut self) -> io::Result<()> {
+        self.publish_with(fsync_dir)
+    }
+
+    fn publish_with(
+        &mut self,
+        sync_directory: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.verify_owned_temp()?;
+        fs::rename(&self.tmp, &self.target)
+            .map_err(|error| name_write_failure(&self.target, &error))?;
+        self.tmp = PathBuf::new();
+        sync_directory(parent_dir(&self.target)?).map_err(|_| {
+            io::Error::other("directory fsync after rename failed; published state is ambiguous")
+        })
+    }
+
+    #[cfg(test)]
+    fn commit_with_dir_fsync(
+        mut self,
+        sync_directory: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.file.sync_all()?;
+        self.publish_with(sync_directory)
+    }
+
+    fn verify_owned_temp(&self) -> io::Result<()> {
+        let metadata = fs::symlink_metadata(&self.tmp)?;
+        if !metadata.file_type().is_file()
+            || metadata.nlink() != 1
+            || (metadata.dev(), metadata.ino()) != (self.tmp_dev, self.tmp_ino)
+        {
+            return Err(io::Error::other("atomic stage pathname identity changed"));
         }
-        result
+        Ok(())
     }
 
     /// Drop the staged bytes without publishing them; [`Drop`] removes the
@@ -104,7 +170,7 @@ impl StagedWrite {
 /// outlive its stage.
 impl Drop for StagedWrite {
     fn drop(&mut self) {
-        if !self.tmp.as_os_str().is_empty() {
+        if !self.tmp.as_os_str().is_empty() && self.verify_owned_temp().is_ok() {
             let _ = fs::remove_file(&self.tmp);
         }
     }
@@ -124,11 +190,6 @@ fn name_write_failure(path: &Path, error: &io::Error) -> io::Error {
         error.kind(),
         format!("failed to write {}: {error}", path.display()),
     )
-}
-
-fn commit_staged(tmp: &Path, target: &Path) -> io::Result<()> {
-    fs::rename(tmp, target)?;
-    fsync_dir(parent_dir(target)?)
 }
 
 fn stage_atomic_inner(path: &Path, bytes: &[u8]) -> io::Result<StagedWrite> {
@@ -161,18 +222,53 @@ fn stage_atomic_inner(path: &Path, bytes: &[u8]) -> io::Result<StagedWrite> {
     // umask must not make them world-readable. The rename below preserves
     // the temp file's mode — it moves the inode.
     let mut file = OpenOptions::new()
+        .read(true)
         .write(true)
         .create(true)
-        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .mode(0o600)
         .open(&tmp)?;
-    // `mode` applies only when the file is CREATED; clamp a stale leftover
-    // temp file to owner-only too before secrets are written into it.
+    let target_metadata = fs::metadata(&target).ok();
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file()
+        || metadata.nlink() != 1
+        || target_metadata
+            .as_ref()
+            .is_some_and(|target| (metadata.dev(), metadata.ino()) == (target.dev(), target.ino()))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "atomic stage is not an independent regular file",
+        ));
+    }
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::Error(error)) => return Err(error),
+        Err(fs::TryLockError::WouldBlock) => {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "atomic stage is already in use",
+            ));
+        }
+    }
+    let path_metadata = fs::symlink_metadata(&tmp)?;
+    if !path_metadata.file_type().is_file()
+        || path_metadata.nlink() != 1
+        || (path_metadata.dev(), path_metadata.ino()) != (metadata.dev(), metadata.ino())
+    {
+        return Err(io::Error::other("atomic stage pathname identity changed"));
+    }
     file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.set_len(0)?;
     file.write_all(bytes)?;
     file.sync_all()?;
-    drop(file);
-    Ok(StagedWrite { tmp, target })
+    Ok(StagedWrite {
+        tmp,
+        target,
+        file,
+        tmp_dev: metadata.dev(),
+        tmp_ino: metadata.ino(),
+    })
 }
 
 fn parent_dir(path: &Path) -> io::Result<&Path> {
@@ -185,13 +281,17 @@ fn parent_dir(path: &Path) -> io::Result<&Path> {
 }
 
 fn fsync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("RUSTBGPD_TEST_MIGRATION_DIR_FSYNC_FAILURE").is_some() {
+        return Err(io::Error::other("injected directory fsync failure"));
+    }
     File::open(dir)?.sync_all()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{MetadataExt as _, symlink};
+    use std::os::unix::fs::symlink;
 
     #[test]
     fn retired_locator_free_authority_is_refused_untouched() {
@@ -277,5 +377,81 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains(&format!("failed to write {}", missing.display())));
+    }
+
+    #[test]
+    fn temp_inode_lock_serializes_same_target_but_not_different_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.toml");
+        let second = dir.path().join("second.toml");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+        let stage = stage_atomic(&first, b"candidate-one").unwrap();
+        let stage_path = stage.path().to_path_buf();
+        let before = fs::metadata(&stage_path).unwrap();
+        let bytes = fs::read(&stage_path).unwrap();
+        let collision = stage_atomic(&first, b"must-not-truncate").unwrap_err();
+        assert_eq!(collision.kind(), io::ErrorKind::WouldBlock);
+        let after = fs::metadata(&stage_path).unwrap();
+        assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+        assert_eq!(fs::read(&stage_path).unwrap(), bytes);
+        assert_eq!(fs::read(&first).unwrap(), b"first");
+        let other = stage_atomic(&second, b"candidate-two").unwrap();
+        other.discard();
+        stage.discard();
+        let retry = stage_atomic(&first, b"retry").unwrap();
+        retry.discard();
+    }
+
+    #[test]
+    fn stale_temp_is_clamped_before_payload_and_path_substitution_is_never_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("config.toml");
+        fs::write(&target, b"accepted").unwrap();
+        let tmp = target.with_extension("toml.tmp");
+        fs::write(&tmp, b"stale").unwrap();
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644)).unwrap();
+        let stage = stage_atomic(&target, b"candidate").unwrap();
+        assert_eq!(
+            fs::metadata(&tmp).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read(&tmp).unwrap(), b"candidate");
+        let owned = dir.path().join("owned-aside");
+        fs::rename(&tmp, &owned).unwrap();
+        fs::write(&tmp, b"replacement").unwrap();
+        assert!(stage.commit().is_err());
+        assert_eq!(fs::read(&tmp).unwrap(), b"replacement");
+        assert_eq!(fs::read(&owned).unwrap(), b"candidate");
+
+        fs::remove_file(&tmp).unwrap();
+        fs::remove_file(&owned).unwrap();
+        let stage = stage_atomic(&target, b"drop-candidate").unwrap();
+        fs::rename(&tmp, &owned).unwrap();
+        fs::write(&tmp, b"drop-replacement").unwrap();
+        drop(stage);
+        assert_eq!(fs::read(&tmp).unwrap(), b"drop-replacement");
+    }
+
+    #[test]
+    fn post_rename_directory_fsync_failure_cannot_delete_successor_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("config.toml");
+        fs::write(&target, b"accepted").unwrap();
+        let successor = target.with_extension("toml.tmp");
+        let stage = stage_atomic(&target, b"candidate").unwrap();
+        let error = stage
+            .commit_with_dir_fsync(|_| {
+                fs::write(&successor, b"successor")?;
+                Err(io::Error::other("injected directory fsync failure"))
+            })
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("directory fsync after rename failed")
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"candidate");
+        assert_eq!(fs::read(&successor).unwrap(), b"successor");
     }
 }
