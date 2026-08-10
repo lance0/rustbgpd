@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rbgp` Bash completions now offer filesystem paths for file positionals,
+  including filenames with spaces and repeatable `policy fmt` inputs. (LAN-938)
 - `rustbgpd --migrate-config ACTION --offline` now performs explicit Linux-only
   RFC 8212 config migrations in place. It supports epoch-1/false pinning,
   epoch-2/true preparation, full dry-run proof, and a downgrade that preserves
