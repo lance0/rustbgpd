@@ -49,23 +49,35 @@ The starter config is expected to pass strict validation without warnings.
 Most `[[evpn_instances]]` edits now **hot-apply** at runtime via the
 ADR-0063 EVPN runtime coordinator — through both SIGHUP file-driven reload
 and the gRPC `EvpnService.ApplyEvpnRuntime`. `--diff` classifies each edit
-as **reload-applied** or **restart-required**: only the two by-design
-restart-required shape classes stay restart-required — L3VNI/device/table
-IP-VRF identity changes (kernel VRF lifecycle) and the broader ES / IP-VRF
-mixed-row edits that fall outside the L2VNI-only composer. See ADR-0063 and
-`KNOWN_ISSUES.md` for the full supported-shape list.
+as **reload-applied** or **restart-required**. What stays restart-required is
+IP-VRF L3VNI/device/table identity redefines (kernel VRF identity lifecycle),
+plus the shapes the plan decomposer's fixed phase order cannot express: a
+relink away from an IP-VRF deleted in the same candidate, a relink onto an
+IP-VRF added in the same candidate, and an Ethernet Segment left memberless
+mid-sequence. Every other mixed ES / IP-VRF edit hot-applies through the
+decomposer, one committed runtime generation per step. See ADR-0063,
+`docs/reload-matrix.md`, and `KNOWN_ISSUES.md`.
 
 ## Pre-create the Linux bridge/VXLAN devices
 
-Gate 7b deliberately does not create bridge or VXLAN netdevs. The
+rustbgpd does not create bridge or VXLAN netdevs by default — this example
+pre-creates them out of band. To have the daemon own their lifecycle instead,
+opt into the ADR-0091 `[[managed_netdevs.bridges]]` / `[[managed_netdevs.vxlans]]`
+rows (status via `rbgp evpn managed-netdevs`); that table is restart-required.
+
+For a legacy instance (`bridge_vlan` unset, the shape this example uses) the
 readiness probe requires:
 
 - bridge exists;
+- bridge VLAN filtering is disabled;
 - exactly one VXLAN port is enslaved to the bridge;
 - VXLAN VNI matches the `[[evpn_instances]].vni`;
 - VXLAN local IP matches `local_vtep_ip`;
-- VXLAN learning is disabled;
-- bridge VLAN filtering is disabled.
+- VXLAN learning is disabled.
+
+On a `vlan_filtering=1` bridge, set `[[evpn_instances]].bridge_vlan` instead —
+the ADR-0089 VLAN-aware path then selects either a fixed-VNI VXLAN member or a
+collect-metadata / SVD member via the bridge VLAN tunnel mapping.
 
 Example for the first instance (`vni = 10100`, `bridge = "br100"`,
 `local_vtep_ip = "10.0.0.10"`):
@@ -107,8 +119,12 @@ Expected output (human format):
 ```
 vni=10100 rd=10.0.0.10:10100 vtep=10.0.0.10 rts=[65000:10100] readiness=ready bridge=br100 originated-local-macs=0
 vni=10200 rd=10.0.0.10:10200 vtep=10.0.0.10 rts=[65000:10200] readiness=ready bridge=br200 advertise-svi-mac originated-local-macs=0
-vni=10300 rd=4200000000:300 vtep=10.0.0.10 rts=[65000:10300,65000:55000] readiness=ready originated-local-macs=0
+vni=10300 rd=4200000000:300 vtep=10.0.0.10 rts=[65000:10300,65000:55000] readiness=unbound originated-local-macs=0
 ```
+
+VNI 10300 has no `bridge` binding in this config, so it reports
+`readiness=unbound` — the probe does not apply to it. Add a `bridge` key (and
+the matching netdevs) to move it to `ready`.
 
 The same state plus route/metric presence can be summarized with:
 
@@ -118,7 +134,8 @@ rbgp evpn diagnose
 
 ## What this example does NOT do (yet)
 
-- Create Linux bridge or VXLAN netdevs for you.
+- Create Linux bridge or VXLAN netdevs for you: it declares no
+  `[managed_netdevs]` rows, so the ADR-0091 lifecycle is off here.
 - Enforce RFC 7432 §15 duplicate-MAC quarantine beyond what ships today:
   detect-only quarantine (detection metrics exposed) plus the optional
   `action = "suppress_local"` enforcement both ship. The M/N detector

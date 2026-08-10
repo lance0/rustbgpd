@@ -30,11 +30,19 @@ prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 ```
 
-If you prefer a loopback TCP backend instead, add:
+A loopback TCP backend is also possible, but it must carry its own
+credential: `security.grpc.enforcement = "tier"` is the only enforcement
+mode, and an unauthenticated TCP listener is rejected at config load. Use a
+bearer token (Envoy then has to inject the header itself):
 
 ```toml
 [global.telemetry.grpc_tcp]
 address = "127.0.0.1:50051"
+token_file = "/etc/rustbgpd/grpc.token"
+principal = "envoy-frontend"
+
+[security.grpc.roles]
+"envoy-frontend" = "operator"
 ```
 
 ## Certificate layout
@@ -53,6 +61,10 @@ Remote operators need a client certificate and key signed by the same CA.
 envoy -c examples/envoy-mtls/envoy.yaml
 ```
 
+Envoy must be able to open the backend socket. The default UDS is created with
+mode `0o600` owned by the daemon user, so run Envoy as that user (or as root);
+any other identity gets `EACCES` on connect.
+
 ## Example client call
 
 ```bash
@@ -68,6 +80,16 @@ grpcurl \
 
 ## Operational notes
 
+- **Every client Envoy admits becomes `local-operator` at operator tier.** The
+  default UDS is owner-only, so the daemon authorizes its clients by filesystem
+  ownership; the client certificate identity stops at Envoy and never reaches
+  the authorization layer. mTLS is an admission gate here, not per-client RBAC
+  — a monitoring-only certificate gets full mutating control. For tier
+  separation, either cap the backend with an explicit
+  `[global.telemetry.grpc_uds] max_tier` and run a second socket for mutating
+  access, or use the native mTLS TCP listener, which derives a per-certificate
+  principal that `[security.grpc.roles]` maps to `observer` / `automation` /
+  `operator`.
 - Firewall the exposed Envoy listener to known management hosts even when mTLS
   is enabled.
 - Prefer a dedicated management VLAN/interface instead of `0.0.0.0` where

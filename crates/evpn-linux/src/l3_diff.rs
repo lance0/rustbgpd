@@ -1859,7 +1859,8 @@ mod tests {
         );
     }
 
-    /// Regression for Copilot finding `reconcile.rs:489`:
+    /// Regression for the reconcile L3 sweep gate
+    /// (`!intent.ip_vrfs.is_empty() || !self.state.l3_owned.is_empty()`):
     /// when config reload removes every `[[evpn_ip_vrfs]]`
     /// entry, the `IpVrfTable` carried on `DataplaneIntent`
     /// becomes empty, but `L3OwnedState` can still hold the

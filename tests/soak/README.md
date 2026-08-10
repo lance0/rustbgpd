@@ -2,12 +2,12 @@
 
 Every soak entrypoint in this directory acquires an exclusive `flock` on
 `${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}` before
-doing real work. The `bench/compare-criterion.sh` script (and the
-`Criterion Bench Compare` GitHub Actions workflow that drives it) takes
-the same lock on the same path. When the soak host is also the bench
-host, this guarantees only one workload runs at a time — a bench
-dispatch refuses to start while a soak is active, and a soak refuses to
-start while a bench is mid-attempt.
+doing real work. The `bench/compare-criterion.sh` script (and both GitHub
+Actions workflows that drive it — `Criterion Bench Compare` on dispatch
+and `Criterion Bench Nightly` on cron) takes the same lock on the same
+path. When the soak host is also the bench host, this guarantees only one
+workload runs at a time — a bench dispatch refuses to start while a soak
+is active, and a soak refuses to start while a bench is mid-attempt.
 
 The shared logic lives in `tests/soak/host-lock.sh`; sourcing it and
 calling `acquire_rustbgpd_host_lock` is a two-line block right after
@@ -49,7 +49,7 @@ where that directory was absent, so a soak and the nightly bench could
 run unprotected. An uncontended lock is free, so always taking it is
 transparent on laptops / dev boxes too. On contention the entrypoint
 exits `75` (`EX_TEMPFAIL`, "host busy") so an unattended caller — the
-nightly bench workflow — can skip cleanly rather than fail.
+`Criterion Bench Nightly` workflow — can skip cleanly rather than fail.
 
 ---
 
@@ -304,8 +304,8 @@ Publish the 24h postmortem only after checking:
   advance with churn.
 - `evpn_local_origination_errors_total` stays flat at zero.
 - `evpn_local_observations_dropped_total` stays flat at zero.
-- `duplicate_mac_moves_total` stays flat unless the test deliberately reuses
-  a MAC before its withdraw converges.
+- `evpn_duplicate_mac_moves_total` stays flat unless the test deliberately
+  reuses a MAC before its withdraw converges.
 - Steady-state RSS slope after `WARMUP_SEC` is flat enough to rule out a
   retained-state leak.
 
@@ -548,7 +548,8 @@ so the soak exercises:
 The base Gate 8b soak validated steady memory under DF-flip churn
 only (no FDB churn). This variant was the alpha-checklist exit
 condition for the production-default flip of `apply_bum_enforcement`
-and `apply_aliasing_ecmp` to `true`; it PASSED 2026-05-16 (postmortem
+to `true` (`apply_aliasing_ecmp` already defaulted to `true` since
+v0.20.0, ADR-0059 slice 3.5); it PASSED 2026-05-16 (postmortem
 `docs/soaks/soak-gate8b-mac-churn-24h.md`) and the flip shipped in v0.23.0.
 Future runs guard the production default rather than gate its
 initial flip.
@@ -691,9 +692,10 @@ CSV inspection.
 ## When to run
 
 - **As a regression guard** for the production defaults of
-  `apply_bum_enforcement` and `apply_aliasing_ecmp` (`true` since
-  v0.23.0; gating evidence: Gate 8b 24 h MAC-churn 2026-05-16 +
-  M37 local-origination 24 h MAC-churn 2026-05-19). See
+  `apply_bum_enforcement` (`true` since v0.23.0) and
+  `apply_aliasing_ecmp` (`true` since v0.20.0, ADR-0059 slice 3.5);
+  gating evidence for both: Gate 8b 24 h MAC-churn 2026-05-16 +
+  M37 local-origination 24 h MAC-churn 2026-05-19. See
   `docs/evpn-alpha-soak.md`.
 - **After any change to** the local-MAC origination / withdraw
   path (`crates/evpn-linux/src/reconcile.rs`,
@@ -842,6 +844,8 @@ per-cycle events recorded in `churn.log`.
   or the `evpn_l3_originator` / `evpn_l3_installer` daemon tasks.
 - **Before tagging any release that touches the symmetric IRB
   packet path or the L3 owned-state model.**
+
+---
 
 # Intern-table / churn soak harnesses
 
