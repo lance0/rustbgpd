@@ -40,7 +40,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Top-level keys of the supported `template-context` shape, sorted.
 ///
@@ -214,6 +215,55 @@ pub struct Rendered {
     /// part of the deterministic file set).
     pub receipt: serde_json::Value,
     pub warnings: Vec<String>,
+}
+
+/// One exact UTF-8 customization input and its operator-facing source path.
+#[derive(Debug, Clone)]
+pub struct SiteLocalFile {
+    pub source_path: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Strict site-local merge request. At least one policy file is required.
+#[derive(Debug, Clone)]
+pub struct SiteLocalInput {
+    pub merge: SiteLocalFile,
+    pub policies: Vec<SiteLocalFile>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SitePolicyHooks {
+    #[serde(default)]
+    import_chain: Vec<String>,
+    #[serde(default)]
+    export_chain: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SiteNeighborHooks {
+    address: String,
+    #[serde(default)]
+    import_policy_chain: Vec<String>,
+    #[serde(default)]
+    export_policy_chain: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SiteMerge {
+    #[serde(default)]
+    policy: SitePolicyHooks,
+    #[serde(default)]
+    neighbors: Vec<SiteNeighborHooks>,
+}
+
+struct ValidatedSite {
+    merge: SiteMerge,
+    neighbors: BTreeMap<std::net::IpAddr, SiteNeighborHooks>,
+    emitted: Vec<(String, String)>,
+    receipt: serde_json::Value,
 }
 
 // ---------------------------------------------------------------------------
@@ -876,6 +926,23 @@ enum CommunityKind {
 }
 
 pub fn render(context_input: &str, opts: &Options) -> Result<Rendered, RenderError> {
+    render_inner(context_input, opts, None)
+}
+
+/// Render a validated site-local bundle whose compiled effects cannot bypass generated safety.
+pub fn render_site_local(
+    context_input: &str,
+    opts: &Options,
+    site: &SiteLocalInput,
+) -> Result<Rendered, RenderError> {
+    render_inner(context_input, opts, Some(site))
+}
+
+fn render_inner(
+    context_input: &str,
+    opts: &Options,
+    site: Option<&SiteLocalInput>,
+) -> Result<Rendered, RenderError> {
     let mut warnings = Vec::new();
     let (value, found_fingerprint) = if looks_sectioned(context_input) {
         ingest_sectioned(context_input, opts, &mut warnings)?
@@ -908,6 +975,9 @@ pub fn render(context_input: &str, opts: &Options) -> Result<Rendered, RenderErr
         }
     };
 
+    let site = site
+        .map(|input| validate_site_local(&ctx, &resolved, input))
+        .transpose()?;
     let mut files = BTreeMap::new();
     files.insert(
         "policy/rs-hygiene.rpol".to_owned(),
@@ -921,16 +991,372 @@ pub fn render(context_input: &str, opts: &Options) -> Result<Rendered, RenderErr
     }
     files.insert(
         "config.toml".to_owned(),
-        render_toml(&ctx, &resolved, &router_id, &found_fingerprint, opts),
+        render_toml(
+            &ctx,
+            &resolved,
+            &router_id,
+            &found_fingerprint,
+            opts,
+            site.as_ref(),
+        ),
     );
 
-    let receipt = build_receipt(&resolved, &found_fingerprint, &warnings);
+    if let Some(site) = &site {
+        files.extend(site.emitted.iter().cloned());
+    }
+
+    let mut receipt = build_receipt(&resolved, &found_fingerprint, &warnings);
+    if let Some(site) = &site {
+        let mut attestation = site.receipt.clone();
+        attestation["final_neighbors"] = final_neighbor_receipt(&resolved, site);
+        attestation["config_sha256"] = sha256(files["config.toml"].as_bytes()).into();
+        receipt["site_local"] = attestation;
+    }
 
     Ok(Rendered {
         files,
         receipt,
         warnings,
     })
+}
+
+fn validate_site_local(
+    ctx: &Context,
+    clients: &[ResolvedClient<'_>],
+    input: &SiteLocalInput,
+) -> Result<ValidatedSite, RenderError> {
+    use rustbgpd_policy::rpol::RpolFile;
+    use rustbgpd_policy::sets::SetStore;
+
+    let mut refusals = Vec::new();
+    if input.policies.is_empty() {
+        refusals.push("site-local customization requires at least one --extra-rpol".into());
+    }
+    let merge_text = std::str::from_utf8(&input.merge.bytes)
+        .map_err(|error| RenderError::Refused(vec![format!("merge TOML is not UTF-8: {error}")]))?;
+    let merge: SiteMerge = toml::from_str(merge_text)
+        .map_err(|error| RenderError::Refused(vec![format!("invalid merge TOML: {error}")]))?;
+    let mut generated =
+        BTreeSet::from(["rs-hygiene".to_owned(), "rs-transparent-export".to_owned()]);
+    generated.extend(
+        clients
+            .iter()
+            .map(|client| format!("client-{}", client.slug)),
+    );
+    generated.extend(export_policy_names(clients).0.into_values());
+    let mut roster = BTreeSet::new();
+    let mut flattened = BTreeSet::new();
+    let mut emitted = Vec::new();
+    let mut attestations = Vec::new();
+    let forbidden = forbidden_markers(ctx);
+    for (index, source) in input.policies.iter().enumerate() {
+        let text = match std::str::from_utf8(&source.bytes) {
+            Ok(text) => text,
+            Err(error) => {
+                refusals.push(format!("{} is not UTF-8: {error}", source.source_path));
+                continue;
+            }
+        };
+        let file = match RpolFile::parse(text) {
+            Ok(file) => file,
+            Err(error) => {
+                refusals.push(format!(
+                    "{}: imports or invalid RPOL are refused: {error:?}",
+                    source.source_path
+                ));
+                continue;
+            }
+        };
+        if file.dataset_decls().next().is_some() {
+            refusals.push(format!("{}: datasets are refused", source.source_path));
+        }
+        let policies = file
+            .policies()
+            .map(|(name, arity)| (name.to_owned(), arity))
+            .collect::<Vec<_>>();
+        if policies.is_empty() {
+            refusals.push(format!("{}: empty policy roster", source.source_path));
+        }
+        let mut declared = Vec::new();
+        let mut file_flattened = Vec::new();
+        let mut store = SetStore::new();
+        for (name, arity) in policies {
+            declared.push(name.clone());
+            if arity != 0 {
+                refusals.push(format!("{name}: parameters are refused"));
+                continue;
+            }
+            if generated.contains(&name) {
+                refusals.push(format!("{name}: generated policy name collision"));
+            }
+            if !roster.insert(name.clone()) {
+                refusals.push(format!("duplicate policy `{name}` across extra files"));
+            }
+            let Some(compiled) = file.compile_policy_bound(
+                &name,
+                &[],
+                &mut store,
+                &rustbgpd_policy::datasets::DatasetBindings::new(),
+            ) else {
+                unreachable!("policy came from the parsed roster")
+            };
+            let chain = match compiled {
+                Ok(chain) => chain,
+                Err(missing) => {
+                    refusals.push(format!("{name}: datasets are refused: {missing:?}"));
+                    continue;
+                }
+            };
+            for policy in &chain.policies {
+                file_flattened.push(policy.name.as_deref().unwrap_or(&name).to_string());
+            }
+            if let Some(reason) = unsafe_chain(&chain, &forbidden) {
+                refusals.push(format!("{name}: {reason}"));
+            }
+        }
+        flattened.extend(file_flattened.iter().cloned());
+        let emitted_path = format!("policy/site-local-{:03}.rpol", index + 1);
+        let digest = sha256(&source.bytes);
+        attestations.push(serde_json::json!({
+            "source_path": source.source_path,
+            "source_sha256": digest,
+            "emitted_path": emitted_path,
+            "emitted_sha256": digest,
+            "declared_policies": declared,
+            "flattened_policies": file_flattened,
+        }));
+        emitted.push((emitted_path, text.to_owned()));
+    }
+
+    let known_addresses = clients
+        .iter()
+        .filter_map(|client| client.client.ip.parse::<std::net::IpAddr>().ok())
+        .collect::<BTreeSet<_>>();
+    let mut used = BTreeSet::new();
+    validate_hooks(
+        "policy.import_chain",
+        &merge.policy.import_chain,
+        &roster,
+        &generated,
+        &mut used,
+        &mut refusals,
+    );
+    validate_hooks(
+        "policy.export_chain",
+        &merge.policy.export_chain,
+        &roster,
+        &generated,
+        &mut used,
+        &mut refusals,
+    );
+    let mut neighbors = BTreeMap::new();
+    for neighbor in &merge.neighbors {
+        let address = match neighbor.address.parse::<std::net::IpAddr>() {
+            Ok(address) => address,
+            Err(_) => {
+                refusals.push(format!("malformed neighbor address `{}`", neighbor.address));
+                continue;
+            }
+        };
+        if !known_addresses.contains(&address) {
+            refusals.push(format!("unknown neighbor `{address}`"));
+        }
+        if neighbors.insert(address, neighbor.clone()).is_some() {
+            refusals.push(format!("duplicate neighbor `{address}`"));
+        }
+        validate_hooks(
+            "neighbor import",
+            &neighbor.import_policy_chain,
+            &roster,
+            &generated,
+            &mut used,
+            &mut refusals,
+        );
+        validate_hooks(
+            "neighbor export",
+            &neighbor.export_policy_chain,
+            &roster,
+            &generated,
+            &mut used,
+            &mut refusals,
+        );
+        for (direction, global, local) in [
+            (
+                "import",
+                &merge.policy.import_chain,
+                &neighbor.import_policy_chain,
+            ),
+            (
+                "export",
+                &merge.policy.export_chain,
+                &neighbor.export_policy_chain,
+            ),
+        ] {
+            for hook in local.iter().filter(|hook| global.contains(hook)) {
+                refusals.push(format!(
+                    "duplicate hook `{hook}` in final {direction} chain for `{address}`"
+                ));
+            }
+        }
+    }
+    for name in roster.difference(&used) {
+        refusals.push(format!("unused site-local policy `{name}`"));
+    }
+    if !refusals.is_empty() {
+        return Err(RenderError::Refused(refusals));
+    }
+    Ok(ValidatedSite {
+        receipt: serde_json::json!({
+            "merge_source": {"path": input.merge.source_path, "sha256": sha256(&input.merge.bytes)},
+            "extra_policies": attestations,
+            "declared_policy_roster": roster,
+            "flattened_policy_roster": flattened,
+            "requested": merge,
+        }),
+        merge,
+        neighbors,
+        emitted,
+    })
+}
+
+fn validate_hooks(
+    scope: &str,
+    hooks: &[String],
+    roster: &BTreeSet<String>,
+    generated: &BTreeSet<String>,
+    used: &mut BTreeSet<String>,
+    refusals: &mut Vec<String>,
+) {
+    let mut local = BTreeSet::new();
+    for hook in hooks {
+        if !local.insert(hook) {
+            refusals.push(format!("duplicate hook `{hook}` in {scope}"));
+        }
+        if generated.contains(hook) {
+            refusals.push(format!("generated policy hook `{hook}` in {scope}"));
+        } else if roster.contains(hook) {
+            used.insert(hook.clone());
+        } else {
+            refusals.push(format!("unknown policy hook `{hook}` in {scope}"));
+        }
+    }
+}
+
+fn forbidden_markers(ctx: &Context) -> Vec<rustbgpd_policy::CommunityMatch> {
+    let mut markers = vec![rustbgpd_policy::parse_community_match("BLACKHOLE").unwrap()];
+    if let Some(values) = ctx.cfg.communities.get("blackholing") {
+        for value in [&values.std, &values.lrg, &values.ext]
+            .into_iter()
+            .flatten()
+        {
+            let value = if value.matches(':').count() == 2
+                && !value.starts_with("RT:")
+                && !value.starts_with("RO:")
+            {
+                format!("LC:{value}")
+            } else {
+                value.clone()
+            };
+            if let Ok(marker) = rustbgpd_policy::parse_community_match(&value) {
+                markers.push(marker);
+            }
+        }
+    }
+    markers
+}
+
+fn unsafe_chain(
+    chain: &rustbgpd_policy::ir::CompiledChain,
+    forbidden: &[rustbgpd_policy::CommunityMatch],
+) -> Option<&'static str> {
+    chain.policies.iter().find_map(|policy| {
+        match policy.default_action {
+            rustbgpd_policy::PolicyAction::Permit | rustbgpd_policy::PolicyAction::Deny => {}
+        }
+        policy
+            .terms
+            .iter()
+            .find_map(|term| unsafe_term(term, forbidden))
+    })
+}
+
+fn unsafe_term(
+    term: &rustbgpd_policy::ir::Term,
+    forbidden: &[rustbgpd_policy::CommunityMatch],
+) -> Option<&'static str> {
+    use rustbgpd_policy::ir::TermAction;
+    match &term.action {
+        TermAction::Permit(mods) | TermAction::Continue(mods) => unsafe_mods(mods, forbidden),
+        TermAction::CommunityVar { .. } => Some("community variables are refused"),
+        TermAction::ForEach(node) => node
+            .body
+            .iter()
+            .find_map(|term| unsafe_term(term, forbidden)),
+        TermAction::Deny
+        | TermAction::Bind { .. }
+        | TermAction::Break
+        | TermAction::ContinueLoop => None,
+    }
+}
+
+fn unsafe_mods(
+    mods: &rustbgpd_policy::RouteModifications,
+    forbidden: &[rustbgpd_policy::CommunityMatch],
+) -> Option<&'static str> {
+    let rustbgpd_policy::RouteModifications {
+        set_local_pref,
+        set_med,
+        set_next_hop,
+        communities_add,
+        communities_remove,
+        extended_communities_add,
+        extended_communities_remove,
+        large_communities_add,
+        large_communities_remove,
+        as_path_prepend,
+        as_path_prepend_computed,
+        set_local_pref_computed,
+        set_med_computed,
+    } = mods;
+    if !communities_remove.is_empty()
+        || !large_communities_remove.is_empty()
+        || !extended_communities_remove.is_empty()
+    {
+        return Some("community removal is refused");
+    }
+    if set_next_hop.is_some() {
+        return Some("next-hop changes are refused");
+    }
+    if as_path_prepend.is_some() || as_path_prepend_computed.is_some() {
+        return Some("AS prepend is refused");
+    }
+    let _ = (
+        set_local_pref,
+        set_med,
+        set_local_pref_computed,
+        set_med_computed,
+    );
+    let adds_marker = forbidden.iter().any(|marker| {
+        communities_add
+            .iter()
+            .any(|value| marker.matches_standard(*value))
+            || large_communities_add
+                .iter()
+                .any(|value| marker.matches_large(value))
+            || extended_communities_add
+                .iter()
+                .any(|value| marker.matches_ec(value))
+    });
+    adds_marker.then_some("blackhole add/local marker add is refused")
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            write!(output, "{byte:02x}").expect("writing to String cannot fail");
+            output
+        })
 }
 
 fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
@@ -1528,6 +1954,7 @@ fn render_toml(
     router_id: &str,
     fingerprint: &str,
     opts: &Options,
+    site: Option<&ValidatedSite>,
 ) -> String {
     let mut out = generated_header("Route-server configuration", fingerprint);
     let cfg = &ctx.cfg;
@@ -1601,19 +2028,7 @@ fn render_toml(
          [policy.definitions.rs-transparent-export]\ndefault_action = \"permit\"\n",
     );
 
-    let mut export_names = BTreeMap::new();
-    let mut client_exports = BTreeMap::new();
-    for rc in clients {
-        if let Some(blackhole) = &rc.blackhole {
-            let key = blackhole_export_key(blackhole);
-            let next = export_names.len() + 1;
-            let name = export_names
-                .entry(key)
-                .or_insert_with(|| format!("rs-blackhole-export-{next}"))
-                .clone();
-            client_exports.insert(rc.slug.clone(), name);
-        }
-    }
+    let (export_names, client_exports) = export_policy_names(clients);
     for (key, name) in &export_names {
         render_blackhole_export_toml(&mut out, name, key);
     }
@@ -1621,6 +2036,11 @@ fn render_toml(
     out.push_str("\n[policy]\nrpol_files = [\n    \"policy/rs-hygiene.rpol\",\n");
     for rc in clients {
         let _ = writeln!(out, "    \"policy/client-{}.rpol\",", rc.slug);
+    }
+    if let Some(site) = site {
+        for (path, _) in &site.emitted {
+            let _ = writeln!(out, "    \"{path}\",");
+        }
     }
     out.push_str("]\nexport_chain = [\"rs-transparent-export\"]\n");
 
@@ -1656,19 +2076,66 @@ fn render_toml(
         if let Some(seconds) = rc.max_prefix_restart_seconds {
             let _ = writeln!(out, "max_prefix_restart_seconds = {seconds}");
         }
-        let _ = writeln!(
-            out,
-            "import_policy_chain = [\"rs-hygiene\", \"client-{}\"]",
-            rc.slug
-        );
-        if let Some(export) = client_exports.get(&rc.slug) {
-            let _ = writeln!(out, "export_policy_chain = [\"{export}\"]");
+        if let Some(site) = site {
+            let base = client_exports
+                .get(&rc.slug)
+                .map_or("rs-transparent-export", String::as_str);
+            let (imports, exports) = site_chains(rc, site, base);
+            write_chain(&mut out, "import_policy_chain", &imports);
+            write_chain(&mut out, "export_policy_chain", &exports);
+        } else {
+            let _ = writeln!(
+                out,
+                "import_policy_chain = [\"rs-hygiene\", \"client-{}\"]",
+                rc.slug
+            );
+            if let Some(export) = client_exports.get(&rc.slug) {
+                let _ = writeln!(out, "export_policy_chain = [\"{export}\"]");
+            }
         }
         if rc.add_path {
             out.push_str("\n[neighbors.add_path]\nsend = true\nsend_max = 8\n");
         }
     }
     out
+}
+
+fn write_chain(out: &mut String, key: &str, chain: &[String]) {
+    let values = chain
+        .iter()
+        .map(|name| format!("\"{}\"", toml_escape(name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(out, "{key} = [{values}]");
+}
+
+fn site_chains(
+    client: &ResolvedClient<'_>,
+    site: &ValidatedSite,
+    export_base: &str,
+) -> (Vec<String>, Vec<String>) {
+    let hooks = client
+        .client
+        .ip
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .and_then(|address| site.neighbors.get(&address));
+    let mut import = vec!["rs-hygiene".to_owned()];
+    import.extend(site.merge.policy.import_chain.iter().cloned());
+    import.extend(
+        hooks
+            .into_iter()
+            .flat_map(|hook| hook.import_policy_chain.iter().cloned()),
+    );
+    import.push(format!("client-{}", client.slug));
+    let mut export = site.merge.policy.export_chain.clone();
+    export.extend(
+        hooks
+            .into_iter()
+            .flat_map(|hook| hook.export_policy_chain.iter().cloned()),
+    );
+    export.push(export_base.to_owned());
+    (import, export)
 }
 
 fn blackhole_export_key(b: &ResolvedBlackhole) -> String {
@@ -1699,6 +2166,25 @@ fn blackhole_export_key(b: &ResolvedBlackhole) -> String {
         b.rewrite_next_hop.as_deref().unwrap_or(""),
         markers
     )
+}
+
+fn export_policy_names(
+    clients: &[ResolvedClient<'_>],
+) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+    let mut names = BTreeMap::new();
+    let mut clients_by_name = BTreeMap::new();
+    for client in clients {
+        if let Some(blackhole) = &client.blackhole {
+            let key = blackhole_export_key(blackhole);
+            let next = names.len() + 1;
+            let name = names
+                .entry(key)
+                .or_insert_with(|| format!("rs-blackhole-export-{next}"))
+                .clone();
+            clients_by_name.insert(client.slug.clone(), name);
+        }
+    }
+    (names, clients_by_name)
 }
 
 fn render_blackhole_export_toml(out: &mut String, name: &str, key: &str) {
@@ -2204,6 +2690,25 @@ fn unregistered_origin(origins: &[u32]) -> u32 {
 // ---------------------------------------------------------------------------
 // Receipt
 // ---------------------------------------------------------------------------
+
+fn final_neighbor_receipt(
+    clients: &[ResolvedClient<'_>],
+    site: &ValidatedSite,
+) -> serde_json::Value {
+    let (_, client_exports) = export_policy_names(clients);
+    serde_json::Value::Array(
+        clients
+            .iter()
+            .map(|client| {
+                let base = client_exports
+                    .get(&client.slug)
+                    .map_or("rs-transparent-export", String::as_str);
+                let (import, export) = site_chains(client, site, base);
+                serde_json::json!({"address": client.client.ip, "import_policy_chain": import, "export_policy_chain": export})
+            })
+            .collect(),
+    )
+}
 
 fn build_receipt(
     clients: &[ResolvedClient<'_>],

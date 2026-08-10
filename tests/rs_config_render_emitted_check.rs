@@ -10,7 +10,10 @@
 //! warned about for resolving no export policy — the tool taught operators
 //! that the gate they run is noise.
 
-use rs_config_render::{Options, RenderError, render};
+use rs_config_render::{
+    Options, RenderError, SiteLocalFile, SiteLocalInput, render, render_site_local,
+};
+use sha2::{Digest, Sha256};
 
 const FIXTURE: &str = include_str!("../tools/rs-config-render/tests/fixtures/context-small.yml");
 
@@ -19,6 +22,13 @@ fn rtr_options() -> Options {
         rtr_caches: vec!["127.0.0.1:3323".to_owned()],
         ..Options::default()
     }
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[test]
@@ -115,8 +125,37 @@ fn emitted_blackhole_policy_passes_rpol_and_daemon_checks() {
     prefix["exact"] = false.into();
     prefix["ge"] = 26.into();
     prefix["le"] = 28.into();
-    let rendered = render(&serde_yaml::to_string(&value).unwrap(), &rtr_options()).unwrap();
+    let policy = b"policy site-tag { term t { add community 65000:42; accept } }";
+    let merge = b"[policy]\nexport_chain=[\"site-tag\"]";
+    let site = SiteLocalInput {
+        merge: SiteLocalFile {
+            source_path: "merge.toml".into(),
+            bytes: merge.to_vec(),
+        },
+        policies: vec![SiteLocalFile {
+            source_path: "site.rpol".into(),
+            bytes: policy.to_vec(),
+        }],
+    };
+    let rendered = render_site_local(
+        &serde_yaml::to_string(&value).unwrap(),
+        &rtr_options(),
+        &site,
+    )
+    .unwrap();
     assert!(rendered.files["config.toml"].contains("set_next_hop = \"192.0.2.66\""));
+    assert!(
+        rendered.files["config.toml"]
+            .contains("export_policy_chain = [\"site-tag\", \"rs-blackhole-export-1\"]")
+    );
+    assert_eq!(
+        rendered.receipt["site_local"]["config_sha256"],
+        sha256(rendered.files["config.toml"].as_bytes())
+    );
+    assert_eq!(
+        rendered.receipt["site_local"]["extra_policies"][0]["emitted_sha256"],
+        sha256(policy)
+    );
     for (path, source) in rendered
         .files
         .iter()

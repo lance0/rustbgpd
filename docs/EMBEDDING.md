@@ -18,7 +18,7 @@ This document is the contract for embedders: which crate to depend on, what the
 |---------|---------------|-----------------------------------------|------|
 | `birdwatcher-adapter` | Disabled | `rustbgpd-api` | Birdwatcher-compatible REST adapter backed by the daemon gRPC API. |
 | `event-bridge` | Disabled | `rustbgpd-api` | Reference durable-event collector bridge. |
-| `rs-config-render` | Disabled | None | Route-server configuration rendering tool. |
+| `rs-config-render` | Disabled | `rustbgpd-policy` | Route-server configuration rendering tool. |
 | `rustbgpctl` | Disabled | `rustbgpd-policy`, `rustbgpd-wire` | Thin gRPC management CLI and support library. |
 | `rustbgpd` | Disabled | `rustbgpd-api`, `rustbgpd-bfd`, `rustbgpd-bmp`, `rustbgpd-event-history`, `rustbgpd-evpn`, `rustbgpd-evpn-linux`, `rustbgpd-fsm`, `rustbgpd-mrt`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | Daemon binary and internal assembly library. |
 | `rustbgpd-api` | Disabled | `rustbgpd-event-history`, `rustbgpd-evpn`, `rustbgpd-fsm`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | gRPC server, generated bindings, and service types. |

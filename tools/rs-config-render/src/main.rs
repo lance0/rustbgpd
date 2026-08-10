@@ -8,7 +8,9 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use rs_config_render::{Options, render};
+use rs_config_render::{
+    Options, RenderError, SiteLocalFile, SiteLocalInput, render, render_site_local,
+};
 
 #[derive(Parser)]
 #[command(
@@ -36,6 +38,12 @@ struct Cli {
     /// Proceed despite a context-shape fingerprint mismatch
     #[arg(long)]
     allow_shape_drift: bool,
+    /// Exact UTF-8 site-local .rpol source; repeatable and requires --merge-toml
+    #[arg(long = "extra-rpol")]
+    extra_rpol: Vec<PathBuf>,
+    /// Strict site-local hook TOML; exactly one when --extra-rpol is used
+    #[arg(long = "merge-toml")]
+    merge_toml: Vec<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -89,6 +97,17 @@ fn stdout_exit(result: Result<(), StdoutWriteError>) -> ExitCode {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let customized = !cli.extra_rpol.is_empty() || !cli.merge_toml.is_empty();
+    if customized && (cli.extra_rpol.is_empty() || cli.merge_toml.len() != 1) {
+        eprintln!(
+            "rs-config-render: {}",
+            RenderError::Refused(vec![
+                "customization requires at least one --extra-rpol and exactly one --merge-toml"
+                    .into(),
+            ])
+        );
+        return ExitCode::from(2);
+    }
     let context = match std::fs::read_to_string(&cli.context) {
         Ok(context) => context,
         Err(e) => {
@@ -105,7 +124,31 @@ fn main() -> ExitCode {
         rtr_caches: cli.rtr_cache,
         allow_shape_drift: cli.allow_shape_drift,
     };
-    let rendered = match render(&context, &opts) {
+    let site = customized.then(|| {
+        let read = |path: &PathBuf| {
+            std::fs::read(path)
+                .map(|bytes| SiteLocalFile {
+                    source_path: path.display().to_string(),
+                    bytes,
+                })
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))
+        };
+        Ok::<_, String>(SiteLocalInput {
+            merge: read(&cli.merge_toml[0])?,
+            policies: cli.extra_rpol.iter().map(read).collect::<Result<_, _>>()?,
+        })
+    });
+    let site = match site.transpose() {
+        Ok(site) => site,
+        Err(error) => {
+            eprintln!("rs-config-render: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let rendered = match site.as_ref().map_or_else(
+        || render(&context, &opts),
+        |site| render_site_local(&context, &opts, site),
+    ) {
         Ok(rendered) => rendered,
         Err(e) => {
             eprintln!("rs-config-render: {e}");

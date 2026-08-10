@@ -165,12 +165,39 @@ and `EXPECTED_SECTION_NAMES` (`src/lib.rs`).
 --min-prefixes <N>     per-client prefix-set plausibility floor (default 1)
 --min-origins <N>      per-client origin-set plausibility floor (default 1)
 --allow-shape-drift    proceed despite a fingerprint mismatch
+--extra-rpol <PATH>    exact site-local policy bytes; repeatable
+--merge-toml <PATH>    one strict site-local hook file (requires --extra-rpol)
 ```
 
 ## Local customization
 
-The renderer owns the whole output directory — do not hand-edit
-generated files. Site-local policy belongs in a separate `.rpol` file
-appended to the daemon's `[policy] rpol_files` by your own tooling
-after the rsync step, or in a wrapper that post-processes
-`config.toml`; a first-class merge-in point is a tracked follow-up.
+The renderer owns the whole output directory — do not hand-edit generated
+files. Supply one or more site policies together with exactly one merge file:
+
+```console
+rs-config-render --context context.yml --out-dir candidate \
+  --extra-rpol site-global.rpol --extra-rpol site-peer.rpol \
+  --merge-toml site-hooks.toml --rtr-cache 127.0.0.1:3323
+```
+
+```toml
+[policy]
+import_chain = ["site-global-in"]
+export_chain = ["site-global-out"]
+
+[[neighbors]]
+address = "192.0.2.11"
+import_policy_chain = ["site-peer-in"]
+export_policy_chain = ["site-peer-out"]
+```
+
+This is intentionally not arbitrary TOML. Only those hook keys are accepted,
+every hook must name a supplied policy, each final direction chain is unique,
+and every policy must be used. Imports, datasets, parameters, generated-name collisions,
+next-hop changes, AS prepends, community removals or variables, and configured
+BLACKHOLE-marker synthesis are refused. The renderer validates and compiles the
+whole bundle in memory before touching the output directory, emits exact source
+bytes as `policy/site-local-NNN.rpol`, and attests source/emitted/config hashes
+and requested/final chains under `site_local` in the receipt. Generated safety
+always stays final: import is hygiene, global hook, neighbor hook, client deny;
+export is global hook, neighbor hook, then transparent or BLACKHOLE base.
