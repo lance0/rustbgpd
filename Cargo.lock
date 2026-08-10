@@ -2820,10 +2820,13 @@ name = "rs-config-render"
 version = "0.64.0"
 dependencies = [
  "clap",
+ "rustbgpd-policy",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.11.0",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

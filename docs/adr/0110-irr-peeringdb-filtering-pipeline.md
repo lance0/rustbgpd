@@ -199,7 +199,7 @@ still refuses an untranslated mode.
 | RFC 8950 IPv6 next hop for IPv4 | extended-nexthop (ADR-0037) | Shipped (BIRD-1.x and OpenBGPD lack this) |
 | 16/32-bit ASN community forms, large communities (RFC 8092) | standard/extended/large community model | Shipped |
 | Client blacklists | omit neighbor from generated TOML | Trivial |
-| Operator local-customization hooks (`.local` files) | rpol `import` + `rpol_roots` for policy; **TOML has no include** — the renderer owns the whole TOML and must provide merge-in points itself | Design point for the renderer, not a daemon gap |
+| Operator local-customization hooks (`.local` files) | renderer `--extra-rpol` plus strict `--merge-toml`; exact bytes and hashes in the receipt | Shipped as confined append hooks. Global hooks are expanded into each neighbor, before the generated client deny/import or transparent/BLACKHOLE export base; arbitrary TOML, imported graphs, datasets, parameters, next-hop/AS-prepend changes, community removal/variables, BLACKHOLE-marker synthesis, generated collisions, and unused hooks fail closed before output. |
 
 Summary: the daemon primitives needed for a pilot are shipped except the
 explicitly deferred NEXT_HOP same-AS inventory mode. The renderer remains
