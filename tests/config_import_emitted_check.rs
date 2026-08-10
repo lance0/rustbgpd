@@ -66,6 +66,36 @@ fn emitted_configs_pass_rustbgpd_check() {
     }
 }
 
+#[test]
+fn bird_empty_channels_emit_a_daemon_valid_config() {
+    let source = "router id 192.0.2.10;\n\
+                  protocol bgp edge { local as 64500; neighbor 192.0.2.1 as 64500; \
+                  ipv4; ipv6; rr client on; }\n";
+    let imported =
+        import_source(SourceFormat::Bird, "empty-channels.conf", source).expect("import");
+    assert!(
+        imported
+            .config_toml
+            .contains("families = [\"ipv4_unicast\", \"ipv6_unicast\"]")
+    );
+    assert!(!imported.config_toml.contains("route_reflector_client"));
+    assert!(
+        imported.report.skipped.iter().any(|skip| {
+            skip.stanza.ends_with("rr client on")
+                && skip.guidance.contains("route_reflector_client = true")
+        }),
+        "{:?}",
+        imported.report.skipped
+    );
+
+    let (code, stdout, stderr) = run_check(&imported.config_toml);
+    assert_eq!(
+        code,
+        Some(0),
+        "rustbgpd --check rejected the import\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
 /// Fail-closed exit contract: when the emitted config is one the daemon's
 /// `--check` rejects, the import itself must exit nonzero — a clean exit 0
 /// alongside a rejected translation would break the ladder's "operator
