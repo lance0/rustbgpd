@@ -107,6 +107,12 @@ struct WireRow {
     bitmap: Bitmap,
     wire_ms: u128,
 }
+struct CollectorGates {
+    ready: oneshot::Sender<()>,
+    arm: oneshot::Receiver<()>,
+    armed: oneshot::Sender<()>,
+    start: oneshot::Receiver<Instant>,
+}
 fn value(index: usize) -> Ipv4Prefix {
     let within = index % 65_536;
     Ipv4Prefix::new(
@@ -172,8 +178,7 @@ fn checkpoint_json(name: &str, value: Checkpoint) -> String {
 async fn collect(
     peer: IpAddr,
     mut rx: mpsc::Receiver<Message>,
-    ready: oneshot::Sender<()>,
-    start: oneshot::Receiver<Instant>,
+    gates: CollectorGates,
     shape: Shape,
     deadline: tokio::time::Instant,
 ) -> Result<WireRow> {
@@ -189,10 +194,11 @@ async fn collect(
             }
         }
     }
-    ready
+    gates
+        .ready
         .send(())
         .map_err(|_| anyhow::anyhow!("ready dropped"))?;
-    let t0 = start_after_keepalives(&mut rx, start, deadline).await?;
+    let t0 = start_after_keepalives(&mut rx, gates.arm, gates.armed, gates.start, deadline).await?;
     let mut row = WireRow {
         peer,
         messages: 0,
@@ -231,6 +237,21 @@ async fn collect(
     );
     row.wire_ms = t0.elapsed().as_millis();
     Ok(row)
+}
+
+async fn arm_collectors(
+    arms: Vec<oneshot::Sender<()>>,
+    armed: Vec<oneshot::Receiver<()>>,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
+    for arm in arms {
+        arm.send(())
+            .map_err(|_| anyhow::anyhow!("collector exited"))?;
+    }
+    for acknowledgement in armed {
+        tokio::time::timeout_at(deadline, acknowledgement).await??;
+    }
+    Ok(())
 }
 async fn counts(query: &mpsc::Sender<RibUpdate>) -> Result<HashMap<IpAddr, u64>> {
     let (reply, receive) = oneshot::channel();
@@ -336,6 +357,8 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
         .map(|address| address.ip())
         .collect::<Vec<_>>();
     let mut ready = Vec::new();
+    let mut arms = Vec::new();
+    let mut armed = Vec::new();
     let mut starts = Vec::new();
     let mut stub_senders = Vec::with_capacity(shape.peers);
     let collectors = stubs
@@ -344,14 +367,22 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
         .map(|(stub, peer)| {
             stub_senders.push(stub.tx);
             let (ready_tx, ready_rx) = oneshot::channel();
+            let (arm_tx, arm_rx) = oneshot::channel();
+            let (armed_tx, armed_rx) = oneshot::channel();
             let (start_tx, start_rx) = oneshot::channel();
             ready.push(ready_rx);
+            arms.push(arm_tx);
+            armed.push(armed_rx);
             starts.push(start_tx);
             tokio::spawn(collect(
                 *peer,
                 stub.rx,
-                ready_tx,
-                start_rx,
+                CollectorGates {
+                    ready: ready_tx,
+                    arm: arm_rx,
+                    armed: armed_tx,
+                    start: start_rx,
+                },
                 shape,
                 run_deadline,
             ))
@@ -365,6 +396,7 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
         groups.insert(tokio::time::timeout_at(run_deadline, group(&query_tx, *peer)).await??);
     }
     ensure!(groups.len() == 1 && groups.iter().all(|item| item.starts_with("group:")));
+    arm_collectors(arms, armed, run_deadline).await?;
     let t0 = Instant::now();
     for start in starts {
         start
@@ -460,6 +492,38 @@ mod tests {
     use super::*;
     use rustbgpd_policy::{rpol::RpolFile, sets::SetStore, NamedPolicy, PolicyChain};
     use rustbgpd_transport::{fanout_bench_export_encoder, fanout_bench_export_snapshot_evidence};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+
+    fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
+        let mut context = Context::from_waker(Waker::noop());
+        future.poll(&mut context)
+    }
+
+    #[tokio::test]
+    async fn arm_collectors_waits_for_every_acknowledgement() {
+        let (first_arm_tx, first_arm_rx) = oneshot::channel();
+        let (second_arm_tx, second_arm_rx) = oneshot::channel();
+        let (first_armed_tx, first_armed_rx) = oneshot::channel();
+        let (second_armed_tx, second_armed_rx) = oneshot::channel();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let mut coordinator = Box::pin(arm_collectors(
+            vec![first_arm_tx, second_arm_tx],
+            vec![first_armed_rx, second_armed_rx],
+            deadline,
+        ));
+
+        assert!(poll_once(coordinator.as_mut()).is_pending());
+        assert!(first_arm_rx.await.is_ok() && second_arm_rx.await.is_ok());
+        first_armed_tx.send(()).unwrap();
+        assert!(poll_once(coordinator.as_mut()).is_pending());
+        second_armed_tx.send(()).unwrap();
+        assert!(matches!(
+            poll_once(coordinator.as_mut()),
+            Poll::Ready(Ok(()))
+        ));
+    }
 
     fn community_chain(value: u16) -> PolicyChain {
         let source = format!("policy p {{ term t {{ add community 65000:{value}; accept }} }}");
