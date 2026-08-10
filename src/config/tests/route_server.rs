@@ -211,6 +211,10 @@ fn orr_vantage_without_linkstate_raises_an_advisory() {
     let toml = orr_toml(
         "orr_vantage = \"192.0.2.7\"\nroute_reflector_client = true",
         "",
+    )
+    .replace(
+        "listen_port = 179",
+        "listen_port = 179\nebgp_requires_policy = false",
     );
     let config = parse(&toml).unwrap();
     let advisory = config
@@ -236,17 +240,25 @@ fn orr_vantage_without_linkstate_raises_an_advisory() {
     assert!(!text.contains('\n'), "one_line kept a newline: {text}");
 
     // Static peer-group inheritance raises the identical final advisory.
-    let inherited = parse(&orr_toml(
+    let inherited_toml = orr_toml(
         "",
         "orr_vantage = \"192.0.2.7\"\nroute_reflector_client = true",
-    ))
-    .unwrap();
+    )
+    .replace(
+        "listen_port = 179",
+        "listen_port = 179\nebgp_requires_policy = false",
+    );
+    let inherited = parse(&inherited_toml).unwrap();
     assert_eq!(inherited.advisories(), vec![advisory]);
 
     // Cleared once a neighbor carries the feed.
     let toml = orr_toml(
         "orr_vantage = \"192.0.2.7\"\nroute_reflector_client = true\nfamilies = [\"ipv4_unicast\", \"linkstate\"]",
         "",
+    )
+    .replace(
+        "listen_port = 179",
+        "listen_port = 179\nebgp_requires_policy = false",
     );
     let config = parse(&toml).unwrap();
     assert!(config.advisories().is_empty(), "{:?}", config.advisories());

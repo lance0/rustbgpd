@@ -68,6 +68,43 @@ fn rfc8212_epoch_two_omission_and_invalid_epochs_fail_closed() {
     }
 }
 
+#[test]
+fn legacy_omission_advisory_is_stable_and_independent_of_policy_completeness() {
+    for epoch in [None, Some("1")] {
+        let config = parse(&rfc8212_representation_toml(epoch, None)).unwrap();
+        let advisory = config
+            .advisories()
+            .into_iter()
+            .find(|advisory| advisory.headline.contains("rfc8212_secure_default_ready"))
+            .expect("legacy omission must raise the readiness advisory");
+        let text = advisory.one_line();
+        for exact in [
+            "source=legacy_omission, effective=false",
+            "RFC 8212 enforcement remains disabled",
+            "missing chains remain permit-all",
+            "config_epoch = 1",
+            "[global].ebgp_requires_policy = false",
+            "config_epoch = 2",
+            "[global].ebgp_requires_policy = true",
+        ] {
+            assert!(text.contains(exact), "missing {exact:?}: {text}");
+        }
+    }
+
+    for epoch in [None, Some("1"), Some("2")] {
+        for explicit in [false, true] {
+            let config = parse(&rfc8212_representation_toml(epoch, Some(explicit))).unwrap();
+            assert!(
+                config
+                    .advisories()
+                    .iter()
+                    .all(|advisory| !advisory.headline.contains("rfc8212_secure_default_ready")),
+                "explicit {explicit} at epoch {epoch:?} must not warn"
+            );
+        }
+    }
+}
+
 /// ADR-0112 restart pinning. Changing only `[global] ebgp_requires_policy` must
 /// classify as restart-required, name the *field* (not just `[global]`) in the
 /// human diff and in the v1 transaction rejection, and leave the running

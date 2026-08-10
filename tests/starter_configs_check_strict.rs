@@ -94,9 +94,9 @@ fn assert_clean(label: &str, code: Option<i32>, stdout: &str, stderr: &str) {
         code,
         Some(0),
         "{label} does not pass `rustbgpd --check --strict`.\n\
-         A shipped starter must be policy-complete: give every eBGP neighbor \
-         an explicit import and export chain (permit-all is fine when the \
-         comment says it is deliberate).\nstdout:\n{stdout}\nstderr:\n{stderr}"
+         A shipped starter must pin an explicit RFC 8212 posture and give every \
+         eBGP neighbor explicit import and export chains (permit-all is fine when \
+         the comment says it is deliberate).\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
         stdout.contains("config OK"),

@@ -11,6 +11,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Epoch-less and explicit epoch-1 RFC 8212 policy omission now raises the
+  `rfc8212_secure_default_ready` advisory. It keeps permissive behavior
+  unchanged while spelling out the exact epoch-1/false and epoch-2/true edits;
+  ordinary `--check` warns and exits 0, while `--check --strict` exits 1.
 - Persisted config normalization now serializes large policy-statement lanes in
   bounded borrowed chunks, preserving exact bytes while sharply reducing peak
   memory on the retained 3.2-million-statement receipt.

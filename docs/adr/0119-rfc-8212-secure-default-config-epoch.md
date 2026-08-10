@@ -22,10 +22,12 @@ authorizes activation only after the production-mutation proof gate below is
 complete. Acceptance itself does not change route handling, activate a new
 default, or supersede ADR-0112 and its M95 real-session receipt.
 
-The representation and transaction-materialization tranches are implemented: typed raw
-presence, pre-activation epoch-2 rejection, full-tuple restart pinning, shared canonical
-rendering, and atomic transaction planning/receipt proofs have landed. The advisory,
-migration/downgrade tooling, M95 extension, and activation remain gated by the proof plan below.
+The representation, transaction-materialization, and legacy-advisory tranches
+are implemented: typed raw presence, pre-activation epoch-2 rejection,
+full-tuple restart pinning, shared canonical rendering, atomic transaction
+planning/receipt proofs, and the human-visible
+`rfc8212_secure_default_ready` warning have landed. Migration/downgrade
+tooling, the M95 extension, and activation remain gated by the proof plan below.
 
 ## Decision
 
@@ -94,6 +96,9 @@ and prints both exact edits: `config_epoch = 1` plus
 This advisory alone leaves ordinary `rustbgpd --check` at exit 0; it contributes
 to the warning count that makes `rustbgpd --check --strict` exit 1. Other
 warnings remain independently counted. Explicit `false` never triggers it.
+
+This pre-activation advisory is now shipped. It changes diagnostics only: no
+default, route behavior, activation gate, schema, or configuration API changed.
 
 ### Reload, transactions, and receipts
 

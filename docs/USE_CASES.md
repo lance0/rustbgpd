@@ -291,6 +291,7 @@ selected unicast best routes into explicit non-reserved kernel tables.
 asn = 65100
 router_id = "10.255.0.1"
 listen_port = 1179           # non-standard port (edge routers own 179)
+ebgp_requires_policy = false
 
 [global.telemetry]
 prometheus_addr = "127.0.0.1:9179"
@@ -717,6 +718,7 @@ peers in AS 65000 with `families = ["l2vpn_evpn"]` and
 asn = 65000
 router_id = "10.0.0.100"
 cluster_id = "10.0.0.100"
+ebgp_requires_policy = false
 
 [[neighbors]]
 address = "10.0.0.1"

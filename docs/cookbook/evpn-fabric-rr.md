@@ -29,6 +29,7 @@ asn = 65000
 router_id = "10.0.0.100"
 listen_port = 179
 cluster_id = "10.0.0.100"
+ebgp_requires_policy = false
 
 [global.telemetry]
 prometheus_addr = "127.0.0.1:9179"

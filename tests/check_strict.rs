@@ -18,6 +18,7 @@ asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
 runtime_state_dir = "/tmp/rustbgpd-check-strict"
+ebgp_requires_policy = false
 
 [global.telemetry]
 log_format = "json"
@@ -47,6 +48,7 @@ asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
 runtime_state_dir = "/tmp/rustbgpd-check-strict"
+ebgp_requires_policy = false
 
 [global.telemetry]
 log_format = "json"
@@ -88,6 +90,7 @@ asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
 runtime_state_dir = "/tmp/rustbgpd-check-strict"
+ebgp_requires_policy = false
 
 [global.telemetry]
 log_format = "json"
@@ -120,6 +123,7 @@ asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
 runtime_state_dir = "/tmp/rustbgpd-check-strict"
+ebgp_requires_policy = false
 
 [global.telemetry]
 log_format = "json"
@@ -142,6 +146,7 @@ asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
 runtime_state_dir = "/tmp/rustbgpd-check-strict"
+ebgp_requires_policy = false
 
 [global.telemetry]
 log_format = "json"
@@ -177,6 +182,10 @@ fn run(config_toml: &str, args: &[&str]) -> (Option<i32>, String, String) {
     )
 }
 
+fn legacy_omission(config: &str) -> String {
+    config.replace("ebgp_requires_policy = false\n", "")
+}
+
 fn dynamic_config(enforced: bool, policy_complete: bool) -> String {
     let group_policy = if policy_complete {
         "import_policy = [{ action = \"permit\", prefix = \"0.0.0.0/0\", le = 32 }]\n\
@@ -202,8 +211,8 @@ remote_asn = 0
     );
     if enforced {
         config = config.replacen(
-            "runtime_state_dir = \"/tmp/rustbgpd-check-strict\"",
-            "runtime_state_dir = \"/tmp/rustbgpd-check-strict\"\nebgp_requires_policy = true",
+            "ebgp_requires_policy = false",
+            "ebgp_requires_policy = true",
             1,
         );
     }
@@ -281,6 +290,30 @@ fn check_strict_exits_zero_on_a_clean_config() {
         stdout.contains("config OK"),
         "clean check did not print the OK summary:\n{stdout}"
     );
+}
+
+#[test]
+fn legacy_omission_advisory_obeys_check_and_strict_exit_contract() {
+    let config = legacy_omission(CLEAN);
+    let (code, stdout, stderr) = run(&config, &["--check"]);
+    assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.contains("config VALID, 1 WARNING — NOT a clean check"));
+    assert!(stderr.contains("rfc8212_secure_default_ready"), "{stderr}");
+
+    let (code, stdout, stderr) = run(&config, &["--check", "--strict"]);
+    assert_eq!(code, Some(1), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.contains("config VALID, 1 WARNING — NOT a clean check"));
+}
+
+#[test]
+fn unpoliced_legacy_omission_aggregates_two_independent_warnings() {
+    let config = legacy_omission(WARNS);
+    let (code, stdout, stderr) = run(&config, &["--check"]);
+    assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.contains("config VALID, 2 WARNINGS — NOT a clean check"));
+    assert!(stderr.contains("rfc8212_secure_default_ready"), "{stderr}");
+    assert!(stderr.contains("eBGP neighbor"), "{stderr}");
+    assert_eq!(stderr.matches("WARNING:").count(), 2, "{stderr}");
 }
 
 /// A warning raised inside `Config::validate` has to reach the operator.
