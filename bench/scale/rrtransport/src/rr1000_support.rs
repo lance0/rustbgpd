@@ -81,19 +81,25 @@ pub async fn send_before<T>(
 
 pub async fn start_after_keepalives(
     receiver: &mut mpsc::Receiver<Message>,
+    arm: oneshot::Receiver<()>,
+    armed: oneshot::Sender<()>,
     start: oneshot::Receiver<std::time::Instant>,
     deadline: tokio::time::Instant,
 ) -> Result<std::time::Instant> {
-    let started = tokio::time::timeout_at(deadline, start).await??;
+    tokio::time::timeout_at(deadline, arm).await??;
     loop {
         match receiver.try_recv() {
             Ok(Message::Keepalive) => {}
-            Err(mpsc::error::TryRecvError::Empty) => return Ok(started),
+            Err(mpsc::error::TryRecvError::Empty) => break,
             Ok(_) | Err(mpsc::error::TryRecvError::Disconnected) => {
                 ensure!(false, "non-KEEPALIVE message queued before T0")
             }
         }
     }
+    armed
+        .send(())
+        .map_err(|_| anyhow::anyhow!("armed dropped"))?;
+    Ok(tokio::time::timeout_at(deadline, start).await??)
 }
 
 pub fn rss_kib() -> Result<(u64, u64)> {
@@ -142,6 +148,15 @@ pub async fn shutdown(sessions: Vec<PeerHandle>, deadline: tokio::time::Instant)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustbgpd_wire::RouteRefreshMessage;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+
+    fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
+        let mut context = Context::from_waker(Waker::noop());
+        future.poll(&mut context)
+    }
 
     #[tokio::test]
     async fn full_injection_channel_obeys_absolute_deadline() {
@@ -155,5 +170,65 @@ mod tests {
         .await
         .expect("injection helper ignored its deadline");
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn collector_arms_after_keepalive_drain_and_waits_for_t0() {
+        let (sender, mut receiver) = mpsc::channel(2);
+        sender.send(Message::Keepalive).await.unwrap();
+        let (arm_tx, arm_rx) = oneshot::channel();
+        let (armed_tx, mut armed_rx) = oneshot::channel();
+        let (start_tx, start_rx) = oneshot::channel();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut collector = Box::pin(start_after_keepalives(
+            &mut receiver,
+            arm_rx,
+            armed_tx,
+            start_rx,
+            deadline,
+        ));
+
+        assert!(poll_once(collector.as_mut()).is_pending());
+        assert!(poll_once(Pin::new(&mut armed_rx)).is_pending());
+        arm_tx.send(()).unwrap();
+        assert!(poll_once(collector.as_mut()).is_pending());
+        assert!(matches!(
+            poll_once(Pin::new(&mut armed_rx)),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(poll_once(collector.as_mut()).is_pending());
+        let t0 = std::time::Instant::now();
+        start_tx.send(t0).unwrap();
+        assert!(matches!(poll_once(collector.as_mut()), Poll::Ready(Ok(value)) if value == t0));
+    }
+
+    #[tokio::test]
+    async fn collector_does_not_arm_with_pre_t0_non_keepalive() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender
+            .send(Message::RouteRefresh(RouteRefreshMessage::new(
+                rustbgpd_wire::Afi::Ipv4,
+                rustbgpd_wire::Safi::Unicast,
+            )))
+            .await
+            .unwrap();
+        let (arm_tx, arm_rx) = oneshot::channel();
+        let (armed_tx, mut armed_rx) = oneshot::channel();
+        let (_start_tx, start_rx) = oneshot::channel();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut collector = Box::pin(start_after_keepalives(
+            &mut receiver,
+            arm_rx,
+            armed_tx,
+            start_rx,
+            deadline,
+        ));
+
+        arm_tx.send(()).unwrap();
+        assert!(matches!(poll_once(collector.as_mut()), Poll::Ready(Err(_))));
+        assert!(matches!(
+            poll_once(Pin::new(&mut armed_rx)),
+            Poll::Ready(Err(_))
+        ));
     }
 }
