@@ -573,11 +573,12 @@ impl ExtendedCommunity {
         let raw = u64::from_be_bytes([0x06, 0x03, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]]);
         Self(raw)
     }
-    /// Decode as Default Gateway Extended Community (RFC 4761 §3.2.5 /
-    /// RFC 7432). Type 0x03, subtype 0x0D. This is a flag-only community:
-    /// presence is the signal and the 6-byte value field must be all zeros.
-    /// Malformed advertisements with non-zero value bytes are treated as
-    /// non-matches rather than silently accepted — downstream policy and
+    /// Decode as Default Gateway Extended Community (RFC 7432 §7.8).
+    /// Type 0x03, subtype 0x0D. This is a flag-only community: presence is
+    /// the signal and the 6-byte value field is reserved, set to zero by
+    /// senders. rustbgpd is deliberately stricter than the RFC's "ignored by
+    /// the receivers": advertisements with non-zero value bytes are treated
+    /// as non-matches rather than silently accepted — downstream policy and
     /// validation consumers treat this accessor as semantic truth.
     #[must_use]
     pub fn as_default_gateway(self) -> bool {
@@ -4975,7 +4976,7 @@ mod tests {
     }
     /// Audit follow-up: a peer sending an `MP_REACH` for `FlowSpec`
     /// (SAFI 133) with a non-zero `NH-Len` is malformed per RFC
-    /// 8955 §6.1 — the decoder must reject so the rest of the
+    /// 8955 §4 — the decoder must reject so the rest of the
     /// pipeline never sees a misshapen `FlowSpec` advertisement.
     /// Logic exists at `decode_mp_reach_nlri` but had no direct
     /// regression test; adding one cheaply pins the wire-level

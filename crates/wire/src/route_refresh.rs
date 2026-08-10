@@ -8,7 +8,7 @@ use crate::orf::{
 };
 
 /// ROUTE-REFRESH base body length (AFI u16 + subtype u8 + SAFI u8). An ORF
-/// message (RFC 5291 §5.2) extends the body beyond this with ORF entries.
+/// message (RFC 5291 §4) extends the body beyond this with ORF entries.
 const BODY_LEN: usize = 4;
 
 /// Total wire length of a plain ROUTE-REFRESH message (header + base body).
@@ -99,7 +99,7 @@ impl RouteRefreshMessage {
         }
     }
 
-    /// Create an ORF-carrying ROUTE-REFRESH (RFC 5291 §5.2). The third octet
+    /// Create an ORF-carrying ROUTE-REFRESH (RFC 5291 §4). The third octet
     /// is Reserved (subtype 0) for an ORF message.
     #[must_use]
     pub fn new_with_orf(afi: Afi, safi: Safi, orf: OrfPayload) -> Self {
@@ -135,7 +135,7 @@ impl RouteRefreshMessage {
     /// carries an RFC 5291 ORF section, decoded into `orf`. A malformed ORF
     /// *entry* does not fail the decode — it is surfaced via
     /// [`crate::orf::OrfEntries::Malformed`] so the caller can apply the RFC
-    /// 5291 §5.2 reset semantics instead of tearing the session down.
+    /// 5291 §6 reset semantics instead of tearing the session down.
     ///
     /// # Errors
     ///

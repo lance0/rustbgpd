@@ -48,8 +48,10 @@ rbgp config import <source> [--format bird|frr|gobgp] [--out <path>]
 
 ```bash
 rbgp neighbor
+rbgp neighbor --wide                        # add MsgRcvd/MsgSent/Flaps/RRC/Slow/PfxRcd columns
 rbgp summary                                # alias for neighbor list
 rbgp neighbor <addr>
+rbgp neighbor <addr> --compare <NEIGHBOR>   # compare live update-group membership
 rbgp neighbor <addr> add --remote-asn <asn> [--peer-group <name>] [--families <list>] [--route-server-client|--no-route-server-client] [--per-client-best|--no-per-client-best] [--role <role>] [--strict-role|--no-strict-role] [--no-add-path]
 rbgp neighbor <addr> enable
 rbgp neighbor <addr> disable --reason "maintenance"
@@ -78,9 +80,10 @@ passwordless `ix-members` group from ordinary JSON before adding the range.
 
 `neighbor add` preserves omission for peer-group inheritance. Positive and
 `--no-*` forms create explicit boolean overrides; any Add-Path option emits the
-complete atomic block, while `--no-add-path` explicitly disables it. Old
-daemons fail the one wrapper-only RPC with an upgrade diagnostic; the CLI never
-retries with legacy semantics.
+complete atomic block, while `--no-add-path` explicitly disables it. The CLI
+sends only the presence-aware `intent` carrier and never retries with legacy
+semantics; a daemon predating v0.65 rejects the RPC because it does not read
+that field.
 
 ### Routes, Policy, and Dataplane
 
@@ -98,6 +101,7 @@ rbgp rib advertised <addr> --age
 rbgp rib advertised <addr> --count
 rbgp rib sent <addr>                        # alias
 rbgp rib --prefix <prefix> --explain
+rbgp rib --prefix <prefix> --explain --explain-peer <peer>   # scope the explain to one peer's Add-Path send view
 rbgp rib blackholes
 rbgp rib fib
 rbgp rib bgpls    # BGP-LS routes learned from peers (RFC 9552)

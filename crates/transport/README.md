@@ -6,11 +6,17 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
 ## Architecture
 
-Single tokio task per peer. `tokio::select!` multiplexes TCP reads,
-keepalive/hold/connect timers, inbound commands, and outbound route
-updates. The transport layer intercepts UPDATEs (parse, validate, apply
-policy) before forwarding to the RIB — the FSM sees only payloadless
-events.
+Two tokio tasks per peer (ADR-0051): a session task, and a dedicated
+outbound writer task that owns the TCP write half plus a bounded bulk /
+unbounded priority queue, so TCP back-pressure cannot park the session
+loop. The session task's `tokio::select!` multiplexes TCP reads,
+hold/connect-retry/reconnect timers, inbound commands, outbound route
+updates from the RIB, and outbound-connect completion. The KEEPALIVE
+cadence is owned by the writer task (ADR-0078), so it keeps running
+while the session task is parked on a blocking RIB delivery.
+
+The transport layer intercepts UPDATEs (parse, validate, apply policy)
+before forwarding to the RIB — the FSM sees only payloadless events.
 
 ## Features
 
@@ -48,6 +54,17 @@ events.
 - **Extended messages** (RFC 8654) — dynamic buffer sizing up to 65535 bytes
 - **Add-Path** (RFC 7911) — per-family path ID encode/decode
 - **Extended next hop** (RFC 8950) — IPv4 NLRI over IPv6 next hop
+- **Graceful Restart + LLGR** (RFC 4724, RFC 9494) — stale-route retention
+  across peer restart, with long-lived retention via `llgr_stale_time`
+- **BGP Roles + Only-to-Customer** (RFC 9234) — OPEN-time role-mismatch
+  NOTIFICATION 2/11 plus the OTC ingress/egress leak gates
+- **Outbound route filtering** (RFC 5291/5292) — inbound ORF ROUTE-REFRESH
+  handling applied to the peer's Adj-RIB-Out
+- **Enhanced route refresh** (RFC 7313) — BoRR/EoRR demarcation accounting
+  per inbound refresh window
+- **Slow-peer detection** — outbound-backlog episodes flagged via
+  `slow_peer_threshold_pct` / `slow_peer_duration`, with opt-in isolation
+  (`slow_peer_isolation`, default off — detection alone is observational)
 
 ## License
 

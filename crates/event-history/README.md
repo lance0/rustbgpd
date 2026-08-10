@@ -22,12 +22,15 @@ one SQLite transaction, and serves cursor-based replay through the
   `EventEnvelope`, `CommittedEvent`, `EventHistorySender`,
   `Category`, `Severity`, `PayloadCodec`, `EnvelopePeers`, plus the
   shared `EhmState` and the async actor loop (`run_actor`). It also
-  re-exports `EventSubscription` / `SubscribeFilter` /
-  `SubscribeRequest` / `SubscribeStats` from `cursor.rs`.
+  re-exports `EventSubscription` / `EventSubscriptionItem` /
+  `SubscribeFilter` / `SubscribeRequest` / `SubscribeStats` /
+  `SubscribeStatsSnapshot` from `cursor.rs`.
 - `storage.rs` — the `spawn_blocking` boundary. Owns the rusqlite
   `Connection` on a dedicated thread; processes batches via an
-  internal channel. Only place in the crate that touches
-  `rusqlite::Connection`. Contains the batching + retention SQL paths
+  internal channel. Sole owner of the live `Connection`:
+  `migrations.rs` and `sequence.rs` execute against a borrowed
+  handle, and `quarantine.rs` opens a separate read-only connection
+  against a quarantined DB. Contains the batching + retention SQL paths
   (no separate `batch.rs` / `retention.rs` modules; both are method
   groups on the storage thread for atomic coupling with the
   connection).
