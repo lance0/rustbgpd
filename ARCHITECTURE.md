@@ -219,7 +219,7 @@ gRPC request
 | FlowSpec NLRI | `crates/wire/src/flowspec.rs` |
 | FSM state transitions | `crates/fsm/src/lib.rs` |
 | Capability negotiation | `crates/fsm/src/negotiation.rs` |
-| Peer session runtime | `crates/transport/src/session/` (split into `mod.rs`, `fsm.rs`, `inbound.rs`, `outbound.rs`, `io.rs`, `commands.rs`, `writer.rs`, `import_decision_cache.rs`, `rejected_routes.rs`, `export.rs`, `refresh_accounting.rs`, `shared_group.rs`, `tests.rs`) |
+| Peer session runtime | `crates/transport/src/session/` (split into `mod.rs`, `fsm.rs`, `inbound.rs`, `outbound.rs`, `io.rs`, `commands.rs`, `writer.rs`, `import_decision_cache.rs`, `rejected_routes.rs`, `export.rs`, `refresh_accounting.rs`, `shared_group.rs`, `tests/`) |
 | Outbound UPDATE construction | `crates/transport/src/session/outbound.rs` — `prepare_outbound_attributes()` |
 | Policy evaluation | `crates/policy/src/engine.rs` |
 | Best-path selection | `crates/rib/src/best_path.rs` — `best_path_cmp` / `best_path_cmp_with_reason` |
@@ -249,6 +249,14 @@ gRPC request
 ## Lifecycle Flows
 
 ### Startup
+
+Every Unix signal handler (SIGINT, SIGTERM, SIGHUP) is registered before any
+step below binds or spawns an externally reachable service — the gRPC server,
+the BGP listener, the metrics/readiness listener, or gNMI dial-out. A signal
+delivered during startup stays pending until the select loop begins, so a
+SIGTERM in that window is retained and honored as a graceful shutdown instead
+of taking its default process action. The ordering is a contract, asserted by
+`signal_handlers_are_registered_before_external_reachability`.
 
 1. `main.rs` loads TOML config, validates, initializes logging and metrics.
 2. Checks for GR restart marker file (`runtime_state_dir/gr-restart.toml`). If present and not expired, static peers will advertise `R=1` in OPEN.
@@ -329,13 +337,22 @@ gRPC request
    pending confirmation, other persisted runtime config mutators return
    `FAILED_PRECONDITION`.
 5. Commit-confirm survives a restart durably (ADR-0076 Decision 6 amendment).
-   The pre-commit snapshot is journaled to
-   `<runtime_state_dir>/commit-confirm-journal.json` before the candidate
-   commits. A daemon restart inside the confirm window triggers a boot-time
-   revert (`boot_revert_check()`, per RFC 6241 §8.4): the pre-transaction
-   config is restored and the unconfirmed candidate is saved aside as
-   `<config>.unconfirmed`. A torn or unusable journal refuses boot rather than
-   guessing. See `tests/commit_confirm_binary.rs`.
+   Before the candidate commits, the v3 authority is published in durability
+   order: the normalized pre-commit snapshot to
+   `<runtime_state_dir>/commit-confirm-v3-prior.toml`, then provenance and
+   file-identity digests to `<runtime_state_dir>/commit-confirm-v3-metadata.json`,
+   then the config-adjacent `<config>.commit-confirm-locator.json`. The locator
+   is the sole boot authority — its absence carries no pending state, so a
+   restart that finds no locator boots the candidate normally. A daemon restart
+   inside the confirm window triggers a boot-time revert
+   (`boot_revert_check()`, per RFC 6241 §8.4): the pre-transaction config is
+   restored and the unconfirmed candidate is saved aside as
+   `<config>.unconfirmed`. Torn or unusable v3 state refuses boot rather than
+   guessing, and so does a retired locator-free
+   `<runtime_state_dir>/commit-confirm-journal.json` or retired v2 locator —
+   both are left untouched for recovery with rustbgpd v0.64.0. Never create
+   either retired artifact by hand; their presence alone blocks startup. See
+   `tests/commit_confirm_binary.rs`.
 
 ### Graceful Shutdown
 

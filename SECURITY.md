@@ -58,8 +58,8 @@ input from the network. It runs under continuous fuzzing in CI.
   v3 in durability order: secret-bearing normalized configuration at
   `<runtime_state_dir>/commit-confirm-v3-prior.toml`, confidential provenance
   and file-identity metadata at `commit-confirm-v3-metadata.json`, then the
-  confidential config-adjacent `commit-confirm-locator.json`. Metadata and the
-  locator contain paths and digests, not raw TOML; the locator is the sole boot
+  confidential config-adjacent `<config>.commit-confirm-locator.json`. Metadata
+  and the locator contain paths and digests, not raw TOML; the locator is the sole boot
   authority. All are bounded daemon-owned regular `0600` files, and a writer or
   present pending object requires daemon-owned real parents that are not group-
   or world-writable. Reads are descriptor-relative, no-follow, same-FD
@@ -110,10 +110,11 @@ see the full ~16,000-ASN path.
 
 ### Fuzzing
 
-Four fuzz crates (`crates/wire`, `crates/policy`, `crates/mrt`,
-`crates/evpn`) carry 17 fuzz targets covering the message decoders, the
-policy frontend, MRT snapshot and warm-bundle readers, and EVPN parsing.
-A nightly CI campaign (`.github/workflows/fuzz.yml`) runs every target
+Six fuzz crates (`crates/wire`, `crates/policy`, `crates/mrt`,
+`crates/evpn`, `crates/bfd`, `crates/rpki`) carry 19 fuzz targets covering
+the message decoders, the policy frontend, MRT snapshot and warm-bundle
+readers, EVPN parsing, the BFD control-packet decoder, and the RTR PDU
+decoder. A nightly CI campaign (`.github/workflows/fuzz.yml`) runs every target
 in each crate against tracked seed corpora and fails loudly if target
 enumeration returns nothing. A ClusterFuzzLite workflow builds all
 targets with AddressSanitizer for on-demand campaigns. The target

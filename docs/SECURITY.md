@@ -196,13 +196,16 @@ Mitigations, in preference order:
 - Keep the loopback default, or bind the adapter to a management network,
   and put an authenticating reverse proxy in front of it before any wider
   exposure — the same network-level discipline as Prometheus.
-- Point the adapter at a dedicated gRPC listener and cap it:
-  `ListRejectedRoutes` and the noexport view's backing RPCs
-  (`ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`) are
-  all `sensitive_read`-tier methods — the noexport view raises no tier
-  requirement beyond what the adapter already needed — so `max_tier =
-  "read"` on that listener denies both the filtered and noexport views
-  while keeping liveness reads working.
+- Do not expect a listener tier cap to help here. `ListRejectedRoutes` and
+  the noexport view's backing RPCs (`ListBestRoutes`,
+  `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`) are all
+  `sensitive_read`-tier methods — the same tier the adapter's other reads
+  need — so no `max_tier` value denies the filtered and noexport views while
+  leaving the rest of the adapter working. `max_tier = "read"` denies every
+  RPC, because no method carries the `read` tier (see
+  [`grpc-method-inventory.md`](grpc-method-inventory.md)); even `GetHealth`
+  is `sensitive_read`. A dedicated listener is still worth having, but for
+  the network isolation and separate credentials, not for tier filtering.
 - Disable retention daemon-side with `[policy.reject_retention]
   enabled = false`: the reject store is never populated and the filtered
   view is served empty as a configuration fact.

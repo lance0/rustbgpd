@@ -145,8 +145,8 @@ config from their existing `general.yml`/`clients.yml`:
   (`[policy.explain] enabled = true`), because it retains a decision cache
   per session ([docs/explain.md](docs/explain.md))
 - **Update-group fanout** — peers with provably identical staged output share
-  one staging pass: ~28x faster 100k-route convergence at 256 uniform RR
-  clients (15.1 s to 0.54 s); v2 extends sharing to VPNv4/v6 with per-member
+  one staging pass: ~27x faster 100k-route convergence at 256 uniform RR
+  clients (15.1 s to 0.56 s); v2 extends sharing to VPNv4/v6 with per-member
   RT filtering at emit ([receipt](docs/perf/scale-receipt-2026-07.md))
 - **Full BMP monitoring trio** — per-collector Adj-RIB-In / Adj-RIB-Out
   (byte-exact wire PDUs) / Loc-RIB on one exporter, validated against pmacct,
@@ -179,7 +179,8 @@ fanout numbers — is the [feature tour](docs/feature-tour.md).
 - **SDN / network automation controllers** — programmable BGP control plane
 - **Route collectors and looking glasses** — structured data via gRPC, MRT, BMP,
   plus a Birdwatcher-shaped status/peer/accepted/filtered/noexport subset via
-  the external `examples/birdwatcher-adapter`
+  the shipped `birdwatcher-adapter` binary (`examples/birdwatcher-adapter`
+  carries the source and deployment notes)
 - **Lab and test environments** — clean API, structured logs, containerlab interop
 
 See [docs/USE_CASES.md](docs/USE_CASES.md) for detailed deployment scenarios with
@@ -234,7 +235,10 @@ Four binaries: the daemon, the `rbgp` CLI, `rs-config-render` (the
 [IXP route-server config renderer](tools/rs-config-render/README.md) —
 harmless if you don't run one), and the optional Alice-LG
 `birdwatcher-adapter`. The tarball also carries man pages and
-bash/zsh/fish completions under `share/` — the
+bash/zsh/fish completions under `share/`, plus the version-matched Grafana
+dashboard, Prometheus alert rules, and promtool test suite under
+`share/monitoring/` (`/usr/share/doc/rustbgpd/monitoring/` after a
+`.deb`/`.rpm` install) — the
 [install walkthrough](docs/deployment.md#install) covers installing those
 and pinning a specific version.
 
@@ -251,7 +255,7 @@ cargo build --release -p rustbgpd -p rustbgpctl -p rs-config-render -p birdwatch
 ### Docker
 
 Release images are published to GHCR (versioned tags, e.g.
-`ghcr.io/lance0/rustbgpd:0.61.0`), or build locally:
+`ghcr.io/lance0/rustbgpd:0.64.0`), or build locally:
 
 ```bash
 docker build -t rustbgpd .                    # daemon + rbgp + birdwatcher-adapter, nonroot
@@ -289,22 +293,22 @@ two independent campaign runs, losses published alongside wins:
 
 | KPI (700 clients × 400,400 routes, p50) | rustbgpd | BIRD 3.3.1 | OpenBGPD 9.1 |
 |---|---|---|---|
-| Sessions Established | **0.7 s** | 18.4–20.8 s | 66.7–155.7 s |
-| Cold start, full table to all members | **4.7–5.0 s** | 61.6–65.3 s | 338.8–422.1 s |
-| Reload: UPDATE stall | 0.42–0.73 s | 1.74–2.68 s | **0.24–0.28 s** |
-| Reload: new policy fully delivered | **1.29–1.67 s** | 68–85 s | 247–253 s |
-| Flapstorm: withdraw propagation | **0.25–0.48 s** | 0.38–0.57 s | 10.3–12.6 s |
-| Flapstorm: re-announce | **0.46–0.49 s** | 2.7–3.7 s | 20.9–21.4 s |
-| Settled RSS (S2, runs A/B) | **412 / 410 MiB** | 425 / 417 MiB | 768 / 773 MiB |
-| Settled RSS (S3, runs A/B) | 440 / 502 MiB | **337 / 292 MiB** | 824 / 821 MiB |
+| Sessions Established | **0.7 s** | 18.2–20.5 s | 68.9–85.8 s |
+| Cold start, full table to all members | **4.8–5.0 s** | 60.9–63.3 s | 338.0–352.1 s |
+| Reload: UPDATE stall | 0.42–0.60 s | 1.70–2.70 s | **0.25–0.29 s** |
+| Reload: new policy fully delivered | **1.28–1.57 s** | 64.3–84.5 s | 244.0–251.3 s |
+| Flapstorm: withdraw propagation | **0.31–0.47 s** | 0.47–0.61 s | 10.45–11.47 s |
+| Flapstorm: re-announce | **0.49–0.55 s** | 2.85–3.74 s | 21.14–21.54 s |
+| Settled RSS (S2, runs A/B) | 419 / 419 MiB | 422 / 412 MiB | 756 / 753 MiB |
+| Settled RSS (S3, runs A/B) | 441 / 451 MiB | **337 / 328 MiB** | 813 / 815 MiB |
 
-Figures are the v0.61.0 same-host refresh (2026-07-27); the original
+Figures are the v0.64.0 same-host refresh (2026-08-08); the original
 campaign's tables and artifacts are preserved unchanged in the receipt.
 rustbgpd is the only daemon in the matrix holding both a sub-second median
 stall **and** single-digit-seconds completion; OpenBGPD has the smallest
-stall at every scale rung; the settled-memory picture is split — rustbgpd
-edged BIRD at S2 in these runs after the explain-cache default change,
-while BIRD's S3 advantage remains clear. The receipt includes the full
+stall at every scale rung; the settled-memory picture is split — S2 settled
+RSS is a dead heat (one run each way), while BIRD's S3 advantage remains
+clear. The receipt includes the full
 method, configuration disclosure, honesty notes, raw artifacts — and a
 post-publication note where the receipt's own tables exposed a rustbgpd
 re-announce plateau that was root-caused, fixed, and rerun (9.5–9.8 s →
