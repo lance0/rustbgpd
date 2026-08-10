@@ -133,7 +133,7 @@ Added to `ExtendedCommunity`:
 | Subtype | Purpose | RFC |
 |---|---|---|
 | 0x03 / 0x0C | BGP Encapsulation (distinguish VXLAN=8) | RFC 9012 / 8365 |
-| 0x03 / 0x0D | Default Gateway (flag-only) | RFC 4761 / 7432 |
+| 0x03 / 0x0D | Default Gateway (flag-only) | RFC 7432 §7.8 |
 | 0x06 / 0x00 | MAC Mobility (sticky + sequence) | RFC 7432 §7.7 |
 | 0x06 / 0x01 | ESI Label (single-active + label) | RFC 7432 §7.5 |
 | 0x06 / 0x02 | ES-Import Route Target | RFC 7432 §7.6 |

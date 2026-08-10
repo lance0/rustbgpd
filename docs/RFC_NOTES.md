@@ -142,6 +142,15 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   shipped starter config with eBGP neighbors sets the knob, and all starters
   pass `rustbgpd --check --strict` (fenced by
   `tests/starter_configs_check_strict.rs`).
+- **Migration surface (ADR-0119).** The knob's posture is carried by a root
+  `config_epoch = 1 | 2` key alongside a lossless record of whether
+  `ebgp_requires_policy` was written at all. Epoch 1 pins the legacy
+  permit-all default; epoch 2 selects the RFC-aligned default. A config that
+  states neither resolves to `LegacyOmission` and raises the
+  `rfc8212_secure_default_ready` advisory: `rustbgpd --check` warns and exits
+  0, `--check --strict` exits 1. `rustbgpd --migrate-config
+  pin-legacy|prepare-secure --offline` performs the in-place move to an
+  explicit posture.
 - Full knob semantics, what counts as explicit policy, and the observability
   surfaces (neighbor detail, Prometheus, doctor, export explain) are in
   [docs/CONFIGURATION.md](CONFIGURATION.md) under
@@ -884,8 +893,10 @@ Enforcement is send-side only: rustbgpd caps what it sends at the peer's
 advertised limit but does not police received paths against its own
 advertised limit — the draft places that obligation on the sender.
 Neighbor output orders rows by numeric AFI/SAFI and carries an optional
-normalized limit whose presence distinguishes active unlimited from inactive,
-while retaining the legacy raw unlimited sentinel for rolling compatibility.
+normalized limit whose presence distinguishes active unlimited from inactive.
+The raw `effective_send_max` sentinel is gone: `PathsLimitState` field number
+and name 5 are reserved, and optional `effective_send_limit` (field 6) alone
+carries inactive (absent), unlimited (zero), or finite.
 
 - Capability code 69. Per-family Send/Receive/Both modes.
 - Adj-RIB-In/Out keyed by `(Prefix, u32)` for multi-path storage.
@@ -1273,7 +1284,7 @@ while retaining the legacy raw unlimited sentinel for rolling compatibility.
   value), drops `NTF_EXT_LEARNED` echoes (we programmed those) and
   VXLAN-port ifindexes (those are remote-MAC echoes), and resolves
   bridge-port → VNI via a new `LinkCache::bridge_port_to_vni` map.
-  The daemon-side `src/evpn_originator.rs` actor mirrors the
+  The daemon-side `src/evpn_originator/` actor mirrors the
   dataplane supervisor on the upward flow and emits
   `RibUpdate::InjectEvpn` / `WithdrawEvpn`. Self-NH routes are
   filtered before reaching the state machine via the existing
@@ -1321,7 +1332,7 @@ while retaining the legacy raw unlimited sentinel for rolling compatibility.
   suppression (Gate 7b+2 — `AF_INET` / `AF_INET6` classifier in
   `crates/evpn-linux`, `LocalMacIpOriginator` in `crates/evpn`,
   daemon correlation under the FRR-style replace model per
-  RFC 9135 §7.2.3 in `src/evpn_originator.rs`. Operator
+  RFC 9135 §7.2.3 in `src/evpn_originator/`. Operator
   prerequisite: bridge `neigh_suppress on`).
 - **Partially shipped (tracked in ADR-0055 §9 +
   `docs/evpn-alpha-soak.md`):** RFC 7432 §15.1 duplicate-MAC M/N

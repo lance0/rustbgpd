@@ -559,7 +559,7 @@ for the architectural record.
 2. **6 typed extended-community accessors** (`crates/wire/src/attribute.rs`) —
    BGP Encapsulation (RFC 8365 / 9012), MAC Mobility (RFC 7432 §7.7),
    ESI Label (§7.5), ES-Import RT (§7.6), Router MAC (RFC 9135 §4.1),
-   Default Gateway (RFC 4761 §3.2.5).
+   Default Gateway (RFC 7432 §7.8).
 3. **Parallel RIB tables** (`crates/rib/src/`) — `HashMap<EvpnRouteKey,
    EvpnRibRoute>` in AdjRibIn / Loc-RIB / AdjRibOut, mirroring the
    FlowSpec pattern from M22.

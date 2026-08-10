@@ -252,8 +252,8 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 60 | 58.3% |
-| `mutating` | 20 | 19.4% |
+| `sensitive_read` | 60 | 57.7% |
+| `mutating` | 20 | 19.2% |
 | `operator_only` | 24 | 23.1% |
 | **Total** | **104** | **100%** |
 
@@ -284,7 +284,7 @@ specific method if the model warrants it.
    requiring a distinct principal role (`operator` vs. `automation`) has
    low operational cost and high blast-radius reduction.
 3. **InjectionService is uniformly `operator_only`.** Six of the
-   twenty-three `operator_only` methods live here. The simplest model is
+   twenty-four `operator_only` methods live here. The simplest model is
    to make the whole service gated behind an `inject` capability or a
    dedicated listener — operators rarely use it for automation, and
    when they do it should be a deliberate channel.

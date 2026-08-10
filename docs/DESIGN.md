@@ -246,6 +246,10 @@ group-accessible access; see `docs/CONFIGURATION.md` under `[security.grpc]`.
 asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
+# Explicit RFC 8212 posture. Omit it and the config inherits the legacy
+# permit-all default, which raises the `rfc8212_secure_default_ready`
+# advisory: `--check` warns, `--check --strict` exits 1.
+ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
@@ -279,7 +283,9 @@ hold_time = 90
 
 ### Graceful Shutdown
 
-Shutdown is triggered by SIGTERM or by the `Shutdown` gRPC RPC:
+Shutdown is triggered by SIGINT, SIGTERM, or the `Shutdown` gRPC RPC. Signal
+handlers are registered before the daemon becomes externally reachable, so a
+signal arriving during startup is never dropped:
 
 1. Stop accepting new gRPC commands.
 2. Send NOTIFICATION/Cease (Administrative Shutdown, subcode 2) to every established peer.
@@ -560,10 +566,22 @@ containerlab is the test harness — not "where feasible," but the default. Ever
 
 ### Fuzzing
 
-libFuzzer harnesses for:
-- Message decoding (all message types)
-- Attribute decoding (all supported attributes)
-- NLRI parsing (IPv4 unicast)
+19 libFuzzer targets across six crates, each with its own `fuzz/` workspace:
+
+- `crates/wire/fuzz` (12) — OPEN / UPDATE / message and Route Refresh
+  decoding, Route Distinguisher parsing, and per-family NLRI decoders
+  (FlowSpec, EVPN, BGP-LS, MPLS-VPN, labeled-unicast, RT-Constrain) plus an
+  EVPN encode target.
+- `crates/policy/fuzz` (2) — `.rpol` compilation and dataset parsing.
+- `crates/mrt/fuzz` (2) — snapshot-reader drain and warm-bundle manifest.
+- `crates/bfd/fuzz` (1) — BFD control-packet decoding.
+- `crates/rpki/fuzz` (1) — RTR PDU decoding.
+- `crates/evpn/fuzz` (1) — Route Target parsing.
+
+Run them per crate — `cd` into the owning crate and use `cargo fuzz list` /
+`cargo fuzz run <target>` on the pinned nightly. Seed corpora are tracked
+under each crate's `fuzz/seeds/<target>/`. The repo-root `fuzz/` directory is
+OSS-Fuzz build scaffolding, not a runnable target set.
 
 Fuzz runs on a nightly CI schedule (`fuzz.yml`, all targets); PRs gate on the unit/property/interop suites.
 
@@ -613,10 +631,19 @@ key edits/reordering remain restart-required.
 
 ### Connection Rate Limiting
 
-- Max inbound TCP connections per source IP: configurable, default 5 per minute.
-- Max total pending connections: configurable, default 100.
+- Per-source inbound accept-rate limiting (ADR-0120, top-level
+  `[inbound_admission]`) is **opt-in**: `enabled` defaults to `false`.
+- When enabled, a token bucket per aggregated source: `rate_per_minute`
+  default 12, `burst` default 5, source aggregation at
+  `v4_aggregation_len = 32` / `v6_aggregation_len = 64`, and
+  `table_capacity = 4096` LRU-evicted tracking entries bounding limiter
+  memory regardless of offered load. All fields are restart-required.
+- Statically configured neighbor addresses are exempt — a flapping legitimate
+  peer is never rate-limited out of its own session.
 - Connections from unconfigured peers are dropped immediately after TCP accept — no BGP processing.
-- All rate limit events produce structured log entries.
+- All rate limit events produce structured log entries and increment
+  `bgp_inbound_connections_dropped_total`.
+- See [CONFIGURATION.md](CONFIGURATION.md#inbound_admission).
 
 ### Malformed Message Handling Philosophy
 
@@ -634,7 +661,11 @@ Bounded channels, prefix limits, and backpressure behavior are detailed in [ARCH
 
 ### gRPC Security (v1)
 
-- gRPC listens on a configurable address (default: localhost only).
+- There is no default TCP listener. By default gRPC is reachable only on the
+  owner-only Unix domain socket the daemon synthesizes at
+  `<runtime_state_dir>/grpc.sock`. TCP is opt-in via
+  `[global.telemetry.grpc_tcp]` and requires bearer-token or native-mTLS
+  identity.
 - Native gRPC mTLS is supported on TCP listeners via `tls_cert_file` /
   `tls_key_file` / `tls_client_ca_file` (all three required together; no
   TLS-without-mTLS half-mode) — see docs/CONFIGURATION.md "Native gRPC mTLS".
@@ -642,8 +673,10 @@ Bounded channels, prefix limits, and backpressure behavior are detailed in [ARCH
 - Per-method tier authorization (ADR-0064) is the enforcement model: every
   RPC carries a tier assignment (docs/grpc-method-inventory.md), listeners
   enforce a `max_tier` ceiling, and `[security.grpc].enforcement = "tier"`
-  (the default since v0.24.0) maps authenticated principals to role
-  ceilings. The per-listener `access_mode = "read_only"` setting remains as
+  maps authenticated principals to role ceilings. `"tier"` has been the
+  default since v0.24.0 and is now the only accepted value —
+  `GrpcEnforcementConfig` has a single variant, and the `"legacy"` mode and
+  its validation branch are gone. The per-listener `access_mode = "read_only"` setting remains as
   a compatibility ceiling on top of the eleven-service split.
 
 ---
@@ -761,7 +794,7 @@ Milestone-based releases. Each milestone (M0–M4) is a tagged release with:
 
 ### Security Policy
 
-- Vulnerabilities are reported via email (address TBD) or GitHub security advisories.
+- Vulnerabilities are reported through GitHub private vulnerability reporting, the single channel named in the repository-root `SECURITY.md`. There is no email channel, and security issues must not be filed as public issues.
 - Critical vulnerabilities (remote crash, session hijack) are patched and released within 72 hours of confirmation.
 - The wire decoder is the primary attack surface and runs under continuous fuzzing.
 

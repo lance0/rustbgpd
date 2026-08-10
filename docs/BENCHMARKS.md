@@ -30,7 +30,9 @@ full-daemon DHAT rebaseline: 2026-07-13; structured high-N RIB memory
 profile refresh (RouteSlab + attribute interning correction): 2026-07-17;
 production UPDATE parser and IPv6 MP-BGP Add-Path coverage: 2026-07-26;
 v0.61.0 release-tip real-daemon and single-revision absolute baseline:
-2026-07-26.
+2026-07-26; RIB-ops prefix-fixture audit bounding the above-65,536 rows:
+2026-08; v0.64.0 release-tag bgperf2 spot-check (rustbgpd only, same host):
+2026-08-08.
 
 | Field | Value |
 |-------|-------|
@@ -126,8 +128,8 @@ not a merge gate.
 
 The VPS bench runner is also planned to run rustbgpd's soak suite.
 Both workloads acquire an exclusive `flock` on
-`$HOME/.local/state/rustbgpd-host.lock` before doing real work — the
-bench script via `bench/compare-criterion.sh` directly, the soak
+`${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}` before doing
+real work — the bench script via `bench/compare-criterion.sh` directly, the soak
 runners via the shared `tests/soak/host-lock.sh` helper. A bench
 dispatch refuses to start while a soak is active and a soak refuses to
 start while a bench is mid-attempt; either workload fails fast with a
@@ -137,22 +139,39 @@ needed — an uncontended `flock` is free on a laptop / dev box, and an
 earlier skip-when-absent escape hatch silently disabled the mutex on
 the shared runner. The sudo / `$HOME` trap (running soak as
 root moves the lock to `/root/...` and bypasses the guard) is covered
-in `tests/soak/README.md` under "Host mutex".
+in `tests/soak/README.md` under "Host mutex"; exporting
+`RUSTBGPD_HOST_LOCK` explicitly is the fix, and every call site honors it.
 
 ## Running
 
-```bash
-# Default-feature benchmarks. A bare `cargo bench` runs only the targets that
-# build with default features (codec, rib_ops, policy_eval, explain_snapshot,
-# validate, and the mrt snapshot_allocation harness); the seven
-# `bench-internals`-gated targets (fanout, inbound_attrs, fib_projection,
-# route_paging, event_history_producer, vpn_query_timing,
-# vpn_query_allocation) are skipped and must be run explicitly with
-# `--features bench-internals` as shown below. vpn_query_allocation
-# additionally requires the api crate's vpn-query-allocation feature
-# (required-features = ["bench-internals", "vpn-query-allocation"]).
-cargo bench
+**Do not run a bare `cargo bench`.** The workspace root is a non-virtual
+workspace (`[package] rustbgpd` alongside `[workspace]`) with no
+`default-members`, so Cargo selects only the root package. Its sole
+`[[bench]]` target, `fib_projection`, is `bench-internals`-gated, which
+leaves the auto-discovered `src/lib.rs` libtest harness as the one thing that
+runs — and it declares no benchmarks. `cargo bench` at the root therefore
+measures nothing. `cargo bench --workspace` is not a substitute either: four
+targets are standalone CLIs rather than criterion harnesses and reject
+criterion's flags.
 
+Run each target explicitly with `-p <crate> --bench <name>`. Thirteen exist.
+Six build with default features (wire/`codec`, rib/`rib_ops`,
+policy/`policy_eval`, policy/`explain_snapshot`, rpki/`validate`,
+mrt/`snapshot_allocation`); seven are `bench-internals`-gated
+(transport/`fanout`, transport/`inbound_attrs`, rustbgpd/`fib_projection`,
+rib/`route_paging`, api/`event_history_producer`, api/`vpn_query_timing`,
+api/`vpn_query_allocation` — the last also requires the api crate's
+`vpn-query-allocation` feature). Four of the thirteen —
+`snapshot_allocation`, `route_paging`, `vpn_query_timing`, and
+`vpn_query_allocation` — are standalone measurement CLIs with their own
+argument contracts (`snapshot_allocation` hard-errors without a
+`timing|diagnostic` mode), not criterion harnesses.
+
+`bench/smoke-benches.sh` enumerates the target list from `cargo metadata`,
+excludes those four by name, and runs every remaining criterion target once
+in `--test` mode — the cheapest proof that each still executes.
+
+```bash
 # Wire codec only
 cargo bench -p rustbgpd-wire --bench codec
 
@@ -189,7 +208,8 @@ separate Cargo target directory per side and a shared Criterion results tree,
 and writes a Markdown summary plus raw Criterion artifacts under
 `target/bench-compare/`.
 
-It requires `bash`, `git`, `cargo`, `python3`, and `taskset` from util-linux.
+It requires `bash`, `git`, `cargo`, `python3`, `flock` (the host mutex is
+taken unconditionally), and `taskset` from util-linux.
 Fixed-harness mode also requires GNU `sha256sum` from coreutils and is supported
 on Linux only; it does not promise macOS portability.
 
@@ -311,7 +331,7 @@ ONE benchmark row (attempts = N, N ≥ 3 recommended)
 │ no
 │ min..max straddles 0 ? ──────────────► NOISE: not actionable (sign unreliable)
 │ no  (entirely one side of 0)
-│ stddev ≥ ~10% (≈ same-SHA noise floor) ? ─► INCONCLUSIVE: re-dispatch, more attempts
+│ stddev ≥ ~10% (script default; see below) ? ─► INCONCLUSIVE: re-dispatch, more attempts
 │ no  (single-digit stddev)
 ▼ CONFIRMED SIGNAL
 │
@@ -326,14 +346,21 @@ ONE benchmark row (attempts = N, N ≥ 3 recommended)
 | Result | Action |
 |---|---|
 | `min..max` straddles 0 | noise — not actionable |
-| `stddev` ≥ ~10% (≈ same-SHA noise floor) | inconclusive — rerun with more attempts |
+| `stddev` ≥ ~10% (`--regression-max-stddev-pct` default) | inconclusive — rerun with more attempts |
 | confirmed improvement | note it, no gate |
 | confirmed regression < ~3% | acceptable if explained by the PR; mention the tradeoff |
 | confirmed regression < ~3% but unexplained in a hot path | investigate anyway |
 | confirmed regression ≥ ~3% | block + investigate before merge |
 
+**The 10% cut is `bench/compare-criterion.sh`'s default, not a noise floor.**
+Per the calibration above, the same-SHA floor is a property of a (host,
+benchmark, size) triple — 0.55%, 1.44%, and 16.76% on the primary host for
+three different shapes. Where a same-SHA control on the measuring host at the
+measured shape gives a tighter or wider figure, pass
+`--regression-max-stddev-pct` rather than trusting 10.
+
 > **Confirmed regression** means `min..max` is entirely above zero and
-> `stddev` is below the same-SHA noise floor. Regressions under ~3% may
+> `stddev` is below the configured stddev ceiling. Regressions under ~3% may
 > be accepted when the PR explains the tradeoff; regressions at or above
 > ~3%, or unexplained regressions in a hot path, should block pending
 > investigation.
@@ -618,7 +645,12 @@ inventory per peer. It instruments the clean single-best path that
 skips per-peer affected-prefix scans unless resolved ORR,
 per-client-best, or Add-Path send behavior requires them.
 
-Three further groups complete the fanout bench's inventory.
+The `per_client_best_full_resync` group instruments the ADR-0126 shared-group
+per-client-best full-table resync at 8- and 64-member fleets over a fixed
+4,096-route Loc-RIB — the shape where a shared update group must fall back to
+per-client best selection.
+
+Three further groups cover replacement-adjacent shapes.
 `initial_table_peer_join` times one initial-table join of a
 route-reflector client — the full inventory advertisement plus exactly
 one End-of-RIB envelope — at fixed route counts.
@@ -700,7 +732,7 @@ members; the 8-member result remains unclaimed. See
 [`docs/perf/grouped-withdrawal-probe-skip-2026-07.md`](perf/grouped-withdrawal-probe-skip-2026-07.md).
 
 The `adj_rib_out_family_gauge` group is the allocation-sensitive steady-state
-control. It keeps persistent homogeneous route-server fleets at 8, 64, 256,
+control. It keeps persistent homogeneous route-server fleets at 1, 8, 64, 256,
 and 1,000 peers, drains the prewarm advertisement, and alternates a wire-visible
 MED across all 64 routes before each measured pass. Route mutation, Loc-RIB
 recompute, receipt assertions, and receiver draining stay outside accumulated
@@ -855,8 +887,17 @@ high-N profile emits JSONL rows for the comparison script.
 # Compile/schema guard
 cargo test -p rustbgpd-rib --features bench-internals --test memory_profile
 
-# Manual full profile (100k / 500k / 900k)
+# Manual full profile (100k / 500k / 900k) — also the default when neither
+# RUSTBGPD_RIB_MEMORY_SIZES nor RUSTBGPD_RIB_MEMORY_PROFILE is set.
+# RUSTBGPD_RIB_MEMORY_PROFILE=quick is 10k / 100k.
 RUSTBGPD_RIB_MEMORY_PROFILE=full \
+  cargo test -p rustbgpd-rib --features bench-internals \
+  --test memory_profile memory_profile_high_n -- --ignored --nocapture
+
+# Explicit size override. Checked *before* RUSTBGPD_RIB_MEMORY_PROFILE and
+# reported as profile "custom". Tiny sizes smoke all four shape rows in
+# milliseconds instead of minutes — mechanics only, never comparison evidence.
+RUSTBGPD_RIB_MEMORY_SIZES=1000 \
   cargo test -p rustbgpd-rib --features bench-internals \
   --test memory_profile memory_profile_high_n -- --ignored --nocapture
 
@@ -874,7 +915,7 @@ bench/compare-rib-memory.sh --base origin/main --head HEAD --profile quick
 | `AsPath` | 24 bytes |
 | `AsPathSegment` | 32 bytes |
 | `AdjRibIn` | 1336 bytes |
-| `LocRib` | 1008 bytes |
+| `LocRib` | 1040 bytes |
 
 `PathAttribute` grew from 112 to 208 bytes since the last figures in this
 doc: new attribute variants (RFC 6514 `PmsiTunnel`, RFC 9234
@@ -884,7 +925,7 @@ BGP-LS). It is interned globally, across all peers, so the
 per-route impact is amortized to near zero (see below), but it does raise
 the per-unique-attribute-set heap cost.
 
-`AdjRibIn` (1032 → 1336 bytes) and `LocRib` (96 → 1008 bytes) grew the same
+`AdjRibIn` (1032 → 1336 bytes) and `LocRib` (96 → 1040 bytes) grew the same
 way — each struct picked up a route map and/or secondary index per added RIB
 family (VPN, labeled-unicast, RT-Constrain, EVPN, BGP-LS, FlowSpec; see
 `crates/rib/src/adj_rib_in.rs` and `crates/rib/src/loc_rib.rs`). Confirmed
@@ -918,6 +959,14 @@ allocation instead of one copy per route or per peer.
 These are per-unique-attribute-set costs. With interning, routes sharing the
 same attributes pay only the 128-byte `Route` stack cost plus an 8-byte `Arc`
 pointer.
+
+The `memory_profile` harness emits **four** shape rows per size —
+`adj_rib_in`, `full_rib`, `full_rib_diverse`, and `rr_fanout`. Three are
+tabled below. `full_rib_diverse` is the `full_rib` shape with a distinct
+attribute set per prefix rather than one per peer, so it prices the
+interning claim above by removing the sharing; no published table is carried
+for it here, and a run of `bench/compare-rib-memory.sh` will show that fourth
+row uninterpreted.
 
 ### AdjRibIn at Scale (single peer, typical attrs)
 
@@ -1068,7 +1117,8 @@ above** — they are *full-daemon* process RSS, not the RIB-only figure, and are
 improved ~9% — see above). Since the ~257–260 MB era the daemon gained
 substantial always-available operational surfaces (BFD, gNMI, ASPA, BGP
 roles/OTC, plus the explain cache — opt-in, default off since v0.61.0) and
-`PathAttribute` grew 72→112 B. The single
+`PathAttribute` grew 72→112 B over that era (it is 208 B on HEAD — see the
+Type Sizes table above). The single
 biggest contributor is the durable **event-history outbox** (ADR-0072), which
 persists every route event to SQLite: enabling it
 (`[event_history].enabled = true`) adds **~62 MB** RSS (~284 → ~346 MB) **and
