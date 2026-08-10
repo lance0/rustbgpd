@@ -185,10 +185,13 @@ HTML reports are generated to `target/criterion/`.
 
 Use `bench/compare-criterion.sh` when judging a performance PR locally. It
 creates detached worktrees for the baseline and head refs, runs both with a
-shared Criterion target directory, and writes a Markdown summary plus raw
-Criterion artifacts under `target/bench-compare/`.
+separate Cargo target directory per side and a shared Criterion results tree,
+and writes a Markdown summary plus raw Criterion artifacts under
+`target/bench-compare/`.
 
 It requires `bash`, `git`, `cargo`, `python3`, and `taskset` from util-linux.
+Fixed-harness mode also requires GNU `sha256sum` from coreutils and is supported
+on Linux only; it does not promise macOS portability.
 
 ```bash
 bench/compare-criterion.sh \
@@ -199,6 +202,28 @@ bench/compare-criterion.sh \
   --bench rib_ops \
   --filter adj_rib_in_insert
 ```
+
+When source revisions contain different benchmark fixtures, select one exact
+harness blob for both sides. The driver records each side's original blob and
+SHA-256 separately from the selected and installed provenance, then rejects
+any overlay that changes an unrelated path:
+
+```bash
+bench/compare-criterion.sh \
+  --base v0.62.0 \
+  --head v0.63.0 \
+  --package rustbgpd-rib \
+  --bench rib_ops \
+  --filter '^adj_rib_in_insert/500000$' \
+  --harness-ref 13d542c3 \
+  --harness-path crates/rib/benches/rib_ops.rs
+```
+
+The historical v0.62-to-v0.63 `adj_rib_in_insert/500000` comparison did not
+hold this fixture constant: v0.62 repeated 65,536 prefix keys while v0.63 used
+500,000 unique keys. Its roughly 50% delta is fixture-confounded and is not
+evidence of a shipped-code regression. Re-measure it with a fixed harness and
+a fresh same-SHA control before attributing a source regression or bisecting.
 
 For pinned runs, put the selected CPU into the `performance` governor first
 where the host allows it:

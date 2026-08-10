@@ -121,6 +121,13 @@ jobs:
           # a real failure and propagates.
           set -uo pipefail
           rc=0
+          harness_args=()
+          if [ "$PACKAGE" = "rustbgpd-rib" ] && [ "$BENCH" = "rib_ops" ]; then
+            harness_args=(
+              --harness-ref HEAD
+              --harness-path crates/rib/benches/rib_ops.rs
+            )
+          fi
           bench/compare-criterion.sh \
             --base "$BASE_REF" \
             --head "HEAD" \
@@ -128,6 +135,7 @@ jobs:
             --bench "$BENCH" \
             --core "$CORE" \
             --attempts "$ATTEMPTS" \
+            "${harness_args[@]}" \
             --fail-on-regression \
             --out-dir "target/bench-compare" || rc=$?
           if [ "$rc" -eq 75 ]; then
