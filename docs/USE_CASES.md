@@ -435,8 +435,10 @@ IX peer C  ──┘
   with bgpdump, BGPKIT parser, and RouteViews/RIPE RIS tooling)
 - **BMP export** — stream to OpenBMP or pmacct for long-term archival
 - **RPKI validation state** — each route annotated with Valid/Invalid/NotFound
-- **Birdwatcher-shaped REST subset** — the external
-  [`examples/birdwatcher-adapter`](../examples/birdwatcher-adapter/) serves
+- **Birdwatcher-shaped REST subset** — the shipped `birdwatcher-adapter`
+  binary (one of the four in the release tarball and packages;
+  [`examples/birdwatcher-adapter`](../examples/birdwatcher-adapter/) carries
+  the source and deployment notes) serves
   accepted-route, filtered-route (with reject-reason communities synthesized
   from `PolicyService.ListRejectedRoutes` structured reasons), noexport
   (best-routes-minus-advertised, each suppression explained by the live

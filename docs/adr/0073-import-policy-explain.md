@@ -12,7 +12,7 @@ evaluation is `evaluate_export_chain` in
 `crates/rib/src/manager/distribution/mod.rs`, and `ExplainAdvertisedRoute`
 assembly lives in `crates/rib/src/manager/distribution/unicast.rs`), and
 the RPC surface hangs off the route-explain group at
-`proto/rustbgpd.proto:1722` (`RibService.ExplainAdvertisedRoute`).
+`RibService.ExplainAdvertisedRoute` in `proto/rustbgpd.proto`.
 
 There is no equivalent for **import**. The operator question
 "why didn't this route come in?" cannot be answered today, because:
@@ -28,7 +28,7 @@ There is no equivalent for **import**. The operator question
   prefix that was *rejected* on arrival.
 - `bgp_policy_routes_total{peer,policy,direction,action}`
   counters answer "how many," not "which prefix and why."
-- `PolicyEvaluation` (`crates/policy/src/engine.rs:1217`) carries
+- `PolicyEvaluation` (`crates/policy/src/engine.rs`) carries
   the terminal-decision policy + action, which is what an explain
   surface should report — but it is consumed and discarded at the
   eval site.
@@ -90,9 +90,14 @@ flag on this one.
   announce/withdraw peer therefore can't fill the LRU with
   full-payload dead entries crowding out live decisions.
 - **Write triggers:** every return from
-  `evaluate_chain_with_attribution` in
-  `crates/transport/src/session/inbound.rs`, **gated on
-  `[policy.explain].enabled`** (see below). Insert or replace under the key.
+  `evaluate_chain_with_attribution` on the **unicast** paths in
+  `crates/transport/src/session/inbound.rs` — the IPv4 body path and the
+  MP-unicast path — **gated on `[policy.explain].enabled`** (see below).
+  Insert or replace under the key. The six other eval call sites (FlowSpec,
+  EVPN, BGP-LS, MPLS-VPN, labeled-unicast, RT-Constrain) evaluate policy but
+  never insert — the non-unicast families are out of scope for this ADR.
+  Unicast withdrawals write a `mark_withdrawn` tombstone rather than an
+  insert.
   When explain is disabled the gate is checked *before* the decision snapshot
   is built, so a disabled deployment pays one boolean per UPDATE and clones
   nothing.
@@ -128,9 +133,9 @@ flag on this one.
   retention*, not policy evaluation behaviour — flipping these knobs
   cannot change which routes get accepted. LRU eviction. A small
   secondary structure — a recent-eviction key set, lossy with
-  false-positive-only semantics, sized in the low hundreds of
-  entries per peer — lets a subsequent lookup return `EVICTED`
-  rather than `NOT_SEEN`.
+  false-positive-only semantics, capped at `EVICTION_TRACKER_CAPACITY = 512`
+  entries per peer and allocated once at that capacity — lets a subsequent
+  lookup return `EVICTED` rather than `NOT_SEEN`.
 
   **What 4096 is and isn't.** 4096 targets **fabric / partial-table
   debugging** — a leaf-spine or route-reflector peer carrying
@@ -177,6 +182,11 @@ Response carries one of eight outcomes:
 
 The CLI renders `CACHE_DISABLED` and `NO_SESSION` as errors (nonzero
 exit) rather than as answers.
+
+Those eight outcomes are the answer surface, not the whole error surface: a
+peer session that does not answer the bounded query in time returns gRPC
+`DEADLINE_EXCEEDED` instead of any outcome
+(`PeerHandle::explain_import_policy_timeout`). See docs/API.md.
 
 The query is a **read** — it must not increment policy counters,
 must not touch RIB, must not log a new policy decision.
@@ -347,7 +357,7 @@ review added the enable flag (7). They are pinned here, not deferred:
 | 3 | EVICTED tracker | **Yes**, kept compact: lossy recent-eviction key set / bloom-ish ring, false-positive-only. A wrong `EVICTED` is operationally better than a wrong `NOT_SEEN`. |
 | 4 | Withdraw semantics | **`WITHDRAWN`**, retained as a **lighter** tombstone (attrs + mods dropped; outcome + matched policy + timestamp + generation kept) until evicted / stale / session reset. Preserves the "never seen" vs "seen and removed" distinction without letting a churny peer crowd live decisions out of the LRU with full-payload dead entries. |
 | 5 | Add-Path | Include `path_id` in the cache key and the response. CLI accepts optional `--path-id`. Without it, return all matching entries for the prefix (a clear multi-path response), never an arbitrary first hit. |
-| 6 | Statement-level trace | **Shipped.** Originally deferred ("No in v1," terminal `matched_policy` only); the per-statement trace later landed as `repeated ImportExplainStatementStep statements = 13` on the explain response (rendered by the CLI). It is **re-derived at query time** from the cached pre-policy context, **not** stored inside `PolicyEvaluation` — so the live import path records no extra statement-trace state and the out-of-scope item below (storage *inside* `PolicyEvaluation`) still holds. |
+| 6 | Statement-level trace | **Shipped.** Originally deferred ("No in v1," terminal `matched_policy` only); the per-statement trace later landed as `repeated ImportExplainStatementStep statements = 13` on `ImportExplainMatch` — the per-match element of the explain response, not the response message itself, whose fields stop at 6 (rendered by the CLI). It is **re-derived at query time** from the cached pre-policy context, **not** stored inside `PolicyEvaluation` — so the live import path records no extra statement-trace state and the out-of-scope item below (storage *inside* `PolicyEvaluation`) still holds. |
 | 7 | Enable flag (added post-review) | **`[policy.explain].enabled`, default `false`.** The load-bearing perf control: the cost is on the write path (per-NLRI policy-context/modification clone on every UPDATE, denies included). The decision-build is gated on this flag, checked *before* any clone, so the default costs one boolean per UPDATE, stores nothing, and allocates no cache. The flag is **global** — no per-peer or per-group granularity. Shipped `true`; see [Reversal](#reversal-retention-is-opt-in). |
 
 ## Out of scope
@@ -381,20 +391,23 @@ built in stages but is not split across PRs:
 2. CLI + Add-Path semantics: `rbgp policy explain`, text + JSON
    renderers, AFI inferred from the prefix, all-paths vs `--path-id`.
 3. (shipped in a later PR) Statement-level trace: `repeated
-   ImportExplainStatementStep statements = 13` on the explain response,
+   ImportExplainStatementStep statements = 13` on `ImportExplainMatch`,
    re-derived at query time from the cached pre-policy context (not stored
    inside `PolicyEvaluation`) and rendered by the CLI.
 
 ## Anchors
 
 - Eval call sites: `evaluate_chain_with_attribution` in
-  `crates/transport/src/session/inbound.rs` (body IPv4, FlowSpec, EVPN,
-  and MP-unicast paths)
-- `PolicyEvaluation`: `crates/policy/src/engine.rs:1217`
+  `crates/transport/src/session/inbound.rs` — eight of them (body IPv4,
+  FlowSpec, EVPN, BGP-LS, MPLS-VPN, labeled-unicast, RT-Constrain, and
+  MP-unicast paths). Only the body-IPv4 and MP-unicast paths write the
+  decision cache; see "Write triggers"
+- `PolicyEvaluation`: `pub struct PolicyEvaluation` in
+  `crates/policy/src/engine.rs`
 - Export-explain reference: `evaluate_export_chain` in
   `crates/rib/src/manager/distribution/mod.rs` (assembly in
   `crates/rib/src/manager/distribution/unicast.rs`),
-  RPC at `proto/rustbgpd.proto:1722`
-- Existing import counters: `record_import_policy_eval` at
-  `crates/transport/src/session/inbound.rs:34`
+  RPC `RibService.ExplainAdvertisedRoute` in `proto/rustbgpd.proto`
+- Existing import counters: `record_import_policy_eval` in
+  `crates/transport/src/session/inbound.rs`
 - Authz tier reference: `crates/api/src/authz.rs`

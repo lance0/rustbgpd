@@ -115,7 +115,7 @@ releases rather than carried forward from older measurements.
 
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
-| Total RPCs | ~55 | 102 | 98 `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs |
+| Total RPCs | ~55 | 104 | 100 `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs |
 | Peer CRUD | Yes | Yes | Add/Delete/List/Enable/Disable |
 | Peer groups | Yes | Yes | `PeerGroupService` + neighbor membership RPCs |
 | Dynamic neighbors (prefix-based) | Yes | Yes | `[[dynamic_neighbors]]` config plus runtime `AddDynamicNeighbor` / `DeleteDynamicNeighbor` / `ListDynamicNeighbors` (add/delete tier `mutating`, persisted to TOML); overlapping ranges resolve by longest-prefix-match |
@@ -172,7 +172,7 @@ releases rather than carried forward from older measurements.
 | Config reload (SIGHUP) | Yes | Yes | Neighbor diff + reconcile; global changes require restart. Measured at route-server scale: sub-second UPDATE stall and ~1.6 s full re-advertisement at 700 clients x 400k routes (docs/perf/reload-stall-2026-07.md) |
 | Config persistence | No | Yes | gRPC mutations atomically persisted to TOML |
 | Prefix limits | Yes | Yes | rustbgpd inbound limits are per-family and tear down with Cease/1, latch the peer, and optionally make one generation-fenced restart attempt after a configured hold-down. Outbound per-family limits keep the session Established and withhold net-new advertisements without withdrawals or NOTIFICATION |
-| Embeddable library | Yes (Go) | No | Wire crate is standalone |
+| Embeddable library | Yes (Go) | No | Two crates are registry-published rather than the whole daemon: `rustbgpd-wire` (codec) and `rustbgpd-fsm` (pure RFC 4271 FSM) — see [EMBEDDING.md](EMBEDDING.md) |
 | CLI tool | Yes (gobgp) | Yes | `rbgp` wraps gRPC API |
 | Live TUI dashboard | No | Yes | `rbgp top` — sessions, prefix counts, message rates, route events |
 | Rustc-style config errors | No | Yes | Source-line spans with column markers on validation errors |
@@ -212,7 +212,7 @@ the gRPC API table's "Total RPCs" row, not a Yes-tally.)
 | Core protocol | 16 | 16 | 100% |
 | Path attributes | 13 | 11 | ~85% |
 | Policy engine | 18 | 21 | 100%+ (`.rpol` language, live-RIB dry run, per-term hit counters are rustbgpd-only) |
-| gRPC RPCs | ~55 | 102 | 100%+ (98 `rustbgpd.v1` RPCs plus gNMI) |
+| gRPC RPCs | ~55 | 104 | 100%+ (100 `rustbgpd.v1` RPCs plus gNMI) |
 | Monitoring | 5 | 9 | 100%+ |
 | Security | 5 | 6 | 100%+ |
 | Best-path steps | 12 | 12 | 100% (different single gaps: GoBGP lacks Optimal Route Reflection, rustbgpd lacks AIGP) |
