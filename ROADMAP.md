@@ -538,6 +538,9 @@ Details in the "Recently shipped" section below and ADR-0097.
   The pre-activation `rfc8212_secure_default_ready` advisory is also shipped:
   legacy omission remains effective `false`, but `--check` now gives both exact
   operator choices and `--check --strict` gates on that warning.
+  The explicit Linux-only offline migration tool is shipped too: operators can
+  pin epoch 1/false, prepare epoch 2/true, dry-run the complete proof, or emit
+  epoch-less v0.64-compatible bytes behind an exact external v0.64.0 validator.
   ADR-0125 authorizes activation only after ADR-0119's remaining mutation and
   interop proofs pass; activation changes only epoch-2 omission to effective
   `true`. Epoch-less and epoch-1 omission stay permissive, and explicit

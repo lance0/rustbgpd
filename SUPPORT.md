@@ -14,9 +14,11 @@ The rest of the project remains alpha and may change between minor releases.
 
 RFC 8212 enforcement remains opt-in under
 [ADR-0112](docs/adr/0112-rfc-8212-ebgp-requires-policy.md).
-[ADR-0119](docs/adr/0119-rfc-8212-secure-default-config-epoch.md) is Accepted,
-but its representation and production-mutation proof gates remain
-unimplemented; acceptance alone does not activate a secure default.
+[ADR-0119](docs/adr/0119-rfc-8212-secure-default-config-epoch.md) is Accepted;
+its representation, advisory, and offline migration/downgrade tooling are
+shipped, but acceptance still does not activate a secure default. Migration is
+Linux-only and requires an explicit config path; downgrade also
+requires an explicitly selected exact v0.64.0 validator binary.
 
 ## Reporting an ordinary bug
 

@@ -11,6 +11,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rustbgpd --migrate-config ACTION --offline` now performs explicit Linux-only
+  RFC 8212 config migrations in place. It supports epoch-1/false pinning,
+  epoch-2/true preparation, full dry-run proof, and a downgrade that preserves
+  the effective boolean while requiring an exact external v0.64.0 validator.
+  A locked source plus source/symlink fingerprints, a 0600 validated stage,
+  preserved source metadata, one rename, and directory fsync protect
+  publication; a post-rename directory-sync failure is reported as ambiguous
+  with inspect-before-retry guidance.
+  (LAN-779)
+
 - `rs-config-render` now translates ARouteServer IPv4/IPv6 blackhole policies
   into explicit import and per-client export policy. Authorized marked
   more-specifics use IRR origin plus covering-prefix checks, local marker forms
