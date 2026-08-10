@@ -546,7 +546,7 @@ impl Capability {
                 }
             }
             capability_code::OUTBOUND_ROUTE_FILTERING => {
-                // RFC 5291 §4: per-family blocks. Preserve as Unknown on a
+                // RFC 5291 §5: per-family blocks. Preserve as Unknown on a
                 // structural error or unrecognized AFI/SAFI (lossless
                 // round-trip, mirroring Add-Path).
                 let raw = buf.copy_to_bytes(usize::from(length));
@@ -744,7 +744,7 @@ impl Capability {
                 }
             }
             Capability::OutboundRouteFilter(entries) => {
-                // RFC 5291 §4: the value carries one or more blocks. An empty
+                // RFC 5291 §5: the value carries one or more blocks. An empty
                 // list would encode to a zero-length value, which the decoder
                 // (correctly) treats as malformed and round-trips as Unknown —
                 // reject it here so encode/decode stay symmetric.
@@ -1787,7 +1787,7 @@ mod tests {
         }
     }
 
-    // --- Outbound Route Filtering capability (RFC 5291 §4) tests ---
+    // --- Outbound Route Filtering capability (RFC 5291 §5) tests ---
 
     #[test]
     fn roundtrip_outbound_route_filter() {
@@ -1812,7 +1812,7 @@ mod tests {
 
     #[test]
     fn outbound_route_filter_rejects_empty_entries() {
-        // An empty block list has no valid wire form (RFC 5291 §4 requires one
+        // An empty block list has no valid wire form (RFC 5291 §5 requires one
         // or more), and the decoder treats a zero-length value as Unknown —
         // encode must refuse it so the codec stays symmetric.
         let cap = Capability::OutboundRouteFilter(vec![]);

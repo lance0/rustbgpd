@@ -12,7 +12,7 @@
 //! group length that overruns the message body) return a `DecodeError`; a
 //! malformed Address-Prefix *entry* (undefined Action, or a prefix length
 //! beyond the address family) decodes into [`OrfEntries::Malformed`] so the
-//! caller can apply the RFC 5291 §5.2 reset instead of tearing the session down.
+//! caller can apply the RFC 5291 §6 reset instead of tearing the session down.
 
 use bytes::{Buf, BufMut, Bytes};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -63,7 +63,7 @@ impl OrfType {
     }
 }
 
-/// Capability Send/Receive field (RFC 5291 §4). Unknown values are preserved.
+/// Capability Send/Receive field (RFC 5291 §5). Unknown values are preserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OrfSendReceive {
     /// The speaker is willing to receive ORF entries from its peer.
@@ -121,7 +121,7 @@ pub struct OrfCapType {
     pub send_receive: OrfSendReceive,
 }
 
-/// One per-(AFI,SAFI) block of the ORF capability value (RFC 5291 §4).
+/// One per-(AFI,SAFI) block of the ORF capability value (RFC 5291 §5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrfCapEntry {
     /// Address family.
@@ -132,7 +132,7 @@ pub struct OrfCapEntry {
     pub orf_types: Vec<OrfCapType>,
 }
 
-/// ROUTE-REFRESH When-to-refresh octet (RFC 5291 §5.2). Unknown values preserved.
+/// ROUTE-REFRESH When-to-refresh octet (RFC 5291 §4). Unknown values preserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WhenToRefresh {
     /// Re-run the outbound advertisement sweep immediately.
@@ -165,7 +165,7 @@ impl WhenToRefresh {
     }
 }
 
-/// Action field of a common ORF entry header (RFC 5291 §5.1.1).
+/// Action field of a common ORF entry header (RFC 5291 §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OrfAction {
     /// Add this entry to the ORF list.
@@ -176,7 +176,7 @@ pub enum OrfAction {
     RemoveAll,
 }
 
-/// Match field of a common ORF entry header (RFC 5291 §5.1.1).
+/// Match field of a common ORF entry header (RFC 5291 §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OrfMatch {
     /// Permit routes matching this entry.
@@ -185,7 +185,7 @@ pub enum OrfMatch {
     Deny,
 }
 
-/// A single Address-Prefix ORF entry (RFC 5291 §5.1.1 header + RFC 5292 §4).
+/// A single Address-Prefix ORF entry (RFC 5291 §4 header + RFC 5292 Address-Prefix encoding).
 ///
 /// For [`OrfAction::RemoveAll`], only the action is meaningful — `prefix` is
 /// `None` and the length/sequence fields are zero.
@@ -215,7 +215,7 @@ pub enum OrfEntries {
     /// for lossless round-trip (the caller ignores un-negotiated types).
     Raw(Bytes),
     /// An Address-Prefix group whose entries could not be parsed (undefined
-    /// Action, prefix length beyond the family, etc.). Per RFC 5291 §5.2 the
+    /// Action, prefix length beyond the family, etc.). Per RFC 5291 §6 the
     /// receiver ignores the malformed entries and removes the previously
     /// installed ORF list of that type — it does not tear the session down,
     /// so this is surfaced as data rather than a `DecodeError`. The raw bytes
@@ -223,7 +223,7 @@ pub enum OrfEntries {
     Malformed(Bytes),
 }
 
-/// One ORF-Type group within a ROUTE-REFRESH ORF payload (RFC 5291 §5.2).
+/// One ORF-Type group within a ROUTE-REFRESH ORF payload (RFC 5291 §4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrfEntryGroup {
     /// The ORF-Type of this group.
@@ -232,7 +232,7 @@ pub struct OrfEntryGroup {
     pub entries: OrfEntries,
 }
 
-/// The ORF section carried in a ROUTE-REFRESH message (RFC 5291 §5.2),
+/// The ORF section carried in a ROUTE-REFRESH message (RFC 5291 §4),
 /// following the standard AFI/Reserved/SAFI header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrfPayload {
@@ -242,7 +242,7 @@ pub struct OrfPayload {
     pub groups: Vec<OrfEntryGroup>,
 }
 
-// ── Capability value codec (RFC 5291 §4) ─────────────────────────────────
+// ── Capability value codec (RFC 5291 §5) ─────────────────────────────────
 
 /// Encoded length of the ORF capability value (sum over blocks).
 #[must_use]
@@ -273,7 +273,7 @@ pub fn encode_capability_value(entries: &[OrfCapEntry], buf: &mut impl BufMut) {
 /// `Capability::Unknown` for a lossless round-trip (mirroring Add-Path).
 #[must_use]
 pub fn decode_capability_value(mut raw: &[u8]) -> Option<Vec<OrfCapEntry>> {
-    // RFC 5291 §4: the value carries one or more blocks. An empty value is
+    // RFC 5291 §5: the value carries one or more blocks. An empty value is
     // malformed — return None so the caller preserves it as Unknown.
     if raw.is_empty() {
         return None;
@@ -309,7 +309,7 @@ pub fn decode_capability_value(mut raw: &[u8]) -> Option<Vec<OrfCapEntry>> {
     Some(entries)
 }
 
-// ── ROUTE-REFRESH ORF payload codec (RFC 5291 §5.2) ──────────────────────
+// ── ROUTE-REFRESH ORF payload codec (RFC 5291 §4) ────────────────────────
 
 /// Decode the ORF section of a ROUTE-REFRESH body, after the AFI/Reserved/SAFI
 /// header. `family` is the resolved AFI/SAFI pair of the message. Address-
@@ -322,7 +322,7 @@ pub fn decode_capability_value(mut raw: &[u8]) -> Option<Vec<OrfCapEntry>> {
 /// group length that overruns the body. A malformed Address-Prefix *entry*
 /// (undefined Action, or a prefix length beyond the address family) does not
 /// error — that group decodes into [`OrfEntries::Malformed`] for the caller to
-/// reset (RFC 5291 §5.2).
+/// reset (RFC 5291 §6).
 pub fn decode_route_refresh_orf(
     buf: &mut impl Buf,
     family: Option<(Afi, Safi)>,
@@ -362,7 +362,7 @@ pub fn decode_route_refresh_orf(
         };
         let entries = if let Some(afi) = parse_family {
             // A parse failure here is a malformed-but-framed group: surface it
-            // as data (RFC 5291 §5.2 reset semantics), not a session error.
+            // as data (RFC 5291 §6 reset semantics), not a session error.
             match decode_address_prefix_entries(&group_bytes, afi) {
                 Ok(parsed) => OrfEntries::AddressPrefix(parsed),
                 Err(_) => OrfEntries::Malformed(group_bytes),
@@ -896,7 +896,7 @@ mod tests {
     #[test]
     fn rr_orf_prefix_len_over_family_max_is_malformed_not_error() {
         // prefixlen 40 for IPv4 is a malformed-but-framed group: it decodes
-        // into Malformed (RFC 5291 §5.2 reset semantics), not a session error.
+        // into Malformed (RFC 5291 §6 reset semantics), not a session error.
         let mut buf = BytesMut::new();
         buf.put_u8(WhenToRefresh::Immediate.as_u8());
         buf.put_u8(OrfType::AddressPrefix.as_u8());

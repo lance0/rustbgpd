@@ -70,7 +70,7 @@ async fn inbound_orf_malformed_group_resets_via_remove_all() {
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
     session.negotiated = Some(neg);
-    // A malformed Address-Prefix group → RFC 5291 §5.2 reset (REMOVE-ALL).
+    // A malformed Address-Prefix group → RFC 5291 §6 reset (REMOVE-ALL).
     let rr = orf_rr(
         OrfType::AddressPrefix,
         OrfEntries::Malformed(Bytes::from_static(&[0x40])),

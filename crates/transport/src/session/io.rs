@@ -56,7 +56,7 @@ impl PeerSession {
             }
             let entries = match &group.entries {
                 OrfEntries::AddressPrefix(entries) => entries.clone(),
-                // RFC 5291 §5.2: a malformed entry of a negotiated type removes
+                // RFC 5291 §6: a malformed entry of a negotiated type removes
                 // the previously installed list of that type — emit a reset.
                 OrfEntries::Malformed(_) => vec![AddressPrefixOrf {
                     action: OrfAction::RemoveAll,

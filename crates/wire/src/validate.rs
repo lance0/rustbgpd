@@ -135,7 +135,7 @@ pub fn validate_update_attributes_with_options(
         match attr {
             PathAttribute::NextHop(addr) => check_next_hop(*addr)?,
             PathAttribute::AsPath(path) => check_as_path(path)?,
-            // RFC 8955 §6.1: for FlowSpec (SAFI 133), the NEXT_HOP
+            // RFC 8955 §4: for FlowSpec (SAFI 133), the NEXT_HOP
             // attribute value is "irrelevant" and is recommended
             // to be 0 when advertising. The on-wire NH-Len for
             // FlowSpec is 0 and the decoder fills `mp.next_hop`
@@ -755,7 +755,7 @@ mod tests {
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
     }
     /// Regression: an `MP_REACH` for `FlowSpec` (SAFI 133) with
-    /// the recommended-by-RFC-8955-§6.1 next-hop value of 0.0.0.0
+    /// the recommended-by-RFC-8955-§4 next-hop value of 0.0.0.0
     /// must NOT trip `NEXT_HOP` validation. Before the `FlowSpec`
     /// guard, validate ran the standard `check_next_hop` against
     /// every `MP_REACH` next-hop and rejected 0.0.0.0 with subcode
@@ -776,7 +776,7 @@ mod tests {
             PathAttribute::MpReachNlri(MpReachNlri {
                 afi: Afi::Ipv4,
                 safi: Safi::FlowSpec,
-                // RFC 8955 §6.1 recommends 0.0.0.0 for FlowSpec
+                // RFC 8955 §4 recommends 0.0.0.0 for FlowSpec
                 // advertisements; on the wire NH-Len is 0 and the
                 // decoder defaults this to 0.0.0.0.
                 next_hop: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
@@ -794,7 +794,7 @@ mod tests {
         // shape FRR sends post-handshake. Must pass validation.
         assert!(
             validate_update_attributes(&attrs, false, false, true).is_ok(),
-            "FlowSpec MP_REACH with 0.0.0.0 next-hop must pass — RFC 8955 §6.1 \
+            "FlowSpec MP_REACH with 0.0.0.0 next-hop must pass — RFC 8955 §4 \
              specifies the next-hop value is irrelevant for FlowSpec and \
              recommends 0. The pre-fix path tore sessions against every \
              RFC-compliant FlowSpec peer."

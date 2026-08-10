@@ -96,19 +96,19 @@ pub mod orf {
     /// interoperability; never advertised. Applied only if negotiated.
     pub const TYPE_ADDRESS_PREFIX_LEGACY: u8 = 128;
 
-    /// Capability Send/Receive (RFC 5291 §4): willing to receive ORF entries.
+    /// Capability Send/Receive (RFC 5291 §5): willing to receive ORF entries.
     pub const SEND_RECEIVE_RECEIVE: u8 = 1;
     /// Capability Send/Receive: willing to send ORF entries.
     pub const SEND_RECEIVE_SEND: u8 = 2;
     /// Capability Send/Receive: willing to both send and receive.
     pub const SEND_RECEIVE_BOTH: u8 = 3;
 
-    /// ROUTE-REFRESH When-to-refresh (RFC 5291 §5.2): refresh immediately.
+    /// ROUTE-REFRESH When-to-refresh (RFC 5291 §4): refresh immediately.
     pub const WHEN_IMMEDIATE: u8 = 1;
     /// ROUTE-REFRESH When-to-refresh: defer the re-advertisement sweep.
     pub const WHEN_DEFER: u8 = 2;
 
-    /// Common ORF entry header — Action field mask (top 2 bits, RFC 5291 §5.1.1).
+    /// Common ORF entry header — Action field mask (top 2 bits, RFC 5291 §4).
     pub const ACTION_MASK: u8 = 0xC0;
     /// Common ORF entry Action: ADD.
     pub const ACTION_ADD: u8 = 0x00;
@@ -116,7 +116,7 @@ pub mod orf {
     pub const ACTION_REMOVE: u8 = 0x80;
     /// Common ORF entry Action: REMOVE-ALL (entry carries only the header byte).
     pub const ACTION_REMOVE_ALL: u8 = 0xC0;
-    /// Common ORF entry header — Match field mask (bit 5, RFC 5291 §5.1.1).
+    /// Common ORF entry header — Match field mask (bit 5, RFC 5291 §4).
     pub const MATCH_MASK: u8 = 0x20;
     /// Common ORF entry Match: DENY (PERMIT is the mask cleared).
     pub const MATCH_DENY: u8 = 0x20;

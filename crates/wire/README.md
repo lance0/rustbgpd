@@ -1,11 +1,11 @@
 # rustbgpd-wire
 
-BGP message codec for Rust. Encode and decode OPEN, UPDATE, KEEPALIVE,
-NOTIFICATION, and ROUTE-REFRESH messages per RFC 4271, with extensions for
-MP-BGP, EVPN (including PMSI Tunnel for ingress-replication BUM), FlowSpec,
-VPNv4/VPNv6 labeled NLRI substrate, BGP-LS/BGP-LS-VPN codec support,
-Add-Path, Extended Messages, Outbound Route Filtering (RFC 5291/5292), BGP
-Roles + Only-to-Customer (RFC 9234), and more.
+BGP message codec for Rust. Encode and decode the RFC 4271 messages — OPEN,
+UPDATE, KEEPALIVE, NOTIFICATION — plus ROUTE-REFRESH (RFC 2918, RFC 7313),
+with extensions for MP-BGP, EVPN (including PMSI Tunnel for
+ingress-replication BUM), FlowSpec, VPNv4/VPNv6 labeled NLRI substrate,
+BGP-LS/BGP-LS-VPN codec support, Add-Path, Extended Messages, Outbound Route
+Filtering (RFC 5291/5292), BGP Roles + Only-to-Customer (RFC 9234), and more.
 
 This crate is the wire-protocol foundation of
 [rustbgpd](https://github.com/lance0/rustbgpd) but is designed for standalone
@@ -29,7 +29,6 @@ analyzers, test harnesses, MRT readers, etc.
 | 4684 | Route Target Constrain (RTC) NLRI codec (SAFI 132): `RtcNlri` encode/decode with default-route and prefix-bit bounds. Inert codec substrate — negotiation/distribution live in the daemon |
 | 4724 | Graceful restart capability |
 | 4760 | MP-BGP: `MP_REACH_NLRI` / `MP_UNREACH_NLRI` |
-| 4761 §3.2.5 | Default Gateway extended community (decode) |
 | 5291 | Outbound Route Filtering (ORF) capability (code 3) + ORF-carrying Route Refresh |
 | 5292 | Address-Prefix ORF-Type (64), with the legacy pre-standard type (128) decoded for interoperability |
 | 5492 | BGP capabilities |
@@ -39,9 +38,9 @@ analyzers, test harnesses, MRT readers, etc.
 | 6811 | RPKI prefix-origin validation state — the `RpkiValidation` routing-domain enum (no extended-community codec) |
 | 7313 | Enhanced Route Refresh (BoRR / EoRR markers) |
 | 7385 | PMSI Tunnel Type IANA registry — `PmsiTunnelType` preserves unknown values via an `Other(u8)` variant |
-| 7432 | EVPN: Types 1–4 (EAD, MAC/IP, IMET, Ethernet Segment) including MAC Mobility extended community (§7.7) |
+| 7432 | EVPN: Types 1–4 (EAD, MAC/IP, IMET, Ethernet Segment) including the MAC Mobility extended community (§7.7) and the flag-only Default Gateway extended community (§7.8, type 0x03 / subtype 0x0D, decode + construct) |
 | 7606 | Revised UPDATE error handling: `UpdateMessage::parse_revised` recovers malformed path attributes without aborting the parse, each carrying its §7 per-attribute disposition (treat-as-withdraw / attribute-discard / session-reset) from `malformed_attr_disposition`; an attribute that decodes but fails validation may be retained in `update.attributes` for observation alongside its disposition; malformed or duplicated `MP_REACH_NLRI` / `MP_UNREACH_NLRI` and unparseable NLRI stay session-reset (§5.3, §7.11) |
-| 7674 | Clarification of MP_REACH_NLRI next-hop encoding |
+| 7674 | FlowSpec Redirect Extended Community formatting (updates RFC 5575): redirect-to-IPv4 type 0x8108 and redirect-to-4-octet-AS type 0x8208 in `FlowSpecAction` |
 | 7911 | Add-Path: path ID in NLRI encode/decode |
 | 7999 | `BLACKHOLE` well-known community (`0xFFFF_029A`, rendered as `65535:666`) |
 | 8092 | Large communities (3× u32) |
@@ -53,7 +52,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 8584 §2.2 | DF Election Extended Community (type 0x06, subtype 0x06): decode + construct of the algorithm / capabilities / DF-preference fields |
 | 8654 | Extended messages (up to 65535 bytes). `encode_message_with_limit()` and the per-message `encode_with_limit()` helpers (on `NotificationMessage` / `RouteRefreshMessage`) encode against a caller-supplied size ceiling; the default `encode()` keeps the 4096-byte base limit |
 | 8950 | Extended next hop (IPv4 NLRI over IPv6 NH); optional acceptance of a link-local-primary `MP_REACH_NLRI` next-hop for unnumbered peers via `UpdateValidationOptions` |
-| 8955/8956 | FlowSpec: 13 component types, numeric/bitmask operators; §6.1-compliant `NEXT_HOP` validation (the irrelevant-next-hop case is accepted, not rejected); `FlowSpecRule::validate_encoded_len` rejects rules above the 12-bit `MAX_FLOWSPEC_NLRI_RULE_LEN` (4095 bytes) before they reach the wire |
+| 8955/8956 | FlowSpec: 13 component types, numeric/bitmask operators; §4-compliant `NEXT_HOP` handling (the irrelevant-next-hop case is accepted, not rejected); `FlowSpecRule::validate_encoded_len` rejects rules above the 12-bit `MAX_FLOWSPEC_NLRI_RULE_LEN` (4095 bytes) before they reach the wire |
 | 9003 | Administrative Shutdown Communication (obsoletes RFC 8203) |
 | 9012 | BGP Encapsulation extended community (§4.1) — VXLAN sub-type used by EVPN encap |
 | 9072 | Extended Optional Parameters Length for BGP OPEN: classic encoding through 255 optional-parameter octets, extended aggregate and per-parameter lengths above that boundary, and permissive extended-format receive at smaller lengths |
@@ -65,8 +64,8 @@ analyzers, test harnesses, MRT readers, etc.
 | 9687 | Send Hold Timer: NOTIFICATION code 8 (`NotificationCode::SendHoldTimerExpired`, subcode always 0 per §6). Codec only — the timer itself lives in the daemon |
 | 9774 | AS_SET / AS_CONFED_SET deprecation: prohibited segment types in `AS_PATH` / `AS4_PATH` are rejected on decode with RFC 7606 treat-as-withdraw disposition, and an `AS_PATH` containing an AS_SET refuses to encode (`EncodeError::ValueOutOfRange`) |
 | 9785 §3 | DF Election preference algorithms + Don't-Preempt bit, extending the RFC 8584 DF Election Extended Community |
-| draft-abraitis-idr-addpath-paths-limit-04 | Experimental Paths-Limit capability (`PathsLimitFamily`, IANA-assigned capability code 76). The draft is expired and archived; interoperability and behavior remain experimental |
 | 10005 | Link Bandwidth Extended Community receiver subset: decode exact transitive/non-transitive types 0x00/0x40, subtype 0x04, as raw AS + IEEE-754 bytes/second; the constructor remains non-transitive type 0x40 |
+| draft-abraitis-idr-addpath-paths-limit-04 | Experimental Paths-Limit capability (`PathsLimitFamily`, IANA-assigned capability code 76). The draft is expired and archived; interoperability and behavior remain experimental |
 
 ### 0.17.0 compatibility note
 
@@ -149,30 +148,31 @@ Decode a single BGP message from raw bytes:
 use bytes::Bytes;
 use rustbgpd_wire::{decode_message, Message, MAX_MESSAGE_LEN};
 
-# fn handle(raw_bytes: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
-let mut buf = Bytes::from(raw_bytes);
-let msg = decode_message(&mut buf, MAX_MESSAGE_LEN)?;
+fn handle(raw_bytes: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut buf = Bytes::from(raw_bytes);
+    let msg = decode_message(&mut buf, MAX_MESSAGE_LEN)?;
 
-match msg {
-    Message::Update(update) => {
-        let parsed = update.parse(
-            true,   // 4-octet AS numbers negotiated
-            false,  // Add-Path not negotiated for body NLRI
-            &[],    // Add-Path families for MP NLRI (empty = none)
-        )?;
-        for entry in &parsed.announced {
-            println!("announced: {}", entry.prefix);
+    match msg {
+        Message::Update(update) => {
+            let parsed = update.parse(
+                true,   // 4-octet AS numbers negotiated
+                false,  // Add-Path not negotiated for body NLRI
+                &[],    // Add-Path families for MP NLRI (empty = none)
+            )?;
+            for entry in &parsed.announced {
+                println!("announced: {}", entry.prefix);
+            }
+            for attr in &parsed.attributes {
+                println!("attribute: {:?}", attr);
+            }
         }
-        for attr in &parsed.attributes {
-            println!("attribute: {:?}", attr);
+        Message::Open(open) => {
+            println!("OPEN: as={} hold={} caps={}", open.my_as, open.hold_time, open.capabilities.len());
         }
+        _ => {}
     }
-    Message::Open(open) => {
-        println!("OPEN: as={} hold={} caps={}", open.my_as, open.hold_time, open.capabilities.len());
-    }
-    _ => {}
+    Ok(())
 }
-# Ok(()) }
 ```
 
 Build and encode an OPEN message:
@@ -208,7 +208,7 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
 - **`Capability`** — OPEN capabilities: multi-protocol, 4-octet AS, Add-Path,
   experimental Paths-Limit (`Capability::PathsLimit` / `PathsLimitFamily`,
   code 76), graceful restart, Outbound Route Filtering, etc.
-- **ORF types** (`orf` module, RFC 5291/5292) — `OrfCapEntry` (capability blocks), `OrfPayload` / `OrfEntryGroup` / `OrfEntries` (the Route Refresh ORF section), and `AddressPrefixOrf` (one Address-Prefix entry: action, match, sequence, min/max length, prefix). `RouteRefreshMessage::orf` carries the decoded section; a malformed IPv4/IPv6 unicast Address-Prefix group decodes to `OrfEntries::Malformed` (RFC 5291 §5.2 reset) rather than failing the message, while non-unicast / future-family Address-Prefix groups are preserved as raw bytes until those family encodings are implemented. Adding `orf` to `RouteRefreshMessage` made that struct `Clone` rather than `Copy` (0.11.0)
+- **ORF types** (`orf` module, RFC 5291/5292) — `OrfCapEntry` (capability blocks), `OrfPayload` / `OrfEntryGroup` / `OrfEntries` (the Route Refresh ORF section), and `AddressPrefixOrf` (one Address-Prefix entry: action, match, sequence, min/max length, prefix). `RouteRefreshMessage::orf` carries the decoded section; a malformed IPv4/IPv6 unicast Address-Prefix group decodes to `OrfEntries::Malformed` (RFC 5291 §6 reset) rather than failing the message, while non-unicast / future-family Address-Prefix groups are preserved as raw bytes until those family encodings are implemented. Adding `orf` to `RouteRefreshMessage` made that struct `Clone` rather than `Copy` (0.11.0)
 - **`FlowSpecRule`** / **`FlowSpecComponent`** — FlowSpec NLRI with all 13 match types
 - **`EvpnRoute`** / **`EvpnRouteKey`** — typed EVPN routes (Types 1–5) with
   full payloads (RFC 7432, RFC 9136); `EvpnRouteKey` implements `Ord` for
@@ -222,8 +222,10 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
   (`bgp_ls_attribute_tlvs`, `igp_metric`, `prefix_metric`, `te_default_metric`,
   `BgpLsNodeKey`, and the `BGP_LS_TLV_*` type constants)
 - **`labeled` module** — IPv4/IPv6 labeled-unicast NLRI codec (SAFI 4, RFC 8277):
-  `LabeledNlri` / `LabeledNlriEntry` / `LABELED_UNICAST_SAFI`, label-stack +
-  prefix encode/decode with Add-Path and withdraw forms
+  `LabeledNlri` / `LabeledNlriEntry` / `LabeledAddressFamily`, label-stack +
+  prefix encode/decode with Add-Path and withdraw forms. The SAFI-4 constant
+  `LABELED_UNICAST_SAFI` is defined in the `vpn` module and re-exported at the
+  crate root
 - **`rtc` module** — Route Target Constrain NLRI codec (SAFI 132, RFC 4684):
   `RtcNlri` / `RTC_SAFI` / `RTC_MAX_PREFIX_BITS`, `decode_rtc_nlri` /
   `encode_rtc_nlri` with default-route and prefix-bit bounds
@@ -233,7 +235,7 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
   `ipv4:val` textual encodings and the exact `0x<16-hex-digits>` display
   fallback for unknown RD types; malformed or noncanonical fallback text
   returns `RouteDistinguisherParseError::InvalidHexFallback`
-- **`DfElectionExtendedCommunity`** (`attribute`) — RFC 8584 §2.2 / RFC 9785 §3 DF Election Extended Community: `ExtendedCommunity::as_df_election()` decodes one, `ExtendedCommunity::df_election(algorithm, capabilities, preference: Option<u16>)` constructs it (EVPN DF election algorithm, capabilities, and the RFC 9785 preference / Don't-Preempt fields)
+- **`DfElectionExtendedCommunity`** (`attribute`) — RFC 8584 §2.2 / RFC 9785 §3 DF Election Extended Community: `ExtendedCommunity::as_df_election()` decodes one, `ExtendedCommunity::df_election(algorithm_id: u8, capabilities: u16, preference: Option<u16>)` constructs it (EVPN DF election algorithm, capabilities, and the RFC 9785 preference / Don't-Preempt fields). `algorithm_id` is masked to the five-bit DF Alg field, so wider values truncate silently
 - **Link Bandwidth** (RFC 10005 §§2, 3.2) — `ExtendedCommunity::as_link_bandwidth()` decodes exact type 0x00/0x40, subtype 0x04, without interpreting the raw AS/float payload; `ExtendedCommunity::link_bandwidth(asn, bytes_per_sec)` continues to construct non-transitive type 0x40
 - **Origin Validation State** (RFC 8097) — `ExtendedCommunity::ORIGIN_VALIDATION_VALID` /
   `_NOT_FOUND` / `_INVALID` constants (type 0x43) for the RPKI prefix-origin
