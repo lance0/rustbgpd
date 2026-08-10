@@ -63,6 +63,39 @@ fn bird3_golden_translation_and_operational_guidance() {
 }
 
 #[test]
+fn bird_empty_channels_and_rr_client_on_are_recognized() {
+    let source = "router id 192.0.2.10;\n\
+                  protocol bgp edge { local as 64500; neighbor 192.0.2.1 as 64500; \
+                  ipv4; ipv6; rr client on; }\n";
+    let imported =
+        import_source(SourceFormat::Bird, "empty-channels.conf", source).expect("translates");
+
+    assert!(
+        imported
+            .config_toml
+            .contains("families = [\"ipv4_unicast\", \"ipv6_unicast\"]"),
+        "{}",
+        imported.config_toml
+    );
+    assert_eq!(imported.report.skipped.len(), 1);
+    assert_eq!(imported.report.exit_code, 2);
+    assert!(!imported.config_toml.contains("route_reflector_client"));
+    assert!(
+        imported
+            .report
+            .skipped
+            .iter()
+            .all(|skip| !skip.stanza.ends_with("ipv4") && !skip.stanza.ends_with("ipv6"))
+    );
+    let skip = &imported.report.skipped[0];
+    assert_eq!(skip.line, Some(2));
+    assert_eq!(skip.stanza, "protocol edge: rr client on");
+    assert!(skip.guidance.contains("route_reflector_client = true"));
+    assert!(skip.guidance.contains("by hand"));
+    assert!(skip.guidance.contains("iBGP only"));
+}
+
+#[test]
 fn frr_golden_translation() {
     let imported = import_source(SourceFormat::Frr, "frr.conf", FRR).expect("translates");
     assert_eq!(

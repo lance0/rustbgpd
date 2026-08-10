@@ -397,6 +397,8 @@ fn scope(acc: &BgpAcc) -> String {
 fn bgp_stmt(model: &mut Model, acc: &mut BgpAcc, line: usize, text: &str) {
     let words: Vec<&str> = text.split_whitespace().collect();
     match words.as_slice() {
+        ["ipv4"] => acc.families.push("ipv4_unicast".to_owned()),
+        ["ipv6"] => acc.families.push("ipv6_unicast".to_owned()),
         // `local as N;` and `local <ip> as N;`
         ["local", rest @ ..] if rest.len() >= 2 && rest[rest.len() - 2] == "as" => {
             if let Ok(asn) = rest[rest.len() - 1].parse::<u32>() {
@@ -439,10 +441,10 @@ fn bgp_stmt(model: &mut Model, acc: &mut BgpAcc, line: usize, text: &str) {
             Err(_) => skip(model, line, text.to_owned(), GENERIC_GUIDANCE),
         },
         ["password", ..] => acc.auth_present = true,
-        ["rr", "client"] => skip(
+        ["rr", "client"] | ["rr", "client", "on"] => skip(
             model,
             line,
-            format!("{}: rr client", scope(acc)),
+            format!("{}: {text}", scope(acc)),
             "set route_reflector_client = true on the neighbor by hand (iBGP only)",
         ),
         ["rs", "client"] | ["rs", "client", "on"] => skip(
