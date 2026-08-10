@@ -17,6 +17,7 @@ asn = 65001
 router_id = "10.0.0.1"
 listen_port = {port}
 runtime_state_dir = "/tmp/rustbgpd-daemon-stdout-closed"
+ebgp_requires_policy = false
 
 [global.telemetry]
 log_format = "json"

@@ -850,6 +850,10 @@ fn tier_grpc_enforcement_does_not_warn() {
     let toml_str = format!(
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"local-admin\" = \"operator\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nprincipal = \"local-admin\"\n",
         valid_toml_no_grpc_security()
+    )
+    .replace(
+        "listen_port = 179",
+        "listen_port = 179\nebgp_requires_policy = false",
     );
     let config = parse_strict(&toml_str).unwrap();
     assert!(

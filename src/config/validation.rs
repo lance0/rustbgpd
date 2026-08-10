@@ -13,7 +13,7 @@ use super::parse::{
 use super::schema::{
     ManagedBridgeNetdevConfig, ManagedL3VxlanNetdevConfig, ManagedNetdevsConfig,
     ManagedSvdVxlanNetdevConfig, ManagedVlanUpperNetdevConfig, ManagedVrfNetdevConfig,
-    ManagedVxlanNetdevConfig,
+    ManagedVxlanNetdevConfig, Rfc8212PolicySource,
 };
 use super::{
     Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig, InboundAdmissionConfig, Neighbor,
@@ -1399,6 +1399,17 @@ impl Config {
     /// testable without standing up a subscriber.
     pub(crate) fn advisories(&self) -> Vec<ConfigAdvisory> {
         let mut advisories = Vec::new();
+
+        if self.rfc8212_posture().policy_source == Rfc8212PolicySource::LegacyOmission {
+            advisories.push(ConfigAdvisory {
+                headline: "rfc8212_secure_default_ready: RFC 8212 policy mode is inherited from legacy omission.",
+                detail: "The retained posture is source=legacy_omission, effective=false: RFC 8212 \
+                         enforcement remains disabled and missing chains remain permit-all. Choose \
+                         exactly one explicit posture: set root config_epoch = 1 and \
+                         [global].ebgp_requires_policy = false, or set root config_epoch = 2 and \
+                         [global].ebgp_requires_policy = true.",
+            });
+        }
 
         // RFC 9107 ORR: a vantage without a BGP-LS feed can never resolve.
         // Legal — linkstate peers may be added later — so it warns rather

@@ -535,6 +535,9 @@ Details in the "Recently shipped" section below and ADR-0097.
   (`ebgp_requires_policy`, ADR-0112) is shipped and receipted; the
   typed config-epoch/raw-presence representation, pre-activation rejection,
   full-tuple restart pin, allocation-safe canonical rendering, and transaction-scoped canonical tuple materialization are shipped.
+  The pre-activation `rfc8212_secure_default_ready` advisory is also shipped:
+  legacy omission remains effective `false`, but `--check` now gives both exact
+  operator choices and `--check --strict` gates on that warning.
   ADR-0125 authorizes activation only after ADR-0119's remaining mutation and
   interop proofs pass; activation changes only epoch-2 omission to effective
   `true`. Epoch-less and epoch-1 omission stay permissive, and explicit
