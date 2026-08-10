@@ -263,7 +263,7 @@ struct Cfg {
     #[serde(default)]
     rtt_thresholds: Option<serde_yaml::Value>,
     #[serde(default)]
-    communities: BTreeMap<String, serde_yaml::Value>,
+    communities: BTreeMap<String, CommunityValues>,
     filtering: Filtering,
 }
 
@@ -284,9 +284,17 @@ struct Toggle {
 struct BlackholeFiltering {
     policy_ipv4: Option<String>,
     policy_ipv6: Option<String>,
+    rewrite_next_hop_ipv4: Option<String>,
+    rewrite_next_hop_ipv6: Option<String>,
     announce_to_client: Option<bool>,
+    add_noexport: Option<bool>,
 }
-
+#[derive(Deserialize, Default)]
+struct CommunityValues {
+    std: Option<String>,
+    lrg: Option<String>,
+    ext: Option<String>,
+}
 #[derive(Deserialize)]
 struct Filtering {
     #[serde(default)]
@@ -848,6 +856,23 @@ struct ResolvedClient<'a> {
     limit_ipv4: Option<u32>,
     limit_ipv6: Option<u32>,
     max_prefix_restart_seconds: Option<u32>,
+    blackhole: Option<ResolvedBlackhole>,
+    pref_len: Option<(u8, u8)>,
+    reject_rpki_invalid: bool,
+}
+#[derive(Clone)]
+struct ResolvedBlackhole {
+    ipv6: bool,
+    rewrite_next_hop: Option<String>,
+    announce: bool,
+    add_noexport: bool,
+    markers: Vec<(CommunityKind, String)>,
+}
+#[derive(Clone, Copy)]
+enum CommunityKind {
+    Standard,
+    Large,
+    Extended,
 }
 
 pub fn render(context_input: &str, opts: &Options) -> Result<Rendered, RenderError> {
@@ -954,20 +979,40 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
         ("policy_ipv4", &blackhole.policy_ipv4),
         ("policy_ipv6", &blackhole.policy_ipv6),
     ] {
-        if let Some(policy) = policy {
+        if let Some(policy) = policy
+            && !matches!(policy.as_str(), "propagate-unchanged" | "rewrite-next-hop")
+        {
             refusals.push(format!(
-                "general: blackhole_filtering.{name} `{policy}` is not rendered"
+                "general: unknown blackhole_filtering.{name} `{policy}`"
             ));
         }
+    }
+    check_blackhole_rewrite(blackhole, false, &mut refusals);
+    check_blackhole_rewrite(blackhole, true, &mut refusals);
+    if let Some(markers) = cfg.communities.get("blackholing") {
+        validate_blackhole_marker(
+            markers.std.as_deref(),
+            CommunityKind::Standard,
+            &mut refusals,
+        );
+        validate_blackhole_marker(markers.lrg.as_deref(), CommunityKind::Large, &mut refusals);
+        validate_blackhole_marker(
+            markers.ext.as_deref(),
+            CommunityKind::Extended,
+            &mut refusals,
+        );
     }
 
     check_next_hop_policy(&filtering.next_hop.policy, "general", &mut refusals);
     check_reject_policy(&filtering.reject_policy.policy, "general", &mut refusals);
-    if !filtering.irrdb.enforce_origin_in_as_set && !filtering.irrdb.enforce_prefix_in_as_set {
+    let active_blackhole = blackhole.policy_ipv4.is_some() || blackhole.policy_ipv6.is_some();
+    if !filtering.irrdb.enforce_origin_in_as_set
+        && (!filtering.irrdb.enforce_prefix_in_as_set || active_blackhole)
+    {
         refusals.push(
-            "both irrdb.enforce_origin_in_as_set and irrdb.enforce_prefix_in_as_set are \
-             disabled; the renderer only produces IRR-enforcing (default-reject) \
-             per-client policy"
+            "an active blackhole policy requires irrdb.enforce_origin_in_as_set=true; \
+             without blackhole filtering, both IRR enforcement knobs may not be disabled \
+             because the renderer requires an IRR-enforcing per-client policy"
                 .to_owned(),
         );
     }
@@ -1002,16 +1047,22 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
                 "{scope}: effective rfc8950=true is not rendered on IPv6 sessions"
             ));
         }
-        let client_has_blackhole_policy = if ipv6 {
-            blackhole.policy_ipv6.is_some() || (rfc8950 && blackhole.policy_ipv4.is_some())
-        } else {
-            blackhole.policy_ipv4.is_some()
-        };
-        let client_announce = client.cfg.blackhole_filtering.announce_to_client;
-        let general_announce = cfg.blackhole_filtering.announce_to_client.unwrap_or(true);
-        if client_has_blackhole_policy && client_announce.is_some_and(|v| v != general_announce) {
+        if client.cfg.blackhole_filtering.policy_ipv4.is_some()
+            || client.cfg.blackhole_filtering.policy_ipv6.is_some()
+            || client
+                .cfg
+                .blackhole_filtering
+                .rewrite_next_hop_ipv4
+                .is_some()
+            || client
+                .cfg
+                .blackhole_filtering
+                .rewrite_next_hop_ipv6
+                .is_some()
+            || client.cfg.blackhole_filtering.add_noexport.is_some()
+        {
             refusals.push(format!(
-                "{scope}: blackhole announce_to_client override is not rendered"
+                "{scope}: only blackhole_filtering.announce_to_client may be overridden"
             ));
         }
         if let Some(next_hop) = &client.cfg.filtering.next_hop {
@@ -1083,11 +1134,79 @@ fn value_present(value: Option<&serde_yaml::Value>) -> bool {
     })
 }
 
-fn community_configured(value: &serde_yaml::Value) -> bool {
-    value.as_mapping().is_some_and(|m| {
-        m.iter()
-            .any(|(k, v)| matches!(k.as_str(), Some("std" | "lrg" | "ext")) && !v.is_null())
-    })
+fn community_configured(value: &CommunityValues) -> bool {
+    value.std.is_some() || value.lrg.is_some() || value.ext.is_some()
+}
+
+fn check_blackhole_rewrite(blackhole: &BlackholeFiltering, ipv6: bool, refusals: &mut Vec<String>) {
+    let (policy, next_hop, name) = if ipv6 {
+        (
+            &blackhole.policy_ipv6,
+            &blackhole.rewrite_next_hop_ipv6,
+            "ipv6",
+        )
+    } else {
+        (
+            &blackhole.policy_ipv4,
+            &blackhole.rewrite_next_hop_ipv4,
+            "ipv4",
+        )
+    };
+    if policy.as_deref() == Some("rewrite-next-hop") {
+        match next_hop
+            .as_deref()
+            .and_then(|s| s.parse::<std::net::IpAddr>().ok())
+        {
+            None => refusals.push(format!(
+                "general: rewrite-next-hop for {name} requires a valid rewrite_next_hop_{name}"
+            )),
+            Some(ip) if ip.is_ipv6() != ipv6 => refusals.push(format!(
+                "general: rewrite_next_hop_{name} has the wrong address family"
+            )),
+            Some(_) => {}
+        }
+    }
+}
+
+fn validate_blackhole_marker(
+    marker: Option<&str>,
+    kind: CommunityKind,
+    refusals: &mut Vec<String>,
+) {
+    let Some(marker) = marker else { return };
+    let valid_num = |part: &str, max: u64| part.parse::<u64>().is_ok_and(|n| n <= max);
+    let valid = match kind {
+        CommunityKind::Standard => {
+            let p: Vec<_> = marker.split(':').collect();
+            p.len() == 2 && p.iter().all(|v| valid_num(v, u16::MAX.into()))
+        }
+        CommunityKind::Large => {
+            let p: Vec<_> = marker
+                .strip_prefix("LC:")
+                .unwrap_or(marker)
+                .split(':')
+                .collect();
+            p.len() == 3 && p.iter().all(|v| valid_num(v, u32::MAX.into()))
+        }
+        CommunityKind::Extended => {
+            let p: Vec<_> = marker.split(':').collect();
+            matches!(p.first().copied(), Some("RT" | "RO"))
+                && p.len() == 3
+                && !matches!(p[1].as_bytes().first(), Some(b'+' | b'-'))
+                && !matches!(p[2].as_bytes().first(), Some(b'+' | b'-'))
+                && p[2].parse::<u32>().ok().is_some_and(|local| {
+                    p[1].parse::<u32>().map_or_else(
+                        |_| p[1].parse::<std::net::Ipv4Addr>().is_ok() && local <= u16::MAX.into(),
+                        |asn| asn <= u16::MAX.into() || local <= u16::MAX.into(),
+                    )
+                })
+        }
+    };
+    if !valid {
+        refusals.push(format!(
+            "general: malformed blackholing community `{marker}`"
+        ));
+    }
 }
 
 fn check_next_hop_policy(policy: &str, scope: &str, refusals: &mut Vec<String>) {
@@ -1298,6 +1417,9 @@ fn resolve_clients<'a>(
             .or_else(|| client.cfg.description.clone())
             .unwrap_or_else(|| client.id.clone());
 
+        let ipv6 = client.ip.contains(':');
+        let blackhole = resolve_blackhole(ctx, client, ipv6);
+
         resolved.push(ResolvedClient {
             client,
             slug,
@@ -1314,6 +1436,22 @@ fn resolve_clients<'a>(
             limit_ipv4,
             limit_ipv6,
             max_prefix_restart_seconds,
+            blackhole,
+            pref_len: if ipv6 {
+                ctx.cfg
+                    .filtering
+                    .ipv6_pref_len
+                    .as_ref()
+                    .map(|p| (p.min, p.max))
+            } else {
+                ctx.cfg
+                    .filtering
+                    .ipv4_pref_len
+                    .as_ref()
+                    .map(|p| (p.min, p.max))
+            },
+            reject_rpki_invalid: ctx.cfg.filtering.rpki_bgp_origin_validation.enabled
+                && ctx.cfg.filtering.rpki_bgp_origin_validation.reject_invalid,
         });
     }
 
@@ -1321,6 +1459,45 @@ fn resolve_clients<'a>(
         return Err(RenderError::Implausible(implausible));
     }
     Ok(resolved)
+}
+
+fn resolve_blackhole(ctx: &Context, client: &Client, ipv6: bool) -> Option<ResolvedBlackhole> {
+    let cfg = &ctx.cfg.blackhole_filtering;
+    let policy = if ipv6 {
+        cfg.policy_ipv6.as_deref()
+    } else {
+        cfg.policy_ipv4.as_deref()
+    }?;
+    let mut markers = Vec::new();
+    if let Some(v) = ctx.cfg.communities.get("blackholing") {
+        for (kind, value) in [
+            (CommunityKind::Standard, &v.std),
+            (CommunityKind::Large, &v.lrg),
+            (CommunityKind::Extended, &v.ext),
+        ] {
+            if let Some(value) = value {
+                markers.push((kind, value.clone()));
+            }
+        }
+    }
+    let rewrite = if ipv6 {
+        &cfg.rewrite_next_hop_ipv6
+    } else {
+        &cfg.rewrite_next_hop_ipv4
+    };
+    Some(ResolvedBlackhole {
+        ipv6,
+        rewrite_next_hop: (policy == "rewrite-next-hop")
+            .then(|| rewrite.clone())
+            .flatten(),
+        announce: client
+            .cfg
+            .blackhole_filtering
+            .announce_to_client
+            .unwrap_or(cfg.announce_to_client.unwrap_or(true)),
+        add_noexport: cfg.add_noexport.unwrap_or(false),
+        markers,
+    })
 }
 
 fn collect_warnings(ctx: &Context, warnings: &mut Vec<String>) {
@@ -1366,6 +1543,11 @@ fn render_toml(
             "# RFC 8326: honor GRACEFUL_SHUTDOWN from members (local-pref 0 chain tail).\n\
              honor_graceful_shutdown = true\n",
         );
+    }
+    if cfg.blackhole_filtering.policy_ipv4.is_some()
+        || cfg.blackhole_filtering.policy_ipv6.is_some()
+    {
+        out.push_str("# Blackhole behavior is rendered explicitly in per-client policy.\nhonor_blackhole = false\n");
     }
     out.push_str(
         "# RFC 8212: a member session with no explicit policy carries nothing in\n\
@@ -1419,6 +1601,23 @@ fn render_toml(
          [policy.definitions.rs-transparent-export]\ndefault_action = \"permit\"\n",
     );
 
+    let mut export_names = BTreeMap::new();
+    let mut client_exports = BTreeMap::new();
+    for rc in clients {
+        if let Some(blackhole) = &rc.blackhole {
+            let key = blackhole_export_key(blackhole);
+            let next = export_names.len() + 1;
+            let name = export_names
+                .entry(key)
+                .or_insert_with(|| format!("rs-blackhole-export-{next}"))
+                .clone();
+            client_exports.insert(rc.slug.clone(), name);
+        }
+    }
+    for (key, name) in &export_names {
+        render_blackhole_export_toml(&mut out, name, key);
+    }
+
     out.push_str("\n[policy]\nrpol_files = [\n    \"policy/rs-hygiene.rpol\",\n");
     for rc in clients {
         let _ = writeln!(out, "    \"policy/client-{}.rpol\",", rc.slug);
@@ -1462,11 +1661,101 @@ fn render_toml(
             "import_policy_chain = [\"rs-hygiene\", \"client-{}\"]",
             rc.slug
         );
+        if let Some(export) = client_exports.get(&rc.slug) {
+            let _ = writeln!(out, "export_policy_chain = [\"{export}\"]");
+        }
         if rc.add_path {
             out.push_str("\n[neighbors.add_path]\nsend = true\nsend_max = 8\n");
         }
     }
     out
+}
+
+fn blackhole_export_key(b: &ResolvedBlackhole) -> String {
+    let markers = b
+        .markers
+        .iter()
+        .map(|(k, v)| {
+            let v = if matches!(k, CommunityKind::Large) && !v.starts_with("LC:") {
+                format!("LC:{v}")
+            } else {
+                v.clone()
+            };
+            format!(
+                "{}:{v}",
+                match k {
+                    CommunityKind::Standard => "s",
+                    CommunityKind::Large => "l",
+                    CommunityKind::Extended => "e",
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{}|{}|{}|{}",
+        b.announce,
+        b.add_noexport,
+        b.rewrite_next_hop.as_deref().unwrap_or(""),
+        markers
+    )
+}
+
+fn render_blackhole_export_toml(out: &mut String, name: &str, key: &str) {
+    let mut parts = key.splitn(4, '|');
+    let announce = parts.next() == Some("true");
+    let noexport = parts.next() == Some("true");
+    let next_hop = parts.next().unwrap_or_default();
+    let marker_blob = parts.next().unwrap_or_default();
+    let markers: Vec<&str> = marker_blob
+        .split(',')
+        .filter_map(|m| m.split_once(':').map(|(_, v)| v))
+        .collect();
+    let mut matches = vec!["BLACKHOLE"];
+    matches.extend(markers.iter().copied());
+    let mut removes = markers.clone();
+    removes.sort_unstable();
+    removes.dedup();
+    let _ = writeln!(
+        out,
+        "\n[policy.definitions.{name}]\ndefault_action = \"permit\""
+    );
+    for marker in matches {
+        let _ = writeln!(
+            out,
+            "\n[[policy.definitions.{name}.statements]]\nmatch_community = [\"{}\"]\naction = \"{}\"",
+            toml_escape(marker),
+            if announce { "permit" } else { "deny" }
+        );
+        if announce {
+            let mut adds = vec!["BLACKHOLE"];
+            if noexport {
+                adds.push("NO_EXPORT");
+            }
+            let _ = writeln!(
+                out,
+                "set_community_add = [{}]",
+                adds.iter()
+                    .map(|v| format!("\"{v}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            if !removes.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "set_community_remove = [{}]",
+                    removes
+                        .iter()
+                        .map(|v| format!("\"{}\"", toml_escape(v)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            if !next_hop.is_empty() {
+                let _ = writeln!(out, "set_next_hop = \"{}\"", toml_escape(next_hop));
+            }
+        }
+    }
 }
 
 fn render_prefix_set(
@@ -1614,6 +1903,7 @@ fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
         &mut tests,
         filtering.ipv4_pref_len.as_ref(),
         false,
+        ctx.cfg.blackhole_filtering.policy_ipv4.is_some(),
     );
     render_pref_len_window(
         &mut sets,
@@ -1621,16 +1911,28 @@ fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
         &mut tests,
         filtering.ipv6_pref_len.as_ref(),
         true,
+        ctx.cfg.blackhole_filtering.policy_ipv6.is_some(),
     );
 
     let rpki = &filtering.rpki_bgp_origin_validation;
     if rpki.enabled {
+        let guard = inactive_family_guard(ctx);
         if rpki.reject_invalid {
-            terms
-                .push_str("    term reject-rpki-invalid { if route.rpki == invalid { reject } }\n");
-            tests.push_str(
-                "test rpki-invalid-is-rejected {\n    route { prefix 203.0.113.0/24; as-path \"3333\"; rpki invalid }\n    expect rs-hygiene == reject\n}\n",
+            let _ = writeln!(
+                terms,
+                "    term reject-rpki-invalid {{ if {guard}route.rpki == invalid {{ reject }} }}"
             );
+            if ctx.cfg.blackhole_filtering.policy_ipv4.is_none() {
+                tests.push_str(if ctx.cfg.blackhole_filtering.policy_ipv6.is_none() {
+                    "test rpki-invalid-is-rejected {\n    route { prefix 203.0.113.0/24; as-path \"3333\"; rpki invalid }\n    expect rs-hygiene == reject\n}\n"
+                } else {
+                    "test rpki-invalid-is-rejected {\n    route { family ipv4-unicast; prefix 203.0.113.0/24; as-path \"3333\"; rpki invalid }\n    expect rs-hygiene == reject\n}\n"
+                });
+            } else if ctx.cfg.blackhole_filtering.policy_ipv6.is_none() {
+                tests.push_str(
+                    "test rpki-invalid-is-rejected {\n    route { family ipv6-unicast; prefix 2001:db8::/32; as-path \"3333\"; rpki invalid }\n    expect rs-hygiene == reject\n}\n",
+                );
+            }
         }
         terms.push_str(
             "    # RFC 8097 origin-validation extended communities for members.\n\
@@ -1665,6 +1967,7 @@ fn render_pref_len_window(
     tests: &mut String,
     window: Option<&PrefLen>,
     ipv6: bool,
+    blackhole_active: bool,
 ) {
     let Some(window) = window else { return };
     let (root, bits, tag) = if ipv6 {
@@ -1693,15 +1996,38 @@ fn render_pref_len_window(
         "    # Accepted {tag} prefix lengths: {}-{}.",
         window.min, window.max
     );
+    let family_guard = if blackhole_active {
+        format!(
+            "route.family != {tag_family} && ",
+            tag_family = if ipv6 { "ipv6-unicast" } else { "ipv4-unicast" }
+        )
+    } else {
+        String::new()
+    };
     let _ = writeln!(
         terms,
-        "    term reject-{tag}-len-outside-window {{ if route.prefix in {set_name} {{ reject }} }}"
+        "    term reject-{tag}-len-outside-window {{ if {family_guard}route.prefix in {set_name} {{ reject }} }}"
     );
-    if window.min > 0 {
+    if window.min > 0 && !blackhole_active {
         let _ = write!(
             tests,
             "test {tag}-default-route-is-rejected {{\n    route {{ prefix {root} }}\n    expect rs-hygiene == reject\n}}\n"
         );
+    }
+}
+
+fn inactive_family_guard(ctx: &Context) -> String {
+    let mut guards = Vec::new();
+    if ctx.cfg.blackhole_filtering.policy_ipv4.is_some() {
+        guards.push("route.family != ipv4-unicast");
+    }
+    if ctx.cfg.blackhole_filtering.policy_ipv6.is_some() {
+        guards.push("route.family != ipv6-unicast");
+    }
+    if guards.is_empty() {
+        String::new()
+    } else {
+        format!("{} && ", guards.join(" && "))
     }
 }
 
@@ -1740,9 +2066,66 @@ fn render_client_rpol(rc: &ResolvedClient<'_>, fingerprint: &str) -> String {
         conjuncts.push(format!("route.prefix in client-{slug}-prefixes"));
     }
 
+    let mut blackhole_terms = String::new();
+    if let Some(blackhole) = &rc.blackhole {
+        let family = if blackhole.ipv6 {
+            "ipv6-unicast"
+        } else {
+            "ipv4-unicast"
+        };
+        let mut marker_guards = vec!["route.communities has BLACKHOLE".to_owned()];
+        for (kind, marker) in &blackhole.markers {
+            marker_guards.push(format!("{} has {marker}", community_field(*kind)));
+        }
+        render_covering_prefix_set(
+            &mut out,
+            &format!("client-{slug}-blackhole-cover"),
+            &rc.prefixes,
+            blackhole.ipv6,
+        );
+        let origin = if rc.enforce_origin {
+            format!(" && route.origin-as in client-{slug}-origins")
+        } else {
+            String::new()
+        };
+        let _ = write!(
+            blackhole_terms,
+            "    term accept-authorized-blackhole {{\n        if route.family == {family} && ({}){origin} && route.prefix in client-{slug}-blackhole-cover {{ add community BLACKHOLE; accept }}\n    }}\n",
+            marker_guards.join(" || ")
+        );
+        let _ = writeln!(
+            blackhole_terms,
+            "    term reject-unauthorized-blackhole {{ if route.family == {family} && ({}) {{ reject }} }}",
+            marker_guards.join(" || ")
+        );
+        if let Some((min, max)) = rc.pref_len {
+            let root = if blackhole.ipv6 { "::/0" } else { "0.0.0.0/0" };
+            let bits = if blackhole.ipv6 { 128 } else { 32 };
+            let _ = writeln!(out, "prefix-set client-{slug}-ordinary-length-reject {{");
+            if min > 0 {
+                let _ = writeln!(out, "    {root} le {},", min - 1);
+            }
+            if max < bits {
+                let _ = writeln!(out, "    {root} ge {},", max + 1);
+            }
+            out.push_str("}\n");
+            let _ = writeln!(
+                blackhole_terms,
+                "    term reject-ordinary-length {{ if route.family == {family} && route.prefix in client-{slug}-ordinary-length-reject {{ reject }} }}"
+            );
+        }
+        if rc.reject_rpki_invalid {
+            let _ = writeln!(
+                blackhole_terms,
+                "    term reject-ordinary-rpki-invalid {{ if route.family == {family} && route.rpki == invalid {{ reject }} }}"
+            );
+        }
+    }
+
     let _ = write!(
         out,
         "\npolicy client-{slug} {{\n\
+         {blackhole_terms}\
          \x20   term accept-authorized {{\n\
          \x20       if {} {{ accept }}\n\
          \x20   }}\n\
@@ -1778,6 +2161,27 @@ fn render_client_rpol(rc: &ResolvedClient<'_>, fingerprint: &str) -> String {
         }
     }
     out
+}
+
+fn community_field(kind: CommunityKind) -> &'static str {
+    match kind {
+        CommunityKind::Standard => "route.communities",
+        CommunityKind::Large => "route.large-communities",
+        CommunityKind::Extended => "route.ext-communities",
+    }
+}
+
+fn render_covering_prefix_set(out: &mut String, name: &str, entries: &[&PrefixEntry], ipv6: bool) {
+    let _ = writeln!(out, "prefix-set {name} {{");
+    for entry in entries.iter().filter(|entry| entry.is_ipv6() == ipv6) {
+        let mut member = format!("{}/{}", entry.prefix, entry.length);
+        if let Some(ge) = entry.ge.filter(|ge| *ge > entry.length) {
+            let _ = write!(member, " ge {ge}");
+        }
+        let _ = write!(member, " le {}", entry.family_bits());
+        let _ = writeln!(out, "    {member},");
+    }
+    out.push_str("}\n");
 }
 
 /// A concrete prefix guaranteed to match the given set member: the

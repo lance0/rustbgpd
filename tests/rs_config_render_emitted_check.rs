@@ -93,3 +93,72 @@ fn emitted_config_passes_rustbgpd_check_strict() {
         "strict check exited 0 without a clean summary\nstdout:\n{stdout}\nstderr:\n{stderr}",
     );
 }
+
+#[test]
+fn emitted_blackhole_policy_passes_rpol_and_daemon_checks() {
+    let mut value: serde_yaml::Value = serde_yaml::from_str(FIXTURE).expect("fixture parses");
+    value["clients"]
+        .as_sequence_mut()
+        .unwrap()
+        .retain(|c| c["id"].as_str() != Some("AS51325_1"));
+    value["irrdb_info"]
+        .as_mapping_mut()
+        .unwrap()
+        .remove(serde_yaml::Value::String("AS51325_bundle".into()));
+    value["cfg"]["blackhole_filtering"]["policy_ipv4"] = "rewrite-next-hop".into();
+    value["cfg"]["blackhole_filtering"]["rewrite_next_hop_ipv4"] = "192.0.2.66".into();
+    value["cfg"]["blackhole_filtering"]["add_noexport"] = true.into();
+    value["cfg"]["communities"]["blackholing"]["std"] = "65500:666".into();
+    value["cfg"]["communities"]["blackholing"]["lrg"] = "65500:666:1".into();
+    value["cfg"]["communities"]["blackholing"]["ext"] = "RT:192.0.2.1:65535".into();
+    let prefix = &mut value["irrdb_info"]["AS4242_bundle"]["prefixes"][0];
+    prefix["exact"] = false.into();
+    prefix["ge"] = 26.into();
+    prefix["le"] = 28.into();
+    let rendered = render(&serde_yaml::to_string(&value).unwrap(), &rtr_options()).unwrap();
+    assert!(rendered.files["config.toml"].contains("set_next_hop = \"192.0.2.66\""));
+    for (path, source) in rendered
+        .files
+        .iter()
+        .filter(|(path, _)| path.ends_with(".rpol"))
+    {
+        let mut source = source.clone();
+        if path == "policy/client-as4242-1.rpol" {
+            source.push_str(r#"
+test bh-v25-reject { route { family ipv4-unicast; prefix 203.0.113.0/25; communities [BLACKHOLE]; as-path "4242" } expect client-as4242-1 == reject }
+test bh-v26-accept { route { family ipv4-unicast; prefix 203.0.113.0/26; communities [BLACKHOLE]; as-path "4242" } expect client-as4242-1 == accept with community BLACKHOLE }
+test bh-v32-accept { route { family ipv4-unicast; prefix 203.0.113.0/32; communities [BLACKHOLE]; as-path "4242" } expect client-as4242-1 == accept with community BLACKHOLE }
+test bh-unmarked-reject { route { family ipv4-unicast; prefix 203.0.113.0/32; as-path "4242" } expect client-as4242-1 == reject }
+test bh-uncovered-reject { route { family ipv4-unicast; prefix 8.8.8.8/32; communities [BLACKHOLE]; as-path "4242" } expect client-as4242-1 == reject }
+test bh-origin-reject { route { family ipv4-unicast; prefix 203.0.113.0/32; communities [BLACKHOLE]; as-path "4244" } expect client-as4242-1 == reject }
+test bh-std { route { family ipv4-unicast; prefix 203.0.113.0/26; communities [65500:666]; as-path "4242" } expect client-as4242-1 == accept with community BLACKHOLE }
+test bh-large { route { family ipv4-unicast; prefix 203.0.113.0/26; large-communities [65500:666:1]; as-path "4242" } expect client-as4242-1 == accept with community BLACKHOLE }
+test bh-ext { route { family ipv4-unicast; prefix 203.0.113.0/26; ext-communities [RT:192.0.2.1:65535]; as-path "4242" } expect client-as4242-1 == accept with community BLACKHOLE }
+"#);
+        }
+        let report = rustbgpd_policy::rpol::check_rpol(&source);
+        assert!(
+            report.is_ok(),
+            "{path}: diagnostics={:?} tests={:?}\n{source}",
+            report.diagnostics,
+            report.tests
+        );
+    }
+    let out_dir = tempfile::tempdir().unwrap();
+    for (rel_path, contents) in &rendered.files {
+        let path = out_dir.path().join(rel_path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
+        .args(["--check", "--strict"])
+        .arg(out_dir.path().join("config.toml"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

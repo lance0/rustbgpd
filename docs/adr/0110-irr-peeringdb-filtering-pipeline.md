@@ -191,7 +191,7 @@ still refuses an untranslated mode.
 | Reject policy `reject` | default-reject term tail | Shipped |
 | Reject policy `tag` (keep, low pref, reason community) | `set local-pref` + `add community`, no reject | Expressible in daemon policy; renderer still refuses this mode until its tag translation semantics are defined |
 | Reject policy `tag_and_reject` (BIRD-only; feeds Alice-LG) | native reject-reason retention plus renderer reason-community translation | Native bounded retention, `PolicyService.ListRejectedRoutes`, CLI, and the Birdwatcher filtered view are shipped; the separate noexport view is backed by export-explain truth; renderer still refuses `tag` and `tag_and_reject` until the community translation semantics exist |
-| BLACKHOLE handling (RFC 7999) + propagation control | `honor_blackhole`, policy next-hop rewrite; per-client propagation via control communities | Shipped, including control-community propagation. ADR-0107 makes BLACKHOLE explicitly not an ownership bypass |
+| BLACKHOLE handling (RFC 7999) + propagation control | renderer-owned import/export policy and optional next-hop rewrite | Shipped in `rs-config-render`: typed local markers normalize to `BLACKHOLE`; IRR origin plus covering-prefix authorization precedes ordinary length/RPKI gates; per-client announce/suppress inheritance, marker scrub, optional `NO_EXPORT`, and v4/v6 rewrites are explicit. Generated configs set `honor_blackhole = false`, so the daemon's implicit `NO_ADVERTISE` path is not used. ADR-0107 still makes BLACKHOLE no ownership bypass |
 | GRACEFUL_SHUTDOWN recv (RFC 8326) | `honor_graceful_shutdown` | Shipped |
 | `--perform-graceful-shutdown` of the RS itself | generator emits a temporary config; daemon needs nothing new | N/A to daemon |
 | ADD_PATH (RFC 7911) | `add_path` per neighbor/group | Shipped |
@@ -205,7 +205,9 @@ Summary: the daemon primitives needed for a pilot are shipped except the
 explicitly deferred NEXT_HOP same-AS inventory mode. The renderer remains
 fail-closed on `tag` and `tag_and_reject` because their translation semantics
 are not implemented. The external IXP pilot and optional upstream contribution
-are still pending; active ceilings remain accepted-route-only.
+are still pending; active ceilings remain accepted-route-only. ARouteServer
+blackhole `propagate-unchanged` and `rewrite-next-hop` are renderer-owned and
+fail closed on malformed or incomplete context.
 
 ### Delivery plan
 

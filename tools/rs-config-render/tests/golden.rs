@@ -410,43 +410,220 @@ fn effective_rfc8950_is_refused_only_for_ipv6_sessions() {
 }
 
 #[test]
-/// Load-bearing: removing policy/announce parsing misses a refusal; dropping
-/// family/value guards rejects an asserted inert case.
-fn blackhole_policy_and_matching_client_override_are_refused() {
+/// Load-bearing: an active, supported blackhole policy renders explicitly
+/// instead of falling back to the daemon's global implicit behavior.
+fn blackhole_policy_is_rendered_without_global_implicit_behavior() {
     use serde_yaml::Value;
-    let mut ipv6 = healthy_value();
-    set_blackhole_policy(&mut ipv6, "policy_ipv6", Some("rewrite-next-hop"));
-    set_client_announce(&mut ipv6, 0, false);
-    assert_eq!(
-        refusals(render(&to_yaml(&ipv6), &rtr_options())),
-        ["general: blackhole_filtering.policy_ipv6 `rewrite-next-hop` is not rendered"]
+    let mut value = healthy_value();
+    set_blackhole_policy(&mut value, "policy_ipv4", Some("propagate-unchanged"));
+    set_path(
+        &mut value,
+        &["cfg", "blackhole_filtering", "add_noexport"],
+        Value::Bool(true),
+    );
+    set_path(
+        &mut value,
+        &["cfg", "communities", "blackholing", "std"],
+        Value::String("65500:666".to_owned()),
+    );
+    set_client_announce(&mut value, 0, false);
+    value["clients"][0]["cfg"]["blackhole_filtering"]["add_noexport"] = false.into();
+    assert!(
+        refusals(render(&to_yaml(&value), &rtr_options()))
+            .iter()
+            .any(|item| item
+                .contains("only blackhole_filtering.announce_to_client may be overridden"))
+    );
+    value["clients"][0]["cfg"]["blackhole_filtering"]["add_noexport"] = Value::Null;
+    let rendered = render(&to_yaml(&value), &rtr_options()).expect("supported policy renders");
+    assert!(rendered.files["config.toml"].contains("honor_blackhole = false"));
+    assert!(!rendered.files["config.toml"].contains("NO_ADVERTISE"));
+    assert!(
+        rendered.files["policy/rs-hygiene.rpol"]
+            .contains("route { family ipv6-unicast; prefix 2001:db8::/32")
     );
 
-    let mut overridden = healthy_value();
-    set_blackhole_policy(&mut overridden, "policy_ipv4", Some("propagate-unchanged"));
-    set_client_announce(&mut overridden, 0, false);
+    set_blackhole_policy(&mut value, "policy_ipv6", Some("propagate-unchanged"));
+    let both = render(&to_yaml(&value), &rtr_options()).unwrap();
+    assert!(!both.files["policy/rs-hygiene.rpol"].contains("test rpki-invalid-is-rejected"));
+
+    value["clients"]
+        .as_sequence_mut()
+        .unwrap()
+        .retain(|client| !client["ip"].as_str().unwrap().contains(':'));
+    set_blackhole_policy(&mut value, "policy_ipv4", None);
+    let no_matching_neighbor = render(&to_yaml(&value), &rtr_options()).unwrap();
+    assert!(no_matching_neighbor.files["config.toml"].contains("honor_blackhole = false"));
+    assert!(
+        no_matching_neighbor.files["policy/rs-hygiene.rpol"]
+            .contains("route { family ipv4-unicast; prefix 203.0.113.0/24")
+    );
+}
+
+#[test]
+fn blackhole_import_covering_markers_and_export_matrix() {
+    let mut value = healthy_value();
+    set_blackhole_policy(&mut value, "policy_ipv4", Some("propagate-unchanged"));
+    set_path(
+        &mut value,
+        &["cfg", "blackhole_filtering", "add_noexport"],
+        true.into(),
+    );
+    for (kind, marker) in [
+        ("std", "65500:666"),
+        ("lrg", "65500:666:1"),
+        ("ext", "RT:65500:666"),
+    ] {
+        set_path(
+            &mut value,
+            &["cfg", "communities", "blackholing", kind],
+            marker.into(),
+        );
+    }
+    let prefix = &mut value["irrdb_info"]["AS4242_bundle"]["prefixes"][0];
+    prefix["exact"] = false.into();
+    prefix["ge"] = 26.into();
+    prefix["le"] = 28.into();
+    let mut twin = value["clients"][0].clone();
+    twin["id"] = "AS4242_2".into();
+    twin["ip"] = "192.0.2.12".into();
+    value["clients"].as_sequence_mut().unwrap().push(twin);
+    let rendered = render(&to_yaml(&value), &rtr_options()).unwrap();
+    let client = &rendered.files["policy/client-as4242-1.rpol"];
+    assert!(client.contains("203.0.113.0/24 ge 26 le 32"), "{client}");
+    for guard in [
+        "route.communities has 65500:666",
+        "route.large-communities has 65500:666:1",
+        "route.ext-communities has RT:65500:666",
+    ] {
+        assert!(client.contains(guard), "{guard}\n{client}");
+    }
+    let config = &rendered.files["config.toml"];
+    assert!(config.contains("set_community_add = [\"BLACKHOLE\", \"NO_EXPORT\"]"));
+    assert!(
+        config.contains(
+            "set_community_remove = [\"65500:666\", \"LC:65500:666:1\", \"RT:65500:666\"]"
+        )
+    );
+    assert!(!config.contains("NO_ADVERTISE"));
+    assert!(!config.contains("set_next_hop ="));
     assert_eq!(
-        refusals(render(&to_yaml(&overridden), &rtr_options())),
-        [
-            "general: blackhole_filtering.policy_ipv4 `propagate-unchanged` is not rendered",
-            "client AS4242_1: blackhole announce_to_client override is not rendered",
-        ]
+        config
+            .matches("[policy.definitions.rs-blackhole-export-1]")
+            .count(),
+        1
+    );
+    assert_eq!(
+        config
+            .matches("export_policy_chain = [\"rs-blackhole-export-1\"]")
+            .count(),
+        2
     );
 
-    set_blackhole_policy(&mut overridden, "policy_ipv4", None);
-    render(&to_yaml(&overridden), &rtr_options()).expect("override is inert without a policy");
+    set_path(
+        &mut value,
+        &["cfg", "blackhole_filtering", "announce_to_client"],
+        false.into(),
+    );
+    set_client_announce(&mut value, 0, true);
+    let inherited_off_overridden_on = render(&to_yaml(&value), &rtr_options()).unwrap();
+    assert!(
+        inherited_off_overridden_on.files["config.toml"]
+            .contains("set_community_add = [\"BLACKHOLE\", \"NO_EXPORT\"]")
+    );
+    set_path(
+        &mut value,
+        &["cfg", "blackhole_filtering", "announce_to_client"],
+        true.into(),
+    );
+    set_client_announce(&mut value, 0, false);
+    let inherited_on_overridden_off = render(&to_yaml(&value), &rtr_options()).unwrap();
+    assert!(inherited_on_overridden_off.files["config.toml"].contains("action = \"deny\""));
+}
 
-    let mut rfc8950 = healthy_value();
-    set_blackhole_policy(&mut rfc8950, "policy_ipv4", Some("propagate-unchanged"));
-    set_client(&mut rfc8950, 1, &["cfg", "rfc8950"], Value::Bool(true));
-    set_client_announce(&mut rfc8950, 1, false);
-    assert_eq!(
-        refusals(render(&to_yaml(&rfc8950), &rtr_options())),
-        [
-            "general: blackhole_filtering.policy_ipv4 `propagate-unchanged` is not rendered",
-            "client AS197000_1: effective rfc8950=true is not rendered on IPv6 sessions",
-            "client AS197000_1: blackhole announce_to_client override is not rendered",
-        ]
+#[test]
+fn blackhole_unknown_malformed_and_rewrite_errors_refuse() {
+    let cases = [
+        ("unknown", None, "unknown blackhole_filtering.policy_ipv4"),
+        (
+            "rewrite-next-hop",
+            None,
+            "requires a valid rewrite_next_hop_ipv4",
+        ),
+        (
+            "rewrite-next-hop",
+            Some("2001:db8::66"),
+            "wrong address family",
+        ),
+    ];
+    for (policy, next_hop, expected) in cases {
+        let mut value = healthy_value();
+        set_blackhole_policy(&mut value, "policy_ipv4", Some(policy));
+        if let Some(next_hop) = next_hop {
+            set_path(
+                &mut value,
+                &["cfg", "blackhole_filtering", "rewrite_next_hop_ipv4"],
+                next_hop.into(),
+            );
+        }
+        assert!(
+            refusals(render(&to_yaml(&value), &rtr_options()))
+                .iter()
+                .any(|item| item.contains(expected))
+        );
+    }
+    let mut base = healthy_value();
+    set_blackhole_policy(&mut base, "policy_ipv4", Some("propagate-unchanged"));
+    for (kind, marker, accepted) in [
+        ("ext", "RT:65000:4294967295", true),
+        ("ext", "RO:65535:4294967295", true),
+        ("ext", "RT:65536:65535", true),
+        ("ext", "RO:4294967295:65535", true),
+        ("ext", "RT:192.0.2.1:65535", true),
+        ("ext", "RO:203.0.113.9:0", true),
+        ("ext", "rt:65000:1", false),
+        ("ext", "ro:65000:1", false),
+        ("ext", "RT:4294967296:1", false),
+        ("ext", "RT:65536:65536", false),
+        ("ext", "RT:192.0.2.1:65536", false),
+        ("ext", "RT:-1:1", false),
+        ("ext", "RT:1:-1", false),
+        ("ext", "RT:+1:1", false),
+        ("ext", "RT:1:+1", false),
+        ("ext", "RT:1", false),
+        ("ext", "RT:1:2:3", false),
+        ("ext", "not-a-community", false),
+        ("lrg", "not-a-community", false),
+    ] {
+        let mut value = base.clone();
+        set_path(
+            &mut value,
+            &["cfg", "communities", "blackholing", kind],
+            marker.into(),
+        );
+        assert_eq!(
+            render(&to_yaml(&value), &rtr_options()).is_ok(),
+            accepted,
+            "{marker}"
+        );
+    }
+}
+
+#[test]
+fn active_blackhole_requires_irr_origin_enforcement() {
+    let mut value = healthy_value();
+    set_blackhole_policy(&mut value, "policy_ipv4", Some("propagate-unchanged"));
+    set_path(
+        &mut value,
+        &["cfg", "filtering", "irrdb", "enforce_origin_in_as_set"],
+        false.into(),
+    );
+    value["irrdb_info"]["AS4242_bundle"]["asns"] = serde_yaml::Value::Sequence(Vec::new());
+    let items = refusals(render(&to_yaml(&value), &rtr_options()));
+    assert!(
+        items.iter().any(|item| item
+            .contains("active blackhole policy requires irrdb.enforce_origin_in_as_set=true")),
+        "{items:?}"
     );
 }
 
