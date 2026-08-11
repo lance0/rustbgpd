@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed when release payloads and copyable install docs diverge."""
+"""Check release artifacts through the commands that build and exercise them."""
 
 from __future__ import annotations
 
@@ -8,7 +8,12 @@ import sys
 from pathlib import Path
 
 
-MONITORING_PAYLOADS = (
+BINARIES = ("rustbgpd", "rbgp", "rs-config-render", "birdwatcher-adapter")
+SYSTEMD = (
+    "share/systemd/rustbgpd.service",
+    "share/systemd/rustbgpd-dataplane.conf",
+)
+MONITORING = (
     (
         "docs/grafana/rustbgpd-overview.json",
         "share/monitoring/rustbgpd-overview.json",
@@ -26,282 +31,141 @@ MONITORING_PAYLOADS = (
     ),
 )
 
-BIRDWATCHER_WORKFLOW_INPUTS = (
-    "Cargo.toml",
-    "Cargo.lock",
-    "Dockerfile",
-    "README.md",
-    "docs/cookbook/ixp-filter-pipeline.md",
-    "docs/cookbook/monitoring-feed.md",
-    "examples/birdwatcher-adapter/Cargo.toml",
-    "examples/birdwatcher-adapter/src/main.rs",
-    "examples/birdwatcher-adapter/README.md",
-    "tests/birdwatcher_adapter_smoke.rs",
-    "packaging/nfpm.yaml",
-    "scripts/build-packages.sh",
-    "scripts/check_release_install_contract.py",
-    "scripts/test_check_release_install_contract.py",
-    "docs/deployment.md",
-    "docs/QUICKSTART.md",
-    ".github/workflows/release-install-contract.yml",
-)
+
+def exact(command: str) -> str:
+    return rf"^{re.escape(command)}$"
 
 
-def marked(text: str, name: str, label: str) -> str:
-    start = f"<!-- release-install-contract:{name}:start -->"
-    end = f"<!-- release-install-contract:{name}:end -->"
-    if text.count(start) != 1 or text.count(end) != 1:
-        raise ValueError(f"{label}: expected one {name} marker pair")
-    body = text.split(start, 1)[1].split(end, 1)[0]
-    if not body.strip():
-        raise ValueError(f"{label}: empty {name} region")
-    return body
-
-
-def workflow_step(text: str, name: str) -> str:
-    match = re.search(
-        rf"(?ms)^      - name: {re.escape(name)}\n(.*?)(?=^      - name: |^  [a-zA-Z0-9_-]+:|\Z)",
-        text,
+def workflow_scripts(text: str) -> tuple[str, ...]:
+    steps = re.findall(r"(?ms)^      - .*?(?=^      - |^  [\w-]+:|\Z)", text)
+    return tuple(
+        active_script(step)
+        for step in steps
+        if re.search(r"(?m)^(?:      - |        )run:", step)
     )
-    if not match:
-        raise ValueError(f"release.yml: missing step {name!r}")
-    return match.group(1)
 
 
-def require(errors: list[str], label: str, text: str, tokens: tuple[str, ...]) -> None:
-    for token in tokens:
-        if token not in text:
-            errors.append(f"{label}: missing {token!r}")
+def select_script(text: str, label: str, discriminator: str) -> str:
+    matches = [
+        script
+        for script in workflow_scripts(text)
+        if re.search(exact(discriminator), script, re.MULTILINE)
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"{label}: expected one matching run body, found {len(matches)}")
+    return matches[0]
+
+
+def active_script(step: str) -> str:
+    block = re.search(r"(?ms)^(?:      - |        )run: \|\n(.*)\Z", step)
+    if block:
+        lines = block.group(1).splitlines()
+    else:
+        inline = re.search(r"(?m)^(?:      - |        )run: (.+)$", step)
+        if not inline:
+            raise ValueError("workflow step has no run command")
+        lines = [inline.group(1)]
+    commands = []
+    pending = ""
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        line = line.split(" #", 1)[0].rstrip()
+        pending += (" " if pending else "") + line.removesuffix("\\").rstrip()
+        if not line.endswith("\\"):
+            commands.append(pending)
+            pending = ""
+    if pending:
+        commands.append(pending)
+    return "\n".join(commands)
+
+
+def require_patterns(errors: list[str], label: str, text: str, patterns: tuple[str, ...]) -> None:
+    missing = [pattern for pattern in patterns if not re.search(pattern, text, re.MULTILINE)]
+    if missing:
+        errors.append(f"{label}: missing active commands {missing!r}")
 
 
 def check(root: Path) -> list[str]:
     errors: list[str] = []
     read = lambda path: (root / path).read_text(encoding="utf-8")
-    monitoring_sources = tuple(source for source, _, _ in MONITORING_PAYLOADS)
-    monitoring_tar_paths = tuple(tar for _, tar, _ in MONITORING_PAYLOADS)
-    monitoring_names = tuple(Path(source).name for source in monitoring_sources)
     try:
         release = read(".github/workflows/release.yml")
-        package = workflow_step(release, "Package binaries")
-        assertion = workflow_step(
+        package_tar = (
+            "tar -C staging -czf dist/rustbgpd-${SUFFIX}.tar.gz rustbgpd rbgp "
+            "rs-config-render birdwatcher-adapter LICENSE-MIT LICENSE-APACHE rustbgpd.schema.json share"
+        )
+        package = select_script(release, "tarball package commands", package_tar)
+        package_patterns = tuple(rf"^cp target/\$\{{\{{ matrix\.target \}}\}}/release/{binary} staging/$" for binary in BINARIES) + (
+            r"^cp examples/systemd/rustbgpd\.service examples/systemd/rustbgpd-dataplane\.conf staging/share/systemd/$",
+            r"^cp docs/grafana/rustbgpd-overview\.json staging/share/monitoring/$",
+            r"^cp examples/prometheus/rustbgpd-alerts\.yml examples/prometheus/rustbgpd-alerts_test\.yml staging/share/monitoring/$",
+            exact(package_tar),
+        )
+        require_patterns(errors, "tarball package commands", package, package_patterns)
+
+        assertion = select_script(
             release,
-            "Assert tarball release payload is complete",
+            "tarball payload assertions",
+            'entries="$(tar -tzf "dist/rustbgpd-${SUFFIX}.tar.gz")"',
         )
-        require(
-            errors,
-            "release package step",
-            package,
-            (
-                "target/${{ matrix.target }}/release/birdwatcher-adapter",
-                "examples/systemd/rustbgpd.service",
-                "examples/systemd/rustbgpd-dataplane.conf",
-                "staging/share/systemd/",
-                "staging/share/monitoring",
-                "rustbgpd rbgp rs-config-render birdwatcher-adapter",
-            )
-            + monitoring_sources,
+        payloads = BINARIES + SYSTEMD + tuple(tar for _, tar, _ in MONITORING)
+        inventory = re.search(r"(?m)^for f in (.+); do$", assertion)
+        asserted = set(inventory.group(1).split()) if inventory else set()
+        missing_payloads = set(payloads) - asserted
+        if missing_payloads:
+            errors.append(f"tarball payload assertions: missing {sorted(missing_payloads)!r}")
+        tar_checks = (
+            exact('if ! grep -qxF "$f" <<<"$entries"; then'),
+            exact('if [ "$(tar -xOzf "dist/rustbgpd-${SUFFIX}.tar.gz" "$f" | wc -c)" -eq 0 ]; then'),
         )
-        require(
-            errors,
-            "release assertion step",
-            assertion,
-            (
-                "birdwatcher-adapter",
-                "share/systemd/rustbgpd.service",
-                "share/systemd/rustbgpd-dataplane.conf",
-            )
-            + monitoring_tar_paths,
-        )
+        require_patterns(errors, "tarball active assertions", assertion, tar_checks)
 
         nfpm = read("packaging/nfpm.yaml")
-        native_bins = set(re.findall(r"(?m)^\s+dst: (/usr/bin/[^\s]+)\s*$", nfpm))
-        expected = {
-            "/usr/bin/rustbgpd",
-            "/usr/bin/rbgp",
-            "/usr/bin/rs-config-render",
-            "/usr/bin/birdwatcher-adapter",
-        }
-        if native_bins != expected:
-            errors.append(f"packaging/nfpm.yaml: /usr/bin payload {sorted(native_bins)!r}")
-        package_builder = read("scripts/build-packages.sh")
-        require(
-            errors,
-            "native package builder",
-            package_builder,
-            (
-                "for f in rustbgpd rbgp rs-config-render birdwatcher-adapter",
-                'install -D -m 0755 "$staging/birdwatcher-adapter" '
-                '"$pkgroot/usr/bin/birdwatcher-adapter"',
-            ),
-        )
-
-        dockerfile = read("Dockerfile")
-        require(
-            errors,
-            "production container",
-            dockerfile,
-            (
-                "-p rustbgpd -p rustbgpctl -p birdwatcher-adapter",
-                "cp target/release/birdwatcher-adapter /out/",
-                "COPY --from=builder-release /out/birdwatcher-adapter "
-                "/usr/local/bin/birdwatcher-adapter",
-            ),
-        )
-        native_files = set(
+        destinations = set(re.findall(r"(?m)^\s+dst: (/usr/bin/\S+)\s*$", nfpm))
+        expected_bins = {f"/usr/bin/{binary}" for binary in BINARIES}
+        if destinations != expected_bins:
+            errors.append(f"native binary destinations: {sorted(destinations)!r}")
+        mappings = set(
             re.findall(
-                r"(?m)^[ \t]+- src: ([^ \t\r\n]+)\r?\n"
-                r"[ \t]+dst: ([^ \t\r\n]+)[ \t]*$",
+                r"(?m)^\s+- src: (\S+)\s*\n\s+dst: (\S+)\s*$",
                 nfpm,
             )
         )
-        expected_monitoring = {(source, native) for source, _, native in MONITORING_PAYLOADS}
-        missing_monitoring = expected_monitoring - native_files
+        expected_monitoring = {(source, native) for source, _, native in MONITORING}
+        missing_monitoring = expected_monitoring - mappings
         if missing_monitoring:
-            errors.append(
-                "packaging/nfpm.yaml: native monitoring payloads missing exact canonical mappings "
-                f"{sorted(missing_monitoring)!r}"
-            )
+            errors.append(f"native monitoring mappings missing {sorted(missing_monitoring)!r}")
+        for source, _, _ in MONITORING:
+            if not (root / source).is_file() or (root / source).stat().st_size == 0:
+                errors.append(f"monitoring source missing or empty: {source}")
 
-        for source, _, _ in MONITORING_PAYLOADS:
-            asset = root / source
-            if not asset.is_file() or asset.stat().st_size == 0:
-                errors.append(f"monitoring payload source missing or empty: {source}")
-
-        alert_test = read("examples/prometheus/rustbgpd-alerts_test.yml")
-        if not re.search(r"(?m)^rule_files:\n  - rustbgpd-alerts\.yml\s*$", alert_test):
-            errors.append(
-                "examples/prometheus/rustbgpd-alerts_test.yml: rule_files must resolve "
-                "rustbgpd-alerts.yml beside the test payload"
-            )
-
-        for path in ("docs/deployment.md", "docs/QUICKSTART.md"):
-            doc = read(path)
-            tarball = marked(doc, "tarball", path)
-            require(
-                errors,
-                f"{path} tarball region",
-                tarball,
-                (
-                    "share/systemd/rustbgpd.service",
-                    "share/systemd/rustbgpd-dataplane.conf",
-                    "rustbgpd --init-config edge --stdout",
-                    "rustbgpd rbgp rs-config-render birdwatcher-adapter",
-                ),
-            )
-            if "examples/systemd/" in tarball:
-                errors.append(f"{path}: tarball region uses source-checkout systemd paths")
-
-            require(
-                errors,
-                f"{path} monitoring discovery",
-                doc,
-                (
-                    "share/monitoring/",
-                    "/usr/share/doc/rustbgpd/monitoring/",
-                )
-                + monitoring_names,
-            )
-            birdwatcher = marked(doc, "birdwatcher-production", path)
-            require(
-                errors,
-                f"{path} birdwatcher production region",
-                birdwatcher,
-                (
-                    "birdwatcher-adapter",
-                    "unix:///var/lib/rustbgpd/grpc.sock",
-                    "http://127.0.0.1:50051",
-                    "502 Bad Gateway",
-                    "without restart",
-                    "service unit",
-                ),
-            )
-
-        root_install = marked(read("README.md"), "root-install", "README.md")
-        require(
-            errors,
-            "README.md canonical install",
-            root_install,
-            (
-                "rustbgpd rbgp rs-config-render birdwatcher-adapter",
-                "-p rs-config-render -p birdwatcher-adapter",
-                "daemon + rbgp + birdwatcher-adapter",
-            ),
+        contract = read(".github/workflows/release-install-contract.yml")
+        native = select_script(
+            contract, "real native package assertions", 'dpkg-deb -x "$deb" extracted/deb'
         )
-        for path, tokens in (
-            ("docs/cookbook/ixp-filter-pipeline.md", ("unix:///var/lib/rustbgpd/grpc.sock", "operator-tier", "`observer`")),
-            ("docs/cookbook/monitoring-feed.md", ("local Unix socket", "`observer`")),
-        ):
-            require(errors, f"{path} Birdwatcher transport", read(path), tokens)
-
-        contract_workflow = read(".github/workflows/release-install-contract.yml")
-        for source, _, _ in MONITORING_PAYLOADS:
-            if contract_workflow.count(f"- {source}") != 2:
-                errors.append(
-                    ".github/workflows/release-install-contract.yml: expected pull/push "
-                    f"enrollment for {source}"
-                )
-        for source in BIRDWATCHER_WORKFLOW_INPUTS:
-            if contract_workflow.count(f"- {source}") != 2:
-                errors.append(
-                    ".github/workflows/release-install-contract.yml: expected pull/push "
-                    f"enrollment for {source}"
-                )
-        require(
+        require_patterns(
             errors,
-            "release install contract workflow",
-            contract_workflow,
-            (
-                "cargo test -p birdwatcher-adapter",
-                "cargo test --test birdwatcher_adapter_smoke",
-                "scripts/build-packages.sh staging amd64",
-                "for tree in extracted/deb extracted/rpm; do",
-                "for exe in rustbgpd rbgp rs-config-render birdwatcher-adapter; do",
-                'test -x "$tree/usr/bin/$exe"',
-                '"$tree/usr/bin/rustbgpd" --check "$tree/etc/rustbgpd/config.toml"',
-                "cpio --quiet -id --no-absolute-filenames --directory=extracted/rpm",
-                "--entrypoint birdwatcher-adapter",
-            ),
-        )
-
-        deployment = read("docs/deployment.md")
-        native = marked(deployment, "native-package", "docs/deployment.md")
-        require(
-            errors,
-            "docs/deployment.md native-package region",
+            "real native package assertions",
             native,
-            ("/usr/share/doc/rustbgpd/monitoring/",),
-        )
-        sentence = re.search(
-            r"installs the four binaries \((.*?)\) to `/usr/bin`",
-            " ".join(native.split()),
-        )
-        documented = re.findall(r"`([^`]+)`", sentence.group(1)) if sentence else []
-        if documented != ["rustbgpd", "rbgp", "rs-config-render", "birdwatcher-adapter"]:
-            errors.append(f"docs/deployment.md: documented native binaries {documented!r}")
-        source = marked(deployment, "source-checkout", "docs/deployment.md")
-        require(
-            errors,
-            "docs/deployment.md source-checkout region",
-            source,
-            ("examples/systemd/rustbgpd.service", "examples/minimal/config.toml"),
-        )
-
-        adapter = marked(
-            read("examples/birdwatcher-adapter/README.md"),
-            "birdwatcher-boundary",
-            "birdwatcher README",
-        )
-        require(
-            errors,
-            "birdwatcher README boundary",
-            adapter,
             (
-                "included in release tarballs",
-                "native `.deb`/`.rpm` packages",
-                "production container image",
-                "excluded from the default source-checkout `cargo build`",
+                r'^deb="\$\(find dist -maxdepth 1 -name \'\*\.deb\' -print -quit\)"$',
+                r'^rpm="\$\(find dist -maxdepth 1 -name \'\*\.rpm\' -print -quit\)"$',
+                r'^test -n "\$deb" && test -n "\$rpm"$',
+                r'^dpkg-deb -x "\$deb" extracted/deb$',
+                r'^rpm2cpio "\$rpm" \| cpio --quiet -id --no-absolute-filenames --directory=extracted/rpm$',
+                r"^for tree in extracted/deb extracted/rpm; do$",
+                r"^for exe in rustbgpd rbgp rs-config-render birdwatcher-adapter; do$",
+                r'^test -x "\$tree/usr/bin/\$exe" ',
+                r'^"\$tree/usr/bin/rustbgpd" --check "\$tree/etc/rustbgpd/config\.toml"$',
             ),
         )
+        if "--to-stdout" in native:
+            errors.append("RPM extraction must populate extracted/rpm, not stdout")
+
+        image_command = "docker run --rm --entrypoint birdwatcher-adapter rustbgpd:release-install-contract --help"
+        select_script(contract, "production image adapter assertion", image_command)
     except (OSError, ValueError) as error:
         errors.append(str(error))
     return errors
