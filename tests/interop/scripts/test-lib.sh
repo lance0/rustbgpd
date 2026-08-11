@@ -245,7 +245,20 @@ vtep_ctl() {
 vtep_routes() {
     local route_type=${1:?}
     local peer=${2:?}
-    vtep_ctl evpn --route-type "$route_type" --peer "$peer" -j 2>/dev/null || echo "[]"
+    local routes rc
+    if routes=$(vtep_ctl evpn --route-type "$route_type" --peer "$peer" -j); then
+        :
+    else
+        rc=$?
+        echo "ERROR: VTEP route observation failed for route type $route_type peer $peer (vtep_ctl rc=$rc)" >&2
+        return 2
+    fi
+    if ! jq -se 'length == 1 and (.[0] | type == "array" and all(.[]; type == "object"))' \
+        >/dev/null 2>&1 <<<"$routes"; then
+        echo "ERROR: VTEP route observation returned an invalid route array for route type $route_type peer $peer" >&2
+        return 2
+    fi
+    printf '%s\n' "$routes"
 }
 
 # Count routes of a type from a peer, optionally filtered by a jq row predicate.
@@ -253,8 +266,18 @@ vtep_route_count() {
     local route_type=${1:?}
     local peer=${2:?}
     local predicate=${3:-true}
-    vtep_routes "$route_type" "$peer" \
-        | jq "[.[] | select(${predicate})] | length" 2>/dev/null || echo 0
+    local routes count
+    if routes=$(vtep_routes "$route_type" "$peer"); then
+        :
+    else
+        return 2
+    fi
+    if count=$(jq -e "[.[] | select(${predicate})] | length" <<<"$routes"); then
+        printf '%s\n' "$count"
+    else
+        echo "ERROR: VTEP route count filter failed for route type $route_type peer $peer" >&2
+        return 2
+    fi
 }
 
 # Poll until at least $4 routes of a type/peer/predicate are present. Echoes
@@ -262,16 +285,22 @@ vtep_route_count() {
 wait_vtep_routes_at_least() {
     local route_type=${1:?} peer=${2:?} predicate=${3:?} want=${4:?}
     local attempts=${5:-${VTEP_ROUTE_WAIT_ATTEMPTS:-60}}
-    local got=0
+    local got
+    local last_usable=0
     for _ in $(seq 1 "$attempts"); do
-        got=$(vtep_route_count "$route_type" "$peer" "$predicate")
-        if [ "${got:-0}" -ge "$want" ] 2>/dev/null; then
-            echo "$got"
-            return 0
+        if got=$(vtep_route_count "$route_type" "$peer" "$predicate"); then
+            last_usable=1
+            if [ "$got" -ge "$want" ]; then
+                echo "$got"
+                return 0
+            fi
+        else
+            last_usable=0
         fi
         sleep 1
     done
-    echo "${got:-0}"
+    [ "$last_usable" -eq 1 ] || return 2
+    echo "$got"
     return 1
 }
 
@@ -280,16 +309,22 @@ wait_vtep_routes_at_least() {
 wait_vtep_routes_gone() {
     local route_type=${1:?} peer=${2:?} predicate=${3:?}
     local attempts=${4:-${VTEP_ROUTE_WAIT_ATTEMPTS:-60}}
-    local got=1
+    local got
+    local last_usable=0
     for _ in $(seq 1 "$attempts"); do
-        got=$(vtep_route_count "$route_type" "$peer" "$predicate")
-        if [ "${got:-1}" -eq 0 ] 2>/dev/null; then
-            echo 0
-            return 0
+        if got=$(vtep_route_count "$route_type" "$peer" "$predicate"); then
+            last_usable=1
+            if [ "$got" -eq 0 ]; then
+                echo 0
+                return 0
+            fi
+        else
+            last_usable=0
         fi
         sleep 1
     done
-    echo "${got:-1}"
+    [ "$last_usable" -eq 1 ] || return 2
+    echo "$got"
     return 1
 }
 
