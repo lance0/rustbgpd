@@ -2065,6 +2065,11 @@ fn stdout_exit(result: Result<(), StdoutWriteError>) -> ExitCode {
     }
 }
 
+fn invalid_invocation(message: impl std::fmt::Display) -> ! {
+    eprintln!("error: {message}");
+    process::exit(2);
+}
+
 async fn trigger_import_validation_refresh(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     dependency: ImportValidationDependency,
@@ -2400,35 +2405,22 @@ Default configuration file.
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
-    if args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "--migrate-config" | "--offline" | "--dry-run" | "--validator"
-        )
-    }) {
-        return config_migration::run(&args);
-    }
-
-    // Handle --version / -V before anything else.
-    if args.iter().any(|a| a == "--version" || a == "-V") {
-        return stdout_exit(write_stdout(|writer| {
-            writeln!(writer, "rustbgpd {}", env!("CARGO_PKG_VERSION"))
-        }));
-    }
-
-    // Handle --man: print the roff man page (section 8) to stdout and
-    // exit. Render with `rustbgpd --man | man -l -` or install with
-    // `rustbgpd --man > /usr/local/share/man/man8/rustbgpd.8`.
-    if args.iter().any(|a| a == "--man") {
-        return stdout_exit(write_stdout(|writer| write!(writer, "{}", man_page())));
-    }
-
-    // Handle --help / -h.
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        return stdout_exit(write_stdout(|writer| {
-            writeln!(
-                writer,
-                "rustbgpd {} — API-first BGP daemon\n\n\
+    let display_mode = args[1..]
+        .iter()
+        .find(|arg| matches!(arg.as_str(), "--version" | "-V" | "--man" | "--help" | "-h"));
+    if let Some(mode) = display_mode {
+        if args.len() != 2 {
+            invalid_invocation(format_args!("{mode} must be used alone"));
+        }
+        return match mode.as_str() {
+            "--version" | "-V" => stdout_exit(write_stdout(|writer| {
+                writeln!(writer, "rustbgpd {}", env!("CARGO_PKG_VERSION"))
+            })),
+            "--man" => stdout_exit(write_stdout(|writer| write!(writer, "{}", man_page()))),
+            "--help" | "-h" => stdout_exit(write_stdout(|writer| {
+                writeln!(
+                    writer,
+                    "rustbgpd {} — API-first BGP daemon\n\n\
              Usage: rustbgpd [OPTIONS] [CONFIG_PATH]\n\n\
              Arguments:\n  \
                CONFIG_PATH  Path to TOML config file [default: /etc/rustbgpd/config.toml]\n\n\
@@ -2459,9 +2451,20 @@ fn main() -> ExitCode {
                   (BGP or metrics/readiness listener bind, unexpected gRPC server exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument)\n  \
                70 Internal error",
-                env!("CARGO_PKG_VERSION")
-            )
-        }));
+                    env!("CARGO_PKG_VERSION")
+                )
+            })),
+            _ => unreachable!("display mode was matched above"),
+        };
+    }
+
+    if args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--migrate-config" | "--offline" | "--dry-run" | "--validator"
+        )
+    }) {
+        return config_migration::run(&args);
     }
 
     // Parse flags and config path from remaining args.
@@ -2472,14 +2475,23 @@ fn main() -> ExitCode {
     let mut init_profile: Option<String> = None;
     let mut to_stdout = false;
     let mut dump_schema = false;
-    let mut config_path = "/etc/rustbgpd/config.toml".to_string();
+    let mut config_path: Option<String> = None;
     let mut expect_diff_path = false;
     let mut expect_init_profile = false;
     for arg in &args[1..] {
         if expect_diff_path {
+            if arg.starts_with('-') {
+                invalid_invocation("--diff requires a path argument");
+            }
             diff_path = Some(arg.clone());
             expect_diff_path = false;
         } else if expect_init_profile {
+            if arg.starts_with('-') {
+                invalid_invocation(format_args!(
+                    "--init-config requires a profile name (one of: {})",
+                    crate::config::profiles::PROFILE_NAMES.join(", ")
+                ));
+            }
             init_profile = Some(arg.clone());
             expect_init_profile = false;
         } else if arg == "--check" {
@@ -2487,23 +2499,32 @@ fn main() -> ExitCode {
         } else if arg == "--strict" {
             strict = true;
         } else if arg == "--diff" {
+            if diff_path.is_some() {
+                invalid_invocation("--diff may only be specified once");
+            }
             expect_diff_path = true;
         } else if arg == "--json" {
             json_output = true;
         } else if arg == "--init-config" {
+            if init_profile.is_some() {
+                invalid_invocation("--init-config may only be specified once");
+            }
             expect_init_profile = true;
         } else if arg == "--stdout" {
             to_stdout = true;
         } else if arg == "--dump-config-schema" {
             dump_schema = true;
         } else if !arg.starts_with('-') {
-            config_path.clone_from(arg);
+            if config_path.is_some() {
+                invalid_invocation("multiple CONFIG_PATH arguments");
+            }
+            config_path = Some(arg.clone());
         } else {
             eprintln!("error: unknown option: {arg}");
             eprintln!(
-                "usage: rustbgpd [--check [--strict]] [--diff PATH] [--json] [--init-config PROFILE --stdout] [--dump-config-schema] [--version] [CONFIG_PATH]"
+                "usage: rustbgpd [--check [--strict]] [--diff PATH] [--json] [--init-config PROFILE --stdout] [--dump-config-schema] [CONFIG_PATH]\n       rustbgpd (--help | -h)\n       rustbgpd (--version | -V)\n       rustbgpd --man"
             );
-            process::exit(1);
+            process::exit(2);
         }
     }
     if expect_diff_path {
@@ -2528,6 +2549,9 @@ fn main() -> ExitCode {
         eprintln!("error: --strict can only be used with --check");
         process::exit(2);
     }
+    if check_only && diff_path.is_some() {
+        invalid_invocation("--check cannot be combined with --diff");
+    }
     // `--stdout` is only the `--init-config` output target. Without it,
     // a bare `--stdout` would otherwise fall through to normal daemon
     // startup (silently, on a box with /etc/rustbgpd/config.toml).
@@ -2542,9 +2566,15 @@ fn main() -> ExitCode {
         eprintln!("error: --init-config cannot be combined with --check or --diff");
         process::exit(2);
     }
+    if init_profile.is_some() && config_path.is_some() {
+        invalid_invocation("--init-config cannot be combined with CONFIG_PATH");
+    }
     // `--dump-config-schema` is a standalone mode, like `--init-config`:
     // reject combining it rather than silently letting one mode win.
     if dump_schema {
+        if config_path.is_some() {
+            invalid_invocation("--dump-config-schema cannot be combined with CONFIG_PATH");
+        }
         if check_only || diff_path.is_some() || init_profile.is_some() || to_stdout {
             eprintln!("error: --dump-config-schema cannot be combined with other modes");
             process::exit(2);
@@ -2584,6 +2614,8 @@ fn main() -> ExitCode {
         }
         return stdout_exit(write_stdout(|writer| write!(writer, "{toml}")));
     }
+
+    let config_path = config_path.unwrap_or_else(|| "/etc/rustbgpd/config.toml".to_string());
 
     // Removed escape hatch: fail loudly rather than silently ignoring it,
     // so automation still setting the variable can't restart into changed

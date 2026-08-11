@@ -100,6 +100,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Ambiguous `rustbgpd` invocations now fail with exit 2 instead of silently
+  overwriting a config path or option value, consuming a flag as a value, or
+  letting a display or one-shot mode ignore companion arguments. (LAN-979)
 - `rs-config-render` now fails stale when
   `communities.rpki_bgp_origin_validation_not_performed` configures a standard,
   large, or extended tag instead of silently dropping its tagging and inbound
