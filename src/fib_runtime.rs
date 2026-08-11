@@ -227,14 +227,6 @@ pub fn spawn(
             }
         }
     }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (rib_tx, rib_query_tx, status_tx, event_tx, shutdown);
-        metrics.record_fib_kernel_failure("unsupported_platform");
-        warn!("general FIB install requested, but kernel route programming is Linux-only");
-        None
-    }
 }
 
 #[expect(
