@@ -1880,4 +1880,24 @@ mod tests {
         assert_eq!(counters.snapshot(), vec![vec![1]]);
         assert_eq!(counters.evals(), 1);
     }
+
+    #[test]
+    fn prometheus_alert_fixture_uses_production_eval_error_labels() {
+        let fixture = include_str!("../../../examples/prometheus/rustbgpd-alerts_test.yml");
+        let mut found = 0;
+        for series in fixture
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("- series: 'bgp_policy_eval_errors_total{"))
+        {
+            found += 1;
+            let kind = series
+                .split_once("kind=\"")
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(kind, _)| kind)
+                .expect("policy eval-error fixture series has a kind label");
+            assert!(super::EvalErrorKind::LABELS.contains(&kind), "{kind}");
+        }
+        assert!(found > 0, "policy eval-error fixture has input series");
+    }
 }
