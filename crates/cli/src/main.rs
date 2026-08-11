@@ -6230,10 +6230,9 @@ printf '%s\n' "${COMPREPLY[@]}"
 
     #[test]
     fn tracked_add_neighbor_payload_sources_are_intent_only() {
-        const SOURCES: [(&str, &str); 5] = [
+        const SOURCES: [(&str, &str); 4] = [
             ("docs/API.md", r#"-d '{"intent"#),
             ("docs/INTEROP.md", r#"-d '{"intent"#),
-            ("tests/chaos/chaos-grpc-churn.sh", r#"-d "{\"intent\""#),
             ("tests/interop/scripts/test-m4-frr.sh", r#"-d "{\"intent\""#),
             (
                 "tests/interop/scripts/test-m44-grpc-tier-authz.sh",
@@ -6254,12 +6253,11 @@ printf '%s\n' "${COMPREPLY[@]}"
             .output()
             .unwrap();
         assert!(found.status.success());
-        assert_eq!(String::from_utf8(found.stdout).unwrap().lines().count(), 5);
+        assert_eq!(String::from_utf8(found.stdout).unwrap().lines().count(), 4);
         for (rel, intent) in SOURCES {
             let source = std::fs::read_to_string(root.join(rel)).unwrap();
             let mask = match rel {
                 "docs/API.md" | "docs/INTEROP.md" => r#""paths": []"#,
-                "tests/chaos/chaos-grpc-churn.sh" => r#"\"paths\":[\"families\"]"#,
                 "tests/interop/scripts/test-m4-frr.sh" => r#"\"paths\": []"#,
                 _ => r#""paths":[]"#,
             };

@@ -69,6 +69,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- Retired stale subsystem stress scripts and a checked-in benchmark scratch
+  artifact; maintained soak and interop coverage remain authoritative. (LAN-968)
 - `NeighborService.AddNeighbor` now requires field-2 `intent` with its inner
   config and mask. Field 1/name `config` are reserved; custom clients must
   move the former top-level config under `intent` and mask each selected
