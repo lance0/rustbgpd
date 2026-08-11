@@ -347,7 +347,7 @@ impl RibManager {
     /// per-client-best per-peer fallback. Since the ADR-0126 Phase 3
     /// classifier flip a unicast-only per-client-best peer GROUPS, so the
     /// fallback these fixtures promise requires a non-unicast-only session:
-    /// each peer also negotiates VPNv4 (no VPN routes exist in any fixture,
+    /// each peer also negotiates `VPNv4` (no VPN routes exist in any fixture,
     /// so the wire stays pure IPv4-unicast). The explicit seam keeps the
     /// grouping disqualifier visible instead of adding a positional flag to
     /// callers.
