@@ -5,7 +5,7 @@ use super::{
     PolicyChain, PolicyTransitionGroupStart, Prefix, RibManager, Route, UpdateGroupClassification,
     classify_update_group, routes_equal, source_control_input,
 };
-use tracing::debug;
+use tracing::info;
 
 /// One `None` arm of the clean-transition inventory walk. Every arm
 /// degrades the WHOLE cohort back to the authoritative per-peer path,
@@ -13,11 +13,12 @@ use tracing::debug;
 /// is otherwise indistinguishable in the log from one that never
 /// qualified for the fast path at all.
 fn inventory_degraded(source: usize, destination: usize, key: Option<(Prefix, u32)>, term: &str) {
-    debug!(
+    info!(
         source,
         destination,
         ?key,
-        "clean transition inventory degraded: {term}"
+        term,
+        "clean transition inventory degraded"
     );
 }
 

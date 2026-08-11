@@ -5467,6 +5467,82 @@ fn clean_transition_inventory_degrades_on_source_flip_and_control_tag() {
     );
 }
 
+#[test]
+fn clean_transition_source_flip_emits_one_structured_info_event() {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc as StdArc, Mutex};
+
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Level, Metadata, Subscriber};
+
+    #[derive(Debug, Default)]
+    struct Fields(BTreeMap<String, String>);
+    impl Visit for Fields {
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    struct Capture(StdArc<Mutex<Vec<(Level, Fields)>>>);
+    impl Subscriber for Capture {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            *metadata.level() == Level::INFO
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            self.0
+                .lock()
+                .unwrap()
+                .push((*event.metadata().level(), fields));
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    let key = (prefix(1), 0);
+    let manager = inventory_manager(
+        group_with(&[announce_delta(key.0, OTHER1, None)]),
+        group_with(&[announce_delta(key.0, OTHER2, None)]),
+    );
+    let captured = StdArc::new(Mutex::new(Vec::new()));
+    tracing::subscriber::with_default(Capture(StdArc::clone(&captured)), || {
+        tracing::callsite::rebuild_interest_cache();
+        assert!(extend_inventory(&manager, &[key], &[]).is_none());
+    });
+
+    let events = captured.lock().unwrap();
+    assert_eq!(events.len(), 1, "exactly one degradation event: {events:?}");
+    let (level, fields) = &events[0];
+    assert_eq!(*level, Level::INFO);
+    assert_eq!(
+        fields.0,
+        BTreeMap::from([
+            ("destination".to_string(), CLEAN_DESTINATION.to_string()),
+            ("key".to_string(), format!("{:?}", Some(key))),
+            (
+                "message".to_string(),
+                "clean transition inventory degraded".to_string(),
+            ),
+            ("source".to_string(), CLEAN_SOURCE.to_string()),
+            ("term".to_string(), "source flip".to_string()),
+        ])
+    );
+}
+
 /// Table drift on either side between the snapshot and the walk:
 /// a key the snapshot recorded is gone, so the inventory can no
 /// longer describe the old-to-new wire delta and degrades.
