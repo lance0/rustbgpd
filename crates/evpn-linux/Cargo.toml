@@ -17,8 +17,8 @@ tokio = { workspace = true, features = ["sync", "time", "macros", "rt"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing.workspace = true
 
-# Linux-only — real netlink. cfg-gated so the crate type-checks on
-# macOS dev builds. The four netlink crates form a coherent ecosystem
+# Linux-only real netlink; cfg-gating preserves portable trait/test surfaces
+# without promising non-Linux daemon support. The four netlink crates form a coherent ecosystem
 # released together; bump them as a set or transitive resolution
 # pulls in two copies of `netlink-packet-utils`.
 [target.'cfg(target_os = "linux")'.dependencies]

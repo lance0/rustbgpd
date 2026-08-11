@@ -11,8 +11,8 @@
 //! | [`LocalEadPerEviOriginator`] | Type 1 EAD-per-EVI (RFC 7432 §7.1) | One per `(ESI, VNI)` |
 //!
 //! All three live in `crates/evpn` for the same reasons the local-MAC
-//! originators do: deterministic, no I/O, no tokio, testable on macOS
-//! dev builds. Daemon-side wiring (slice 3) composes them per ESI
+//! originators do: deterministic, no I/O, no tokio, and portable for component
+//! testing without implying non-Linux daemon support. Daemon-side wiring composes them per ESI
 //! alongside the [`crate::DfElection`] state machine.
 //!
 //! ## Why no mobility sequencing

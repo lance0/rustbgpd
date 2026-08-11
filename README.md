@@ -52,8 +52,9 @@ control-plane target and expanding toward cloud / AI-scale data-center
 fabric use.
 
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.
-> Breaking changes are possible between minor versions. The daemon runs on
-> Linux (the primary target); other platforms are not tested. See
+> Breaking changes are possible between minor versions. The supported daemon
+> targets are Linux x86_64 and aarch64; see the canonical
+> [platform support contract](SUPPORT.md#platform-support) and
 > [Project Status](#project-status) for details.
 
 ## Try it (60 seconds)
@@ -437,7 +438,7 @@ evolving API.**
 | **Adopter support** | Reporting channels, compatibility boundaries, and proof limits are documented in [SUPPORT.md](SUPPORT.md). |
 | **Narrow stable contract** | The machine-pinned [route-server / route-reflector v1 contract](docs/v1-stable-contract.md) covers only its inventoried control-plane roles and surfaces; the project and all unlisted features remain alpha. |
 | **Implemented** | Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR, ASPA path verification, FlowSpec, BMP, MRT, BFD, EVPN/VXLAN (alpha), and full gRPC/CLI management. Linux FIB integration is default-off and scoped to RFC 7999 discard routes and configured unicast tables (including ECMP and weighted multipath); broader routing-suite features remain future work. |
-| **Supported OS** | Linux (primary target). Requires `CAP_NET_BIND_SERVICE` for port 179. |
+| **Supported OS** | Linux x86_64 and aarch64 only; see the [platform support contract](SUPPORT.md#platform-support). Requires `CAP_NET_BIND_SERVICE` for port 179. |
 | **Runtime** | Rust 1.95+ (workspace MSRV — set by the bundled SQLite build), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | Inventoried RS/RR v1 fields follow the narrow compatibility policy; unlisted TOML may change between minor versions with migrations documented in CHANGELOG. |
 | **API stability** | Inventoried native gRPC/CLI/JSON surfaces follow the narrow v1 policy; unlisted API remains alpha and may evolve between minor versions. |

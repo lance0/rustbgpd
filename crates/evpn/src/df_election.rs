@@ -4,7 +4,8 @@
 //! carving, RFC 8584 §2.2 algorithm negotiation, and the RFC 8584
 //! §3.2 Highest Random Weight algorithm. Lives in
 //! `crates/evpn` for the same reasons the local-MAC originator does:
-//! deterministic, no I/O, no tokio, testable on macOS dev builds.
+//! deterministic, no I/O, no tokio, and portable for component testing without
+//! implying non-Linux daemon support.
 //!
 //! The daemon-side orchestrator (slice 3 in `src/evpn_segment.rs`)
 //! gathers candidate PEs from the RIB's Type 4 ES routes, calls

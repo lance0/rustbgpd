@@ -4,8 +4,9 @@
 
 - Rust 1.95+ (edition 2024 — workspace MSRV; raised to 1.95 because the bundled SQLite build (libsqlite3-sys) uses the `cfg_select!` macro stabilized in Rust 1.95)
 - `protobuf-compiler` (`apt-get install protobuf-compiler` on Debian/Ubuntu)
-- Linux x86_64 or aarch64 (primary targets)
-- macOS works for development but is not CI-tested
+- Linux x86_64 for native daemon/runtime CI; Linux aarch64 is cross-built
+- Non-Linux work is limited to portable components; see the
+  [platform support contract](SUPPORT.md#platform-support)
 - Docker + [containerlab](https://containerlab.dev/) for interop tests
 
 ## Building

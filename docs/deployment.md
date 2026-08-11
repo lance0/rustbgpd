@@ -23,7 +23,10 @@ change between minor versions. See [`CHANGELOG.md`](../CHANGELOG.md) for
 migration notes and run `rustbgpd --check <new config>` against the new binary
 before swapping it in.
 
-It runs on Linux. Other platforms are not tested.
+The supported daemon targets are Linux x86_64 and aarch64. Published binaries
+use a glibc 2.31 baseline. See the canonical
+[platform support contract](../SUPPORT.md#platform-support) for CI and
+non-Linux boundaries.
 
 Suitable for: lab pilots, data-center fabric pilots, IX route-server
 pilots, automation-heavy control-plane work where the API surface

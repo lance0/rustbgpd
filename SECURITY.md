@@ -10,6 +10,9 @@ logging — see [docs/SECURITY.md](docs/SECURITY.md).
 |---------|-----------|
 | 0.x     | Yes (current development) |
 
+Daemon security support follows the Linux-only
+[platform support contract](SUPPORT.md#platform-support).
+
 ## Reporting a Vulnerability
 
 Report security vulnerabilities via
