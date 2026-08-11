@@ -62,7 +62,7 @@
   "config": {
     "stable_fields": [
       {"definition": "Config", "fields": ["bmp", "dynamic_neighbors", "event_history", "global", "mrt", "neighbors", "peer_groups", "policy", "rpki", "security"], "schema_sha256": "f18e9cf437e78c8fb48be7a51de93f9142fdf26c229ef040b2b44c5655015b3e"},
-      {"definition": "Global", "fields": ["asn", "cluster_id", "dynamic_neighbor_limit", "honor_graceful_shutdown", "listen_port", "multipath_relax", "router_id", "runtime_state_dir", "telemetry", "worker_threads"], "schema_sha256": "89760ebeef12ffad5357ae56cee8b3e2ff950b957102168aed59f7517b0899b0"},
+      {"definition": "Global", "fields": ["asn", "cluster_id", "dynamic_neighbor_limit", "honor_graceful_shutdown", "listen_port", "multipath_relax", "router_id", "runtime_state_dir", "telemetry"], "schema_sha256": "0c466a203cb6519f865d6fe3fc9a81921cef27942240e38125738259aa73eb5d"},
       {"definition": "TelemetryConfig", "fields": ["grpc_tcp", "grpc_uds", "log_format", "prometheus_addr"], "schema_sha256": "95ed5115adecb2c4fda72873482c6fee1d8b7df7a0844712a5408f04505e793d"},
       {"definition": "GrpcTcpListenerConfig", "fields": ["access_mode", "address", "enabled", "max_tier", "principal", "tls_cert_file", "tls_client_ca_file", "tls_key_file", "token_file"], "schema_sha256": "2c5304b180fea247a211160087b6eed583e2834558faa02efc3473410a8695b2"},
       {"definition": "GrpcUdsListenerConfig", "fields": ["access_mode", "enabled", "max_tier", "mode", "path", "principal", "token_file"], "schema_sha256": "1616e6489f89848d729f1e0cc11f5150539bc22d6f548a09b4519735ebf1b6c0"},
@@ -84,7 +84,7 @@
       {"definition": "BmpConfig", "fields": ["collectors", "sys_descr", "sys_name"], "schema_sha256": "276cacbbba180a48b3b7cff30730d8689d390758f28b1996c11dee745889efb4"},
       {"definition": "BmpCollector", "fields": ["address", "monitor", "reconnect_interval"], "schema_sha256": "2e237f8810604f2ccd0f683c1bb324e7739a0b6d4d9f79964ee17af40c5f0a98"},
       {"definition": "MrtConfig", "fields": ["compress", "dump_interval", "file_prefix", "output_dir"], "schema_sha256": "5f4847a618512e32cbc1a11f7f8890e13fa59c88db0b80f3b2867e997c099a72"},
-      {"definition": "EventHistoryConfig", "fields": ["batch_interval_ms", "batch_size", "enabled", "max_bytes", "max_events", "overflow", "path", "queue_capacity", "required", "synchronous"], "schema_sha256": "9248ba3657a4e1085ea1e4745f338823ccf022a015a3f7c1434f47c81ab7c007"}
+      {"definition": "EventHistoryConfig", "fields": ["enabled", "max_bytes", "max_events", "path", "required"], "schema_sha256": "07227afb2fd18c166fc671f78689795afdb701783fd5f621beff0ab1664327de"}
     ],
     "stable_types": [
       {"definition": "BgpRoleConfig", "schema_sha256": "33acb141838f6612e3cff7273c7936e30683836d7ef8b56d09012215f745f183"},
@@ -157,7 +157,7 @@
   },
   "cli": {
     "stability_scope": "command_path_and_name_only",
-    "stable_command_paths": ["config abort", "config apply", "config confirm", "config diff", "config effective", "config plan", "config status", "diff", "diff advertised", "diff snapshot", "diff snapshot from-bmp", "diff snapshot from-mrt", "doctor", "dynamic-neighbor", "events", "global", "gshut", "health", "metrics", "mrt-dump", "neighbor", "neighbor-set", "peer-group", "policy check", "policy explain", "policy list", "policy stats", "policy test", "rib", "rib advertised", "rib received", "shutdown", "watch"],
+    "stable_command_paths": ["config abort", "config apply", "config confirm", "config diff", "config effective", "config plan", "config status", "diff", "diff advertised", "diff snapshot", "diff snapshot from-bmp", "diff snapshot from-mrt", "doctor", "dynamic-neighbor", "events", "global", "gshut", "health", "metrics", "mrt-dump", "neighbor", "neighbor-set", "peer-group", "policy check", "policy explain", "policy list", "policy stats", "policy test", "rib", "rib advertised", "rib received", "shutdown"],
     "scoped_rr_only_command_paths": ["orr", "rib bgpls", "rib labeled", "rib rtc", "rib vpn", "topology links", "topology nodes"],
     "versioned_json_contracts": [
       {
