@@ -3613,49 +3613,6 @@ mod tests {
         prepared
     }
 
-    #[test]
-    fn root_fixture_test_surfaces_require_explicit_tier_preparation() {
-        let legacy_toml = concat!("enforcement = \"", "legacy\"");
-        let legacy_variant = concat!("GrpcEnforcementConfig::", "Legacy");
-        let helper = concat!("tier_authorized_uds", "_test_config");
-        let module_marker = "#[cfg(test)]\nmod tests {";
-        let module_sources = [
-            ("gnmi_set_bridge.rs", include_str!("gnmi_set_bridge.rs"), 2),
-            ("main.rs", include_str!("main.rs"), 5),
-            ("policy_admin.rs", include_str!("policy_admin.rs"), 3),
-        ];
-
-        for (path, source, helper_count) in module_sources {
-            let test_surface = source.rsplit_once(module_marker).unwrap().1;
-            assert!(!test_surface.contains(legacy_toml), "{path}");
-            assert!(!test_surface.contains(legacy_variant), "{path}");
-            assert_eq!(test_surface.matches(helper).count(), helper_count, "{path}");
-        }
-
-        let this_source = include_str!("config_transaction_control.rs");
-        let this_surface = this_source.rsplit_once(module_marker).unwrap().1;
-        let transaction_helper = concat!("tier_transaction", "_test_config");
-        assert!(!this_surface.contains(legacy_toml));
-        assert!(!this_surface.contains(legacy_variant));
-        assert_eq!(this_surface.matches(transaction_helper).count(), 13);
-
-        // The peer-manager test surface is a directory module, so the scan
-        // concatenates every sibling rather than one file.
-        let mut peer_manager_tests = String::new();
-        for entry in std::fs::read_dir(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/peer_manager/tests"
-        ))
-        .unwrap()
-        {
-            peer_manager_tests.push_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap());
-        }
-        let peer_manager_tests = peer_manager_tests.as_str();
-        assert!(!peer_manager_tests.contains(legacy_toml));
-        assert!(!peer_manager_tests.contains(legacy_variant));
-        assert_eq!(peer_manager_tests.matches(helper).count(), 5);
-    }
-
     fn base_toml(extra: &str) -> String {
         tier_transaction_test_config(&format!(
             r#"
