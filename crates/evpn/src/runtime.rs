@@ -337,31 +337,6 @@ impl EvpnRuntimeCandidate {
     }
 }
 
-/// Accepts or rejects the convergence work required before a candidate
-/// model may become the committed EVPN runtime generation.
-///
-/// The first coordinator slice keeps this trait synchronous and domain
-/// local so tests can prove the commit gate without daemon actor wiring.
-/// Later daemon code can back the trait with command queues that drain
-/// and replay IMET, Type 2, Type 5, ES/DF, SVI, and dataplane state.
-pub trait EvpnRuntimeConverger {
-    /// Queue or perform all convergence required by `plan`.
-    ///
-    /// Returning `Ok(())` authorizes the coordinator to publish the
-    /// candidate as the next committed generation. Returning an error
-    /// leaves the previous generation committed.
-    ///
-    /// # Errors
-    /// Returns [`EvpnRuntimeConvergeError`] when downstream convergence
-    /// could not be queued safely.
-    fn converge(
-        &mut self,
-        current: &EvpnRuntimeModel,
-        candidate: &EvpnRuntimeCandidate,
-        plan: &EvpnRuntimePlan,
-    ) -> Result<(), EvpnRuntimeConvergeError>;
-}
-
 /// Convergence failure reported by a coordinator backend.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{message}")]
@@ -451,11 +426,10 @@ impl EvpnRuntimeApplyError {
 /// Coordinator-owned EVPN runtime model writer.
 ///
 /// This type is the first ADR-0063 write boundary. It does not expose a
-/// public gRPC API and does not mutate daemon actors directly; instead,
-/// it proves the state-machine contract that later daemon wiring must
-/// use: plan a fully validated candidate, ask a convergence backend to
-/// queue all required drain/replay work, and only then publish the next
-/// committed generation.
+/// public gRPC API and does not mutate daemon actors directly. Daemon
+/// convergence happens before this transition; the supplied result either
+/// publishes the candidate or retains the committed model and records the
+/// failed plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvpnRuntimeCoordinator {
     model: EvpnRuntimeModel,
@@ -523,20 +497,17 @@ impl EvpnRuntimeCoordinator {
         self.last_converge_error.as_ref()
     }
 
-    /// Apply a fully validated candidate through the convergence gate.
+    /// Apply a fully validated candidate with its daemon convergence result.
     ///
     /// # Errors
-    /// Returns [`EvpnRuntimeApplyError`] when the convergence backend
-    /// rejects the plan. In that case the previous generation remains
+    /// Returns [`EvpnRuntimeApplyError`] when convergence failed. In that
+    /// case the previous generation remains
     /// committed and the coordinator snapshot reports degraded/failed.
-    pub fn apply_candidate<C>(
+    pub fn apply_candidate(
         &mut self,
         candidate: EvpnRuntimeCandidate,
-        converger: &mut C,
-    ) -> Result<EvpnRuntimeApplyReport, EvpnRuntimeApplyError>
-    where
-        C: EvpnRuntimeConverger,
-    {
+        converge_result: Result<(), EvpnRuntimeConvergeError>,
+    ) -> Result<EvpnRuntimeApplyReport, EvpnRuntimeApplyError> {
         let current = self.model.clone();
         let plan = current.plan_candidate(&candidate);
         if plan.is_noop() {
@@ -553,7 +524,7 @@ impl EvpnRuntimeCoordinator {
             COORDINATOR_IN_PROGRESS_MESSAGE,
         );
 
-        if let Err(source) = converger.converge(&current, &candidate, &plan) {
+        if let Err(source) = converge_result {
             self.model = current.with_status(
                 EvpnRuntimeLifecycle::Degraded,
                 EvpnRuntimeMutationState::Failed,
@@ -988,7 +959,7 @@ mod tests {
         observed_candidate_counts: Vec<usize>,
     }
 
-    impl EvpnRuntimeConverger for RecordingConverger {
+    impl RecordingConverger {
         fn converge(
             &mut self,
             current: &EvpnRuntimeModel,
@@ -1030,13 +1001,15 @@ mod tests {
             Vec::new(),
         );
         let candidate = EvpnRuntimeCandidate::from_model(coordinator.model());
-        let mut converger = RecordingConverger {
+        let converger = RecordingConverger {
             fail: Some(EvpnRuntimeConvergeError::new("should not be called")),
             ..RecordingConverger::default()
         };
-
         let report = coordinator
-            .apply_candidate(candidate, &mut converger)
+            .apply_candidate(
+                candidate,
+                Err(EvpnRuntimeConvergeError::new("ignored for no-op")),
+            )
             .expect("no-op candidate should not require convergence");
 
         assert_eq!(report.outcome, EvpnRuntimeApplyOutcome::Noop);
@@ -1069,9 +1042,10 @@ mod tests {
             Vec::new(),
         );
         let mut converger = RecordingConverger::default();
-
+        let plan = coordinator.plan_candidate(&candidate);
+        let converge_result = converger.converge(coordinator.model(), &candidate, &plan);
         let report = coordinator
-            .apply_candidate(candidate, &mut converger)
+            .apply_candidate(candidate, converge_result)
             .expect("accepted convergence should commit the candidate");
 
         assert_eq!(report.outcome, EvpnRuntimeApplyOutcome::Committed);
@@ -1088,12 +1062,9 @@ mod tests {
             coordinator.snapshot().message,
             COORDINATOR_COMMITTED_MESSAGE
         );
-        assert_eq!(converger.calls, 1);
-        assert_eq!(converger.observed_current_generation, vec![1]);
-        assert_eq!(converger.observed_added_vnis, vec![vec![200]]);
-        assert_eq!(converger.observed_candidate_counts, vec![2]);
         assert!(coordinator.last_failed_plan().is_none());
         assert!(coordinator.last_converge_error().is_none());
+        assert_eq!(converger.calls, 1);
     }
 
     #[test]
@@ -1115,9 +1086,10 @@ mod tests {
             fail: Some(EvpnRuntimeConvergeError::new("IMET command queue closed")),
             ..RecordingConverger::default()
         };
-
+        let plan = coordinator.plan_candidate(&candidate);
+        let converge_result = converger.converge(coordinator.model(), &candidate, &plan);
         let error = coordinator
-            .apply_candidate(candidate, &mut converger)
+            .apply_candidate(candidate.clone(), converge_result)
             .expect_err("failed convergence should reject the candidate");
 
         assert_eq!(
@@ -1150,6 +1122,32 @@ mod tests {
                 .expect("converge error retained")
                 .message(),
             "IMET command queue closed"
+        );
+
+        let noop = EvpnRuntimeCandidate::from_model(coordinator.model());
+        let report = coordinator
+            .apply_candidate(noop, Ok(()))
+            .expect("no-op after failure should retain the committed model");
+        assert_eq!(report.outcome, EvpnRuntimeApplyOutcome::Noop);
+        assert_eq!(
+            coordinator.snapshot().mutation_state,
+            EvpnRuntimeMutationState::Failed
+        );
+        assert!(
+            coordinator.last_failed_plan().is_some() && coordinator.last_converge_error().is_some()
+        );
+
+        let report = coordinator
+            .apply_candidate(candidate, Ok(()))
+            .expect("successful non-noop should clear prior failure");
+        assert_eq!(report.outcome, EvpnRuntimeApplyOutcome::Committed);
+        assert_eq!(coordinator.snapshot().generation.as_u64(), 2);
+        assert_eq!(
+            coordinator.snapshot().mutation_state,
+            EvpnRuntimeMutationState::Idle
+        );
+        assert!(
+            coordinator.last_failed_plan().is_none() && coordinator.last_converge_error().is_none()
         );
         assert_eq!(converger.calls, 1);
     }
