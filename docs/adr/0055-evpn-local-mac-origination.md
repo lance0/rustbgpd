@@ -51,8 +51,9 @@ The relevant source constraints are:
 The constraints from ADR-0054 carry over unchanged:
 
 - `crates/evpn-linux` may not depend on `crates/rib` or `crates/transport`.
-- `crates/evpn` must remain portable to non-Linux dev builds (no
-  netlink, no tokio, no I/O).
+- `crates/evpn` remains pure and kernel-independent (no netlink, no tokio, no
+  I/O), so its logic can be tested across platforms without promising daemon
+  support there.
 - Route-reflector deployments with empty `[[evpn_instances]]` must
   spawn no background tasks.
 
@@ -97,8 +98,8 @@ explicitly:
 
 A pure-function shape (`on_local_learned`, `on_local_aged`,
 `on_remote_changed` each return `Vec<OriginationAction>` and never
-touch I/O) keeps the sequencer testable on macOS dev builds with no
-tokio or RIB scaffolding. The proptest invariant in
+touch I/O) keeps the sequencer portable and testable with no tokio or RIB
+scaffolding. The proptest invariant in
 `crates/evpn/src/origination.rs#tests` exercises the monotonic
 ratchet across mixed-handler sequences.
 
@@ -238,10 +239,8 @@ tracked separately.
 - Sequence-rule logic is unit-testable with no kernel, no RIB, and no
   tokio. The state machine's 17 in-module tests cover every RFC §15.1
   branch including a proptest-style monotonic ratchet invariant.
-- macOS dev builds still build the originator (the channel is a
-  `crates/evpn-linux` trait method that returns `None` on macOS-bound
-  fake impls; the originator's `spawn` path returns `None` too,
-  cleanly skipping the actor).
+- Kernel-independent originator logic remains portable and testable; this does
+  not imply that the daemon is supported on non-Linux systems.
 - RR-only deployments still spawn no background tasks. The empty
   `[[evpn_instances]]` gate covers both the dataplane reconciler
   (Gate 7b) and the originator (Gate 7b+1).

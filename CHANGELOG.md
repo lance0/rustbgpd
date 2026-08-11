@@ -69,6 +69,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- Root-daemon non-Linux fallbacks were removed in #1581. Distributed and
+  supported daemon targets are Linux x86_64 and aarch64; portable component
+  and transport abstractions do not expand daemon support.
 - Retired stale subsystem stress scripts and a checked-in benchmark scratch
   artifact; maintained soak and interop coverage remain authoritative. (LAN-968)
 - `NeighborService.AddNeighbor` now requires field-2 `intent` with its inner

@@ -419,10 +419,10 @@ error). The same surface is available as JSON with
 `rbgp -j rib blackholes`. Adoption and reaping are counted by
 `bgp_blackhole_discard_adopted_total` and
 `bgp_blackhole_discard_reaped_total`.
-If the reconciler cannot start at all (for example netlink setup failure, or
-requesting FIB install on a non-Linux build), the status list is empty and
-`bgp_blackhole_discard_kernel_failures_total{action="setup"}` or
-`{action="unsupported_platform"}` carries the failure signal.
+If the reconciler cannot start at all (for example a netlink setup failure),
+the status list is empty and
+`bgp_blackhole_discard_kernel_failures_total{action="setup"}` carries the
+failure signal.
 
 SIGHUP hot-applies this field with the same best-effort partial-apply
 semantics as `honor_graceful_shutdown`: rustbgpd recomputes runtime policies

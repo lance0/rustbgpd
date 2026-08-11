@@ -606,7 +606,10 @@ This section defines the security stance for rustbgpd. Not all items are v1 impl
 
 ### Session Authentication
 
-**Supported platforms (v1): Linux (x86_64, aarch64).** TCP MD5, GTSM via `IP_TTL`, and certain socket options are Linux-specific. macOS and BSD may work for development builds but are not tested or supported targets. This is stated explicitly to prevent bug reports about platform-specific socket behavior.
+**Supported platforms (v1): Linux (x86_64, aarch64).** TCP MD5, GTSM via
+`IP_TTL`, and certain socket options are Linux-specific. Non-Linux daemon
+builds are unsupported; portable components do not expand the canonical
+[platform support contract](../SUPPORT.md#platform-support).
 
 **Dual-family BGP listener:** The daemon always listens for inbound BGP on both address families — `0.0.0.0:{listen_port}` and `[::]:{listen_port}` — behind one accept loop and one accept channel; there is no listen-address knob (ADR-0019). `IPV6_V6ONLY` is set explicitly on the IPv6 socket so v4-mapped connections always arrive through the IPv4 socket. Every listener-side authentication entry below (MD5 key, TCP-AO MKT, GTSM selector) is installed on the socket matching the peer's address family, so IPv6 peers get the same inbound enforcement as IPv4 peers. If one family cannot be bound (for example IPv6 disabled on the host), a warning names the family and the other keeps serving; startup fails only when neither family binds.
 
@@ -759,9 +762,10 @@ privileged runner is available.
 
 ### Supported Platforms
 
-- **v1:** Linux (x86_64, aarch64). These are the only tested and supported targets.
-- macOS and BSD may compile and run for development purposes but are not CI-tested. Platform-specific socket options (TCP_MD5SIG, IP_TTL for GTSM) are Linux-only.
-- Windows is not supported.
+- **v1:** Linux x86_64 and aarch64 are the supported daemon targets.
+- Native daemon/runtime CI is Linux x86_64; aarch64 is cross-built and packaged.
+- Non-Linux daemon builds are unsupported. See the canonical
+  [platform support contract](../SUPPORT.md#platform-support).
 
 ### Compatibility Targets
 

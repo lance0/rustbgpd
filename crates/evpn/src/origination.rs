@@ -18,9 +18,9 @@
 //! the daemon translates into `RibUpdate::InjectEvpn` /
 //! `RibUpdate::WithdrawEvpn`.
 //!
-//! Living in `crates/evpn` keeps the whole sequencer testable on macOS
-//! dev builds and isolated from the netlink-only `crates/evpn-linux`
-//! per ADR-0054 §1's portability rule.
+//! Living in `crates/evpn` keeps the sequencer portable for component testing
+//! and isolated from the netlink-only `crates/evpn-linux`; this does not imply
+//! non-Linux daemon support (ADR-0054 §1).
 //!
 //! # Inputs
 //!

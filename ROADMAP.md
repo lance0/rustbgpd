@@ -2154,7 +2154,9 @@ rustbgpd is an API-first BGP daemon. The following are explicitly out of scope:
   TUI are polished convenience wrappers, but gRPC is the contract.
 - **GoBGP proto compatibility.** Our protos are our own. A compat adapter can
   exist as a separate project if anyone wants it.
-- **Windows support.** Linux is the target; macOS for dev builds only.
+- **Non-Linux daemon support.** macOS, BSD, and Windows remain outside the
+  supported daemon targets; portable component work does not change that
+  [platform contract](SUPPORT.md#platform-support).
 - **Full web UI / dashboard.** Grafana + Prometheus is the monitoring story; the
   built-in looking glass is read-only JSON for NOC integration. (Market research
   shows IXPs use external presentation layers — Alice-LG, IXP Manager — so a

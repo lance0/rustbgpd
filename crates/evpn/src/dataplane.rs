@@ -10,8 +10,8 @@
 //! These types live in `crates/evpn` rather than `crates/evpn-linux`
 //! deliberately — see ADR-0054 §1 / §2 — so that:
 //!
-//! - The daemon can construct intents on platforms that don't compile
-//!   the netlink crate (macOS dev builds).
+//! - Kernel-independent code can construct and test intents without compiling
+//!   netlink; this portability does not imply non-Linux daemon support.
 //! - A future RR-only feature flag can drop `rustbgpd-evpn-linux`
 //!   entirely while leaving the intent surface untouched.
 //! - The diff and projection unit tests run with no Linux dependencies.
