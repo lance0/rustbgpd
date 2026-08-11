@@ -776,6 +776,8 @@ mod tests {
         include_str!("../../../proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto");
     const INVENTORY_JSON: &str = include_str!("../../../docs/grpc-method-inventory.json");
     const INVENTORY_MD: &str = include_str!("../../../docs/grpc-method-inventory.md");
+    const READ_TOTAL: &str = "| `read` | 0 | 0.0% |";
+    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 60 | 57.7% |";
     const AUTHZ_SOURCE_PATH: &str = "crates/api/src/authz.rs";
     const PRIMARY_PROTO_PATH: &str = "proto/rustbgpd.proto";
     const ADDITIONAL_PROTO_PATHS: &[&str] =
@@ -922,10 +924,10 @@ mod tests {
 
     /// The `## Totals` table of `docs/grpc-method-inventory.md`, keyed by tier
     /// label plus the `Total` row.
-    fn markdown_totals() -> BTreeMap<String, usize> {
+    fn markdown_totals(markdown: &str) -> Result<BTreeMap<String, (usize, f64)>, &'static str> {
         let mut totals = BTreeMap::new();
         let mut in_totals = false;
-        for line in INVENTORY_MD.lines() {
+        for line in markdown.lines() {
             if line.starts_with("## ") {
                 in_totals = line == "## Totals";
                 continue;
@@ -933,15 +935,61 @@ mod tests {
             if !in_totals || !line.starts_with('|') {
                 continue;
             }
-            let mut cells = line.split('|').skip(1).map(cell_text);
-            let (Some(label), Some(count)) = (cells.next(), cells.next()) else {
+            if matches!(line, "| Tier | Count | % |" | "|------|------:|--:|") {
                 continue;
+            }
+            let row = line
+                .strip_prefix('|')
+                .and_then(|row| row.strip_suffix('|'))
+                .ok_or("invalid totals row")?;
+            let mut cells = row.split('|').map(cell_text);
+            let (Some(label), Some(count), Some(percent), None) =
+                (cells.next(), cells.next(), cells.next(), cells.next())
+            else {
+                return Err("invalid percentage");
             };
-            if let Ok(count) = count.parse() {
-                totals.insert(label, count);
+            if label.is_empty() {
+                return Err("invalid totals row");
+            }
+            let count = count.parse().map_err(|_| "invalid count")?;
+            let percent = percent
+                .strip_suffix('%')
+                .and_then(|percent| percent.parse::<f64>().ok())
+                .filter(|percent| percent.is_finite())
+                .ok_or("invalid percentage")?;
+            if totals.insert(label.clone(), (count, percent)).is_some() {
+                return Err("duplicate totals row");
             }
         }
+        Ok(totals)
+    }
+
+    fn verify_markdown_totals(
+        markdown: &str,
+        expected: &BTreeMap<String, usize>,
+        method_count: usize,
+    ) -> Result<(), &'static str> {
+        let totals = markdown_totals(markdown)?;
+        let counts: BTreeMap<_, _> = totals.iter().map(|(l, (c, _))| (l.clone(), *c)).collect();
+        if counts != *expected {
+            return Err("counts mismatch");
+        }
+        for (label, count) in expected {
+            let count = f64::from(u32::try_from(*count).expect("tier count fits u32"));
+            let total = f64::from(u32::try_from(method_count).expect("method count fits u32"));
+            if (totals[label].1 - 100.0 * count / total).abs() > 0.050_000_001 {
+                return Err("percentage mismatch");
+            }
+        }
+        Ok(())
+    }
+
+    fn fixture_totals() -> BTreeMap<String, usize> {
+        let totals = markdown_totals(INVENTORY_MD).expect("fixture totals parse");
         totals
+            .into_iter()
+            .map(|(label, (count, _))| (label, count))
+            .collect()
     }
 
     fn brace_delta(line: &str) -> i32 {
@@ -1078,7 +1126,67 @@ mod tests {
             })
             .collect::<BTreeMap<_, _>>();
         expected_totals.insert("Total".to_owned(), method_count);
-        assert_eq!(markdown_totals(), expected_totals);
+        verify_markdown_totals(INVENTORY_MD, &expected_totals, method_count)
+            .expect("Markdown totals match the machine-readable export");
+    }
+
+    #[test]
+    fn markdown_totals_rejects_stale_percentage() {
+        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 60 | 57.6% |");
+        assert_eq!(
+            verify_markdown_totals(&stale, &fixture_totals(), METHODS.len()),
+            Err("percentage mismatch")
+        );
+    }
+
+    #[test]
+    fn markdown_totals_accepts_half_step_rounding() {
+        let markdown = "## Totals\n| Tier | Count | % |\n| `read` | 3 | 18.7% |";
+        let expected = BTreeMap::from([("read".to_owned(), 3)]);
+        assert_eq!(verify_markdown_totals(markdown, &expected, 16), Ok(()));
+    }
+
+    #[test]
+    fn markdown_totals_rejects_malformed_or_missing_percentage() {
+        for replacement in ["| `read` | 0 | nope |", "| `read` | 0 |"] {
+            let malformed = INVENTORY_MD.replace(READ_TOTAL, replacement);
+            assert_eq!(markdown_totals(&malformed), Err("invalid percentage"));
+        }
+    }
+
+    #[test]
+    fn markdown_totals_rejects_nonfinite_or_duplicate_rows() {
+        let nonfinite = INVENTORY_MD.replace(READ_TOTAL, "| `read` | 0 | NaN% |");
+        assert_eq!(markdown_totals(&nonfinite), Err("invalid percentage"));
+        let duplicate = INVENTORY_MD.replace(READ_TOTAL, &format!("{READ_TOTAL}\n{READ_TOTAL}"));
+        assert_eq!(markdown_totals(&duplicate), Err("duplicate totals row"));
+    }
+
+    #[test]
+    fn markdown_totals_rejects_invalid_row_shapes() {
+        for row in "| |0|0%|\n|read||0%|\n|read|x|0%|\n|read|0|0%\n|read|0|0%|x|".lines() {
+            assert!(markdown_totals(&format!("## Totals\n{row}")).is_err());
+        }
+        let extra = INVENTORY_MD.replace(READ_TOTAL, &format!("{READ_TOTAL}\n|x|0|0%|"));
+        assert_eq!(
+            verify_markdown_totals(&extra, &fixture_totals(), METHODS.len()),
+            Err("counts mismatch")
+        );
+    }
+
+    #[test]
+    fn markdown_totals_rejects_malformed_extra_row() {
+        let markdown = INVENTORY_MD.replace(READ_TOTAL, &format!("{READ_TOTAL}\n|x|bad|0%|"));
+        assert_eq!(markdown_totals(&markdown), Err("invalid count"));
+    }
+
+    #[test]
+    fn markdown_totals_preserves_count_fence() {
+        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 59 | 57.7% |");
+        assert_eq!(
+            verify_markdown_totals(&stale, &fixture_totals(), METHODS.len()),
+            Err("counts mismatch")
+        );
     }
 
     #[test]
