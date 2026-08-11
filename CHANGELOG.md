@@ -152,6 +152,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now ends on the paragraph's terminating blank line, and the packaged config
   body is asserted positively rather than only checked for a leftover dev path.
 
+### Changed
+
+- The planned v1 RS/RR compatibility inventory no longer freezes
+  `[global].worker_threads`, `[event_history]`'s `batch_interval_ms`,
+  `batch_size`, `overflow`, `queue_capacity`, and `synchronous` keys, or the
+  legacy `rbgp watch` command path. All seven remain available and behave
+  unchanged; `RibService.WatchRoutes` remains in the stable RPC set. (LAN-963)
+
 ## [0.64.0] — 2026-08-08
 
 ### Security
