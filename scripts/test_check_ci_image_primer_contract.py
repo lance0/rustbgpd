@@ -338,6 +338,23 @@ class PrimerContractTests(unittest.TestCase):
             with self.subTest(old=old):
                 self.mutate(relative, old, new)
 
+    def test_combined_cheap_interop_job_and_m91_target_are_load_bearing(self):
+        relative = ".github/workflows/interop.yml"
+        for old, new in (
+            ("  m26_m27_m28_m59_m91:\n", "  removed_combined_job:\n"),
+            ("          label: M91\n", "          label: M90\n"),
+            (
+                "          topology: tests/interop/m91-rfc7606-malformed.clab.yml\n",
+                "          topology: tests/interop/m90-differential.clab.yml\n",
+            ),
+            (
+                "          script: tests/interop/scripts/test-m91-rfc7606-malformed.sh\n",
+                "          script: tests/interop/scripts/test-m90-differential.sh\n",
+            ),
+        ):
+            with self.subTest(seam=old):
+                self.mutate(relative, old, new)
+
     def test_dockerfile_exact_source_bridge(self):
         for binary in ("rustbgpd", "rbgp", "evpn-tester", "evpn-monitor"):
             with self.subTest(binary=binary, side="builder"):

@@ -1684,3 +1684,66 @@ jobs:
           label: M64
           topology: tests/interop/m64-ipv6-only.clab.yml
           script: tests/interop/scripts/test-m64-ipv6-only.sh
+
+  m26_m27_m28_m59_m91:
+    needs: prime_dev_image
+    name: M26/M27/M28/M59/M91 — cheap protocol interop (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install grpcurl + jq
+        run: |
+          bash .github/scripts/install-grpcurl.sh
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          target: dev
+          cache-from: type=gha,scope=rustbgpd-dev
+
+      - name: Run M26 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M26
+          topology: tests/interop/m26-cease-frr.clab.yml
+          script: tests/interop/scripts/test-m26-cease-frr.sh
+
+      - name: Run M27 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M27
+          topology: tests/interop/m27-aspa-rtr2.clab.yml
+          script: tests/interop/scripts/test-m27-aspa-rtr2.sh
+
+      - name: Run M28 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M28
+          topology: tests/interop/m28-dynamic-frr.clab.yml
+          script: tests/interop/scripts/test-m28-dynamic-frr.sh
+
+      - name: Run M59 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M59
+          topology: tests/interop/m59-aspa-roles-rtr2.clab.yml
+          script: tests/interop/scripts/test-m59-aspa-roles.sh
+
+      - name: Run M91 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M91
+          topology: tests/interop/m91-rfc7606-malformed.clab.yml
+          script: tests/interop/scripts/test-m91-rfc7606-malformed.sh
