@@ -279,6 +279,53 @@ fn internal_post_transform_invariant_uses_exit_70_and_sanitized_text() {
 }
 
 #[test]
+fn retired_source_keeps_actionable_diagnostic_without_publication() {
+    let (_dir, path) = config_file();
+    fs::write(
+        &path,
+        CONFIG.replace("enforcement = \"tier\"", "enforcement = \"legacy\""),
+    )
+    .unwrap();
+    let before = fs::read(&path).unwrap();
+    let inode = fs::metadata(&path).unwrap().ino();
+    let sentinel = path.parent().unwrap().join("sentinel");
+    let stage = PathBuf::from(format!("{}.tmp", path.display()));
+    fs::write(&sentinel, b"do not replace").unwrap();
+    symlink(&sentinel, &stage).unwrap();
+    let stage_inode = fs::symlink_metadata(&stage).unwrap().ino();
+
+    let output = run(&[&path], &["pin-legacy", "--offline"]);
+
+    assert_eq!(output.status.code(), Some(1), "{:?}", text(&output));
+    assert!(text(&output).0.is_empty());
+    assert_eq!(
+        text(&output).1,
+        "error: config migration refused: migration source validation failed:\n\
+error: security.grpc.enforcement = \"legacy\" was removed in v0.63.0 and no longer boots:\n  \
+1. legacy mode recorded [security.grpc.roles] as audit context but enforced nothing; that runtime path no longer exists, so there is nothing to opt back into\n  \
+2. if your clients are local (rbgp over a UDS socket, including the implicit default at <runtime_state_dir>/grpc.sock), tier enforcement needs no configuration at all — the owner-only socket authorizes them as the implicit \"local-operator\": simply delete the whole [security.grpc] block\n  \
+3. a listener with a declared principal keeps working under tier with a role entry; keep this instead:\n\
+[security.grpc]\n\
+enforcement = \"tier\"\n\
+\n\
+[security.grpc.roles]\n\
+\"<your-principal>\" = \"operator\"\n\
+(migration: docs/CONFIGURATION.md [security.grpc]; removal decision: docs/adr/0064-grpc-authorization.md)\n"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+    assert!(
+        fs::symlink_metadata(&stage)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::symlink_metadata(&stage).unwrap().ino(), stage_inode);
+    assert_eq!(fs::read_link(&stage).unwrap(), sentinel);
+    assert_eq!(fs::read(&sentinel).unwrap(), b"do not replace");
+}
+
+#[test]
 fn locked_captured_bytes_are_the_only_source_semantics_authority() {
     let source = include_str!("../src/config_migration.rs");
     let start = source.find("fn migrate(").unwrap();

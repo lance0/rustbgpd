@@ -200,7 +200,7 @@ fn migrate(request: &Request) -> Result<Outcome, MigrationFailure> {
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| "CONFIG_PATH is not valid UTF-8 TOML".to_string())?;
     let current = load_captured_config(text, &resolved, "migration source")
-        .map_err(|_| "current config validation failed".to_string())?;
+        .map_err(|diagnostic| format!("migration source validation failed:\n{diagnostic}"))?;
     let mut document = text
         .parse::<DocumentMut>()
         .map_err(|_| "CONFIG_PATH is not valid TOML".to_string())?;
