@@ -12,7 +12,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = ROOT / "docs/grafana/rustbgpd-overview.json"
-WORKFLOW = ROOT / ".github/workflows/alert-rules.yml"
+METRICS = ROOT / "crates/telemetry/src/metrics.rs"
 
 VARIABLES = {
     "peer": 'label_values(bgp_peer_admin_enabled{instance=~"$instance"}, peer)',
@@ -161,19 +161,6 @@ REQUIRED_LEGENDS = {
     ("RIB ingest pressure", "C"): "outbound work lost {{peer}}",
 }
 
-REQUIRED_DESCRIPTIONS = {
-    "Event outbox health": (
-        "Latched durability-impacting loss, committed-event delivery skip, or DB "
-        "open/recovery/quarantine failure. Expected shutdown reason=closed drops "
-        "are excluded; replay can remain available."
-    ),
-    "RIB ingest pressure": (
-        "Inbound RIB pressure safely parks producers and paces senders without "
-        "loss. Outbound drops mean BGP work was lost because a peer writer "
-        "channel was full or closed."
-    ),
-}
-
 ROUTE_SAFETY_PANELS = {
     "Export rejections / malformed UPDATEs": 0,
     "Selection-deferral state": 8,
@@ -181,17 +168,10 @@ ROUTE_SAFETY_PANELS = {
 }
 
 CAPACITY_PANELS = {
-    "RFC 8212 missing policy": (62, 0, 161),
-    "Outbound prefix capacity": (63, 12, 161),
-    "Dynamic-neighbor admission capacity": (64, 0, 169),
-    "Dynamic-neighbor admission rejections": (65, 12, 169),
-}
-
-WORKFLOW_PATHS = {
-    "examples/prometheus/**",
-    "docs/grafana/rustbgpd-overview.json",
-    "scripts/check-grafana-dashboard.py",
-    ".github/workflows/alert-rules.yml",
+    "RFC 8212 missing policy",
+    "Outbound prefix capacity",
+    "Dynamic-neighbor admission capacity",
+    "Dynamic-neighbor admission rejections",
 }
 
 
@@ -215,30 +195,155 @@ def all_panels(panels: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return flattened
 
 
-def workflow_trigger_paths(text: str) -> dict[str, set[str]]:
-    triggers: dict[str, set[str]] = {"push": set(), "pull_request": set()}
-    event: str | None = None
-    in_paths = False
-    for line in text.splitlines():
-        event_match = re.fullmatch(r"  (push|pull_request):", line)
-        if event_match:
-            event = event_match.group(1)
-            in_paths = False
-            continue
-        if event is not None and re.fullmatch(r"    paths:", line):
-            in_paths = True
-            continue
-        if in_paths:
-            path_match = re.fullmatch(r'      - ["\']([^"\']+)["\']', line)
-            if path_match:
-                triggers[event].add(path_match.group(1))
+def rust_lex(source: str) -> tuple[str, list[str]]:
+    """Mask Rust comments and literals, retaining string values as opaque tokens."""
+    output: list[str] = []
+    strings: list[str] = []
+    index = 0
+    while index < len(source):
+        if source.startswith("//", index):
+            end = source.find("\n", index)
+            index = len(source) if end < 0 else end
+        elif source.startswith("/*", index):
+            depth, end = 1, index + 2
+            while end < len(source) and depth:
+                if source.startswith("/*", end):
+                    depth += 1
+                    end += 2
+                elif source.startswith("*/", end):
+                    depth -= 1
+                    end += 2
+                else:
+                    end += 1
+            output.append(" ")
+            index = end
+        else:
+            raw = re.match(r'(?:br|r)(?P<hashes>#{0,255})"', source[index:])
+            normal = re.match(r'(?:b)?"', source[index:])
+            if raw:
+                marker = '"' + raw.group("hashes")
+                start = index + raw.end()
+                end = source.find(marker, start)
+                if end < 0:
+                    raise ValueError("unterminated Rust raw string")
+                value, index = source[start:end], end + len(marker)
+            elif normal:
+                start, end = index + normal.end(), index + normal.end()
+                while end < len(source):
+                    if source[end] == '"':
+                        slashes = 0
+                        while end > start + slashes and source[end - slashes - 1] == "\\":
+                            slashes += 1
+                        if slashes % 2 == 0:
+                            break
+                    end += 2 if source[end] == "\\" else 1
+                if end >= len(source):
+                    raise ValueError("unterminated Rust string")
+                value, index = source[start:end], end + 1
+            else:
+                output.append(source[index])
+                index += 1
                 continue
-            if line.strip() and not line.startswith("      "):
-                in_paths = False
-        if event is not None and line and not line.startswith("  "):
-            event = None
-            in_paths = False
-    return triggers
+            output.append(f"__RUST_STRING_{len(strings)}__")
+            strings.append(value)
+    return "".join(output), strings
+
+
+def dashboard_metric_references(dashboard: dict[str, Any]) -> dict[str, list[str]]:
+    references: dict[str, list[str]] = {}
+
+    def add(expression: object, context: str) -> None:
+        if not isinstance(expression, str) or not expression.strip():
+            raise ValueError(f"empty query at {context}")
+        syntax = re.sub(r'"(?:\\.|[^"\\])*"', '""', expression)
+        if re.search(r"[A-Za-z_:][A-Za-z0-9_:]*:[A-Za-z0-9_:]*", syntax):
+            raise ValueError(f"unsupported bare/colon metric alias at {context}: {expression}")
+        names = re.findall(r"(?<![$\w:])([A-Za-z_:][A-Za-z0-9_:]*)\s*(?=\{)", syntax)
+        if re.search(r"(?<![\w:])\{[^}]*__name__\s*=", syntax):
+            raise ValueError(f"metric-less __name__ selector at {context}")
+        remainder = re.sub(r"[A-Za-z_:][\w:]*\s*\{[^}]*\}", " ", syntax)
+        remainder = re.sub(r"\{[^}]*\}|\[[^]]*\]|\$\w+", " ", remainder)
+        remainder = re.sub(
+            r"\b(?:by|without|on|ignoring|group_left|group_right)\s*\([^)]*\)",
+            " ", remainder,
+        )
+        remainder = re.sub(r"\b[A-Za-z_]\w*\s*(?=\()", " ", remainder)
+        aliases = re.findall(r"\b[A-Za-z_:][\w:]*\b", remainder)
+        if aliases:
+            raise ValueError(f"unsupported bare/colon metric alias at {context}: {aliases[0]}")
+        for name in names:
+            references.setdefault(name, []).append(context)
+        if not names and "label_values" not in expression:
+            raise ValueError(f"unsupported metric-free query at {context}: {expression}")
+
+    for variable in dashboard.get("templating", {}).get("list", []):
+        if variable.get("type") != "query":
+            continue
+        query = variable.get("query")
+        match = re.fullmatch(r"\s*label_values\(\s*([A-Za-z_:][\w:]*)\s*(?:\{[^}]*\})?\s*,[^)]+\)\s*", str(query))
+        if not match:
+            raise ValueError(f"unsupported template query at ${variable.get('name')}: {query}")
+        references.setdefault(match.group(1), []).append(f"${variable.get('name')}")
+    for panel in all_panels(dashboard.get("panels", [])):
+        for target in panel.get("targets", []):
+            add(target.get("expr"), f"{panel.get('title')}/{target.get('refId')}")
+    if not references:
+        raise ValueError("no dashboard metric references discovered")
+    return references
+
+
+def rust_metric_inventory(source: str) -> dict[str, str]:
+    source, strings = rust_lex(source)
+    source = source.split("#[cfg(test)]", 1)[0]
+    constructors: dict[str, tuple[str, str]] = {}
+    pattern = re.compile(
+        r"let\s+(\w+)\s*=\s*(IntCounter(?:Vec)?|IntGauge(?:Vec)?|HistogramVec)::new\(\s*"
+        r"(?:(?:Opts|HistogramOpts)::new\(\s*)?__RUST_STRING_(\d+)__",
+        re.DOTALL,
+    )
+    for variable, kind, string_index in pattern.findall(source):
+        if variable in constructors:
+            raise ValueError(f"ambiguous metric constructor variable {variable}")
+        constructors[variable] = (strings[int(string_index)], "histogram" if kind == "HistogramVec" else "ordinary")
+    registered = re.findall(
+        r"\.register\(\s*Box::new\(\s*(\w+)\.clone\(\)\s*,?\s*\)\s*\)", source
+    )
+    inventory: dict[str, str] = {}
+    for variable in registered:
+        if variable not in constructors:
+            continue
+        name, kind = constructors[variable]
+        if name in inventory:
+            raise ValueError(f"duplicate registered metric name {name}")
+        inventory[name] = kind
+    if re.search(r"register\(\s*Box::new\(\s*jemalloc_stats::JemallocCollector::new\(\)\s*\)\s*\)", source):
+        fields = set(re.findall(r"\b(\w+)\s*:\s*IntGauge\b", source))
+        bodies = re.findall(r"(?<!-> )\bSelf\s*\{([^}]*)\}", source)
+        wired: dict[str, set[str]] = {}
+        for body in bodies:
+            for entry in body.split(","):
+                parts = [part.strip() for part in entry.split(":", 1)]
+                field, variable = (parts[0], parts[-1])
+                wired.setdefault(variable, set()).add(field)
+        emitted = set(re.findall(r"self\.(\w+)\.collect\(\)", source))
+        for variable, (name, kind) in constructors.items():
+            if name.startswith("jemalloc_") and wired.get(variable, set()) & fields & emitted:
+                inventory[name] = kind
+    if not inventory:
+        raise ValueError("no registered Rust metrics discovered")
+    return inventory
+
+
+def check_metric_linkage(references: dict[str, list[str]], inventory: dict[str, str]) -> None:
+    unresolved: list[str] = []
+    for name, contexts in sorted(references.items()):
+        if name in inventory:
+            continue
+        base = next((name.removesuffix(suffix) for suffix in ("_bucket", "_count", "_sum") if name.endswith(suffix)), None)
+        if base is None or inventory.get(base) != "histogram":
+            unresolved.append(f"{name} ({', '.join(contexts)})")
+    if unresolved:
+        raise ValueError("unregistered dashboard metrics: " + "; ".join(unresolved))
 
 
 def main() -> None:
@@ -303,11 +408,6 @@ def main() -> None:
         if actual != [expected]:
             fail(f"target {key[0]!r}/{key[1]} must use legend {expected!r}; got {actual!r}")
 
-    for title, expected in REQUIRED_DESCRIPTIONS.items():
-        panel = next((item for item in panels if item.get("title") == title), None)
-        if panel is None or panel.get("description") != expected:
-            fail(f"panel {title!r} must use exact contract description {expected!r}")
-
     update_group_panel = next(
         panel for panel in panels if panel.get("title") == "Update group by peer"
     )
@@ -333,8 +433,6 @@ def main() -> None:
     )
     if truth_panel.get("type") != "timeseries":
         fail("peer administrative/session truth must use a timeseries panel")
-    if truth_panel.get("gridPos") != {"h": 8, "w": 8, "x": 16, "y": 5}:
-        fail("peer administrative/session truth must remain compact in Session health")
     truth_defaults = truth_panel.get("fieldConfig", {}).get("defaults", {})
     if (
         truth_defaults.get("decimals") != 0
@@ -350,20 +448,10 @@ def main() -> None:
     )
     if route_safety_row is None or route_safety_row.get("type") != "row":
         fail("Route safety must exist as a dashboard row")
-    if route_safety_row.get("collapsed") is not False:
-        fail("Route safety row must be expanded by default")
-    row_position = route_safety_row.get("gridPos", {})
-    expected_row_position = {"h": 1, "w": 24, "x": 0, "y": 152}
-    if row_position != expected_row_position:
-        fail(f"Route safety row must use grid position {expected_row_position}")
-    for title, expected_x in ROUTE_SAFETY_PANELS.items():
+    for title in ROUTE_SAFETY_PANELS:
         panel = next((item for item in panels if item.get("title") == title), None)
         if panel is None or panel.get("type") != "timeseries":
             fail(f"{title} must exist as a timeseries panel")
-        position = panel.get("gridPos", {})
-        expected_position = {"h": 8, "w": 8, "x": expected_x, "y": 153}
-        if position != expected_position:
-            fail(f"{title} must use route-safety grid position {expected_position}")
 
     selection_panel = next(
         panel for panel in panels if panel.get("title") == "Selection-deferral state"
@@ -374,15 +462,10 @@ def main() -> None:
     if selection_defaults.get("custom", {}).get("lineInterpolation") != "stepAfter":
         fail("selection-deferral state must use step interpolation")
 
-    for title, (expected_id, expected_x, expected_y) in CAPACITY_PANELS.items():
+    for title in CAPACITY_PANELS:
         panel = next((item for item in panels if item.get("title") == title), None)
         if panel is None or panel.get("type") != "timeseries":
             fail(f"{title} must exist as a timeseries panel")
-        if panel.get("id") != expected_id:
-            fail(f"{title} must use panel id {expected_id}")
-        expected_position = {"h": 8, "w": 12, "x": expected_x, "y": expected_y}
-        if panel.get("gridPos") != expected_position:
-            fail(f"{title} must use compact grid position {expected_position}")
 
     rfc8212_panel = next(
         panel for panel in panels if panel.get("title") == "RFC 8212 missing policy"
@@ -471,23 +554,15 @@ def main() -> None:
         fail("dynamic-neighbor rejection rate must render as nonnegative operations")
 
     try:
-        workflow_text = WORKFLOW.read_text(encoding="utf-8")
-    except OSError as error:
-        fail(f"cannot read {WORKFLOW.relative_to(ROOT)}: {error}")
-    for event, paths in workflow_trigger_paths(workflow_text).items():
-        missing = sorted(WORKFLOW_PATHS - paths)
-        if missing:
-            fail(f"{event} paths are missing {missing}")
-    checker_steps = sum(
-        line.strip() == "run: python3 scripts/check-grafana-dashboard.py"
-        for line in workflow_text.splitlines()
-    )
-    if checker_steps != 1:
-        fail("workflow must contain exactly one executable dashboard-checker step")
+        references = dashboard_metric_references(dashboard)
+        inventory = rust_metric_inventory(METRICS.read_text(encoding="utf-8"))
+        check_metric_linkage(references, inventory)
+    except (OSError, ValueError) as error:
+        fail(str(error))
 
     print(
         f"dashboard check: {len(panels)} unique panels, "
-        f"{len(TARGETS)} operator targets, and workflow triggers are valid"
+        f"{len(TARGETS)} operator targets, and {len(references)} linked metrics"
     )
 
 

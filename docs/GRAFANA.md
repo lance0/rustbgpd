@@ -178,28 +178,22 @@ inside the bounded window does.
 Run the same checks as CI with:
 
 ```bash
+python3 -m unittest -v scripts/test_check_grafana_dashboard.py
 python3 scripts/check-grafana-dashboard.py
 promtool check rules examples/prometheus/rustbgpd-alerts.yml
 (cd examples/prometheus && promtool test rules rustbgpd-alerts_test.yml)
 ```
 
-The dashboard checker parses JSON, rejects duplicate panel IDs, validates the
-multi/All selector definitions, compares the required PromQL targets after
-whitespace normalization, pins the expanded full-width Route safety row, its
-three 8-by-8 panels, and discrete selection-state rendering, and checks both
-workflow path filters plus the real checker step. Its mutation proof makes
-each of these changes red: malformed JSON, a non-integer or duplicate ID,
-renaming, collapsing, resizing, or moving the required row; changing its type;
-moving or changing the type of a required panel; renaming any of the six
-route-safety metrics; declaring a second template variable over the `peer`
-label; changing either raw selection gauge to a rate; removing step
-rendering; dropping `instance` from a route-safety aggregation; weakening any of the six
-label-rich legends; dropping any seeded-series `> 0` filter; or replacing the
-executable workflow step with only a comment.
-It also pins capacity panel IDs 62–65 and their 12-by-8 layout, the exact
-queries and legends, RFC 8212 0/1 mappings and steps, the query-D-only right-axis
-override, and dynamic-neighbor panel target sets, units, and minima. Removing
-either dynamic-neighbor panel or changing any of its four queries is red.
+The dashboard checker parses JSON, rejects non-integer and duplicate panel IDs,
+and links every target and query-variable metric to a registered constructor in
+`crates/telemetry/src/metrics.rs`. Histogram `_bucket`, `_count`, and `_sum`
+series resolve only from registered histograms; aliases, empty discovery,
+unregistered constructors, comments, free strings, and test literals fail
+closed. It retains the canonical multi/All peer selector, load-bearing PromQL
+and legends, panel types, discrete state rendering, RFC 8212 mappings,
+outbound-blocking axis and exclusion, and dynamic-neighbor capacity/rejection
+semantics. Descriptions, layout, row collapsed state, and particular unique IDs
+are intentionally presentation choices rather than validation contracts.
 
 The slow-peer fixture is red if its `== 1` predicate or five-minute hold is
 changed. The RFC 8212 matrix covers import-only, export-only, and healthy peers;

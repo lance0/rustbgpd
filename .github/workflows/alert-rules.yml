@@ -10,13 +10,17 @@ on:
     paths:
       - "examples/prometheus/**"
       - "docs/grafana/rustbgpd-overview.json"
+      - "crates/telemetry/src/metrics.rs"
       - "scripts/check-grafana-dashboard.py"
+      - "scripts/test_check_grafana_dashboard.py"
       - ".github/workflows/alert-rules.yml"
   pull_request:
     paths:
       - "examples/prometheus/**"
       - "docs/grafana/rustbgpd-overview.json"
+      - "crates/telemetry/src/metrics.rs"
       - "scripts/check-grafana-dashboard.py"
+      - "scripts/test_check_grafana_dashboard.py"
       - ".github/workflows/alert-rules.yml"
 
 permissions:
@@ -28,6 +32,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
+      - name: Test Grafana dashboard checker
+        run: python3 -m unittest -v scripts/test_check_grafana_dashboard.py
       - name: Check Grafana dashboard
         run: python3 scripts/check-grafana-dashboard.py
       - name: Install promtool (pinned)
