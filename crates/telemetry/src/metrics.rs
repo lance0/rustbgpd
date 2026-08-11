@@ -3527,8 +3527,7 @@ impl BgpMetrics {
 
     /// Record a kernel apply failure for RFC 7999 discard state.
     ///
-    /// `action` is expected to be `setup`, `install`, `remove`,
-    /// `dump`, or `unsupported_platform`.
+    /// `action` is expected to be `setup`, `install`, `remove`, or `dump`.
     pub fn record_blackhole_discard_kernel_failure(&self, action: &str) {
         self.blackhole_discard_kernel_failures
             .with_label_values(&[action])
@@ -3552,8 +3551,7 @@ impl BgpMetrics {
 
     /// Record a kernel apply failure for general unicast FIB state.
     ///
-    /// `action` is expected to be `setup`, `dump`, `install`,
-    /// `replace`, `remove`, or `unsupported_platform`.
+    /// `action` is expected to be `setup`, `dump`, `install`, `replace`, or `remove`.
     pub fn record_fib_kernel_failure(&self, action: &str) {
         self.fib_kernel_failures.with_label_values(&[action]).inc();
     }
@@ -4877,10 +4875,10 @@ mod tests {
     }
 
     #[test]
-    fn blackhole_kernel_failure_counter_accepts_setup_labels() {
+    fn blackhole_kernel_failure_counter_accepts_production_labels() {
         let m = BgpMetrics::new();
         m.record_blackhole_discard_kernel_failure("setup");
-        m.record_blackhole_discard_kernel_failure("unsupported_platform");
+        m.record_blackhole_discard_kernel_failure("dump");
 
         assert_eq!(
             m.blackhole_discard_kernel_failures
@@ -4890,7 +4888,7 @@ mod tests {
         );
         assert_eq!(
             m.blackhole_discard_kernel_failures
-                .with_label_values(&["unsupported_platform"])
+                .with_label_values(&["dump"])
                 .get(),
             1
         );
