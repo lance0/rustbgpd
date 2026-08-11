@@ -225,6 +225,42 @@ fn explicit_offline_path_and_cli_conflicts_fail_closed() {
 }
 
 #[test]
+fn validator_option_cannot_be_consumed_as_path() {
+    let (dir, path) = config_file();
+    let before = fs::read(&path).unwrap();
+    let inode = fs::metadata(&path).unwrap().ino();
+    let validator = dir.path().join("--dry-run");
+    fs::write(
+        &validator,
+        "#!/bin/sh\n[ \"$1\" != --version ] || printf 'rustbgpd 0.64.0\\n'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&validator, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
+        .current_dir(dir.path())
+        .args([
+            "--migrate-config",
+            "downgrade-v0.64",
+            "--offline",
+            "--validator",
+            "--dry-run",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+
+    let (stdout, stderr) = text(&output);
+    assert_eq!(output.status.code(), Some(2), "{stdout}\n{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains("--validator"), "{stderr}");
+    assert!(stderr.contains("requires a path"), "{stderr}");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+    assert!(!PathBuf::from(format!("{}.tmp", path.display())).exists());
+}
+
+#[test]
 fn large_source_relative_validator_and_stdout_failure_are_bounded() {
     let (dir, path) = config_file();
     let mut source = fs::read_to_string(&path).unwrap();

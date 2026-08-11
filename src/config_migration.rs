@@ -138,7 +138,8 @@ fn parse(args: &[String]) -> Result<Request, String> {
                 index += 1;
                 let path = args
                     .get(index)
-                    .ok_or_else(|| "--validator requires a path".to_string())?;
+                    .filter(|path| !path.starts_with('-'))
+                    .ok_or_else(|| "--validator requires a path argument".to_string())?;
                 validator = Some(PathBuf::from(path));
             }
             option if option.starts_with('-') => {
