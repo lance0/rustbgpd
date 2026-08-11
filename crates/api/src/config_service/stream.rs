@@ -21,7 +21,7 @@ use tokio::time::{Instant, timeout_at};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-use super::{plan_error_to_status, transaction_plan_to_proto};
+use super::{CONFIG_OPERATION_TIMEOUT, plan_error_to_status, transaction_plan_to_proto};
 use crate::audit::{GrpcAuditHandle, stream_plan_config_transaction_summary};
 use crate::authz::PrincipalRole;
 use crate::peer_types::{PeerManagerCommand, RuntimeConfigTransactionStatus};
@@ -33,7 +33,6 @@ const FRAME_VERSION: u32 = 1;
 const MAX_CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_CANDIDATE_BYTES: u64 = 384 * 1024 * 1024;
 const IDLE_TIMEOUT: Duration = Duration::from_mins(1);
-const TOTAL_TIMEOUT: Duration = Duration::from_mins(30);
 const MAX_LIVE_PLAN_TOKENS: usize = 256;
 const PLAN_TOKEN_TTL: Duration = Duration::from_mins(30);
 
@@ -51,7 +50,7 @@ impl Default for StreamLimits {
             max_chunk_bytes: MAX_CHUNK_BYTES,
             max_candidate_bytes: MAX_CANDIDATE_BYTES,
             idle_timeout: IDLE_TIMEOUT,
-            total_timeout: TOTAL_TIMEOUT,
+            total_timeout: CONFIG_OPERATION_TIMEOUT,
         }
     }
 }
