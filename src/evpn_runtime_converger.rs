@@ -146,15 +146,12 @@ pub(crate) struct EvpnRuntimeReloadApply {
 }
 
 impl EvpnRuntimeReloadApply {
-    pub(crate) fn new<C>(
+    pub(crate) fn new(
         coordinator: Arc<Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>>,
         apply_lock: Arc<tokio::sync::Mutex<()>>,
-        converger: Arc<C>,
+        converger: Arc<dyn DaemonEvpnRuntimeConverger>,
         committed_config: Config,
-    ) -> Self
-    where
-        C: DaemonEvpnRuntimeConverger + 'static,
-    {
+    ) -> Self {
         Self {
             coordinator,
             apply_lock,
@@ -364,34 +361,6 @@ fn response_to_reload_outcome(
         value => Err(GrpcEvpnRuntimeApplyError::Internal(format!(
             "EVPN runtime reload returned unexpected outcome value {value}"
         ))),
-    }
-}
-
-struct PreconvergedRuntimeConverger;
-
-impl rustbgpd_evpn::EvpnRuntimeConverger for PreconvergedRuntimeConverger {
-    fn converge(
-        &mut self,
-        _current: &rustbgpd_evpn::EvpnRuntimeModel,
-        _candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
-        _plan: &rustbgpd_evpn::EvpnRuntimePlan,
-    ) -> Result<(), rustbgpd_evpn::EvpnRuntimeConvergeError> {
-        Ok(())
-    }
-}
-
-struct FailedRuntimeConverger {
-    source: rustbgpd_evpn::EvpnRuntimeConvergeError,
-}
-
-impl rustbgpd_evpn::EvpnRuntimeConverger for FailedRuntimeConverger {
-    fn converge(
-        &mut self,
-        _current: &rustbgpd_evpn::EvpnRuntimeModel,
-        _candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
-        _plan: &rustbgpd_evpn::EvpnRuntimePlan,
-    ) -> Result<(), rustbgpd_evpn::EvpnRuntimeConvergeError> {
-        Err(self.source.clone())
     }
 }
 
@@ -3701,15 +3670,12 @@ fn evpn_runtime_candidate_from_config(
 }
 
 #[cfg(test)]
-pub(crate) async fn apply_evpn_runtime_request<C>(
+pub(crate) async fn apply_evpn_runtime_request(
     request: &proto::ApplyEvpnRuntimeRequest,
     coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
     apply_lock: &tokio::sync::Mutex<()>,
-    converger: &C,
-) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError>
-where
-    C: DaemonEvpnRuntimeConverger + ?Sized,
-{
+    converger: &dyn DaemonEvpnRuntimeConverger,
+) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
     apply_evpn_runtime_request_with_metrics(
         request,
         coordinator,
@@ -3723,16 +3689,13 @@ where
 /// Same as [`apply_evpn_runtime_request`] but with a caller-owned metrics
 /// handle, so a test can assert the fail-stop counter moved.
 #[cfg(test)]
-pub(crate) async fn apply_evpn_runtime_request_with_metrics<C>(
+pub(crate) async fn apply_evpn_runtime_request_with_metrics(
     request: &proto::ApplyEvpnRuntimeRequest,
     coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
     apply_lock: &tokio::sync::Mutex<()>,
-    converger: &C,
+    converger: &dyn DaemonEvpnRuntimeConverger,
     metrics: &BgpMetrics,
-) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError>
-where
-    C: DaemonEvpnRuntimeConverger + ?Sized,
-{
+) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
     let candidate = evpn_runtime_candidate_from_toml(&request.candidate_toml)?;
     let _apply_guard = apply_lock.lock().await;
     apply_evpn_runtime_candidate_locked(
@@ -3749,16 +3712,13 @@ where
     clippy::too_many_lines,
     reason = "the plan/validate-only/converge/decompose/commit sequence reads clearest as one flow"
 )]
-async fn apply_evpn_runtime_candidate_locked<C>(
+async fn apply_evpn_runtime_candidate_locked(
     candidate: rustbgpd_evpn::EvpnRuntimeCandidate,
     validate_only: bool,
     coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
-    converger: &C,
+    converger: &dyn DaemonEvpnRuntimeConverger,
     metrics: &BgpMetrics,
-) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError>
-where
-    C: DaemonEvpnRuntimeConverger + ?Sized,
-{
+) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
     let (current, plan, snapshot) = {
         let coordinator = coordinator.lock().map_err(|_| {
             GrpcEvpnRuntimeApplyError::Internal(
@@ -3937,8 +3897,7 @@ where
                     "EVPN runtime coordinator lock poisoned".to_string(),
                 )
             })?;
-            let mut failed = FailedRuntimeConverger { source };
-            let _ = coordinator.apply_candidate(candidate, &mut failed);
+            let _ = coordinator.apply_candidate(candidate, Err(source));
         }
         return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(format!(
             "EVPN runtime mutation failed: {}; generation {} remains committed",
@@ -3950,9 +3909,8 @@ where
     let mut coordinator = coordinator.lock().map_err(|_| {
         GrpcEvpnRuntimeApplyError::Internal("EVPN runtime coordinator lock poisoned".to_string())
     })?;
-    let mut preconverged = PreconvergedRuntimeConverger;
     let report = coordinator
-        .apply_candidate(candidate, &mut preconverged)
+        .apply_candidate(candidate, Ok(()))
         .map_err(|err| GrpcEvpnRuntimeApplyError::FailedPrecondition(err.to_string()))?;
     let snapshot = coordinator.snapshot();
     Ok(proto::ApplyEvpnRuntimeResponse {
@@ -3974,16 +3932,13 @@ where
 /// converge pins the coordinator exactly like the single-shot path, and
 /// the error + `ERROR` log name the completed generations, the failed
 /// step, and the re-SIGHUP recovery. The caller holds the apply lock.
-async fn apply_decomposed_evpn_runtime_steps<C>(
+async fn apply_decomposed_evpn_runtime_steps(
     steps: Vec<crate::evpn_plan_decomposer::DecomposedStep>,
     overall_plan: &rustbgpd_evpn::EvpnRuntimePlan,
     coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
-    converger: &C,
+    converger: &dyn DaemonEvpnRuntimeConverger,
     metrics: &BgpMetrics,
-) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError>
-where
-    C: DaemonEvpnRuntimeConverger + ?Sized,
-{
+) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
     let lock_coordinator = || {
         coordinator.lock().map_err(|_| {
             GrpcEvpnRuntimeApplyError::Internal(
@@ -4016,8 +3971,7 @@ where
         {
             if let DaemonEvpnRuntimeConvergeError::Failed(source) = error.clone() {
                 let mut coordinator = lock_coordinator()?;
-                let mut failed = FailedRuntimeConverger { source };
-                let _ = coordinator.apply_candidate(step.candidate.clone(), &mut failed);
+                let _ = coordinator.apply_candidate(step.candidate.clone(), Err(source));
                 // Fail-stop pinned the coordinator (mutation_state=Failed);
                 // the ERROR log below carries the human detail.
                 metrics.add_evpn_runtime_decomposed_fail_stops(1);
@@ -4049,9 +4003,8 @@ where
         }
         let report = {
             let mut coordinator = lock_coordinator()?;
-            let mut preconverged = PreconvergedRuntimeConverger;
             coordinator
-                .apply_candidate(step.candidate, &mut preconverged)
+                .apply_candidate(step.candidate, Ok(()))
                 .map_err(|err| GrpcEvpnRuntimeApplyError::FailedPrecondition(err.to_string()))?
         };
         tracing::info!(
