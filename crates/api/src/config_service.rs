@@ -2,6 +2,8 @@
 
 pub(crate) mod stream;
 
+use std::time::Duration;
+
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
@@ -21,6 +23,27 @@ use crate::server::{
     ConfigHistoryListFn, ConfigRollbackFn, ConfigTransactionAbortFn, ConfigTransactionApplyError,
     ConfigTransactionApplyFn, ConfigTransactionConfirmFn, ConfigTransactionStatusFn,
 };
+
+pub(super) const CONFIG_OPERATION_TIMEOUT: Duration = Duration::from_mins(30);
+
+async fn request_peer_manager<T>(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    command: impl FnOnce(oneshot::Sender<T>) -> PeerManagerCommand,
+    dropped_reply_message: &'static str,
+) -> Result<T, Status> {
+    tokio::time::timeout(CONFIG_OPERATION_TIMEOUT, async {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        peer_mgr_tx
+            .send(command(reply_tx))
+            .await
+            .map_err(|_| Status::unavailable("peer manager is unavailable"))?;
+        reply_rx
+            .await
+            .map_err(|_| Status::unavailable(dropped_reply_message))
+    })
+    .await
+    .map_err(|_| Status::deadline_exceeded("config operation exceeded deadline"))?
+}
 
 pub struct ConfigService {
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
@@ -194,18 +217,15 @@ impl proto::config_service_server::ConfigService for ConfigService {
             diff_runtime_config_summary(&request.get_ref().candidate_toml),
         );
         let candidate_toml = request.into_inner().candidate_toml;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::DiffRuntimeConfig {
+        match request_peer_manager(
+            &self.peer_mgr_tx,
+            |reply| PeerManagerCommand::DiffRuntimeConfig {
                 candidate_toml,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::unavailable("peer manager is unavailable"))?;
-
-        match reply_rx
-            .await
-            .map_err(|_| Status::unavailable("peer manager dropped config diff reply"))?
+                reply,
+            },
+            "peer manager dropped config diff reply",
+        )
+        .await?
         {
             Ok(diff) => Ok(Response::new(diff_to_proto(diff))),
             Err(error) => Err(diff_error_to_status(error)),
@@ -226,19 +246,17 @@ impl proto::config_service_server::ConfigService for ConfigService {
         let request = request.into_inner();
         let expected_runtime_snapshot_token = (!request.expected_runtime_snapshot_token.is_empty())
             .then_some(request.expected_runtime_snapshot_token);
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::PlanConfigTransaction {
+        match request_peer_manager(
+            &self.peer_mgr_tx,
+            |reply| PeerManagerCommand::PlanConfigTransaction {
                 candidate_toml: request.candidate_toml,
                 expected_runtime_snapshot_token,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::unavailable("peer manager is unavailable"))?;
-
-        match reply_rx.await.map_err(|_| {
-            Status::unavailable("peer manager dropped config transaction plan reply")
-        })? {
+                reply,
+            },
+            "peer manager dropped config transaction plan reply",
+        )
+        .await?
+        {
             Ok(plan) => Ok(Response::new(transaction_plan_to_proto(plan))),
             Err(error) => Err(plan_error_to_status(error)),
         }
@@ -403,15 +421,12 @@ impl proto::config_service_server::ConfigService for ConfigService {
         request: Request<proto::GetEffectiveConfigRequest>,
     ) -> Result<Response<proto::GetEffectiveConfigResponse>, Status> {
         set_request_summary(&request, get_effective_config_summary());
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::EffectiveRuntimeConfig { reply: reply_tx })
-            .await
-            .map_err(|_| Status::unavailable("peer manager is unavailable"))?;
-
-        match reply_rx
-            .await
-            .map_err(|_| Status::unavailable("peer manager dropped effective config reply"))?
+        match request_peer_manager(
+            &self.peer_mgr_tx,
+            |reply| PeerManagerCommand::EffectiveRuntimeConfig { reply },
+            "peer manager dropped effective config reply",
+        )
+        .await?
         {
             Ok(toml) => Ok(Response::new(proto::GetEffectiveConfigResponse { toml })),
             Err(error) => Err(Status::internal(error)),
@@ -424,6 +439,7 @@ mod tests {
     use super::*;
     use prost::Message as _;
     use std::sync::Arc;
+    use tokio::time::Duration;
 
     use crate::audit::GrpcAuditHandle;
     use proto::config_service_server::ConfigService as _;
@@ -454,6 +470,55 @@ mod tests {
         source_sha256: String,
         #[prost(enumeration = "proto::ConfigHistoryProvenanceStatus", tag = "6")]
         provenance_status: i32,
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_config_actor_requests_are_bounded() {
+        enum RequestKind {
+            Diff,
+            Plan,
+            Effective,
+        }
+
+        for request_kind in [RequestKind::Diff, RequestKind::Plan, RequestKind::Effective] {
+            let (tx, mut rx) = mpsc::channel(1);
+            let svc = ConfigService::new(tx);
+            let request = tokio::spawn(async move {
+                match request_kind {
+                    RequestKind::Diff => svc
+                        .diff_runtime_config(Request::new(proto::DiffRuntimeConfigRequest {
+                            candidate_toml: "candidate".to_string(),
+                        }))
+                        .await
+                        .map(|_| ()),
+                    RequestKind::Plan => svc
+                        .plan_config_transaction(Request::new(
+                            proto::PlanConfigTransactionRequest {
+                                candidate_toml: "candidate".to_string(),
+                                expected_runtime_snapshot_token: String::new(),
+                            },
+                        ))
+                        .await
+                        .map(|_| ()),
+                    RequestKind::Effective => svc
+                        .get_effective_config(Request::new(proto::GetEffectiveConfigRequest {}))
+                        .await
+                        .map(|_| ()),
+                }
+            });
+
+            let stalled_command = rx.recv().await.expect("request was not admitted");
+            tokio::time::advance(Duration::from_mins(30) - Duration::from_secs(1)).await;
+            assert!(!request.is_finished());
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            assert!(request.is_finished());
+
+            let error = request.await.unwrap().unwrap_err();
+            assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+            assert_eq!(error.message(), "config operation exceeded deadline");
+            drop(stalled_command);
+        }
     }
 
     #[test]
