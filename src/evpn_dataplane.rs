@@ -449,24 +449,6 @@ pub async fn spawn_with_quarantine(
             }
         }
     }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (
-            config,
-            managed_netdevs,
-            rib_tx,
-            metrics,
-            daemon_shutdown,
-            duplicate_mac_quarantine_rx,
-        );
-        info!(
-            target = std::env::consts::OS,
-            "EVPN Linux dataplane not available on this platform; \
-             skipping reconciler spawn"
-        );
-        None
-    }
 }
 
 /// Generic spawn shared by the production path and the integration

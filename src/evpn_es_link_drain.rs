@@ -11,7 +11,7 @@
 //!
 //! - **Carrier down → drain immediately.** A bound name absent from
 //!   the kernel projection counts as down (fail-closed), as does a
-//!   monitor that cannot run at all (spawn failure, non-Linux build).
+//!   monitor that cannot run at all (spawn failure).
 //! - **Carrier up → hold `recovery_delay_secs`, then undrain.** The
 //!   hold re-arms on every up edge, so a flapping circuit stays
 //!   drained until it holds carrier for the full window (decision 3).
@@ -81,8 +81,7 @@ pub(crate) struct EsLinkDrainDeps {
 /// Where carrier state comes from.
 pub(crate) enum CarrierFeed {
     /// Lazily spawn and own the slice-1 kernel monitor for the bound
-    /// link names (Linux only; elsewhere bound links fail closed to
-    /// down).
+    /// link names; monitor failures fail closed to down.
     Kernel,
     /// Test-injected carrier watch; the watched-name set is whatever
     /// the test publishes.
@@ -323,14 +322,6 @@ impl FeedState {
                     self.fail_closed(watched, fallback_tx);
                 }
             }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            warn!(
-                "Ethernet Segment interface bindings require Linux rtnetlink; bound \
-                 segments fail closed to drained on this platform"
-            );
-            self.fail_closed(watched, fallback_tx);
         }
     }
 }

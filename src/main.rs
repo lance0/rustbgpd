@@ -1347,11 +1347,6 @@ fn sample_gr_restart_clock() -> Result<GrRestartClockSample, String> {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
-fn sample_gr_restart_clock() -> Result<GrRestartClockSample, String> {
-    Err("boottime clock-domain sampling is supported only on Linux".to_string())
-}
-
 fn valid_checkpoint_generation(generation: &str) -> bool {
     !generation.is_empty()
         && generation.len() <= MAX_CHECKPOINT_GENERATION_BYTES
@@ -4271,8 +4266,7 @@ async fn run<T>(
     // Spawn the BFD actor (single-hop async, ADR-0067). Runs the sessions in the
     // PeerManager-owned desired set, publishes their state, and emits state
     // changes that PeerManager couples to BGP (non-strict RFC 5882 teardown).
-    // No-op when no neighbor has BFD configured; configured BFD fails closed
-    // off Linux.
+    // No-op when no neighbor has BFD configured; the actor owns the Linux sockets.
     let (bfd_status_tx, bfd_status_rx) =
         tokio::sync::watch::channel(Vec::<bfd_runtime::BfdStatus>::new());
     // Actor state-change events (ADR-0067 step 3b): the actor broadcasts

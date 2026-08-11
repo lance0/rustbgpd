@@ -295,45 +295,6 @@ pub struct BfdRuntimeEvent {
 #[allow(unused_imports)]
 pub use linux::{BfdRuntimeHandle, spawn};
 
-#[cfg(not(target_os = "linux"))]
-pub use stub::{BfdRuntimeHandle, spawn};
-
-#[cfg(not(target_os = "linux"))]
-mod stub {
-    use super::{BfdRuntimeConfig, BfdRuntimeEvent, BfdStateChangeSender, BfdStatus};
-    use rustbgpd_telemetry::BgpMetrics;
-    use tokio::sync::{broadcast, watch};
-    use tokio_util::sync::CancellationToken;
-
-    /// Non-Linux placeholder handle (BFD sockets are Linux-only).
-    pub struct BfdRuntimeHandle;
-
-    impl BfdRuntimeHandle {
-        /// No-op shutdown.
-        pub async fn shutdown(self) {}
-    }
-
-    /// BFD is unsupported off Linux; disabled startup is a no-op and
-    /// configured startup fails closed.
-    pub fn spawn(
-        desired_rx: watch::Receiver<BfdRuntimeConfig>,
-        _metrics: BgpMetrics,
-        _status_tx: watch::Sender<Vec<BfdStatus>>,
-        _event_tx: broadcast::Sender<BfdRuntimeEvent>,
-        _state_change_tx: BfdStateChangeSender,
-        _shutdown: CancellationToken,
-    ) -> std::io::Result<Option<BfdRuntimeHandle>> {
-        if desired_rx.borrow().enabled() {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "configured BFD runtime requires Linux",
-            ))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
 /// RFC 5880 §6.8.6 demultiplexing decision (pure, testable): pick the session a
 /// received packet belongs to. A non-zero Your Discriminator selects the session
 /// by *our* local discriminator (which the peer echoes back in that field); a
@@ -342,8 +303,7 @@ mod stub {
 /// 5881 §5 warns against identifying an established single-hop session by source
 /// address). Returns the peer key, or `None` if no session matches.
 ///
-/// Gated to Linux (where the actor runs) plus test builds; the non-Linux stub
-/// has no receive path, so without this gate it would be dead code there.
+/// Gated to Linux (where the actor runs) plus test builds.
 #[cfg(any(test, target_os = "linux"))]
 fn demux_target(
     by_discriminator: &std::collections::HashMap<u32, std::net::IpAddr>,

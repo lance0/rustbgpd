@@ -281,14 +281,6 @@ pub fn spawn(
             }
         }
     }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (rib_tx, status_tx, shutdown);
-        metrics.record_blackhole_discard_kernel_failure("unsupported_platform");
-        warn!("BLACKHOLE discard install requested, but kernel FIB programming is Linux-only");
-        None
-    }
 }
 
 fn spawn_with_fib<F>(
