@@ -71,7 +71,8 @@ dispatch always run.
   path-hiding contrast (single-best / `per_client_best` / Add-Path, ADR-0101)
   against BIRD 2 + GoBGP + FRR at once (**M83**); exact post-policy
   message-size rejection and stale-route withdrawal against GoBGP 4.6 + BIRD
-  2.0.12 (**M87**).
+  2.0.12 (**M87**); dual-stack GoBGP 4.7/BIRD differential with a separate
+  negative-completeness deployment (**M92**).
 - **Core RR against incumbents** — RFC 4456 reflection + RFC 4724 GR helper-truth against BIRD 2 clients and OpenBGPD 9.1 clients, plus required-family OPEN enforcement against BIRD: **M85**, **M86**, **M93**.
 - **Live policy-presence safety** — ADR-0112 RFC 8212 import-presence transitions qualified for Route Refresh, rejected whole when one peer cannot converge, and converged on the wire when it can: **M95**.
 - **Graceful Shutdown** — receiver/initiator coverage across unicast, FlowSpec, and EVPN: **M35**, **M35b**, **M35c**.
@@ -129,8 +130,7 @@ prove the positive state and final withdrawal or cleanup.
 The remaining interop scripts are local / manual gates because they
 need substantial wall-clock (M11/M16 GR/LLGR, M33 scale soak),
 additional fixtures (StayRTR / mock RTR v2 server), or
-broader platform-diversity validation (BIRD and non-CI GoBGP cases beyond
-the protected BIRD TCP-AO smoke and M73 BGP-LS receipt).
+broader platform-diversity validation beyond the protected hosted matrix.
 
 | Peer | Version | Topology | Status | Notes | Known Quirks | NOTIFICATIONs Observed |
 |------|---------|----------|--------|-------|--------------|------------------------|
@@ -150,7 +150,7 @@ the protected BIRD TCP-AO smoke and M73 BGP-LS receipt).
 | FRR (bgpd) | 10.3.1 | `tests/interop/m89-paths-limit-frr.clab.yml` | Tested (M89) | Experimental Paths-Limit (IANA capability 76; expired `draft-abraitis-idr-addpath-paths-limit-04`) | Unequal IPv4/IPv6 receive limits cap Add-Path export at 2/3 | Digest-pinned image; outside v1 contract |
 | BIRD 2 + GoBGP ×3 + arouteserver | BIRD 2.0.12, GoBGP 3.37.0, arouteserver 1.23.2 | `tests/interop/m90-differential.clab.yml` | Tested (M90, local) | ADR-0110 route-server filtering differential | One site input drives arouteserver/BIRD and `rs-config-render`/rustbgpd; 11/11 accept/reject verdicts and rustbgpd explain terms agree | Pinned arouteserver digest; 65/65, with a rust-only policy mutation making the differential red |
 | Raw BGP fixture | in-tree Python | `tests/interop/m91-rfc7606-malformed.clab.yml` | Tested (M91, hosted CI) | RFC 7606 revised UPDATE error handling | Malformed MED and AGGREGATOR inputs pin treat-as-withdraw, attribute-discard, session-reset, counters, and the §6 DEBUG capture | Runs in the combined cheap-protocol job |
-| GoBGP ×3 + BIRD 2 | GoBGP 4.7.0, BIRD 2.0.12 | `tests/interop/m92-gobgp-v47-rs-differential.clab.yml` | Tested (M92, local; hosted deferred) | Dual-stack route-server semantic differential | Exact source/target inventories and per-PDU EoRs authorize baseline/mutant/restore diffs; separate missing-EoR refusal | Official amd64 release hash pinned; synthetic evidence only |
+| GoBGP ×3 + BIRD 2 | GoBGP 4.7.0, BIRD 2.0.12 | `tests/interop/m92-gobgp-v47-rs-differential.clab.yml` | Tested (M92, Hosted CI) | Dual-stack route-server semantic differential | Exact source/target inventories and per-PDU EoRs authorize baseline/mutant/restore diffs; normal and negative-completeness proofs use separate deployments | Official amd64 release hash pinned; synthetic evidence only |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m18-extnexthop-frr.clab.yml` | Tested (M18) | Extended Next-Hop (RFC 8950) | Dual-stack, IPv6 NH for IPv4 | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m19-routeserver-frr.clab.yml` | Tested (M19) | Transparent Route Server | No ASN prepend, NH preservation | Needs per-neighbor `no enforce-first-as` |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m20-privateas-frr.clab.yml` | Tested (M20) | Private AS Removal | remove/all/replace modes | — |

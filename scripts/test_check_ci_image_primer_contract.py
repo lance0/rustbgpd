@@ -355,6 +355,25 @@ class PrimerContractTests(unittest.TestCase):
             with self.subTest(seam=old):
                 self.mutate(relative, old, new)
 
+    def test_m92_differential_job_is_load_bearing(self):
+        relative = ".github/workflows/interop.yml"
+        with self.assertRaisesRegex(AssertionError, "missing M92 seam"):
+            count = (ROOT / relative).read_text().count("missing M92 seam")
+            self.assertGreater(count, 0, "missing M92 seam: synthetic")
+        for old in (
+            "          bash .github/scripts/install-grpcurl.sh\n",
+            "      - name: Run M92\n        uses: ./.github/actions/run-interop-test\n",
+            "      - name: Run M92 negative completeness proof\n        uses: ./.github/actions/run-interop-test\n",
+            '          M92_COMPLETENESS_NEGATIVE: "1"\n',
+            "      - name: Build bird:2-bookworm\n        run: docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop\n",
+            "      - name: Build gobgp:v4.7.0-m92\n        run: docker build -t gobgp:v4.7.0-m92 -f tests/interop/Dockerfile.gobgp-v47 tests/interop\n",
+        ):
+            with self.subTest(seam=old):
+                count = (ROOT / relative).read_text().count(old)
+                self.assertGreater(count, 0, f"missing M92 seam: {old}")
+                occurrence = count - 1
+                self.mutate(relative, old, occurrence=occurrence)
+
     def test_dockerfile_exact_source_bridge(self):
         for binary in ("rustbgpd", "rbgp", "evpn-tester", "evpn-monitor"):
             with self.subTest(binary=binary, side="builder"):

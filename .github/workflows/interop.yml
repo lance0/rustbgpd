@@ -1747,3 +1747,53 @@ jobs:
           label: M91
           topology: tests/interop/m91-rfc7606-malformed.clab.yml
           script: tests/interop/scripts/test-m91-rfc7606-malformed.sh
+
+  m92:
+    needs: prime_dev_image
+    name: M92 — GoBGP 4.7 route-server differential
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install grpcurl + jq
+        run: |
+          bash .github/scripts/install-grpcurl.sh
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          target: dev
+          cache-from: type=gha,scope=rustbgpd-dev
+
+      - name: Build bird:2-bookworm
+        run: docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+
+      - name: Build gobgp:v4.7.0-m92
+        run: docker build -t gobgp:v4.7.0-m92 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+
+      - name: Run M92
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M92
+          topology: tests/interop/m92-gobgp-v47-rs-differential.clab.yml
+          script: tests/interop/scripts/test-m92-gobgp-v47-rs-differential.sh
+
+      - name: Run M92 negative completeness proof
+        uses: ./.github/actions/run-interop-test
+        env:
+          M92_COMPLETENESS_NEGATIVE: "1"
+        with:
+          label: M92-negative
+          topology: tests/interop/m92-gobgp-v47-rs-differential.clab.yml
+          script: tests/interop/scripts/test-m92-gobgp-v47-rs-differential.sh
