@@ -12,7 +12,7 @@ from pathlib import Path
 INTEROP = (
     "m1 m13 m80 m15 m10 m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 "
     "m24 m81 m82 m83 m85 m94 m86 m25 m29 m30 m34 m35 m35b m35c m41 "
-    "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91"
+    "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91 m92"
 ).split()
 KERNEL = (
     "m36 m37 m37-ip m38 m39 m39b m48 m60 m61 m62 m40 m42 m50 m52 "
@@ -59,17 +59,17 @@ PERMISSION_HASHES = {
     "kernel-dataplane.yml": "6f1d70d72bad231d43c575acef6946580e439c879794ed2ea1f4a40340245172",
 }
 CALL_HASHES = {
-    "interop.yml": "24a984736b900bc3cc7b64133cb6c4d8b8dba63feb8dc0aa69791c657bfc7efe",
+    "interop.yml": "baf8da4607ed5e36ea6d2a656f05df3c87449456159dd4c847d51588ff0a96b5",
     "kernel-dataplane.yml": "decf4a7ba46c4a89f420de248790ef1badbfaba81371ae7c291ad9c9943add03",
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 80,
+        "actions/checkout@v7": 81,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95": 2,
-        "docker/setup-buildx-action@v4": 43,
-        "docker/build-push-action@v7": 44,
+        "docker/setup-buildx-action@v4": 44,
+        "docker/build-push-action@v7": 45,
         "actions/upload-artifact@v7": 1,
         "rustsec/audit-check@v2.0.0": 1,
         "EmbarkStudios/cargo-deny-action@v2": 1,
@@ -186,6 +186,23 @@ def check(root: Path) -> list[str]:
         )
         if _hash(calls) != CALL_HASHES[name]:
             errors.append(f"{name}: existing test/setup calls drifted")
+    m92 = _jobs(texts["interop.yml"]).get("m92", "")
+    required = {
+        "bash .github/scripts/install-grpcurl.sh": 1,
+        "docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop": 1,
+        "docker build -t gobgp:v4.7.0-m92 -f tests/interop/Dockerfile.gobgp-v47 tests/interop": 1,
+        "uses: ./.github/actions/run-interop-test": 2,
+        "topology: tests/interop/m92-gobgp-v47-rs-differential.clab.yml": 2,
+        "script: tests/interop/scripts/test-m92-gobgp-v47-rs-differential.sh": 2,
+        "label: M92\n": 1,
+        "label: M92-negative\n": 1,
+        'M92_COMPLETENESS_NEGATIVE: "1"': 1,
+    }
+    if any(m92.count(seam) != count for seam, count in required.items()):
+        errors.append("interop.yml:m92: differential job semantics drifted")
+    negative = m92.split("- name: Run M92 negative completeness proof", 1)
+    if len(negative) != 2 or 'M92_COMPLETENESS_NEGATIVE: "1"' in negative[0]:
+        errors.append("interop.yml:m92: negative environment scope drifted")
     interop_classifier = _jobs(texts["interop.yml"]).get("classify_changes", "")
     kernel_jobs = _jobs(texts["kernel-dataplane.yml"])
     interop_classifier = interop_classifier.replace("interop heavy-lab", "heavy-lab")
