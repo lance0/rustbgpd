@@ -100,6 +100,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `rs-config-render` now fails stale when
+  `communities.rpki_bgp_origin_validation_not_performed` configures a standard,
+  large, or extended tag instead of silently dropping its tagging and inbound
+  anti-spoof scrubbing semantics. Missing and all-null values remain output-identical.
+  (LAN-978)
 - An RTR cache that rejects a resumed session no longer blanks its RPKI data.
   A restarted cache answers the Serial Query naming its previous session with
   an Error Report code 0 ("Corrupt Data") rather than the Cache Reset that
