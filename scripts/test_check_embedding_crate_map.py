@@ -70,15 +70,25 @@ class EmbeddingCrateMapTests(unittest.TestCase):
         changed = DOCUMENT.replace(checker.END, row + checker.END, 1)
         self.assert_red(changed, "EMBEDDING_CRATE_MAP_EXTRA")
 
-    def test_scope_sentence_is_guarded(self) -> None:
-        """Red if scope or either marker's exact cardinality drifts."""
-        start, end = DOCUMENT.index(checker.BEGIN), DOCUMENT.index(checker.END)
-        fenced = DOCUMENT[start : end + len(checker.END)]
-        suffixes = (checker.BEGIN, checker.END, fenced)
-        changes = [DOCUMENT.replace(checker.SCOPE, "Drifted.", 1)]
-        changes.extend(DOCUMENT + suffix for suffix in suffixes)
+    def test_scope_paragraph_may_be_reworded(self) -> None:
+        old = "All Cargo workspace packages are listed. Internal dependencies include"
+        changed = DOCUMENT.replace(old, "The complete workspace map includes", 1)
+        self.assertEqual(checker.check(changed, self.metadata), [])
+
+    def test_markers_are_unique_and_ordered(self) -> None:
+        changes = [
+            DOCUMENT.replace(checker.BEGIN, "", 1),
+            DOCUMENT.replace(checker.END, "", 1),
+            DOCUMENT + checker.BEGIN,
+            DOCUMENT + checker.END,
+            DOCUMENT.replace(checker.BEGIN, "TEMP", 1)
+            .replace(checker.END, checker.BEGIN, 1)
+            .replace("TEMP", checker.END, 1),
+        ]
         for changed in changes:
-            self.assert_red(changed, "EMBEDDING_CRATE_MAP_SCOPE")
+            self.assertEqual(checker.check(changed, self.metadata), [
+                "EMBEDDING_CRATE_MAP_MARKERS: crate-map markers must each appear exactly once and BEGIN must precede END"
+            ])
 
     def test_dependency_kind_scope_is_load_bearing(self) -> None:
         """Red if build/target edges are dropped or dev edges are included."""

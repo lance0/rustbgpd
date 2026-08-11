@@ -72,14 +72,47 @@ class EmbeddingVersionContractTests(unittest.TestCase):
             "current-boundary-version",
         )
 
-    def test_prepared_language_is_forbidden(self) -> None:
-        """Red if a published release is again described as prepared."""
+    def test_status_parser_rejects_prepared_as(self) -> None:
+        """Red if an actual publish status changes from published to prepared."""
         self.assert_fails(
             self.replace_nth(
-                "**The 0.16.0 release**", "**The prepared 0.16.0 release**"
+                "(published as `0.17.0`)", "(prepared as `0.17.0`)"
             ),
-            "forbidden-prepared",
+            "publish-status-version",
         )
+
+    def test_heading_renumbering_and_unrelated_prepared_prose_are_allowed(self) -> None:
+        changed = DOCUMENT
+        for old, new in (("## 7. ", "## 70. "), ("### 3.1 ", "### 30.1 "),
+                         ("### 3.3 ", "### 30.3 "), ("## 4. ", "## 40. ")):
+            changed = changed.replace(old, new, 1)
+        changed += "\nAn unrelated consumer prepared its own deployment.\n"
+        self.assertEqual(self.run_checker(changed).returncode, 0)
+
+    def test_each_semantic_heading_is_required(self) -> None:
+        titles = (
+            "Published-crate release boundary",
+            "Decode an UPDATE (codec-only — the canonical embedder)",
+            'Build a session (codec + FSM — the "minimal speaker" consumer)',
+            "Which crate to publish next, and why",
+        )
+        for title in titles:
+            with self.subTest(title=title):
+                self.assert_fails(
+                    DOCUMENT.replace(title, f"{title} drifted", 1),
+                    f"semantic-heading:{title}:missing",
+                )
+
+    def test_duplicate_semantic_heading_is_rejected(self) -> None:
+        title = "Published-crate release boundary"
+        self.assert_fails(DOCUMENT + f"\n## {title}\n", f"semantic-heading:{title}")
+
+    def test_wrong_semantic_heading_levels_are_rejected(self) -> None:
+        title = "Published-crate release boundary"
+        for level in (1, 4, 5, 6):
+            with self.subTest(level=level):
+                changed = DOCUMENT.replace(f"## 7. {title}", f"{'#' * level} 7. {title}")
+                self.assert_fails(changed, f"semantic-heading:{title}:duplicate-or-wrong-level")
 
 
 if __name__ == "__main__":

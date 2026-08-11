@@ -15,11 +15,6 @@ DOCUMENT = ROOT / "docs" / "EMBEDDING.md"
 COMMAND = "cargo metadata --locked --offline --format-version 1 --no-deps".split()
 BEGIN = "<!-- BEGIN EMBEDDING CRATE MAP -->"
 END = "<!-- END EMBEDDING CRATE MAP -->"
-SCOPE = (
-    "All Cargo workspace packages are listed. Internal dependencies include "
-    "normal and build dependencies, including target-specific dependencies; "
-    "dev dependencies are excluded."
-)
 
 
 def cargo_metadata(root: Path = ROOT) -> dict:
@@ -53,8 +48,12 @@ def expected_rows(metadata: dict) -> dict[str, tuple[str, tuple[str, ...]]]:
 
 
 def table_rows(document: str) -> list[tuple[str, str, str]]:
-    if document.count(BEGIN) != 1 or document.count(END) != 1:
-        raise ValueError("crate-map markers must each appear exactly once")
+    if (
+        document.count(BEGIN) != 1
+        or document.count(END) != 1
+        or document.index(BEGIN) >= document.index(END)
+    ):
+        raise ValueError("crate-map markers must each appear exactly once and BEGIN must precede END")
     _, _, rest = document.partition(BEGIN)
     body, _, _ = rest.partition(END)
     rows = []
@@ -79,13 +78,11 @@ def diagnostic(kind: str, detail: str) -> str:
 
 def check(document: str, metadata: dict) -> list[str]:
     errors = []
-    if document.count(f"{END}\n\n{SCOPE}\n") != 1:
-        errors.append(diagnostic("SCOPE", "checked-scope sentence differs"))
     try:
         rows = table_rows(document)
         expected = expected_rows(metadata)
     except ValueError as error:
-        return errors + [diagnostic("SCOPE", str(error))]
+        return errors + [diagnostic("MARKERS", str(error))]
     except (KeyError, TypeError) as error:
         return errors + [diagnostic("METADATA", str(error))]
 
