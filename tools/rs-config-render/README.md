@@ -111,7 +111,10 @@ from "fix the data":
 | 4 | **shape mismatch** — the context's top-level structure (document keys or report sections) drifted from the pinned fingerprint |
 
 Refused knobs: RTT-based communities and `rtt_thresholds` (the daemon
-has no RTT source; permanent), `next_hop.policy` other than `strict`
+has no RTT source; permanent), configured
+`communities.rpki_bgp_origin_validation_not_performed` tagging (the renderer
+cannot reproduce its tagging and inbound anti-spoof scrubbing), `next_hop.policy` other
+than `strict`
 (`same-as` needs the deferred fleet-inventory mode), `reject_policy`
 `tag`/`tag_and_reject` (reject-reason community wiring is a tracked
 follow-up; the daemon retains rejected routes with reasons natively —

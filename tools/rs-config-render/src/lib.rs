@@ -1385,6 +1385,16 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
             ));
         }
     }
+    const RPKI_NOT_PERFORMED: &str = "rpki_bgp_origin_validation_not_performed";
+    if cfg
+        .communities
+        .get(RPKI_NOT_PERFORMED)
+        .is_some_and(community_configured)
+    {
+        refusals.push(format!(
+            "communities.{RPKI_NOT_PERFORMED} is configured; unsupported tagging/scrubbing cannot be rendered"
+        ));
+    }
     if cfg.prepend_rs_as {
         refusals.push(
             "prepend_rs_as: the rendered sessions are transparent route-server-client \

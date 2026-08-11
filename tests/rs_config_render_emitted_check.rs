@@ -162,11 +162,18 @@ fn emitted_blackhole_policy_passes_rpol_and_daemon_checks() {
         .filter(|(path, _)| path.ends_with(".rpol"))
     {
         let mut source = source.clone();
+        if path == "policy/rs-hygiene.rpol" {
+            source.push_str(r#"
+test bh-invalid-passes-hygiene { route { family ipv4-unicast; prefix 203.0.113.0/26; communities [BLACKHOLE]; as-path "4242"; rpki invalid } expect rs-hygiene == accept }
+"#);
+        }
         if path == "policy/client-as4242-1.rpol" {
             source.push_str(r#"
 test bh-v25-reject { route { family ipv4-unicast; prefix 203.0.113.0/25; communities [BLACKHOLE]; as-path "4242" } expect client-as4242-1 == reject }
 test bh-v26-accept { route { family ipv4-unicast; prefix 203.0.113.0/26; communities [BLACKHOLE]; as-path "4242" } expect client-as4242-1 == accept with community BLACKHOLE }
+test bh-v26-invalid-accept { route { family ipv4-unicast; prefix 203.0.113.0/26; communities [BLACKHOLE]; as-path "4242"; rpki invalid } expect client-as4242-1 == accept with community BLACKHOLE }
 test bh-v32-accept { route { family ipv4-unicast; prefix 203.0.113.0/32; communities [BLACKHOLE]; as-path "4242" } expect client-as4242-1 == accept with community BLACKHOLE }
+test ordinary-v24-invalid-reject { route { family ipv4-unicast; prefix 198.51.100.0/24; as-path "4242"; rpki invalid } expect client-as4242-1 == reject }
 test bh-unmarked-reject { route { family ipv4-unicast; prefix 203.0.113.0/32; as-path "4242" } expect client-as4242-1 == reject }
 test bh-uncovered-reject { route { family ipv4-unicast; prefix 8.8.8.8/32; communities [BLACKHOLE]; as-path "4242" } expect client-as4242-1 == reject }
 test bh-origin-reject { route { family ipv4-unicast; prefix 203.0.113.0/32; communities [BLACKHOLE]; as-path "4244" } expect client-as4242-1 == reject }

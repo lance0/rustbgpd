@@ -93,6 +93,13 @@ fn refusals(result: Result<rs_config_render::Rendered, RenderError>) -> Vec<Stri
     }
 }
 
+fn set_general_community(root: &mut serde_yaml::Value, name: &str, value: serde_yaml::Value) {
+    root["cfg"]["communities"]
+        .as_mapping_mut()
+        .expect("fixture cfg.communities is a mapping")
+        .insert(serde_yaml::Value::String(name.to_owned()), value);
+}
+
 #[test]
 fn golden_files_match() {
     let rendered = render(&to_yaml(&healthy_value()), &rtr_options()).expect("healthy render");
@@ -352,6 +359,50 @@ fn refusal_matrix() {
             items.iter().any(|i| i.contains(marker)),
             "no refusal containing {marker:?} for {path:?}: {items:?}"
         );
+    }
+}
+
+#[test]
+fn rpki_not_performed_community_refuses_configured_forms() {
+    for (kind, marker) in [
+        ("std", "65000:1"),
+        ("lrg", "65000:1:1"),
+        ("ext", "RT:65000:1"),
+    ] {
+        let mut value = healthy_value();
+        set_general_community(
+            &mut value,
+            "rpki_bgp_origin_validation_not_performed",
+            serde_yaml::from_str(&format!("{{{kind}: '{marker}'}}")).unwrap(),
+        );
+        assert_eq!(
+            refusals(render(&to_yaml(&value), &rtr_options())),
+            [
+                "communities.rpki_bgp_origin_validation_not_performed is configured; unsupported tagging/scrubbing cannot be rendered"
+            ]
+        );
+    }
+}
+
+#[test]
+fn null_rpki_not_performed_community_is_output_identity() {
+    let missing = render(&to_yaml(&healthy_value()), &rtr_options()).unwrap();
+    let mut value = healthy_value();
+    set_general_community(
+        &mut value,
+        "rpki_bgp_origin_validation_not_performed",
+        serde_yaml::from_str("{std: null, lrg: null, ext: null}").unwrap(),
+    );
+    let all_null = render(&to_yaml(&value), &rtr_options()).unwrap();
+    assert_eq!(all_null.files, missing.files);
+    assert_eq!(all_null.warnings, missing.warnings);
+    for field in [
+        "context_fingerprint",
+        "source_data_ages",
+        "clients",
+        "warnings",
+    ] {
+        assert_eq!(all_null.receipt[field], missing.receipt[field], "{field}");
     }
 }
 
@@ -630,10 +681,13 @@ fn active_blackhole_requires_irr_origin_enforcement() {
 #[test]
 /// Load-bearing: deleting the refusal exits zero and overwrites the sentinel bytes.
 fn cli_refusal_is_exit_two_and_writes_nothing() {
-    use serde_yaml::Value;
     use std::{fs, process::Command};
     let mut value = healthy_value();
-    set_client(&mut value, 1, &["cfg", "rfc8950"], Value::Bool(true));
+    set_general_community(
+        &mut value,
+        "rpki_bgp_origin_validation_not_performed",
+        serde_yaml::from_str("{std: '65000:1'}").unwrap(),
+    );
     let tmp = tempfile::tempdir().unwrap();
     let context = tmp.path().join("context.yml");
     let out = tmp.path().join("out");
@@ -654,7 +708,7 @@ fn cli_refusal_is_exit_two_and_writes_nothing() {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("client AS197000_1: effective rfc8950=true is not rendered on IPv6 sessions"),
+            .contains("communities.rpki_bgp_origin_validation_not_performed is configured; unsupported tagging/scrubbing cannot be rendered"),
         "{output:?}"
     );
     assert_eq!(fs::read(config).unwrap(), b"last-good\n");
