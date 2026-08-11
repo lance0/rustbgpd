@@ -136,42 +136,9 @@ vtep_ctl() {
     docker exec "$VTEP" rbgp -s http://127.0.0.1:50051 "$@"
 }
 
-vtep_routes() {
-    local route_type=${1:?} peer=${2:?}
-    vtep_ctl evpn --route-type "$route_type" --peer "$peer" -j 2>/dev/null || echo "[]"
-}
-
-vtep_route_count() {
-    local route_type=${1:?} peer=${2:?} predicate=${3:-true}
-    vtep_routes "$route_type" "$peer" \
-        | jq "[.[] | select(${predicate})] | length" 2>/dev/null || echo 0
-}
-
-wait_vtep_routes_at_least() {
-    local route_type=${1:?} peer=${2:?} predicate=${3:?} want=${4:?} attempts=${5:-90}
-    local got=0
-    for _ in $(seq 1 "$attempts"); do
-        got=$(vtep_route_count "$route_type" "$peer" "$predicate")
-        if [ "${got:-0}" -ge "$want" ] 2>/dev/null; then
-            return 0
-        fi
-        sleep 1
-    done
-    return 1
-}
-
-wait_vtep_routes_gone() {
-    local route_type=${1:?} peer=${2:?} predicate=${3:?} attempts=${4:-90}
-    local got=1
-    for _ in $(seq 1 "$attempts"); do
-        got=$(vtep_route_count "$route_type" "$peer" "$predicate")
-        if [ "${got:-1}" -eq 0 ] 2>/dev/null; then
-            return 0
-        fi
-        sleep 1
-    done
-    return 1
-}
+# Shared fail-closed route observation and wait helpers.
+# shellcheck source=tests/soak/m67-vtep-route-oracles.sh
+source "$SOAK_SCRIPT_DIR/m67-vtep-route-oracles.sh"
 
 df_role() {
     local container=${1:?} role=${2:?}
