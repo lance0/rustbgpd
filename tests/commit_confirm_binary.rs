@@ -346,8 +346,27 @@ impl Lab {
 
     fn assert_no_v3_authority(&self, context: &str) {
         assert!(!self.locator_path.exists(), "{context}: locator remains");
-        assert!(!self.raw_path.exists(), "{context}: raw prior remains");
-        assert!(!self.metadata_path.exists(), "{context}: metadata remains");
+    }
+
+    fn assert_no_v3_residue_eventually(&self, context: &str) {
+        let raw_tombstone = self
+            .raw_path
+            .with_file_name("commit-confirm-v3-prior.cleanup");
+        let metadata_tombstone = self
+            .metadata_path
+            .with_file_name("commit-confirm-v3-metadata.cleanup");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.raw_path.exists()
+            || self.metadata_path.exists()
+            || raw_tombstone.exists()
+            || metadata_tombstone.exists()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "{context}: non-authoritative v3 residue remains"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn apply_plain(&self, candidate: &Path) {
@@ -529,6 +548,7 @@ fn streamed_confirmed_apply_above_eight_mib_aborts_to_previous_config() {
         "abort must restore the pre-transaction config"
     );
     lab.assert_no_v3_authority("abort must consume v3 authority");
+    lab.assert_no_v3_residue_eventually("abort must clean v3 residue");
     let ranges = rbgp_json(&lab.grpc_addr, &["--json", "dynamic-neighbor", "list"]);
     assert_eq!(
         ranges.as_array().map(Vec::len),
@@ -604,6 +624,7 @@ fn sigkill_in_confirm_window_boots_previous_config_and_saves_candidate_aside() {
         "saved-aside file must hold the unconfirmed candidate:\n{saved_aside}"
     );
     lab.assert_no_v3_authority("boot revert must consume v3 authority");
+    lab.assert_no_v3_residue_eventually("boot revert must clean v3 residue");
     let stderr = daemon.stderr();
     assert!(
         stderr.contains("commit-confirm boot revert")
@@ -647,6 +668,7 @@ fn confirm_then_sigkill_retains_new_config_and_leaves_no_journal() {
     );
     assert_eq!(confirm["confirmation"]["status"], "confirmed", "{confirm}");
     lab.assert_no_v3_authority("confirm must consume v3 authority");
+    lab.assert_no_v3_residue_eventually("confirm must clean v3 residue");
     daemon.sigkill();
 
     let mut daemon = lab.spawn("second.stderr.log");
@@ -692,6 +714,7 @@ fn in_process_timeout_auto_revert_consumes_journal() {
     }
 
     lab.assert_no_v3_authority("timeout auto-revert must consume v3 authority");
+    lab.assert_no_v3_residue_eventually("timeout auto-revert must clean v3 residue");
     let on_disk = std::fs::read_to_string(&lab.config_path).unwrap();
     assert!(
         !on_disk.contains("192.0.2.0/24"),

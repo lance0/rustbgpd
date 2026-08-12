@@ -15,6 +15,9 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+#[cfg(test)]
+use std::sync::{Condvar, atomic::AtomicBool, atomic::Ordering};
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -33,6 +36,8 @@ const RETIRED_V2_LOCATOR: &str = "retired v2 commit-confirm locator";
 const RETIRED_LOCATOR_FREE_AUTHORITY: &str = "retired locator-free commit-confirm authority exists; recover it with rustbgpd v0.64.0, or delete it only after proving the transaction is terminal and the current config is intended; the artifact was left untouched";
 pub(crate) const RAW_FILE_NAME: &str = "commit-confirm-v3-prior.toml";
 pub(crate) const METADATA_FILE_NAME: &str = "commit-confirm-v3-metadata.json";
+const RAW_TOMBSTONE_NAME: &str = "commit-confirm-v3-prior.cleanup";
+const METADATA_TOMBSTONE_NAME: &str = "commit-confirm-v3-metadata.cleanup";
 
 const fn normalized_prior_length_within_limit(length: usize, limit: usize) -> bool {
     length <= limit
@@ -348,10 +353,15 @@ impl LaunchIdentity {
                 locator_identity,
                 metadata_wire,
                 metadata_identity,
+                metadata_sha256: Sha256::digest(&metadata_bytes).into(),
                 raw_identity,
                 locator_phase: CleanupPhase::Published,
-                metadata_phase: CleanupPhase::Published,
-                raw_phase: CleanupPhase::Published,
+                #[cfg(test)]
+                fail_locator_directory_sync_once: false,
+                #[cfg(test)]
+                fail_metadata_clone_once: false,
+                #[cfg(test)]
+                residue_cleanup_stall: None,
             }),
         })
     }
@@ -454,10 +464,15 @@ struct PendingState {
     locator_identity: FileIdentity,
     metadata_wire: Metadata,
     metadata_identity: FileIdentity,
+    metadata_sha256: [u8; 32],
     raw_identity: FileIdentity,
     locator_phase: CleanupPhase,
-    metadata_phase: CleanupPhase,
-    raw_phase: CleanupPhase,
+    #[cfg(test)]
+    fail_locator_directory_sync_once: bool,
+    #[cfg(test)]
+    fail_metadata_clone_once: bool,
+    #[cfg(test)]
+    residue_cleanup_stall: Option<ResidueCleanupStall>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -468,9 +483,7 @@ enum CleanupPhase {
 }
 
 impl PendingFiles {
-    /// Durably remove locator authority first. Fixed residue cleanup after
-    /// that terminal point is warning-only and never re-arms authority.
-    pub(crate) fn terminal_cleanup(&self) -> io::Result<bool> {
+    pub(crate) fn remove_locator_authority(&self) -> io::Result<()> {
         let mut state = self
             .state
             .lock()
@@ -481,32 +494,77 @@ impl PendingFiles {
             state.locator_phase = CleanupPhase::Unlinked;
         }
         if state.locator_phase == CleanupPhase::Unlinked {
+            #[cfg(test)]
+            if std::mem::take(&mut state.fail_locator_directory_sync_once) {
+                return Err(io::Error::other("injected locator-directory sync failure"));
+            }
             self.locator.directory.file.sync_all()?;
             state.locator_phase = CleanupPhase::Synced;
         }
-        let residue_result: io::Result<()> = (|| {
-            if state.metadata_phase == CleanupPhase::Published {
-                self.metadata
-                    .verify_metadata(state.metadata_identity, &state.metadata_wire)?;
-                self.metadata.remove_matching(state.metadata_identity)?;
-                state.metadata_phase = CleanupPhase::Unlinked;
-            }
-            if state.raw_phase == CleanupPhase::Published {
-                self.raw
-                    .verify_raw(state.raw_identity, &state.metadata_wire)?;
-                self.raw.remove_matching(state.raw_identity)?;
-                state.raw_phase = CleanupPhase::Unlinked;
-            }
-            if state.metadata_phase == CleanupPhase::Unlinked
-                || state.raw_phase == CleanupPhase::Unlinked
-            {
-                self.metadata.directory.file.sync_all()?;
-                state.metadata_phase = CleanupPhase::Synced;
-                state.raw_phase = CleanupPhase::Synced;
-            }
-            Ok(())
-        })();
-        Ok(residue_result.is_err())
+        Ok(())
+    }
+
+    pub(crate) fn claim_terminal_residue(&self) -> (Option<TerminalResidueCleanup>, bool) {
+        let state = match self.state.lock() {
+            Ok(state) if state.locator_phase == CleanupPhase::Synced => state,
+            _ => return (None, true),
+        };
+        #[cfg(test)]
+        let fail_metadata_clone = state.fail_metadata_clone_once;
+        let claim = |source: &Entry, target, identity, cap, sha256| {
+            source
+                .rename_to(target)
+                .and_then(|claimed| {
+                    #[cfg(test)]
+                    if fail_metadata_clone && target == METADATA_TOMBSTONE_NAME {
+                        Err(io::Error::other("injected tombstone clone failure"))
+                    } else {
+                        claimed.detached_capability()
+                    }
+                    #[cfg(not(test))]
+                    claimed.detached_capability()
+                })
+                .map(|entry| ClaimedResidue(entry, identity, cap, sha256))
+                .ok()
+        };
+        let m = claim(
+            &self.metadata,
+            METADATA_TOMBSTONE_NAME,
+            state.metadata_identity,
+            MAX_METADATA_BYTES,
+            state.metadata_sha256,
+        );
+        let r = claim(
+            &self.raw,
+            RAW_TOMBSTONE_NAME,
+            state.raw_identity,
+            MAX_RAW_BYTES,
+            state.metadata_wire.raw_sha256,
+        );
+        let failed = m.is_none() | r.is_none() | self.metadata.directory.file.sync_all().is_err();
+        (
+            Some(TerminalResidueCleanup {
+                residue: [m, r],
+                #[cfg(test)]
+                stall: state.residue_cleanup_stall.clone(),
+            }),
+            failed,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_locator_directory_sync_once_for_test(&self) {
+        self.state.lock().unwrap().fail_locator_directory_sync_once = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_metadata_clone_once_for_test(&self) {
+        self.state.lock().unwrap().fail_metadata_clone_once = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stall_residue_cleanup_for_test(&self, stall: ResidueCleanupStall) {
+        self.state.lock().unwrap().residue_cleanup_stall = Some(stall);
     }
 
     /// Replace compact metadata only; locator linkage deliberately excludes
@@ -516,10 +574,7 @@ impl PendingFiles {
             .state
             .lock()
             .map_err(|_| invalid("pending metadata state is unavailable"))?;
-        if state.locator_phase != CleanupPhase::Published
-            || state.metadata_phase != CleanupPhase::Published
-            || state.raw_phase != CleanupPhase::Published
-        {
+        if state.locator_phase != CleanupPhase::Published {
             return Err(invalid("pending cleanup has already started"));
         }
         self.locator.verify_locator(&state.locator_wire)?;
@@ -533,7 +588,69 @@ impl PendingFiles {
         let identity = self.metadata.replace(&bytes)?;
         state.metadata_wire = updated;
         state.metadata_identity = identity;
+        state.metadata_sha256 = Sha256::digest(&bytes).into();
         Ok(())
+    }
+}
+
+struct ClaimedResidue(Entry, FileIdentity, usize, [u8; 32]);
+
+pub(crate) struct TerminalResidueCleanup {
+    residue: [Option<ClaimedResidue>; 2],
+    #[cfg(test)]
+    stall: Option<ResidueCleanupStall>,
+}
+
+impl TerminalResidueCleanup {
+    pub(crate) fn cleanup(self) -> bool {
+        #[cfg(test)]
+        if let Some(stall) = &self.stall {
+            stall.block();
+        }
+        let [metadata, raw] = self.residue;
+        metadata.is_some_and(ClaimedResidue::cleanup_failed)
+            | raw.is_some_and(ClaimedResidue::cleanup_failed)
+    }
+}
+
+impl ClaimedResidue {
+    fn cleanup_failed(self) -> bool {
+        let Ok((bytes, identity)) = self.0.read_bounded(self.2) else {
+            return true;
+        };
+        identity != self.1
+            || <[u8; 32]>::from(Sha256::digest(&bytes)) != self.3
+            || self.0.remove_matching(self.1).is_err()
+            || self.0.directory.file.sync_all().is_err()
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ResidueCleanupStall {
+    started: Arc<AtomicBool>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
+#[cfg(test)]
+impl ResidueCleanupStall {
+    fn block(&self) {
+        self.started.store(true, Ordering::Release);
+        let (lock, ready) = &*self.release;
+        let mut released = lock.lock().unwrap();
+        while !*released {
+            released = ready.wait(released).unwrap();
+        }
+    }
+
+    pub(crate) fn started(&self) -> bool {
+        self.started.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn release(&self) {
+        let (lock, ready) = &*self.release;
+        *lock.lock().unwrap() = true;
+        ready.notify_all();
     }
 }
 
@@ -798,6 +915,30 @@ impl Entry {
         self.directory.real_path.join(&self.name)
     }
 
+    fn detached_capability(&self) -> io::Result<Self> {
+        Ok(Self {
+            directory: Arc::new(Directory {
+                file: self.directory.file.try_clone()?,
+                real_path: PathBuf::new(),
+            }),
+            name: self.name.clone(),
+        })
+    }
+
+    fn rename_to(&self, target: &str) -> io::Result<Self> {
+        use nix::fcntl::{RenameFlags, renameat2};
+
+        renameat2(
+            &self.directory.file,
+            Path::new(&self.name),
+            &self.directory.file,
+            Path::new(target),
+            RenameFlags::RENAME_NOREPLACE,
+        )
+        .map_err(errno)?;
+        Ok(Self::fixed(Arc::clone(&self.directory), target))
+    }
+
     fn stage_name(&self) -> io::Result<OsString> {
         append_name(&self.name, b".tmp")
     }
@@ -1018,6 +1159,9 @@ fn cleanup_created(entry: &Entry, identity: FileIdentity) {
 }
 
 fn cleanup_locator_absent_residue_pinned(pending: &Arc<Directory>) -> io::Result<()> {
+    remove_named_safe(&pending.file, OsStr::new(METADATA_TOMBSTONE_NAME))?;
+    remove_named_safe(&pending.file, OsStr::new(RAW_TOMBSTONE_NAME))?;
+    pending.file.sync_all()?;
     let metadata = Entry::fixed(Arc::clone(pending), METADATA_FILE_NAME);
     let raw = Entry::fixed(Arc::clone(pending), RAW_FILE_NAME);
     let metadata_read = metadata.read_bounded(MAX_METADATA_BYTES);
@@ -1478,6 +1622,174 @@ log_format = "json"
             .unwrap_err();
         assert!(!error.authority_retained());
         assert_eq!(fs::read(&fixture.raw).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn locator_durability_precedes_every_residue_claim() {
+        let fixture = fixture();
+        let files = fixture
+            .launch
+            .publish(&fixture.state, "deploy-1", 9, &fixture.prior)
+            .unwrap();
+        files.fail_locator_directory_sync_once_for_test();
+        assert!(files.remove_locator_authority().is_err());
+        assert!(!fixture.launch.locator_path().exists());
+        assert!(fixture.metadata.exists() && fixture.raw.exists());
+        let premature = files.claim_terminal_residue();
+        assert!(premature.1 && premature.0.is_none());
+        assert!(!fixture.state.join(METADATA_TOMBSTONE_NAME).exists());
+        assert!(!fixture.state.join(RAW_TOMBSTONE_NAME).exists());
+
+        files
+            .remove_locator_authority()
+            .expect("retry must establish durable terminal authority state");
+        let (cleanup, failed) = files.claim_terminal_residue();
+        assert!(!failed);
+        assert!(!cleanup.unwrap().cleanup());
+        assert!(!fixture.metadata.exists() && !fixture.raw.exists());
+    }
+
+    #[test]
+    fn delayed_terminal_cleanup_cannot_delete_successor_publication() {
+        let fixture = fixture();
+        let old = fixture
+            .launch
+            .publish(&fixture.state, "deploy-1", 9, &fixture.prior)
+            .unwrap();
+        old.remove_locator_authority().unwrap();
+        let delayed = old.claim_terminal_residue().0.unwrap();
+        let successor = fixture
+            .launch
+            .publish(&fixture.state, "deploy-1", 9, &fixture.prior)
+            .unwrap();
+        let raw_before = fs::read(&fixture.raw).unwrap();
+        let metadata_before = fs::read(&fixture.metadata).unwrap();
+        let raw_identity = FileIdentity::from_metadata(&fs::metadata(&fixture.raw).unwrap());
+        let metadata_identity =
+            FileIdentity::from_metadata(&fs::metadata(&fixture.metadata).unwrap());
+
+        assert!(delayed.cleanup());
+        assert!(fixture.launch.locator_path().exists());
+        assert_eq!(fs::read(&fixture.raw).unwrap(), raw_before);
+        assert_eq!(fs::read(&fixture.metadata).unwrap(), metadata_before);
+        assert_eq!(
+            FileIdentity::from_metadata(&fs::metadata(&fixture.raw).unwrap()),
+            raw_identity
+        );
+        assert_eq!(
+            FileIdentity::from_metadata(&fs::metadata(&fixture.metadata).unwrap()),
+            metadata_identity
+        );
+
+        successor.remove_locator_authority().unwrap();
+        assert!(!successor.claim_terminal_residue().0.unwrap().cleanup());
+    }
+
+    #[test]
+    fn terminal_cleanup_refuses_tombstone_content_change() {
+        let fixture = fixture();
+        let files = fixture
+            .launch
+            .publish(&fixture.state, "deploy-1", 9, &fixture.prior)
+            .unwrap();
+        files.remove_locator_authority().unwrap();
+        let cleanup = files.claim_terminal_residue().0.unwrap();
+        let metadata_tombstone = fixture.state.join(METADATA_TOMBSTONE_NAME);
+        let mut changed = fs::read(&metadata_tombstone).unwrap();
+        changed[0] ^= 1;
+        fs::write(&metadata_tombstone, changed).unwrap();
+        let raw_tombstone = fixture.state.join(RAW_TOMBSTONE_NAME);
+        let raw = fs::read(&raw_tombstone).unwrap();
+        let replacement = fixture.state.join("identity-replacement");
+        fs::write(&replacement, raw).unwrap();
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::rename(replacement, &raw_tombstone).unwrap();
+        assert!(cleanup.cleanup());
+        assert!(metadata_tombstone.exists());
+        assert!(raw_tombstone.exists());
+    }
+
+    #[test]
+    fn tombstone_collision_is_no_clobber_and_partial_claim_is_bounded() {
+        let collision = fixture();
+        let files = collision
+            .launch
+            .publish(&collision.state, "deploy-1", 9, &collision.prior)
+            .unwrap();
+        files.remove_locator_authority().unwrap();
+        let metadata_tombstone = collision.state.join(METADATA_TOMBSTONE_NAME);
+        fs::write(&metadata_tombstone, b"collision sentinel").unwrap();
+        fs::set_permissions(&metadata_tombstone, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let (cleanup, failed) = files.claim_terminal_residue();
+        assert!(failed);
+        assert_eq!(
+            fs::read(&metadata_tombstone).unwrap(),
+            b"collision sentinel"
+        );
+        assert!(collision.metadata.exists(), "colliding fixed residue moved");
+        assert!(
+            !collision.raw.exists(),
+            "raw half was not atomically claimed"
+        );
+        assert!(!cleanup.unwrap().cleanup());
+        assert!(!collision.state.join(RAW_TOMBSTONE_NAME).exists());
+
+        let clone_failure = fixture();
+        let files = clone_failure
+            .launch
+            .publish(
+                &clone_failure.state,
+                "clone-failure",
+                9,
+                &clone_failure.prior,
+            )
+            .unwrap();
+        files.remove_locator_authority().unwrap();
+        files.fail_metadata_clone_once_for_test();
+        let (cleanup, failed) = files.claim_terminal_residue();
+        assert!(failed);
+        assert!(clone_failure.state.join(METADATA_TOMBSTONE_NAME).exists());
+        assert!(!cleanup.unwrap().cleanup());
+        assert!(!clone_failure.state.join(RAW_TOMBSTONE_NAME).exists());
+        let successor = clone_failure
+            .launch
+            .publish(&clone_failure.state, "successor", 10, &clone_failure.prior)
+            .unwrap();
+        assert!(!clone_failure.state.join(METADATA_TOMBSTONE_NAME).exists());
+        successor.remove_locator_authority().unwrap();
+        assert!(!successor.claim_terminal_residue().0.unwrap().cleanup());
+    }
+
+    #[test]
+    fn missing_residue_cannot_block_terminal_locator_retirement() {
+        let missing = fixture();
+        let files = missing
+            .launch
+            .publish(&missing.state, "deploy-1", 9, &missing.prior)
+            .unwrap();
+        fs::remove_file(&missing.metadata).unwrap();
+        files.remove_locator_authority().unwrap();
+        let (cleanup, failed) = files.claim_terminal_residue();
+        assert!(failed);
+        assert!(!missing.launch.locator_path().exists());
+        assert!(!cleanup.unwrap().cleanup());
+        assert!(!missing.raw.exists());
+
+        let tampered = fixture();
+        let files = tampered
+            .launch
+            .publish(&tampered.state, "deploy-2", 10, &tampered.prior)
+            .unwrap();
+        let mut bytes = fs::read(&tampered.metadata).unwrap();
+        bytes[0] ^= 1;
+        fs::write(&tampered.metadata, bytes).unwrap();
+        files.remove_locator_authority().unwrap();
+        let (cleanup, failed) = files.claim_terminal_residue();
+        assert!(!failed, "tampering does not impede atomic claim");
+        assert!(cleanup.unwrap().cleanup());
+        assert!(!tampered.launch.locator_path().exists());
+        assert!(tampered.state.join(METADATA_TOMBSTONE_NAME).exists());
     }
 
     #[test]
