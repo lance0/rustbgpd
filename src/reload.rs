@@ -11,6 +11,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Instant;
 
+use rustbgpd_api::peer_types::ConfigPersistCommitOutcome;
 use rustbgpd_api::peer_types::{
     CatalogMutationError, ConfigEvent, ConfigPersistAck, ConfigPersistError, FibTableSnapshot,
     PeerManagerCommand, PeerManagerNeighborConfig,
@@ -853,18 +854,23 @@ async fn set_pm_fib_tables_snapshot(
 /// What the bridge should do with its held snapshot after an acknowledged
 /// config event.
 enum AckedPersistOutcome {
+    /// Publication settled. Authority adoption must precede the reply.
     /// The candidate is on disk; adopt it as the bridge snapshot.
-    Applied,
+    Settled {
+        outcome: ConfigPersistCommitOutcome,
+        reply: oneshot::Sender<ConfigPersistCommitOutcome>,
+    },
+    /// Staging was rejected or the runtime owner discarded its stage.
     /// Nothing was written; keep the previous snapshot.
     Rejected,
     /// The persister is gone; the bridge has nothing left to do.
     PersisterLost,
 }
 
-async fn persister_round_trip(rx: oneshot::Receiver<Result<(), String>>) -> Result<(), String> {
-    rx.await
-        .map_err(|_| "config persister dropped persistence acknowledgement".to_string())
-        .and_then(|result| result)
+async fn persister_round_trip(
+    rx: oneshot::Receiver<ConfigPersistCommitOutcome>,
+) -> Result<ConfigPersistCommitOutcome, ()> {
+    rx.await.map_err(|_| ())
 }
 
 /// Drive one acknowledged config event through the persister.
@@ -880,72 +886,82 @@ async fn persist_acknowledged(
     candidate: Arc<AcceptedConfigSnapshot>,
     ack: ConfigPersistAck,
 ) -> AckedPersistOutcome {
-    let ConfigPersistAck { staged, commit } = ack;
-    let Some(commit) = commit else {
+    let (reply, staged_commit) = match ack {
+        ConfigPersistAck::Immediate(reply) => (reply, false),
+        ConfigPersistAck::Staged { staged, commit } => {
+            let (stage_ack_tx, stage_ack_rx) = oneshot::channel();
+            if mutation_tx
+                .send(ConfigMutation::StageConfigAck(
+                    Arc::clone(&candidate),
+                    stage_ack_tx,
+                ))
+                .await
+                .is_err()
+            {
+                let _ = staged.send(Err(ConfigPersistError::Write(
+                    "config persister unavailable".to_string(),
+                )));
+                return AckedPersistOutcome::PersisterLost;
+            }
+            let stage_result = stage_ack_rx
+                .await
+                .map_err(|_| "config persister dropped staging acknowledgement".to_string())
+                .and_then(|result| result);
+            let stage_ok = stage_result.is_ok();
+            let _ = staged.send(stage_result.map_err(ConfigPersistError::Write));
+            if !stage_ok {
+                return AckedPersistOutcome::Rejected;
+            }
+
+            // The caller is applying its runtime change. A dropped commit channel
+            // means that apply failed, or the caller is gone: either way the staged
+            // write must not land.
+            // A dropped commit channel proves the runtime owner never asked
+            // the persister to publish this stage.
+            let Ok(reply) = commit.await else {
+                let _ = mutation_tx.send(ConfigMutation::DiscardStagedConfig).await;
+                return AckedPersistOutcome::Rejected;
+            };
+            (reply, true)
+        }
+    };
+
+    if !staged_commit {
         // Single-phase: the caller owns its own apply/rollback executor and
         // asked for one durable write with one acknowledgement.
         let (persist_ack_tx, persist_ack_rx) = oneshot::channel();
-        if mutation_tx
+        if let Err(error) = mutation_tx
             .send(ConfigMutation::ReplaceConfigAck(candidate, persist_ack_tx))
             .await
-            .is_err()
         {
-            let _ = staged.send(Err(ConfigPersistError::Write(
-                "config persister unavailable".to_string(),
-            )));
-            return AckedPersistOutcome::PersisterLost;
+            let ConfigMutation::ReplaceConfigAck(_, persist_ack) = error.0 else {
+                unreachable!("rejected mutation must be ReplaceConfigAck")
+            };
+            let _ = persist_ack.send(ConfigPersistCommitOutcome::NotPublished(
+                "persister rejected replacement pre-publication".to_string(),
+            ));
         }
-        let result = persister_round_trip(persist_ack_rx).await;
-        let applied = result.is_ok();
-        let _ = staged.send(result.map_err(ConfigPersistError::Write));
-        return if applied {
-            AckedPersistOutcome::Applied
-        } else {
-            AckedPersistOutcome::Rejected
+        return match persister_round_trip(persist_ack_rx).await {
+            Ok(outcome) => AckedPersistOutcome::Settled { outcome, reply },
+            Err(()) => AckedPersistOutcome::PersisterLost,
         };
-    };
-
-    let (stage_ack_tx, stage_ack_rx) = oneshot::channel();
-    if mutation_tx
-        .send(ConfigMutation::StageConfigAck(candidate, stage_ack_tx))
-        .await
-        .is_err()
-    {
-        let _ = staged.send(Err(ConfigPersistError::Write(
-            "config persister unavailable".to_string(),
-        )));
-        return AckedPersistOutcome::PersisterLost;
-    }
-    let stage_result = persister_round_trip(stage_ack_rx).await;
-    let stage_ok = stage_result.is_ok();
-    let _ = staged.send(stage_result.map_err(ConfigPersistError::Write));
-    if !stage_ok {
-        return AckedPersistOutcome::Rejected;
     }
 
-    // The caller is applying its runtime change. A dropped commit channel
-    // means that apply failed, or the caller is gone: either way the staged
-    // write must not land.
-    let Ok(commit_reply) = commit.await else {
-        let _ = mutation_tx.send(ConfigMutation::DiscardStagedConfig).await;
-        return AckedPersistOutcome::Rejected;
-    };
     let (commit_ack_tx, commit_ack_rx) = oneshot::channel();
-    if mutation_tx
+    if let Err(error) = mutation_tx
         .send(ConfigMutation::CommitStagedConfig(commit_ack_tx))
         .await
-        .is_err()
     {
-        let _ = commit_reply.send(Err("config persister unavailable".to_string()));
-        return AckedPersistOutcome::PersisterLost;
+        let ConfigMutation::CommitStagedConfig(commit_ack) = error.0 else {
+            unreachable!("rejected mutation must be CommitStagedConfig")
+        };
+        let _ = commit_ack.send(ConfigPersistCommitOutcome::NotPublished(
+            "persister rejected staged commit pre-publication".to_string(),
+        ));
     }
-    let result = persister_round_trip(commit_ack_rx).await;
-    let applied = result.is_ok();
-    let _ = commit_reply.send(result);
-    if applied {
-        AckedPersistOutcome::Applied
-    } else {
-        AckedPersistOutcome::Rejected
+    match persister_round_trip(commit_ack_rx).await {
+        Ok(outcome) => AckedPersistOutcome::Settled { outcome, reply },
+        Err(()) => AckedPersistOutcome::PersisterLost,
     }
 }
 
@@ -981,6 +997,10 @@ pub(crate) struct AcceptedBridgeReplacement {
     adopted: oneshot::Sender<()>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single serialized bridge loop makes authority adoption ordering explicit"
+)]
 pub(crate) async fn run_config_bridge_accepted(
     mut event_rx: mpsc::Receiver<rustbgpd_api::peer_types::ConfigEvent>,
     mut bridge_replace_rx: mpsc::UnboundedReceiver<AcceptedBridgeReplacement>,
@@ -1055,17 +1075,38 @@ pub(crate) async fn run_config_bridge_accepted(
                             Err(error) => {
                             error!(error = %error, "rejected config event before persistence");
                             if let Some(ack) = event_ack {
-                                let _ = ack.staged.send(Err(ConfigPersistError::Rejected(error)));
+                                match ack {
+                                    ConfigPersistAck::Staged { staged, .. } => {
+                                        let _ = staged.send(Err(ConfigPersistError::Rejected(error)));
+                                    }
+                                    ConfigPersistAck::Immediate(reply) => {
+                                        let _ = reply.send(ConfigPersistCommitOutcome::NotPublished(
+                                            error.to_string(),
+                                        ));
+                                    }
+                                }
                             }
                             continue;
                             }
                         };
                         if let Some(ack) = event_ack {
                             match persist_acknowledged(&mutation_tx, Arc::clone(&candidate), ack).await {
-                                AckedPersistOutcome::Applied => {
-                                    current = candidate;
-                                    accepted_tx.send_replace(Arc::clone(&current));
+                                AckedPersistOutcome::Settled { outcome, reply } => {
+                                    // The candidate is on disk; adopt it as the bridge snapshot.
+                                    if matches!(
+                                        outcome,
+                                        ConfigPersistCommitOutcome::PublishedDurable
+                                            | ConfigPersistCommitOutcome::PublicationAmbiguous(_)
+                                    ) {
+                                        current = candidate;
+                                        accepted_tx.send_replace(Arc::clone(&current));
+                                    }
+                                    // Both bridge and persister authority are
+                                    // updated before the owner can observe the
+                                    // terminal publication result.
+                                    let _ = reply.send(outcome);
                                 }
+                                // Nothing was written; keep the previous snapshot.
                                 AckedPersistOutcome::Rejected => {}
                                 AckedPersistOutcome::PersisterLost => break,
                             }
@@ -2931,6 +2972,18 @@ mod tests {
             .into_temp_path()
             .keep()
             .unwrap()
+    }
+
+    macro_rules! assert_not_published {
+        ($outcome:expr $(,)?) => {
+            assert!(matches!(
+                $outcome,
+                AckedPersistOutcome::Settled {
+                    outcome: ConfigPersistCommitOutcome::NotPublished(_),
+                    ..
+                }
+            ))
+        };
     }
 
     #[test]
@@ -7809,15 +7862,47 @@ peer_group = "secure"
             matches!(ack_rx.try_recv(), Err(TryRecvError::Empty),),
             "bridge must not acknowledge the FIB event before the persister replies"
         );
-        let _ = persist_ack.send(Ok(()));
+        let _ = persist_ack.send(ConfigPersistCommitOutcome::PublishedDurable);
         assert!(
             timeout(Duration::from_secs(1), ack_rx)
                 .await
                 .unwrap()
                 .unwrap()
-                .is_ok(),
+                == ConfigPersistCommitOutcome::PublishedDurable,
             "FIB event ack should reflect the persister result"
         );
+
+        let (closed_tx, closed_rx) = mpsc::channel(1);
+        drop(closed_rx);
+        assert_not_published!(
+            persist_acknowledged(
+                &closed_tx,
+                Arc::clone(&received_event),
+                ConfigPersistAck::immediate(oneshot::channel().0),
+            )
+            .await,
+        );
+
+        let (staged_tx, mut staged_rx) = mpsc::channel(1);
+        let (commit, commit_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            persist_acknowledged(
+                &staged_tx,
+                received_event,
+                ConfigPersistAck::Staged {
+                    staged: oneshot::channel().0,
+                    commit: commit_rx,
+                },
+            )
+            .await
+        });
+        let ConfigMutation::StageConfigAck(_, stage_reply) = staged_rx.recv().await.unwrap() else {
+            panic!("staged persistence must stage first")
+        };
+        stage_reply.send(Ok(())).unwrap();
+        drop(staged_rx);
+        commit.send(oneshot::channel().0).unwrap();
+        assert_not_published!(task.await.unwrap());
 
         drop(replace_tx);
         drop(event_tx);
@@ -7827,6 +7912,10 @@ peer_group = "secure"
             .unwrap();
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one authority-adoption sequence covers durable, not-published, and ambiguous"
+    )]
     #[tokio::test]
     async fn config_bridge_watch_publishes_only_the_successfully_persisted_arc() {
         use rustbgpd_api::peer_types::{ConfigEvent, FibTableSnapshot};
@@ -7871,8 +7960,13 @@ peer_group = "secure"
             panic!("acknowledged event must carry its accepted Arc");
         };
         assert!(Arc::ptr_eq(&accepted_rx.borrow(), &initial));
-        persist_ack.send(Ok(())).unwrap();
-        assert!(ack_rx.await.unwrap().is_ok());
+        persist_ack
+            .send(ConfigPersistCommitOutcome::PublishedDurable)
+            .unwrap();
+        assert_eq!(
+            ack_rx.await.unwrap(),
+            ConfigPersistCommitOutcome::PublishedDurable
+        );
         timeout(Duration::from_secs(1), accepted_rx.changed())
             .await
             .unwrap()
@@ -7891,11 +7985,41 @@ peer_group = "secure"
         };
         assert!(!Arc::ptr_eq(&candidate, &rejected));
         failed_persist_ack
-            .send(Err("injected".to_string()))
+            .send(ConfigPersistCommitOutcome::NotPublished(
+                "injected".to_string(),
+            ))
             .unwrap();
-        assert!(failed_ack_rx.await.unwrap().is_err());
+        assert!(matches!(
+            failed_ack_rx.await.unwrap(),
+            ConfigPersistCommitOutcome::NotPublished(_)
+        ));
         assert!(Arc::ptr_eq(&accepted_rx.borrow(), &candidate));
         assert!(!accepted_rx.has_changed().unwrap());
+
+        let (ambiguous_ack_tx, ambiguous_ack_rx) = oneshot::channel();
+        event_tx
+            .send(event("visible-candidate", ambiguous_ack_tx))
+            .await
+            .unwrap();
+        let ConfigMutation::ReplaceConfigAck(ambiguous, ambiguous_persist_ack) =
+            mutation_rx.recv().await.unwrap()
+        else {
+            panic!("ambiguous event must carry its candidate Arc");
+        };
+        ambiguous_persist_ack
+            .send(ConfigPersistCommitOutcome::PublicationAmbiguous(
+                "directory sync failed".to_string(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            ambiguous_ack_rx.await.unwrap(),
+            ConfigPersistCommitOutcome::PublicationAmbiguous(_)
+        ));
+        timeout(Duration::from_secs(1), accepted_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&accepted_rx.borrow(), &ambiguous));
 
         drop(replace_tx);
         drop(event_tx);
@@ -7957,13 +8081,13 @@ remote_asn = 65002
             matches!(ack_rx.try_recv(), Err(TryRecvError::Empty),),
             "bridge must not acknowledge the config transaction before the persister replies"
         );
-        let _ = persist_ack.send(Ok(()));
+        let _ = persist_ack.send(ConfigPersistCommitOutcome::PublishedDurable);
         assert!(
             timeout(Duration::from_secs(1), ack_rx)
                 .await
                 .unwrap()
                 .unwrap()
-                .is_ok(),
+                == ConfigPersistCommitOutcome::PublishedDurable,
             "config transaction ack should reflect the persister result"
         );
 
@@ -8066,13 +8190,13 @@ remote_asn = 65002
             matches!(ack_rx.try_recv(), Err(TryRecvError::Empty),),
             "bridge must not acknowledge the static-neighbor event before the persister replies"
         );
-        let _ = persist_ack.send(Ok(()));
+        let _ = persist_ack.send(ConfigPersistCommitOutcome::PublishedDurable);
         assert!(
             timeout(Duration::from_secs(1), ack_rx)
                 .await
                 .unwrap()
                 .unwrap()
-                .is_ok(),
+                == ConfigPersistCommitOutcome::PublishedDurable,
             "static-neighbor event ack should reflect the persister result"
         );
 
@@ -8173,16 +8297,16 @@ remote_asn = 65002
                 .iter()
                 .any(|neighbor| neighbor.address == "10.0.0.9")
         );
-        let _ = persist_ack.send(Err("disk full".to_string()));
-        assert_eq!(
+        let _ = persist_ack.send(ConfigPersistCommitOutcome::NotPublished(
+            "disk full".to_string(),
+        ));
+        assert!(matches!(
             timeout(Duration::from_secs(1), ack_rx)
                 .await
                 .unwrap()
-                .unwrap()
-                .unwrap_err()
-                .to_string(),
-            "disk full"
-        );
+                .unwrap(),
+            ConfigPersistCommitOutcome::NotPublished(ref error) if error == "disk full"
+        ));
 
         event_tx
             .send(ConfigEvent::NeighborDeleted {
@@ -8265,13 +8389,13 @@ remote_asn = 65002
             matches!(ack_rx.try_recv(), Err(TryRecvError::Empty),),
             "bridge must not acknowledge the dynamic-neighbor event before the persister replies"
         );
-        let _ = persist_ack.send(Ok(()));
+        let _ = persist_ack.send(ConfigPersistCommitOutcome::PublishedDurable);
         assert!(
             timeout(Duration::from_secs(1), ack_rx)
                 .await
                 .unwrap()
                 .unwrap()
-                .is_ok(),
+                == ConfigPersistCommitOutcome::PublishedDurable,
             "dynamic-neighbor event ack should reflect the persister result"
         );
 
@@ -8325,16 +8449,16 @@ remote_asn = 65002
             panic!("acked event must request acknowledged persist");
         };
         assert_eq!(first_candidate.dynamic_neighbors.len(), 1);
-        let _ = persist_ack.send(Err("disk full".to_string()));
-        assert_eq!(
+        let _ = persist_ack.send(ConfigPersistCommitOutcome::NotPublished(
+            "disk full".to_string(),
+        ));
+        assert!(matches!(
             timeout(Duration::from_secs(1), ack_rx)
                 .await
                 .unwrap()
-                .unwrap()
-                .unwrap_err()
-                .to_string(),
-            "disk full"
-        );
+                .unwrap(),
+            ConfigPersistCommitOutcome::NotPublished(ref error) if error == "disk full"
+        ));
 
         event_tx
             .send(ConfigEvent::DynamicNeighborAdded {

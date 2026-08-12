@@ -29,6 +29,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 use rustbgpd_api::health_probe::DaemonGate;
+use rustbgpd_api::peer_types::ConfigPersistCommitOutcome;
 use rustbgpd_api::peer_types::{
     CatalogMutationError, ConfigEvent, ConfigPersistAck, ConfigPersistError, FibTableSnapshot,
     PeerManagerCommand,
@@ -37,6 +38,7 @@ use rustbgpd_api::proto;
 use rustbgpd_api::rib_service::{
     FibTableControlError, FibTableControlFn, FibTableControlFuture, FibTableControlRequest,
 };
+use rustbgpd_api::runtime_config_settlement::RuntimeConfigFenceReason;
 use rustbgpd_api::runtime_config_settlement::{
     OwnedRuntimeConfigOperation, OwnedRuntimeConfigOutcome, OwnedRuntimeConfigRequestContext,
     RuntimeConfigOperationKind, RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
@@ -271,8 +273,9 @@ async fn mutate(
         let join = tokio::spawn(async move {
             let _guard = coordinator.acquire().await?;
             match body(None).await {
-                OwnedRuntimeConfigOutcome::Clean(result) => result,
-                OwnedRuntimeConfigOutcome::Ambiguous(error) => {
+                OwnedRuntimeConfigOutcome::CleanNoEffect(result) => result,
+                OwnedRuntimeConfigOutcome::PublishedDurable(value) => Ok(value),
+                OwnedRuntimeConfigOutcome::Fenced { error, .. } => {
                     let _ = error;
                     std::future::pending().await
                 }
@@ -290,37 +293,27 @@ async fn mutate(
 }
 
 struct StagedFibPersistence {
-    commit: oneshot::Sender<oneshot::Sender<Result<(), String>>>,
+    commit: oneshot::Sender<oneshot::Sender<ConfigPersistCommitOutcome>>,
+}
+
+enum StagedFibCommitOutcome {
+    Settled(ConfigPersistCommitOutcome),
+    NotDelivered,
+    AcknowledgementLost,
 }
 
 impl StagedFibPersistence {
-    async fn commit(
-        self,
-        candidate: &[FibTableConfig],
-    ) -> OwnedRuntimeConfigOutcome<proto::ListFibTablesResponse, OwnedFibControlError> {
+    async fn commit(self) -> StagedFibCommitOutcome {
         let (reply, acknowledgement) = oneshot::channel();
+        // The caller is applying its runtime change. A dropped commit channel
+        // means that apply failed, or the caller is gone: either way the staged
+        // write must not land.
         if self.commit.send(reply).is_err() {
-            return OwnedRuntimeConfigOutcome::Ambiguous(
-                FibTableControlError::Internal(
-                    "config bridge dropped staged FIB commit handoff".to_string(),
-                )
-                .into(),
-            );
+            return StagedFibCommitOutcome::NotDelivered;
         }
         match acknowledgement.await {
-            Ok(Ok(())) => OwnedRuntimeConfigOutcome::Clean(Ok(response(candidate))),
-            Ok(Err(error)) => OwnedRuntimeConfigOutcome::Ambiguous(
-                FibTableControlError::Internal(format!(
-                    "staged FIB commit outcome is uncertain: {error}"
-                ))
-                .into(),
-            ),
-            Err(_) => OwnedRuntimeConfigOutcome::Ambiguous(
-                FibTableControlError::Internal(
-                    "config bridge dropped staged FIB commit acknowledgement".to_string(),
-                )
-                .into(),
-            ),
+            Ok(outcome) => StagedFibCommitOutcome::Settled(outcome),
+            Err(_) => StagedFibCommitOutcome::AcknowledgementLost,
         }
     }
 }
@@ -339,9 +332,9 @@ async fn stage_fib_persistence(
     let (commit_tx, commit_rx) = oneshot::channel();
     permit.send(ConfigEvent::FibTablesReplaced {
         tables: snapshots,
-        ack: Some(ConfigPersistAck {
+        ack: Some(ConfigPersistAck::Staged {
             staged: staged_tx,
-            commit: Some(commit_rx),
+            commit: commit_rx,
         }),
     });
     match staged_rx.await {
@@ -434,10 +427,55 @@ async fn dispatch_owned_replace(
     }
 }
 
+/// Typed reconciler settlement used by the config-transaction executor.
+pub(crate) enum FibTransactionReplaceOutcome {
+    /// The command was definitely rejected before the actor accepted it.
+    NotAccepted(FibTableControlError),
+    /// The actor proved the requested replacement is active.
+    Applied,
+    /// The actor rejected the replacement and proved it produced no effect.
+    RejectedNoEffect(FibTableControlError),
+    /// The actor reported a failed internal compensation.
+    KnownDivergence(FibTableControlError),
+    /// The actor accepted the replacement but its reply was lost.
+    AcknowledgementLost(FibTableControlError),
+}
+
+/// Replace the runtime table set without collapsing accepted-reply loss into
+/// the same error as a definitely rejected handoff.
+pub(crate) async fn replace_tables_for_transaction(
+    fib_cmd_tx: &mpsc::Sender<FibRuntimeCommand>,
+    tables: Vec<FibTableConfig>,
+) -> FibTransactionReplaceOutcome {
+    match dispatch_owned_replace(fib_cmd_tx, tables).await {
+        AcceptedDispatch::NotAccepted(error) => FibTransactionReplaceOutcome::NotAccepted(error),
+        AcceptedDispatch::AcceptedReplyLost(error) => {
+            FibTransactionReplaceOutcome::AcknowledgementLost(error)
+        }
+        AcceptedDispatch::Replied(OwnedFibReplaceOutcome::Applied) => {
+            FibTransactionReplaceOutcome::Applied
+        }
+        AcceptedDispatch::Replied(OwnedFibReplaceOutcome::RejectedNoEffect(error)) => {
+            FibTransactionReplaceOutcome::RejectedNoEffect(
+                FibTableControlError::FailedPrecondition(error),
+            )
+        }
+        AcceptedDispatch::Replied(OwnedFibReplaceOutcome::CompensationAmbiguous(error)) => {
+            FibTransactionReplaceOutcome::KnownDivergence(FibTableControlError::Internal(error))
+        }
+    }
+}
+
+enum CompensationOutcome {
+    Complete,
+    KnownFailure(FibTableControlError),
+    AcknowledgementLost(FibTableControlError),
+}
+
 async fn restore_pm_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     snapshots: Vec<FibTableSnapshot>,
-) -> Result<(), FibTableControlError> {
+) -> CompensationOutcome {
     let (reply_tx, reply_rx) = oneshot::channel();
     match tokio::time::timeout(
         OWNED_FIB_ACTOR_TIMEOUT,
@@ -448,21 +486,48 @@ async fn restore_pm_snapshot(
     )
     .await
     {
-        Err(_) => Err(FibTableControlError::Internal(
+        Err(_) => CompensationOutcome::KnownFailure(FibTableControlError::Internal(
             "peer manager rollback queue timed out before accepting command".to_string(),
         )),
-        Ok(Err(_)) => Err(FibTableControlError::Internal(
+        Ok(Err(_)) => CompensationOutcome::KnownFailure(FibTableControlError::Internal(
             "peer manager unavailable during FIB snapshot rollback".to_string(),
         )),
         Ok(Ok(())) => match tokio::time::timeout(OWNED_FIB_ACTOR_TIMEOUT, reply_rx).await {
-            Ok(Ok(())) => Ok(()),
-            Err(_) => Err(FibTableControlError::Internal(
+            Ok(Ok(())) => CompensationOutcome::Complete,
+            Err(_) => CompensationOutcome::AcknowledgementLost(FibTableControlError::Internal(
                 "peer manager accepted FIB snapshot rollback but reply timed out".to_string(),
             )),
-            Ok(Err(_)) => Err(FibTableControlError::Internal(
+            Ok(Err(_)) => CompensationOutcome::AcknowledgementLost(FibTableControlError::Internal(
                 "peer manager accepted FIB snapshot rollback but dropped its reply".to_string(),
             )),
         },
+    }
+}
+
+fn fenced_fib(
+    error: FibTableControlError,
+    reason: RuntimeConfigFenceReason,
+) -> OwnedRuntimeConfigOutcome<proto::ListFibTablesResponse, OwnedFibControlError> {
+    OwnedRuntimeConfigOutcome::Fenced {
+        error: error.into(),
+        reason,
+    }
+}
+
+fn settle_pm_compensation(
+    outcome: CompensationOutcome,
+    original: FibTableControlError,
+) -> OwnedRuntimeConfigOutcome<proto::ListFibTablesResponse, OwnedFibControlError> {
+    match outcome {
+        CompensationOutcome::Complete => {
+            OwnedRuntimeConfigOutcome::CleanNoEffect(Err(original.into()))
+        }
+        CompensationOutcome::KnownFailure(error) => {
+            fenced_fib(error, RuntimeConfigFenceReason::KnownDivergence)
+        }
+        CompensationOutcome::AcknowledgementLost(error) => {
+            fenced_fib(error, RuntimeConfigFenceReason::AcknowledgementLost)
+        }
     }
 }
 
@@ -473,6 +538,10 @@ fn response(candidate: &[FibTableConfig]) -> proto::ListFibTablesResponse {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear typed settlement matrix keeps every authority transition visible"
+)]
 async fn owned_fib_mutation_body(
     owned: Option<OwnedRuntimeConfigOperation>,
     config_mutation_gate: Option<ConfigMutationGateFn>,
@@ -485,20 +554,19 @@ async fn owned_fib_mutation_body(
     if let Some(gate) = config_mutation_gate
         && let Err(error) = gate(operation_name).await
     {
-        return OwnedRuntimeConfigOutcome::Clean(Err(FibTableControlError::FailedPrecondition(
-            error,
-        )
-        .into()));
+        return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(
+            FibTableControlError::FailedPrecondition(error).into(),
+        ));
     }
     let previous =
         match read_current_tables(Some(&fib_cmd_tx), FibTableControlError::Internal).await {
             Ok(Some(tables)) => tables,
             Ok(None) => Vec::new(),
-            Err(error) => return OwnedRuntimeConfigOutcome::Clean(Err(error.into())),
+            Err(error) => return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error.into())),
         };
     let candidate = match apply_mutation(previous.clone(), mutation) {
         Ok(candidate) => candidate,
-        Err(error) => return OwnedRuntimeConfigOutcome::Clean(Err(error.into())),
+        Err(error) => return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error.into())),
     };
     let previous_snapshots = previous.iter().map(config_to_snapshot).collect::<Vec<_>>();
     let snapshots = candidate.iter().map(config_to_snapshot).collect::<Vec<_>>();
@@ -508,22 +576,21 @@ async fn owned_fib_mutation_body(
     }
     let staged = match stage_fib_persistence(persist_permit, snapshots.clone()).await {
         Ok(staged) => staged,
-        Err(error) => return OwnedRuntimeConfigOutcome::Clean(Err(error.into())),
+        Err(error) => return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error.into())),
     };
     match stage_pm_candidate(&peer_mgr_tx, snapshots).await {
         AcceptedDispatch::NotAccepted(error) => {
             drop(staged);
-            return OwnedRuntimeConfigOutcome::Clean(Err(error.into()));
+            return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error.into()));
         }
         AcceptedDispatch::Replied(Err(error)) => {
             drop(staged);
-            return OwnedRuntimeConfigOutcome::Clean(Err(FibTableControlError::InvalidArgument(
-                error,
-            )
-            .into()));
+            return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(
+                FibTableControlError::InvalidArgument(error).into(),
+            ));
         }
         AcceptedDispatch::AcceptedReplyLost(error) => {
-            return OwnedRuntimeConfigOutcome::Ambiguous(error.into());
+            return fenced_fib(error, RuntimeConfigFenceReason::AcknowledgementLost);
         }
         AcceptedDispatch::Replied(Ok(())) => {}
     }
@@ -531,11 +598,12 @@ async fn owned_fib_mutation_body(
     let replacement = dispatch_owned_replace(&fib_cmd_tx, candidate.clone()).await;
     match replacement {
         AcceptedDispatch::AcceptedReplyLost(error) => {
-            return OwnedRuntimeConfigOutcome::Ambiguous(error.into());
+            return fenced_fib(error, RuntimeConfigFenceReason::AcknowledgementLost);
         }
         AcceptedDispatch::Replied(OwnedFibReplaceOutcome::CompensationAmbiguous(error)) => {
-            return OwnedRuntimeConfigOutcome::Ambiguous(
-                FibTableControlError::Internal(error).into(),
+            return fenced_fib(
+                FibTableControlError::Internal(error),
+                RuntimeConfigFenceReason::KnownDivergence,
             );
         }
         AcceptedDispatch::NotAccepted(error) => {
@@ -543,22 +611,20 @@ async fn owned_fib_mutation_body(
                 operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
             }
             drop(staged);
-            return match restore_pm_snapshot(&peer_mgr_tx, previous_snapshots).await {
-                Ok(()) => OwnedRuntimeConfigOutcome::Clean(Err(error.into())),
-                Err(rollback) => OwnedRuntimeConfigOutcome::Ambiguous(rollback.into()),
-            };
+            return settle_pm_compensation(
+                restore_pm_snapshot(&peer_mgr_tx, previous_snapshots).await,
+                error,
+            );
         }
         AcceptedDispatch::Replied(OwnedFibReplaceOutcome::RejectedNoEffect(error)) => {
             if let Some(operation) = &owned {
                 operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
             }
             drop(staged);
-            return match restore_pm_snapshot(&peer_mgr_tx, previous_snapshots).await {
-                Ok(()) => OwnedRuntimeConfigOutcome::Clean(Err(
-                    FibTableControlError::FailedPrecondition(error).into(),
-                )),
-                Err(rollback) => OwnedRuntimeConfigOutcome::Ambiguous(rollback.into()),
-            };
+            return settle_pm_compensation(
+                restore_pm_snapshot(&peer_mgr_tx, previous_snapshots).await,
+                FibTableControlError::FailedPrecondition(error),
+            );
         }
         AcceptedDispatch::Replied(OwnedFibReplaceOutcome::Applied) => {}
     }
@@ -566,7 +632,80 @@ async fn owned_fib_mutation_body(
     if let Some(operation) = &owned {
         operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
     }
-    staged.commit(&candidate).await
+    match staged.commit().await {
+        StagedFibCommitOutcome::Settled(ConfigPersistCommitOutcome::PublishedDurable) => {
+            OwnedRuntimeConfigOutcome::PublishedDurable(response(&candidate))
+        }
+        StagedFibCommitOutcome::Settled(ConfigPersistCommitOutcome::PublicationAmbiguous(
+            error,
+        )) => fenced_fib(
+            FibTableControlError::Internal(format!(
+                "FIB candidate is visible but publication durability is unproved: {error}"
+            )),
+            RuntimeConfigFenceReason::PublicationAmbiguous,
+        ),
+        StagedFibCommitOutcome::AcknowledgementLost => fenced_fib(
+            FibTableControlError::Internal(
+                "config bridge dropped staged FIB commit acknowledgement".to_string(),
+            ),
+            RuntimeConfigFenceReason::AcknowledgementLost,
+        ),
+        StagedFibCommitOutcome::NotDelivered => {
+            compensate_fib_not_published(
+                &fib_cmd_tx,
+                &peer_mgr_tx,
+                previous,
+                previous_snapshots,
+                FibTableControlError::Internal(
+                    "config bridge rejected staged FIB commit before delivery".to_string(),
+                ),
+            )
+            .await
+        }
+        StagedFibCommitOutcome::Settled(ConfigPersistCommitOutcome::NotPublished(error)) => {
+            compensate_fib_not_published(
+                &fib_cmd_tx,
+                &peer_mgr_tx,
+                previous,
+                previous_snapshots,
+                FibTableControlError::FailedPrecondition(format!(
+                    "FIB candidate was not published: {error}"
+                )),
+            )
+            .await
+        }
+    }
+}
+
+async fn compensate_fib_not_published(
+    fib_cmd_tx: &mpsc::Sender<FibRuntimeCommand>,
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    previous: Vec<FibTableConfig>,
+    previous_snapshots: Vec<FibTableSnapshot>,
+    original: FibTableControlError,
+) -> OwnedRuntimeConfigOutcome<proto::ListFibTablesResponse, OwnedFibControlError> {
+    match dispatch_owned_replace(fib_cmd_tx, previous).await {
+        AcceptedDispatch::Replied(OwnedFibReplaceOutcome::Applied) => {}
+        AcceptedDispatch::AcceptedReplyLost(error) => {
+            return fenced_fib(error, RuntimeConfigFenceReason::AcknowledgementLost);
+        }
+        AcceptedDispatch::NotAccepted(error) => {
+            return fenced_fib(error, RuntimeConfigFenceReason::KnownDivergence);
+        }
+        AcceptedDispatch::Replied(
+            OwnedFibReplaceOutcome::RejectedNoEffect(error)
+            | OwnedFibReplaceOutcome::CompensationAmbiguous(error),
+        ) => {
+            return fenced_fib(
+                FibTableControlError::Internal(format!("FIB rollback failed: {error}")),
+                RuntimeConfigFenceReason::KnownDivergence,
+            );
+        }
+    }
+    settle_pm_compensation(
+        restore_pm_snapshot(peer_mgr_tx, previous_snapshots).await,
+        original,
+    )
 }
 
 /// Legacy rollback harness retained for the config-transaction regression
@@ -643,15 +782,25 @@ pub(crate) async fn commit_fib_tables_locked(
             ),
         });
     };
-    if let Err(error) = persist_result {
-        return Err(rollback_applied_tables_after_error(
-            fib_cmd_tx,
-            peer_mgr_tx,
-            previous_tables,
-            previous_snapshots,
-            FibTableControlError::FailedPrecondition(error.to_string()).into(),
-        )
-        .await);
+    match persist_result {
+        ConfigPersistCommitOutcome::PublishedDurable => {}
+        ConfigPersistCommitOutcome::NotPublished(error) => {
+            return Err(rollback_applied_tables_after_error(
+                fib_cmd_tx,
+                peer_mgr_tx,
+                previous_tables,
+                previous_snapshots,
+                FibTableControlError::FailedPrecondition(error).into(),
+            )
+            .await);
+        }
+        ConfigPersistCommitOutcome::PublicationAmbiguous(error) => {
+            return Err(FibCommitFailure {
+                error: FibTableControlError::Internal(format!(
+                    "FIB publication durability is ambiguous: {error}"
+                )),
+            });
+        }
     }
 
     Ok(proto::ListFibTablesResponse {
@@ -856,6 +1005,7 @@ async fn reserve_persist_permit(
         })
 }
 
+#[cfg(test)]
 pub(crate) async fn replace_tables(
     fib_cmd_tx: &mpsc::Sender<FibRuntimeCommand>,
     tables: Vec<FibTableConfig>,
@@ -1274,7 +1424,10 @@ mod tests {
                 if drop_ack {
                     drop(ack);
                 } else {
-                    let _ = ack.staged.send(Err(ConfigPersistError::Rejected(
+                    let ConfigPersistAck::Staged { staged, .. } = ack else {
+                        panic!("expected staged FIB acknowledgement")
+                    };
+                    let _ = staged.send(Err(ConfigPersistError::Rejected(
                         CatalogMutationError::invalid("invalid staged FIB candidate"),
                     )));
                 }
@@ -1324,6 +1477,7 @@ mod tests {
     enum CommitBehavior {
         Applied,
         Rejected,
+        PublicationAmbiguous,
         AckLost,
         HandoffLost,
     }
@@ -1333,6 +1487,8 @@ mod tests {
         Reply(OwnedFibReplaceOutcome),
         ReplyLost,
     }
+
+    type PersistOutcome = ConfigPersistCommitOutcome;
 
     async fn run_owned_body(
         fib_behavior: FibBehavior,
@@ -1352,22 +1508,29 @@ mod tests {
             else {
                 panic!("expected staged FIB event")
             };
-            let ConfigPersistAck { staged, commit } = ack;
+            let ConfigPersistAck::Staged { staged, commit } = ack else {
+                panic!("expected staged FIB persistence")
+            };
             staged.send(Ok(())).unwrap();
-            let commit = commit.unwrap();
             if matches!(commit_behavior, CommitBehavior::HandoffLost) {
                 drop(commit);
                 return;
             }
             let Ok(reply) = commit.await else { return };
             match commit_behavior {
-                CommitBehavior::Applied => reply.send(Ok(())).unwrap(),
-                CommitBehavior::Rejected => reply.send(Err("commit rejected".to_string())).unwrap(),
+                CommitBehavior::Applied => reply.send(PersistOutcome::PublishedDurable).unwrap(),
+                CommitBehavior::Rejected => reply
+                    .send(PersistOutcome::NotPublished("commit rejected".to_string()))
+                    .unwrap(),
+                CommitBehavior::PublicationAmbiguous => reply
+                    .send(PersistOutcome::PublicationAmbiguous(
+                        "directory sync failed".to_string(),
+                    ))
+                    .unwrap(),
                 CommitBehavior::AckLost => drop(reply),
                 CommitBehavior::HandoffLost => unreachable!(),
             }
         });
-
         let rollback_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let rollback_count_actor = rollback_count.clone();
         let (peer_tx, mut peer_rx) = mpsc::channel(2);
@@ -1387,8 +1550,14 @@ mod tests {
                 }
             }
         });
-
         let (fib_tx, mut fib_rx) = mpsc::channel(2);
+        let expect_runtime_rollback = matches!(
+            (&fib_behavior, commit_behavior),
+            (
+                FibBehavior::Reply(OwnedFibReplaceOutcome::Applied),
+                CommitBehavior::Rejected | CommitBehavior::HandoffLost
+            )
+        );
         tokio::spawn(async move {
             let FibRuntimeCommand::GetTables { reply } = fib_rx.recv().await.unwrap() else {
                 panic!("expected GetTables")
@@ -1403,6 +1572,14 @@ mod tests {
                     let _ = reply.send(outcome);
                 }
                 FibBehavior::ReplyLost => drop(reply),
+            }
+            if expect_runtime_rollback {
+                let FibRuntimeCommand::OwnedReplaceTables { reply, .. } =
+                    fib_rx.recv().await.unwrap()
+                else {
+                    panic!("expected owned FIB rollback")
+                };
+                let _ = reply.send(OwnedFibReplaceOutcome::Applied);
             }
         });
 
@@ -1428,23 +1605,55 @@ mod tests {
             true,
         )
         .await;
-        assert!(matches!(outcome, OwnedRuntimeConfigOutcome::Clean(Ok(_))));
+        assert!(matches!(
+            outcome,
+            OwnedRuntimeConfigOutcome::PublishedDurable(_)
+        ));
         assert_eq!(rollback, 0);
 
-        for behavior in [
-            CommitBehavior::Rejected,
-            CommitBehavior::AckLost,
-            CommitBehavior::HandoffLost,
-        ] {
+        for behavior in [CommitBehavior::Rejected, CommitBehavior::HandoffLost] {
             let (outcome, rollback) = run_owned_body(
                 FibBehavior::Reply(OwnedFibReplaceOutcome::Applied),
                 behavior,
                 true,
             )
             .await;
-            assert!(matches!(outcome, OwnedRuntimeConfigOutcome::Ambiguous(_)));
-            assert_eq!(rollback, 0, "commit uncertainty must never compensate");
+            assert!(matches!(
+                outcome,
+                OwnedRuntimeConfigOutcome::CleanNoEffect(Err(_))
+            ));
+            assert_eq!(rollback, 1);
         }
+
+        let (ack_lost, rollback) = run_owned_body(
+            FibBehavior::Reply(OwnedFibReplaceOutcome::Applied),
+            CommitBehavior::AckLost,
+            true,
+        )
+        .await;
+        assert!(matches!(
+            ack_lost,
+            OwnedRuntimeConfigOutcome::Fenced {
+                reason: RuntimeConfigFenceReason::AcknowledgementLost,
+                ..
+            }
+        ));
+        assert_eq!(rollback, 0);
+
+        let (publication_ambiguous, rollback) = run_owned_body(
+            FibBehavior::Reply(OwnedFibReplaceOutcome::Applied),
+            CommitBehavior::PublicationAmbiguous,
+            true,
+        )
+        .await;
+        assert!(matches!(
+            publication_ambiguous,
+            OwnedRuntimeConfigOutcome::Fenced {
+                reason: RuntimeConfigFenceReason::PublicationAmbiguous,
+                ..
+            }
+        ));
+        assert_eq!(rollback, 0);
     }
 
     #[tokio::test]
@@ -1457,7 +1666,10 @@ mod tests {
             true,
         )
         .await;
-        assert!(matches!(clean, OwnedRuntimeConfigOutcome::Clean(Err(_))));
+        assert!(matches!(
+            clean,
+            OwnedRuntimeConfigOutcome::CleanNoEffect(Err(_))
+        ));
         assert_eq!(rollback, 1);
 
         for behavior in [
@@ -1468,7 +1680,10 @@ mod tests {
         ] {
             let (ambiguous, rollback) =
                 run_owned_body(behavior, CommitBehavior::Applied, true).await;
-            assert!(matches!(ambiguous, OwnedRuntimeConfigOutcome::Ambiguous(_)));
+            assert!(matches!(
+                ambiguous,
+                OwnedRuntimeConfigOutcome::Fenced { .. }
+            ));
             assert_eq!(rollback, 0, "accepted ambiguity must never compensate");
         }
 
@@ -1482,7 +1697,10 @@ mod tests {
         .await;
         assert!(matches!(
             rollback_lost,
-            OwnedRuntimeConfigOutcome::Ambiguous(_)
+            OwnedRuntimeConfigOutcome::Fenced {
+                reason: RuntimeConfigFenceReason::AcknowledgementLost,
+                ..
+            }
         ));
         assert_eq!(rollback, 1);
     }
@@ -1538,7 +1756,7 @@ mod tests {
         let disk = body.find("stage_fib_persistence(").unwrap();
         let pm = body.find("stage_pm_candidate(").unwrap();
         let actor = body.find("dispatch_owned_replace(").unwrap();
-        let commit = body.find("staged.commit(&candidate)").unwrap();
+        let commit = body.find("staged.commit().await").unwrap();
         assert!(disk < pm && pm < actor && actor < commit);
     }
 

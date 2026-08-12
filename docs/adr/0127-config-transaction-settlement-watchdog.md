@@ -45,6 +45,46 @@ described below and the final cross-roster recovery proofs also remain
 incomplete. Until those land, this ADR stays Proposed and the source inventory
 must distinguish shipped owners from the decision's full target roster.
 
+### Typed publication and recovery classification
+
+The ordinary config publisher now classifies failures at the rename boundary,
+not from errno or error text. `NotPublished` means rename did not succeed and
+the old target remains authoritative. `PublicationAmbiguous` means rename
+succeeded, the complete candidate is visible at the target, and only its
+directory-fsync durability is unproved. The persister and config bridge adopt
+the candidate before returning either `PublishedDurable` or
+`PublicationAmbiguous`; they retain their prior snapshot for `NotPublished`.
+Only `PublishedDurable` enters applied-config history.
+
+Post-ownership settlement has three exact terminal states: `Owned`, `Settled`,
+and `RecoveryFenced`. A clean no-effect rejection or fully acknowledged
+compensation can settle. A durable success can settle only after finalization.
+Recovery fencing records one of `BudgetExpired`, `ExecutorLost`,
+`KnownDivergence`, `PublicationAmbiguous`, or `AcknowledgementLost`; it makes
+readiness red, closes mutation admission, retains ownership, and exits 70 after
+the existing five-second grace.
+
+The authority and compensation matrix is:
+
+| Publication/finalization result | Runtime action | Terminal classification |
+| --- | --- | --- |
+| Stage failure or lost stage acknowledgement before runtime mutation | No runtime work begins | Clean no effect |
+| `NotPublished` plus complete acknowledged compensation | Restore runtime and snapshot | Clean no effect |
+| `NotPublished` after a neighbor, peer-group, or policy session mutation | Session identity cannot be restored | `KnownDivergence` |
+| `NotPublished` plus known compensation failure | Stop compensation | `KnownDivergence` |
+| `NotPublished` plus accepted compensation reply loss | Do not guess completion | `AcknowledgementLost` |
+| `PublicationAmbiguous` | Adopt candidate; do not roll back | `PublicationAmbiguous` |
+| Accepted persistence acknowledgement lost | Do not roll back | `AcknowledgementLost` |
+| `PublishedDurable` plus successful finalization | Keep candidate | Durable success |
+| `PublishedDurable` plus known finalization failure | Keep candidate | `KnownDivergence` |
+| `PublishedDurable` plus finalization reply loss | Keep candidate | `AcknowledgementLost` |
+
+A commit handoff definitely rejected before delivery is `NotPublished`.
+Once a commit or finalization command is accepted, loss of its reply is
+`AcknowledgementLost`; no path rolls back or infers authority from channel
+closure. Restart validates the old config for a pre-rename failure and the
+complete candidate for a post-rename durability ambiguity.
+
 ## Decision
 
 ### One operation, one owner, one candidate
@@ -92,12 +132,12 @@ Any owned live phase terminates through exactly one mutually exclusive branch:
   rejection, a fully acknowledged rollback, or an acknowledged SIGHUP
   known-partial result after the runtime snapshot and config bridge adopted
   the same authority; or
-- `ambiguous_fenced`: ambiguity branches from any owned phase when settlement
-  cannot be proved; no success or rollback claim is permitted and fail-stop is
-  in progress.
+- `RecoveryFenced`: recovery fencing branches from any owned phase when
+  settlement cannot be proved; no success or rollback claim is permitted and
+  fail-stop is in progress.
 
 Only `clean_settled` releases the coordinator and streamed admission normally.
-`ambiguous_fenced` retains their logical ownership until process death. At
+`RecoveryFenced` retains their logical ownership until process death. At
 fail-stop or shutdown, every operation still queued in `waiting-for-ownership`
 is rejected and no queued waiter may acquire the newly freed physical mutex.
 A new process reconstructs authority from durable state.
@@ -141,7 +181,7 @@ cannot
 extend or replace the deadline.
 
 At 30 minutes without `clean_settled`, one atomic compare-and-swap irreversibly
-wins the `owned -> ambiguous_fenced` race against settlement. It marks readiness
+wins the `Owned -> RecoveryFenced` race against settlement. It marks readiness
 unavailable, closes admission for new persisted mutations, and requests
 supervised shutdown. Settlement may disarm only if its compare-and-swap wins
 first; after expiry wins, no late reply can reverse the fence or claim success.
@@ -157,7 +197,7 @@ disconnect, dropped response receiver, or caller cancellation may prevent a
 client from learning the outcome, but never aborts the transaction task,
 releases the coordinator, releases streamed admission, or disarms the terminal
 watchdog. The daemon-owned operation continues toward `clean_settled` or
-fail-stop.
+`RecoveryFenced`.
 
 The response therefore remains at-least-once ambiguous to the caller. Existing
 transaction status is authoritative only for the confirmed-transaction
@@ -173,7 +213,7 @@ acquisition advances the hard-exit deadline to five seconds after the loss.
 The same exact compare-and-swap decides executor-loss versus a concurrent
 `clean_settled` transition: loss cannot fence a prior settlement, and
 settlement cannot revoke a loss-won fence. Unless already `clean_settled`, the
-owner guard marks `ambiguous_fenced` before its coordinator guard or stream
+owner guard marks `RecoveryFenced` before its coordinator guard or stream
 permit can drop; the OS-thread registration outlives the task. Process abort
 already meets fail-stop.
 
@@ -191,7 +231,7 @@ For an unconfirmed apply:
 - After atomic persistence publishes it, restart uses the candidate on disk as
   authority even if the response or in-process finalization was lost.
 - If publication cannot be proven at watchdog expiry, the running process says
-  only `ambiguous_fenced`. Startup validates the one atomically published
+  only `RecoveryFenced`. Startup validates the one atomically published
   config object and fails closed under the existing persistence contract.
 
 V3 authority has three explicit publication windows. Before locator
@@ -214,12 +254,12 @@ Restart with a retained locator performs the existing verified boot revert.
 The typed terminal classifier is uniform across owner families.
 `clean_settled` includes success, a proved no-side-effect rejection, a fully
 acknowledged rollback, and the acknowledged SIGHUP known-partial case above.
-`ambiguous_fenced` includes an accepted-command deadline, lost mutation or
+`RecoveryFenced` includes an accepted-command deadline, lost mutation or
 persistence acknowledgement, failed or unacknowledged rollback, uncertain
 publication, executor loss, and true SIGHUP reconcile or bridge ambiguity.
 Pre-persistence, post-persistence, rollback, and lost-ack windows obey the same
 rule: no success or clean-failure claim without proof. A family-local timeout
-may advance an ambiguous operation to `ambiguous_fenced`; it never releases
+may advance an operation to `RecoveryFenced`; it never releases
 ownership or proves settlement. The watchdog does not guess which side effect
 completed. It fences, exits, and lets established durable authority decide
 startup behavior.
@@ -271,7 +311,7 @@ recovery contract:
 1. An injected deterministic watchdog driver holds each actor and persistence
    reply used by every persisted owner family. At 29 minutes 59 seconds the
    owner, coordinator, admission, and watchdog remain live; at 30 minutes the
-   state becomes `ambiguous_fenced` exactly once. Tokio paused time cannot
+   state becomes `RecoveryFenced` exactly once. Tokio paused time cannot
    drive an OS-thread condition variable, so real OS-thread and subprocess
    tests must separately prove wake-up and terminal behavior.
 2. Caller-`JoinHandle` wait/drop tests prove the operation remains owned/running.

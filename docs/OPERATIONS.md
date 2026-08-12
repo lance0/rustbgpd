@@ -49,17 +49,22 @@ Persisted runtime mutations use a cancellation-shielded owner. If creation of
 the initial persistence stage fails because the config directory is not
 writable, the request is rejected cleanly before runtime state changes and the
 daemon remains available. That is different from failure after durable staging
-and runtime mutation have begun: if rename or directory fsync publication
-cannot be proved, the outcome is ambiguous. A read-only bind-mounted config
-*file* in an otherwise writable directory is especially dangerous because the
-temporary stage can succeed while replacement of the mount point cannot.
+and runtime mutation have begun. A failed rename is `NotPublished`, with the
+old file still authoritative. It returns cleanly only after complete
+acknowledged compensation; an unrestorable session identity instead fences as
+`KnownDivergence`. Directory fsync failing after rename is
+`PublicationAmbiguous`: the complete candidate is visible and adopted, no
+rollback is attempted, and restart decides durability. A read-only bind-mounted
+config *file* in an otherwise writable directory can stage successfully but
+fails replacement as `NotPublished`.
 
-An ambiguous owner immediately makes `/readyz` fail, closes admission for new
-persisted mutations, and retains ownership until process death. Detected
-ambiguity or executor loss exits with status 70 after a five-second fencing
-grace. A silent owner is fenced after the fixed 30-minute owned-settlement
-budget and exits five seconds later. Do not classify 70 as success or suppress
-its restart: the new process re-establishes authority from durable state.
+A recovery-fenced owner immediately makes `/readyz` fail, closes admission for
+new persisted mutations, and retains ownership until process death. Detected
+divergence, publication ambiguity, acknowledgement loss, or executor loss exits
+with status 70 after a five-second fencing grace. A silent owner is fenced after
+the fixed 30-minute owned-settlement budget and exits five seconds later. Do not
+classify 70 as success or suppress its restart: the new process re-establishes
+authority from durable state.
 
 The shipped systemd unit uses `Restart=on-failure`, but caps recovery at five
 starts per ten minutes so a deterministic persistence fault cannot flap every

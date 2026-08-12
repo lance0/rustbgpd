@@ -225,8 +225,9 @@ impl NeighborService {
             let join = tokio::spawn(async move {
                 let _permit = coordinator.acquire().await?;
                 match body(None).await {
-                    OwnedRuntimeConfigOutcome::Clean(result) => result,
-                    OwnedRuntimeConfigOutcome::Ambiguous(error) => {
+                    OwnedRuntimeConfigOutcome::CleanNoEffect(result) => result,
+                    OwnedRuntimeConfigOutcome::PublishedDurable(()) => Ok(()),
+                    OwnedRuntimeConfigOutcome::Fenced { error, .. } => {
                         let _ = error;
                         std::future::pending().await
                     }
@@ -300,12 +301,12 @@ where
     B: FnOnce(crate::peer_types::ConfigPersistAck) -> ConfigEvent,
 {
     if daemon_gate.is_some_and(|gate| gate.is_shutting_down()) {
-        return OwnedRuntimeConfigOutcome::Clean(Err(Status::unavailable(format!(
+        return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(Status::unavailable(format!(
             "{operation_name} rejected: daemon is shutting down"
         ))));
     }
     if let Err(error) = check_config_mutation_gate(&config_mutation_gate, operation_name).await {
-        return OwnedRuntimeConfigOutcome::Clean(Err(error));
+        return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error));
     }
     if let Some(operation) = &owned {
         operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
@@ -314,7 +315,7 @@ where
         match stage_runtime_config_event_typed(permit, build_event).await {
             Ok(staged) => Some(staged),
             Err(error) => {
-                return OwnedRuntimeConfigOutcome::Clean(Err(error.into_status()));
+                return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error.into_status()));
             }
         }
     } else {
@@ -325,31 +326,41 @@ where
     match outcome {
         OwnedNeighborDispatch::NotAccepted(error) => {
             drop(staged);
-            OwnedRuntimeConfigOutcome::Clean(Err(error))
+            OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error))
         }
-        OwnedNeighborDispatch::AcceptedReplyLost(error) => {
-            OwnedRuntimeConfigOutcome::Ambiguous(error)
-        }
+        OwnedNeighborDispatch::AcceptedReplyLost(error) => OwnedRuntimeConfigOutcome::Fenced {
+            error,
+            reason: crate::runtime_config_settlement::RuntimeConfigFenceReason::AcknowledgementLost,
+        },
         OwnedNeighborDispatch::Replied(
             OwnedNeighborMutationOutcome::RejectedNoEffect(error)
             | OwnedNeighborMutationOutcome::FullyCompensated(error),
         ) => {
             drop(staged);
-            OwnedRuntimeConfigOutcome::Clean(Err(owned_neighbor_error_status(error)))
+            OwnedRuntimeConfigOutcome::CleanNoEffect(Err(owned_neighbor_error_status(error)))
         }
         OwnedNeighborDispatch::Replied(OwnedNeighborMutationOutcome::CompensationAmbiguous(
             error,
-        )) => OwnedRuntimeConfigOutcome::Ambiguous(owned_neighbor_error_status(error)),
+        )) => OwnedRuntimeConfigOutcome::Fenced {
+            error: owned_neighbor_error_status(error),
+            reason: crate::runtime_config_settlement::RuntimeConfigFenceReason::KnownDivergence,
+        },
         OwnedNeighborDispatch::Replied(OwnedNeighborMutationOutcome::Success) => {
             let Some(staged) = staged else {
-                return OwnedRuntimeConfigOutcome::Clean(Ok(()));
+                return OwnedRuntimeConfigOutcome::PublishedDurable(());
             };
             if let Some(operation) = &owned {
                 operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
             }
             match staged.commit_typed().await {
-                Ok(()) => OwnedRuntimeConfigOutcome::Clean(Ok(())),
-                Err(error) => OwnedRuntimeConfigOutcome::Ambiguous(error.into_status()),
+                Ok(()) => OwnedRuntimeConfigOutcome::PublishedDurable(()),
+                Err(error) => {
+                    let reason = error.fence_reason();
+                    OwnedRuntimeConfigOutcome::Fenced {
+                        error: error.into_status(),
+                        reason,
+                    }
+                }
             }
         }
     }

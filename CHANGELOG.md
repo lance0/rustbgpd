@@ -111,6 +111,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Config publication failures now carry an exact rename-boundary result:
+  pre-rename failures preserve the prior config and may return clean only after
+  complete acknowledged compensation, while post-rename directory-sync
+  failures adopt the visible candidate and fail stop without rollback. Lost
+  commit, rollback, and finalization acknowledgements likewise fence mutation
+  admission, turn readiness red, retain ownership, and exit 70 for supervised
+  restart instead of guessing or exposing a clean failure. A real-daemon test
+  proves both restart authorities and rejects a second mutation during the
+  recovery fence. (LAN-1009)
 - Persisted runtime-config owners now fail stop with exit 70 five seconds after
   settlement ambiguity is detected, or when an owner remains unsettled for the
   fixed 30-minute budget plus that grace. Transaction/Apply, Neighbor4, FIB2,

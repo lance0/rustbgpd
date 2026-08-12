@@ -381,8 +381,9 @@ impl PeerGroupService {
             let join = tokio::spawn(async move {
                 let _permit = coordinator.acquire().await?;
                 match body(None).await {
-                    OwnedRuntimeConfigOutcome::Clean(result) => result,
-                    OwnedRuntimeConfigOutcome::Ambiguous(error) => {
+                    OwnedRuntimeConfigOutcome::CleanNoEffect(result) => result,
+                    OwnedRuntimeConfigOutcome::PublishedDurable(()) => Ok(()),
+                    OwnedRuntimeConfigOutcome::Fenced { error, .. } => {
                         let _ = error;
                         std::future::pending().await
                     }
@@ -434,12 +435,12 @@ async fn owned_peer_group_mutation_body(
     persist_permit: Option<mpsc::OwnedPermit<ConfigEvent>>,
 ) -> OwnedRuntimeConfigOutcome<(), Status> {
     if daemon_gate.is_some_and(|gate| gate.is_shutting_down()) {
-        return OwnedRuntimeConfigOutcome::Clean(Err(Status::unavailable(format!(
+        return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(Status::unavailable(format!(
             "{operation_name} rejected: daemon is shutting down"
         ))));
     }
     if let Err(error) = check_config_mutation_gate(&config_mutation_gate, operation_name).await {
-        return OwnedRuntimeConfigOutcome::Clean(Err(error));
+        return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error));
     }
 
     let (mutation, event) = match intent {
@@ -459,15 +460,15 @@ async fn owned_peer_group_mutation_body(
                 .await
                 {
                     Ok(prior) => prior,
-                    Err(error) => return OwnedRuntimeConfigOutcome::Clean(Err(error)),
+                    Err(error) => return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error)),
                 };
                 match prior {
                     Some(prior) => definition.md5_password = prior.md5_password,
                     None if allow_passwordless_create => {}
                     None => {
-                        return OwnedRuntimeConfigOutcome::Clean(Err(Status::not_found(format!(
-                            "peer group {name} not found"
-                        ))));
+                        return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(Status::not_found(
+                            format!("peer group {name} not found"),
+                        )));
                     }
                 }
             }
@@ -515,7 +516,9 @@ async fn owned_peer_group_mutation_body(
             .await
         {
             Ok(staged) => Some(staged),
-            Err(error) => return OwnedRuntimeConfigOutcome::Clean(Err(error.into_status())),
+            Err(error) => {
+                return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error.into_status()));
+            }
         }
     } else {
         None
@@ -530,28 +533,38 @@ async fn owned_peer_group_mutation_body(
     match dispatch {
         OwnedCatalogDispatch::NotAccepted(error) => {
             drop(staged);
-            OwnedRuntimeConfigOutcome::Clean(Err(error))
+            OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error))
         }
-        OwnedCatalogDispatch::AcceptedReplyLost(error) => {
-            OwnedRuntimeConfigOutcome::Ambiguous(error)
-        }
+        OwnedCatalogDispatch::AcceptedReplyLost(error) => OwnedRuntimeConfigOutcome::Fenced {
+            error,
+            reason: crate::runtime_config_settlement::RuntimeConfigFenceReason::AcknowledgementLost,
+        },
         OwnedCatalogDispatch::Replied(
             OwnedCatalogMutationOutcome::RejectedNoEffect(error)
             | OwnedCatalogMutationOutcome::FullyCompensated(error),
         ) => {
             drop(staged);
-            OwnedRuntimeConfigOutcome::Clean(Err(catalog_mutation_error_to_status(&error)))
+            OwnedRuntimeConfigOutcome::CleanNoEffect(Err(catalog_mutation_error_to_status(&error)))
         }
         OwnedCatalogDispatch::Replied(OwnedCatalogMutationOutcome::CompensationAmbiguous(
             error,
-        )) => OwnedRuntimeConfigOutcome::Ambiguous(catalog_mutation_error_to_status(&error)),
+        )) => OwnedRuntimeConfigOutcome::Fenced {
+            error: catalog_mutation_error_to_status(&error),
+            reason: crate::runtime_config_settlement::RuntimeConfigFenceReason::KnownDivergence,
+        },
         OwnedCatalogDispatch::Replied(OwnedCatalogMutationOutcome::Success) => {
             let Some(staged) = staged else {
-                return OwnedRuntimeConfigOutcome::Clean(Ok(()));
+                return OwnedRuntimeConfigOutcome::PublishedDurable(());
             };
             match staged.commit_typed().await {
-                Ok(()) => OwnedRuntimeConfigOutcome::Clean(Ok(())),
-                Err(error) => OwnedRuntimeConfigOutcome::Ambiguous(error.into_status()),
+                Ok(()) => OwnedRuntimeConfigOutcome::PublishedDurable(()),
+                Err(error) => {
+                    let reason = error.fence_reason();
+                    OwnedRuntimeConfigOutcome::Fenced {
+                        error: error.into_status(),
+                        reason,
+                    }
+                }
             }
         }
     }
@@ -1751,7 +1764,9 @@ mod tests {
         let (config_tx, mut config_rx) = mpsc::channel(4);
         let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
         let (mut call, ack) = staged_delete_call(svc, &mut config_rx).await;
-        let crate::peer_types::ConfigPersistAck { staged, commit } = ack;
+        let crate::peer_types::ConfigPersistAck::Staged { staged, commit } = ack else {
+            panic!("expected staged persistence")
+        };
         staged.send(Ok(())).unwrap();
         match peer_rx.recv().await.expect("expected owned delete") {
             PeerManagerCommand::OwnedCatalogMutation { reply, .. } => {
@@ -1760,7 +1775,6 @@ mod tests {
             _ => panic!("expected owned peer-group delete"),
         }
         let reply = commit
-            .expect("owned mutation requires commit handshake")
             .await
             .expect("runtime owner must hand off commit acknowledgement");
         drop(reply);
@@ -1786,7 +1800,9 @@ mod tests {
             coordinator.clone(),
         );
         let (call, ack) = staged_delete_call(svc, &mut config_rx).await;
-        let crate::peer_types::ConfigPersistAck { staged, commit } = ack;
+        let crate::peer_types::ConfigPersistAck::Staged { staged, commit } = ack else {
+            panic!("expected staged persistence")
+        };
         staged.send(Ok(())).unwrap();
         let PeerManagerCommand::OwnedCatalogMutation { reply, .. } =
             peer_rx.recv().await.expect("expected owned delete")
@@ -1802,11 +1818,10 @@ mod tests {
             "caller cancellation must not release mutation ownership"
         );
         reply.send(OwnedCatalogMutationOutcome::Success).unwrap();
-        let commit_reply = commit
-            .expect("owned mutation requires commit handshake")
-            .await
-            .expect("detached executor must request commit");
-        commit_reply.send(Ok(())).unwrap();
+        let commit_reply = commit.await.expect("detached executor must request commit");
+        commit_reply
+            .send(crate::peer_types::ConfigPersistCommitOutcome::PublishedDurable)
+            .unwrap();
         assert!(
             tokio::time::timeout(Duration::from_secs(1), coordinator.acquire())
                 .await
