@@ -837,14 +837,22 @@ fn explain_lines(
         }
         if !m.extended_communities_add.is_empty() {
             mods.push(format!(
-                "extended-communities+={:?}",
+                "extended-communities+={}",
                 m.extended_communities_add
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
             ));
         }
         if !m.extended_communities_remove.is_empty() {
             mods.push(format!(
-                "extended-communities-={:?}",
+                "extended-communities-={}",
                 m.extended_communities_remove
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
             ));
         }
         if !m.large_communities_add.is_empty() {
@@ -1582,6 +1590,8 @@ mod tests {
                     set_med: Some(0),
                     set_next_hop: "192.0.2.9".into(),
                     communities_add: vec![4_259_840_001],
+                    extended_communities_add: vec![4_294_967_297, 4_294_967_298],
+                    extended_communities_remove: vec![8_589_934_593],
                     large_communities_add: vec!["64512:1:2".into()],
                     as_path_prepend_asn: Some(64512),
                     as_path_prepend_count: Some(2),
@@ -1606,10 +1616,13 @@ mod tests {
             "MED=0",
             "prepend=64512x2",
             "communities+=65000:1",
+            "extended-communities+=4294967297,4294967298",
+            "extended-communities-=8589934593",
         ] {
             assert!(rendered.contains(text), "missing {text}");
         }
         assert!(!rendered.contains("4259840001"));
+        assert!(!rendered.contains("[4294967297"));
         app.explain = Some(ExplainState::Ready(Box::new(
             crate::proto::ExplainAdvertisedRouteResponse {
                 decision: ExplainDecision::Advertise as i32,
