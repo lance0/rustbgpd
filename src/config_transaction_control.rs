@@ -11,16 +11,21 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
+use rustbgpd_api::health_probe::DaemonGate;
 use rustbgpd_api::peer_types::{
     ConfigEvent, ConfigPersistAck, DynamicPeerBounceOutcome, DynamicRangeTarget, PeerKey,
     PeerLifecycleError, PeerManagerCommand, PeerManagerNeighborConfig, ResolvedPeerPolicy,
     RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus, StageConfigSnapshotError,
 };
 use rustbgpd_api::proto;
+use rustbgpd_api::runtime_config_settlement::{
+    RuntimeConfigOperationKind, RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
+};
 use rustbgpd_api::server::{
     ConfigHistoryListFn, ConfigMutationGateFn, ConfigRollbackFn, ConfigTransactionAbortFn,
-    ConfigTransactionApplyError, ConfigTransactionApplyFn, ConfigTransactionConfirmFn,
-    ConfigTransactionStatusFn, GnmiSetCommitAction, GnmiSetError, GnmiSetFn, GnmiSetOutcome,
+    ConfigTransactionApplyContext, ConfigTransactionApplyError, ConfigTransactionApplyFn,
+    ConfigTransactionConfirmFn, ConfigTransactionStatusFn, GnmiSetCommitAction, GnmiSetError,
+    GnmiSetFn, GnmiSetOutcome,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use tracing::{error, info, warn};
@@ -62,6 +67,7 @@ pub struct ConfigTransactionController {
     peer_mgr_internal_tx: Option<mpsc::UnboundedSender<InternalCommand>>,
     confirm_v3_launch: Option<crate::confirm_journal::v3::LaunchIdentity>,
     v3_residue_cleanup_active: Arc<AtomicBool>,
+    settlement: Option<(RuntimeConfigSettlementWatchdog, DaemonGate)>,
     #[cfg(test)]
     v3_residue_cleanup_spawn_fail: Arc<AtomicBool>,
 }
@@ -135,6 +141,7 @@ impl ConfigTransactionController {
             peer_mgr_internal_tx: None,
             confirm_v3_launch: None,
             v3_residue_cleanup_active: Arc::new(AtomicBool::new(false)),
+            settlement: None,
             v3_residue_cleanup_spawn_fail: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -153,9 +160,20 @@ impl ConfigTransactionController {
             peer_mgr_internal_tx: None,
             confirm_v3_launch: None,
             v3_residue_cleanup_active: Arc::new(AtomicBool::new(false)),
+            settlement: None,
             #[cfg(test)]
             v3_residue_cleanup_spawn_fail: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_runtime_config_settlement(
+        mut self,
+        watchdog: RuntimeConfigSettlementWatchdog,
+        daemon_gate: DaemonGate,
+    ) -> Self {
+        self.settlement = Some((watchdog, daemon_gate));
+        self
     }
 
     #[must_use]
@@ -367,9 +385,9 @@ impl ConfigTransactionController {
     #[must_use]
     pub fn apply_fn(&self) -> ConfigTransactionApplyFn {
         let controller = self.clone();
-        Arc::new(move |request| {
+        Arc::new(move |request, context| {
             let controller = controller.clone();
-            Box::pin(async move { controller.apply(request).await })
+            Box::pin(async move { controller.apply_with_context(request, context).await })
         })
     }
 
@@ -463,14 +481,25 @@ impl ConfigTransactionController {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn apply(
         self,
         request: proto::ApplyConfigTransactionRequest,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+        let (context, _attachment) = ConfigTransactionApplyContext::unary();
+        self.apply_with_context(request, context).await
+    }
+
+    async fn apply_with_context(
+        self,
+        request: proto::ApplyConfigTransactionRequest,
+        mut context: ConfigTransactionApplyContext,
+    ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
         validate_apply_request(&request)?;
         let confirmed = parse_confirmed_apply_mode(&request)?;
+        let watched = self.settlement.is_some();
         let join = tokio::spawn(async move {
-            let _guard = tokio::time::timeout(
+            let coordinator_permit = tokio::time::timeout(
                 CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT,
                 self.deps.lock.acquire(),
             )
@@ -482,14 +511,62 @@ impl ConfigTransactionController {
                         .to_string(),
                 )
             })??;
-            self.apply_locked(request, confirmed).await
+            let Some((watchdog, daemon_gate)) = self.settlement.clone() else {
+                drop(context);
+                return self.apply_locked(request, confirmed).await;
+            };
+            let response_attached = context.response_attached();
+            let stream = context.take_stream_ownership();
+            let (stream_permit, stream_admission) = stream
+                .map_or((None, None), |(permit, admission)| {
+                    (Some(permit), Some(admission))
+                });
+            let (operation, executor_guard) = watchdog.register_owned(
+                RuntimeConfigOperationKind::Apply,
+                self.deps.lock.clone(),
+                coordinator_permit,
+                daemon_gate,
+                stream_permit,
+                stream_admission,
+                response_attached,
+            );
+            drop(context);
+            if self
+                .settlement
+                .as_ref()
+                .is_some_and(|(_, gate)| gate.is_shutting_down())
+            {
+                if !operation.try_settle() {
+                    std::future::pending::<()>().await;
+                }
+                drop(executor_guard);
+                return Err(ConfigTransactionApplyError::Unavailable(
+                    "config transaction rejected: daemon is shutting down".to_string(),
+                ));
+            }
+            operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+            let result = self.apply_locked(request, confirmed).await;
+            if matches!(
+                result,
+                Err(ConfigTransactionApplyError::DetectedAmbiguousOutcome(_))
+            ) {
+                let _ = operation.fence_ambiguous_outcome();
+                std::future::pending::<()>().await;
+            }
+            if !operation.try_settle() {
+                std::future::pending::<()>().await;
+            }
+            drop(executor_guard);
+            result
         });
 
-        join.await.map_err(|_| {
-            ConfigTransactionApplyError::Internal(
+        match join.await {
+            Ok(result) => result,
+            Err(_) if watched => std::future::pending().await,
+            Err(_) => Err(ConfigTransactionApplyError::Internal(
                 "config transaction apply task did not complete".to_string(),
-            )
-        })?
+            )),
+        }
     }
 
     async fn apply_gnmi_set(
@@ -625,7 +702,15 @@ impl ConfigTransactionController {
                 .await?;
             apply_config_transaction_locked(&self.deps, request, self.peer_mgr_internal_tx.as_ref())
                 .await
-                .map_err(|failure| failure.error)
+                .map_err(|failure| {
+                    if failure.ambiguous {
+                        ConfigTransactionApplyError::DetectedAmbiguousOutcome(
+                            failure.error.to_string(),
+                        )
+                    } else {
+                        failure.error
+                    }
+                })
         }
     }
 
@@ -708,7 +793,7 @@ impl ConfigTransactionController {
                         self.state.lock().await.ambiguous_failure_confirm_id =
                             Some(confirmed.confirm_id.clone());
                     }
-                    return Err(ConfigTransactionApplyError::Internal(format!(
+                    let message = format!(
                         "refusing confirmed apply: v3 pending authority publication failed ({:?}); {}",
                         error.kind(),
                         if error.authority_retained() {
@@ -716,7 +801,12 @@ impl ConfigTransactionController {
                         } else {
                             "the candidate and runtime remain untouched"
                         }
-                    )));
+                    );
+                    return Err(if error.authority_retained() {
+                        ConfigTransactionApplyError::DetectedAmbiguousOutcome(message)
+                    } else {
+                        ConfigTransactionApplyError::Internal(message)
+                    });
                 }
             }
         } else {
@@ -755,9 +845,11 @@ impl ConfigTransactionController {
                         error = %failure.error,
                         "confirmed config transaction failed with an ambiguous outcome; retaining the revert journal and blocking config mutations until restart"
                     );
-                    return Err(append_error_context(
-                        failure.error,
-                        "the transaction outcome is ambiguous; the commit-confirm revert journal is retained and config mutations are blocked; restart rustbgpd to boot-revert to the pre-transaction config",
+                    return Err(ConfigTransactionApplyError::DetectedAmbiguousOutcome(
+                        format!(
+                            "{}; the transaction outcome is ambiguous; the commit-confirm revert journal is retained and config mutations are blocked; restart rustbgpd to boot-revert to the pre-transaction config",
+                            failure.error
+                        ),
                     ));
                 }
                 // Provably nothing committed — a stale journal would only
@@ -1470,10 +1562,12 @@ impl ConfigTransactionController {
             Err(error) => {
                 let mut state = self.state.lock().await;
                 state.ambiguous_failure_confirm_id = Some(confirm_id.to_string());
-                Err(ConfigTransactionApplyError::Internal(format!(
-                    "v3 commit-confirm operation is nonterminal because durable locator removal failed ({:?}); config mutations remain blocked",
-                    error.kind()
-                )))
+                Err(ConfigTransactionApplyError::DetectedAmbiguousOutcome(
+                    format!(
+                        "v3 commit-confirm operation is nonterminal because durable locator removal failed ({:?}); config mutations remain blocked",
+                        error.kind()
+                    ),
+                ))
             }
         }
     }
@@ -1688,31 +1782,6 @@ fn ambiguous_failure_fence_error(operation: &str, confirm_id: &str) -> ConfigTra
          ambiguous outcome and its revert journal is retained; restart rustbgpd to boot-revert \
          to the pre-transaction config before further config mutations"
     ))
-}
-
-/// Append operator guidance to an apply error without changing its variant
-/// (the variant maps to the gRPC status code).
-fn append_error_context(
-    error: ConfigTransactionApplyError,
-    context: &str,
-) -> ConfigTransactionApplyError {
-    match error {
-        ConfigTransactionApplyError::InvalidArgument(message) => {
-            ConfigTransactionApplyError::InvalidArgument(format!("{message}; {context}"))
-        }
-        ConfigTransactionApplyError::FailedPrecondition(message) => {
-            ConfigTransactionApplyError::FailedPrecondition(format!("{message}; {context}"))
-        }
-        ConfigTransactionApplyError::Unavailable(message) => {
-            ConfigTransactionApplyError::Unavailable(format!("{message}; {context}"))
-        }
-        ConfigTransactionApplyError::DeadlineExceeded(message) => {
-            ConfigTransactionApplyError::DeadlineExceeded(format!("{message}; {context}"))
-        }
-        ConfigTransactionApplyError::Internal(message) => {
-            ConfigTransactionApplyError::Internal(format!("{message}; {context}"))
-        }
-    }
 }
 
 fn validate_apply_request(
@@ -3568,6 +3637,9 @@ fn apply_error_to_gnmi_set_error(error: ConfigTransactionApplyError) -> GnmiSetE
             GnmiSetError::Unavailable(message)
         }
         ConfigTransactionApplyError::Internal(message) => GnmiSetError::Internal(message),
+        ConfigTransactionApplyError::DetectedAmbiguousOutcome(message) => {
+            GnmiSetError::Internal(message)
+        }
     }
 }
 
@@ -3653,6 +3725,9 @@ fn confirm_abort_rollback_error(
             ConfigTransactionApplyError::DeadlineExceeded(message)
         }
         ConfigTransactionApplyError::Internal(_) => ConfigTransactionApplyError::Internal(message),
+        ConfigTransactionApplyError::DetectedAmbiguousOutcome(_) => {
+            ConfigTransactionApplyError::DetectedAmbiguousOutcome(message)
+        }
     }
 }
 
@@ -3787,7 +3862,10 @@ remote_asn = 65002
             (main, "\n                lock: runtime_config_lock.clone(),", 2),
             (main, "runtime_config_lock: runtime_config_lock.clone(),", 1),
             (main, "let Ok(_runtime_config_guard) = runtime_config_lock.acquire().await else {", 1),
-            (main, "tokio::time::timeout_at(deadline, runtime_config_lock.acquire()).await", 1),
+            (main, "tokio::time::timeout_at(runtime_config_deadline, runtime_config_lock.acquire())", 1),
+            (main, "RuntimeConfigSettlementWatchdog::new()", 1),
+            (main, ".with_runtime_config_settlement(", 1),
+            (main, "move || settlement_wait.wait_until_idle()", 1),
             (transaction, "self.deps.lock.acquire()", 6),
             (fib, ".acquire()", 2),
             (neighbor, "runtime_config_lock.acquire()", 4),
@@ -3807,8 +3885,20 @@ remote_asn = 65002
             assert!(!server.contains(prohibited), "{prohibited}");
         }
         assert_eq!(server.matches(".close();").count(), 1);
+        assert_eq!(main.matches("runtime_config_lock.close();").count(), 1);
+        let shutdown_gate = main.find("daemon_gate.begin_shutdown();").unwrap();
+        let watched_idle = main
+            .find("move || settlement_wait.wait_until_idle()")
+            .unwrap();
+        let bounded_fence = main
+            .find("tokio::time::timeout_at(runtime_config_deadline, runtime_config_lock.acquire())")
+            .unwrap();
+        let closed = main.find("runtime_config_lock.close();").unwrap();
         assert!(
-            owners[1..]
+            shutdown_gate < watched_idle && watched_idle < bounded_fence && bounded_fence < closed
+        );
+        assert!(
+            owners[1..6]
                 .iter()
                 .all(|source| !source.contains(".close();"))
         );
@@ -6617,6 +6707,48 @@ families = ["ipv4_unicast"]
     }
 
     #[tokio::test]
+    async fn uncommitted_authority_locator_sync_failure_is_ambiguous() {
+        let harness = external_fib_harness(60, None).await;
+        let files = harness
+            .controller
+            .state
+            .lock()
+            .await
+            .pending
+            .as_ref()
+            .unwrap()
+            .v3_files
+            .clone()
+            .unwrap();
+        files.fail_locator_directory_sync_once_for_test();
+        let error = harness
+            .controller
+            .cleanup_uncommitted_authority(
+                "external-fib",
+                Some(files.as_ref()),
+                "fault-injected cleanup",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigTransactionApplyError::DetectedAmbiguousOutcome(ref message)
+                if message.contains("nonterminal") && message.contains("locator removal failed")
+        ));
+        assert_eq!(
+            harness
+                .controller
+                .state
+                .lock()
+                .await
+                .ambiguous_failure_confirm_id
+                .as_deref(),
+            Some("external-fib")
+        );
+        harness.ack_task.abort();
+    }
+
+    #[tokio::test]
     async fn stalled_v3_residue_cleanup_releases_terminal_paths_and_is_singleton() {
         use std::os::unix::fs::PermissionsExt as _;
 
@@ -6902,7 +7034,7 @@ families = ["ipv4_unicast"]
 
         let err = assert_ambiguous_apply_failure_wedges(&controller, &dir, &previous_toml).await;
         assert!(
-            matches!(err, ConfigTransactionApplyError::Unavailable(ref message)
+            matches!(err, ConfigTransactionApplyError::DetectedAmbiguousOutcome(ref message)
                 if message.contains("snapshot commit") && message.contains("ambiguous")),
             "{err:?}"
         );
@@ -6943,7 +7075,7 @@ families = ["ipv4_unicast"]
 
         let err = assert_ambiguous_apply_failure_wedges(&controller, &dir, &previous_toml).await;
         assert!(
-            matches!(err, ConfigTransactionApplyError::Internal(ref message)
+            matches!(err, ConfigTransactionApplyError::DetectedAmbiguousOutcome(ref message)
                 if message.contains("persistence acknowledgement") && message.contains("ambiguous")),
             "{err:?}"
         );
@@ -6992,7 +7124,7 @@ families = ["ipv4_unicast"]
 
         let err = assert_ambiguous_apply_failure_wedges(&controller, &dir, &previous_toml).await;
         assert!(
-            matches!(err, ConfigTransactionApplyError::Internal(ref message)
+            matches!(err, ConfigTransactionApplyError::DetectedAmbiguousOutcome(ref message)
                 if message.contains("rollback failed") && message.contains("ambiguous")),
             "{err:?}"
         );

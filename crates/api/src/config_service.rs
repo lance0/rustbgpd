@@ -20,8 +20,9 @@ use crate::peer_types::{
 };
 use crate::proto;
 use crate::server::{
-    ConfigHistoryListFn, ConfigRollbackFn, ConfigTransactionAbortFn, ConfigTransactionApplyError,
-    ConfigTransactionApplyFn, ConfigTransactionConfirmFn, ConfigTransactionStatusFn,
+    ConfigHistoryListFn, ConfigRollbackFn, ConfigTransactionAbortFn, ConfigTransactionApplyContext,
+    ConfigTransactionApplyError, ConfigTransactionApplyFn, ConfigTransactionConfirmFn,
+    ConfigTransactionStatusFn,
 };
 
 pub(super) const CONFIG_OPERATION_TIMEOUT: Duration = Duration::from_mins(30);
@@ -309,7 +310,8 @@ impl proto::config_service_server::ConfigService for ConfigService {
                 "ConfigService.ApplyConfigTransaction executor is unavailable",
             ));
         };
-        transaction_apply(request)
+        let (context, _attachment) = ConfigTransactionApplyContext::unary();
+        transaction_apply(request, context)
             .await
             .map(Response::new)
             .map_err(ConfigTransactionApplyError::into_status)
@@ -909,7 +911,7 @@ mod tests {
     async fn apply_config_transaction_forwards_to_hook() {
         let (tx, _rx) = mpsc::channel(1);
         let svc = ConfigService::new(tx).with_transaction_hooks(
-            Some(Arc::new(|request| {
+            Some(Arc::new(|request, _context| {
                 Box::pin(async move {
                     assert_eq!(request.candidate_toml, "candidate");
                     assert_eq!(request.expected_runtime_snapshot_token, "kv1:abc:9");

@@ -2970,6 +2970,7 @@ dependencies = [
  "bytes",
  "criterion",
  "futures",
+ "libc",
  "nix 0.31.3",
  "prometheus",
  "prost",
