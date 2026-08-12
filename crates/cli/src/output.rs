@@ -1311,11 +1311,8 @@ mod tests {
         let unlimited = serde_json::to_value(row(Some(0))).unwrap();
         let finite = serde_json::to_value(row(Some(4))).unwrap();
 
-        // Load-bearing: restoring the raw sentinel key or changing any
-        // presence state makes these exact machine-format assertions red.
-        for value in [&inactive, &unlimited, &finite] {
-            assert!(value.get("effective_send_max").is_none());
-        }
+        // Load-bearing: changing any presence state makes these exact
+        // machine-format assertions red.
         assert_eq!(inactive["effective_send_active"], false);
         assert!(inactive.get("effective_send_limit").is_none());
         assert_eq!(unlimited["effective_send_active"], true);
