@@ -61,7 +61,7 @@ use crate::error::DataplaneError;
 use super::links::{FdbVxlanTarget, LinkCache, unique_fdb_vxlan_target_for_vni};
 
 /// `NDA_NH_ID` (kind = 13). Not exposed as a typed variant by
-/// `netlink-packet-route 0.30`; emit via the `Other(DefaultNla)`
+/// `netlink-packet-route 0.32.1`; emit via the `Other(DefaultNla)`
 /// escape hatch.
 const NDA_NH_ID: u16 = 13;
 

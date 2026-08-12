@@ -176,8 +176,8 @@ socket2.workspace = true
 tokio-util = { version = "0.7", features = ["rt"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rtnetlink = "0.21"
-netlink-packet-route = "0.30"
+rtnetlink = "0.22"
+netlink-packet-route = "0.32.1"
 libc.workspace = true
 nix = { workspace = true, features = ["fs", "signal", "time", "user"] }
 futures = "0.3"

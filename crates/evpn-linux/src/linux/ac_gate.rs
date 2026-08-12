@@ -28,7 +28,7 @@
 //! `tests/netns_ac_gate.rs` (`EVPN_LINUX_NETNS=1`).
 //!
 //! The `IFLA_PROTINFO` attribute is hand-built via [`DefaultNla`]:
-//! netlink-packet-route 0.30's typed `LinkAttribute::ProtoInfoBridge`
+//! netlink-packet-route 0.32.1's typed `LinkAttribute::ProtoInfoBridge`
 //! emits `IFLA_PROTINFO` *without* `NLA_F_NESTED`, which the kernel's
 //! `br_setlink` would interpret through its legacy non-nested
 //! "binary compatibility with old RSTP" branch — reading the first

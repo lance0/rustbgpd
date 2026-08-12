@@ -2035,29 +2035,21 @@ branch is between features.
   deliberately differ: cargo-deny warns (not fails) on unsound-class
   advisories, so only the unmaintained `paste` entry needs a deny.toml
   ignore while `.cargo/audit.toml` also carries the rand unsoundness entry.
-- [ ] **`netlink-packet-route` 0.31 upgrade — proven ready, blocked on rtnetlink
-  lockstep.** 0.31.0's two breaking changes (`InfoIpTunnel::CollectMetadata`,
-  `InfoVxlan::Df`) don't affect us — rustbgpd compiles clean against 0.31 with no
-  source changes. The blocker is upstream: `rtnetlink` (latest crates.io 0.21.0)
-  pins `netlink-packet-route ^0.30`, and our code feeds `netlink_packet_route`
-  types straight into `rtnetlink::Handle`, so a lone bump produces a
-  duplicate-version tree and ~31 type-mismatch errors. **Readiness is proven** —
-  draft PR #538 validates the upgrade against a git-pinned upstream `rtnetlink`
-  revision already on 0.31: workspace check/clippy/test/doc, the privileged netns
-  selectors, and M42/M50/M58/M70 containerlab receipts all green. To stop the
-  un-mergeable nag, Dependabot now **ignores `netlink-packet-route` `>= 0.31`**
-  (0.30.x security patches still flow). **Revisit when `rtnetlink` 0.22+ lands on
-  crates.io with 0.31 support**: drop the Dependabot ignore + the
-  `[patch.crates-io]` pin, bump the pair together in one PR, rerun the #538 matrix
-  (raw `IFLA_PROTINFO` AC-gate encode + `link_carrier` flag reads are the surfaces
-  to re-verify), and merge. LAN-643 is the sole live upstream-watch tracker;
-  closed Dependabot PR #452 remains the duplicate-version/type-mismatch proof.
-  Verified during the FIB route-drift eventing work (#482). **Upstream nudge
-  filed 2026-06-23:**
-  rust-netlink/rtnetlink#173 — a "New release 0.22.0" version-bump + CHANGELOG PR
-  against their `main` (which already carries the 0.31 dep) — requests the release
-  that unblocks this; execute the close-out above if/when any `rtnetlink` 0.22+
-  publishes.
+- [x] **Upgrade the released rtnetlink pair.** Done: rustbgpd now uses
+  `rtnetlink 0.22.0` with its coherent `netlink-packet-route 0.32.1` dependency,
+  with one resolved copy of each crate and no git patch or compatibility shim.
+  The obsolete Dependabot ignore for `netlink-packet-route >= 0.31` is removed.
+  Upstream release-preparation PR rust-netlink/rtnetlink#173 was closed unmerged
+  after the maintainer published 0.22.0 directly, so the old intermediate proof
+  PR #538 was closed rather than revived. Validation on the released crates
+  covers locked workspace check/test/Clippy, strict `rustbgpd-evpn-linux`
+  rustdoc, no-default/all-feature builds, and the privileged FDB-NHG,
+  FIB-runtime, BFD-runtime, VLAN-aware FDB,
+  MAC+IP/VLAN attribution, SVD FDB/VNI, managed SVD VXLAN, and managed IP-VRF
+  netns selectors. The raw `NDA_NH_ID`, `RT_TABLE_COMPAT`, and nested
+  `IFLA_PROTINFO` escape hatches remain because 0.32.1 still does not expose the
+  required typed kernel encodings. LAN-643 records the completion; closed
+  Dependabot PR #452 remains the historical duplicate-version proof.
 - [x] **Workspace `cargo doc` warning posture.** `.github/workflows/ci.yml` runs
   `cargo doc --workspace --lib --no-deps` with
   `RUSTDOCFLAGS="-D warnings"`; keep that as the standing local pre-flight
