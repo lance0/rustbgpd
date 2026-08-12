@@ -83,13 +83,15 @@ docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 summary
 # Browse the RIB
 docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 rib
 
-# Live TUI dashboard — sessions, prefix counts, message rates
+# Live TUI dashboard — sessions, prefix counts, message rates, export explain
 docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 top
 ```
 
 ![rbgp top — live TUI dashboard](docs/images/tui-screenshot.png)
 
-Press `q` to exit the TUI. When you're done: `docker compose down`.
+Select a peer, open its detail, then press `r` to browse the point-in-time
+unicast Best-RIB and explain export decisions for that peer. Press `q` to exit
+the TUI. When you're done: `docker compose down`.
 
 ## Policy you can test before it touches a route
 
@@ -144,7 +146,8 @@ config from their existing `general.yml`/`clients.yml`:
   looking-glass stack for less. Best-path, export-gate, and filtered-route
   views are always on; the **import**-decision surface is opt-in
   (`[policy.explain] enabled = true`), because it retains a decision cache
-  per session ([docs/explain.md](docs/explain.md))
+  per session. The TUI also exposes the unicast export-gate slice for a
+  selected peer ([docs/explain.md](docs/explain.md))
 - **Update-group fanout** — peers with provably identical staged output share
   one staging pass: ~27x faster 100k-route convergence at 256 uniform RR
   clients (15.1 s to 0.56 s); v2 extends sharing to VPNv4/v6 with per-member
