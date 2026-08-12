@@ -34,6 +34,7 @@ pub mod peer_types;
 mod policy_helpers;
 mod policy_service;
 pub mod rib_service;
+pub mod runtime_config_settlement;
 pub mod server;
 #[cfg(test)]
 mod test_support;
