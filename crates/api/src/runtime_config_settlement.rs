@@ -26,6 +26,10 @@ pub enum RuntimeConfigOperationKind {
     Abort,
     Rollback,
     AutoRevert,
+    NeighborAdd,
+    NeighborDelete,
+    DynamicNeighborAdd,
+    DynamicNeighborDelete,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -268,6 +272,63 @@ impl RuntimeConfigSettlementWatchdog {
         )
     }
 
+    /// Run one detached, owned mutation from coordinator acquisition through
+    /// typed settlement. Registration is the first post-acquire operation.
+    /// Caller cancellation detaches only the response; typed ambiguity,
+    /// deadline, or executor loss fences and parks the retained owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns only the error carried by a typed clean outcome or coordinator
+    /// acquisition before ownership. Ambiguous owned outcomes never return.
+    pub async fn execute_owned<T, E, F, Fut>(
+        &self,
+        kind: RuntimeConfigOperationKind,
+        coordinator: RuntimeConfigCoordinator,
+        daemon_gate: DaemonGate,
+        response_attached: Arc<AtomicBool>,
+        body: F,
+    ) -> Result<T, E>
+    where
+        T: Send + 'static,
+        E: From<crate::server::RuntimeConfigCoordinatorClosed> + Send + 'static,
+        F: FnOnce(OwnedRuntimeConfigOperation) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = OwnedRuntimeConfigOutcome<T, E>> + Send + 'static,
+    {
+        let watchdog = self.clone();
+        let join = tokio::spawn(async move {
+            let coordinator_permit = coordinator.acquire().await?;
+            let (operation, executor_guard) = watchdog.register_owned(
+                kind,
+                coordinator,
+                coordinator_permit,
+                daemon_gate,
+                None,
+                None,
+                response_attached,
+            );
+            let outcome = body(operation.clone()).await;
+            match outcome {
+                OwnedRuntimeConfigOutcome::Clean(result) => {
+                    if !operation.try_settle() {
+                        std::future::pending::<()>().await;
+                    }
+                    drop(executor_guard);
+                    result
+                }
+                OwnedRuntimeConfigOutcome::Ambiguous(error) => {
+                    let _ = error;
+                    let _ = operation.fence_ambiguous_outcome();
+                    std::future::pending().await
+                }
+            }
+        });
+        match join.await {
+            Ok(result) => result,
+            Err(_) => std::future::pending().await,
+        }
+    }
+
     /// Block the calling OS thread until every clean registration settles.
     /// Ambiguous ownership deliberately never unregisters; its fail-stop wins.
     pub fn wait_until_idle(&self) {
@@ -279,6 +340,48 @@ impl RuntimeConfigSettlementWatchdog {
                 .wait(state)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
+    }
+}
+
+/// Typed result from an owned body; never inferred from transport status.
+pub enum OwnedRuntimeConfigOutcome<T, E> {
+    /// Success or a proven no-effect or fully-compensated failure.
+    Clean(Result<T, E>),
+    /// An accepted effect whose final state cannot be proved.
+    Ambiguous(E),
+}
+
+/// Response attachment shared with a detached owned executor.
+pub struct OwnedRuntimeConfigRequestContext {
+    response_attached: Arc<AtomicBool>,
+}
+
+impl OwnedRuntimeConfigRequestContext {
+    /// Create a unary response attachment owned by the outer RPC future.
+    #[must_use]
+    pub fn unary() -> (Self, OwnedRuntimeConfigResponseAttachment) {
+        let attached = Arc::new(AtomicBool::new(true));
+        (
+            Self {
+                response_attached: Arc::clone(&attached),
+            },
+            OwnedRuntimeConfigResponseAttachment(attached),
+        )
+    }
+
+    /// Transfer the shared attachment sentinel to the detached executor.
+    #[must_use]
+    pub fn response_attached(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.response_attached)
+    }
+}
+
+/// Outer-RPC sentinel; dropping it records cancellation without releasing ownership.
+pub struct OwnedRuntimeConfigResponseAttachment(Arc<AtomicBool>);
+
+impl Drop for OwnedRuntimeConfigResponseAttachment {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -703,6 +806,120 @@ mod tests {
         assert!(operation.try_settle());
         drop(guard);
         waiter.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn shared_executor_outlives_rpc_cancellation_and_settles_cleanly() {
+        let (watchdog, _receiver) = test_watchdog(Duration::from_secs(5), Duration::from_secs(1));
+        let coordinator = RuntimeConfigCoordinator::new();
+        let gate = DaemonGate::new();
+        let (context, attachment) = OwnedRuntimeConfigRequestContext::unary();
+        let (operation_tx, operation_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let executor = tokio::spawn({
+            let watchdog = watchdog.clone();
+            let coordinator = coordinator.clone();
+            async move {
+                watchdog
+                    .execute_owned(
+                        RuntimeConfigOperationKind::NeighborAdd,
+                        coordinator,
+                        gate,
+                        context.response_attached(),
+                        move |operation| async move {
+                            let _ = operation_tx.send(operation);
+                            let _ = release_rx.await;
+                            OwnedRuntimeConfigOutcome::<(), tonic::Status>::Clean(Ok(()))
+                        },
+                    )
+                    .await
+            }
+        });
+        let operation = operation_rx.await.unwrap();
+        executor.abort();
+        let _ = executor.await;
+        drop(attachment);
+        assert!(!operation.response_attached());
+        assert_eq!(operation.terminal(), RuntimeConfigSettlementTerminal::Owned);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), coordinator.acquire())
+                .await
+                .is_err(),
+            "caller cancellation must not release coordinator ownership"
+        );
+        release_tx.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), coordinator.acquire())
+                .await
+                .unwrap()
+                .is_ok()
+        );
+        assert_eq!(
+            operation.terminal(),
+            RuntimeConfigSettlementTerminal::Settled
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_executor_ambiguity_fences_queued_and_future_owners() {
+        let (watchdog, receiver) = test_watchdog(Duration::from_secs(5), Duration::from_millis(20));
+        let coordinator = RuntimeConfigCoordinator::new();
+        let gate = DaemonGate::new();
+        let (context, _attachment) = OwnedRuntimeConfigRequestContext::unary();
+        let (operation_tx, operation_rx) = tokio::sync::oneshot::channel();
+        let (ambiguous_tx, ambiguous_rx) = tokio::sync::oneshot::channel();
+        let executor = tokio::spawn({
+            let watchdog = watchdog.clone();
+            let coordinator = coordinator.clone();
+            let gate = gate.clone();
+            async move {
+                watchdog
+                    .execute_owned(
+                        RuntimeConfigOperationKind::NeighborDelete,
+                        coordinator,
+                        gate,
+                        context.response_attached(),
+                        move |operation| async move {
+                            let _ = operation_tx.send(operation);
+                            let _ = ambiguous_rx.await;
+                            OwnedRuntimeConfigOutcome::<(), tonic::Status>::Ambiguous(
+                                tonic::Status::internal("typed ambiguous test outcome"),
+                            )
+                        },
+                    )
+                    .await
+            }
+        });
+        let operation = operation_rx.await.unwrap();
+        let queued = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.acquire().await }
+        });
+        ambiguous_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while operation.terminal() == RuntimeConfigSettlementTerminal::Owned {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            operation.terminal(),
+            RuntimeConfigSettlementTerminal::AmbiguousFenced
+        );
+        assert_eq!(
+            operation.fence_reason(),
+            Some(RuntimeConfigFenceReason::DetectedAmbiguousOutcome)
+        );
+        assert!(gate.is_shutting_down());
+        assert!(queued.await.unwrap().is_err());
+        assert!(coordinator.acquire().await.is_err());
+        assert!(
+            !executor.is_finished(),
+            "ambiguous outcome must never return"
+        );
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(), 70);
+        executor.abort();
     }
 
     #[tokio::test(start_paused = true)]

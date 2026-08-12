@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
 use rustbgpd_api::peer_types::{
-    ConfigEvent, DynamicNeighborInfo, POLICY_EVENT_HISTORY_CAPACITY, PeerKey, PeerManagerCommand,
+    ConfigEvent, DynamicNeighborInfo, OwnedNeighborMutation, OwnedNeighborMutationError,
+    OwnedNeighborMutationOutcome, POLICY_EVENT_HISTORY_CAPACITY, PeerKey, PeerManagerCommand,
     PeerManagerNeighborConfig, PeerManagerReadinessQuery, PolicyDatasetStatusRow, PolicyEvent,
     SESSION_EVENT_HISTORY_CAPACITY, SessionEvent, SessionLifecycleEvent, StageConfigSnapshotError,
 };
@@ -948,6 +949,67 @@ impl PeerManager {
                         PeerManagerCommand::DeletePeer { peer, sync_config_snapshot, reply } => {
                             let result = self.delete_peer_runtime(peer, sync_config_snapshot).await;
                             let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::OwnedNeighborMutation { mutation, reply } => {
+                            // Static delete and both dynamic operations validate
+                            // before effect; static add reports cleanup explicitly.
+                            let outcome = match mutation {
+                                OwnedNeighborMutation::Add(spec) => {
+                                    let mut effect =
+                                        lifecycle::RuntimeCreatePeerFailureEffect::NoEffect;
+                                    match self
+                                        .runtime_create_peer_classified(spec, Some(&mut effect))
+                                        .await
+                                    {
+                                        Ok(()) => OwnedNeighborMutationOutcome::Success,
+                                        Err(error) => match effect {
+                                            lifecycle::RuntimeCreatePeerFailureEffect::NoEffect => {
+                                                OwnedNeighborMutationOutcome::RejectedNoEffect(
+                                                    OwnedNeighborMutationError::Peer(error),
+                                                )
+                                            }
+                                            lifecycle::RuntimeCreatePeerFailureEffect::FullyCompensated => {
+                                                OwnedNeighborMutationOutcome::FullyCompensated(
+                                                    OwnedNeighborMutationError::Peer(error),
+                                                )
+                                            }
+                                        },
+                                    }
+                                }
+                                OwnedNeighborMutation::Delete(peer) => {
+                                    match self.delete_peer_runtime(peer, true).await {
+                                        Ok(_) => OwnedNeighborMutationOutcome::Success,
+                                        Err(error) => OwnedNeighborMutationOutcome::RejectedNoEffect(
+                                            OwnedNeighborMutationError::Peer(error),
+                                        ),
+                                    }
+                                }
+                                OwnedNeighborMutation::DynamicAdd {
+                                    prefix,
+                                    peer_group,
+                                    remote_asn,
+                                    description,
+                                } => match self.add_dynamic_range(
+                                        prefix,
+                                        peer_group,
+                                        remote_asn,
+                                        description,
+                                    ) {
+                                        Ok(()) => OwnedNeighborMutationOutcome::Success,
+                                        Err(error) => OwnedNeighborMutationOutcome::RejectedNoEffect(
+                                            OwnedNeighborMutationError::Dynamic(error),
+                                        ),
+                                    },
+                                OwnedNeighborMutation::DynamicDelete { prefix } => {
+                                    match self.delete_dynamic_range(&prefix) {
+                                        Ok(_) => OwnedNeighborMutationOutcome::Success,
+                                        Err(error) => OwnedNeighborMutationOutcome::RejectedNoEffect(
+                                            OwnedNeighborMutationError::Dynamic(error),
+                                        ),
+                                    }
+                                }
+                            };
+                            let _ = reply.send(outcome);
                         }
                         PeerManagerCommand::ReconfigurePeer { config, reply } => {
                             let result = self.reconfigure_peer_runtime(config).await;
