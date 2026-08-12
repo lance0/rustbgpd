@@ -21,13 +21,11 @@ streamed candidates and other config mutation paths remain fenced until daemon
 restart, but the daemon can continue to report process health even though its
 config plane cannot settle.
 
-A separate proposed precursor, published in PR #1607 but not yet part of this
-ADR's baseline behavior, would give unary and streamed
-`ApplyConfigTransaction` ten minutes to acquire the coordinator. It is a
-dependency for this design: expiry rejects only those waiting Apply operations
-without mutation, while this ADR covers liveness after ownership. It does not
-cover rollback, confirm, abort, gNMI, or auto-revert and does not close the
-underlying settlement-liveness issue.
+PR #1607 and current source give unary and streamed `ApplyConfigTransaction`
+ten minutes to acquire the coordinator. Expiry rejects only those waiting Apply
+operations without mutation, while this ADR covers liveness after ownership.
+That precursor does not bound rollback, confirm, abort, gNMI, or auto-revert
+before ownership and does not close the underlying settlement-liveness issue.
 
 This ADR defines the post-ownership contract. It is architecture only. Its
 Proposed status does not claim that a watchdog, fail-stop path, observability,
@@ -85,32 +83,39 @@ The 30-minute budget, five-second grace, and exit status 70 below are Proposed
 acceptance choices. None describes current behavior until this ADR is accepted
 and its implementation gates pass.
 
-An owned operation gets one 30-minute monotonic settlement budget. The sealed
+An owned operation gets one fixed, non-resettable 30-minute monotonic
+settlement budget. This is the latest normal settlement deadline; independently
+detected executor loss can advance fail-stop as specified below without
+resetting or extending the budget. The sealed
 [IRR transactional-apply receipt](../perf/irr-transactional-apply-2026-08.md)
 measured a 295.6 MB candidate with end-to-end completion no higher than 208.55
 seconds and auto-revert no slower than 69.5 seconds. Thirty minutes is a
-conservative design target, not a latency promise; family limits stay separate.
+receipt-based conservative design target, not a normal-latency promise; family
+limits stay separate. A streamed request that consumes every sequential bound
+could take about 70 minutes and 5 seconds: 30 minutes of ingress, 10 minutes
+waiting for ownership, 30 minutes owned, and 5 seconds of fail-stop grace.
 
-A dedicated OS thread owns the terminal clock and, after the grace below,
-calls `std::process::exit(70)` directly. The choice of this primitive requires
-owner acceptance with this ADR. Its hard-exit path cannot await the async
-runtime, an actor, logging, filesystem I/O, cleanup, or unwinding. The operation
-can update an atomic phase and disarm the thread only with a proved terminal
-`settled` transition; it cannot extend or replace the deadline.
+One process-wide Linux OS thread owns all terminal clocks. After the grace
+below it invokes audited `libc::_exit(70)`, a no-handler process primitive.
+This is a deliberate Linux implementation contract, not a portable-standard
+claim, and requires owner acceptance with this ADR. Before that call, the
+user-space terminal wrapper performs no allocation, lock acquisition, tracing,
+filesystem I/O, async work, handler dispatch, or unwinding; kernel descriptor
+and process teardown can still occur and are outside that guarantee. A
+multithreaded subprocess test must prove every thread dies and the parent
+observes exact status 70. The operation can update an atomic phase and disarm
+its registration only with a proved terminal `settled` transition; it cannot
+extend or replace the deadline.
 
-At 30 minutes without `settled`, the watchdog atomically marks the operation
-`ambiguous-fenced`, marks process readiness unavailable, closes admission for
-all new persisted config mutations, and requests supervised shutdown. Existing
-read-only diagnostics may remain available during the fail-stop grace. The
-shutdown path may finish sooner, but it must not wait on the wedged operation.
-If the process is still alive five seconds after watchdog expiry, that OS
-thread calls `std::process::exit(70)`. Thus an owned operation either settles
-normally or the daemon exits nonzero no later than 30 minutes and five seconds
-after ownership.
-
-The five-second grace lets the async side publish its fence and request
-shutdown; it is not a rollback window. The OS thread does not depend on that
-work completing.
+At 30 minutes without `settled`, one atomic compare-and-swap irreversibly wins
+the `owned -> ambiguous-fenced` race against settlement. It marks readiness
+unavailable, closes admission for new persisted mutations, and requests
+supervised shutdown. Settlement may disarm only if its compare-and-swap wins
+first; after expiry wins, no late reply can reverse the fence or claim success.
+The five-second grace exists solely to propagate that fence and emit one
+bounded emergency diagnostic. It is not a rollback window, graceful actor
+drain, telemetry-scrape interval, or permission to wait on the wedged operation.
+If the process remains alive, the OS thread exits it at 30 minutes 5 seconds.
 
 ### Response and ownership are separate clocks
 
@@ -130,7 +135,10 @@ enum, or token format.
 Awaiting or dropping a caller-side `JoinHandle` never cancels the detached task;
 a dropped handle detaches, and the operation remains owned/running. Executor
 `JoinError`, owner-guard drop, panic, unwind, or task abort after coordinator
-acquisition fences immediately. Unless already `settled`, the owner guard marks
+acquisition advances the hard-exit deadline to five seconds after the loss.
+The same exact compare-and-swap decides executor-loss versus a concurrent
+`settled` transition: loss cannot fence a prior settlement, and settlement
+cannot revoke a loss-won fence. Unless already `settled`, the owner guard marks
 `ambiguous-fenced` before its coordinator guard or stream permit can drop; the
 OS-thread registration outlives the task. Process abort already meets fail-stop.
 
@@ -193,10 +201,12 @@ or free-form actor/error strings. Metric labels come from a closed enum.
 
 The existing process availability gate is the first fencing mechanism at
 watchdog expiry: readiness turns red and every entry point for a new persisted
-mutation rejects work. Where the process is still schedulable, mutation actors
-must also reject newly dequeued persisted work after observing that fence.
-Neither step is permission to release the owned coordinator or streamed
-admission before death.
+mutation rejects work. An actor dequeue fence is additionally required only
+where source inventory proves a producer can bypass the coordinator. A
+closeable coordinator is sufficient for queued and future producers only when
+an inventory and checker prove that every persisted producer passes through it.
+No fence may reject settlement commands from the current owner. None of these
+steps permits release of its coordinator or streamed admission before death.
 
 Ordinary coordinated shutdown first closes mutation admission. If an owned
 transaction exists, shutdown may wait only until the earlier of normal
@@ -212,10 +222,12 @@ are rejected before teardown and cannot begin after the owner settles or dies.
 Implementation is not complete until deterministic tests cover the phase and
 recovery contract:
 
-1. Paused-clock unit tests hold each actor and persistence reply used by every
-   mutation family. At 29 minutes 59 seconds the owner, coordinator, admission,
-   and watchdog remain live; at 30 minutes the state becomes
-   `ambiguous-fenced` exactly once.
+1. An injected deterministic watchdog driver holds each actor and persistence
+   reply used by every mutation family. At 29 minutes 59 seconds the owner,
+   coordinator, admission, and watchdog remain live; at 30 minutes the state
+   becomes `ambiguous-fenced` exactly once. Tokio paused time cannot drive an
+   OS-thread condition variable, so real OS-thread and subprocess tests must
+   separately prove wake-up and terminal behavior.
 2. Caller-`JoinHandle` wait/drop tests prove the operation remains owned/running.
    Executor `JoinError`, panic/unwind/task-abort, and owner-guard-drop tests prove
    immediate fencing before coordinator/permit release, OS thread still armed,
@@ -235,7 +247,9 @@ recovery contract:
    graceful-shutdown path are independently stalled.
 
 The test matrix must exercise every config-transaction entry path and mutation
-family. A single synthetic oneshot test is necessary but insufficient.
+family with a finite pairwise matrix of entry path, phase, and failure class;
+it must not grow into their full Cartesian product. A single synthetic oneshot
+test is necessary but insufficient.
 
 ### Rejected alternatives
 
@@ -259,6 +273,9 @@ family. A single synthetic oneshot test is necessary but insufficient.
 
 - A permanently stuck owned transaction becomes a bounded daemon restart
   instead of an indefinite config-plane wedge.
+- Systemd and other supervisors must treat exit 70 as failure and restartable.
+  Deployment documentation and shipped supervisor examples must be updated as
+  part of implementation; this ADR makes no portable supervisor claim.
 - The bound is deliberately fail-stop, so BGP sessions can be interrupted after
   a severe control-plane ambiguity. Supervision and graceful-restart behavior
   mitigate but do not erase that operational cost.
