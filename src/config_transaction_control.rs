@@ -19,13 +19,14 @@ use rustbgpd_api::peer_types::{
 };
 use rustbgpd_api::proto;
 use rustbgpd_api::runtime_config_settlement::{
-    RuntimeConfigOperationKind, RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
+    OwnedRuntimeConfigOperation, RuntimeConfigOperationKind, RuntimeConfigSettlementPhase,
+    RuntimeConfigSettlementWatchdog,
 };
 use rustbgpd_api::server::{
     ConfigHistoryListFn, ConfigMutationGateFn, ConfigRollbackFn, ConfigTransactionAbortFn,
     ConfigTransactionApplyContext, ConfigTransactionApplyError, ConfigTransactionApplyFn,
     ConfigTransactionConfirmFn, ConfigTransactionStatusFn, GnmiSetCommitAction, GnmiSetError,
-    GnmiSetFn, GnmiSetOutcome,
+    GnmiSetFn, GnmiSetOutcome, RuntimeConfigCoordinatorClosed,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use tracing::{error, info, warn};
@@ -129,7 +130,119 @@ struct ConfirmedApplyMode {
     timeout_seconds: u32,
 }
 
+trait OwnedOperationError: From<RuntimeConfigCoordinatorClosed> + Send + 'static {
+    fn unavailable(message: &'static str) -> Self;
+    fn task_lost(message: &'static str) -> Self;
+    fn is_ambiguous(&self) -> bool;
+}
+
+impl OwnedOperationError for ConfigTransactionApplyError {
+    fn unavailable(message: &'static str) -> Self {
+        Self::Unavailable(message.to_string())
+    }
+
+    fn task_lost(message: &'static str) -> Self {
+        Self::Internal(message.to_string())
+    }
+
+    fn is_ambiguous(&self) -> bool {
+        matches!(self, Self::DetectedAmbiguousOutcome(_))
+    }
+}
+
+enum OwnedGnmiSetError {
+    Clean(GnmiSetError),
+    Ambiguous(String),
+}
+
+impl From<RuntimeConfigCoordinatorClosed> for OwnedGnmiSetError {
+    fn from(error: RuntimeConfigCoordinatorClosed) -> Self {
+        Self::Clean(error.into())
+    }
+}
+
+impl OwnedOperationError for OwnedGnmiSetError {
+    fn unavailable(message: &'static str) -> Self {
+        Self::Clean(GnmiSetError::Unavailable(message.to_string()))
+    }
+
+    fn task_lost(message: &'static str) -> Self {
+        Self::Clean(GnmiSetError::Internal(message.to_string()))
+    }
+
+    fn is_ambiguous(&self) -> bool {
+        matches!(self, Self::Ambiguous(_))
+    }
+}
+
+impl From<GnmiSetError> for OwnedGnmiSetError {
+    fn from(error: GnmiSetError) -> Self {
+        Self::Clean(error)
+    }
+}
+
 impl ConfigTransactionController {
+    async fn execute_owned_operation<T, E, F, Fut>(
+        self,
+        kind: RuntimeConfigOperationKind,
+        response_attached: bool,
+        shutdown_message: &'static str,
+        task_lost_message: &'static str,
+        body: F,
+    ) -> Result<T, E>
+    where
+        T: Send + 'static,
+        E: OwnedOperationError,
+        F: FnOnce(Self, Option<OwnedRuntimeConfigOperation>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, E>> + Send + 'static,
+    {
+        let watched = self.settlement.is_some();
+        let join = tokio::spawn(async move {
+            let coordinator_permit = self.deps.lock.acquire().await?;
+            let Some((watchdog, daemon_gate)) = self.settlement.clone() else {
+                return body(self, None).await;
+            };
+            let (operation, executor_guard) = watchdog.register_owned(
+                kind,
+                self.deps.lock.clone(),
+                coordinator_permit,
+                daemon_gate,
+                None,
+                None,
+                Arc::new(AtomicBool::new(response_attached)),
+            );
+            if self
+                .settlement
+                .as_ref()
+                .is_some_and(|(_, gate)| gate.is_shutting_down())
+            {
+                if !operation.try_settle() {
+                    std::future::pending::<()>().await;
+                }
+                drop(executor_guard);
+                return Err(E::unavailable(shutdown_message));
+            }
+            let result = body(self, Some(operation.clone())).await;
+            if result
+                .as_ref()
+                .is_err_and(OwnedOperationError::is_ambiguous)
+            {
+                let _ = operation.fence_ambiguous_outcome();
+                std::future::pending::<()>().await;
+            }
+            if !operation.try_settle() {
+                std::future::pending::<()>().await;
+            }
+            drop(executor_guard);
+            result
+        });
+        match join.await {
+            Ok(result) => result,
+            Err(_) if watched => std::future::pending().await,
+            Err(_) => Err(E::task_lost(task_lost_message)),
+        }
+    }
+
     #[cfg(test)]
     #[must_use]
     pub fn new(deps: FibTableControlDeps, metrics: BgpMetrics) -> Self {
@@ -346,7 +459,13 @@ impl ConfigTransactionController {
                 self.peer_mgr_internal_tx.as_ref(),
             )
             .await
-            .map_err(|failure| failure.error)
+            .map_err(|failure| {
+                if failure.ambiguous {
+                    ConfigTransactionApplyError::DetectedAmbiguousOutcome(failure.error.to_string())
+                } else {
+                    failure.error
+                }
+            })
         } else {
             self.apply_locked(request, None).await
         }
@@ -512,8 +631,9 @@ impl ConfigTransactionController {
                 )
             })??;
             let Some((watchdog, daemon_gate)) = self.settlement.clone() else {
+                let result = self.apply_locked(request, confirmed).await;
                 drop(context);
-                return self.apply_locked(request, confirmed).await;
+                return result;
             };
             let response_attached = context.response_attached();
             let stream = context.take_stream_ownership();
@@ -569,112 +689,158 @@ impl ConfigTransactionController {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "gNMI Set keeps its closed commit-action dispatch inside one owned settlement executor"
+    )]
     async fn apply_gnmi_set(
         self,
         transaction: rustbgpd_api::server::GnmiSetTransaction,
     ) -> Result<GnmiSetOutcome, GnmiSetError> {
-        let join = tokio::spawn(async move {
-            let _guard = self.deps.lock.acquire().await?;
-            match transaction.commit_action.clone() {
-                Some(GnmiSetCommitAction::Confirm { confirm_id }) => {
-                    let confirm_id =
-                        validate_confirm_id(&confirm_id).map_err(apply_error_to_gnmi_set_error)?;
-                    self.confirm_locked(confirm_id)
+        let result = self
+            .execute_owned_operation(
+                RuntimeConfigOperationKind::GnmiSet,
+                true,
+                "gNMI Set rejected: daemon is shutting down",
+                "gNMI Set transaction task did not complete",
+                move |controller, operation| async move {
+                    let self_ = controller;
+                    match transaction.commit_action.clone() {
+                        Some(GnmiSetCommitAction::Confirm { confirm_id }) => {
+                            let confirm_id = validate_confirm_id(&confirm_id)
+                                .map_err(apply_error_to_owned_gnmi_set_error)?;
+                            if let Some(operation) = &operation {
+                                operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+                            }
+                            self_
+                                .confirm_locked(confirm_id)
+                                .await
+                                .map_err(apply_error_to_owned_gnmi_set_error)?;
+                            return Ok(GnmiSetOutcome::default());
+                        }
+                        Some(GnmiSetCommitAction::Cancel { confirm_id }) => {
+                            let confirm_id = validate_confirm_id(&confirm_id)
+                                .map_err(apply_error_to_owned_gnmi_set_error)?;
+                            if let Some(operation) = &operation {
+                                operation
+                                    .advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
+                            }
+                            self_
+                                .abort_locked(confirm_id)
+                                .await
+                                .map_err(apply_error_to_owned_gnmi_set_error)?;
+                            return Ok(GnmiSetOutcome::default());
+                        }
+                        Some(GnmiSetCommitAction::SetRollbackDuration {
+                            confirm_id,
+                            confirm_timeout_seconds,
+                        }) => {
+                            let confirm_id = validate_confirm_id(&confirm_id)
+                                .map_err(apply_error_to_owned_gnmi_set_error)?;
+                            let confirm_timeout_seconds =
+                                validate_confirm_timeout_seconds(confirm_timeout_seconds)
+                                    .map_err(apply_error_to_owned_gnmi_set_error)?;
+                            if let Some(operation) = &operation {
+                                operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+                            }
+                            self_
+                                .reset_rollback_duration_locked(confirm_id, confirm_timeout_seconds)
+                                .await
+                                .map_err(apply_error_to_owned_gnmi_set_error)?;
+                            return Ok(GnmiSetOutcome::default());
+                        }
+                        Some(GnmiSetCommitAction::Commit { .. }) => {
+                            self_
+                                .reject_if_pending("gnmi.gNMI/Set")
+                                .await
+                                .map_err(apply_error_to_owned_gnmi_set_error)?;
+                            // A confirmed gNMI candidate is derived from the live
+                            // config. The ordinary planner must still fence external
+                            // declarations after constructing the full snapshot.
+                        }
+                        None => {
+                            self_
+                                .reject_if_pending("gnmi.gNMI/Set")
+                                .await
+                                .map_err(apply_error_to_owned_gnmi_set_error)?;
+                        }
+                    }
+                    let current = self_.accepted_runtime_snapshot().await.map_err(|error| {
+                        OwnedGnmiSetError::Clean(GnmiSetError::Unavailable(error))
+                    })?;
+                    let candidate =
+                        gnmi_set_bridge::apply_transaction_to_config(current, &transaction)
+                            .map_err(OwnedGnmiSetError::Clean)?;
+                    let candidate_toml = toml::to_string_pretty(&candidate).map_err(|error| {
+                        GnmiSetError::Internal(format!(
+                            "failed to serialize gNMI Set candidate config: {error}"
+                        ))
+                    })?;
+                    let (confirm_id, confirm_timeout_seconds) = match transaction.commit_action {
+                        Some(GnmiSetCommitAction::Commit {
+                            confirm_id,
+                            confirm_timeout_seconds,
+                        }) => (confirm_id, confirm_timeout_seconds),
+                        Some(
+                            GnmiSetCommitAction::Confirm { .. }
+                            | GnmiSetCommitAction::Cancel { .. }
+                            | GnmiSetCommitAction::SetRollbackDuration { .. },
+                        ) => unreachable!(
+                            "commit-control actions handled before candidate generation"
+                        ),
+                        None => (String::new(), 0),
+                    };
+                    let request = proto::ApplyConfigTransactionRequest {
+                        candidate_toml,
+                        expected_runtime_snapshot_token: String::new(),
+                        client_request_id: "gnmi-set".to_string(),
+                        comment: String::new(),
+                        confirm_id,
+                        confirm_timeout_seconds,
+                    };
+                    let confirmed = parse_confirmed_apply_mode(&request)
+                        .map_err(apply_error_to_owned_gnmi_set_error)?;
+                    if let Some(operation) = &operation {
+                        operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+                    }
+                    let response = if confirmed.is_some() {
+                        self_
+                            .apply_locked(request, confirmed)
+                            .await
+                            .map_err(apply_error_to_owned_gnmi_set_error)?
+                    } else {
+                        // The coordinator lock serializes this internal gNMI Set path,
+                        // and the candidate was just built from the live runtime
+                        // snapshot. Let the shared apply executor do the single
+                        // authoritative plan.
+                        apply_config_transaction_locked(
+                            &self_.deps,
+                            request,
+                            self_.peer_mgr_internal_tx.as_ref(),
+                        )
                         .await
-                        .map_err(apply_error_to_gnmi_set_error)?;
-                    return Ok(GnmiSetOutcome::default());
-                }
-                Some(GnmiSetCommitAction::Cancel { confirm_id }) => {
-                    let confirm_id =
-                        validate_confirm_id(&confirm_id).map_err(apply_error_to_gnmi_set_error)?;
-                    self.abort_locked(confirm_id)
-                        .await
-                        .map_err(apply_error_to_gnmi_set_error)?;
-                    return Ok(GnmiSetOutcome::default());
-                }
-                Some(GnmiSetCommitAction::SetRollbackDuration {
-                    confirm_id,
-                    confirm_timeout_seconds,
-                }) => {
-                    let confirm_id =
-                        validate_confirm_id(&confirm_id).map_err(apply_error_to_gnmi_set_error)?;
-                    let confirm_timeout_seconds =
-                        validate_confirm_timeout_seconds(confirm_timeout_seconds)
-                            .map_err(apply_error_to_gnmi_set_error)?;
-                    self.reset_rollback_duration_locked(confirm_id, confirm_timeout_seconds)
-                        .await
-                        .map_err(apply_error_to_gnmi_set_error)?;
-                    return Ok(GnmiSetOutcome::default());
-                }
-                Some(GnmiSetCommitAction::Commit { .. }) => {
-                    self.reject_if_pending("gnmi.gNMI/Set")
-                        .await
-                        .map_err(apply_error_to_gnmi_set_error)?;
-                    // A confirmed gNMI candidate is derived from the live
-                    // config. The ordinary planner must still fence external
-                    // declarations after constructing the full snapshot.
-                }
-                None => {
-                    self.reject_if_pending("gnmi.gNMI/Set")
-                        .await
-                        .map_err(apply_error_to_gnmi_set_error)?;
-                }
+                        .map_err(|failure| {
+                            if failure.ambiguous {
+                                OwnedGnmiSetError::Ambiguous(failure.error.to_string())
+                            } else {
+                                OwnedGnmiSetError::Clean(apply_error_to_gnmi_set_error(
+                                    failure.error,
+                                ))
+                            }
+                        })?
+                    };
+                    gnmi_set_outcome_from_apply_response(response).map_err(OwnedGnmiSetError::Clean)
+                },
+            )
+            .await;
+        match result {
+            Ok(outcome) => Ok(outcome),
+            Err(OwnedGnmiSetError::Clean(error)) => Err(error),
+            Err(OwnedGnmiSetError::Ambiguous(message)) => {
+                let _ = message;
+                std::future::pending().await
             }
-            let current = self
-                .accepted_runtime_snapshot()
-                .await
-                .map_err(GnmiSetError::Unavailable)?;
-            let candidate = gnmi_set_bridge::apply_transaction_to_config(current, &transaction)?;
-            let candidate_toml = toml::to_string_pretty(&candidate).map_err(|error| {
-                GnmiSetError::Internal(format!(
-                    "failed to serialize gNMI Set candidate config: {error}"
-                ))
-            })?;
-            let (confirm_id, confirm_timeout_seconds) = match transaction.commit_action {
-                Some(GnmiSetCommitAction::Commit {
-                    confirm_id,
-                    confirm_timeout_seconds,
-                }) => (confirm_id, confirm_timeout_seconds),
-                Some(
-                    GnmiSetCommitAction::Confirm { .. }
-                    | GnmiSetCommitAction::Cancel { .. }
-                    | GnmiSetCommitAction::SetRollbackDuration { .. },
-                ) => unreachable!("commit-control actions handled before candidate generation"),
-                None => (String::new(), 0),
-            };
-            let request = proto::ApplyConfigTransactionRequest {
-                candidate_toml,
-                expected_runtime_snapshot_token: String::new(),
-                client_request_id: "gnmi-set".to_string(),
-                comment: String::new(),
-                confirm_id,
-                confirm_timeout_seconds,
-            };
-            let confirmed =
-                parse_confirmed_apply_mode(&request).map_err(apply_error_to_gnmi_set_error)?;
-            let response = if confirmed.is_some() {
-                self.apply_locked(request, confirmed)
-                    .await
-                    .map_err(apply_error_to_gnmi_set_error)?
-            } else {
-                // The coordinator lock serializes this internal gNMI Set path,
-                // and the candidate was just built from the live runtime
-                // snapshot. Let the shared apply executor do the single
-                // authoritative plan.
-                apply_config_transaction_locked(
-                    &self.deps,
-                    request,
-                    self.peer_mgr_internal_tx.as_ref(),
-                )
-                .await
-                .map_err(|failure| apply_error_to_gnmi_set_error(failure.error))?
-            };
-            gnmi_set_outcome_from_apply_response(response)
-        });
-
-        join.await.map_err(|_| {
-            GnmiSetError::Internal("gNMI Set transaction task did not complete".to_string())
-        })?
+        }
     }
 
     async fn apply_locked(
@@ -912,15 +1078,19 @@ impl ConfigTransactionController {
         request: proto::ConfirmConfigTransactionRequest,
     ) -> Result<proto::ConfirmConfigTransactionResponse, ConfigTransactionApplyError> {
         let confirm_id = validate_confirm_id(&request.confirm_id)?;
-        let join = tokio::spawn(async move {
-            let _guard = self.deps.lock.acquire().await?;
-            self.confirm_locked(confirm_id).await
-        });
-        join.await.map_err(|_| {
-            ConfigTransactionApplyError::Internal(
-                "config transaction confirm task did not complete".to_string(),
-            )
-        })?
+        self.execute_owned_operation(
+            RuntimeConfigOperationKind::Confirm,
+            true,
+            "config transaction confirm rejected: daemon is shutting down",
+            "config transaction confirm task did not complete",
+            move |controller, operation| async move {
+                if let Some(operation) = operation {
+                    operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+                }
+                controller.confirm_locked(confirm_id).await
+            },
+        )
+        .await
     }
 
     async fn confirm_locked(
@@ -935,7 +1105,7 @@ impl ConfigTransactionController {
         let matched = self.matching_pending(&confirm_id).await?;
         let residue_cleanup = if let Some(files) = &matched.v3_files {
             files.remove_locator_authority().map_err(|error| {
-                ConfigTransactionApplyError::Internal(format!(
+                ConfigTransactionApplyError::DetectedAmbiguousOutcome(format!(
                     "confirm not recorded: durable v3 locator removal failed ({:?}); the transaction is still pending and will roll back on timeout",
                     error.kind()
                 ))
@@ -970,15 +1140,19 @@ impl ConfigTransactionController {
         request: proto::AbortConfigTransactionRequest,
     ) -> Result<proto::AbortConfigTransactionResponse, ConfigTransactionApplyError> {
         let confirm_id = validate_confirm_id(&request.confirm_id)?;
-        let join = tokio::spawn(async move {
-            let _guard = self.deps.lock.acquire().await?;
-            self.abort_locked(confirm_id).await
-        });
-        join.await.map_err(|_| {
-            ConfigTransactionApplyError::Internal(
-                "config transaction abort task did not complete".to_string(),
-            )
-        })?
+        self.execute_owned_operation(
+            RuntimeConfigOperationKind::Abort,
+            true,
+            "config transaction abort rejected: daemon is shutting down",
+            "config transaction abort task did not complete",
+            move |controller, operation| async move {
+                if let Some(operation) = operation {
+                    operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
+                }
+                controller.abort_locked(confirm_id).await
+            },
+        )
+        .await
     }
 
     async fn abort_locked(
@@ -1208,11 +1382,16 @@ impl ConfigTransactionController {
                 "confirm_id is required when confirm_timeout_seconds is set".to_string(),
             ));
         }
-        let join = tokio::spawn(async move {
-            let _guard = self.deps.lock.acquire().await?;
+        self.execute_owned_operation(
+            RuntimeConfigOperationKind::Rollback,
+            true,
+            "config rollback rejected: daemon is shutting down",
+            "config rollback task did not complete",
+            move |controller, operation| async move {
+            let self_ = controller;
             // Resolve the entry under the coordinator lock so a concurrent
             // commit cannot shift indexes between resolution and apply.
-            let dir = self.history_dir()?;
+            let dir = self_.history_dir()?;
             let index = usize::try_from(request.index).unwrap_or(usize::MAX);
             let entries = crate::config_history::list_mixed(dir).map_err(|_| {
                 ConfigTransactionApplyError::FailedPrecondition(
@@ -1242,7 +1421,7 @@ impl ConfigTransactionController {
                 )
             })?;
             let (candidate_toml, preloaded) =
-                self.prepare_rollback_payload(payload, &request).await?;
+                self_.prepare_rollback_payload(payload, &request).await?;
             let client_request_id = if request.client_request_id.is_empty() {
                 format!("config-rollback:{index}")
             } else {
@@ -1256,7 +1435,10 @@ impl ConfigTransactionController {
                 confirm_id: request.confirm_id,
                 confirm_timeout_seconds: request.confirm_timeout_seconds,
             };
-            let mut response = self
+            if let Some(operation) = operation {
+                operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+            }
+            let mut response = self_
                 .apply_prepared_rollback(apply_request, preloaded)
                 .await?;
             // Name the restored entry only when something actually committed;
@@ -1271,12 +1453,9 @@ impl ConfigTransactionController {
                 );
             }
             Ok(response)
-        });
-        join.await.map_err(|_| {
-            ConfigTransactionApplyError::Internal(
-                "config rollback task did not complete".to_string(),
-            )
-        })?
+            },
+        )
+        .await
     }
 
     fn history_dir(&self) -> Result<&std::path::Path, ConfigTransactionApplyError> {
@@ -1382,17 +1561,24 @@ impl ConfigTransactionController {
     }
 
     async fn auto_revert(self, confirm_id: String) -> Result<(), ConfigTransactionApplyError> {
-        let join = tokio::spawn(async move {
-            let _guard = self.deps.lock.acquire().await?;
-            let Some(pending) = self.pending_for_timeout(&confirm_id).await else {
-                return Ok(());
-            };
-            if tokio::time::Instant::now() < pending.deadline {
-                return Ok(());
-            }
-            match self.rollback_pending_locked(&pending).await {
-                Ok(response) => {
-                    self.remove_pending_after_rollback(
+        self.execute_owned_operation(
+            RuntimeConfigOperationKind::AutoRevert,
+            false,
+            "config transaction auto-revert rejected: daemon is shutting down",
+            "config transaction auto-revert task did not complete",
+            move |controller, operation| async move {
+                if let Some(operation) = operation {
+                    operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
+                }
+                let Some(pending) = controller.pending_for_timeout(&confirm_id).await else {
+                    return Ok(());
+                };
+                if tokio::time::Instant::now() < pending.deadline {
+                    return Ok(());
+                }
+                match controller.rollback_pending_locked(&pending).await {
+                    Ok(response) => {
+                        controller.remove_pending_after_rollback(
                         &confirm_id,
                         proto::ConfigTransactionConfirmationStatus::AutoReverted,
                         response.runtime_snapshot_token,
@@ -1400,35 +1586,35 @@ impl ConfigTransactionController {
                         false,
                     )
                     .await?;
-                    self.metrics
-                        .record_config_transaction_lifecycle("auto_revert", "success");
-                    info!(confirm_id, "confirmed config transaction auto-reverted");
-                    Ok(())
+                        controller
+                            .metrics
+                            .record_config_transaction_lifecycle("auto_revert", "success");
+                        info!(confirm_id, "confirmed config transaction auto-reverted");
+                        Ok(())
+                    }
+                    Err(error) => {
+                        // LAN-277: keep the transaction pending on a failed
+                        // auto-revert (fence closed, journal retained). The
+                        // one-shot timer has already fired and is NOT re-armed —
+                        // retrying in a loop against a persistently failing
+                        // rollback would spin; the operator resolves it by
+                        // retrying abort, confirming, resetting the rollback
+                        // duration (which re-arms the timer), or restarting.
+                        controller
+                            .mark_pending_rollback_failed(
+                                &confirm_id,
+                                proto::ConfigTransactionConfirmationStatus::AutoRevertFailed,
+                            )
+                            .await;
+                        controller
+                            .metrics
+                            .record_config_transaction_lifecycle("auto_revert", "failure");
+                        Err(error)
+                    }
                 }
-                Err(error) => {
-                    // LAN-277: keep the transaction pending on a failed
-                    // auto-revert (fence closed, journal retained). The
-                    // one-shot timer has already fired and is NOT re-armed —
-                    // retrying in a loop against a persistently failing
-                    // rollback would spin; the operator resolves it by
-                    // retrying abort, confirming, resetting the rollback
-                    // duration (which re-arms the timer), or restarting.
-                    self.mark_pending_rollback_failed(
-                        &confirm_id,
-                        proto::ConfigTransactionConfirmationStatus::AutoRevertFailed,
-                    )
-                    .await;
-                    self.metrics
-                        .record_config_transaction_lifecycle("auto_revert", "failure");
-                    Err(error)
-                }
-            }
-        });
-        join.await.map_err(|_| {
-            ConfigTransactionApplyError::Internal(
-                "config transaction auto-revert task did not complete".to_string(),
-            )
-        })?
+            },
+        )
+        .await
     }
 
     async fn matching_pending(
@@ -1510,10 +1696,13 @@ impl ConfigTransactionController {
             self.peer_mgr_internal_tx.as_ref(),
         )
         .await;
-        let response = result
-            // A failed rollback keeps the transaction pending with the journal
-            // retained regardless of ambiguity, so the flag adds nothing here.
-            .map_err(|failure| failure.error)?;
+        let response = result.map_err(|failure| {
+            if failure.ambiguous {
+                ConfigTransactionApplyError::DetectedAmbiguousOutcome(failure.error.to_string())
+            } else {
+                failure.error
+            }
+        })?;
         // A rollback whose re-apply plan did not commit leaves the
         // aborted/expired candidate running — that is a rollback failure,
         // not a success, and the caller must record AbortFailed /
@@ -1564,7 +1753,7 @@ impl ConfigTransactionController {
                 state.ambiguous_failure_confirm_id = Some(confirm_id.to_string());
                 Err(ConfigTransactionApplyError::DetectedAmbiguousOutcome(
                     format!(
-                        "v3 commit-confirm operation is nonterminal because durable locator removal failed ({:?}); config mutations remain blocked",
+                        "confirm outcome is ambiguous because durable v3 locator removal could not be proven ({:?}); config mutation admission is being fenced and the daemon will exit for supervised recovery",
                         error.kind()
                     ),
                 ))
@@ -1588,7 +1777,7 @@ impl ConfigTransactionController {
         let matched = self.matching_pending(confirm_id).await?;
         let residue_cleanup = if let Some(files) = &matched.v3_files {
             files.remove_locator_authority().map_err(|error| {
-                ConfigTransactionApplyError::Internal(format!(
+                ConfigTransactionApplyError::DetectedAmbiguousOutcome(format!(
                     "rollback restored the prior config but remains nonterminal because durable v3 locator removal failed ({:?})",
                     error.kind()
                 ))
@@ -3643,6 +3832,15 @@ fn apply_error_to_gnmi_set_error(error: ConfigTransactionApplyError) -> GnmiSetE
     }
 }
 
+fn apply_error_to_owned_gnmi_set_error(error: ConfigTransactionApplyError) -> OwnedGnmiSetError {
+    match error {
+        ConfigTransactionApplyError::DetectedAmbiguousOutcome(message) => {
+            OwnedGnmiSetError::Ambiguous(message)
+        }
+        error => OwnedGnmiSetError::Clean(apply_error_to_gnmi_set_error(error)),
+    }
+}
+
 fn gnmi_set_outcome_from_apply_response(
     response: proto::ConfigTransactionApplyResponse,
 ) -> Result<GnmiSetOutcome, GnmiSetError> {
@@ -3837,6 +4035,25 @@ remote_asn = 65002
     }
 
     #[test]
+    fn unwatched_apply_retains_response_attachment_through_settlement() {
+        let source = include_str!("config_transaction_control.rs");
+        let production = source.split("#[cfg(test)]\nmod tests {").next().unwrap();
+        let fallback = production
+            .rsplit_once("let Some((watchdog, daemon_gate)) = self.settlement.clone() else {")
+            .unwrap()
+            .1
+            .split_once("};")
+            .unwrap()
+            .0;
+        let apply = fallback
+            .find("let result = self.apply_locked(request, confirmed).await;")
+            .unwrap();
+        let detach = fallback.find("drop(context);").unwrap();
+        let response = fallback.find("return result;").unwrap();
+        assert!(apply < detach && detach < response);
+    }
+
+    #[test]
     fn runtime_config_coordinator_inventory_is_complete_and_closed() {
         fn production(source: &'static str) -> &'static str {
             source
@@ -3866,7 +4083,8 @@ remote_asn = 65002
             (main, "RuntimeConfigSettlementWatchdog::new()", 1),
             (main, ".with_runtime_config_settlement(", 1),
             (main, "move || settlement_wait.wait_until_idle()", 1),
-            (transaction, "self.deps.lock.acquire()", 6),
+            (transaction, "self.deps.lock.acquire()", 2),
+            (transaction, ".execute_owned_operation(", 5),
             (fib, ".acquire()", 2),
             (neighbor, "runtime_config_lock.acquire()", 4),
             (server, "runtime_config_lock.acquire()", 1),
@@ -3877,6 +4095,15 @@ remote_asn = 65002
         ];
         for (source, shape, count) in inventory {
             assert_eq!(source.matches(shape).count(), count, "{shape}");
+        }
+        for kind in ["GnmiSet", "Confirm", "Abort", "Rollback", "AutoRevert"] {
+            assert_eq!(
+                transaction
+                    .matches(&format!("RuntimeConfigOperationKind::{kind}"))
+                    .count(),
+                1,
+                "settlement registration inventory for {kind}"
+            );
         }
 
         #[rustfmt::skip]
@@ -6733,7 +6960,8 @@ families = ["ipv4_unicast"]
         assert!(matches!(
             error,
             ConfigTransactionApplyError::DetectedAmbiguousOutcome(ref message)
-                if message.contains("nonterminal") && message.contains("locator removal failed")
+                if message.contains("confirm outcome is ambiguous")
+                    && message.contains("daemon will exit for supervised recovery")
         ));
         assert_eq!(
             harness
