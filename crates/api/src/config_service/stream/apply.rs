@@ -4,14 +4,17 @@ use std::sync::Arc;
 
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
-use tokio::sync::{OwnedSemaphorePermit, oneshot};
+use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout_at};
 use tonic::{Request, Response, Status};
 
 use super::{AdmissionAudit, FRAME_VERSION, StreamPlanState, principal_role};
 use crate::audit::{GrpcAuditHandle, stream_apply_config_transaction_summary};
 use crate::proto;
-use crate::server::{ConfigTransactionApplyFn, validate_config_transaction_apply_metadata};
+use crate::server::{
+    ConfigTransactionApplyContext, ConfigTransactionApplyFn,
+    validate_config_transaction_apply_metadata,
+};
 
 struct ApplyAudit {
     handle: Option<GrpcAuditHandle>,
@@ -128,23 +131,26 @@ pub(crate) async fn stream_apply_config_transaction(
     audit.outcome = "handed_off";
     audit.publish();
     let (response_tx, response_rx) = oneshot::channel();
+    let (context, attachment) =
+        ConfigTransactionApplyContext::streamed(admission.permit, Arc::clone(&state.admission));
     tokio::spawn(run_detached_apply(
         transaction_apply,
         apply_request,
-        admission.permit,
+        context,
         admission.after_operator_wait,
         audit,
         response_tx,
     ));
-    timeout_at(deadline, response_rx)
+    let response = timeout_at(deadline, response_rx)
         .await
         .map_err(|_| {
             Status::deadline_exceeded(
                 "streamed config apply response exceeded total deadline; apply continues to settlement",
             )
         })?
-        .map_err(|_| Status::internal("streamed config apply task did not complete"))?
-        .map(Response::new)
+        .map_err(|_| Status::internal("streamed config apply task did not complete"))?;
+    drop(attachment);
+    response.map(Response::new)
 }
 
 struct ApplyMetadata {
@@ -333,12 +339,12 @@ async fn read_candidate(
 async fn run_detached_apply(
     transaction_apply: ConfigTransactionApplyFn,
     request: proto::ApplyConfigTransactionRequest,
-    _permit: OwnedSemaphorePermit,
+    context: ConfigTransactionApplyContext,
     after_operator_wait: bool,
     mut audit: ApplyAudit,
     response_tx: oneshot::Sender<Result<proto::ConfigTransactionApplyResponse, Status>>,
 ) {
-    let response = transaction_apply(request)
+    let response = transaction_apply(request, context)
         .await
         .map_err(crate::server::ConfigTransactionApplyError::into_status);
     audit.outcome = if response.is_ok() {

@@ -95,6 +95,7 @@ use rustbgpd_api::peer_types::{
     ImportValidationDependency, PeerManagerCommand, PeerManagerNeighborConfig,
     PeerManagerReadinessQuery, WarmCheckpointCapture, WarmCheckpointSession,
 };
+use rustbgpd_api::runtime_config_settlement::RuntimeConfigSettlementWatchdog;
 use rustbgpd_api::server::{
     AccessMode as GrpcServerAccessMode, ConfigMutationGateFn, ListenerConfig as GrpcListenerConfig,
     ListenerEndpoint, RuntimeConfigCoordinator, ServeConfig,
@@ -4468,6 +4469,10 @@ async fn run<T>(
     // read/apply/persist sequence so stale TOML snapshots cannot clobber
     // accepted runtime changes.
     let runtime_config_lock = RuntimeConfigCoordinator::new();
+    // The gate and watchdog are process singletons shared by every watched
+    // runtime-config owner and the readiness/admission surfaces.
+    let daemon_gate = DaemonGate::new();
+    let runtime_config_settlement = RuntimeConfigSettlementWatchdog::new();
     let config_transaction_controller =
         config_transaction_control::ConfigTransactionController::new_accepted(
             fib_table_control::FibTableControlDeps {
@@ -4494,12 +4499,12 @@ async fn run<T>(
                 .expect("daemon config transactions require accepted-config authority")
                 .clone(),
         )
+        .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone())
         .with_preloaded_planner(peer_mgr_internal_tx.clone())
         .with_confirm_v3_launch(launch_identity);
     // Process-wide availability gate (LAN-286): BGP-listener bind failure
     // turns readiness red; coordinated shutdown turns readiness red AND
     // stops admitting persisted config mutations and inbound BGP sessions.
-    let daemon_gate = DaemonGate::new();
     let config_mutation_gate: ConfigMutationGateFn = {
         let inner = config_transaction_controller.mutation_gate_fn();
         let gate = daemon_gate.clone();
@@ -5202,28 +5207,38 @@ async fn run<T>(
     // 1. Tell PeerManager to shut down (sends NOTIFICATIONs to all peers)
     daemon_gate.begin_shutdown();
     info!("initiating coordinated shutdown");
+    let settlement_wait = runtime_config_settlement.clone();
+    tokio::task::spawn_blocking(move || settlement_wait.wait_until_idle())
+        .await
+        .expect("runtime-config settlement wait task must not panic");
+    let runtime_config_deadline = tokio::time::Instant::now() + WARM_CHECKPOINT_DEADLINE;
+    let mut runtime_config_fence_failure = None;
+    let runtime_config_fence =
+        match tokio::time::timeout_at(runtime_config_deadline, runtime_config_lock.acquire()).await
+        {
+            Ok(Ok(permit)) => Some(permit),
+            Ok(Err(_)) => {
+                runtime_config_fence_failure =
+                    Some("authoritative runtime-config coordinator is closed".to_string());
+                None
+            }
+            Err(_) => {
+                runtime_config_fence_failure =
+                    Some("timed out acquiring the authoritative runtime-config fence".to_string());
+                None
+            }
+        };
+    runtime_config_lock.close();
     let mut restart_time_secs = max_gr_restart_time_secs(&config);
     let mut checkpoint_generation = None;
     let mut checkpoint_failure = None;
-    let mut _runtime_config_fence = None;
     let mut evpn_apply_fence = None;
 
     if warm_checkpoint_on_shutdown {
         if let Some(directory) = warm_bundle_directory.clone() {
-            let deadline = tokio::time::Instant::now() + WARM_CHECKPOINT_DEADLINE;
-            match tokio::time::timeout_at(deadline, runtime_config_lock.acquire()).await {
-                Ok(Ok(guard)) => _runtime_config_fence = Some(guard),
-                Ok(Err(_)) => {
-                    checkpoint_failure =
-                        Some("authoritative runtime-config coordinator is closed".to_string());
-                }
-                Err(_) => {
-                    checkpoint_failure = Some(
-                        "timed out acquiring the authoritative runtime-config fence".to_string(),
-                    );
-                }
-            }
-            if checkpoint_failure.is_none() {
+            let deadline = runtime_config_deadline;
+            checkpoint_failure = runtime_config_fence_failure.take();
+            if checkpoint_failure.is_none() && runtime_config_fence.is_some() {
                 match tokio::time::timeout_at(deadline, evpn_runtime_apply_lock.lock()).await {
                     Ok(guard) => evpn_apply_fence = Some(guard),
                     Err(_) => {
@@ -5231,6 +5246,9 @@ async fn run<T>(
                             Some("timed out waiting for the EVPN runtime-apply fence".to_string());
                     }
                 }
+            } else if checkpoint_failure.is_none() {
+                checkpoint_failure =
+                    Some("authoritative runtime-config coordinator is closed".to_string());
             }
             if checkpoint_failure.is_none() {
                 match tokio::time::timeout_at(deadline, query_warm_checkpoint_capture(&peer_mgr_tx))
