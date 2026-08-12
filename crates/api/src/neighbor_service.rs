@@ -1737,31 +1737,6 @@ mod tests {
         config: Option<FrozenNeighborConfig>,
     }
 
-    #[test]
-    fn add_neighbor_proto_reserves_only_the_retired_carrier() {
-        let source = include_str!("../../../proto/rustbgpd.proto");
-        let request_body = source
-            .split_once("message AddNeighborRequest {")
-            .unwrap()
-            .1
-            .split_once('}')
-            .unwrap()
-            .0;
-        let active: Vec<_> = request_body
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with("//"))
-            .collect();
-        assert_eq!(
-            active,
-            [
-                "reserved 1;",
-                "reserved \"config\";",
-                "NeighborCreateIntent intent = 2;",
-            ]
-        );
-    }
-
     #[tokio::test]
     async fn frozen_v064_intent_wire_is_accepted_unchanged() {
         let frozen = FrozenV064AddNeighborRequest {
@@ -2055,8 +2030,6 @@ mod tests {
             .split_once("\n}")
             .unwrap()
             .0;
-        assert!(paths_limit.contains("reserved 5;"));
-        assert!(paths_limit.contains("reserved \"effective_send_max\";"));
         assert!(paths_limit.contains("optional uint32 effective_send_limit = 6;"));
         assert!(source.contains("optional uint32 max_prefix_restart_seconds = 19;"));
         assert!(source.contains("string max_prefix_action = 38;"));

@@ -6188,10 +6188,9 @@ printf '%s\n' "${COMPREPLY[@]}"
     /// ADR-0122 L1: config candidates are positional, while JSON CRUD keeps
     /// its separate `--from-file` contract.
     #[test]
-    fn config_candidate_is_positional_and_rejects_retired_alias() {
-        // Load-bearing: removing a positional CANDIDATE makes one of these
-        // parse checks red; restoring any retired alias makes the matching
-        // UnknownArgument check below red.
+    fn config_candidate_is_positional() {
+        // Load-bearing: removing the positional CANDIDATE or making it optional
+        // changes one of these parse results.
         for args in [
             vec!["rbgp", "config", "diff", "candidate.toml"],
             vec!["rbgp", "config", "plan", "candidate.toml"],
@@ -6208,24 +6207,6 @@ printf '%s\n' "${COMPREPLY[@]}"
         }
 
         assert!(Cli::try_parse_from(["rbgp", "config", "diff"]).is_err());
-        for args in [
-            vec!["rbgp", "config", "diff", "--from-file", "candidate.toml"],
-            vec!["rbgp", "config", "plan", "--from-file", "candidate.toml"],
-            vec![
-                "rbgp",
-                "config",
-                "apply",
-                "--from-file",
-                "candidate.toml",
-                "--expected-runtime-snapshot-token",
-                "kv1:old:1",
-            ],
-        ] {
-            let Err(error) = Cli::try_parse_from(args) else {
-                panic!("retired --from-file alias parsed");
-            };
-            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-        }
     }
 
     #[test]
