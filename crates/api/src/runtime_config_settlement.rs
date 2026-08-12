@@ -21,6 +21,11 @@ pub const AMBIGUOUS_CONFIG_EXIT_STATUS: i32 = 70;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeConfigOperationKind {
     Apply,
+    GnmiSet,
+    Confirm,
+    Abort,
+    Rollback,
+    AutoRevert,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
