@@ -1,6 +1,5 @@
 //! gRPC peer-group service — reusable neighbor defaults and membership.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -18,8 +17,8 @@ use crate::peer_types::{
 use crate::policy_helpers::proto_statement_to_input;
 use crate::proto;
 use crate::server::{
-    AccessMode, ConfigMutationGateFn, apply_catalog_mutation, peer_manager_request,
-    persist_then_apply, read_only_rejection, run_shielded_catalog_mutation,
+    AccessMode, ConfigMutationGateFn, RuntimeConfigCoordinator, apply_catalog_mutation,
+    peer_manager_request, persist_then_apply, read_only_rejection, run_shielded_catalog_mutation,
 };
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -276,7 +275,7 @@ pub struct PeerGroupService {
     access_mode: AccessMode,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
-    runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
+    runtime_config_lock: RuntimeConfigCoordinator,
     config_mutation_gate: Option<ConfigMutationGateFn>,
 }
 
@@ -290,24 +289,24 @@ impl PeerGroupService {
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
         config_mutation_gate: Option<ConfigMutationGateFn>,
     ) -> Self {
-        Self::with_runtime_config_lock(
+        Self::with_runtime_config_coordinator(
             access_mode,
             peer_mgr_tx,
             config_tx,
             config_mutation_gate,
-            Arc::new(tokio::sync::Mutex::new(())),
+            RuntimeConfigCoordinator::new(),
         )
     }
 
     /// Create a peer-group service sharing the daemon-wide runtime-config
     /// coordinator lock, so catalog mutations serialize with SIGHUP
     /// reload, neighbor / FIB-table CRUD, and config transactions.
-    pub fn with_runtime_config_lock(
+    pub fn with_runtime_config_coordinator(
         access_mode: AccessMode,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
         config_mutation_gate: Option<ConfigMutationGateFn>,
-        runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
+        runtime_config_lock: RuntimeConfigCoordinator,
     ) -> Self {
         Self {
             access_mode,

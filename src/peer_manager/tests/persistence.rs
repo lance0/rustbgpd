@@ -202,13 +202,13 @@ hold_time = 90
         );
         tokio::spawn(mgr.run());
 
-        let service = rustbgpd_api::NeighborService::with_runtime_config_lock(
+        let service = rustbgpd_api::NeighborService::with_runtime_config_coordinator(
             65001,
             rustbgpd_api::server::AccessMode::ReadWrite,
             peer_mgr_tx.clone(),
             rib_tx,
             Some(event_tx),
-            Arc::new(tokio::sync::Mutex::new(())),
+            rustbgpd_api::server::RuntimeConfigCoordinator::new(),
             None,
         );
 

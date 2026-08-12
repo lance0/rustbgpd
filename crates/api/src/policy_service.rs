@@ -18,10 +18,9 @@ use crate::peer_types::{
 use crate::policy_helpers::{proto_statement_to_input, validate_policy_action};
 use crate::proto;
 use crate::server::{
-    AccessMode, ConfigMutationGateFn, apply_catalog_mutation, peer_manager_request,
-    persist_then_apply, read_only_rejection, run_shielded_catalog_mutation,
+    AccessMode, ConfigMutationGateFn, RuntimeConfigCoordinator, apply_catalog_mutation,
+    peer_manager_request, persist_then_apply, read_only_rejection, run_shielded_catalog_mutation,
 };
-use std::sync::Arc;
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 const POLICY_STATS_AGGREGATE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -297,7 +296,7 @@ pub struct PolicyService {
     access_mode: AccessMode,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
-    runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
+    runtime_config_lock: RuntimeConfigCoordinator,
     config_mutation_gate: Option<ConfigMutationGateFn>,
     /// RIB query channel backing `TestPolicy`'s read-only snapshot
     /// (ADR-0096 Decision 6). `None` when the service was built
@@ -315,24 +314,24 @@ impl PolicyService {
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
         config_mutation_gate: Option<ConfigMutationGateFn>,
     ) -> Self {
-        Self::with_runtime_config_lock(
+        Self::with_runtime_config_coordinator(
             access_mode,
             peer_mgr_tx,
             config_tx,
             config_mutation_gate,
-            Arc::new(tokio::sync::Mutex::new(())),
+            RuntimeConfigCoordinator::new(),
         )
     }
 
     /// Create a policy service sharing the daemon-wide runtime-config
     /// coordinator lock, so catalog mutations serialize with SIGHUP
     /// reload, neighbor / FIB-table CRUD, and config transactions.
-    pub fn with_runtime_config_lock(
+    pub fn with_runtime_config_coordinator(
         access_mode: AccessMode,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
         config_mutation_gate: Option<ConfigMutationGateFn>,
-        runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
+        runtime_config_lock: RuntimeConfigCoordinator,
     ) -> Self {
         Self {
             access_mode,
@@ -1626,6 +1625,8 @@ fn render_modification_changes(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::peer_types::{CatalogMutationError, PolicyAsPathPrependConfig};
     use crate::proto::policy_service_server::PolicyService as PolicyServiceRpc;

@@ -27,7 +27,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, ConfigPersistAck, FibTableSnapshot, PeerManagerCommand,
@@ -36,7 +36,7 @@ use rustbgpd_api::proto;
 use rustbgpd_api::rib_service::{
     FibTableControlError, FibTableControlFn, FibTableControlFuture, FibTableControlRequest,
 };
-use rustbgpd_api::server::ConfigMutationGateFn;
+use rustbgpd_api::server::{ConfigMutationGateFn, RuntimeConfigCoordinator};
 use tracing::error;
 
 use crate::config::FibTableConfig;
@@ -45,6 +45,7 @@ use crate::fib_runtime::FibRuntimeCommand;
 /// How long to wait for a config-persistence permit before refusing the
 /// mutation (mirrors the dynamic-neighbor CRUD reserve deadline).
 const PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
+const COORDINATOR_CLOSED: &str = "runtime config coordinator is closed";
 
 /// Dependencies for the FIB-table control hook, wired from `main.rs`.
 pub struct FibTableControlDeps {
@@ -62,7 +63,7 @@ pub struct FibTableControlDeps {
     /// loads its config from a file, so it always supplies one.
     pub config_tx: Option<mpsc::Sender<ConfigEvent>>,
     /// Coordinator lock shared with the SIGHUP reload FIB step.
-    pub lock: Arc<Mutex<()>>,
+    pub lock: RuntimeConfigCoordinator,
     /// Optional confirmed config transaction gate. While a confirmed
     /// transaction is applying or pending confirmation, targeted FIB-table CRUD
     /// must fail closed so it cannot be overwritten by timeout rollback.
@@ -113,7 +114,11 @@ async fn handle(
 ) -> Result<proto::ListFibTablesResponse, FibTableControlError> {
     match request {
         FibTableControlRequest::List => {
-            let _guard = deps.lock.lock().await;
+            let _guard = deps
+                .lock
+                .acquire()
+                .await
+                .map_err(|_| FibTableControlError::Unavailable(COORDINATOR_CLOSED.into()))?;
             // A running reconciler is the source of truth; otherwise fall back
             // to the startup set so configured tables stay visible even when
             // the actor failed to spawn (non-Linux / netlink failure).
@@ -177,7 +182,10 @@ async fn mutate(
     // cannot split a successful `ReplaceTables` from its persistence: once the
     // task starts it runs to completion regardless of the awaiting future.
     let join = tokio::spawn(async move {
-        let _guard = lock.lock().await;
+        let _guard = lock
+            .acquire()
+            .await
+            .map_err(|_| FibTableControlError::Unavailable(COORDINATOR_CLOSED.into()))?;
         if let Some(gate) = &config_mutation_gate {
             gate(operation)
                 .await
@@ -564,6 +572,7 @@ mod tests {
     use rustbgpd_api::proto::rib_service_server::RibService as _;
     use rustbgpd_api::rib_service::RibService;
     use rustbgpd_api::server::AccessMode;
+    use tokio::sync::Mutex;
     use tonic::{Code, Request, Status};
 
     use crate::test_support::basic_fib_table as table;
@@ -655,7 +664,7 @@ mod tests {
             peer_mgr_tx,
             rib_tx: None,
             config_tx: Some(config_tx),
-            lock: Arc::new(Mutex::new(())),
+            lock: RuntimeConfigCoordinator::new(),
             config_mutation_gate: None,
             startup_tables,
             confirm_journal_path: None,
@@ -663,6 +672,47 @@ mod tests {
         });
         let (rib_tx, _rib_rx) = mpsc::channel(1);
         RibService::new(rib_tx).with_fib_table_control(AccessMode::ReadWrite, Some(control))
+    }
+
+    #[tokio::test]
+    async fn closed_coordinator_rejects_fib_before_actor_or_persistence() {
+        let (fib_tx, mut fib_rx) = mpsc::channel(1);
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (config_tx, mut config_rx) = mpsc::channel(1);
+        let coordinator = RuntimeConfigCoordinator::new();
+        coordinator.close();
+        let deps = Arc::new(FibTableControlDeps {
+            fib_cmd_tx: Some(fib_tx),
+            peer_mgr_tx: peer_tx,
+            rib_tx: None,
+            config_tx: Some(config_tx),
+            lock: coordinator,
+            config_mutation_gate: None,
+            startup_tables: vec![table("edge", 1000)],
+            confirm_journal_path: None,
+            config_history_dir: None,
+        });
+
+        let list_error = handle(deps.clone(), FibTableControlRequest::List)
+            .await
+            .unwrap_err();
+        assert!(matches!(list_error, FibTableControlError::Unavailable(_)));
+        let set_error = mutate(deps.clone(), Mutation::Upsert(table("core", 1001)))
+            .await
+            .unwrap_err();
+        assert!(matches!(set_error, FibTableControlError::Unavailable(_)));
+        assert!(matches!(
+            fib_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            peer_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            config_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     fn assert_actor_read_error(status: &Status, code: Code, failure: ReadFailure) {
@@ -800,7 +850,7 @@ mod tests {
             peer_mgr_tx: peer_tx,
             rib_tx: None,
             config_tx: Some(config_tx),
-            lock: Arc::new(Mutex::new(())),
+            lock: RuntimeConfigCoordinator::new(),
             config_mutation_gate: None,
             startup_tables: vec![original.clone()],
             confirm_journal_path: None,
@@ -871,7 +921,7 @@ mod tests {
             peer_mgr_tx: peer_tx,
             rib_tx: None,
             config_tx: Some(config_tx),
-            lock: Arc::new(Mutex::new(())),
+            lock: RuntimeConfigCoordinator::new(),
             config_mutation_gate: None,
             startup_tables: vec![original.clone()],
             confirm_journal_path: None,
