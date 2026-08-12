@@ -69,6 +69,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- `rbgp top` now requires `EventService.WatchEvents`; the degraded
+  `RibService.WatchRoutes` fallback for daemons through v0.62 was removed.
+  `RibService.WatchRoutes` and direct `rbgp watch` remain available.
 - Root-daemon non-Linux fallbacks were removed in #1581. Distributed and
   supported daemon targets are Linux x86_64 and aarch64; portable component
   and transport abstractions do not expand daemon support.
