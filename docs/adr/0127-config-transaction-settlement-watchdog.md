@@ -1,4 +1,4 @@
-# ADR-0127: Config Transaction Settlement Watchdog
+# ADR-0127: Persisted Runtime-Config Settlement Watchdog
 
 **Status:** Proposed
 **Date:** 2026-08-11
@@ -13,13 +13,14 @@ streamed apply path also hands its sole admission permit and candidate to that
 detached operation. An RPC deadline or disconnect can end the response wait but
 intentionally cannot cancel the apply or release admission.
 
-That cancellation safety creates a liveness obligation. After the controller
-owns the coordinator, an executor can await an actor reply, persistence reply,
-or rollback reply without a terminal bound. A lost reply can therefore retain
-both the coordinator and the streamed admission permit indefinitely. Later
-streamed candidates and other config mutation paths remain fenced until daemon
-restart, but the daemon can continue to report process health even though its
-config plane cannot settle.
+That cancellation safety creates a liveness obligation shared by every
+persisted runtime-config owner. After acquiring the coordinator, an executor
+can await an actor reply, persistence reply, rollback reply, or reload bridge
+adoption without a terminal bound. A lost reply can therefore retain the
+coordinator (and, for streamed apply, its admission permit) indefinitely.
+Later persisted mutations remain fenced until daemon restart, but the daemon
+can continue to report process health even though its config plane cannot
+settle.
 
 PR #1607 and current source give unary and streamed `ApplyConfigTransaction`
 ten minutes to acquire the coordinator. Expiry rejects only those waiting Apply
@@ -27,47 +28,64 @@ operations without mutation, while this ADR covers liveness after ownership.
 That precursor does not bound rollback, confirm, abort, gNMI, or auto-revert
 before ownership and does not close the underlying settlement-liveness issue.
 
-This ADR defines the post-ownership contract. It is architecture only. Its
-Proposed status does not claim that a watchdog, fail-stop path, observability,
-or recovery proof has shipped.
+This ADR defines the post-ownership contract. Transaction-watchdog substrate
+exists in current source, but Proposed status does not claim the complete owner
+roster, SIGHUP settlement/shutdown rules, or required recovery proof has
+shipped.
 
 ## Decision
 
 ### One operation, one owner, one candidate
 
-Every config transaction mutation has exactly one daemon-owned internal
+Every persisted runtime-config mutation has exactly one daemon-owned internal
 operation record and one owner of the shared runtime-config coordinator. A
-streamed apply also has exactly one materialized candidate, one consumed
-candidate token, and one held stream-admission permit. The transport transfers
-the candidate and permit to the daemon-owned operation; it never retains a
-second candidate, starts a replacement operation, or reacquires admission for
-the same request.
+streamed transaction apply also has exactly one materialized candidate, one
+consumed candidate token, and one held stream-admission permit. The transport
+transfers the candidate and permit to the daemon-owned operation; it never
+retains a second candidate, starts a replacement operation, or reacquires
+admission for the same request.
 
-The exact coordinator-owning roster is unary/streamed `ApplyConfigTransaction`,
-`RollbackConfigTransaction`, gRPC `ConfirmConfigTransaction`/
-`AbortConfigTransaction`, gNMI Set with ordinary operations or `Commit`,
-`Confirm`, `Cancel`, or `SetRollbackDuration`, and timeout auto-revert.
-Plan, Status, and History operations are read-only and outside the watchdog.
-Other mutators that share the coordinator do not gain a watchdog here; they
-remain unable to overlap an owned transaction.
+The exact persisted coordinator-owner roster is:
 
-The operation moves monotonically through these phases:
+- transaction owners: unary/streamed `ApplyConfigTransaction`,
+  `RollbackConfigTransaction`, `ConfirmConfigTransaction`,
+  `AbortConfigTransaction`, timeout auto-revert, and gNMI Set ordinary,
+  `Commit`, `Confirm`, `Cancel`, and `SetRollbackDuration` operations;
+- SIGHUP reload;
+- Neighbor4: static and dynamic Add/Delete;
+- FIB `SetFibTable` and `DeleteFibTable`;
+- PeerGroup4: group Set/Delete and neighbor membership Set/Clear;
+- Policy12: policy and neighbor-set Set/Delete, global import/export chain
+  Set/Clear, and neighbor import/export chain Set/Clear.
 
-1. `waiting-for-ownership`: validated request, but no coordinator guard and no
-   mutation authority.
-2. `owned-preflight`: coordinator acquired and watchdog armed, while re-plan,
-   token comparison, mutation-family validation, and other side-effect-free
-   checks run.
-3. `mutating`: the first reversible runtime or journal mutation has begun.
-4. `settling/rollback`: persistence, finalization, confirmation-state
+Read-only Plan, Status, History, Get, and List operations, including
+`ListFibTables`, are outside the watchdog. The shutdown/warm-checkpoint
+coordinator acquisition is a fence, not a persisted mutation owner. A
+source-closed inventory checker must keep this roster complete as entry paths
+change.
+
+`waiting-for-ownership` is a pre-watchdog state: the request is validated, but
+has no coordinator guard or mutation authority. Ownership arms the watchdog
+and begins exactly three live phases that advance monotonically:
+
+1. `owned-preflight`: re-plan, token comparison, mutation-family validation,
+   and other side-effect-free checks;
+2. `mutating`: the first reversible runtime or journal mutation has begun; and
+3. `settling/rollback`: persistence, finalization, confirmation-state
    publication, or compensating rollback is in progress.
-5. `settled`: a success or clean failure is terminal and all required outcome
-   state has been recorded.
-6. `ambiguous-fenced`: the watchdog expired without proof of settlement; no
-   success or rollback claim is permitted and fail-stop is in progress.
 
-Only `settled` releases the coordinator and streamed admission normally.
-`ambiguous-fenced` retains their logical ownership until process death. At
+Any owned live phase terminates through exactly one mutually exclusive branch:
+
+- `clean_settled`: a typed terminal outcome proves success, a no-side-effect
+  rejection, a fully acknowledged rollback, or an acknowledged SIGHUP
+  known-partial result after the runtime snapshot and config bridge adopted
+  the same authority; or
+- `ambiguous_fenced`: ambiguity branches from any owned phase when settlement
+  cannot be proved; no success or rollback claim is permitted and fail-stop is
+  in progress.
+
+Only `clean_settled` releases the coordinator and streamed admission normally.
+`ambiguous_fenced` retains their logical ownership until process death. At
 fail-stop or shutdown, every operation still queued in `waiting-for-ownership`
 is rejected and no queued waiter may acquire the newly freed physical mutex.
 A new process reconstructs authority from durable state.
@@ -79,14 +97,15 @@ arms the watchdog before any further await or side effect.
 
 ### Independent terminal watchdog
 
-The 30-minute budget, five-second grace, and exit status 70 below are Proposed
-acceptance choices. None describes current behavior until this ADR is accepted
-and its implementation gates pass.
+The 30-minute budget, five-second grace, and exit status 70 remain Proposed
+owner acceptance choices for the complete roster. Existing transaction
+watchdog code does not by itself satisfy this amended contract or its gates.
 
 An owned operation gets one fixed, non-resettable 30-minute monotonic
 settlement budget. This is the latest normal settlement deadline; independently
 detected executor loss can advance fail-stop as specified below without
-resetting or extending the budget. The sealed
+resetting or extending the budget. It is a fixed implementation contract, not
+an operator config knob. The sealed
 [IRR transactional-apply receipt](../perf/irr-transactional-apply-2026-08.md)
 measured a 295.6 MB candidate with end-to-end completion no higher than 208.55
 seconds and auto-revert no slower than 69.5 seconds. Thirty minutes is a
@@ -104,11 +123,12 @@ filesystem I/O, async work, handler dispatch, or unwinding; kernel descriptor
 and process teardown can still occur and are outside that guarantee. A
 multithreaded subprocess test must prove every thread dies and the parent
 observes exact status 70. The operation can update an atomic phase and disarm
-its registration only with a proved terminal `settled` transition; it cannot
+its registration only with a proved terminal `clean_settled` transition; it
+cannot
 extend or replace the deadline.
 
-At 30 minutes without `settled`, one atomic compare-and-swap irreversibly wins
-the `owned -> ambiguous-fenced` race against settlement. It marks readiness
+At 30 minutes without `clean_settled`, one atomic compare-and-swap irreversibly
+wins the `owned -> ambiguous_fenced` race against settlement. It marks readiness
 unavailable, closes admission for new persisted mutations, and requests
 supervised shutdown. Settlement may disarm only if its compare-and-swap wins
 first; after expiry wins, no late reply can reverse the fence or claim success.
@@ -123,7 +143,8 @@ The RPC response deadline remains a transport concern. Deadline expiry,
 disconnect, dropped response receiver, or caller cancellation may prevent a
 client from learning the outcome, but never aborts the transaction task,
 releases the coordinator, releases streamed admission, or disarms the terminal
-watchdog. The daemon-owned operation continues toward `settled` or fail-stop.
+watchdog. The daemon-owned operation continues toward `clean_settled` or
+fail-stop.
 
 The response therefore remains at-least-once ambiguous to the caller. Existing
 transaction status is authoritative only for the confirmed-transaction
@@ -137,10 +158,11 @@ a dropped handle detaches, and the operation remains owned/running. Executor
 `JoinError`, owner-guard drop, panic, unwind, or task abort after coordinator
 acquisition advances the hard-exit deadline to five seconds after the loss.
 The same exact compare-and-swap decides executor-loss versus a concurrent
-`settled` transition: loss cannot fence a prior settlement, and settlement
-cannot revoke a loss-won fence. Unless already `settled`, the owner guard marks
-`ambiguous-fenced` before its coordinator guard or stream permit can drop; the
-OS-thread registration outlives the task. Process abort already meets fail-stop.
+`clean_settled` transition: loss cannot fence a prior settlement, and
+settlement cannot revoke a loss-won fence. Unless already `clean_settled`, the
+owner guard marks `ambiguous_fenced` before its coordinator guard or stream
+permit can drop; the OS-thread registration outlives the task. Process abort
+already meets fail-stop.
 
 ### Persistence and confirmed transactions
 
@@ -156,7 +178,7 @@ For an unconfirmed apply:
 - After atomic persistence publishes it, restart uses the candidate on disk as
   authority even if the response or in-process finalization was lost.
 - If publication cannot be proven at watchdog expiry, the running process says
-  only `ambiguous-fenced`. Startup validates the one atomically published
+  only `ambiguous_fenced`. Startup validates the one atomically published
   config object and fails closed under the existing persistence contract.
 
 V3 authority has three explicit publication windows. Before locator
@@ -176,10 +198,18 @@ Locator unlink or directory-fsync failure remains nonterminal, retains the
 fence and authority, and proceeds to watchdog fail-stop if it cannot settle.
 Restart with a retained locator performs the existing verified boot revert.
 
-Pre-persistence, post-persistence, rollback, and lost-ack windows all obey the
-same rule: no in-process success or clean-failure claim without proof. The
-watchdog does not guess which side effect completed. It fences, exits, and lets
-the established durable authority decide startup behavior.
+The typed terminal classifier is uniform across owner families.
+`clean_settled` includes success, a proved no-side-effect rejection, a fully
+acknowledged rollback, and the acknowledged SIGHUP known-partial case above.
+`ambiguous_fenced` includes an accepted-command deadline, lost mutation or
+persistence acknowledgement, failed or unacknowledged rollback, uncertain
+publication, executor loss, and true SIGHUP reconcile or bridge ambiguity.
+Pre-persistence, post-persistence, rollback, and lost-ack windows obey the same
+rule: no success or clean-failure claim without proof. A family-local timeout
+may advance an ambiguous operation to `ambiguous_fenced`; it never releases
+ownership or proves settlement. The watchdog does not guess which side effect
+completed. It fences, exits, and lets established durable authority decide
+startup behavior.
 
 ### Fencing, observability, and shutdown
 
@@ -208,14 +238,17 @@ an inventory and checker prove that every persisted producer passes through it.
 No fence may reject settlement commands from the current owner. None of these
 steps permits release of its coordinator or streamed admission before death.
 
-Ordinary coordinated shutdown first closes mutation admission. If an owned
-transaction exists, shutdown may wait only until the earlier of normal
-settlement or its already-armed watchdog deadline. Shutdown cannot abort its
-`JoinHandle`, reset the deadline, start a parallel rollback, or tear down a
-required actor while the operation is still trying to settle. Watchdog expiry
-during shutdown follows the same readiness, fence, and nonzero fail-stop path;
-it is not converted to a successful shutdown. All queued coordinator waiters
-are rejected before teardown and cannot begin after the owner settles or dies.
+Ordinary coordinated shutdown first closes mutation admission. A SIGHUP
+rejected before ownership is a clean no-side-effect rejection. Once SIGHUP owns
+the coordinator, shutdown must not abort its task: it waits for settlement or
+the already-armed watchdog, then retains the coordinator as the
+shutdown/warm-checkpoint fence. The same rule applies to every owned operation.
+Shutdown cannot abort its `JoinHandle`, reset the deadline, start a parallel
+rollback, or tear down a required actor while the operation is still trying to
+settle. Watchdog expiry during shutdown follows the same readiness, fence, and
+nonzero fail-stop path; it is not converted to a successful shutdown. All
+queued coordinator waiters are rejected before teardown and cannot begin after
+the owner settles or dies.
 
 ### Required proof before acceptance
 
@@ -223,19 +256,19 @@ Implementation is not complete until deterministic tests cover the phase and
 recovery contract:
 
 1. An injected deterministic watchdog driver holds each actor and persistence
-   reply used by every mutation family. At 29 minutes 59 seconds the owner,
-   coordinator, admission, and watchdog remain live; at 30 minutes the state
-   becomes `ambiguous-fenced` exactly once. Tokio paused time cannot drive an
-   OS-thread condition variable, so real OS-thread and subprocess tests must
-   separately prove wake-up and terminal behavior.
+   reply used by every persisted owner family. At 29 minutes 59 seconds the
+   owner, coordinator, admission, and watchdog remain live; at 30 minutes the
+   state becomes `ambiguous_fenced` exactly once. Tokio paused time cannot
+   drive an OS-thread condition variable, so real OS-thread and subprocess
+   tests must separately prove wake-up and terminal behavior.
 2. Caller-`JoinHandle` wait/drop tests prove the operation remains owned/running.
    Executor `JoinError`, panic/unwind/task-abort, and owner-guard-drop tests prove
    immediate fencing before coordinator/permit release, OS thread still armed,
    and no new admission.
 3. Adversarial tests stall owned preflight, first mutation, persistence before
-   and after atomic publication, finalization, rollback, confirm, abort, and
-   auto-revert. Each produces either a proved `settled` result or the same
-   fail-stop transition.
+   and after atomic publication, finalization, rollback, confirm, abort,
+   auto-revert, and SIGHUP reconcile/bridge adoption. Each produces either a
+   proved `clean_settled` result or the same fail-stop transition.
 4. Real-binary subprocess tests prove readiness goes red, queued/new mutations
    reject, exit 70 occurs by the grace, and no second transaction begins.
 5. Restart/fault tests cover unconfirmed persistence; v3 before, after, and
@@ -246,10 +279,11 @@ recovery contract:
    transaction task, relevant actor mailbox, persistence acknowledgement, and
    graceful-shutdown path are independently stalled.
 
-The test matrix must exercise every config-transaction entry path and mutation
-family with a finite pairwise matrix of entry path, phase, and failure class;
-it must not grow into their full Cartesian product. A single synthetic oneshot
-test is necessary but insufficient.
+The test matrix must exercise every roster family with a finite pairwise matrix
+of owner family, phase, and failure class. Each family appears in normal,
+rollback where applicable, lost-ack, and shutdown pairings, but no full
+owner-entry-path by phase by failure-class Cartesian product is required. A
+single synthetic oneshot test is necessary but insufficient.
 
 ### Rejected alternatives
 
