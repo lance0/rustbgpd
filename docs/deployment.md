@@ -336,11 +336,16 @@ Notes on the sandbox:
   listener failing to bind, or the gRPC server exiting unexpectedly.
   None of these listeners is rebound without a restart, so the daemon exits
   rather than run on deaf; the supervisor's retry is the recovery path.
-  With `RestartSec=5` a transient bind failure clears on the next
-  attempt, and a permanent one (port held by another speaker, missing
-  `CAP_NET_BIND_SERVICE`) repeats the bind error in the journal on every
-  attempt. `rbgp doctor` reports the same cause against the down daemon
-  through its `bgp.listener` check.
+  Exit 70 is also a failure: it is the runtime-config settlement watchdog's
+  fail-stop recovery request and must remain restartable. `RestartSec=5`
+  retries a transient failure, while `StartLimitBurst=5` and
+  `StartLimitIntervalSec=10min` stop a deterministic failure from flapping
+  forever. After correcting config authority or permissions, recover a
+  rate-limited unit with `systemctl reset-failed rustbgpd` followed by
+  `systemctl start rustbgpd`. An explicit `systemctl stop` suppresses restart,
+  and `TimeoutStopSec=32min` gives an already-owned mutation longer than its
+  30-minute watchdog plus five-second terminal grace to settle or fail-stop.
+  `rbgp doctor` reports listener failures through its `bgp.listener` check.
 
 ### Installation
 
@@ -481,6 +486,7 @@ For your own deployment:
 
   docker run --rm -d \
     --name rustbgpd \
+    --stop-timeout=1920 \
     -v /etc/rustbgpd:/etc/rustbgpd \
     -v /var/lib/rustbgpd:/var/lib/rustbgpd \
     -p 179:179 \
@@ -508,6 +514,18 @@ For your own deployment:
   *directory*, not just the file, has to be writable, and every mutating
   RPC is rejected without it. Mount it `:ro` only when the config is
   managed entirely from outside and reloaded with SIGHUP.
+
+- **Settlement fail-stop**: `--stop-timeout=1920` gives an explicit stop the
+  same 32-minute grace as the shipped systemd unit. A failure to create the
+  initial persistence stage rejects cleanly before runtime mutation. After
+  staging and runtime mutation begin, an unprovable rename or directory fsync
+  is ambiguous; a read-only bind-mounted config *file* can have a writable
+  parent yet still fail replacement in this window. The daemon then marks
+  readiness unavailable, closes persisted-mutation admission, and exits 70
+  within five seconds of detected ambiguity. A silent owner is fenced at 30
+  minutes and exits five seconds later. This standalone command has no restart
+  policy; use bounded supervisor retries and inspect durable config authority
+  before recovery.
 
 - **Health**: the image declares a `HEALTHCHECK` that runs `rbgp
   --json health` against the daemon's local gRPC socket and requires a

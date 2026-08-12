@@ -3,6 +3,9 @@ Description=rustbgpd BGP daemon
 Documentation=https://github.com/lance0/rustbgpd
 After=network-online.target
 Wants=network-online.target
+# Bound repeated fail-stop recovery: five starts per ten-minute window.
+StartLimitIntervalSec=10min
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -37,6 +40,9 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 # Restart on failure, but not on clean shutdown (exit 0) or SIGTERM
 Restart=on-failure
 RestartSec=5
+# An owned runtime-config mutation may need its full 30-minute settlement
+# watchdog plus the five-second fail-stop grace during an explicit stop.
+TimeoutStopSec=32min
 
 [Install]
 WantedBy=multi-user.target

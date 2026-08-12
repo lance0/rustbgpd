@@ -50,6 +50,13 @@ temp-file + rename write that config persistence uses, and every mutating
 command would fail. Edit the template and `docker compose down -v` to start
 over from it.
 
+The service has a 32-minute stop grace so an explicit Compose stop does not
+kill a runtime-config owner before its fixed 30-minute settlement watchdog.
+There is deliberately no Compose restart policy: production supervisors
+should choose their own bounded retry policy. A detected ambiguous mutation
+turns readiness red, closes persisted-mutation admission, and exits 70 within
+five seconds; a silent owner exits by 30 minutes plus five seconds.
+
 ## Stop
 
 ```bash

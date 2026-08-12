@@ -30,6 +30,15 @@ MONITORING = (
         "/usr/share/doc/rustbgpd/monitoring/rustbgpd-alerts_test.yml",
     ),
 )
+SYSTEMD_UNIT = "examples/systemd/rustbgpd.service"
+COMPOSE_FILE = "examples/docker-compose/docker-compose.yml"
+SYSTEMD_DIRECTIVES = {
+    ("Unit", "StartLimitIntervalSec"): "10min",
+    ("Unit", "StartLimitBurst"): "5",
+    ("Service", "Restart"): "on-failure",
+    ("Service", "RestartSec"): "5",
+    ("Service", "TimeoutStopSec"): "32min",
+}
 
 
 def exact(command: str) -> str:
@@ -52,7 +61,9 @@ def select_script(text: str, label: str, discriminator: str) -> str:
         if re.search(exact(discriminator), script, re.MULTILINE)
     ]
     if len(matches) != 1:
-        raise ValueError(f"{label}: expected one matching run body, found {len(matches)}")
+        raise ValueError(
+            f"{label}: expected one matching run body, found {len(matches)}"
+        )
     return matches[0]
 
 
@@ -81,23 +92,142 @@ def active_script(step: str) -> str:
     return "\n".join(commands)
 
 
-def require_patterns(errors: list[str], label: str, text: str, patterns: tuple[str, ...]) -> None:
-    missing = [pattern for pattern in patterns if not re.search(pattern, text, re.MULTILINE)]
+def require_patterns(
+    errors: list[str], label: str, text: str, patterns: tuple[str, ...]
+) -> None:
+    missing = [
+        pattern for pattern in patterns if not re.search(pattern, text, re.MULTILINE)
+    ]
     if missing:
         errors.append(f"{label}: missing active commands {missing!r}")
+
+
+def systemd_logical_lines(text: str) -> tuple[str, ...]:
+    logical = []
+    continued = ""
+    for raw_line in text.splitlines():
+        if raw_line.lstrip().startswith(("#", ";")):
+            continue
+        line = raw_line.rstrip()
+        if continued:
+            line = continued + " " + line.lstrip()
+        if line.endswith("\\"):
+            continued = line[:-1].rstrip()
+        else:
+            logical.append(line)
+            continued = ""
+    if continued:
+        logical.append(continued)
+    return tuple(logical)
+
+
+def systemd_assignments(text: str) -> tuple[tuple[str | None, str, str], ...]:
+    section: str | None = None
+    assignments = []
+    for raw_line in systemd_logical_lines(text):
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if match := re.fullmatch(r"\[([^]]+)\]", line):
+            section = match.group(1)
+        elif "=" in line:
+            key, value = line.split("=", 1)
+            assignments.append((section, key.strip(), value.strip()))
+    return tuple(assignments)
+
+
+def systemd_status_is_70(token: str) -> bool:
+    token = token.removeprefix("+")
+    if token == "SOFTWARE":
+        return True
+    try:
+        if token.lower().startswith("0b"):
+            base = 2
+        elif token.lower().startswith("0x"):
+            base = 16
+        elif len(token) > 1 and token.startswith("0"):
+            base = 8
+        else:
+            base = 10
+        return int(token, base) == 70
+    except ValueError:
+        return False
+
+
+def check_systemd_unit(errors: list[str], text: str) -> None:
+    assignments = systemd_assignments(text)
+    for (section, key), expected in SYSTEMD_DIRECTIVES.items():
+        actual = [
+            value
+            for found_section, found_key, value in assignments
+            if found_section == section and found_key == key
+        ]
+        if actual != [expected]:
+            errors.append(
+                f"systemd unit: [{section}] {key} must occur once with value {expected!r}, got {actual!r}"
+            )
+    for _, key, value in assignments:
+        if key in {"SuccessExitStatus", "RestartPreventExitStatus"} and any(
+            systemd_status_is_70(token) for token in value.split()
+        ):
+            errors.append(
+                f"systemd unit: {key} must not classify exit 70/SOFTWARE as non-restartable"
+            )
+
+
+def compose_service(text: str, name: str) -> tuple[str, ...]:
+    lines = text.splitlines()
+    marker = f"  {name}:"
+    try:
+        start = lines.index(marker) + 1
+    except ValueError:
+        return ()
+    body = []
+    for line in lines[start:]:
+        if (
+            line.strip()
+            and not line.lstrip().startswith("#")
+            and len(line) - len(line.lstrip()) <= 2
+        ):
+            break
+        body.append(line)
+    return tuple(body)
+
+
+def check_compose(errors: list[str], text: str) -> None:
+    service = compose_service(text, "rustbgpd")
+    if not service:
+        errors.append("docker compose: rustbgpd service missing or empty")
+        return
+    grace = [
+        match.group(1).strip()
+        for line in service
+        if (match := re.fullmatch(r"    stop_grace_period:\s*(.*?)\s*", line))
+    ]
+    if grace != ["32m"]:
+        errors.append(
+            f"docker compose: rustbgpd stop_grace_period must occur once as 32m, got {grace!r}"
+        )
+    if any(re.match(r"^\s+(?:restart|restart_policy):", line) for line in service):
+        errors.append("docker compose: rustbgpd must not declare a restart policy")
 
 
 def check(root: Path) -> list[str]:
     errors: list[str] = []
     read = lambda path: (root / path).read_text(encoding="utf-8")
     try:
+        check_systemd_unit(errors, read(SYSTEMD_UNIT))
+        check_compose(errors, read(COMPOSE_FILE))
         release = read(".github/workflows/release.yml")
         package_tar = (
             "tar -C staging -czf dist/rustbgpd-${SUFFIX}.tar.gz rustbgpd rbgp "
             "rs-config-render birdwatcher-adapter LICENSE-MIT LICENSE-APACHE rustbgpd.schema.json share"
         )
         package = select_script(release, "tarball package commands", package_tar)
-        package_patterns = tuple(rf"^cp target/\$\{{\{{ matrix\.target \}}\}}/release/{binary} staging/$" for binary in BINARIES) + (
+        package_patterns = tuple(
+            rf"^cp target/\$\{{\{{ matrix\.target \}}\}}/release/{binary} staging/$"
+            for binary in BINARIES
+        ) + (
             r"^cp examples/systemd/rustbgpd\.service examples/systemd/rustbgpd-dataplane\.conf staging/share/systemd/$",
             r"^cp docs/grafana/rustbgpd-overview\.json staging/share/monitoring/$",
             r"^cp examples/prometheus/rustbgpd-alerts\.yml examples/prometheus/rustbgpd-alerts_test\.yml staging/share/monitoring/$",
@@ -115,10 +245,14 @@ def check(root: Path) -> list[str]:
         asserted = set(inventory.group(1).split()) if inventory else set()
         missing_payloads = set(payloads) - asserted
         if missing_payloads:
-            errors.append(f"tarball payload assertions: missing {sorted(missing_payloads)!r}")
+            errors.append(
+                f"tarball payload assertions: missing {sorted(missing_payloads)!r}"
+            )
         tar_checks = (
             exact('if ! grep -qxF "$f" <<<"$entries"; then'),
-            exact('if [ "$(tar -xOzf "dist/rustbgpd-${SUFFIX}.tar.gz" "$f" | wc -c)" -eq 0 ]; then'),
+            exact(
+                'if [ "$(tar -xOzf "dist/rustbgpd-${SUFFIX}.tar.gz" "$f" | wc -c)" -eq 0 ]; then'
+            ),
         )
         require_patterns(errors, "tarball active assertions", assertion, tar_checks)
 
@@ -136,14 +270,18 @@ def check(root: Path) -> list[str]:
         expected_monitoring = {(source, native) for source, _, native in MONITORING}
         missing_monitoring = expected_monitoring - mappings
         if missing_monitoring:
-            errors.append(f"native monitoring mappings missing {sorted(missing_monitoring)!r}")
+            errors.append(
+                f"native monitoring mappings missing {sorted(missing_monitoring)!r}"
+            )
         for source, _, _ in MONITORING:
             if not (root / source).is_file() or (root / source).stat().st_size == 0:
                 errors.append(f"monitoring source missing or empty: {source}")
 
         contract = read(".github/workflows/release-install-contract.yml")
         native = select_script(
-            contract, "real native package assertions", 'dpkg-deb -x "$deb" extracted/deb'
+            contract,
+            "real native package assertions",
+            'dpkg-deb -x "$deb" extracted/deb',
         )
         require_patterns(
             errors,
@@ -159,6 +297,13 @@ def check(root: Path) -> list[str]:
                 r"^for exe in rustbgpd rbgp rs-config-render birdwatcher-adapter; do$",
                 r'^test -x "\$tree/usr/bin/\$exe" ',
                 r'^"\$tree/usr/bin/rustbgpd" --check "\$tree/etc/rustbgpd/config\.toml"$',
+                r'^unit="\$tree/lib/systemd/system/rustbgpd\.service"$',
+                r"^for directive in StartLimitIntervalSec=10min StartLimitBurst=5 Restart=on-failure RestartSec=5 TimeoutStopSec=32min; do$",
+                r'^grep -qxF "\$directive" "\$unit"$',
+                r"^from scripts\.check_release_install_contract import systemd_assignments, systemd_status_is_70$",
+                r"^for _, key, value in systemd_assignments\(Path\(sys\.argv\[1\]\)\.read_text\(\)\):$",
+                r'^if key in \{"SuccessExitStatus", "RestartPreventExitStatus"\} and any\($',
+                r"^systemd_status_is_70\(token\) for token in value\.split\(\)$",
             ),
         )
         if "--to-stdout" in native:

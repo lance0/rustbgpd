@@ -281,6 +281,7 @@ starting from `--init-config edge` needs no such edit.
 
 ```bash
 docker run -d --name rustbgpd \
+  --stop-timeout=1920 \
   -v "$(pwd)/config.toml":/etc/rustbgpd/config.template.toml:ro \
   -v rustbgpd-state:/var/lib/rustbgpd \
   -p 179:179 -p 9179:9179 \
@@ -323,6 +324,13 @@ rejected. Mount it read-write and the write still fails, because the image's
 
 Deployments that manage the config exclusively from the outside — SIGHUP after
 an external edit, no runtime mutation — can mount it read-only and skip this.
+
+`--stop-timeout=1920` gives an explicit container stop 32 minutes to wait for
+an owned runtime-config mutation. If settlement becomes ambiguous, readiness
+fails and new persisted mutations are rejected before the daemon exits 70:
+within five seconds when ambiguity is detected, or by 30 minutes plus five
+seconds when an owner goes silent. Docker does not restart this standalone
+example; production supervision should bound retries.
 
 Or use systemd with
 [`examples/systemd/rustbgpd.service`](../examples/systemd/rustbgpd.service).

@@ -43,6 +43,36 @@ signal; it returns ready once the PeerManager and RIB actors answer their
 bounded probes. The `starting rustbgpd` log line means process startup reached
 runtime wiring, not that every actor has answered a readiness probe yet.
 
+### Runtime-config settlement fail-stop
+
+Persisted runtime mutations use a cancellation-shielded owner. If creation of
+the initial persistence stage fails because the config directory is not
+writable, the request is rejected cleanly before runtime state changes and the
+daemon remains available. That is different from failure after durable staging
+and runtime mutation have begun: if rename or directory fsync publication
+cannot be proved, the outcome is ambiguous. A read-only bind-mounted config
+*file* in an otherwise writable directory is especially dangerous because the
+temporary stage can succeed while replacement of the mount point cannot.
+
+An ambiguous owner immediately makes `/readyz` fail, closes admission for new
+persisted mutations, and retains ownership until process death. Detected
+ambiguity or executor loss exits with status 70 after a five-second fencing
+grace. A silent owner is fenced after the fixed 30-minute owned-settlement
+budget and exits five seconds later. Do not classify 70 as success or suppress
+its restart: the new process re-establishes authority from durable state.
+
+The shipped systemd unit uses `Restart=on-failure`, but caps recovery at five
+starts per ten minutes so a deterministic persistence fault cannot flap every
+five seconds forever. `TimeoutStopSec=32min` lets an explicit stop wait through
+the watchdog; systemd suppresses automatic restart for an explicit
+`systemctl stop`. After inspecting and fixing the config directory, bind mount,
+and on-disk authority, recover a rate-limited unit with:
+
+```bash
+sudo systemctl reset-failed rustbgpd
+sudo systemctl start rustbgpd
+```
+
 ### Per-peer log filtering
 
 Set `log_level` on any neighbor or peer group to override the global log level:

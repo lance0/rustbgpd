@@ -33,6 +33,18 @@ exists in current source, but Proposed status does not claim the complete owner
 roster, SIGHUP settlement/shutdown rules, or required recovery proof has
 shipped.
 
+### Implementation status (2026-08-12)
+
+The shared watchdog, readiness/admission fence, Linux exit-70 terminal action,
+and typed settlement wiring have shipped for transaction/Apply owners,
+Neighbor4, FIB2, PeerGroup4, and Policy12. That is a partial roster, not
+acceptance of this ADR or closure of the underlying issue.
+
+SIGHUP ownership remains incomplete. The bounded metrics/log observability
+described below and the final cross-roster recovery proofs also remain
+incomplete. Until those land, this ADR stays Proposed and the source inventory
+must distinguish shipped owners from the decision's full target roster.
+
 ## Decision
 
 ### One operation, one owner, one candidate
@@ -97,9 +109,10 @@ arms the watchdog before any further await or side effect.
 
 ### Independent terminal watchdog
 
-The 30-minute budget, five-second grace, and exit status 70 remain Proposed
-owner acceptance choices for the complete roster. Existing transaction
-watchdog code does not by itself satisfy this amended contract or its gates.
+The 30-minute budget, five-second grace, and exit status 70 are implemented for
+the shipped partial roster, but remain Proposed as complete-roster acceptance
+criteria. Existing watchdog code does not by itself satisfy this amended
+contract or its gates.
 
 An owned operation gets one fixed, non-resettable 30-minute monotonic
 settlement budget. This is the latest normal settlement deadline; independently
