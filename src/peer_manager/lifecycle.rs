@@ -24,6 +24,19 @@ pub(super) enum RuntimeCreatePeerFailureEffect {
     FullyCompensated,
 }
 
+pub(super) enum ReconfigurePeerFailureEffect {
+    NoEffect,
+    FullyCompensated,
+    CompensationAmbiguous,
+}
+
+pub(super) enum PeerReshapeSnapshotOutcome {
+    Success(Vec<PeerManagerNeighborConfig>),
+    RejectedNoEffect(PeerLifecycleError),
+    FullyCompensated(PeerLifecycleError),
+    CompensationAmbiguous(PeerLifecycleError),
+}
+
 async fn send_max_prefix_start_before(
     commands: tokio::sync::mpsc::Sender<PeerCommand>,
     deadline: tokio::time::Instant,
@@ -851,8 +864,16 @@ impl PeerManager {
         &mut self,
         config: PeerManagerNeighborConfig,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
+        let mut effect = ReconfigurePeerFailureEffect::NoEffect;
+        self.reconfigure_peer_classified(config, &mut effect).await
+    }
+
+    async fn reconfigure_peer_classified(
+        &mut self,
+        config: PeerManagerNeighborConfig,
+        effect: &mut ReconfigurePeerFailureEffect,
+    ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let peer = PeerKey::new(config.address, config.interface.clone());
-        self.invalidate_max_prefix_restart(&peer);
         #[cfg(test)]
         if let Some(remaining) = self.inject_reconfigure_failures.get_mut(&peer) {
             if *remaining == 0 {
@@ -862,6 +883,7 @@ impl PeerManager {
             }
             *remaining -= 1;
         }
+        self.invalidate_max_prefix_restart(&peer);
         let (was_enabled, graceful_shutdown) = self
             .peers
             .get(&peer)
@@ -884,12 +906,18 @@ impl PeerManager {
                 )
                 .await
             {
-                Ok(()) => Err(PeerLifecycleError::Internal(format!(
-                    "failed to add reconfigured peer {peer}: {add_error}; previous peer restored"
-                ))),
-                Err(restore_error) => Err(PeerLifecycleError::Internal(format!(
-                    "failed to add reconfigured peer {peer}: {add_error}; restore previous peer failed: {restore_error}"
-                ))),
+                Ok(()) => {
+                    *effect = ReconfigurePeerFailureEffect::FullyCompensated;
+                    Err(PeerLifecycleError::Internal(format!(
+                        "failed to add reconfigured peer {peer}: {add_error}; previous peer restored"
+                    )))
+                }
+                Err(restore_error) => {
+                    *effect = ReconfigurePeerFailureEffect::CompensationAmbiguous;
+                    Err(PeerLifecycleError::Internal(format!(
+                        "failed to add reconfigured peer {peer}: {add_error}; restore previous peer failed: {restore_error}"
+                    )))
+                }
             };
         }
 
@@ -906,12 +934,18 @@ impl PeerManager {
                 )
                 .await
             {
-                Ok(()) => Err(PeerLifecycleError::Internal(format!(
-                    "failed to restore runtime state for reconfigured peer {peer}: {state_error}; previous peer restored"
-                ))),
-                Err(restore_error) => Err(PeerLifecycleError::Internal(format!(
-                    "failed to restore runtime state for reconfigured peer {peer}: {state_error}; restore previous peer failed: {restore_error}"
-                ))),
+                Ok(()) => {
+                    *effect = ReconfigurePeerFailureEffect::FullyCompensated;
+                    Err(PeerLifecycleError::Internal(format!(
+                        "failed to restore runtime state for reconfigured peer {peer}: {state_error}; previous peer restored"
+                    )))
+                }
+                Err(restore_error) => {
+                    *effect = ReconfigurePeerFailureEffect::CompensationAmbiguous;
+                    Err(PeerLifecycleError::Internal(format!(
+                        "failed to restore runtime state for reconfigured peer {peer}: {state_error}; restore previous peer failed: {restore_error}"
+                    )))
+                }
             };
         }
 
@@ -1128,22 +1162,37 @@ impl PeerManager {
         &mut self,
         targets: Vec<PeerManagerNeighborConfig>,
     ) -> Result<Vec<PeerManagerNeighborConfig>, PeerLifecycleError> {
+        match self.apply_peer_reshape_snapshot_classified(targets).await {
+            PeerReshapeSnapshotOutcome::Success(priors) => Ok(priors),
+            PeerReshapeSnapshotOutcome::RejectedNoEffect(error)
+            | PeerReshapeSnapshotOutcome::FullyCompensated(error)
+            | PeerReshapeSnapshotOutcome::CompensationAmbiguous(error) => Err(error),
+        }
+    }
+
+    pub(super) async fn apply_peer_reshape_snapshot_classified(
+        &mut self,
+        targets: Vec<PeerManagerNeighborConfig>,
+    ) -> PeerReshapeSnapshotOutcome {
         let mut seen = BTreeSet::new();
         for target in &targets {
             let peer = PeerKey::new(target.address, target.interface.clone());
             if !seen.insert(peer.clone()) {
-                return Err(PeerLifecycleError::Invalid(format!(
-                    "peer reshape target {peer} appears more than once"
-                )));
+                return PeerReshapeSnapshotOutcome::RejectedNoEffect(PeerLifecycleError::Invalid(
+                    format!("peer reshape target {peer} appears more than once"),
+                ));
             }
-            let managed = self
-                .peers
-                .get(&peer)
-                .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
+            let Some(managed) = self.peers.get(&peer) else {
+                return PeerReshapeSnapshotOutcome::RejectedNoEffect(PeerLifecycleError::NotFound(
+                    peer,
+                ));
+            };
             if managed.transport_config.tcp_ao != target.tcp_ao {
-                return Err(PeerLifecycleError::RestartRequired(format!(
-                    "peer reshape target {peer} changes tcp_ao; TCP-AO changes require a daemon restart"
-                )));
+                return PeerReshapeSnapshotOutcome::RejectedNoEffect(
+                    PeerLifecycleError::RestartRequired(format!(
+                        "peer reshape target {peer} changes tcp_ao; TCP-AO changes require a daemon restart"
+                    )),
+                );
             }
             // Inbound MD5 keys and GTSM selectors live on the BGP listener,
             // which only startup and the SIGHUP reload coordinator can
@@ -1153,44 +1202,60 @@ impl PeerManager {
             if managed.transport_config.md5_password != target.md5_password
                 || managed.transport_config.ttl_security != target.ttl_security
             {
-                return Err(PeerLifecycleError::RestartRequired(format!(
-                    "peer reshape target {peer} changes md5_password or ttl_security; inbound \
+                return PeerReshapeSnapshotOutcome::RejectedNoEffect(
+                    PeerLifecycleError::RestartRequired(format!(
+                        "peer reshape target {peer} changes md5_password or ttl_security; inbound \
                      listener enforcement is updated only by startup or SIGHUP reload — apply \
                      this change through the config file and SIGHUP"
-                )));
+                    )),
+                );
             }
             // Defense in depth: the transaction executor already gates dynamic
             // ranges out of reshape targets, but reconfigure's delete/re-add
             // semantics are wrong for an ephemeral dynamic peer (it would change
             // `is_dynamic` lifecycle/persistence), so refuse one here too.
             if managed.is_dynamic {
-                return Err(PeerLifecycleError::Invalid(format!(
-                    "peer reshape target {peer} is a dynamic peer; reshape transactions reconfigure static neighbors only"
-                )));
+                return PeerReshapeSnapshotOutcome::RejectedNoEffect(PeerLifecycleError::Invalid(
+                    format!(
+                        "peer reshape target {peer} is a dynamic peer; reshape transactions reconfigure static neighbors only"
+                    ),
+                ));
             }
         }
 
         let mut priors = Vec::with_capacity(targets.len());
         for target in targets {
             let peer = PeerKey::new(target.address, target.interface.clone());
-            match self.reconfigure_peer(target).await {
+            let mut effect = ReconfigurePeerFailureEffect::NoEffect;
+            match self.reconfigure_peer_classified(target, &mut effect).await {
                 Ok(previous) => priors.push(previous),
                 Err(error) => {
-                    return match self.restore_peer_reshape_priors(priors).await {
-                        Ok(()) => Err(PeerLifecycleError::Internal(format!(
+                    let had_prior_effects = !priors.is_empty();
+                    let restore = self.restore_peer_reshape_priors(priors).await;
+                    let restore_failed = restore.is_err();
+                    let composed = match restore {
+                        Ok(()) => PeerLifecycleError::Internal(format!(
                             "failed to reconfigure peer {peer}: {error}; prior peers restored"
-                        ))),
-                        // The rollback error already names exactly which prior
-                        // members were left reshaped (and notes the rest were
-                        // restored), so compose it verbatim.
-                        Err(restore_error) => Err(PeerLifecycleError::Internal(format!(
+                        )),
+                        Err(restore_error) => PeerLifecycleError::Internal(format!(
                             "failed to reconfigure peer {peer}: {error}; {restore_error}"
-                        ))),
+                        )),
+                    };
+                    return if restore_failed
+                        || matches!(effect, ReconfigurePeerFailureEffect::CompensationAmbiguous)
+                    {
+                        PeerReshapeSnapshotOutcome::CompensationAmbiguous(composed)
+                    } else if had_prior_effects
+                        || matches!(effect, ReconfigurePeerFailureEffect::FullyCompensated)
+                    {
+                        PeerReshapeSnapshotOutcome::FullyCompensated(composed)
+                    } else {
+                        PeerReshapeSnapshotOutcome::RejectedNoEffect(composed)
                     };
                 }
             }
         }
-        Ok(priors)
+        PeerReshapeSnapshotOutcome::Success(priors)
     }
 
     async fn restore_peer_reshape_priors(

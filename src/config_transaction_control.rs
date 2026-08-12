@@ -4098,9 +4098,11 @@ remote_asn = 65002
             (neighbor, "self.execute_owned_neighbor_mutation(", 4),
             (neighbor, "reserve_config_event_slot(self.config_tx.clone()).await?", 4),
             (server, "runtime_config_lock.acquire()", 1),
-            (peer_group, "run_shielded_catalog_mutation(", 1),
+            (server, ".with_runtime_config_settlement(", 4),
+            (server, "PeerGroupService::with_runtime_config_coordinator(", 2),
+            (peer_group, "self.execute_owned_peer_group_mutation(", 4),
+            (peer_group, "reserve_config_event_slot(self.config_tx.clone()).await?", 4),
             (policy, "run_shielded_catalog_mutation(", 1),
-            (peer_group, "self.run_mutation(", 4),
             (policy, "self.run_mutation(", 12),
         ];
         for (source, shape, count) in inventory {
@@ -4127,6 +4129,25 @@ remote_asn = 65002
                     .count(),
                 1,
                 "Neighbor4 settlement registration inventory for {kind}"
+            );
+            assert_eq!(
+                settlement.matches(&format!("    {kind},")).count(),
+                1,
+                "closed operation-kind roster for {kind}"
+            );
+        }
+        for kind in [
+            "PeerGroupSet",
+            "PeerGroupDelete",
+            "NeighborPeerGroupSet",
+            "NeighborPeerGroupClear",
+        ] {
+            assert_eq!(
+                peer_group
+                    .matches(&format!("RuntimeConfigOperationKind::{kind}"))
+                    .count(),
+                1,
+                "PeerGroup4 settlement registration inventory for {kind}"
             );
             assert_eq!(
                 settlement.matches(&format!("    {kind},")).count(),
@@ -4180,6 +4201,48 @@ remote_asn = 65002
         assert_eq!(
             peer_manager
                 .matches("PeerManagerCommand::OwnedNeighborMutation")
+                .count(),
+            1
+        );
+        let owned_peer_group_body = peer_group
+            .split_once("async fn owned_peer_group_mutation_body")
+            .unwrap()
+            .1
+            .split_once("#[tonic::async_trait]")
+            .unwrap()
+            .0;
+        assert!(!owned_peer_group_body.contains(".code()"));
+        assert!(!owned_peer_group_body.contains(".message()"));
+        assert!(!owned_peer_group_body.contains("to_string().contains"));
+        let gate = owned_peer_group_body
+            .find("check_config_mutation_gate(")
+            .unwrap();
+        let mutating = owned_peer_group_body
+            .find("advance_phase(RuntimeConfigSettlementPhase::Mutating)")
+            .unwrap();
+        let stage = owned_peer_group_body
+            .find("stage_runtime_config_event_typed(")
+            .unwrap();
+        let actor = owned_peer_group_body
+            .find("dispatch_owned_peer_group_mutation(")
+            .unwrap();
+        let settling = owned_peer_group_body
+            .find("advance_phase(RuntimeConfigSettlementPhase::SettlingRollback)")
+            .unwrap();
+        let commit = owned_peer_group_body.find("staged.commit_typed()").unwrap();
+        assert!(gate < mutating && mutating < stage && stage < actor);
+        assert!(actor < settling && settling < commit);
+        for legacy in [
+            "PeerManagerCommand::SetPeerGroup",
+            "PeerManagerCommand::DeletePeerGroup",
+            "PeerManagerCommand::SetNeighborPeerGroup",
+            "PeerManagerCommand::ClearNeighborPeerGroup",
+        ] {
+            assert!(!peer_group.contains(legacy), "PeerGroup4 bypass: {legacy}");
+        }
+        assert_eq!(
+            peer_manager
+                .matches("PeerManagerCommand::OwnedPeerGroupMutation")
                 .count(),
             1
         );

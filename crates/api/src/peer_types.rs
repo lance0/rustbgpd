@@ -710,6 +710,11 @@ pub enum PeerManagerCommand {
         mutation: OwnedNeighborMutation,
         reply: oneshot::Sender<OwnedNeighborMutationOutcome>,
     },
+    /// Settlement-owned peer-group definition or membership mutation.
+    OwnedPeerGroupMutation {
+        mutation: OwnedPeerGroupMutation,
+        reply: oneshot::Sender<OwnedPeerGroupMutationOutcome>,
+    },
     /// Reconfigure an existing static peer by replacing its live session with
     /// a newly resolved configuration.
     ReconfigurePeer {
@@ -1468,6 +1473,37 @@ pub enum OwnedNeighborMutationOutcome {
     FullyCompensated(OwnedNeighborMutationError),
     /// A compensation send, reply, or effect failed and final state is unknown.
     CompensationAmbiguous(OwnedNeighborMutationError),
+}
+
+/// One of the four peer-group mutations protected by settlement ownership.
+pub enum OwnedPeerGroupMutation {
+    Set {
+        name: String,
+        definition: Box<PeerGroupDefinition>,
+    },
+    Delete {
+        name: String,
+    },
+    SetNeighbor {
+        address: IpAddr,
+        peer_group: String,
+    },
+    ClearNeighbor {
+        address: IpAddr,
+    },
+}
+
+/// Actor-owned settlement proof for a peer-group mutation.
+#[derive(Debug)]
+pub enum OwnedPeerGroupMutationOutcome {
+    /// The requested runtime mutation completed.
+    Success,
+    /// The actor rejected before producing any runtime effect.
+    RejectedNoEffect(CatalogMutationError),
+    /// The actor acknowledged restoration of every forward effect.
+    FullyCompensated(CatalogMutationError),
+    /// A forward or compensation effect left final runtime state unknown.
+    CompensationAmbiguous(CatalogMutationError),
 }
 
 /// Read-only peer-manager queries admitted between bounded policy-transaction
