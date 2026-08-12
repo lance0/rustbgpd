@@ -706,6 +706,10 @@ pub enum PeerManagerCommand {
         /// Reply channel returning the removed config on success.
         reply: oneshot::Sender<Result<PeerManagerNeighborConfig, PeerLifecycleError>>,
     },
+    OwnedNeighborMutation {
+        mutation: OwnedNeighborMutation,
+        reply: oneshot::Sender<OwnedNeighborMutationOutcome>,
+    },
     /// Reconfigure an existing static peer by replacing its live session with
     /// a newly resolved configuration.
     ReconfigurePeer {
@@ -1423,6 +1427,47 @@ pub enum PeerManagerCommand {
         /// persist can roll the deletion back by re-adding the exact range.
         reply: oneshot::Sender<Result<RemovedDynamicRange, DynamicRangeError>>,
     },
+}
+
+pub enum OwnedNeighborMutation {
+    Add(Box<PresenceAwareNeighborCreate>),
+    Delete(PeerKey),
+    /// Add a dynamic-neighbor range.
+    DynamicAdd {
+        /// IP prefix range.
+        prefix: String,
+        /// Inherited peer group.
+        peer_group: String,
+        /// Expected remote ASN (`0` accepts any ASN).
+        remote_asn: u32,
+        /// Optional range description.
+        description: Option<String>,
+    },
+    DynamicDelete {
+        prefix: String,
+    },
+}
+
+/// Typed error returned by an owned Neighbor4 actor command.
+#[derive(Debug)]
+pub enum OwnedNeighborMutationError {
+    /// Static-neighbor lifecycle failure.
+    Peer(PeerLifecycleError),
+    /// Dynamic-neighbor range failure.
+    Dynamic(DynamicRangeError),
+}
+
+/// Actor-owned settlement proof for a Neighbor4 mutation.
+#[derive(Debug)]
+pub enum OwnedNeighborMutationOutcome {
+    /// The requested runtime mutation completed.
+    Success,
+    /// The actor rejected before producing any runtime effect.
+    RejectedNoEffect(OwnedNeighborMutationError),
+    /// The actor acknowledged restoration of every forward effect.
+    FullyCompensated(OwnedNeighborMutationError),
+    /// A compensation send, reply, or effect failed and final state is unknown.
+    CompensationAmbiguous(OwnedNeighborMutationError),
 }
 
 /// Read-only peer-manager queries admitted between bounded policy-transaction

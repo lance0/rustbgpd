@@ -4054,6 +4054,10 @@ remote_asn = 65002
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one closed source inventory covers every runtime-config owner and prohibited bypass"
+    )]
     fn runtime_config_coordinator_inventory_is_complete_and_closed() {
         fn production(source: &'static str) -> &'static str {
             source
@@ -4062,6 +4066,9 @@ remote_asn = 65002
         }
 
         let server = production(include_str!("../crates/api/src/server.rs"));
+        let settlement = production(include_str!(
+            "../crates/api/src/runtime_config_settlement.rs"
+        ));
         let neighbor = production(include_str!("../crates/api/src/neighbor_service.rs"));
         let peer_group = production(include_str!("../crates/api/src/peer_group_service.rs"));
         let policy = production(include_str!("../crates/api/src/policy_service.rs"));
@@ -4085,8 +4092,11 @@ remote_asn = 65002
             (main, "move || settlement_wait.wait_until_idle()", 1),
             (transaction, "self.deps.lock.acquire()", 2),
             (transaction, ".execute_owned_operation(", 5),
+            (settlement, "let coordinator_permit = coordinator.acquire().await?;", 1),
+            (settlement, "watchdog.register_owned(", 1),
             (fib, ".acquire()", 2),
-            (neighbor, "runtime_config_lock.acquire()", 4),
+            (neighbor, "self.execute_owned_neighbor_mutation(", 4),
+            (neighbor, "reserve_config_event_slot(self.config_tx.clone()).await?", 4),
             (server, "runtime_config_lock.acquire()", 1),
             (peer_group, "run_shielded_catalog_mutation(", 1),
             (policy, "run_shielded_catalog_mutation(", 1),
@@ -4105,6 +4115,74 @@ remote_asn = 65002
                 "settlement registration inventory for {kind}"
             );
         }
+        for kind in [
+            "NeighborAdd",
+            "NeighborDelete",
+            "DynamicNeighborAdd",
+            "DynamicNeighborDelete",
+        ] {
+            assert_eq!(
+                neighbor
+                    .matches(&format!("RuntimeConfigOperationKind::{kind}"))
+                    .count(),
+                1,
+                "Neighbor4 settlement registration inventory for {kind}"
+            );
+            assert_eq!(
+                settlement.matches(&format!("    {kind},")).count(),
+                1,
+                "closed operation-kind roster for {kind}"
+            );
+        }
+        let acquired = settlement
+            .find("let coordinator_permit = coordinator.acquire().await?;")
+            .unwrap();
+        let registered = settlement.find("watchdog.register_owned(").unwrap();
+        let body = settlement
+            .find("let outcome = body(operation.clone()).await;")
+            .unwrap();
+        assert!(acquired < registered && registered < body);
+        let owned_body = neighbor
+            .split_once("async fn owned_neighbor_mutation_body")
+            .unwrap()
+            .1
+            .split_once("async fn reserve_config_event_slot")
+            .unwrap()
+            .0;
+        assert!(!owned_body.contains(".code()"));
+        assert!(!owned_body.contains(".message()"));
+        assert!(!owned_body.contains("to_string().contains"));
+        let gate = owned_body.find("check_config_mutation_gate(").unwrap();
+        let mutating = owned_body
+            .find("advance_phase(RuntimeConfigSettlementPhase::Mutating)")
+            .unwrap();
+        let stage = owned_body
+            .find("stage_runtime_config_event_typed(")
+            .unwrap();
+        let actor = owned_body
+            .find("dispatch_owned_neighbor_mutation(")
+            .unwrap();
+        let settling = owned_body
+            .find("advance_phase(RuntimeConfigSettlementPhase::SettlingRollback)")
+            .unwrap();
+        let commit = owned_body.find("staged.commit_typed()").unwrap();
+        assert!(gate < mutating && mutating < stage && stage < actor);
+        assert!(actor < settling && settling < commit);
+        for legacy in [
+            "PeerManagerCommand::RuntimeCreatePeer",
+            "PeerManagerCommand::DeletePeer",
+            "PeerManagerCommand::AddDynamicRange",
+            "PeerManagerCommand::DeleteDynamicRange",
+        ] {
+            assert!(!neighbor.contains(legacy), "Neighbor4 bypass: {legacy}");
+        }
+        let peer_manager = production(include_str!("peer_manager/mod.rs"));
+        assert_eq!(
+            peer_manager
+                .matches("PeerManagerCommand::OwnedNeighborMutation")
+                .count(),
+            1
+        );
 
         #[rustfmt::skip]
         let prohibited_apis = ["add_permits", "forget", "acquire_many", "wait_idle", "reopen", "pub fn reset", "impl Default for RuntimeConfigCoordinator"];

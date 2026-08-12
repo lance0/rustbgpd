@@ -4710,6 +4710,8 @@ async fn run<T>(
         ),
         config_mutation_gate: Some(config_mutation_gate.clone()),
         runtime_config_lock: runtime_config_lock.clone(),
+        runtime_config_settlement: runtime_config_settlement.clone(),
+        daemon_gate: daemon_gate.clone(),
         dataplane_route_events: Some(fib_bgp_event_tx),
         bfd_session_snapshot: {
             let rx = bfd_status_rx.clone();

@@ -19,6 +19,11 @@ use super::{
     PeerShutdownOutcome,
 };
 
+pub(super) enum RuntimeCreatePeerFailureEffect {
+    NoEffect,
+    FullyCompensated,
+}
+
 async fn send_max_prefix_start_before(
     commands: tokio::sync::mpsc::Sender<PeerCommand>,
     deadline: tokio::time::Instant,
@@ -489,6 +494,14 @@ impl PeerManager {
         &mut self,
         spec: Box<PresenceAwareNeighborCreate>,
     ) -> Result<(), PeerLifecycleError> {
+        self.runtime_create_peer_classified(spec, None).await
+    }
+
+    pub(super) async fn runtime_create_peer_classified(
+        &mut self,
+        spec: Box<PresenceAwareNeighborCreate>,
+        mut failure_effect: Option<&mut RuntimeCreatePeerFailureEffect>,
+    ) -> Result<(), PeerLifecycleError> {
         let peer = PeerKey::new(spec.address, spec.interface.clone());
         if self.peers.contains_key(&peer) {
             return Err(PeerLifecycleError::AlreadyExists(peer));
@@ -531,6 +544,9 @@ impl PeerManager {
             Ok(()) => Ok(()),
             Err(error) => {
                 self.current_config = previous_config;
+                if let Some(effect) = &mut failure_effect {
+                    **effect = RuntimeCreatePeerFailureEffect::FullyCompensated;
+                }
                 Err(error)
             }
         }
@@ -1392,6 +1408,25 @@ impl PeerManager {
             )));
         }
 
+        // Build and validate the next actor-owned snapshot before the first
+        // teardown effect. This ordering is the proof used by the settlement-
+        // owned Neighbor4 envelope: every returned delete error is a no-effect
+        // rejection, never a partially removed live session.
+        let next_config = if sync_config_snapshot {
+            let mut next_config = self.current_config.clone();
+            apply_config_event(
+                &mut next_config,
+                &ConfigEvent::NeighborDeleted {
+                    peer: peer.clone(),
+                    ack: None,
+                },
+            )
+            .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
+            Some(next_config)
+        } else {
+            None
+        };
+
         // Linearize any terminal signal already emitted by this generation
         // before moving it out of the live ownership table.
         self.drain_ready_session_notifications().await;
@@ -1435,12 +1470,8 @@ impl PeerManager {
         }
 
         let peer_for_reap = peer.clone();
-        if sync_config_snapshot {
-            apply_config_event(
-                &mut self.current_config,
-                &ConfigEvent::NeighborDeleted { peer, ack: None },
-            )
-            .map_err(|e| PeerLifecycleError::Invalid(e.to_string()))?;
+        if let Some(next_config) = next_config {
+            self.current_config = next_config;
         }
 
         // ADR-0067 step 4: drain the deleted peer's BFD session.

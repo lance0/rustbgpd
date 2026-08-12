@@ -37,6 +37,7 @@ use crate::evpn_service::{
 use crate::global_service::GlobalService;
 use crate::gnmi::g_nmi_server::GNmiServer;
 use crate::gnmi_service::GnmiService;
+use crate::health_probe::DaemonGate;
 use crate::injection_service::InjectionService;
 use crate::neighbor_service::NeighborService;
 use crate::peer_group_service::PeerGroupService;
@@ -56,6 +57,7 @@ use crate::proto::peer_group_service_server::PeerGroupServiceServer;
 use crate::proto::policy_service_server::PolicyServiceServer;
 use crate::proto::rib_service_server::RibServiceServer;
 use crate::rib_service::RibService;
+use crate::runtime_config_settlement::RuntimeConfigSettlementWatchdog;
 use rustbgpd_rib::{RibReadinessQuery, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
 
@@ -594,20 +596,62 @@ impl StagedConfigWrite {
     /// already applied: runtime and disk have drifted and only SIGHUP or a
     /// restart reconciles them.
     pub(crate) async fn commit(self) -> Result<(), Status> {
+        self.commit_typed()
+            .await
+            .map_err(RuntimeConfigCommitError::into_status)
+    }
+
+    /// Publish a staged write with a typed post-runtime result.
+    pub(crate) async fn commit_typed(self) -> Result<(), RuntimeConfigCommitError> {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         self.commit_tx
             .send(ack_tx)
-            .map_err(|_| Status::internal(COMMIT_LOST))?;
+            .map_err(|_| RuntimeConfigCommitError::HandoffLost)?;
         ack_rx
             .await
-            .map_err(|_| Status::internal(COMMIT_LOST))?
-            .map_err(|error| {
-                Status::internal(format!(
-                    "config persistence commit failed after the runtime change was applied \
-                     (runtime and persisted config have drifted — SIGHUP or restart to \
-                     reconcile): {error}"
-                ))
-            })
+            .map_err(|_| RuntimeConfigCommitError::AcknowledgementLost)?
+            .map_err(RuntimeConfigCommitError::Failed)
+    }
+}
+
+/// Typed failure before any runtime mutation has been dispatched.
+pub(crate) enum RuntimeConfigStageError {
+    AcknowledgementLost,
+    Rejected(crate::peer_types::CatalogMutationError),
+    Write(String),
+}
+
+impl RuntimeConfigStageError {
+    pub(crate) fn into_status(self) -> Status {
+        match self {
+            Self::AcknowledgementLost => {
+                Status::internal("config bridge dropped persistence acknowledgement")
+            }
+            Self::Rejected(error) => catalog_mutation_error_to_status(&error),
+            Self::Write(message) => {
+                Status::failed_precondition(format!("config persistence failed: {message}"))
+            }
+        }
+    }
+}
+
+/// Typed failure after runtime mutation and publication began.
+pub(crate) enum RuntimeConfigCommitError {
+    HandoffLost,
+    AcknowledgementLost,
+    Failed(String),
+}
+
+impl RuntimeConfigCommitError {
+    pub(crate) fn into_status(self) -> Status {
+        match self {
+            Self::HandoffLost | Self::AcknowledgementLost => Status::internal(COMMIT_LOST),
+            Self::Failed(error) => Status::internal(format!(
+                "config persistence commit failed after the runtime change was applied \
+                 (runtime and persisted config have drifted — SIGHUP or restart to \
+                 reconcile): {error}"
+            )),
+        }
     }
 }
 
@@ -642,6 +686,16 @@ pub(crate) async fn stage_runtime_config_event(
     permit: tokio::sync::mpsc::OwnedPermit<crate::peer_types::ConfigEvent>,
     build_event: impl FnOnce(crate::peer_types::ConfigPersistAck) -> crate::peer_types::ConfigEvent,
 ) -> Result<StagedConfigWrite, Status> {
+    stage_runtime_config_event_typed(permit, build_event)
+        .await
+        .map_err(RuntimeConfigStageError::into_status)
+}
+
+/// Typed form of [`stage_runtime_config_event`] for settlement owners.
+pub(crate) async fn stage_runtime_config_event_typed(
+    permit: tokio::sync::mpsc::OwnedPermit<crate::peer_types::ConfigEvent>,
+    build_event: impl FnOnce(crate::peer_types::ConfigPersistAck) -> crate::peer_types::ConfigEvent,
+) -> Result<StagedConfigWrite, RuntimeConfigStageError> {
     let (staged_tx, staged_rx) = tokio::sync::oneshot::channel();
     let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
     permit.send(build_event(crate::peer_types::ConfigPersistAck {
@@ -650,13 +704,13 @@ pub(crate) async fn stage_runtime_config_event(
     }));
     staged_rx
         .await
-        .map_err(|_| Status::internal("config bridge dropped persistence acknowledgement"))?
+        .map_err(|_| RuntimeConfigStageError::AcknowledgementLost)?
         .map_err(|error| match error {
             crate::peer_types::ConfigPersistError::Rejected(error) => {
-                catalog_mutation_error_to_status(&error)
+                RuntimeConfigStageError::Rejected(error)
             }
             crate::peer_types::ConfigPersistError::Write(message) => {
-                Status::failed_precondition(format!("config persistence failed: {message}"))
+                RuntimeConfigStageError::Write(message)
             }
         })?;
     Ok(StagedConfigWrite { commit_tx })
@@ -892,6 +946,11 @@ pub struct ServeConfig {
     /// FIB-table CRUD so accepted runtime mutations cannot be clobbered by a
     /// reload that read stale TOML before the persistence acknowledgement.
     pub runtime_config_lock: RuntimeConfigCoordinator,
+    /// Process-wide fail-stop owner roster used by settlement-owned runtime
+    /// mutations.
+    pub runtime_config_settlement: RuntimeConfigSettlementWatchdog,
+    /// The same process availability gate retained by every registered owner.
+    pub daemon_gate: DaemonGate,
     /// Live ADR-0061 per-route FIB dataplane event source. This is
     /// separate from the aggregate dataplane poller so route events
     /// are not delayed by snapshot polling.
@@ -1322,6 +1381,8 @@ async fn run_listener(
     let config_rollback = config.config_rollback;
     let config_mutation_gate = config.config_mutation_gate;
     let runtime_config_lock = config.runtime_config_lock;
+    let runtime_config_settlement = config.runtime_config_settlement;
+    let daemon_gate = config.daemon_gate;
     let dataplane_route_events = config.dataplane_route_events;
     let bfd_session_snapshot = config.bfd_session_snapshot;
     let bfd_events = config.bfd_events;
@@ -1384,6 +1445,8 @@ async fn run_listener(
                 config_rollback,
                 config_mutation_gate,
                 runtime_config_lock,
+                runtime_config_settlement,
+                daemon_gate,
                 dataplane_route_events,
                 bfd_session_snapshot,
                 bfd_events,
@@ -1444,6 +1507,8 @@ async fn run_listener(
                 config_rollback,
                 config_mutation_gate,
                 runtime_config_lock,
+                runtime_config_settlement,
+                daemon_gate,
                 dataplane_route_events,
                 bfd_session_snapshot,
                 bfd_events,
@@ -1510,6 +1575,8 @@ async fn run_tcp_listener(
     config_rollback: Option<ConfigRollbackFn>,
     config_mutation_gate: Option<ConfigMutationGateFn>,
     runtime_config_lock: RuntimeConfigCoordinator,
+    runtime_config_settlement: RuntimeConfigSettlementWatchdog,
+    daemon_gate: DaemonGate,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
     bfd_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
@@ -1626,7 +1693,8 @@ async fn run_tcp_listener(
             config_tx.clone(),
             runtime_config_lock.clone(),
             config_mutation_gate.clone(),
-        ),
+        )
+        .with_runtime_config_settlement(runtime_config_settlement, daemon_gate),
         interceptor.clone(),
     ));
     routes.add_service(PeerGroupServiceServer::with_interceptor(
@@ -1773,6 +1841,8 @@ async fn run_uds_listener(
     config_rollback: Option<ConfigRollbackFn>,
     config_mutation_gate: Option<ConfigMutationGateFn>,
     runtime_config_lock: RuntimeConfigCoordinator,
+    runtime_config_settlement: RuntimeConfigSettlementWatchdog,
+    daemon_gate: DaemonGate,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
     bfd_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
@@ -1850,7 +1920,8 @@ async fn run_uds_listener(
             config_tx.clone(),
             runtime_config_lock.clone(),
             config_mutation_gate.clone(),
-        ),
+        )
+        .with_runtime_config_settlement(runtime_config_settlement, daemon_gate),
         interceptor.clone(),
     ));
     routes.add_service(PeerGroupServiceServer::with_interceptor(

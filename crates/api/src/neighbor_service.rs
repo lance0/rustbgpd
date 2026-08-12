@@ -10,15 +10,21 @@ use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
 use crate::actor_read::{peer_manager_read, rib_manager_read};
+use crate::health_probe::DaemonGate;
 use crate::peer_types::{
-    ConfigEvent, DynamicRangeError, NeighborCreateAddPath, OutboundRefreshError, PeerInfo, PeerKey,
-    PeerLifecycleError, PeerManagerCommand, PeerManagerNeighborConfig, PresenceAwareNeighborCreate,
-    RemovedDynamicRange, Rfc8212PolicyStatus,
+    ConfigEvent, DynamicRangeError, NeighborCreateAddPath, OutboundRefreshError,
+    OwnedNeighborMutation, OwnedNeighborMutationError, OwnedNeighborMutationOutcome, PeerInfo,
+    PeerKey, PeerLifecycleError, PeerManagerCommand, PresenceAwareNeighborCreate,
+    Rfc8212PolicyStatus,
 };
 use crate::proto;
+use crate::runtime_config_settlement::{
+    OwnedRuntimeConfigOperation, OwnedRuntimeConfigOutcome, OwnedRuntimeConfigRequestContext,
+    RuntimeConfigOperationKind, RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
+};
 use crate::server::{
     AccessMode, ConfigMutationGateFn, RuntimeConfigCoordinator, check_config_mutation_gate,
-    peer_manager_request, persist_then_apply, read_only_rejection,
+    peer_manager_request, read_only_rejection, stage_runtime_config_event_typed,
 };
 use rustbgpd_rib::{
     EffectiveDistributionMode, NeighborRibSnapshot, NeighborRibSnapshotResponse, RibUpdate,
@@ -27,6 +33,7 @@ use rustbgpd_rib::{
 };
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
+const OWNED_NEIGHBOR_ACTOR_TIMEOUT: Duration = Duration::from_mins(10);
 /// Bound both channel admission and the reply from the single-threaded RIB
 /// actor.  This matches the existing internal RIB-query timeout precedent and
 /// prevents an operator inventory request from waiting indefinitely behind a
@@ -88,6 +95,8 @@ pub struct NeighborService {
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
     runtime_config_lock: RuntimeConfigCoordinator,
     config_mutation_gate: Option<ConfigMutationGateFn>,
+    settlement: Option<(RuntimeConfigSettlementWatchdog, DaemonGate)>,
+    owned_actor_timeout: Duration,
 }
 
 impl NeighborService {
@@ -133,7 +142,20 @@ impl NeighborService {
             config_tx,
             runtime_config_lock,
             config_mutation_gate,
+            settlement: None,
+            owned_actor_timeout: OWNED_NEIGHBOR_ACTOR_TIMEOUT,
         }
+    }
+
+    /// Arm Neighbor4 CRUD with the process-wide fail-stop settlement owner.
+    #[must_use]
+    pub fn with_runtime_config_settlement(
+        mut self,
+        watchdog: RuntimeConfigSettlementWatchdog,
+        daemon_gate: DaemonGate,
+    ) -> Self {
+        self.settlement = Some((watchdog, daemon_gate));
+        self
     }
 
     async fn add_presence_aware_neighbor(
@@ -142,27 +164,194 @@ impl NeighborService {
     ) -> Result<Response<proto::AddNeighborResponse>, Status> {
         let spec = parse_presence_aware_create(intent)?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
-        let runtime_config_lock = self.runtime_config_lock.clone();
-        let config_mutation_gate = self.config_mutation_gate.clone();
         let persisted_spec = spec.clone();
-        let join = tokio::spawn(async move {
-            let _guard = runtime_config_lock.acquire().await?;
-            check_config_mutation_gate(&config_mutation_gate, "NeighborService.AddNeighbor")
-                .await?;
-            persist_then_apply(
+        self.execute_owned_neighbor_mutation(
+            RuntimeConfigOperationKind::NeighborAdd,
+            "NeighborService.AddNeighbor",
+            OwnedNeighborMutation::Add(spec),
+            persist_permit,
+            |ack| ConfigEvent::PresenceAwareNeighborAdded {
+                spec: persisted_spec,
+                ack: Some(ack),
+            },
+        )
+        .await?;
+        Ok(Response::new(proto::AddNeighborResponse {}))
+    }
+
+    async fn execute_owned_neighbor_mutation<B>(
+        &self,
+        kind: RuntimeConfigOperationKind,
+        operation_name: &'static str,
+        mutation: OwnedNeighborMutation,
+        persist_permit: Option<mpsc::OwnedPermit<ConfigEvent>>,
+        build_event: B,
+    ) -> Result<(), Status>
+    where
+        B: FnOnce(crate::peer_types::ConfigPersistAck) -> ConfigEvent + Send + 'static,
+    {
+        let peer_mgr_tx = self.peer_mgr_tx.clone();
+        let config_mutation_gate = self.config_mutation_gate.clone();
+        let actor_timeout = self.owned_actor_timeout;
+        let settlement = self.settlement.clone();
+        let daemon_gate = settlement.as_ref().map(|(_, gate)| gate.clone());
+        let body = move |owned: Option<OwnedRuntimeConfigOperation>| async move {
+            owned_neighbor_mutation_body(
+                owned,
+                daemon_gate,
+                config_mutation_gate,
+                operation_name,
+                peer_mgr_tx,
+                actor_timeout,
+                mutation,
                 persist_permit,
-                |ack| ConfigEvent::PresenceAwareNeighborAdded {
-                    spec: persisted_spec,
-                    ack: Some(ack),
-                },
-                || add_presence_aware_peer(&peer_mgr_tx, spec),
+                build_event,
             )
             .await
-        });
-        join.await
-            .map_err(|_| Status::internal("neighbor add task did not complete"))??;
-        Ok(Response::new(proto::AddNeighborResponse {}))
+        };
+        let (context, attachment) = OwnedRuntimeConfigRequestContext::unary();
+        let result = if let Some((watchdog, daemon_gate)) = settlement {
+            watchdog
+                .execute_owned(
+                    kind,
+                    self.runtime_config_lock.clone(),
+                    daemon_gate,
+                    context.response_attached(),
+                    move |operation| body(Some(operation)),
+                )
+                .await
+        } else {
+            let coordinator = self.runtime_config_lock.clone();
+            let join = tokio::spawn(async move {
+                let _permit = coordinator.acquire().await?;
+                match body(None).await {
+                    OwnedRuntimeConfigOutcome::Clean(result) => result,
+                    OwnedRuntimeConfigOutcome::Ambiguous(error) => {
+                        let _ = error;
+                        std::future::pending().await
+                    }
+                }
+            });
+            join.await
+                .map_err(|_| Status::internal("owned neighbor mutation task did not complete"))?
+        };
+        drop(attachment);
+        result
+    }
+
+    #[cfg(test)]
+    fn with_owned_actor_timeout(mut self, timeout: Duration) -> Self {
+        self.owned_actor_timeout = timeout;
+        self
+    }
+}
+
+enum OwnedNeighborDispatch {
+    NotAccepted(Status),
+    Replied(OwnedNeighborMutationOutcome),
+    AcceptedReplyLost(Status),
+}
+
+async fn dispatch_owned_neighbor_mutation(
+    peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+    timeout: Duration,
+    mutation: OwnedNeighborMutation,
+) -> OwnedNeighborDispatch {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let command = PeerManagerCommand::OwnedNeighborMutation {
+        mutation,
+        reply: reply_tx,
+    };
+    match tokio::time::timeout(timeout, peer_mgr_tx.send(command)).await {
+        Err(_) => OwnedNeighborDispatch::NotAccepted(Status::unavailable(
+            "peer manager mutation queue timed out before accepting command",
+        )),
+        Ok(Err(_)) => OwnedNeighborDispatch::NotAccepted(Status::unavailable(
+            "peer manager unavailable before accepting command",
+        )),
+        Ok(Ok(())) => match tokio::time::timeout(timeout, reply_rx).await {
+            Err(_) => OwnedNeighborDispatch::AcceptedReplyLost(Status::deadline_exceeded(
+                "peer manager accepted owned neighbor mutation but reply timed out",
+            )),
+            Ok(Err(_)) => OwnedNeighborDispatch::AcceptedReplyLost(Status::internal(
+                "peer manager accepted owned neighbor mutation but dropped its reply",
+            )),
+            Ok(Ok(outcome)) => OwnedNeighborDispatch::Replied(outcome),
+        },
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the closed owner body lists each retained mutation and settlement dependency explicitly"
+)]
+async fn owned_neighbor_mutation_body<B>(
+    owned: Option<OwnedRuntimeConfigOperation>,
+    daemon_gate: Option<DaemonGate>,
+    config_mutation_gate: Option<ConfigMutationGateFn>,
+    operation_name: &'static str,
+    peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+    actor_timeout: Duration,
+    mutation: OwnedNeighborMutation,
+    persist_permit: Option<mpsc::OwnedPermit<ConfigEvent>>,
+    build_event: B,
+) -> OwnedRuntimeConfigOutcome<(), Status>
+where
+    B: FnOnce(crate::peer_types::ConfigPersistAck) -> ConfigEvent,
+{
+    if daemon_gate.is_some_and(|gate| gate.is_shutting_down()) {
+        return OwnedRuntimeConfigOutcome::Clean(Err(Status::unavailable(format!(
+            "{operation_name} rejected: daemon is shutting down"
+        ))));
+    }
+    if let Err(error) = check_config_mutation_gate(&config_mutation_gate, operation_name).await {
+        return OwnedRuntimeConfigOutcome::Clean(Err(error));
+    }
+    if let Some(operation) = &owned {
+        operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+    }
+    let staged = if let Some(permit) = persist_permit {
+        match stage_runtime_config_event_typed(permit, build_event).await {
+            Ok(staged) => Some(staged),
+            Err(error) => {
+                return OwnedRuntimeConfigOutcome::Clean(Err(error.into_status()));
+            }
+        }
+    } else {
+        None
+    };
+
+    let outcome = dispatch_owned_neighbor_mutation(peer_mgr_tx, actor_timeout, mutation).await;
+    match outcome {
+        OwnedNeighborDispatch::NotAccepted(error) => {
+            drop(staged);
+            OwnedRuntimeConfigOutcome::Clean(Err(error))
+        }
+        OwnedNeighborDispatch::AcceptedReplyLost(error) => {
+            OwnedRuntimeConfigOutcome::Ambiguous(error)
+        }
+        OwnedNeighborDispatch::Replied(
+            OwnedNeighborMutationOutcome::RejectedNoEffect(error)
+            | OwnedNeighborMutationOutcome::FullyCompensated(error),
+        ) => {
+            drop(staged);
+            OwnedRuntimeConfigOutcome::Clean(Err(owned_neighbor_error_status(error)))
+        }
+        OwnedNeighborDispatch::Replied(OwnedNeighborMutationOutcome::CompensationAmbiguous(
+            error,
+        )) => OwnedRuntimeConfigOutcome::Ambiguous(owned_neighbor_error_status(error)),
+        OwnedNeighborDispatch::Replied(OwnedNeighborMutationOutcome::Success) => {
+            let Some(staged) = staged else {
+                return OwnedRuntimeConfigOutcome::Clean(Ok(()));
+            };
+            if let Some(operation) = &owned {
+                operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
+            }
+            match staged.commit_typed().await {
+                Ok(()) => OwnedRuntimeConfigOutcome::Clean(Ok(())),
+                Err(error) => OwnedRuntimeConfigOutcome::Ambiguous(error.into_status()),
+            }
+        }
     }
 }
 
@@ -297,6 +486,13 @@ fn dynamic_range_error_status(error: DynamicRangeError) -> Status {
     }
 }
 
+fn owned_neighbor_error_status(error: OwnedNeighborMutationError) -> Status {
+    match error {
+        OwnedNeighborMutationError::Peer(error) => peer_lifecycle_error_status(error),
+        OwnedNeighborMutationError::Dynamic(error) => dynamic_range_error_status(error),
+    }
+}
+
 pub(crate) fn peer_lifecycle_error_status(error: PeerLifecycleError) -> Status {
     match error {
         PeerLifecycleError::AlreadyExists(peer) => {
@@ -319,61 +515,6 @@ fn outbound_refresh_error_status(error: OutboundRefreshError) -> Status {
         }
         OutboundRefreshError::Internal(message) => Status::internal(message),
     }
-}
-
-async fn add_dynamic_range(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    prefix: String,
-    peer_group: String,
-    remote_asn: u32,
-    description: Option<String>,
-) -> Result<(), Status> {
-    peer_manager_request(peer_mgr_tx, |reply| PeerManagerCommand::AddDynamicRange {
-        prefix,
-        peer_group,
-        remote_asn,
-        description,
-        reply,
-    })
-    .await?
-    .map_err(dynamic_range_error_status)
-}
-
-async fn add_presence_aware_peer(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    spec: Box<PresenceAwareNeighborCreate>,
-) -> Result<(), Status> {
-    peer_manager_request(peer_mgr_tx, |reply| PeerManagerCommand::RuntimeCreatePeer {
-        spec,
-        reply,
-    })
-    .await?
-    .map_err(peer_lifecycle_error_status)
-}
-
-async fn delete_static_peer(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    peer: PeerKey,
-    sync_config_snapshot: bool,
-) -> Result<PeerManagerNeighborConfig, Status> {
-    peer_manager_request(peer_mgr_tx, |reply| PeerManagerCommand::DeletePeer {
-        peer,
-        sync_config_snapshot,
-        reply,
-    })
-    .await?
-    .map_err(peer_lifecycle_error_status)
-}
-
-async fn delete_dynamic_range(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    prefix: String,
-) -> Result<RemovedDynamicRange, Status> {
-    peer_manager_request(peer_mgr_tx, |reply| {
-        PeerManagerCommand::DeleteDynamicRange { prefix, reply }
-    })
-    .await?
-    .map_err(dynamic_range_error_status)
 }
 
 pub(crate) fn family_to_string(afi: Afi, safi: Safi) -> String {
@@ -1026,37 +1167,18 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         // This makes DeleteNeighbor fail-fast when persistence is unavailable.
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
 
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
-        let runtime_config_lock = self.runtime_config_lock.clone();
-        let config_mutation_gate = self.config_mutation_gate.clone();
-        let join = tokio::spawn(async move {
-            let _guard = runtime_config_lock.acquire().await?;
-            check_config_mutation_gate(&config_mutation_gate, "NeighborService.DeleteNeighbor")
-                .await?;
-            // The session teardown below is irreversible: re-adding the peer
-            // builds a *new* session with a new identity, a zeroed uptime,
-            // zeroed counters, and a fresh metric series, and the teardown
-            // never reaches the operator's flap count. So the write is staged
-            // and acknowledged first — a persistence failure is reported while
-            // the session is still up and untouched. The shared runtime-config
-            // lock is held across the whole window so SIGHUP cannot rebuild
-            // from stale TOML in the middle.
-            persist_then_apply(
-                persist_permit,
-                |ack| ConfigEvent::NeighborDeleted {
-                    peer: peer.clone(),
-                    ack: Some(ack),
-                },
-                || async {
-                    delete_static_peer(&peer_mgr_tx, peer.clone(), true)
-                        .await
-                        .map(|_| ())
-                },
-            )
-            .await
-        });
-        join.await
-            .map_err(|_| Status::internal("neighbor delete task did not complete"))??;
+        let persisted_peer = peer.clone();
+        self.execute_owned_neighbor_mutation(
+            RuntimeConfigOperationKind::NeighborDelete,
+            "NeighborService.DeleteNeighbor",
+            OwnedNeighborMutation::Delete(peer),
+            persist_permit,
+            |ack| ConfigEvent::NeighborDeleted {
+                peer: persisted_peer,
+                ack: Some(ack),
+            },
+        )
+        .await?;
 
         Ok(Response::new(proto::DeleteNeighborResponse {}))
     }
@@ -1320,42 +1442,31 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         // (fail-fast when persistence is unavailable), mirroring AddNeighbor.
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
 
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
-        let runtime_config_lock = self.runtime_config_lock.clone();
-        let config_mutation_gate = self.config_mutation_gate.clone();
-        let join = tokio::spawn(async move {
-            let _guard = runtime_config_lock.acquire().await?;
-            check_config_mutation_gate(&config_mutation_gate, "NeighborService.AddDynamicNeighbor")
-                .await?;
-            // Stage the write before the matcher changes, so a persistence
-            // failure cannot leave a range that briefly accepted a session.
-            // This runs inside the spawned task so a canceled gRPC request
-            // cannot split the runtime add from the queued config event, and
-            // the shared runtime-config lock is held across the whole window
-            // so a concurrent SIGHUP cannot reload stale disk in the middle.
-            persist_then_apply(
-                persist_permit,
-                |ack| ConfigEvent::DynamicNeighborAdded {
-                    prefix: range.prefix.clone(),
-                    peer_group: range.peer_group.clone(),
-                    remote_asn: range.remote_asn,
-                    description: description.clone(),
-                    ack: Some(ack),
-                },
-                || {
-                    add_dynamic_range(
-                        &peer_mgr_tx,
-                        range.prefix.clone(),
-                        range.peer_group.clone(),
-                        range.remote_asn,
-                        description.clone(),
-                    )
-                },
-            )
-            .await
-        });
-        join.await
-            .map_err(|_| Status::internal("dynamic-neighbor add task did not complete"))??;
+        let prefix = range.prefix;
+        let peer_group = range.peer_group;
+        let remote_asn = range.remote_asn;
+        let persisted_prefix = prefix.clone();
+        let persisted_peer_group = peer_group.clone();
+        let persisted_description = description.clone();
+        self.execute_owned_neighbor_mutation(
+            RuntimeConfigOperationKind::DynamicNeighborAdd,
+            "NeighborService.AddDynamicNeighbor",
+            OwnedNeighborMutation::DynamicAdd {
+                prefix,
+                peer_group,
+                remote_asn,
+                description,
+            },
+            persist_permit,
+            move |ack| ConfigEvent::DynamicNeighborAdded {
+                prefix: persisted_prefix,
+                peer_group: persisted_peer_group,
+                remote_asn,
+                description: persisted_description,
+                ack: Some(ack),
+            },
+        )
+        .await?;
 
         Ok(Response::new(proto::AddDynamicNeighborResponse {}))
     }
@@ -1374,38 +1485,18 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
 
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
-        let runtime_config_lock = self.runtime_config_lock.clone();
-        let config_mutation_gate = self.config_mutation_gate.clone();
-        let join = tokio::spawn(async move {
-            let _guard = runtime_config_lock.acquire().await?;
-            check_config_mutation_gate(
-                &config_mutation_gate,
-                "NeighborService.DeleteDynamicNeighbor",
-            )
-            .await?;
-            // Stage the write first so a persistence failure leaves the range
-            // in place rather than removing and re-adding it. This runs inside
-            // the spawned task so cancellation cannot split runtime delete
-            // from the queued config event, and the shared runtime-config lock
-            // is held across the window so SIGHUP cannot rebuild from stale
-            // TOML in the middle.
-            persist_then_apply(
-                persist_permit,
-                |ack| ConfigEvent::DynamicNeighborDeleted {
-                    prefix: prefix.clone(),
-                    ack: Some(ack),
-                },
-                || async {
-                    delete_dynamic_range(&peer_mgr_tx, prefix.clone())
-                        .await
-                        .map(|_| ())
-                },
-            )
-            .await
-        });
-        join.await
-            .map_err(|_| Status::internal("dynamic-neighbor delete task did not complete"))??;
+        let persisted_prefix = prefix.clone();
+        self.execute_owned_neighbor_mutation(
+            RuntimeConfigOperationKind::DynamicNeighborDelete,
+            "NeighborService.DeleteDynamicNeighbor",
+            OwnedNeighborMutation::DynamicDelete { prefix },
+            persist_permit,
+            |ack| ConfigEvent::DynamicNeighborDeleted {
+                prefix: persisted_prefix,
+                ack: Some(ack),
+            },
+        )
+        .await?;
 
         Ok(Response::new(proto::DeleteDynamicNeighborResponse {}))
     }
@@ -1791,12 +1882,15 @@ mod tests {
         let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
         let call = tokio::spawn(async move { svc.add_neighbor(Request::new(request)).await });
         match peer_rx.recv().await.unwrap() {
-            PeerManagerCommand::RuntimeCreatePeer { spec, reply } => {
+            PeerManagerCommand::OwnedNeighborMutation {
+                mutation: OwnedNeighborMutation::Add(spec),
+                reply,
+            } => {
                 assert_eq!(spec.address.to_string(), "10.0.0.9");
                 assert_eq!(spec.remote_asn, 65009);
-                reply.send(Ok(())).unwrap();
+                reply.send(OwnedNeighborMutationOutcome::Success).unwrap();
             }
-            _ => panic!("expected RuntimeCreatePeer"),
+            _ => panic!("expected owned neighbor add"),
         }
         call.await.unwrap().unwrap();
     }
@@ -2138,57 +2232,6 @@ mod tests {
         );
     }
 
-    fn test_static_peer_config() -> PeerManagerNeighborConfig {
-        PeerManagerNeighborConfig {
-            min_hold_time: None,
-            address: "10.0.0.2".parse().unwrap(),
-            interface: None,
-            scope_id: None,
-            remote_asn: 65002,
-            description: "static peer".to_string(),
-            peer_group: None,
-            hold_time: Some(90),
-            send_hold_time: None,
-            max_prefixes: None,
-            max_prefixes_ipv4: None,
-            max_prefixes_ipv6: None,
-            max_prefix_restart_seconds: None,
-            md5_password: None,
-            tcp_ao: None,
-            ttl_security: false,
-            families: vec![(Afi::Ipv4, Safi::Unicast)],
-            required_families: Vec::new(),
-            graceful_restart: true,
-            gr_restart_time: 120,
-            gr_peer_restart_time_max: 4095,
-            gr_stale_routes_time: 360,
-            llgr_stale_time: 0,
-            gr_restart_eligible: false,
-            local_ipv6_nexthop: None,
-            route_reflector_client: false,
-            orr_vantage: None,
-            route_server_client: false,
-            per_client_best: false,
-            next_hop_ownership_strict_peer: false,
-            slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,
-            slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,
-            slow_peer_isolation: false,
-            interpret_rfc1997: true,
-            rs_control_communities: false,
-            remove_private_as: RemovePrivateAs::Disabled,
-            add_path_receive: false,
-            add_path_send: false,
-            add_path_send_max: 0,
-            paths_limit_receive_max: 0,
-            local_role: None,
-            strict_role: false,
-            prefix_orf_receive: false,
-            disable_ipv4_unicast: false,
-            import_policy: None,
-            export_policy: None,
-        }
-    }
-
     #[test]
     fn peer_lifecycle_errors_map_by_variant() {
         let peer = PeerKey::new("10.0.0.2".parse().unwrap(), None);
@@ -2311,11 +2354,14 @@ mod tests {
         let staged = tokio::spawn(staged.accept());
 
         match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::AddDynamicRange {
-                prefix,
-                peer_group,
-                remote_asn,
-                description,
+            PeerManagerCommand::OwnedNeighborMutation {
+                mutation:
+                    OwnedNeighborMutation::DynamicAdd {
+                        prefix,
+                        peer_group,
+                        remote_asn,
+                        description,
+                    },
                 reply,
             } => {
                 assert_eq!(prefix, "192.0.2.0/24");
@@ -2328,9 +2374,9 @@ mod tests {
                         .is_err(),
                     "call must wait for the staged write to be committed"
                 );
-                reply.send(Ok(())).unwrap();
+                reply.send(OwnedNeighborMutationOutcome::Success).unwrap();
             }
-            _ => panic!("expected AddDynamicRange"),
+            _ => panic!("expected owned dynamic add"),
         }
         assert!(staged.await.unwrap(), "the staged write must be committed");
         call.await.unwrap();
@@ -2399,18 +2445,141 @@ mod tests {
         });
 
         match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::AddDynamicRange { reply, .. } => {
+            PeerManagerCommand::OwnedNeighborMutation {
+                mutation: OwnedNeighborMutation::DynamicAdd { .. },
+                reply,
+            } => {
                 reply
-                    .send(Err(DynamicRangeError::NotFound(
-                        "peer_group \"missing\" not defined".to_string(),
-                    )))
+                    .send(OwnedNeighborMutationOutcome::RejectedNoEffect(
+                        OwnedNeighborMutationError::Dynamic(DynamicRangeError::NotFound(
+                            "peer_group \"missing\" not defined".to_string(),
+                        )),
+                    ))
                     .unwrap();
             }
-            _ => panic!("expected AddDynamicRange"),
+            _ => panic!("expected owned dynamic add"),
         }
 
         let err = call.await.unwrap().unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn owned_neighbor_gate_rejection_is_clean_and_precedes_actor_dispatch() {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let coordinator = RuntimeConfigCoordinator::new();
+        let gate: ConfigMutationGateFn = std::sync::Arc::new(|operation| {
+            Box::pin(async move { Err(format!("{operation} rejected by test gate")) })
+        });
+        let svc = NeighborService::with_runtime_config_coordinator(
+            65001,
+            AccessMode::ReadWrite,
+            peer_mgr_tx,
+            rib_tx,
+            None,
+            coordinator.clone(),
+            Some(gate),
+        );
+        let error = svc
+            .delete_dynamic_neighbor(Request::new(proto::DeleteDynamicNeighborRequest {
+                prefix: "192.0.2.0/24".to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(matches!(peer_mgr_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(coordinator.acquire().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn fully_acknowledged_actor_compensation_is_clean() {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let coordinator = RuntimeConfigCoordinator::new();
+        let svc = NeighborService::with_runtime_config_coordinator(
+            65001,
+            AccessMode::ReadWrite,
+            peer_mgr_tx,
+            rib_tx,
+            None,
+            coordinator.clone(),
+            None,
+        );
+        let call = tokio::spawn(async move {
+            svc.delete_dynamic_neighbor(Request::new(proto::DeleteDynamicNeighborRequest {
+                prefix: "192.0.2.0/24".to_string(),
+            }))
+            .await
+        });
+        let PeerManagerCommand::OwnedNeighborMutation { reply, .. } =
+            peer_mgr_rx.recv().await.unwrap()
+        else {
+            panic!("expected owned neighbor mutation");
+        };
+        reply
+            .send(OwnedNeighborMutationOutcome::FullyCompensated(
+                OwnedNeighborMutationError::Dynamic(DynamicRangeError::NotFound(
+                    "range disappeared before mutation".to_string(),
+                )),
+            ))
+            .unwrap();
+        assert_eq!(
+            call.await.unwrap().unwrap_err().code(),
+            tonic::Code::NotFound
+        );
+        assert!(coordinator.acquire().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn accepted_reply_loss_and_timeout_never_release_or_return() {
+        for drop_reply in [true, false] {
+            let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+            let (rib_tx, _rib_rx) = mpsc::channel(1);
+            let coordinator = RuntimeConfigCoordinator::new();
+            let svc = NeighborService::with_runtime_config_coordinator(
+                65001,
+                AccessMode::ReadWrite,
+                peer_mgr_tx,
+                rib_tx,
+                None,
+                coordinator.clone(),
+                None,
+            )
+            .with_owned_actor_timeout(Duration::from_millis(20));
+            let mut call = tokio::spawn(async move {
+                svc.delete_dynamic_neighbor(Request::new(proto::DeleteDynamicNeighborRequest {
+                    prefix: "192.0.2.0/24".to_string(),
+                }))
+                .await
+            });
+            let PeerManagerCommand::OwnedNeighborMutation { reply, .. } =
+                peer_mgr_rx.recv().await.unwrap()
+            else {
+                panic!("expected owned neighbor mutation");
+            };
+            if drop_reply {
+                drop(reply);
+            } else {
+                tokio::spawn(async move {
+                    std::future::pending::<()>().await;
+                    drop(reply);
+                });
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(60), &mut call)
+                    .await
+                    .is_err(),
+                "accepted actor ambiguity must never return an RPC result"
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), coordinator.acquire())
+                    .await
+                    .is_err(),
+                "accepted actor ambiguity must retain coordinator ownership"
+            );
+            call.abort();
+        }
     }
 
     #[tokio::test]
@@ -2448,7 +2617,10 @@ mod tests {
         let staged = tokio::spawn(staged.accept());
 
         match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::DeleteDynamicRange { prefix, reply } => {
+            PeerManagerCommand::OwnedNeighborMutation {
+                mutation: OwnedNeighborMutation::DynamicDelete { prefix },
+                reply,
+            } => {
                 assert_eq!(prefix, "192.0.2.0/24");
                 assert!(
                     tokio::time::timeout(Duration::from_millis(20), &mut call)
@@ -2456,16 +2628,9 @@ mod tests {
                         .is_err(),
                     "call must wait for the staged write to be committed"
                 );
-                reply
-                    .send(Ok(RemovedDynamicRange {
-                        prefix,
-                        peer_group: "fabric".to_string(),
-                        remote_asn: 65002,
-                        description: Some("lab range".to_string()),
-                    }))
-                    .unwrap();
+                reply.send(OwnedNeighborMutationOutcome::Success).unwrap();
             }
-            _ => panic!("expected DeleteDynamicRange"),
+            _ => panic!("expected owned dynamic delete"),
         }
         assert!(staged.await.unwrap(), "the staged write must be committed");
         call.await.unwrap();
@@ -3861,7 +4026,10 @@ mod tests {
         let staged = tokio::spawn(ack.accept());
 
         match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::RuntimeCreatePeer { spec, reply } => {
+            PeerManagerCommand::OwnedNeighborMutation {
+                mutation: OwnedNeighborMutation::Add(spec),
+                reply,
+            } => {
                 assert_eq!(spec, persisted);
                 assert!(
                     tokio::time::timeout(Duration::from_millis(20), &mut call)
@@ -3869,9 +4037,9 @@ mod tests {
                         .is_err(),
                     "the RPC must wait for actor apply and persistence commit"
                 );
-                reply.send(Ok(())).unwrap();
+                reply.send(OwnedNeighborMutationOutcome::Success).unwrap();
             }
-            _ => panic!("expected RuntimeCreatePeer"),
+            _ => panic!("expected owned neighbor add"),
         }
         assert!(staged.await.unwrap());
         call.await.unwrap().unwrap();
@@ -3913,24 +4081,20 @@ mod tests {
         let staged = tokio::spawn(staged.accept());
 
         match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::DeletePeer {
-                peer,
-                sync_config_snapshot,
+            PeerManagerCommand::OwnedNeighborMutation {
+                mutation: OwnedNeighborMutation::Delete(peer),
                 reply,
             } => {
                 assert_eq!(peer.address.to_string(), "10.0.0.2");
-                // One command now does both: there is no separate snapshot
-                // fix-up, because the config row is no longer rollback state.
-                assert!(sync_config_snapshot);
                 assert!(
                     tokio::time::timeout(Duration::from_millis(20), &mut call)
                         .await
                         .is_err(),
                     "call must wait for the staged write to be committed"
                 );
-                assert!(reply.send(Ok(test_static_peer_config())).is_ok());
+                assert!(reply.send(OwnedNeighborMutationOutcome::Success).is_ok());
             }
-            _ => panic!("expected DeletePeer"),
+            _ => panic!("expected owned neighbor delete"),
         }
         assert!(staged.await.unwrap(), "the staged write must be committed");
         call.await.unwrap().unwrap();
