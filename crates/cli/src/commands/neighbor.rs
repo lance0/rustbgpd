@@ -318,20 +318,9 @@ pub async fn show(
     };
 
     let cfg = n.config.as_ref();
-    let distribution_mode = effective_distribution_mode_label(
-        n.effective_distribution_mode,
-        cfg.map(|c| c.add_path_send).unwrap_or(false),
-        cfg.map(|c| c.per_client_best).unwrap_or(false),
-        &n.update_group,
-    );
-    let max_prefix_action = max_prefix_action_label(
-        &n.max_prefix_action,
-        cfg.and_then(|config| config.max_prefix_restart_seconds),
-    );
-    let effective_max_prefixes = effective_max_prefix_limit(
-        n.effective_max_prefixes,
-        cfg.map(|config| config.max_prefixes).unwrap_or(0),
-    );
+    let distribution_mode = effective_distribution_mode_label(n.effective_distribution_mode);
+    let max_prefix_action = max_prefix_action_label(&n.max_prefix_action);
+    let effective_max_prefixes = n.effective_max_prefixes;
     if json {
         let (negotiation_available, negotiated_session) = negotiated_session_json(&n);
         let out = JsonNeighborDetail {
@@ -951,20 +940,12 @@ fn graceful_shutdown_advertise_intent_label(value: Option<bool>) -> &'static str
     }
 }
 
-fn max_prefix_action_label(reported: &str, restart_seconds: Option<u32>) -> &str {
+fn max_prefix_action_label(reported: &str) -> &str {
     if reported.is_empty() {
-        if restart_seconds.is_some() {
-            "restart"
-        } else {
-            "shutdown"
-        }
+        "unknown"
     } else {
         reported
     }
-}
-
-fn effective_max_prefix_limit(reported: Option<u32>, legacy: u32) -> Option<u32> {
-    reported.or_else(|| (legacy != 0).then_some(legacy))
 }
 
 fn max_prefix_capacity_label(limit: Option<u32>, headroom: Option<u32>, stale: bool) -> String {
@@ -1006,29 +987,17 @@ pub(crate) fn rfc8212_policy_status_label(value: i32) -> &'static str {
     }
 }
 
-fn effective_distribution_mode_label(
-    value: i32,
-    legacy_add_path_send: bool,
-    legacy_per_client_best: bool,
-    legacy_update_group: &str,
-) -> &'static str {
+fn effective_distribution_mode_label(value: i32) -> &'static str {
     match crate::proto::EffectiveDistributionMode::try_from(value) {
         Ok(crate::proto::EffectiveDistributionMode::SingleBest) => "single-best",
         Ok(crate::proto::EffectiveDistributionMode::AddPath) => "add-path",
         Ok(crate::proto::EffectiveDistributionMode::Orr) => "orr",
         Ok(crate::proto::EffectiveDistributionMode::PerClientBest) => "per-client-best",
-        Ok(crate::proto::EffectiveDistributionMode::Unknown) | Err(_) => "unknown",
-        Ok(crate::proto::EffectiveDistributionMode::Unspecified) => {
-            if legacy_add_path_send {
-                "add-path"
-            } else if legacy_per_client_best {
-                "per-client-best"
-            } else if legacy_update_group == "orr_vantage" {
-                "orr"
-            } else {
-                "single-best"
-            }
-        }
+        Ok(
+            crate::proto::EffectiveDistributionMode::Unspecified
+            | crate::proto::EffectiveDistributionMode::Unknown,
+        )
+        | Err(_) => "unknown",
     }
 }
 
@@ -1466,50 +1435,49 @@ mod tests {
     }
 
     #[test]
-    fn effective_distribution_mode_is_live_and_backward_compatible() {
+    fn effective_distribution_mode_preserves_known_and_unknown_values() {
         assert_eq!(
             effective_distribution_mode_label(
-                crate::proto::EffectiveDistributionMode::AddPath as i32,
-                false,
-                false,
-                ""
+                crate::proto::EffectiveDistributionMode::AddPath as i32
             ),
             "add-path"
         );
         assert_eq!(
             effective_distribution_mode_label(
-                crate::proto::EffectiveDistributionMode::PerClientBest as i32,
-                false,
-                false,
-                ""
+                crate::proto::EffectiveDistributionMode::PerClientBest as i32
             ),
             "per-client-best"
         );
         assert_eq!(
-            effective_distribution_mode_label(0, true, false, ""),
-            "add-path"
+            effective_distribution_mode_label(
+                crate::proto::EffectiveDistributionMode::Unknown as i32
+            ),
+            "unknown"
+        );
+        assert_eq!(effective_distribution_mode_label(i32::MAX), "unknown");
+        assert_eq!(
+            effective_distribution_mode_label(
+                crate::proto::EffectiveDistributionMode::Unspecified as i32
+            ),
+            "unknown"
         );
         assert_eq!(
-            effective_distribution_mode_label(0, false, true, ""),
-            "per-client-best"
+            effective_distribution_mode_label(
+                crate::proto::EffectiveDistributionMode::SingleBest as i32
+            ),
+            "single-best"
         );
         assert_eq!(
-            effective_distribution_mode_label(0, false, false, "orr_vantage"),
+            effective_distribution_mode_label(crate::proto::EffectiveDistributionMode::Orr as i32),
             "orr"
         );
-        assert_eq!(
-            effective_distribution_mode_label(
-                crate::proto::EffectiveDistributionMode::Unknown as i32,
-                true,
-                true,
-                "orr_vantage"
-            ),
-            "unknown"
-        );
-        assert_eq!(
-            effective_distribution_mode_label(i32::MAX, true, true, "orr_vantage"),
-            "unknown"
-        );
+    }
+
+    #[test]
+    fn max_prefix_action_empty_is_unknown_and_reported_values_pass_through() {
+        assert_eq!(max_prefix_action_label(""), "unknown");
+        assert_eq!(max_prefix_action_label("restart"), "restart");
+        assert_eq!(max_prefix_action_label("shutdown"), "shutdown");
     }
 
     #[test]
@@ -1655,15 +1623,6 @@ mod tests {
         assert_eq!(next_hop_ownership_label(i32::MAX), "unknown");
     }
 
-    /// Load-bearing: returning the raw protobuf string makes both old-daemon
-    /// cases blank instead of deriving a truthful action from config presence.
-    #[test]
-    fn max_prefix_action_is_rolling_upgrade_safe() {
-        assert_eq!(max_prefix_action_label("", None), "shutdown");
-        assert_eq!(max_prefix_action_label("", Some(30)), "restart");
-        assert_eq!(max_prefix_action_label("shutdown", Some(30)), "shutdown");
-    }
-
     /// Load-bearing: collapsing protobuf absence into zero, or deriving
     /// headroom from a stale zero count, changes these operator-facing labels.
     #[test]
@@ -1677,15 +1636,6 @@ mod tests {
             max_prefix_capacity_label(Some(20), None, true),
             "20 (headroom unavailable: stale state)"
         );
-    }
-
-    /// Load-bearing: ignoring the legacy config value makes a new CLI call an
-    /// older daemon's finite aggregate limit unlimited during rolling upgrade.
-    #[test]
-    fn effective_max_prefix_limit_falls_back_without_inventing_zero() {
-        assert_eq!(effective_max_prefix_limit(Some(20), 10), Some(20));
-        assert_eq!(effective_max_prefix_limit(None, 10), Some(10));
-        assert_eq!(effective_max_prefix_limit(None, 0), None);
     }
 
     /// Load-bearing proof: collapsing protobuf presence, ignoring stale, or
