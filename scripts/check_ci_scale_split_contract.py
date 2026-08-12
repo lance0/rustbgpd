@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 ROSTER = [
+    "v064_validator",
     "core",
     "core_tests",
     "scale_receipts",
@@ -20,10 +21,11 @@ ROSTER = [
 TRIGGER_HASH = "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8"
 PERMISSION_HASH = "9691400b3b1036bcdfe724926816dbe71b0aa22ed9b5eb89627e2eeb75079898"
 JOB_HASHES = {
-    "core": "0a2dcd28b3e15df6ca51b2df4abe7d764ec0d8a07f1e52bdc0a7a2ebe06506c5",
-    "core_tests": "45cf057af044f2acd7a434361db7d40383c303e9b4e9363564fe8d133e130edd",
+    "v064_validator": "b3f0ae8906bd28397a5f82bab0db5467e09a8e312aa24a8c8f2db8fd01c6310a",
+    "core": "8a77646df5100ecbdbfe67deabd6c1c2a432367f12e668ad9df7ecc43ea261f3",
+    "core_tests": "c5d8ed560cd4e572f535bb4eabe065372fddfc1dbefe0c341a9c5af76ed6df0f",
     "scale_receipts": "18b47124c6a93c50e44f385eb762b41493fb33fd3ea251ac952b3bb3a46d5639",
-    "check": "cfc655ca80392ab0699390b461e5e8e9b41410cc724201aafe75ae6da7d83213",
+    "check": "736f69ca686c06e889962d5fb93d80ee848090718dcf63aeff695febc6cbfcc5",
     "msrv": "273de02a6a1e67e17913b50023326214261b8f4d6399f8f8867188e7e3d2acb9",
     "evpn_bum_filter_kernel": "d427ed2c650d619d926cad0a4cbb6b558dd013ace9b18ba48757be529420863a",
 }
@@ -36,7 +38,10 @@ TOOLCHAIN = (
 RUST_CACHE = "uses: Swatinem/rust-cache@v2"
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 5,
+        "actions/checkout@v7": 6,
+        "actions/cache@v6": 1,
+        "actions/upload-artifact@v7": 1,
+        "actions/download-artifact@v8": 2,
         "Swatinem/rust-cache@v2": 4,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 3,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95": 1,
@@ -90,9 +95,30 @@ def check(root: Path) -> list[str]:
         if _hash(jobs.get(name, "")) != expected:
             errors.append(f"{name} job body drifted")
 
+    producer = jobs.get("v064_validator", "")
+    for seam in (
+        "name: prepare exact v0.64 config migration validator",
+        "runs-on: ubuntu-latest",
+        "timeout-minutes: 10",
+        CHECKOUT,
+        "uses: actions/cache@v6",
+        "key: rustbgpd-v0.64.0-linux-amd64-bd4829de08d0c50074f9ecd5c351399fae42be06d456b3880a04aa4a7cda1137",
+        "--self-test",
+        "--prepare-archive",
+        "uses: actions/upload-artifact@v7",
+        "name: rustbgpd-v0.64.0-linux-amd64",
+        "if-no-files-found: error",
+    ):
+        if seam not in producer:
+            errors.append(f"v064_validator missing {seam}")
+    for forbidden in ("restore-keys:", "continue-on-error:"):
+        if forbidden in producer:
+            errors.append(f"v064_validator permits {forbidden}")
+
     core_tests = jobs.get("core_tests", "")
     for seam in (
         "name: core tests / rustdoc",
+        "needs: v064_validator",
         "runs-on: ubuntu-latest",
         "timeout-minutes: 30",
         CHECKOUT,
@@ -146,14 +172,16 @@ def check(root: Path) -> list[str]:
         "runs-on: ubuntu-latest",
         "timeout-minutes: 5",
         "if: ${{ always() }}",
-        "needs: [core, core_tests, scale_receipts]",
+        "needs: [v064_validator, core, core_tests, scale_receipts]",
+        "V064_VALIDATOR_RESULT: ${{ needs.v064_validator.result }}",
         "CORE_RESULT: ${{ needs.core.result }}",
         "CORE_TESTS_RESULT: ${{ needs.core_tests.result }}",
         "SCALE_RECEIPTS_RESULT: ${{ needs.scale_receipts.result }}",
+        "printf 'v064_validator=%s\\n' \"$V064_VALIDATOR_RESULT\"",
         "printf 'core=%s\\n' \"$CORE_RESULT\"",
         "printf 'core_tests=%s\\n' \"$CORE_TESTS_RESULT\"",
         "printf 'scale_receipts=%s\\n' \"$SCALE_RECEIPTS_RESULT\"",
-        '[[ "$CORE_RESULT" != "success" || "$CORE_TESTS_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]',
+        '[[ "$V064_VALIDATOR_RESULT" != "success" || "$CORE_RESULT" != "success" || "$CORE_TESTS_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]',
     ):
         if seam not in aggregate:
             errors.append(f"aggregate check missing {seam}")

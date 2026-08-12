@@ -45,6 +45,10 @@ GOBGP_CHECKSUMS = {
     "amd64": "e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522",
     "arm64": "0aaa2da6e4dcaaf57e3d0e64eae14946292b0a5894d80ef3b7ebde3bf52beb29",
 }
+V064_SHA256 = "bd4829de08d0c50074f9ecd5c351399fae42be06d456b3880a04aa4a7cda1137"
+V064_ARCHIVE = "rustbgpd-linux-amd64.tar.gz"
+V064_ARTIFACT = "rustbgpd-v0.64.0-linux-amd64"
+V064_CACHE_KEY = f"rustbgpd-v0.64.0-linux-amd64-{V064_SHA256}"
 
 TRIGGER_HASHES = {
     "ci.yml": "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8",
@@ -64,13 +68,15 @@ CALL_HASHES = {
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 81,
+        "actions/checkout@v7": 82,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95": 2,
         "docker/setup-buildx-action@v4": 44,
         "docker/build-push-action@v7": 45,
-        "actions/upload-artifact@v7": 1,
+        "actions/cache@v6": 1,
+        "actions/upload-artifact@v7": 2,
+        "actions/download-artifact@v8": 2,
         "rustsec/audit-check@v2.0.0": 1,
         "EmbarkStudios/cargo-deny-action@v2": 1,
     }
@@ -117,6 +123,73 @@ def check(root: Path) -> list[str]:
         )
         if _hash(permissions) != PERMISSION_HASHES[name]:
             errors.append(f"{name}: permissions drifted")
+
+    ci_jobs = _jobs(texts["ci.yml"])
+    producer = ci_jobs.get("v064_validator", "")
+    producer_seams = (
+        "name: prepare exact v0.64 config migration validator",
+        "runs-on: ubuntu-latest",
+        "timeout-minutes: 10",
+        CHECKOUT,
+        "uses: actions/cache@v6",
+        f"path: ${{{{ runner.temp }}}}/rustbgpd-v064-cache/{V064_ARCHIVE}",
+        f"key: {V064_CACHE_KEY}",
+        "--self-test",
+        "--prepare-archive",
+        "uses: actions/upload-artifact@v7",
+        f"name: {V064_ARTIFACT}",
+        "if-no-files-found: error",
+        "retention-days: 1",
+        "compression-level: 0",
+    )
+    for seam in producer_seams:
+        if seam not in producer:
+            errors.append(f"ci.yml:v064_validator missing {seam}")
+    for forbidden in ("restore-keys:", "continue-on-error:"):
+        if forbidden in producer:
+            errors.append(f"ci.yml:v064_validator permits {forbidden}")
+    if producer.count("uses: actions/cache@v6") != 1:
+        errors.append("ci.yml:v064_validator must have one cache producer")
+    if producer.count("uses: actions/upload-artifact@v7") != 1:
+        errors.append("ci.yml:v064_validator must upload one same-run artifact")
+
+    for job_name in ("core", "core_tests"):
+        consumer = ci_jobs.get(job_name, "")
+        for seam in (
+            "needs: v064_validator",
+            "uses: actions/download-artifact@v8",
+            f"name: {V064_ARTIFACT}",
+            f"path: ${{{{ runner.temp }}}}/rustbgpd-v064-artifact",
+            "--install-archive",
+            f'"$RUNNER_TEMP/rustbgpd-v064-artifact/{V064_ARCHIVE}"',
+            '"$RUNNER_TEMP/rustbgpd-v064"',
+        ):
+            if seam not in consumer:
+                errors.append(f"ci.yml:{job_name} missing validator seam {seam}")
+        if consumer.count("uses: actions/download-artifact@v8") != 1:
+            errors.append(f"ci.yml:{job_name} must download one validator artifact")
+        for forbidden in (
+            "--prepare-archive",
+            "actions/cache@",
+            "actions/upload-artifact@",
+            "releases/download/v0.64.0",
+            "restore-keys:",
+            "continue-on-error:",
+        ):
+            if forbidden in consumer:
+                errors.append(
+                    f"ci.yml:{job_name} validator consumer permits {forbidden}"
+                )
+
+    aggregate = ci_jobs.get("check", "")
+    for seam in (
+        "needs: [v064_validator, core, core_tests, scale_receipts]",
+        "V064_VALIDATOR_RESULT: ${{ needs.v064_validator.result }}",
+        "printf 'v064_validator=%s\\n' \"$V064_VALIDATOR_RESULT\"",
+        '[[ "$V064_VALIDATOR_RESULT" != "success"',
+    ):
+        if seam not in aggregate:
+            errors.append(f"ci.yml:check missing validator result seam {seam}")
 
     for name, roster, setup in (
         ("interop.yml", INTEROP, False),
@@ -274,7 +347,7 @@ def check(root: Path) -> list[str]:
         f"ENV GOBGP_VERSION={GOBGP_VERSION}",
         'archive="gobgp_${GOBGP_VERSION}_linux_${TARGETARCH}.tar.gz"',
         '*) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;;',
-        'https://github.com/osrg/gobgp/releases/download/v${GOBGP_VERSION}/${archive}',
+        "https://github.com/osrg/gobgp/releases/download/v${GOBGP_VERSION}/${archive}",
         'echo "${checksum}  /tmp/${archive}" | sha256sum --check --strict',
         'tar --extract --gzip --file "/tmp/${archive}" --directory /usr/local/bin gobgp gobgpd',
         'test "$(gobgp --version)" = "gobgp version ${GOBGP_VERSION}"',
@@ -287,7 +360,9 @@ def check(root: Path) -> list[str]:
     for arch, checksum in GOBGP_CHECKSUMS.items():
         if f'{arch}) checksum="{checksum}" ;;' not in gobgp:
             errors.append(f"Dockerfile.gobgp: {arch} checksum drifted")
-    if re.search(r"(?:@latest|releases/(?:latest|download/latest)|GOBGP_VERSION=latest)", gobgp):
+    if re.search(
+        r"(?:@latest|releases/(?:latest|download/latest)|GOBGP_VERSION=latest)", gobgp
+    ):
         errors.append("Dockerfile.gobgp: floating GoBGP release is forbidden")
     if "go install github.com/osrg/gobgp" in gobgp or "FROM golang:" in gobgp:
         errors.append("Dockerfile.gobgp: source build replaced pinned release archives")

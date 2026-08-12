@@ -37,6 +37,7 @@ class ScaleSplitContractTests(unittest.TestCase):
 
     def test_destructive_roster_and_preserved_bodies(self) -> None:
         cases = (
+            ("  v064_validator:\n", "  renamed_validator:\n"),
             ("  core:\n", "  renamed_core:\n"),
             ("  core_tests:\n", "  renamed_core_tests:\n"),
             ("  scale_receipts:\n", "  renamed_scale:\n"),
@@ -68,6 +69,27 @@ class ScaleSplitContractTests(unittest.TestCase):
             target.write_text(text[:core_start] + scale + core + text[check_start:])
             self.assertTrue(check(root), "job-order mutation stayed green")
 
+    def test_destructive_validator_producer(self) -> None:
+        cache_key = (
+            "key: rustbgpd-v0.64.0-linux-amd64-"
+            "bd4829de08d0c50074f9ecd5c351399fae42be06d456b3880a04aa4a7cda1137"
+        )
+        cases = (
+            (
+                "name: prepare exact v0.64 config migration validator",
+                "name: changed validator producer",
+            ),
+            ("uses: actions/cache@v6", "uses: actions/cache@main"),
+            (cache_key, f"{cache_key}\n          restore-keys: rustbgpd-v0.64"),
+            ("--self-test", "--skipped-self-test"),
+            ("--prepare-archive", "--changed-prepare"),
+            ("uses: actions/upload-artifact@v7", "uses: actions/upload-artifact@main"),
+            ("if-no-files-found: error", "if-no-files-found: ignore"),
+        )
+        for old, new in cases:
+            with self.subTest(seam=old):
+                self.mutate(old, new)
+
     def test_destructive_extracted_step_and_setup(self) -> None:
         step_name = "- name: Check standalone scale harnesses and receipt classifiers"
         cases = (
@@ -93,7 +115,7 @@ class ScaleSplitContractTests(unittest.TestCase):
             with self.subTest(seam=old):
                 self.mutate(old, new, occurrence[0] if occurrence else 0)
         for pin, occurrence in (
-            ("actions/checkout@v7", 2),
+            ("actions/checkout@v7", 3),
             ("dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c", 2),
             ("Swatinem/rust-cache@v2", 2),
         ):
@@ -115,12 +137,12 @@ class ScaleSplitContractTests(unittest.TestCase):
             with self.subTest(seam=old):
                 self.mutate(old, new, occurrence[0] if occurrence else 0)
         for pin in (
-            "actions/checkout@v7",
             "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c",
             "Swatinem/rust-cache@v2",
         ):
             with self.subTest(pin=pin):
                 self.mutate(pin, "changed@main", 1)
+        self.mutate("actions/checkout@v7", "changed@main", 2)
         self.mutate(
             "      - name: Wire crate README freshness gate",
             "      - run: cargo test --workspace\n"
@@ -136,14 +158,25 @@ class ScaleSplitContractTests(unittest.TestCase):
             ("timeout-minutes: 5", "timeout-minutes: 6"),
             ("if: ${{ always() }}", "if: ${{ success() }}"),
             (
+                "needs: [v064_validator, core, core_tests, scale_receipts]",
                 "needs: [core, core_tests, scale_receipts]",
-                "needs: [core_tests, scale_receipts]",
             ),
             (
-                "needs: [core, core_tests, scale_receipts]",
-                "needs: [core, scale_receipts]",
+                "needs: [v064_validator, core, core_tests, scale_receipts]",
+                "needs: [v064_validator, core_tests, scale_receipts]",
             ),
-            ("needs: [core, core_tests, scale_receipts]", "needs: [core, core_tests]"),
+            (
+                "needs: [v064_validator, core, core_tests, scale_receipts]",
+                "needs: [v064_validator, core, scale_receipts]",
+            ),
+            (
+                "needs: [v064_validator, core, core_tests, scale_receipts]",
+                "needs: [v064_validator, core, core_tests]",
+            ),
+            (
+                "V064_VALIDATOR_RESULT: ${{ needs.v064_validator.result }}",
+                "V064_VALIDATOR_RESULT: success",
+            ),
             ("CORE_RESULT: ${{ needs.core.result }}", "CORE_RESULT: success"),
             (
                 "CORE_TESTS_RESULT: ${{ needs.core_tests.result }}",
@@ -156,7 +189,7 @@ class ScaleSplitContractTests(unittest.TestCase):
             ("printf 'core=%s\\n' \"$CORE_RESULT\"", "true"),
             ("printf 'core_tests=%s\\n' \"$CORE_TESTS_RESULT\"", "true"),
             (
-                '[[ "$CORE_RESULT" != "success" || "$CORE_TESTS_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]',
+                '[[ "$V064_VALIDATOR_RESULT" != "success" || "$CORE_RESULT" != "success" || "$CORE_TESTS_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]',
                 "[[ false ]]",
             ),
         )
@@ -169,11 +202,14 @@ class ScaleSplitContractTests(unittest.TestCase):
         shell = aggregate_shell(_jobs(workflow)["check"])
         self.assertTrue(shell)
 
-        def run(core=None, core_tests=None, scale=None):
+        def run(validator=None, core=None, core_tests=None, scale=None):
             env = os.environ.copy()
+            env.pop("V064_VALIDATOR_RESULT", None)
             env.pop("CORE_RESULT", None)
             env.pop("CORE_TESTS_RESULT", None)
             env.pop("SCALE_RECEIPTS_RESULT", None)
+            if validator is not None:
+                env["V064_VALIDATOR_RESULT"] = validator
             if core is not None:
                 env["CORE_RESULT"] = core
             if core_tests is not None:
@@ -184,17 +220,28 @@ class ScaleSplitContractTests(unittest.TestCase):
                 ["bash", "-c", shell], env=env, capture_output=True, text=True
             )
 
-        self.assertEqual(0, run("success", "success", "success").returncode)
+        self.assertEqual(0, run("success", "success", "success", "success").returncode)
         for bad in ("failure", "cancelled", "skipped", ""):
+            with self.subTest(child="v064_validator", result=bad):
+                self.assertNotEqual(
+                    0, run(bad, "success", "success", "success").returncode
+                )
             with self.subTest(child="core", result=bad):
-                self.assertNotEqual(0, run(bad, "success", "success").returncode)
+                self.assertNotEqual(
+                    0, run("success", bad, "success", "success").returncode
+                )
             with self.subTest(child="core_tests", result=bad):
-                self.assertNotEqual(0, run("success", bad, "success").returncode)
+                self.assertNotEqual(
+                    0, run("success", "success", bad, "success").returncode
+                )
             with self.subTest(child="scale_receipts", result=bad):
-                self.assertNotEqual(0, run("success", "success", bad).returncode)
-        self.assertNotEqual(0, run(None, "success", "success").returncode)
-        self.assertNotEqual(0, run("success", None, "success").returncode)
-        self.assertNotEqual(0, run("success", "success", None).returncode)
+                self.assertNotEqual(
+                    0, run("success", "success", "success", bad).returncode
+                )
+        self.assertNotEqual(0, run(None, "success", "success", "success").returncode)
+        self.assertNotEqual(0, run("success", None, "success", "success").returncode)
+        self.assertNotEqual(0, run("success", "success", None, "success").returncode)
+        self.assertNotEqual(0, run("success", "success", "success", None).returncode)
 
 
 if __name__ == "__main__":
