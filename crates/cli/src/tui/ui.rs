@@ -740,16 +740,16 @@ mod tests {
         assert_eq!(format_number(1234567), "1,234,567");
     }
 
-    /// Red proof: restoring the source-only event row or storing the degraded
-    /// warning in the bounded route rows removes these strings from the real
+    /// Red proof: restoring the source-only event row or storing the primary
+    /// status in the bounded route rows removes these strings from the real
     /// rendered event panel.
     #[test]
-    fn event_panel_test_backend_renders_context_lag_and_degraded_status() {
+    fn event_panel_test_backend_renders_context_lag_and_primary_status() {
         let mut app = App::new();
         app.show_events = true;
         app.on_data(snapshot(Vec::new(), Freshness::Fresh));
         app.on_route_event(crate::tui::data::RouteEventUpdate::StreamStatus(Some(
-            "DEGRADED: WatchEvents unsupported; using legacy WatchRoutes; missed-event counts unavailable".into(),
+            "route event stream error: primary unavailable; retrying".into(),
         )));
         let lag = |missed_count| RouteEventEntry {
             kind: RouteEventKind::StreamLag,
@@ -789,7 +789,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
 
-        assert!(rendered.contains("DEGRADED: WatchEvents unsupported"));
+        assert!(rendered.contains("route event stream error: primary unavailable; retrying"));
         assert!(rendered.contains(
             "from 192.0.2.1 previous=192.0.2.2 to=192.0.2.3 reason=policy_denied path_id=77"
         ));

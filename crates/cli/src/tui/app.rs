@@ -528,13 +528,13 @@ mod tests {
         assert_eq!(app.view, View::PeerDetail("198.51.100.1".into()));
     }
 
-    /// Red proof: storing compatibility state in the bounded event deque (or
-    /// clearing it while evicting rows) loses the warning after 101 events.
+    /// Red proof: storing stream status in the bounded event deque (or clearing
+    /// it while evicting rows) loses the error after 101 events.
     #[test]
-    fn degraded_stream_warning_survives_event_deque_eviction() {
+    fn primary_stream_error_survives_event_deque_eviction() {
         let mut app = App::new();
-        let warning = "DEGRADED: WatchEvents unsupported; using legacy WatchRoutes; missed-event counts unavailable";
-        app.on_route_event(RouteEventUpdate::StreamStatus(Some(warning.into())));
+        let status = "route event stream error: primary unavailable; retrying";
+        app.on_route_event(RouteEventUpdate::StreamStatus(Some(status.into())));
         for index in 0..=MAX_EVENTS {
             app.on_route_event(RouteEventUpdate::Event(RouteEventEntry {
                 kind: crate::tui::data::RouteEventKind::Route,
@@ -551,7 +551,7 @@ mod tests {
         }
 
         assert_eq!(app.route_events.len(), MAX_EVENTS);
-        assert_eq!(app.route_event_stream_status.as_deref(), Some(warning));
+        assert_eq!(app.route_event_stream_status.as_deref(), Some(status));
         app.on_route_event(RouteEventUpdate::StreamStatus(None));
         assert!(app.route_event_stream_status.is_none());
     }

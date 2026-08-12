@@ -10,11 +10,10 @@ use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::event_service_client::EventServiceClient;
 use crate::proto::global_service_client::GlobalServiceClient;
 use crate::proto::neighbor_service_client::NeighborServiceClient;
-use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     BgpEvent, BgpEventType, EventCategory, GetGlobalRequest, GlobalState, HealthRequest,
     HealthResponse, ListDynamicNeighborsRequest, ListNeighborsRequest, MetricsRequest,
-    NeighborState, RouteEvent, RouteEventType, WatchEventsRequest, WatchRoutesRequest, bgp_event,
+    NeighborState, RouteEvent, WatchEventsRequest, bgp_event,
 };
 
 pub struct DataSnapshot {
@@ -81,16 +80,6 @@ fn format_event_type(t: BgpEventType) -> &'static str {
     }
 }
 
-fn format_legacy_event_type(t: i32) -> &'static str {
-    match RouteEventType::try_from(t) {
-        Ok(RouteEventType::Added) => "added",
-        Ok(RouteEventType::Withdrawn) => "withdrawn",
-        Ok(RouteEventType::BestChanged) => "best_changed",
-        Ok(RouteEventType::PolicyFiltered) => "policy_filtered",
-        _ => "unknown",
-    }
-}
-
 fn parse_vrp_count(prometheus_text: &str) -> Option<u64> {
     rpki_vrp_count_sum(prometheus_text)
 }
@@ -98,8 +87,6 @@ fn parse_vrp_count(prometheus_text: &str) -> Option<u64> {
 const METRICS_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const DYNAMIC_RANGES_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const ROUTE_STREAM_RECONNECT_BACKOFF: Duration = Duration::from_secs(2);
-const LEGACY_ROUTE_STREAM_WARNING: &str =
-    "DEGRADED: WatchEvents unsupported; using legacy WatchRoutes; missed-event counts unavailable";
 
 struct FetcherState {
     global: Option<GlobalState>,
@@ -307,29 +294,10 @@ async fn route_event_loop(
     }
 }
 
-enum PrimaryStreamOutcome {
-    Unsupported,
-    Finished(Result<(), tonic::Status>),
-}
-
 async fn stream_route_events(connection: &Connection, event_tx: &mpsc::Sender<RouteEventUpdate>) {
-    match stream_events(connection, event_tx).await {
-        PrimaryStreamOutcome::Unsupported => {
-            if send_stream_status(event_tx, LEGACY_ROUTE_STREAM_WARNING.to_string()).await
-                && let Err(error) = stream_routes(connection, event_tx).await
-            {
-                let status = format!(
-                    "{LEGACY_ROUTE_STREAM_WARNING}; legacy stream error: {}; retrying",
-                    error.message()
-                );
-                send_stream_status(event_tx, status).await;
-            }
-        }
-        PrimaryStreamOutcome::Finished(Err(error)) => {
-            let status = format!("route event stream error: {}; retrying", error.message());
-            send_stream_status(event_tx, status).await;
-        }
-        PrimaryStreamOutcome::Finished(Ok(())) => {}
+    if let Err(error) = stream_events(connection, event_tx).await {
+        let status = format!("route event stream error: {}; retrying", error.message());
+        send_stream_status(event_tx, status).await;
     }
 }
 
@@ -343,28 +311,22 @@ async fn send_stream_status(event_tx: &mpsc::Sender<RouteEventUpdate>, status: S
 async fn stream_events(
     connection: &Connection,
     event_tx: &mpsc::Sender<RouteEventUpdate>,
-) -> PrimaryStreamOutcome {
+) -> Result<(), tonic::Status> {
     let mut client =
         EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let mut stream = match client
+    let mut stream = client
         .watch_events(WatchEventsRequest {
             categories: vec![EventCategory::Route as i32],
             ..Default::default()
         })
-        .await
-    {
-        Ok(response) => response.into_inner(),
-        Err(error) if error.code() == tonic::Code::Unimplemented => {
-            return PrimaryStreamOutcome::Unsupported;
-        }
-        Err(error) => return PrimaryStreamOutcome::Finished(Err(error)),
-    };
+        .await?
+        .into_inner();
     if event_tx
         .send(RouteEventUpdate::StreamStatus(None))
         .await
         .is_err()
     {
-        return PrimaryStreamOutcome::Finished(Ok(()));
+        return Ok(());
     }
 
     loop {
@@ -373,11 +335,11 @@ async fn stream_events(
                 if let Some(entry) = route_event_entry(event)
                     && event_tx.send(RouteEventUpdate::Event(entry)).await.is_err()
                 {
-                    return PrimaryStreamOutcome::Finished(Ok(()));
+                    return Ok(());
                 }
             }
-            Ok(None) => return PrimaryStreamOutcome::Finished(Ok(())),
-            Err(error) => return PrimaryStreamOutcome::Finished(Err(error)),
+            Ok(None) => return Ok(()),
+            Err(error) => return Err(error),
         }
     }
 }
@@ -429,33 +391,6 @@ fn route_entry(event_type: &str, event: RouteEvent) -> RouteEventEntry {
     }
 }
 
-async fn stream_routes(
-    connection: &Connection,
-    event_tx: &mpsc::Sender<RouteEventUpdate>,
-) -> Result<(), tonic::Status> {
-    let mut client =
-        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let mut stream = client
-        .watch_routes(WatchRoutesRequest {
-            neighbor_address: String::new(),
-            afi_safi: 0,
-        })
-        .await?
-        .into_inner();
-
-    while let Some(event) = stream.message().await? {
-        let event_type = format_legacy_event_type(event.event_type);
-        if event_tx
-            .send(RouteEventUpdate::Event(route_entry(event_type, event)))
-            .await
-            .is_err()
-        {
-            break;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::Ordering;
@@ -488,7 +423,7 @@ mod tests {
             summary: summary.into(),
             payload: Some(rustbgpd_api::proto::bgp_event::Payload::Route(
                 rustbgpd_api::proto::RouteEvent {
-                    event_type: RouteEventType::PolicyFiltered as i32,
+                    event_type: rustbgpd_api::proto::RouteEventType::PolicyFiltered as i32,
                     prefix: "203.0.113.0".into(),
                     prefix_length: 24,
                     peer_address: "192.0.2.1".into(),
@@ -535,40 +470,6 @@ mod tests {
             .state
             .list_dynamic_neighbors_calls
             .load(Ordering::SeqCst)
-    }
-
-    async fn assert_route_reconnect_backoff(server: &crate::test_support::MockServerHandle) {
-        *server.state.watch_events_admission_error.lock().await = Some((
-            tonic::Code::Unimplemented,
-            "WatchEvents unavailable on this daemon".into(),
-        ));
-        let connection = connect(&server.addr, None).await.unwrap();
-        let (enabled_tx, enabled_rx) = watch::channel(true);
-        let (event_tx, _event_rx) = mpsc::channel(8);
-        let task = tokio::spawn(route_event_loop(connection, event_tx, enabled_rx));
-
-        wait_for(|| server.state.watch_routes_calls.load(Ordering::SeqCst) == 1).await;
-        wait_for(|| {
-            server
-                .state
-                .watch_routes_terminations
-                .load(Ordering::SeqCst)
-                == 1
-        })
-        .await;
-        settle_tasks().await;
-        tokio::time::advance(ROUTE_STREAM_RECONNECT_BACKOFF - Duration::from_millis(1)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(server.state.watch_events_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(server.state.watch_routes_calls.load(Ordering::SeqCst), 1);
-
-        tokio::time::advance(Duration::from_millis(1)).await;
-        wait_for(|| server.state.watch_events_calls.load(Ordering::SeqCst) == 2).await;
-        wait_for(|| server.state.watch_routes_calls.load(Ordering::SeqCst) == 2).await;
-
-        drop(enabled_tx);
-        task.abort();
-        let _ = task.await;
     }
 
     /// Red proof: the old polling parser loses this production-shaped value.
@@ -859,36 +760,14 @@ mod tests {
         wait_for(|| server.state.watch_events_active.load(Ordering::SeqCst) == 0).await;
     }
 
-    /// Red proof: detaching the fallback stream from the visibility select
-    /// leaves its active counter nonzero after hide and handle drop.
+    /// Red proof: restoring the admission fallback calls WatchRoutes, while
+    /// suppressing the primary error loses the exact visible status.
     #[tokio::test]
-    async fn legacy_fallback_is_cancellable() {
-        let server = spawn_mock_server(None).await;
-        *server.state.watch_events_admission_error.lock().await =
-            Some((tonic::Code::Unimplemented, "old daemon".into()));
-        let connection = connect(&server.addr, None).await.unwrap();
-        let (enabled_tx, enabled_rx) = watch::channel(true);
-        let (event_tx, _event_rx) = mpsc::channel(4);
-        let task = tokio::spawn(route_event_loop(connection, event_tx, enabled_rx));
-
-        wait_for(|| server.state.watch_routes_active.load(Ordering::SeqCst) == 1).await;
-        enabled_tx.send(false).unwrap();
-        wait_for(|| server.state.watch_routes_active.load(Ordering::SeqCst) == 0).await;
-        enabled_tx.send(true).unwrap();
-        wait_for(|| server.state.watch_routes_active.load(Ordering::SeqCst) == 1).await;
-        task.abort();
-        let _ = task.await;
-        wait_for(|| server.state.watch_routes_active.load(Ordering::SeqCst) == 0).await;
-    }
-
-    /// Red proof: broadening fallback beyond admission UNIMPLEMENTED makes the
-    /// PermissionDenied and Unavailable rows call legacy WatchRoutes.
-    #[tokio::test]
-    async fn only_admission_unimplemented_enters_legacy_stream() {
-        for (code, expected_legacy_calls) in [
-            (tonic::Code::Unimplemented, 1),
-            (tonic::Code::PermissionDenied, 0),
-            (tonic::Code::Unavailable, 0),
+    async fn primary_admission_errors_are_visible_without_fallback() {
+        for code in [
+            tonic::Code::Unimplemented,
+            tonic::Code::PermissionDenied,
+            tonic::Code::Unavailable,
         ] {
             let server = spawn_mock_server(None).await;
             *server.state.watch_events_admission_error.lock().await =
@@ -902,19 +781,17 @@ mod tests {
             settle_tasks().await;
             assert_eq!(
                 server.state.watch_routes_calls.load(Ordering::SeqCst),
-                expected_legacy_calls,
+                0,
                 "admission status {code:?}"
             );
             let RouteEventUpdate::StreamStatus(Some(status)) = event_rx.recv().await.unwrap()
             else {
                 panic!("stream admission must publish visible status");
             };
-            if code == tonic::Code::Unimplemented {
-                assert_eq!(
-                    status,
-                    "DEGRADED: WatchEvents unsupported; using legacy WatchRoutes; missed-event counts unavailable"
-                );
-            }
+            assert_eq!(
+                status,
+                "route event stream error: primary admission rejected; retrying"
+            );
             task.abort();
             let _ = task.await;
         }
@@ -958,67 +835,35 @@ mod tests {
         let _ = task.await;
     }
 
-    /// Red proof: bypassing the typed legacy mapper drops one or more policy
-    /// source/previous/target/reason/path fields from the fallback result.
-    #[tokio::test]
-    async fn legacy_fallback_preserves_policy_context_through_mock_grpc() {
-        let server = spawn_mock_server(None).await;
-        *server.state.watch_events_admission_error.lock().await =
-            Some((tonic::Code::Unimplemented, "old daemon".into()));
-        let route = match policy_event("legacy policy summary").payload.unwrap() {
-            rustbgpd_api::proto::bgp_event::Payload::Route(route) => route,
-            _ => unreachable!(),
-        };
-        *server.state.watch_routes_response.lock().await = vec![route];
-        let connection = connect(&server.addr, None).await.unwrap();
-        let (_enabled_tx, enabled_rx) = watch::channel(true);
-        let (event_tx, mut event_rx) = mpsc::channel(4);
-        let task = tokio::spawn(route_event_loop(connection, event_tx, enabled_rx));
-
-        let policy = next_event(&mut event_rx).await;
-        assert_eq!(policy.event_type, "policy_filtered");
-        assert_eq!(policy.peer_address, "192.0.2.1");
-        assert_eq!(policy.previous_peer_address, "192.0.2.2");
-        assert_eq!(policy.target_peer_address, "192.0.2.3");
-        assert_eq!(policy.reason, "policy_denied");
-        assert_eq!(policy.path_id, 77);
-        task.abort();
-        let _ = task.await;
-    }
-
-    /// Red proof: decoding the legacy enum as BgpEventType makes the invalid
-    /// legacy value inherit an unrelated BGP-event label.
-    #[test]
-    fn legacy_route_event_type_has_an_independent_mapping() {
-        assert_eq!(
-            format_legacy_event_type(RouteEventType::PolicyFiltered as i32),
-            "policy_filtered"
-        );
-        assert_eq!(
-            format_legacy_event_type(BgpEventType::SessionEstablished as i32),
-            "unknown"
-        );
-    }
-
-    /// Red proof: treating a post-admission UNIMPLEMENTED as legacy support
-    /// increments WatchRoutes instead of surfacing the primary error.
+    /// Red proof: suppressing a stream error loses the visible status; removing
+    /// the delay reprobes before the exact two-second deadline.
     #[tokio::test(start_paused = true)]
-    async fn post_admission_unimplemented_never_falls_back() {
+    async fn primary_stream_errors_are_visible_and_reprobe_after_backoff() {
         let server = spawn_mock_server(None).await;
         *server.state.watch_events_stream_error.lock().await =
-            Some((tonic::Code::Unimplemented, "stream item failed".into()));
+            Some((tonic::Code::Unavailable, "stream item failed".into()));
         let connection = connect(&server.addr, None).await.unwrap();
         let (_enabled_tx, enabled_rx) = watch::channel(true);
         let (event_tx, mut event_rx) = mpsc::channel(4);
         let task = tokio::spawn(route_event_loop(connection, event_tx, enabled_rx));
 
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(RouteEventUpdate::StreamStatus(None))
+        ));
         let mut visible_error = None;
-        while visible_error.is_none() {
-            if let RouteEventUpdate::StreamStatus(status) = event_rx.recv().await.unwrap() {
-                visible_error = status;
+        for _ in 0..1_000 {
+            if let Ok(update) = event_rx.try_recv() {
+                visible_error = Some(update);
+                break;
             }
+            tokio::task::yield_now().await;
         }
-        assert!(visible_error.unwrap().contains("stream item failed"));
+        let visible_error = visible_error.expect("stream error status");
+        let RouteEventUpdate::StreamStatus(Some(visible_error)) = visible_error else {
+            panic!("stream failure must publish visible status");
+        };
+        assert!(visible_error.contains("stream item failed"));
         assert_eq!(server.state.watch_routes_calls.load(Ordering::SeqCst), 0);
         tokio::time::advance(ROUTE_STREAM_RECONNECT_BACKOFF - Duration::from_millis(1)).await;
         assert_eq!(server.state.watch_events_calls.load(Ordering::SeqCst), 1);
@@ -1059,28 +904,6 @@ mod tests {
         assert_eq!(server.state.watch_routes_calls.load(Ordering::SeqCst), 0);
         task.abort();
         let _ = task.await;
-    }
-
-    /// Red proof: removing the clean-end delay reconnects before the deadline.
-    #[tokio::test(start_paused = true)]
-    async fn clean_route_stream_end_uses_reconnect_backoff() {
-        let server = spawn_mock_server(None).await;
-        server
-            .state
-            .watch_routes_clean_end
-            .store(true, Ordering::SeqCst);
-        assert_route_reconnect_backoff(&server).await;
-    }
-
-    /// Red proof: removing the error delay reconnects before the deadline.
-    #[tokio::test(start_paused = true)]
-    async fn route_stream_error_uses_reconnect_backoff() {
-        let server = spawn_mock_server(None).await;
-        server
-            .state
-            .watch_routes_failures_remaining
-            .store(1, Ordering::SeqCst);
-        assert_route_reconnect_backoff(&server).await;
     }
 
     /// Red proof: calling first failure stale or dropping cached values changes assertions.
