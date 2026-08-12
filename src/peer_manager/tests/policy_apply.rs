@@ -136,6 +136,90 @@ fn export_fails_once_policy_handle(peer_addr: IpAddr, state: SessionState) -> Pe
     PeerHandle::from_parts(session_tx, task)
 }
 
+#[tokio::test]
+async fn owned_policy_cohort_failure_reports_fully_compensated() {
+    use rustbgpd_api::peer_types::{
+        ConfigEvent, NamedPolicyDefinition, OwnedCatalogMutationOutcome, PolicyStatementDefinition,
+    };
+
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let first = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let failing = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let rib_driver = tokio::spawn(async move {
+        let RibUpdate::PrepareExportPolicyDestination { reply, .. } =
+            rib_rx.recv().await.expect("cohort destination preflight")
+        else {
+            panic!("expected destination preflight");
+        };
+        reply.send(Err("test: prestage skipped".into())).unwrap();
+        let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
+            rib_rx.recv().await.expect("cohort rollback RIB restore")
+        else {
+            panic!("expected rollback RIB restore");
+        };
+        assert_eq!(peer, first);
+        reply.send(Ok(())).unwrap();
+    });
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    insert_test_managed_peer(
+        &mut mgr,
+        first,
+        acking_policy_handle(first, SessionState::Established),
+        false,
+    );
+    insert_test_managed_peer(
+        &mut mgr,
+        failing,
+        export_fails_once_policy_handle(failing, SessionState::Established),
+        false,
+    );
+    mgr.current_config.neighbors = [first, failing]
+        .into_iter()
+        .map(|address| {
+            let mut neighbor = config_neighbor(address, 65002);
+            neighbor.export_policy_chain = vec!["edge-export".into()];
+            neighbor
+        })
+        .collect();
+
+    let outcome = mgr
+        .apply_policy_change_owned(
+            ConfigEvent::SetPolicy {
+                name: "edge-export".into(),
+                definition: NamedPolicyDefinition {
+                    default_action: "deny".into(),
+                    statements: Vec::<PolicyStatementDefinition>::new(),
+                },
+                ack: None,
+            },
+            Some(vec![first, failing]),
+        )
+        .await;
+    assert!(
+        matches!(outcome, OwnedCatalogMutationOutcome::FullyCompensated(_)),
+        "the failing member and acknowledged prefix must restore exactly: {outcome:?}"
+    );
+    assert!(!mgr.peers[&key(first)].pending_export_apply);
+    assert!(!mgr.peers[&key(failing)].pending_export_apply);
+    assert!(
+        !mgr.current_config
+            .policy
+            .definitions
+            .contains_key("edge-export")
+    );
+    rib_driver.await.unwrap();
+}
+
 /// A peer handle that acks policy hot-applies but rejects Route Refresh, as a
 /// peer that did not negotiate the Route Refresh capability would (the session
 /// returns "peer lacks Route Refresh capability"). Used to verify a live-impact

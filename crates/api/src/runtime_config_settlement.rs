@@ -36,6 +36,18 @@ pub enum RuntimeConfigOperationKind {
     PeerGroupDelete,
     NeighborPeerGroupSet,
     NeighborPeerGroupClear,
+    PolicySet,
+    PolicyDelete,
+    NeighborSetSet,
+    NeighborSetDelete,
+    GlobalImportChainSet,
+    GlobalExportChainSet,
+    GlobalImportChainClear,
+    GlobalExportChainClear,
+    NeighborImportChainSet,
+    NeighborExportChainSet,
+    NeighborImportChainClear,
+    NeighborExportChainClear,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

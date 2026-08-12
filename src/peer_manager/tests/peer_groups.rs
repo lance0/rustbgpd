@@ -116,7 +116,7 @@ async fn owned_peer_group_validation_rejection_is_typed_no_effect() {
         .await;
     assert!(matches!(
         outcome,
-        rustbgpd_api::peer_types::OwnedPeerGroupMutationOutcome::RejectedNoEffect(_)
+        rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::RejectedNoEffect(_)
     ));
     assert_eq!(mgr.current_config, prior);
 }
@@ -364,7 +364,7 @@ async fn owned_peer_group_reshape_reports_fully_compensated_failure() {
     assert!(
         matches!(
             outcome,
-            rustbgpd_api::peer_types::OwnedPeerGroupMutationOutcome::FullyCompensated(_)
+            rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::FullyCompensated(_)
         ),
         "a restored fan-out must carry typed full-compensation proof"
     );
@@ -487,7 +487,7 @@ async fn owned_peer_group_reshape_reports_ambiguous_rollback_failure() {
     assert!(
         matches!(
             outcome,
-            rustbgpd_api::peer_types::OwnedPeerGroupMutationOutcome::CompensationAmbiguous(_)
+            rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::CompensationAmbiguous(_)
         ),
         "a failed restore must carry typed ambiguity"
     );

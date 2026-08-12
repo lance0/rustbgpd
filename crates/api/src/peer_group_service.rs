@@ -12,7 +12,7 @@ use crate::neighbor_service::{
     family_to_string, parse_families_proto, parse_remove_private_as_proto,
 };
 use crate::peer_types::{
-    AddPathDefinition, ConfigEvent, OwnedPeerGroupMutation, OwnedPeerGroupMutationOutcome,
+    AddPathDefinition, ConfigEvent, OwnedCatalogMutation, OwnedCatalogMutationOutcome,
     PeerGroupDefinition, PeerManagerCommand, PolicyStatementDefinition,
 };
 use crate::policy_helpers::proto_statement_to_input;
@@ -22,9 +22,10 @@ use crate::runtime_config_settlement::{
     RuntimeConfigOperationKind, RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
 };
 use crate::server::{
-    AccessMode, ConfigMutationGateFn, RuntimeConfigCoordinator, catalog_mutation_error_to_status,
-    check_config_mutation_gate, peer_manager_request, read_only_rejection,
-    stage_runtime_config_event_typed,
+    AccessMode, ConfigMutationGateFn, OwnedCatalogDispatch, RuntimeConfigCoordinator,
+    catalog_mutation_error_to_status, check_config_mutation_gate, dispatch_owned_catalog_mutation,
+    peer_manager_request, read_only_rejection, stage_runtime_config_event_typed,
+    with_catalog_persist_ack,
 };
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -414,76 +415,6 @@ enum PeerGroupMutationIntent {
     },
 }
 
-enum OwnedPeerGroupDispatch {
-    NotAccepted(Status),
-    Replied(OwnedPeerGroupMutationOutcome),
-    AcceptedReplyLost(Status),
-}
-
-fn with_peer_group_persist_ack(
-    event: ConfigEvent,
-    ack: crate::peer_types::ConfigPersistAck,
-) -> ConfigEvent {
-    match event {
-        ConfigEvent::SetPeerGroup {
-            name, definition, ..
-        } => ConfigEvent::SetPeerGroup {
-            name,
-            definition,
-            ack: Some(ack),
-        },
-        ConfigEvent::DeletePeerGroup { name, .. } => ConfigEvent::DeletePeerGroup {
-            name,
-            ack: Some(ack),
-        },
-        ConfigEvent::SetNeighborPeerGroup {
-            address,
-            peer_group,
-            ..
-        } => ConfigEvent::SetNeighborPeerGroup {
-            address,
-            peer_group,
-            ack: Some(ack),
-        },
-        ConfigEvent::ClearNeighborPeerGroup { address, .. } => {
-            ConfigEvent::ClearNeighborPeerGroup {
-                address,
-                ack: Some(ack),
-            }
-        }
-        _ => unreachable!("owned peer-group intent produced a non-peer-group event"),
-    }
-}
-
-async fn dispatch_owned_peer_group_mutation(
-    peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
-    timeout: Duration,
-    mutation: OwnedPeerGroupMutation,
-) -> OwnedPeerGroupDispatch {
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let command = PeerManagerCommand::OwnedPeerGroupMutation {
-        mutation,
-        reply: reply_tx,
-    };
-    match tokio::time::timeout(timeout, peer_mgr_tx.send(command)).await {
-        Err(_) => OwnedPeerGroupDispatch::NotAccepted(Status::unavailable(
-            "peer manager mutation queue timed out before accepting command",
-        )),
-        Ok(Err(_)) => OwnedPeerGroupDispatch::NotAccepted(Status::unavailable(
-            "peer manager unavailable before accepting command",
-        )),
-        Ok(Ok(())) => match tokio::time::timeout(timeout, reply_rx).await {
-            Err(_) => OwnedPeerGroupDispatch::AcceptedReplyLost(Status::deadline_exceeded(
-                "peer manager accepted owned peer-group mutation but reply timed out",
-            )),
-            Ok(Err(_)) => OwnedPeerGroupDispatch::AcceptedReplyLost(Status::internal(
-                "peer manager accepted owned peer-group mutation but dropped its reply",
-            )),
-            Ok(Ok(outcome)) => OwnedPeerGroupDispatch::Replied(outcome),
-        },
-    }
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "the closed owner body lists each retained mutation and settlement dependency explicitly"
@@ -541,7 +472,7 @@ async fn owned_peer_group_mutation_body(
                 }
             }
             (
-                OwnedPeerGroupMutation::Set {
+                OwnedCatalogMutation::SetPeerGroup {
                     name: name.clone(),
                     definition: definition.clone(),
                 },
@@ -553,14 +484,14 @@ async fn owned_peer_group_mutation_body(
             )
         }
         PeerGroupMutationIntent::Delete { name } => (
-            OwnedPeerGroupMutation::Delete { name: name.clone() },
+            OwnedCatalogMutation::DeletePeerGroup { name: name.clone() },
             ConfigEvent::DeletePeerGroup { name, ack: None },
         ),
         PeerGroupMutationIntent::SetNeighbor {
             address,
             peer_group,
         } => (
-            OwnedPeerGroupMutation::SetNeighbor {
+            OwnedCatalogMutation::SetNeighborPeerGroup {
                 address,
                 peer_group: peer_group.clone(),
             },
@@ -571,7 +502,7 @@ async fn owned_peer_group_mutation_body(
             },
         ),
         PeerGroupMutationIntent::ClearNeighbor { address } => (
-            OwnedPeerGroupMutation::ClearNeighbor { address },
+            OwnedCatalogMutation::ClearNeighborPeerGroup { address },
             ConfigEvent::ClearNeighborPeerGroup { address, ack: None },
         ),
     };
@@ -580,10 +511,8 @@ async fn owned_peer_group_mutation_body(
         operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
     }
     let staged = if let Some(permit) = persist_permit {
-        match stage_runtime_config_event_typed(permit, |ack| {
-            with_peer_group_persist_ack(event, ack)
-        })
-        .await
+        match stage_runtime_config_event_typed(permit, |ack| with_catalog_persist_ack(event, ack))
+            .await
         {
             Ok(staged) => Some(staged),
             Err(error) => return OwnedRuntimeConfigOutcome::Clean(Err(error.into_status())),
@@ -592,31 +521,34 @@ async fn owned_peer_group_mutation_body(
         None
     };
 
-    match dispatch_owned_peer_group_mutation(peer_mgr_tx, actor_timeout, mutation).await {
-        OwnedPeerGroupDispatch::NotAccepted(error) => {
+    let dispatch = dispatch_owned_catalog_mutation(peer_mgr_tx, actor_timeout, mutation).await;
+    if matches!(dispatch, OwnedCatalogDispatch::Replied(_))
+        && let Some(operation) = &owned
+    {
+        operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
+    }
+    match dispatch {
+        OwnedCatalogDispatch::NotAccepted(error) => {
             drop(staged);
             OwnedRuntimeConfigOutcome::Clean(Err(error))
         }
-        OwnedPeerGroupDispatch::AcceptedReplyLost(error) => {
+        OwnedCatalogDispatch::AcceptedReplyLost(error) => {
             OwnedRuntimeConfigOutcome::Ambiguous(error)
         }
-        OwnedPeerGroupDispatch::Replied(
-            OwnedPeerGroupMutationOutcome::RejectedNoEffect(error)
-            | OwnedPeerGroupMutationOutcome::FullyCompensated(error),
+        OwnedCatalogDispatch::Replied(
+            OwnedCatalogMutationOutcome::RejectedNoEffect(error)
+            | OwnedCatalogMutationOutcome::FullyCompensated(error),
         ) => {
             drop(staged);
             OwnedRuntimeConfigOutcome::Clean(Err(catalog_mutation_error_to_status(&error)))
         }
-        OwnedPeerGroupDispatch::Replied(OwnedPeerGroupMutationOutcome::CompensationAmbiguous(
+        OwnedCatalogDispatch::Replied(OwnedCatalogMutationOutcome::CompensationAmbiguous(
             error,
         )) => OwnedRuntimeConfigOutcome::Ambiguous(catalog_mutation_error_to_status(&error)),
-        OwnedPeerGroupDispatch::Replied(OwnedPeerGroupMutationOutcome::Success) => {
+        OwnedCatalogDispatch::Replied(OwnedCatalogMutationOutcome::Success) => {
             let Some(staged) = staged else {
                 return OwnedRuntimeConfigOutcome::Clean(Ok(()));
             };
-            if let Some(operation) = &owned {
-                operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
-            }
             match staged.commit_typed().await {
                 Ok(()) => OwnedRuntimeConfigOutcome::Clean(Ok(())),
                 Err(error) => OwnedRuntimeConfigOutcome::Ambiguous(error.into_status()),
@@ -1111,8 +1043,8 @@ mod tests {
                         stored.md5_password = Some("secret".into());
                         let _ = reply.send(Some(stored));
                     }
-                    PeerManagerCommand::OwnedPeerGroupMutation {
-                        mutation: OwnedPeerGroupMutation::Set { name, definition },
+                    PeerManagerCommand::OwnedCatalogMutation {
+                        mutation: OwnedCatalogMutation::SetPeerGroup { name, definition },
                         reply,
                     } => {
                         assert_eq!(name, "rs-clients");
@@ -1124,7 +1056,7 @@ mod tests {
                             Some("secret")
                         );
                         assert_eq!(definition.families, vec!["ipv6_unicast"]);
-                        let _ = reply.send(OwnedPeerGroupMutationOutcome::Success);
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
@@ -1199,8 +1131,8 @@ mod tests {
                     PeerManagerCommand::GetPeerGroup { reply, .. } => {
                         let _ = reply.send(None);
                     }
-                    PeerManagerCommand::OwnedPeerGroupMutation {
-                        mutation: OwnedPeerGroupMutation::Set { definition, .. },
+                    PeerManagerCommand::OwnedCatalogMutation {
+                        mutation: OwnedCatalogMutation::SetPeerGroup { definition, .. },
                         reply,
                     } => {
                         assert_eq!(
@@ -1210,7 +1142,7 @@ mod tests {
                                 .map(std::convert::AsRef::as_ref),
                             Some("super-secret")
                         );
-                        let _ = reply.send(OwnedPeerGroupMutationOutcome::Success);
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
@@ -1259,8 +1191,8 @@ mod tests {
                         stored.md5_password = Some("secret".into());
                         let _ = reply.send(Some(stored));
                     }
-                    PeerManagerCommand::OwnedPeerGroupMutation {
-                        mutation: OwnedPeerGroupMutation::Set { name, definition },
+                    PeerManagerCommand::OwnedCatalogMutation {
+                        mutation: OwnedCatalogMutation::SetPeerGroup { name, definition },
                         reply,
                     } => {
                         assert_eq!(name, "rs-clients");
@@ -1271,7 +1203,7 @@ mod tests {
                                 .map(std::convert::AsRef::as_ref),
                             Some("secret")
                         );
-                        let _ = reply.send(OwnedPeerGroupMutationOutcome::Success);
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
@@ -1334,8 +1266,8 @@ mod tests {
         };
         let staged = tokio::spawn(staged.accept());
         match peer_rx.recv().await.expect("expected passwordless create") {
-            PeerManagerCommand::OwnedPeerGroupMutation {
-                mutation: OwnedPeerGroupMutation::Set { name, definition },
+            PeerManagerCommand::OwnedCatalogMutation {
+                mutation: OwnedCatalogMutation::SetPeerGroup { name, definition },
                 reply,
             } => {
                 assert_eq!(name, "ix-members");
@@ -1343,7 +1275,7 @@ mod tests {
                 assert_eq!(definition.families, vec!["ipv4_unicast"]);
                 assert_eq!(definition.route_server_client, Some(true));
                 reply
-                    .send(OwnedPeerGroupMutationOutcome::Success)
+                    .send(OwnedCatalogMutationOutcome::Success)
                     .expect("service dropped create reply");
             }
             _ => panic!("unexpected peer-manager command"),
@@ -1423,13 +1355,13 @@ mod tests {
                     PeerManagerCommand::GetPeerGroup { reply, .. } => {
                         let _ = reply.send(None);
                     }
-                    PeerManagerCommand::OwnedPeerGroupMutation {
-                        mutation: OwnedPeerGroupMutation::Set { name, definition },
+                    PeerManagerCommand::OwnedCatalogMutation {
+                        mutation: OwnedCatalogMutation::SetPeerGroup { name, definition },
                         reply,
                     } => {
                         assert_eq!(name, "rs-clients");
                         assert_eq!(definition.md5_password, None);
-                        let _ = reply.send(OwnedPeerGroupMutationOutcome::Success);
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
@@ -1737,13 +1669,13 @@ mod tests {
         let (call, ack) = staged_delete_call(svc, &mut config_rx).await;
         let staged = tokio::spawn(ack.accept());
         match peer_rx.recv().await.expect("expected owned delete") {
-            PeerManagerCommand::OwnedPeerGroupMutation {
-                mutation: OwnedPeerGroupMutation::Delete { name },
+            PeerManagerCommand::OwnedCatalogMutation {
+                mutation: OwnedCatalogMutation::DeletePeerGroup { name },
                 reply,
             } => {
                 assert_eq!(name, "edge");
                 reply
-                    .send(OwnedPeerGroupMutationOutcome::RejectedNoEffect(
+                    .send(OwnedCatalogMutationOutcome::RejectedNoEffect(
                         crate::peer_types::CatalogMutationError::not_found("missing group"),
                     ))
                     .unwrap();
@@ -1768,9 +1700,9 @@ mod tests {
         let (call, ack) = staged_delete_call(svc, &mut config_rx).await;
         let staged = tokio::spawn(ack.accept());
         match peer_rx.recv().await.expect("expected owned delete") {
-            PeerManagerCommand::OwnedPeerGroupMutation { reply, .. } => {
+            PeerManagerCommand::OwnedCatalogMutation { reply, .. } => {
                 reply
-                    .send(OwnedPeerGroupMutationOutcome::FullyCompensated(
+                    .send(OwnedCatalogMutationOutcome::FullyCompensated(
                         crate::peer_types::CatalogMutationError::internal(
                             "apply failed; prior runtime restored",
                         ),
@@ -1797,7 +1729,7 @@ mod tests {
         let (mut call, ack) = staged_delete_call(svc, &mut config_rx).await;
         let staged = tokio::spawn(ack.accept());
         match peer_rx.recv().await.expect("expected owned delete") {
-            PeerManagerCommand::OwnedPeerGroupMutation { reply, .. } => drop(reply),
+            PeerManagerCommand::OwnedCatalogMutation { reply, .. } => drop(reply),
             _ => panic!("expected owned peer-group delete"),
         }
         assert!(
@@ -1822,8 +1754,8 @@ mod tests {
         let crate::peer_types::ConfigPersistAck { staged, commit } = ack;
         staged.send(Ok(())).unwrap();
         match peer_rx.recv().await.expect("expected owned delete") {
-            PeerManagerCommand::OwnedPeerGroupMutation { reply, .. } => {
-                reply.send(OwnedPeerGroupMutationOutcome::Success).unwrap();
+            PeerManagerCommand::OwnedCatalogMutation { reply, .. } => {
+                reply.send(OwnedCatalogMutationOutcome::Success).unwrap();
             }
             _ => panic!("expected owned peer-group delete"),
         }
@@ -1856,7 +1788,7 @@ mod tests {
         let (call, ack) = staged_delete_call(svc, &mut config_rx).await;
         let crate::peer_types::ConfigPersistAck { staged, commit } = ack;
         staged.send(Ok(())).unwrap();
-        let PeerManagerCommand::OwnedPeerGroupMutation { reply, .. } =
+        let PeerManagerCommand::OwnedCatalogMutation { reply, .. } =
             peer_rx.recv().await.expect("expected owned delete")
         else {
             panic!("expected owned peer-group delete");
@@ -1869,7 +1801,7 @@ mod tests {
                 .is_err(),
             "caller cancellation must not release mutation ownership"
         );
-        reply.send(OwnedPeerGroupMutationOutcome::Success).unwrap();
+        reply.send(OwnedCatalogMutationOutcome::Success).unwrap();
         let commit_reply = commit
             .expect("owned mutation requires commit handshake")
             .await
