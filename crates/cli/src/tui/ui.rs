@@ -662,8 +662,8 @@ fn draw_best_rib(f: &mut Frame, app: &mut App, peer: &str, theme: &Theme) {
                             .collect::<Vec<_>>()
                             .join(" "),
                     ),
-                    Cell::from(route.local_pref.to_string()),
-                    Cell::from(route.med_attr.map_or_else(|| "-".into(), |v| v.to_string())),
+                    Cell::from(optional_u32(route.local_pref_attr)),
+                    Cell::from(optional_u32(route.med_attr)),
                     Cell::from(route.validation_state.clone()),
                     Cell::from(route.aspa_state.clone()),
                 ])
@@ -1000,6 +1000,10 @@ fn format_number(n: u64) -> String {
     result.chars().rev().collect()
 }
 
+fn optional_u32(value: Option<u32>) -> String {
+    value.map_or_else(|| "-".to_string(), |value| value.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1016,6 +1020,12 @@ mod tests {
         assert_eq!(format_number(1000), "1,000");
         assert_eq!(format_number(12345), "12,345");
         assert_eq!(format_number(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn optional_route_attributes_distinguish_absent_from_explicit_zero() {
+        assert_eq!(optional_u32(None), "-");
+        assert_eq!(optional_u32(Some(0)), "0");
     }
 
     /// Red proof: restoring the source-only event row or storing the primary
