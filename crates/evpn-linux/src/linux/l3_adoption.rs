@@ -73,7 +73,7 @@ const NUD_PERMANENT: u16 = 0x80;
 /// reachability probing. Read alongside `NUD_PERMANENT` by the
 /// LAN-283 foreign-neighbor classifier.
 const NUD_NOARP: u16 = 0x40;
-/// `NDA_NH_ID` (kind = 13). `netlink-packet-route 0.30` exposes it
+/// `NDA_NH_ID` (kind = 13). `netlink-packet-route 0.32.1` exposes it
 /// through `NeighbourAttribute::Other(DefaultNla)`.
 const NDA_NH_ID: u16 = 13;
 

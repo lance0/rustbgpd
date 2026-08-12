@@ -44,7 +44,7 @@ use crate::snapshot::{KernelFdbEntry, KernelFdbFlags};
 use super::links::{LinkCache, matching_svd_vxlan_ports, unique_fdb_vxlan_target_for_vni};
 
 /// `NDA_NH_ID` neighbour attribute (kind = 13). Not exposed as a typed
-/// variant by `netlink-packet-route 0.30`; we read it via the
+/// variant by `netlink-packet-route 0.32.1`; we read it via the
 /// `Nla` trait's `kind()` accessor on the `Other(DefaultNla)` escape
 /// hatch.
 const NDA_NH_ID: u16 = 13;
@@ -173,7 +173,7 @@ fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnaps
                 NeighbourAddress::Inet6(v6) => dst = Some(std::net::IpAddr::V6(*v6)),
                 _ => {}
             },
-            // NDA_NH_ID (kind = 13) — `netlink-packet-route 0.30` doesn't
+            // NDA_NH_ID (kind = 13) — `netlink-packet-route 0.32.1` doesn't
             // expose a typed variant, so the kernel sends it through the
             // `Other` escape hatch with a 4-byte native-endian payload.
             // `DefaultNla` keeps its fields private; we read via the

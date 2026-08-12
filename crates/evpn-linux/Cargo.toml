@@ -22,8 +22,8 @@ tracing.workspace = true
 # released together; bump them as a set or transitive resolution
 # pulls in two copies of `netlink-packet-utils`.
 [target.'cfg(target_os = "linux")'.dependencies]
-rtnetlink = "0.21"
-netlink-packet-route = "0.30"
+rtnetlink = "0.22"
+netlink-packet-route = "0.32.1"
 netlink-packet-core = "0.8"
 netlink-packet-utils = "0.6"
 netlink-sys = { version = "0.8", features = ["tokio_socket"] }

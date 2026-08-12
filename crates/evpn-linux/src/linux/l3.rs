@@ -64,7 +64,7 @@ use crate::error::DataplaneError;
 /// (`<linux/rtnetlink.h>`) that tells dump-side parsers "the real
 /// 32-bit table id rides in `RouteAttribute::Table`." Used as the
 /// `header.table` byte for any IP-VRF whose `table_id ≥ 256`.
-/// `netlink-packet-route` 0.30 doesn't expose this constant
+/// `netlink-packet-route` 0.32.1 doesn't expose this constant
 /// directly; inlining the well-known uapi value keeps the apply
 /// path self-contained.
 const RT_TABLE_COMPAT: u8 = 252;
@@ -81,7 +81,7 @@ const NUD_PERMANENT: u16 = 0x80;
 /// constant so the L2 and L3 paths use the same shape.
 const NUD_NOARP_PERMANENT: u16 = NUD_NOARP | NUD_PERMANENT;
 /// `NDA_NH_ID` (kind = 13). Exposed in iproute2 as `bridge fdb ...
-/// nhid N`; `netlink-packet-route 0.30` keeps it behind the raw NLA
+/// nhid N`; `netlink-packet-route 0.32.1` keeps it behind the raw NLA
 /// escape hatch.
 const NDA_NH_ID: u16 = 13;
 
