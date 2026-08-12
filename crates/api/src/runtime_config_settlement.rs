@@ -8,17 +8,13 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
-
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::health_probe::DaemonGate;
 use crate::server::{RuntimeConfigCoordinator, RuntimeConfigCoordinatorPermit};
 
-/// Fixed maximum time from coordinator ownership to proved settlement.
 pub const OWNED_SETTLEMENT_BUDGET: Duration = Duration::from_mins(30);
-/// Fixed propagation interval between fencing and fail-stop.
 pub const AMBIGUITY_FENCE_GRACE: Duration = Duration::from_secs(5);
-/// Process exit status used after an ambiguous runtime-config mutation.
 pub const AMBIGUOUS_CONFIG_EXIT_STATUS: i32 = 70;
 
 /// Closed roster of runtime-config operations that can own the coordinator.
@@ -55,7 +51,6 @@ pub enum RuntimeConfigOperationKind {
     PolicyNeighborExportClear,
 }
 
-/// Monotonic nonterminal phase of an owned mutation.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum RuntimeConfigSettlementPhase {
     OwnedPreflight,
@@ -63,7 +58,6 @@ pub enum RuntimeConfigSettlementPhase {
     SettlingRollback,
 }
 
-/// Immutable terminal state of an owned mutation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeConfigSettlementTerminal {
     Owned,
@@ -71,7 +65,6 @@ pub enum RuntimeConfigSettlementTerminal {
     AmbiguousFenced,
 }
 
-/// Cause of an ambiguity fence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeConfigFenceReason {
     BudgetExpired,
@@ -132,20 +125,23 @@ struct RegistryState {
     stopping: bool,
 }
 
-enum TerminalAction {
-    Exit(fn(i32) -> !),
-    #[cfg(test)]
-    Notify(std::sync::mpsc::Sender<i32>),
-}
-
 struct Registry {
     state: Mutex<RegistryState>,
     wake: Condvar,
     next_id: AtomicU64,
     budget: Duration,
     grace: Duration,
-    terminal: TerminalAction,
     thread_id: Mutex<Option<thread::ThreadId>>,
+    #[cfg(test)]
+    terminal: std::sync::mpsc::Sender<i32>,
+    #[cfg(test)]
+    pre_wait_hook: Mutex<Option<PreWaitHook>>,
+}
+
+#[cfg(test)]
+struct PreWaitHook {
+    reached: std::sync::mpsc::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
 }
 
 impl Registry {
@@ -168,10 +164,11 @@ impl Registry {
     }
 }
 
-/// Cloneable owner of one OS-thread clock multiplexer.
 #[derive(Clone)]
 pub struct RuntimeConfigSettlementWatchdog {
     registry: Arc<Registry>,
+    #[cfg(test)]
+    thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
 
 impl std::fmt::Debug for RuntimeConfigSettlementWatchdog {
@@ -185,15 +182,14 @@ impl std::fmt::Debug for RuntimeConfigSettlementWatchdog {
 impl RuntimeConfigSettlementWatchdog {
     /// Start the process watchdog using fixed production durations.
     #[must_use]
-    pub fn new(exit: fn(i32) -> !) -> Self {
-        Self::start(
-            OWNED_SETTLEMENT_BUDGET,
-            AMBIGUITY_FENCE_GRACE,
-            TerminalAction::Exit(exit),
-        )
+    #[cfg(not(test))]
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self::start(OWNED_SETTLEMENT_BUDGET, AMBIGUITY_FENCE_GRACE)
     }
 
-    fn start(budget: Duration, grace: Duration, terminal: TerminalAction) -> Self {
+    #[cfg(not(test))]
+    fn start(budget: Duration, grace: Duration) -> Self {
         let registry = Arc::new(Registry {
             state: Mutex::new(RegistryState {
                 registrations: HashMap::new(),
@@ -203,7 +199,6 @@ impl RuntimeConfigSettlementWatchdog {
             next_id: AtomicU64::new(1),
             budget,
             grace,
-            terminal,
             thread_id: Mutex::new(None),
         });
         let thread_registry = Arc::clone(&registry);
@@ -214,7 +209,32 @@ impl RuntimeConfigSettlementWatchdog {
         Self { registry }
     }
 
-    /// Register resources after physical coordinator ownership is acquired.
+    #[cfg(test)]
+    fn start(budget: Duration, grace: Duration, terminal: std::sync::mpsc::Sender<i32>) -> Self {
+        let registry = Arc::new(Registry {
+            state: Mutex::new(RegistryState {
+                registrations: HashMap::new(),
+                stopping: false,
+            }),
+            wake: Condvar::new(),
+            next_id: AtomicU64::new(1),
+            budget,
+            grace,
+            thread_id: Mutex::new(None),
+            terminal,
+            pre_wait_hook: Mutex::new(None),
+        });
+        let thread_registry = Arc::clone(&registry);
+        let thread = thread::Builder::new()
+            .name("config-settlement-watchdog".into())
+            .spawn(move || watchdog_loop(&thread_registry))
+            .expect("config settlement watchdog OS thread must start");
+        Self {
+            registry,
+            thread: Arc::new(Mutex::new(Some(thread))),
+        }
+    }
+
     pub fn register_owned(
         &self,
         kind: RuntimeConfigOperationKind,
@@ -414,13 +434,13 @@ fn watchdog_loop(registry: &Arc<Registry>) {
         .thread_id
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(thread::current().id());
-    loop {
-        let now = Instant::now();
-        let (expired, terminal, wait) = {
-            let state = registry.lock();
+    'watchdog: loop {
+        let mut state = registry.lock();
+        loop {
             if state.stopping {
-                return;
+                break 'watchdog;
             }
+            let now = Instant::now();
             let expired = state
                 .registrations
                 .values()
@@ -450,61 +470,108 @@ fn watchdog_loop(registry: &Arc<Registry>) {
                 })
                 .min()
                 .map_or(registry.budget, |next| next.saturating_duration_since(now));
-            (expired, terminal, wait)
-        };
-        for operation in expired {
-            fence(&operation, RuntimeConfigFenceReason::BudgetExpired);
-        }
-        if let Some(operation) = terminal {
-            run_terminal_action(registry, &operation);
-        }
-        let state = registry.lock();
-        drop(
-            registry
+            if !expired.is_empty() || terminal.is_some() {
+                drop(state);
+                for operation in expired {
+                    fence(&operation, RuntimeConfigFenceReason::BudgetExpired);
+                }
+                if let Some(operation) = terminal {
+                    run_terminal_action(registry, &operation);
+                }
+                continue 'watchdog;
+            }
+            #[cfg(test)]
+            if let Some(hook) = registry
+                .pre_wait_hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                let _ = hook.reached.send(());
+                let _ = hook.resume.recv();
+            }
+            (state, _) = registry
                 .wake
                 .wait_timeout(state, wait)
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
     }
+    *registry
+        .thread_id
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    registry.wake.notify_all();
 }
 
 #[cfg(not(test))]
-fn run_terminal_action(registry: &Registry, _operation: &OperationInner) -> ! {
-    match registry.terminal {
-        TerminalAction::Exit(exit) => exit(AMBIGUOUS_CONFIG_EXIT_STATUS),
-    }
+#[allow(unsafe_code)]
+fn run_terminal_action(_registry: &Registry, _operation: &OperationInner) -> ! {
+    // SAFETY: `_exit` is the fail-stop contract and must skip cleanup.
+    unsafe { libc::_exit(AMBIGUOUS_CONFIG_EXIT_STATUS) }
 }
 
 #[cfg(test)]
 fn run_terminal_action(registry: &Registry, operation: &OperationInner) {
-    match &registry.terminal {
-        TerminalAction::Exit(exit) => exit(AMBIGUOUS_CONFIG_EXIT_STATUS),
-        TerminalAction::Notify(sender) => {
-            let _ = sender.send(AMBIGUOUS_CONFIG_EXIT_STATUS);
-            registry.unregister(operation.id);
-            operation
-                .resources
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-        }
-    }
+    let _ = registry.terminal.send(AMBIGUOUS_CONFIG_EXIT_STATUS);
+    registry.unregister(operation.id);
+    operation
+        .resources
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    struct TestWatchdog(RuntimeConfigSettlementWatchdog);
+
+    impl std::ops::Deref for TestWatchdog {
+        type Target = RuntimeConfigSettlementWatchdog;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl Drop for TestWatchdog {
+        fn drop(&mut self) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut state = self.registry.lock();
+            while !state.registrations.is_empty() {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(
+                    !remaining.is_zero(),
+                    "watchdog cleanup refused owned registrations"
+                );
+                (state, _) = self
+                    .registry
+                    .wake
+                    .wait_timeout(state, remaining)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            state.stopping = true;
+            self.registry.wake.notify_all();
+            drop(state);
+            if let Some(thread) = self.0.thread.lock().unwrap().take() {
+                thread
+                    .join()
+                    .expect("watchdog test thread must stop cleanly");
+            }
+            assert!(self.registry.thread_id.lock().unwrap().is_none());
+        }
+    }
+
     fn test_watchdog(
         budget: Duration,
         grace: Duration,
-    ) -> (
-        RuntimeConfigSettlementWatchdog,
-        std::sync::mpsc::Receiver<i32>,
-    ) {
+    ) -> (TestWatchdog, std::sync::mpsc::Receiver<i32>) {
         let (sender, receiver) = std::sync::mpsc::channel();
         (
-            RuntimeConfigSettlementWatchdog::start(budget, grace, TerminalAction::Notify(sender)),
+            TestWatchdog(RuntimeConfigSettlementWatchdog::start(
+                budget, grace, sender,
+            )),
             receiver,
         )
     }
@@ -614,10 +681,15 @@ mod tests {
     #[tokio::test]
     async fn many_settlements_leave_no_registrations_and_share_thread() {
         let (watchdog, _receiver) = test_watchdog(Duration::from_secs(5), Duration::from_secs(1));
+        let start_deadline = Instant::now() + Duration::from_secs(5);
         let thread_id = loop {
             if let Some(thread_id) = *watchdog.registry.thread_id.lock().unwrap() {
                 break thread_id;
             }
+            assert!(
+                Instant::now() < start_deadline,
+                "watchdog thread failed to start"
+            );
             thread::yield_now();
         };
         for _ in 0..32 {
@@ -687,5 +759,40 @@ mod tests {
             assert_eq!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(), 70);
         }
         drop(guard);
+    }
+
+    #[tokio::test]
+    async fn executor_loss_at_pre_wait_boundary_terminates_by_grace() {
+        let old_deadline = Duration::from_secs(4);
+        let grace = Duration::from_millis(20);
+        let (watchdog, receiver) = test_watchdog(old_deadline, grace);
+        let (operation, guard, _, _) = operation(&watchdog, false).await;
+        let (reached_sender, reached_receiver) = std::sync::mpsc::channel();
+        let (resume_sender, resume_receiver) = std::sync::mpsc::channel();
+        *watchdog.registry.pre_wait_hook.lock().unwrap() = Some(PreWaitHook {
+            reached: reached_sender,
+            resume: resume_receiver,
+        });
+        watchdog.registry.wake.notify_one();
+        reached_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let (dropping_sender, dropping_receiver) = std::sync::mpsc::channel();
+        let losing_executor = thread::spawn(move || {
+            dropping_sender.send(()).unwrap();
+            drop(guard);
+        });
+        dropping_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        let started = Instant::now();
+        resume_sender.send(()).unwrap();
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(), 70);
+        assert!(started.elapsed() < old_deadline);
+        losing_executor.join().unwrap();
+        assert_eq!(
+            operation.fence_reason(),
+            Some(RuntimeConfigFenceReason::ExecutorLost)
+        );
     }
 }
