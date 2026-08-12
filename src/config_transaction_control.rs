@@ -4097,13 +4097,13 @@ remote_asn = 65002
             (fib, ".acquire()", 2),
             (neighbor, "self.execute_owned_neighbor_mutation(", 4),
             (neighbor, "reserve_config_event_slot(self.config_tx.clone()).await?", 4),
-            (server, "runtime_config_lock.acquire()", 1),
-            (server, ".with_runtime_config_settlement(", 4),
+            (server, "runtime_config_lock.acquire()", 0),
+            (server, ".with_runtime_config_settlement(", 6),
             (server, "PeerGroupService::with_runtime_config_coordinator(", 2),
             (peer_group, "self.execute_owned_peer_group_mutation(", 4),
             (peer_group, "reserve_config_event_slot(self.config_tx.clone()).await?", 4),
-            (policy, "run_shielded_catalog_mutation(", 1),
-            (policy, "self.run_mutation(", 12),
+            (policy, "self.execute_owned_policy_mutation(", 12),
+            (policy, "reserve_config_event_slot(self.config_tx.clone()).await?", 12),
         ];
         for (source, shape, count) in inventory {
             assert_eq!(source.matches(shape).count(), count, "{shape}");
@@ -4129,6 +4129,33 @@ remote_asn = 65002
                     .count(),
                 1,
                 "Neighbor4 settlement registration inventory for {kind}"
+            );
+            assert_eq!(
+                settlement.matches(&format!("    {kind},")).count(),
+                1,
+                "closed operation-kind roster for {kind}"
+            );
+        }
+        for kind in [
+            "PolicySet",
+            "PolicyDelete",
+            "NeighborSetSet",
+            "NeighborSetDelete",
+            "GlobalImportChainSet",
+            "GlobalExportChainSet",
+            "GlobalImportChainClear",
+            "GlobalExportChainClear",
+            "NeighborImportChainSet",
+            "NeighborExportChainSet",
+            "NeighborImportChainClear",
+            "NeighborExportChainClear",
+        ] {
+            assert_eq!(
+                policy
+                    .matches(&format!("RuntimeConfigOperationKind::{kind}"))
+                    .count(),
+                1,
+                "Policy12 settlement registration inventory for {kind}"
             );
             assert_eq!(
                 settlement.matches(&format!("    {kind},")).count(),
@@ -4224,7 +4251,7 @@ remote_asn = 65002
             .find("stage_runtime_config_event_typed(")
             .unwrap();
         let actor = owned_peer_group_body
-            .find("dispatch_owned_peer_group_mutation(")
+            .find("dispatch_owned_catalog_mutation(")
             .unwrap();
         let settling = owned_peer_group_body
             .find("advance_phase(RuntimeConfigSettlementPhase::SettlingRollback)")
@@ -4242,10 +4269,54 @@ remote_asn = 65002
         }
         assert_eq!(
             peer_manager
-                .matches("PeerManagerCommand::OwnedPeerGroupMutation")
+                .matches("PeerManagerCommand::OwnedCatalogMutation")
                 .count(),
             1
         );
+        let owned_policy_body = policy
+            .split_once("async fn owned_policy_mutation_body")
+            .unwrap()
+            .1
+            .split_once("async fn require_managed_peer_address")
+            .unwrap()
+            .0;
+        assert!(!owned_policy_body.contains(".code()"));
+        assert!(!owned_policy_body.contains(".message()"));
+        assert!(!owned_policy_body.contains("to_string().contains"));
+        let gate = owned_policy_body
+            .find("check_config_mutation_gate(")
+            .unwrap();
+        let mutating = owned_policy_body
+            .find("advance_phase(RuntimeConfigSettlementPhase::Mutating)")
+            .unwrap();
+        let stage = owned_policy_body
+            .find("stage_runtime_config_event_typed(")
+            .unwrap();
+        let actor = owned_policy_body
+            .find("dispatch_owned_catalog_mutation(")
+            .unwrap();
+        let settling = owned_policy_body
+            .find("advance_phase(RuntimeConfigSettlementPhase::SettlingRollback)")
+            .unwrap();
+        let commit = owned_policy_body.find("staged.commit_typed()").unwrap();
+        assert!(gate < mutating && mutating < stage && stage < actor);
+        assert!(actor < settling && settling < commit);
+        for legacy in [
+            "PeerManagerCommand::SetPolicy",
+            "PeerManagerCommand::DeletePolicy",
+            "PeerManagerCommand::SetNeighborSet",
+            "PeerManagerCommand::DeleteNeighborSet",
+            "PeerManagerCommand::SetGlobalImportChain",
+            "PeerManagerCommand::SetGlobalExportChain",
+            "PeerManagerCommand::ClearGlobalImportChain",
+            "PeerManagerCommand::ClearGlobalExportChain",
+            "PeerManagerCommand::SetNeighborImportChain",
+            "PeerManagerCommand::SetNeighborExportChain",
+            "PeerManagerCommand::ClearNeighborImportChain",
+            "PeerManagerCommand::ClearNeighborExportChain",
+        ] {
+            assert!(!policy.contains(legacy), "Policy12 bypass: {legacy}");
+        }
 
         #[rustfmt::skip]
         let prohibited_apis = ["add_permits", "forget", "acquire_many", "wait_idle", "reopen", "pub fn reset", "impl Default for RuntimeConfigCoordinator"];

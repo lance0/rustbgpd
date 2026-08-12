@@ -12,17 +12,25 @@ use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
 use crate::actor_read::{peer_manager_read, rib_manager_read};
+use crate::health_probe::DaemonGate;
 use crate::peer_types::{
-    ConfigEvent, NamedPolicyDefinition, PeerManagerCommand, PolicyStatementDefinition,
+    ConfigEvent, NamedPolicyDefinition, OwnedCatalogMutation, OwnedCatalogMutationOutcome,
+    PeerManagerCommand, PolicyStatementDefinition,
 };
 use crate::policy_helpers::{proto_statement_to_input, validate_policy_action};
 use crate::proto;
+use crate::runtime_config_settlement::{
+    OwnedRuntimeConfigOperation, OwnedRuntimeConfigOutcome, OwnedRuntimeConfigRequestContext,
+    RuntimeConfigOperationKind, RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
+};
 use crate::server::{
-    AccessMode, ConfigMutationGateFn, RuntimeConfigCoordinator, apply_catalog_mutation,
-    peer_manager_request, persist_then_apply, read_only_rejection, run_shielded_catalog_mutation,
+    AccessMode, ConfigMutationGateFn, OwnedCatalogDispatch, RuntimeConfigCoordinator,
+    catalog_mutation_error_to_status, check_config_mutation_gate, dispatch_owned_catalog_mutation,
+    read_only_rejection, stage_runtime_config_event_typed, with_catalog_persist_ack,
 };
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
+const OWNED_POLICY_ACTOR_TIMEOUT: Duration = Duration::from_mins(10);
 const POLICY_STATS_AGGREGATE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Run one policy-stats backend send and reply within the RPC's shared
@@ -302,6 +310,8 @@ pub struct PolicyService {
     /// (ADR-0096 Decision 6). `None` when the service was built
     /// without it — `TestPolicy` then reports `FAILED_PRECONDITION`.
     rib_tx: Option<mpsc::Sender<rustbgpd_rib::RibUpdate>>,
+    settlement: Option<(RuntimeConfigSettlementWatchdog, DaemonGate)>,
+    owned_actor_timeout: Duration,
 }
 
 impl PolicyService {
@@ -340,7 +350,20 @@ impl PolicyService {
             runtime_config_lock,
             config_mutation_gate,
             rib_tx: None,
+            settlement: None,
+            owned_actor_timeout: OWNED_POLICY_ACTOR_TIMEOUT,
         }
+    }
+
+    /// Arm policy catalog mutations with the process-wide fail-stop owner.
+    #[must_use]
+    pub fn with_runtime_config_settlement(
+        mut self,
+        watchdog: RuntimeConfigSettlementWatchdog,
+        daemon_gate: DaemonGate,
+    ) -> Self {
+        self.settlement = Some((watchdog, daemon_gate));
+        self
     }
 
     /// Attach the RIB query channel that backs `TestPolicy`'s
@@ -351,64 +374,134 @@ impl PolicyService {
         self
     }
 
-    /// Run `body` under the ADR-0080 detached-task shield with the
-    /// runtime-config lock held and the transaction gate checked inside
-    /// it (see `server::run_shielded_catalog_mutation`).
-    async fn run_mutation<F, Fut>(&self, operation: &'static str, body: F) -> Result<(), Status>
-    where
-        F: FnOnce() -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<(), Status>> + Send,
-    {
-        run_shielded_catalog_mutation(
-            self.runtime_config_lock.clone(),
-            self.config_mutation_gate.clone(),
-            operation,
-            body,
-        )
-        .await
+    async fn execute_owned_policy_mutation(
+        &self,
+        kind: RuntimeConfigOperationKind,
+        operation_name: &'static str,
+        mutation: OwnedCatalogMutation,
+        event: ConfigEvent,
+        persist_permit: Option<mpsc::OwnedPermit<ConfigEvent>>,
+    ) -> Result<(), Status> {
+        let peer_mgr_tx = self.peer_mgr_tx.clone();
+        let gate = self.config_mutation_gate.clone();
+        let timeout = self.owned_actor_timeout;
+        let settlement = self.settlement.clone();
+        let daemon_gate = settlement.as_ref().map(|(_, gate)| gate.clone());
+        let body = move |owned| async move {
+            owned_policy_mutation_body(
+                owned,
+                daemon_gate,
+                gate,
+                operation_name,
+                peer_mgr_tx,
+                timeout,
+                mutation,
+                event,
+                persist_permit,
+            )
+            .await
+        };
+        let (context, attachment) = OwnedRuntimeConfigRequestContext::unary();
+        let result = if let Some((watchdog, daemon_gate)) = settlement {
+            watchdog
+                .execute_owned(
+                    kind,
+                    self.runtime_config_lock.clone(),
+                    daemon_gate,
+                    context.response_attached(),
+                    move |operation| body(Some(operation)),
+                )
+                .await
+        } else {
+            let coordinator = self.runtime_config_lock.clone();
+            tokio::spawn(async move {
+                let _permit = coordinator.acquire().await?;
+                match body(None).await {
+                    OwnedRuntimeConfigOutcome::Clean(result) => result,
+                    OwnedRuntimeConfigOutcome::Ambiguous(error) => {
+                        let _ = error;
+                        std::future::pending().await
+                    }
+                }
+            })
+            .await
+            .map_err(|_| Status::internal("owned policy mutation task did not complete"))?
+        };
+        drop(attachment);
+        result
     }
 }
 
-async fn set_policy_definition(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    name: String,
-    definition: NamedPolicyDefinition,
-) -> Result<(), Status> {
-    apply_catalog_mutation(peer_mgr_tx, |reply| PeerManagerCommand::SetPolicy {
-        name,
-        definition,
-        reply,
-    })
-    .await
-}
-
-async fn delete_policy_definition(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    name: String,
-) -> Result<(), Status> {
-    apply_catalog_mutation(peer_mgr_tx, |reply| PeerManagerCommand::DeletePolicy {
-        name,
-        reply,
-    })
-    .await
-}
-
-/// Reject a chain mutation for a neighbor that is not configured, without
-/// mutating anything.
-///
-/// The mutators used to discover this from the runtime apply. Staging now
-/// runs first, so the check has to run before it — a request naming an
-/// unknown neighbor is `NOT_FOUND`, not a persistence failure.
-async fn require_configured_neighbor(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    address: IpAddr,
-) -> Result<(), Status> {
-    peer_manager_request(peer_mgr_tx, |reply| {
-        PeerManagerCommand::GetNeighborPolicyChains { address, reply }
-    })
-    .await?
-    .ok_or_else(|| Status::not_found(format!("neighbor {address} not found")))
-    .map(|_| ())
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the owned catalog body exposes every settlement dependency"
+)]
+async fn owned_policy_mutation_body(
+    owned: Option<OwnedRuntimeConfigOperation>,
+    daemon_gate: Option<DaemonGate>,
+    config_mutation_gate: Option<ConfigMutationGateFn>,
+    operation_name: &'static str,
+    peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+    actor_timeout: Duration,
+    mutation: OwnedCatalogMutation,
+    event: ConfigEvent,
+    persist_permit: Option<mpsc::OwnedPermit<ConfigEvent>>,
+) -> OwnedRuntimeConfigOutcome<(), Status> {
+    if daemon_gate.is_some_and(|gate| gate.is_shutting_down()) {
+        return OwnedRuntimeConfigOutcome::Clean(Err(Status::unavailable(format!(
+            "{operation_name} rejected: daemon is shutting down"
+        ))));
+    }
+    if let Err(error) = check_config_mutation_gate(&config_mutation_gate, operation_name).await {
+        return OwnedRuntimeConfigOutcome::Clean(Err(error));
+    }
+    if let Some(operation) = &owned {
+        operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+    }
+    let staged = if let Some(permit) = persist_permit {
+        match stage_runtime_config_event_typed(permit, |ack| with_catalog_persist_ack(event, ack))
+            .await
+        {
+            Ok(staged) => Some(staged),
+            Err(error) => return OwnedRuntimeConfigOutcome::Clean(Err(error.into_status())),
+        }
+    } else {
+        None
+    };
+    let dispatch = dispatch_owned_catalog_mutation(peer_mgr_tx, actor_timeout, mutation).await;
+    if matches!(dispatch, OwnedCatalogDispatch::Replied(_))
+        && let Some(operation) = &owned
+    {
+        operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
+    }
+    match dispatch {
+        OwnedCatalogDispatch::NotAccepted(error) => {
+            drop(staged);
+            OwnedRuntimeConfigOutcome::Clean(Err(error))
+        }
+        OwnedCatalogDispatch::AcceptedReplyLost(error) => {
+            OwnedRuntimeConfigOutcome::Ambiguous(error)
+        }
+        OwnedCatalogDispatch::Replied(
+            OwnedCatalogMutationOutcome::RejectedNoEffect(error)
+            | OwnedCatalogMutationOutcome::FullyCompensated(error),
+        ) => {
+            drop(staged);
+            OwnedRuntimeConfigOutcome::Clean(Err(catalog_mutation_error_to_status(&error)))
+        }
+        OwnedCatalogDispatch::Replied(OwnedCatalogMutationOutcome::CompensationAmbiguous(
+            error,
+        )) => OwnedRuntimeConfigOutcome::Ambiguous(catalog_mutation_error_to_status(&error)),
+        OwnedCatalogDispatch::Replied(OwnedCatalogMutationOutcome::Success) => {
+            let Some(staged) = staged else {
+                return OwnedRuntimeConfigOutcome::Clean(Ok(()));
+            };
+            match staged.commit_typed().await {
+                Ok(()) => OwnedRuntimeConfigOutcome::Clean(Ok(())),
+                Err(error) => OwnedRuntimeConfigOutcome::Ambiguous(error.into_status()),
+            }
+        }
+    }
 }
 
 /// Reject a policy read for an address that does not resolve to one unique
@@ -491,24 +584,21 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let definition = proto_definition_to_input(definition)?;
 
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
         let name = req.name;
-        self.run_mutation("PolicyService.SetPolicy", move || async move {
-            // A policy edit re-evaluates live sessions: it rewrites
-            // Adj-RIB-Out and drives a Route Refresh. Stage the write first
-            // so a persistence failure does not put that churn on the wire
-            // and then a second round of it as "rollback".
-            persist_then_apply(
-                persist_permit,
-                |ack| ConfigEvent::SetPolicy {
-                    name: name.clone(),
-                    definition: definition.clone(),
-                    ack: Some(ack),
-                },
-                || set_policy_definition(&peer_mgr_tx, name.clone(), definition.clone()),
-            )
-            .await
-        })
+        self.execute_owned_policy_mutation(
+            RuntimeConfigOperationKind::PolicySet,
+            "PolicyService.SetPolicy",
+            OwnedCatalogMutation::SetPolicy {
+                name: name.clone(),
+                definition: Box::new(definition.clone()),
+            },
+            ConfigEvent::SetPolicy {
+                name,
+                definition,
+                ack: None,
+            },
+            persist_permit,
+        )
         .await?;
 
         Ok(Response::new(proto::SetPolicyResponse {}))
@@ -527,19 +617,14 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         }
 
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
         let name = req.name;
-        self.run_mutation("PolicyService.DeletePolicy", move || async move {
-            persist_then_apply(
-                persist_permit,
-                |ack| ConfigEvent::DeletePolicy {
-                    name: name.clone(),
-                    ack: Some(ack),
-                },
-                || delete_policy_definition(&peer_mgr_tx, name.clone()),
-            )
-            .await
-        })
+        self.execute_owned_policy_mutation(
+            RuntimeConfigOperationKind::PolicyDelete,
+            "PolicyService.DeletePolicy",
+            OwnedCatalogMutation::DeletePolicy { name: name.clone() },
+            ConfigEvent::DeletePolicy { name, ack: None },
+            persist_permit,
+        )
         .await?;
 
         Ok(Response::new(proto::DeletePolicyResponse {}))
@@ -615,28 +700,21 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         };
 
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
         let name = req.name;
-        self.run_mutation("PolicyService.SetNeighborSet", move || async move {
-            persist_then_apply(
-                persist_permit,
-                |ack| ConfigEvent::SetNeighborSet {
-                    name: name.clone(),
-                    definition: definition.clone(),
-                    ack: Some(ack),
-                },
-                || {
-                    apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                        PeerManagerCommand::SetNeighborSet {
-                            name: name.clone(),
-                            definition: definition.clone(),
-                            reply,
-                        }
-                    })
-                },
-            )
-            .await
-        })
+        self.execute_owned_policy_mutation(
+            RuntimeConfigOperationKind::NeighborSetSet,
+            "PolicyService.SetNeighborSet",
+            OwnedCatalogMutation::SetNeighborSet {
+                name: name.clone(),
+                definition: definition.clone(),
+            },
+            ConfigEvent::SetNeighborSet {
+                name,
+                definition,
+                ack: None,
+            },
+            persist_permit,
+        )
         .await?;
 
         Ok(Response::new(proto::SetNeighborSetResponse {}))
@@ -655,26 +733,14 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         }
 
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
         let name = req.name;
-        self.run_mutation("PolicyService.DeleteNeighborSet", move || async move {
-            persist_then_apply(
-                persist_permit,
-                |ack| ConfigEvent::DeleteNeighborSet {
-                    name: name.clone(),
-                    ack: Some(ack),
-                },
-                || {
-                    apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                        PeerManagerCommand::DeleteNeighborSet {
-                            name: name.clone(),
-                            reply,
-                        }
-                    })
-                },
-            )
-            .await
-        })
+        self.execute_owned_policy_mutation(
+            RuntimeConfigOperationKind::NeighborSetDelete,
+            "PolicyService.DeleteNeighborSet",
+            OwnedCatalogMutation::DeleteNeighborSet { name: name.clone() },
+            ConfigEvent::DeleteNeighborSet { name, ack: None },
+            persist_permit,
+        )
         .await?;
 
         Ok(Response::new(proto::DeleteNeighborSetResponse {}))
@@ -703,26 +769,19 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         }
         let req = request.into_inner();
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
         let policy_names = req.policy_names;
-        self.run_mutation("PolicyService.SetGlobalImportChain", move || async move {
-            persist_then_apply(
-                persist_permit,
-                |ack| ConfigEvent::SetGlobalImportChain {
-                    policy_names: policy_names.clone(),
-                    ack: Some(ack),
-                },
-                || {
-                    apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                        PeerManagerCommand::SetGlobalImportChain {
-                            policy_names: policy_names.clone(),
-                            reply,
-                        }
-                    })
-                },
-            )
-            .await
-        })
+        self.execute_owned_policy_mutation(
+            RuntimeConfigOperationKind::GlobalImportChainSet,
+            "PolicyService.SetGlobalImportChain",
+            OwnedCatalogMutation::SetGlobalImportChain {
+                policy_names: policy_names.clone(),
+            },
+            ConfigEvent::SetGlobalImportChain {
+                policy_names,
+                ack: None,
+            },
+            persist_permit,
+        )
         .await?;
 
         Ok(Response::new(proto::SetGlobalImportChainResponse {}))
@@ -737,26 +796,19 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         }
         let req = request.into_inner();
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
         let policy_names = req.policy_names;
-        self.run_mutation("PolicyService.SetGlobalExportChain", move || async move {
-            persist_then_apply(
-                persist_permit,
-                |ack| ConfigEvent::SetGlobalExportChain {
-                    policy_names: policy_names.clone(),
-                    ack: Some(ack),
-                },
-                || {
-                    apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                        PeerManagerCommand::SetGlobalExportChain {
-                            policy_names: policy_names.clone(),
-                            reply,
-                        }
-                    })
-                },
-            )
-            .await
-        })
+        self.execute_owned_policy_mutation(
+            RuntimeConfigOperationKind::GlobalExportChainSet,
+            "PolicyService.SetGlobalExportChain",
+            OwnedCatalogMutation::SetGlobalExportChain {
+                policy_names: policy_names.clone(),
+            },
+            ConfigEvent::SetGlobalExportChain {
+                policy_names,
+                ack: None,
+            },
+            persist_permit,
+        )
         .await?;
 
         Ok(Response::new(proto::SetGlobalExportChainResponse {}))
@@ -770,19 +822,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             return Err(status);
         }
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
-        self.run_mutation("PolicyService.ClearGlobalImportChain", move || async move {
-            persist_then_apply(
-                persist_permit,
-                |ack| ConfigEvent::ClearGlobalImportChain { ack: Some(ack) },
-                || {
-                    apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                        PeerManagerCommand::ClearGlobalImportChain { reply }
-                    })
-                },
-            )
-            .await
-        })
+        self.execute_owned_policy_mutation(
+            RuntimeConfigOperationKind::GlobalImportChainClear,
+            "PolicyService.ClearGlobalImportChain",
+            OwnedCatalogMutation::ClearGlobalImportChain,
+            ConfigEvent::ClearGlobalImportChain { ack: None },
+            persist_permit,
+        )
         .await?;
 
         Ok(Response::new(proto::ClearGlobalImportChainResponse {}))
@@ -796,19 +842,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             return Err(status);
         }
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
-        self.run_mutation("PolicyService.ClearGlobalExportChain", move || async move {
-            persist_then_apply(
-                persist_permit,
-                |ack| ConfigEvent::ClearGlobalExportChain { ack: Some(ack) },
-                || {
-                    apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                        PeerManagerCommand::ClearGlobalExportChain { reply }
-                    })
-                },
-            )
-            .await
-        })
+        self.execute_owned_policy_mutation(
+            RuntimeConfigOperationKind::GlobalExportChainClear,
+            "PolicyService.ClearGlobalExportChain",
+            OwnedCatalogMutation::ClearGlobalExportChain,
+            ConfigEvent::ClearGlobalExportChain { ack: None },
+            persist_permit,
+        )
         .await?;
 
         Ok(Response::new(proto::ClearGlobalExportChainResponse {}))
@@ -848,29 +888,21 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
         let policy_names = req.policy_names;
-        self.run_mutation("PolicyService.SetNeighborImportChain", move || async move {
-            require_configured_neighbor(&peer_mgr_tx, address).await?;
-            persist_then_apply(
-                persist_permit,
-                |ack| ConfigEvent::SetNeighborImportChain {
-                    address,
-                    policy_names: policy_names.clone(),
-                    ack: Some(ack),
-                },
-                || {
-                    apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                        PeerManagerCommand::SetNeighborImportChain {
-                            address,
-                            policy_names: policy_names.clone(),
-                            reply,
-                        }
-                    })
-                },
-            )
-            .await
-        })
+        self.execute_owned_policy_mutation(
+            RuntimeConfigOperationKind::NeighborImportChainSet,
+            "PolicyService.SetNeighborImportChain",
+            OwnedCatalogMutation::SetNeighborImportChain {
+                address,
+                policy_names: policy_names.clone(),
+            },
+            ConfigEvent::SetNeighborImportChain {
+                address,
+                policy_names,
+                ack: None,
+            },
+            persist_permit,
+        )
         .await?;
 
         Ok(Response::new(proto::SetNeighborImportChainResponse {}))
@@ -889,29 +921,21 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
         let policy_names = req.policy_names;
-        self.run_mutation("PolicyService.SetNeighborExportChain", move || async move {
-            require_configured_neighbor(&peer_mgr_tx, address).await?;
-            persist_then_apply(
-                persist_permit,
-                |ack| ConfigEvent::SetNeighborExportChain {
-                    address,
-                    policy_names: policy_names.clone(),
-                    ack: Some(ack),
-                },
-                || {
-                    apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                        PeerManagerCommand::SetNeighborExportChain {
-                            address,
-                            policy_names: policy_names.clone(),
-                            reply,
-                        }
-                    })
-                },
-            )
-            .await
-        })
+        self.execute_owned_policy_mutation(
+            RuntimeConfigOperationKind::NeighborExportChainSet,
+            "PolicyService.SetNeighborExportChain",
+            OwnedCatalogMutation::SetNeighborExportChain {
+                address,
+                policy_names: policy_names.clone(),
+            },
+            ConfigEvent::SetNeighborExportChain {
+                address,
+                policy_names,
+                ack: None,
+            },
+            persist_permit,
+        )
         .await?;
 
         Ok(Response::new(proto::SetNeighborExportChainResponse {}))
@@ -930,25 +954,12 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
-        self.run_mutation(
+        self.execute_owned_policy_mutation(
+            RuntimeConfigOperationKind::NeighborImportChainClear,
             "PolicyService.ClearNeighborImportChain",
-            move || async move {
-                require_configured_neighbor(&peer_mgr_tx, address).await?;
-                persist_then_apply(
-                    persist_permit,
-                    |ack| ConfigEvent::ClearNeighborImportChain {
-                        address,
-                        ack: Some(ack),
-                    },
-                    || {
-                        apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                            PeerManagerCommand::ClearNeighborImportChain { address, reply }
-                        })
-                    },
-                )
-                .await
-            },
+            OwnedCatalogMutation::ClearNeighborImportChain { address },
+            ConfigEvent::ClearNeighborImportChain { address, ack: None },
+            persist_permit,
         )
         .await?;
 
@@ -968,25 +979,12 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
-        self.run_mutation(
+        self.execute_owned_policy_mutation(
+            RuntimeConfigOperationKind::NeighborExportChainClear,
             "PolicyService.ClearNeighborExportChain",
-            move || async move {
-                require_configured_neighbor(&peer_mgr_tx, address).await?;
-                persist_then_apply(
-                    persist_permit,
-                    |ack| ConfigEvent::ClearNeighborExportChain {
-                        address,
-                        ack: Some(ack),
-                    },
-                    || {
-                        apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                            PeerManagerCommand::ClearNeighborExportChain { address, reply }
-                        })
-                    },
-                )
-                .await
-            },
+            OwnedCatalogMutation::ClearNeighborExportChain { address },
+            ConfigEvent::ClearNeighborExportChain { address, ack: None },
+            persist_permit,
         )
         .await?;
 
@@ -2332,18 +2330,14 @@ mod tests {
         tokio::spawn(async move {
             while let Some(cmd) = peer_rx.recv().await {
                 match cmd {
-                    PeerManagerCommand::GetPolicy { reply, .. } => {
-                        let _ = reply.send(None);
-                    }
-                    PeerManagerCommand::SetPolicy {
-                        name,
-                        definition,
+                    PeerManagerCommand::OwnedCatalogMutation {
+                        mutation: OwnedCatalogMutation::SetPolicy { name, definition },
                         reply,
                     } => {
                         assert_eq!(name, "tag-internal");
                         assert_eq!(definition.default_action, "permit");
                         assert_eq!(definition.statements.len(), 1);
-                        let _ = reply.send(Ok(()));
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
@@ -2621,19 +2615,18 @@ mod tests {
         tokio::spawn(async move {
             while let Some(cmd) = peer_rx.recv().await {
                 match cmd {
-                    PeerManagerCommand::GetPolicy { reply, .. } => {
-                        let _ = reply.send(Some(NamedPolicyDefinition {
-                            default_action: "permit".to_string(),
-                            statements: Vec::new(),
-                        }));
-                    }
-                    PeerManagerCommand::DeletePolicy { name, reply } => {
+                    PeerManagerCommand::OwnedCatalogMutation {
+                        mutation: OwnedCatalogMutation::DeletePolicy { name },
+                        reply,
+                    } => {
                         assert_eq!(name, "tag-internal");
-                        let _ = reply.send(Err(CatalogMutationError::StillReferenced {
-                            kind: "policy",
-                            name: "tag-internal".into(),
-                            references: vec!["global import_chain".into()],
-                        }));
+                        let _ = reply.send(OwnedCatalogMutationOutcome::RejectedNoEffect(
+                            CatalogMutationError::StillReferenced {
+                                kind: "policy",
+                                name: "tag-internal".into(),
+                                references: vec!["global import_chain".into()],
+                            },
+                        ));
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
@@ -3689,5 +3682,90 @@ policy customer-in(peer_lp: u32) {
             0,
             "validation must reject before querying the RIB"
         );
+    }
+
+    async fn staged_policy_delete(
+        svc: PolicyService,
+        config_rx: &mut mpsc::Receiver<ConfigEvent>,
+    ) -> (
+        tokio::task::JoinHandle<Result<Response<proto::DeletePolicyResponse>, Status>>,
+        crate::peer_types::ConfigPersistAck,
+    ) {
+        let call = tokio::spawn(async move {
+            PolicyServiceRpc::delete_policy(
+                &svc,
+                Request::new(proto::DeletePolicyRequest {
+                    name: "edge-policy".into(),
+                }),
+            )
+            .await
+        });
+        let ack = match config_rx
+            .recv()
+            .await
+            .expect("expected staged policy delete")
+        {
+            ConfigEvent::DeletePolicy { name, ack } => {
+                assert_eq!(name, "edge-policy");
+                ack.expect("owned policy delete must use two-phase persistence")
+            }
+            _ => panic!("expected DeletePolicy"),
+        };
+        (call, ack)
+    }
+
+    #[tokio::test]
+    async fn owned_policy_actor_reply_loss_parks_without_response() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+        let (mut call, ack) = staged_policy_delete(svc, &mut config_rx).await;
+        let staged = tokio::spawn(ack.accept());
+        match peer_rx.recv().await.expect("expected owned policy delete") {
+            PeerManagerCommand::OwnedCatalogMutation {
+                mutation: OwnedCatalogMutation::DeletePolicy { name },
+                reply,
+            } => {
+                assert_eq!(name, "edge-policy");
+                drop(reply);
+            }
+            _ => panic!("expected owned policy delete"),
+        }
+        assert!(!staged.await.unwrap(), "reply loss must discard the stage");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut call)
+                .await
+                .is_err(),
+            "accepted actor reply loss must never produce an RPC response"
+        );
+        call.abort();
+    }
+
+    #[tokio::test]
+    async fn owned_policy_commit_ack_loss_parks_without_response() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+        let (mut call, ack) = staged_policy_delete(svc, &mut config_rx).await;
+        let crate::peer_types::ConfigPersistAck { staged, commit } = ack;
+        staged.send(Ok(())).unwrap();
+        match peer_rx.recv().await.expect("expected owned policy delete") {
+            PeerManagerCommand::OwnedCatalogMutation { reply, .. } => {
+                reply.send(OwnedCatalogMutationOutcome::Success).unwrap();
+            }
+            _ => panic!("expected owned policy delete"),
+        }
+        let reply = commit
+            .expect("owned policy mutation requires commit handshake")
+            .await
+            .expect("runtime owner must hand off commit acknowledgement");
+        drop(reply);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut call)
+                .await
+                .is_err(),
+            "lost commit acknowledgement must never produce an RPC response"
+        );
+        call.abort();
     }
 }

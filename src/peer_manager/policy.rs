@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use rustbgpd_api::peer_types::{
     CatalogMutationError, ConfigEvent, DynamicRangeTarget, ImportValidationDependency,
-    OwnedPeerGroupMutationOutcome, PeerGroupDefinition, PeerKey, PeerManagerNeighborConfig,
+    OwnedCatalogMutationOutcome, PeerGroupDefinition, PeerKey, PeerManagerNeighborConfig,
     ResolvedPeerPolicy,
 };
 use rustbgpd_fsm::SessionState;
@@ -117,6 +117,41 @@ impl From<String> for PolicyApplyFailure {
 impl std::fmt::Display for PolicyApplyFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PolicySnapshotFailureKind {
+    RejectedNoEffect,
+    FullyCompensated,
+    CompensationAmbiguous,
+}
+
+struct PolicySnapshotFailure {
+    kind: PolicySnapshotFailureKind,
+    message: String,
+}
+
+impl PolicySnapshotFailure {
+    fn rejected(message: impl Into<String>) -> Self {
+        Self {
+            kind: PolicySnapshotFailureKind::RejectedNoEffect,
+            message: message.into(),
+        }
+    }
+
+    fn compensated(message: impl Into<String>) -> Self {
+        Self {
+            kind: PolicySnapshotFailureKind::FullyCompensated,
+            message: message.into(),
+        }
+    }
+
+    fn ambiguous(message: impl Into<String>) -> Self {
+        Self {
+            kind: PolicySnapshotFailureKind::CompensationAmbiguous,
+            message: message.into(),
+        }
     }
 }
 
@@ -469,10 +504,26 @@ impl PeerManager {
         &mut self,
         targets: Vec<ResolvedPeerPolicy>,
     ) -> Result<Vec<ResolvedPeerPolicy>, String> {
+        self.apply_resolved_policy_snapshot_classified(targets, false)
+            .await
+            .map_err(|failure| failure.message)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the partitioned policy transaction keeps cohort commit and cross-partition rollback ownership together"
+    )]
+    async fn apply_resolved_policy_snapshot_classified(
+        &mut self,
+        targets: Vec<ResolvedPeerPolicy>,
+        require_clean_convergence: bool,
+    ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
         // ADR-0112: qualify RFC 8212 import-presence transitions before
         // anything below can touch a peer, so one incapable peer rejects the
         // whole edit rather than being discovered mid-fanout and unwound.
-        self.preflight_rfc8212_import_transitions(&targets).await?;
+        self.preflight_rfc8212_import_transitions(&targets)
+            .await
+            .map_err(PolicySnapshotFailure::rejected)?;
         let mut rollback_rib_budget = PolicyRollbackRibBudget::default();
         let total_targets = targets.len();
         let mut seen = BTreeSet::new();
@@ -480,29 +531,39 @@ impl PeerManager {
             .iter()
             .any(|target| !seen.insert(PeerKey::new(target.address, target.interface.clone())));
         if has_duplicate {
+            let captured = self
+                .apply_resolved_policy_snapshot_authoritatively(
+                    targets,
+                    &mut rollback_rib_budget,
+                    require_clean_convergence,
+                )
+                .await?;
             return self
-                .apply_resolved_policy_snapshot_authoritatively(targets, &mut rollback_rib_budget)
-                .await
-                .map(|captured| {
-                    captured
-                        .into_iter()
-                        .map(|captured| captured.policy)
-                        .collect()
-                });
+                .complete_policy_snapshot(
+                    captured,
+                    &mut rollback_rib_budget,
+                    require_clean_convergence,
+                )
+                .await;
         }
 
         let cohort_mask = self.export_only_policy_cohort_mask(&targets).await;
         let cohort_targets = cohort_mask.iter().filter(|&&selected| selected).count();
         if cohort_targets < 2 {
+            let captured = self
+                .apply_resolved_policy_snapshot_authoritatively(
+                    targets,
+                    &mut rollback_rib_budget,
+                    require_clean_convergence,
+                )
+                .await?;
             return self
-                .apply_resolved_policy_snapshot_authoritatively(targets, &mut rollback_rib_budget)
-                .await
-                .map(|captured| {
-                    captured
-                        .into_iter()
-                        .map(|captured| captured.policy)
-                        .collect()
-                });
+                .complete_policy_snapshot(
+                    captured,
+                    &mut rollback_rib_budget,
+                    require_clean_convergence,
+                )
+                .await;
         }
 
         let cohort = targets
@@ -518,20 +579,29 @@ impl PeerManager {
         );
 
         let Some(cohort_result) = self
-            .try_apply_export_only_policy_cohort(&cohort, &mut rollback_rib_budget)
+            .try_apply_export_only_policy_cohort(
+                &cohort,
+                &mut rollback_rib_budget,
+                require_clean_convergence,
+            )
             .await
         else {
             // Defensive invariant fallback: no mutation occurs before this
             // helper returns `None`, so preserve original authoritative order.
+            let captured = self
+                .apply_resolved_policy_snapshot_authoritatively(
+                    targets,
+                    &mut rollback_rib_budget,
+                    require_clean_convergence,
+                )
+                .await?;
             return self
-                .apply_resolved_policy_snapshot_authoritatively(targets, &mut rollback_rib_budget)
-                .await
-                .map(|captured| {
-                    captured
-                        .into_iter()
-                        .map(|captured| captured.policy)
-                        .collect()
-                });
+                .complete_policy_snapshot(
+                    captured,
+                    &mut rollback_rib_budget,
+                    require_clean_convergence,
+                )
+                .await;
         };
         let mut captured = cohort_result?;
         drop(cohort);
@@ -541,7 +611,11 @@ impl PeerManager {
             .filter_map(|(target, selected)| (!selected).then_some(target))
             .collect();
         match self
-            .apply_resolved_policy_snapshot_authoritatively(remainder, &mut rollback_rib_budget)
+            .apply_resolved_policy_snapshot_authoritatively(
+                remainder,
+                &mut rollback_rib_budget,
+                require_clean_convergence,
+            )
             .await
         {
             Ok(mut remainder_captured) => {
@@ -553,27 +627,73 @@ impl PeerManager {
                     elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                     "committed partitioned resolved policy snapshot"
                 );
-                Ok(captured
-                    .into_iter()
-                    .map(|captured| captured.policy)
-                    .collect())
+                self.complete_policy_snapshot(
+                    captured,
+                    &mut rollback_rib_budget,
+                    require_clean_convergence,
+                )
+                .await
             }
-            Err(remainder_error) => Err(
-                match self
-                    .restore_resolved_policies(captured, &mut rollback_rib_budget)
-                    .await
-                {
+            Err(remainder_error) => {
+                let rollback = self
+                    .restore_resolved_policies(
+                        captured,
+                        &mut rollback_rib_budget,
+                        require_clean_convergence,
+                    )
+                    .await;
+                let message = match &rollback {
                     Ok(()) => format!(
-                        "failed to apply authoritative policy remainder: {remainder_error}; \
-                     committed cohort restored"
+                        "failed to apply authoritative policy remainder: {}; committed cohort restored",
+                        remainder_error.message
                     ),
                     Err(cohort_restore_error) => format!(
-                        "failed to apply authoritative policy remainder: {remainder_error}; \
-                     restoring committed cohort also failed: {cohort_restore_error}"
+                        "failed to apply authoritative policy remainder: {}; restoring committed cohort also failed: {cohort_restore_error}",
+                        remainder_error.message
                     ),
-                },
-            ),
+                };
+                if remainder_error.kind == PolicySnapshotFailureKind::CompensationAmbiguous
+                    || rollback.is_err()
+                {
+                    Err(PolicySnapshotFailure::ambiguous(message))
+                } else {
+                    Err(PolicySnapshotFailure::compensated(message))
+                }
+            }
         }
+    }
+
+    async fn complete_policy_snapshot(
+        &mut self,
+        captured: Vec<CapturedResolvedPolicy>,
+        rollback_rib_budget: &mut PolicyRollbackRibBudget,
+        require_clean_convergence: bool,
+    ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
+        let convergence_debt = require_clean_convergence
+            && captured.iter().any(|captured| {
+                let peer_key =
+                    PeerKey::new(captured.policy.address, captured.policy.interface.clone());
+                self.peers
+                    .get(&peer_key)
+                    .is_some_and(|managed| managed.pending_refresh || managed.pending_export_apply)
+            });
+        if convergence_debt {
+            return match self
+                .restore_resolved_policies(captured, rollback_rib_budget, require_clean_convergence)
+                .await
+            {
+                Ok(()) => Err(PolicySnapshotFailure::compensated(
+                    "policy mutation retained convergence debt; candidate was fully restored",
+                )),
+                Err(error) => Err(PolicySnapshotFailure::ambiguous(format!(
+                    "policy mutation retained convergence debt and restoration failed: {error}"
+                ))),
+            };
+        }
+        Ok(captured
+            .into_iter()
+            .map(|captured| captured.policy)
+            .collect())
     }
 
     /// Select the largest locally eligible export-only cohort, with a stable
@@ -696,7 +816,8 @@ impl PeerManager {
         &mut self,
         targets: Vec<ResolvedPeerPolicy>,
         rollback_rib_budget: &mut PolicyRollbackRibBudget,
-    ) -> Result<Vec<CapturedResolvedPolicy>, String> {
+        require_clean_convergence: bool,
+    ) -> Result<Vec<CapturedResolvedPolicy>, PolicySnapshotFailure> {
         // Captured priors, in application order, for peers actually mutated.
         let mut applied: Vec<CapturedResolvedPolicy> = Vec::new();
         for target in targets {
@@ -736,23 +857,25 @@ impl PeerManager {
                 // apply did not complete.
                 applied[applied_idx].adj_rib_in_may_have_moved = apply_error.refresh_delivery_began;
                 let restored = std::mem::take(&mut applied);
-                return Err(
-                    match self
-                        .restore_resolved_policies(restored, rollback_rib_budget)
-                        .await
-                    {
-                        Ok(()) => format!(
-                            "failed to apply resolved policy to {}: {apply_error}; \
-                         already-applied peers restored",
-                            target.address
-                        ),
-                        Err(restore_error) => format!(
-                            "failed to apply resolved policy to {}: {apply_error}; \
-                         restoring already-applied peers also failed: {restore_error}",
-                            target.address
-                        ),
-                    },
-                );
+                return match self
+                    .restore_resolved_policies(
+                        restored,
+                        rollback_rib_budget,
+                        require_clean_convergence,
+                    )
+                    .await
+                {
+                    Ok(()) => Err(PolicySnapshotFailure::compensated(format!(
+                        "failed to apply resolved policy to {}: {apply_error}; \
+                             already-applied peers restored",
+                        target.address
+                    ))),
+                    Err(restore_error) => Err(PolicySnapshotFailure::ambiguous(format!(
+                        "failed to apply resolved policy to {}: {apply_error}; \
+                             restoring already-applied peers also failed: {restore_error}",
+                        target.address
+                    ))),
+                };
             }
             applied[applied_idx].adj_rib_in_may_have_moved = true;
         }
@@ -806,7 +929,8 @@ impl PeerManager {
         &mut self,
         targets: &[&ResolvedPeerPolicy],
         rollback_rib_budget: &mut PolicyRollbackRibBudget,
-    ) -> Option<Result<Vec<CapturedResolvedPolicy>, String>> {
+        require_clean_convergence: bool,
+    ) -> Option<Result<Vec<CapturedResolvedPolicy>, PolicySnapshotFailure>> {
         if targets.len() < 2 {
             return None;
         }
@@ -944,9 +1068,13 @@ impl PeerManager {
                         managed.pending_refresh = true;
                     }
                     let prior_restore = self
-                        .restore_resolved_policies(captured, rollback_rib_budget)
+                        .restore_resolved_policies(
+                            captured,
+                            rollback_rib_budget,
+                            require_clean_convergence,
+                        )
                         .await;
-                    return Some(Err(match prior_restore {
+                    return Some(Err(PolicySnapshotFailure::ambiguous(match prior_restore {
                         Ok(()) => format!(
                             "failed to apply resolved policy to {}: import: {error}; already-applied peers restored",
                             target.address
@@ -955,7 +1083,7 @@ impl PeerManager {
                             "failed to apply resolved policy to {}: import: {error}; restoring already-applied peers also failed: {restore_error}",
                             target.address
                         ),
-                    }));
+                    })));
                 }
                 self.peers
                     .get_mut(peer_key)
@@ -1066,10 +1194,17 @@ impl PeerManager {
                                         false
                                     }
                                 };
-                            if !refreshed && let Some(managed) = self.peers.get_mut(peer_key) {
-                                managed.pending_refresh = true;
+                            if refreshed {
+                                Ok(())
+                            } else {
+                                if let Some(managed) = self.peers.get_mut(peer_key) {
+                                    managed.pending_refresh = true;
+                                }
+                                Err(format!(
+                                    "{} import restore left Route Refresh debt",
+                                    target.address
+                                ))
                             }
-                            Ok(())
                         }
                         Err(restore_error) => {
                             // Cross-side carry (the authoritative bail
@@ -1090,21 +1225,25 @@ impl PeerManager {
                     Ok(())
                 };
                 let prior_restore = self
-                    .restore_resolved_policies(captured, rollback_rib_budget)
+                    .restore_resolved_policies(
+                        captured,
+                        rollback_rib_budget,
+                        require_clean_convergence,
+                    )
                     .await;
                 let restore_error = [failing_restore, failing_import_restore, prior_restore]
                     .into_iter()
                     .filter_map(Result::err)
                     .reduce(|folded, error| format!("{folded}; {error}"));
                 return Some(Err(match restore_error {
-                    None => format!(
+                    None => PolicySnapshotFailure::compensated(format!(
                         "failed to apply resolved policy to {}: export: {error}; already-applied peers restored",
                         target.address
-                    ),
-                    Some(restore_error) => format!(
+                    )),
+                    Some(restore_error) => PolicySnapshotFailure::ambiguous(format!(
                         "failed to apply resolved policy to {}: export: {error}; restoring already-applied peers also failed: {restore_error}",
                         target.address
-                    ),
+                    )),
                 }));
             }
             self.peers
@@ -1167,15 +1306,15 @@ impl PeerManager {
                 self.discard_prepared_export_destination(targets[0]).await;
             }
             let rollback = self
-                .restore_resolved_policies(captured, rollback_rib_budget)
+                .restore_resolved_policies(captured, rollback_rib_budget, require_clean_convergence)
                 .await;
             return Some(Err(match rollback {
-                Ok(()) => format!(
+                Ok(()) => PolicySnapshotFailure::compensated(format!(
                     "failed to update export policy cohort: {error}; already-applied peers restored"
-                ),
-                Err(restore_error) => format!(
+                )),
+                Err(restore_error) => PolicySnapshotFailure::ambiguous(format!(
                     "failed to update export policy cohort: {error}; restoring already-applied peers also failed: {restore_error}"
-                ),
+                )),
             }));
         }
 
@@ -1232,27 +1371,51 @@ impl PeerManager {
                     }
                     captured[index].adj_rib_in_may_have_moved = failure.delivery_began;
                     let rollback = self
-                        .restore_resolved_policies(captured, rollback_rib_budget)
+                        .restore_resolved_policies(
+                            captured,
+                            rollback_rib_budget,
+                            require_clean_convergence,
+                        )
                         .await;
                     return Some(Err(match rollback {
-                        Ok(()) => format!(
+                        Ok(()) => PolicySnapshotFailure::compensated(format!(
                             "failed to apply resolved policy to {}: route refresh: {error}; already-applied peers restored",
                             target.address
-                        ),
-                        Err(restore_error) => format!(
+                        )),
+                        Err(restore_error) => PolicySnapshotFailure::ambiguous(format!(
                             "failed to apply resolved policy to {}: route refresh: {error}; restoring already-applied peers also failed: {restore_error}",
                             target.address
-                        ),
+                        )),
                     }));
                 }
-            } else {
-                // Idle/Connect (nothing in Adj-RIB-In yet) or an ambiguous
-                // state query: arm `pending_refresh` so a later call fires the
-                // refresh once the session is reachable — the same handling
-                // the authoritative path applies to a non-Established peer.
+            } else if require_clean_convergence {
+                // The ordinary reload path may carry this refresh as retry
+                // intent. A settlement-owned mutation may not commit with
+                // convergence debt, and the state query cannot distinguish a
+                // down peer from a back-pressured Established one. Restore the
+                // complete cohort before classifying the request.
                 if let Some(managed) = self.peers.get_mut(peer_key) {
                     managed.pending_refresh = true;
                 }
+                let rollback = self
+                    .restore_resolved_policies(
+                        captured,
+                        rollback_rib_budget,
+                        require_clean_convergence,
+                    )
+                    .await;
+                return Some(Err(match rollback {
+                    Ok(()) => PolicySnapshotFailure::compensated(format!(
+                        "failed to apply resolved policy to {}: Route Refresh target state was not provably Established; already-applied peers restored",
+                        target.address
+                    )),
+                    Err(restore_error) => PolicySnapshotFailure::ambiguous(format!(
+                        "failed to apply resolved policy to {}: Route Refresh target state was not provably Established; restoring already-applied peers also failed: {restore_error}",
+                        target.address
+                    )),
+                }));
+            } else if let Some(managed) = self.peers.get_mut(peer_key) {
+                managed.pending_refresh = true;
             }
             captured[index].adj_rib_in_may_have_moved = true;
         }
@@ -1618,17 +1781,37 @@ impl PeerManager {
     /// absolute deadline across this top-level policy transaction. Timing out or
     /// dropping the caller detaches the exact registered aggregate so FIFO repair
     /// can continue while conservative pending flags retain retry intent.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "exact rollback keeps session, RIB, refresh, bookkeeping, and pending-flag acknowledgements in one owner"
+    )]
     async fn restore_resolved_policies(
         &mut self,
         priors: Vec<CapturedResolvedPolicy>,
         budget: &mut PolicyRollbackRibBudget,
+        require_exact_pending: bool,
     ) -> Result<(), String> {
+        let pending_priors = priors
+            .iter()
+            .map(|prior| {
+                (
+                    PeerKey::new(prior.policy.address, prior.policy.interface.clone()),
+                    prior.pending_refresh,
+                    prior.pending_export_apply,
+                )
+            })
+            .collect::<Vec<_>>();
         let mut errors: Vec<String> = Vec::new();
         let mut plans = Vec::new();
         for prior in priors.into_iter().rev() {
             let address = prior.policy.address;
             let peer_key = PeerKey::new(address, prior.policy.interface.clone());
             if !self.peers.contains_key(&peer_key) {
+                if require_exact_pending {
+                    errors.push(format!(
+                        "{peer_key}: peer disappeared before policy rollback could acknowledge restoration"
+                    ));
+                }
                 continue;
             }
             let refresh_failure = if prior.adj_rib_in_may_have_moved {
@@ -1712,6 +1895,25 @@ impl PeerManager {
                         }
                     }
                 }
+            }
+        }
+
+        for (peer_key, prior_refresh, prior_export) in pending_priors {
+            let Some(managed) = self.peers.get(&peer_key) else {
+                continue;
+            };
+            if require_exact_pending
+                && (managed.pending_refresh != prior_refresh
+                    || managed.pending_export_apply != prior_export)
+            {
+                errors.push(format!(
+                    "{} rollback retained convergence debt (pending_refresh={} expected {}; pending_export_apply={} expected {})",
+                    peer_key,
+                    managed.pending_refresh,
+                    prior_refresh,
+                    managed.pending_export_apply,
+                    prior_export
+                ));
             }
         }
 
@@ -2489,6 +2691,82 @@ impl PeerManager {
         Ok(())
     }
 
+    pub(super) async fn apply_policy_change_owned(
+        &mut self,
+        event: ConfigEvent,
+        affected_peers: Option<Vec<IpAddr>>,
+    ) -> OwnedCatalogMutationOutcome {
+        if let ConfigEvent::DeletePolicy { name, .. } = &event {
+            let refs = policy_references(&self.current_config, name);
+            if !refs.is_empty() {
+                return OwnedCatalogMutationOutcome::RejectedNoEffect(
+                    CatalogMutationError::StillReferenced {
+                        kind: "policy",
+                        name: name.clone(),
+                        references: refs,
+                    },
+                );
+            }
+        }
+        if let ConfigEvent::DeleteNeighborSet { name, .. } = &event {
+            let refs = neighbor_set_references(&self.current_config, name);
+            if !refs.is_empty() {
+                return OwnedCatalogMutationOutcome::RejectedNoEffect(
+                    CatalogMutationError::StillReferenced {
+                        kind: "neighbor set",
+                        name: name.clone(),
+                        references: refs,
+                    },
+                );
+            }
+        }
+        if let ConfigEvent::SetPolicy { name, .. } = &event
+            && let Some(entry) = self.current_config.policy.rpol.policies.get(name)
+        {
+            return OwnedCatalogMutationOutcome::RejectedNoEffect(CatalogMutationError::internal(
+                format!(
+                    "policy {name:?} is defined by rpol file {:?}; rpol and TOML policies share one namespace",
+                    entry.path
+                ),
+            ));
+        }
+
+        let mut next_config = self.current_config.clone();
+        if let Err(error) = apply_config_event(&mut next_config, &event) {
+            return OwnedCatalogMutationOutcome::RejectedNoEffect(catalog_config_error(error));
+        }
+        if next_config == self.current_config {
+            return OwnedCatalogMutationOutcome::Success;
+        }
+        match self
+            .refresh_policies_for_config_classified(next_config, affected_peers, true)
+            .await
+        {
+            Ok(applied) => {
+                self.publish_policy_config_event(&event, applied);
+                OwnedCatalogMutationOutcome::Success
+            }
+            Err(PolicySnapshotFailure {
+                kind: PolicySnapshotFailureKind::RejectedNoEffect,
+                message,
+            }) => OwnedCatalogMutationOutcome::RejectedNoEffect(CatalogMutationError::internal(
+                message,
+            )),
+            Err(PolicySnapshotFailure {
+                kind: PolicySnapshotFailureKind::FullyCompensated,
+                message,
+            }) => OwnedCatalogMutationOutcome::FullyCompensated(CatalogMutationError::internal(
+                message,
+            )),
+            Err(PolicySnapshotFailure {
+                kind: PolicySnapshotFailureKind::CompensationAmbiguous,
+                message,
+            }) => OwnedCatalogMutationOutcome::CompensationAmbiguous(
+                CatalogMutationError::internal(message),
+            ),
+        }
+    }
+
     /// ADR-0096: adopt a new compiled `.rpol` registry (SIGHUP reload
     /// of `[policy] rpol_files` or of referenced file content) and
     /// re-resolve every live peer's chains through it, using the same
@@ -2533,6 +2811,17 @@ impl PeerManager {
         next_config: Config,
         affected_peers: Option<Vec<IpAddr>>,
     ) -> Result<usize, CatalogMutationError> {
+        self.refresh_policies_for_config_classified(next_config, affected_peers, false)
+            .await
+            .map_err(|failure| CatalogMutationError::internal(failure.message))
+    }
+
+    async fn refresh_policies_for_config_classified(
+        &mut self,
+        next_config: Config,
+        affected_peers: Option<Vec<IpAddr>>,
+        require_clean_convergence: bool,
+    ) -> Result<usize, PolicySnapshotFailure> {
         let peers: Vec<PeerKey> = affected_peers.map_or_else(
             || self.peers.keys().cloned().collect(),
             |peers| {
@@ -2596,7 +2885,11 @@ impl PeerManager {
                     );
                     continue;
                 }
-                Err(error) => return Err(catalog_config_error(error)),
+                Err(error) => {
+                    return Err(PolicySnapshotFailure::rejected(
+                        catalog_config_error(error).to_string(),
+                    ));
+                }
             };
             targets.push(ResolvedPeerPolicy {
                 address,
@@ -2614,9 +2907,8 @@ impl PeerManager {
             "resolved live peer policy chains"
         );
         let applied = self
-            .apply_resolved_policy_snapshot(targets)
-            .await
-            .map_err(CatalogMutationError::internal)?;
+            .apply_resolved_policy_snapshot_classified(targets, require_clean_convergence)
+            .await?;
 
         // ADR-0110 freshness: adopting `next_config` is the accept moment
         // for this policy generation. Sync the per-dataset series against
@@ -3094,11 +3386,11 @@ impl PeerManager {
         &mut self,
         event: ConfigEvent,
         affected_peers: Vec<IpAddr>,
-    ) -> OwnedPeerGroupMutationOutcome {
+    ) -> OwnedCatalogMutationOutcome {
         if let ConfigEvent::DeletePeerGroup { name, .. } = &event {
             let refs = peer_group_references(&self.current_config, name);
             if !refs.is_empty() {
-                return OwnedPeerGroupMutationOutcome::RejectedNoEffect(
+                return OwnedCatalogMutationOutcome::RejectedNoEffect(
                     CatalogMutationError::StillReferenced {
                         kind: "peer group",
                         name: name.clone(),
@@ -3110,10 +3402,10 @@ impl PeerManager {
 
         let mut next_config = self.current_config.clone();
         if let Err(error) = apply_config_event(&mut next_config, &event) {
-            return OwnedPeerGroupMutationOutcome::RejectedNoEffect(catalog_config_error(error));
+            return OwnedCatalogMutationOutcome::RejectedNoEffect(catalog_config_error(error));
         }
         if next_config == self.current_config {
-            return OwnedPeerGroupMutationOutcome::Success;
+            return OwnedCatalogMutationOutcome::Success;
         }
 
         if let ConfigEvent::SetPeerGroup { name, .. } = &event
@@ -3122,7 +3414,7 @@ impl PeerManager {
             && (old_group.md5_password != new_group.md5_password
                 || old_group.ttl_security != new_group.ttl_security)
         {
-            return OwnedPeerGroupMutationOutcome::RejectedNoEffect(
+            return OwnedCatalogMutationOutcome::RejectedNoEffect(
                 CatalogMutationError::RestartRequired(format!(
                     "peer group {name:?} changes md5_password or ttl_security; inbound listener \
                      enforcement is updated only by startup or SIGHUP reload — apply this change \
@@ -3141,8 +3433,8 @@ impl PeerManager {
                 .apply_peer_group_hot_change(event, next_config, &name, affected_peers)
                 .await
             {
-                Ok(()) => OwnedPeerGroupMutationOutcome::Success,
-                Err(error) => OwnedPeerGroupMutationOutcome::CompensationAmbiguous(error),
+                Ok(()) => OwnedCatalogMutationOutcome::Success,
+                Err(error) => OwnedCatalogMutationOutcome::CompensationAmbiguous(error),
             };
         }
 
@@ -3166,7 +3458,7 @@ impl PeerManager {
             let Some(neighbor) = next_config.neighbors.iter().find(|neighbor| {
                 neighbor.address == address.to_string() && neighbor.interface == peer_key.interface
             }) else {
-                return OwnedPeerGroupMutationOutcome::RejectedNoEffect(
+                return OwnedCatalogMutationOutcome::RejectedNoEffect(
                     CatalogMutationError::internal(format!(
                         "static peer {peer_key} affected by the peer-group change has no neighbor \
                          record in the updated config; refusing to reshape an inconsistent snapshot"
@@ -3176,7 +3468,7 @@ impl PeerManager {
             let resolved = match next_config.resolve_neighbor(neighbor) {
                 Ok(resolved) => resolved,
                 Err(error) => {
-                    return OwnedPeerGroupMutationOutcome::RejectedNoEffect(catalog_config_error(
+                    return OwnedCatalogMutationOutcome::RejectedNoEffect(catalog_config_error(
                         error,
                     ));
                 }
@@ -3187,13 +3479,13 @@ impl PeerManager {
         let priors = match self.apply_peer_reshape_snapshot_classified(targets).await {
             PeerReshapeSnapshotOutcome::Success(priors) => priors,
             PeerReshapeSnapshotOutcome::RejectedNoEffect(error) => {
-                return OwnedPeerGroupMutationOutcome::RejectedNoEffect(error.into());
+                return OwnedCatalogMutationOutcome::RejectedNoEffect(error.into());
             }
             PeerReshapeSnapshotOutcome::FullyCompensated(error) => {
-                return OwnedPeerGroupMutationOutcome::FullyCompensated(error.into());
+                return OwnedCatalogMutationOutcome::FullyCompensated(error.into());
             }
             PeerReshapeSnapshotOutcome::CompensationAmbiguous(error) => {
-                return OwnedPeerGroupMutationOutcome::CompensationAmbiguous(error.into());
+                return OwnedCatalogMutationOutcome::CompensationAmbiguous(error.into());
             }
         };
 
@@ -3203,7 +3495,7 @@ impl PeerManager {
         }
         self.reconcile_stale_dynamic_max_prefix_restarts();
         self.publish_policy_config_event(&event, priors.len());
-        OwnedPeerGroupMutationOutcome::Success
+        OwnedCatalogMutationOutcome::Success
     }
 
     /// The all-hot half of [`Self::apply_peer_group_change`]: apply the

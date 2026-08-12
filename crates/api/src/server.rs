@@ -42,7 +42,8 @@ use crate::injection_service::InjectionService;
 use crate::neighbor_service::NeighborService;
 use crate::peer_group_service::PeerGroupService;
 use crate::peer_types::{
-    CatalogMutationError, ConfigEvent, PeerManagerCommand, PeerManagerReadinessQuery,
+    CatalogMutationError, ConfigEvent, ConfigPersistAck, OwnedCatalogMutation,
+    OwnedCatalogMutationOutcome, PeerManagerCommand, PeerManagerReadinessQuery,
 };
 use crate::policy_service::PolicyService;
 use crate::proto::bfd_service_server::BfdServiceServer;
@@ -588,19 +589,6 @@ pub(crate) struct StagedConfigWrite {
 }
 
 impl StagedConfigWrite {
-    /// Publish the staged write. Call only once the runtime change landed.
-    ///
-    /// # Errors
-    ///
-    /// Returns `INTERNAL` if publishing fails after the runtime change was
-    /// already applied: runtime and disk have drifted and only SIGHUP or a
-    /// restart reconciles them.
-    pub(crate) async fn commit(self) -> Result<(), Status> {
-        self.commit_typed()
-            .await
-            .map_err(RuntimeConfigCommitError::into_status)
-    }
-
     /// Publish a staged write with a typed post-runtime result.
     pub(crate) async fn commit_typed(self) -> Result<(), RuntimeConfigCommitError> {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
@@ -680,18 +668,8 @@ const COMMIT_LOST: &str = "config bridge dropped the staged config write after t
 ///
 /// # Errors
 ///
-/// Returns `FAILED_PRECONDITION` when the candidate cannot be written. The
+/// Returns a typed staging error when the candidate cannot be written. The
 /// caller has not mutated anything at that point, and must not.
-pub(crate) async fn stage_runtime_config_event(
-    permit: tokio::sync::mpsc::OwnedPermit<crate::peer_types::ConfigEvent>,
-    build_event: impl FnOnce(crate::peer_types::ConfigPersistAck) -> crate::peer_types::ConfigEvent,
-) -> Result<StagedConfigWrite, Status> {
-    stage_runtime_config_event_typed(permit, build_event)
-        .await
-        .map_err(RuntimeConfigStageError::into_status)
-}
-
-/// Typed form of [`stage_runtime_config_event`] for settlement owners.
 pub(crate) async fn stage_runtime_config_event_typed(
     permit: tokio::sync::mpsc::OwnedPermit<crate::peer_types::ConfigEvent>,
     build_event: impl FnOnce(crate::peer_types::ConfigPersistAck) -> crate::peer_types::ConfigEvent,
@@ -716,66 +694,6 @@ pub(crate) async fn stage_runtime_config_event_typed(
     Ok(StagedConfigWrite { commit_tx })
 }
 
-/// Stage a runtime-config event, run `apply`, then publish the write.
-///
-/// A staging failure returns before `apply` runs at all; an `apply` failure
-/// drops the stage, so the config file is never written. `persist_permit` is
-/// `None` when the daemon has no config file to persist to, in which case
-/// only `apply` runs.
-pub(crate) async fn persist_then_apply<F, Fut>(
-    persist_permit: Option<tokio::sync::mpsc::OwnedPermit<crate::peer_types::ConfigEvent>>,
-    build_event: impl FnOnce(crate::peer_types::ConfigPersistAck) -> crate::peer_types::ConfigEvent,
-    apply: F,
-) -> Result<(), Status>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<(), Status>>,
-{
-    let Some(permit) = persist_permit else {
-        return apply().await;
-    };
-    let staged = stage_runtime_config_event(permit, build_event).await?;
-    // `staged` drops here on an apply failure, discarding the write.
-    apply().await?;
-    staged.commit().await
-}
-
-/// Run a persisted catalog mutation on a detached task: take the shared
-/// runtime-config lock, check the config-transaction mutation gate
-/// inside it, then run `body` (read prior state, apply, persist with
-/// acknowledgement, roll back on persist failure).
-///
-/// The detached task is the ADR-0080 cancellation shield — a client
-/// that disconnects mid-RPC loses only the response, never the
-/// runtime-vs-disk consistency of the mutation. Holding the lock across
-/// the body serializes catalog mutations with SIGHUP reload, FIB-table
-/// and neighbor CRUD, and config transactions; it also makes the
-/// read-prior-then-apply sequence inside `body` race-free, because
-/// every catalog writer takes this same lock.
-///
-/// # Errors
-///
-/// Returns the gate's `FAILED_PRECONDITION`, the body's error, or
-/// `INTERNAL` if the detached task is lost.
-pub(crate) async fn run_shielded_catalog_mutation<F, Fut>(
-    runtime_config_lock: RuntimeConfigCoordinator,
-    config_mutation_gate: Option<ConfigMutationGateFn>,
-    operation: &'static str,
-    body: F,
-) -> Result<(), Status>
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = Result<(), Status>> + Send,
-{
-    let join = tokio::spawn(async move {
-        let _guard = runtime_config_lock.acquire().await?;
-        check_config_mutation_gate(&config_mutation_gate, operation).await?;
-        body().await
-    });
-    join.await
-        .map_err(|_| Status::internal(format!("{operation} task did not complete")))?
-}
-
 /// Server-side deadline for every peer-manager mutation request.
 ///
 /// Reads share a 2 s bound (`actor_read::PEER_MANAGER_READ_TIMEOUT`)
@@ -787,11 +705,7 @@ where
 /// occupancy at ~70 s plus a 133–145 s commit fan-out — roughly 215 s
 /// daemon-side for one legitimate pass. 600 s keeps ~3x headroom over
 /// that worst receipt while still converting a wedged actor into
-/// `DEADLINE_EXCEEDED`. That bound matters doubly here: the mutation
-/// callers run inside `run_shielded_catalog_mutation`, whose detached
-/// task holds the daemon-wide runtime-config lock and outlives client
-/// cancellation, so an unbounded await wedges every catalog mutation,
-/// SIGHUP reload, and config transaction until daemon restart.
+/// `DEADLINE_EXCEEDED`.
 const PEER_MANAGER_MUTATION_TIMEOUT: Duration = Duration::from_mins(10);
 
 /// Send a peer-manager command built around a oneshot reply channel and
@@ -821,15 +735,144 @@ pub(crate) async fn peer_manager_request<R>(
     .map_err(|_| Status::deadline_exceeded("peer manager mutation timed out"))?
 }
 
-/// Send a catalog mutation command to the peer manager and map its
-/// typed failure onto the gRPC status surface.
-pub(crate) async fn apply_catalog_mutation(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    build_command: impl FnOnce(oneshot::Sender<Result<(), CatalogMutationError>>) -> PeerManagerCommand,
-) -> Result<(), Status> {
-    peer_manager_request(peer_mgr_tx, build_command)
-        .await?
-        .map_err(|error| catalog_mutation_error_to_status(&error))
+pub(crate) enum OwnedCatalogDispatch {
+    NotAccepted(Status),
+    Replied(OwnedCatalogMutationOutcome),
+    AcceptedReplyLost(Status),
+}
+
+/// Dispatch one settlement-owned catalog mutation with transport acceptance
+/// kept distinct from loss of the actor's typed reply.
+pub(crate) async fn dispatch_owned_catalog_mutation(
+    peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+    timeout: Duration,
+    mutation: OwnedCatalogMutation,
+) -> OwnedCatalogDispatch {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let command = PeerManagerCommand::OwnedCatalogMutation {
+        mutation,
+        reply: reply_tx,
+    };
+    match tokio::time::timeout(timeout, peer_mgr_tx.send(command)).await {
+        Err(_) => OwnedCatalogDispatch::NotAccepted(Status::unavailable(
+            "peer manager mutation queue timed out before accepting command",
+        )),
+        Ok(Err(_)) => OwnedCatalogDispatch::NotAccepted(Status::unavailable(
+            "peer manager unavailable before accepting command",
+        )),
+        Ok(Ok(())) => match tokio::time::timeout(timeout, reply_rx).await {
+            Err(_) => OwnedCatalogDispatch::AcceptedReplyLost(Status::deadline_exceeded(
+                "peer manager accepted owned catalog mutation but reply timed out",
+            )),
+            Ok(Err(_)) => OwnedCatalogDispatch::AcceptedReplyLost(Status::internal(
+                "peer manager accepted owned catalog mutation but dropped its reply",
+            )),
+            Ok(Ok(outcome)) => OwnedCatalogDispatch::Replied(outcome),
+        },
+    }
+}
+
+/// Attach a two-phase persistence acknowledgement to any owned catalog event.
+pub(crate) fn with_catalog_persist_ack(event: ConfigEvent, ack: ConfigPersistAck) -> ConfigEvent {
+    match event {
+        ConfigEvent::SetPolicy {
+            name, definition, ..
+        } => ConfigEvent::SetPolicy {
+            name,
+            definition,
+            ack: Some(ack),
+        },
+        ConfigEvent::DeletePolicy { name, .. } => ConfigEvent::DeletePolicy {
+            name,
+            ack: Some(ack),
+        },
+        ConfigEvent::SetNeighborSet {
+            name, definition, ..
+        } => ConfigEvent::SetNeighborSet {
+            name,
+            definition,
+            ack: Some(ack),
+        },
+        ConfigEvent::DeleteNeighborSet { name, .. } => ConfigEvent::DeleteNeighborSet {
+            name,
+            ack: Some(ack),
+        },
+        ConfigEvent::SetGlobalImportChain { policy_names, .. } => {
+            ConfigEvent::SetGlobalImportChain {
+                policy_names,
+                ack: Some(ack),
+            }
+        }
+        ConfigEvent::SetGlobalExportChain { policy_names, .. } => {
+            ConfigEvent::SetGlobalExportChain {
+                policy_names,
+                ack: Some(ack),
+            }
+        }
+        ConfigEvent::ClearGlobalImportChain { .. } => {
+            ConfigEvent::ClearGlobalImportChain { ack: Some(ack) }
+        }
+        ConfigEvent::ClearGlobalExportChain { .. } => {
+            ConfigEvent::ClearGlobalExportChain { ack: Some(ack) }
+        }
+        ConfigEvent::SetNeighborImportChain {
+            address,
+            policy_names,
+            ..
+        } => ConfigEvent::SetNeighborImportChain {
+            address,
+            policy_names,
+            ack: Some(ack),
+        },
+        ConfigEvent::SetNeighborExportChain {
+            address,
+            policy_names,
+            ..
+        } => ConfigEvent::SetNeighborExportChain {
+            address,
+            policy_names,
+            ack: Some(ack),
+        },
+        ConfigEvent::ClearNeighborImportChain { address, .. } => {
+            ConfigEvent::ClearNeighborImportChain {
+                address,
+                ack: Some(ack),
+            }
+        }
+        ConfigEvent::ClearNeighborExportChain { address, .. } => {
+            ConfigEvent::ClearNeighborExportChain {
+                address,
+                ack: Some(ack),
+            }
+        }
+        ConfigEvent::SetPeerGroup {
+            name, definition, ..
+        } => ConfigEvent::SetPeerGroup {
+            name,
+            definition,
+            ack: Some(ack),
+        },
+        ConfigEvent::DeletePeerGroup { name, .. } => ConfigEvent::DeletePeerGroup {
+            name,
+            ack: Some(ack),
+        },
+        ConfigEvent::SetNeighborPeerGroup {
+            address,
+            peer_group,
+            ..
+        } => ConfigEvent::SetNeighborPeerGroup {
+            address,
+            peer_group,
+            ack: Some(ack),
+        },
+        ConfigEvent::ClearNeighborPeerGroup { address, .. } => {
+            ConfigEvent::ClearNeighborPeerGroup {
+                address,
+                ack: Some(ack),
+            }
+        }
+        _ => unreachable!("owned catalog mutation produced a non-catalog event"),
+    }
 }
 
 /// Configuration for the gRPC server beyond basic connectivity.
@@ -1705,7 +1748,7 @@ async fn run_tcp_listener(
             config_mutation_gate.clone(),
             runtime_config_lock.clone(),
         )
-        .with_runtime_config_settlement(runtime_config_settlement, daemon_gate),
+        .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone()),
         interceptor.clone(),
     ));
     routes.add_service(PolicyServiceServer::with_interceptor(
@@ -1716,6 +1759,7 @@ async fn run_tcp_listener(
             config_mutation_gate.clone(),
             runtime_config_lock,
         )
+        .with_runtime_config_settlement(runtime_config_settlement, daemon_gate)
         .with_rib_query(rib_query_tx.clone()),
         interceptor.clone(),
     ));
@@ -1933,7 +1977,7 @@ async fn run_uds_listener(
             config_mutation_gate.clone(),
             runtime_config_lock.clone(),
         )
-        .with_runtime_config_settlement(runtime_config_settlement, daemon_gate),
+        .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone()),
         interceptor.clone(),
     ));
     routes.add_service(PolicyServiceServer::with_interceptor(
@@ -1944,6 +1988,7 @@ async fn run_uds_listener(
             config_mutation_gate.clone(),
             runtime_config_lock,
         )
+        .with_runtime_config_settlement(runtime_config_settlement, daemon_gate)
         .with_rib_query(rib_query_tx.clone()),
         interceptor.clone(),
     ));
@@ -2168,23 +2213,6 @@ mod tests {
         assert_eq!(order_rx.recv().await, Some(0));
         assert_eq!(order_rx.recv().await, Some(1));
         assert_eq!(order_rx.recv().await, Some(2));
-    }
-
-    #[tokio::test]
-    async fn closed_coordinator_rejects_catalog_before_body() {
-        let coordinator = RuntimeConfigCoordinator::new();
-        coordinator.close();
-        let body_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let body_ran_task = body_ran.clone();
-        let result =
-            run_shielded_catalog_mutation(coordinator, None, "test.closed", move || async move {
-                body_ran_task.store(true, std::sync::atomic::Ordering::SeqCst);
-                Ok(())
-            })
-            .await;
-
-        assert_eq!(result.unwrap_err().code(), tonic::Code::Unavailable);
-        assert!(!body_ran.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
@@ -2593,67 +2621,5 @@ mod tests {
         assert_eq!(result.unwrap_err().code(), tonic::Code::DeadlineExceeded);
         // Held so the command is accepted but never answered.
         drop(rx);
-    }
-
-    /// The timeout must propagate out of the shielded body so the
-    /// detached task finishes and drops the runtime-config lock guard.
-    /// A timeout that leaked the lock would leave the second mutation
-    /// parked on `lock().await` until this test's own guard expires.
-    #[tokio::test(start_paused = true)]
-    async fn catalog_mutation_after_peer_manager_timeout_acquires_coordinator() {
-        let coordinator = RuntimeConfigCoordinator::new();
-        let (tx, mut rx) = mpsc::channel(2);
-        let responder = tokio::spawn(async move {
-            // First mutation: accept the command but never answer it, so
-            // the shielded body can only finish via the server-side
-            // deadline. Holding the command keeps its reply sender alive.
-            let wedged = rx.recv().await.expect("first command");
-            // Second mutation: answer promptly.
-            match rx.recv().await.expect("second command") {
-                PeerManagerCommand::DeletePeerGroup { reply, .. } => {
-                    let _ = reply.send(Ok(()));
-                }
-                _ => panic!("unexpected command"),
-            }
-            drop(wedged);
-        });
-
-        let wedged_tx = tx.clone();
-        let first = tokio::time::timeout(
-            Duration::from_hours(1),
-            run_shielded_catalog_mutation(
-                coordinator.clone(),
-                None,
-                "test.wedged",
-                move || async move {
-                    apply_catalog_mutation(&wedged_tx, |reply| {
-                        PeerManagerCommand::DeletePeerGroup {
-                            name: "wedged".into(),
-                            reply,
-                        }
-                    })
-                    .await
-                },
-            ),
-        )
-        .await
-        .expect("catalog mutation must be bounded server-side");
-        assert_eq!(first.unwrap_err().code(), tonic::Code::DeadlineExceeded);
-
-        let healthy_tx = tx.clone();
-        let second = tokio::time::timeout(
-            Duration::from_secs(5),
-            run_shielded_catalog_mutation(coordinator, None, "test.healthy", move || async move {
-                apply_catalog_mutation(&healthy_tx, |reply| PeerManagerCommand::DeletePeerGroup {
-                    name: "healthy".into(),
-                    reply,
-                })
-                .await
-            }),
-        )
-        .await
-        .expect("timed-out mutation must release the runtime-config lock");
-        second.expect("second mutation must succeed after the first times out");
-        responder.await.expect("responder task");
     }
 }

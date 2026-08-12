@@ -710,10 +710,10 @@ pub enum PeerManagerCommand {
         mutation: OwnedNeighborMutation,
         reply: oneshot::Sender<OwnedNeighborMutationOutcome>,
     },
-    /// Settlement-owned peer-group definition or membership mutation.
-    OwnedPeerGroupMutation {
-        mutation: OwnedPeerGroupMutation,
-        reply: oneshot::Sender<OwnedPeerGroupMutationOutcome>,
+    /// Settlement-owned peer-group or policy-catalog mutation.
+    OwnedCatalogMutation {
+        mutation: OwnedCatalogMutation,
+        reply: oneshot::Sender<OwnedCatalogMutationOutcome>,
     },
     /// Reconfigure an existing static peer by replacing its live session with
     /// a newly resolved configuration.
@@ -1475,27 +1475,63 @@ pub enum OwnedNeighborMutationOutcome {
     CompensationAmbiguous(OwnedNeighborMutationError),
 }
 
-/// One of the four peer-group mutations protected by settlement ownership.
-pub enum OwnedPeerGroupMutation {
-    Set {
+/// One of the catalog mutations protected by settlement ownership.
+pub enum OwnedCatalogMutation {
+    SetPeerGroup {
         name: String,
         definition: Box<PeerGroupDefinition>,
     },
-    Delete {
+    DeletePeerGroup {
         name: String,
     },
-    SetNeighbor {
+    SetNeighborPeerGroup {
         address: IpAddr,
         peer_group: String,
     },
-    ClearNeighbor {
+    ClearNeighborPeerGroup {
+        address: IpAddr,
+    },
+    SetPolicy {
+        name: String,
+        definition: Box<NamedPolicyDefinition>,
+    },
+    DeletePolicy {
+        name: String,
+    },
+    SetNeighborSet {
+        name: String,
+        definition: NeighborSetDefinition,
+    },
+    DeleteNeighborSet {
+        name: String,
+    },
+    SetGlobalImportChain {
+        policy_names: Vec<String>,
+    },
+    SetGlobalExportChain {
+        policy_names: Vec<String>,
+    },
+    ClearGlobalImportChain,
+    ClearGlobalExportChain,
+    SetNeighborImportChain {
+        address: IpAddr,
+        policy_names: Vec<String>,
+    },
+    SetNeighborExportChain {
+        address: IpAddr,
+        policy_names: Vec<String>,
+    },
+    ClearNeighborImportChain {
+        address: IpAddr,
+    },
+    ClearNeighborExportChain {
         address: IpAddr,
     },
 }
 
-/// Actor-owned settlement proof for a peer-group mutation.
+/// Actor-owned settlement proof for a catalog mutation.
 #[derive(Debug)]
-pub enum OwnedPeerGroupMutationOutcome {
+pub enum OwnedCatalogMutationOutcome {
     /// The requested runtime mutation completed.
     Success,
     /// The actor rejected before producing any runtime effect.

@@ -5,11 +5,11 @@ use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
 use rustbgpd_api::peer_types::{
-    ConfigEvent, DynamicNeighborInfo, OwnedNeighborMutation, OwnedNeighborMutationError,
-    OwnedNeighborMutationOutcome, OwnedPeerGroupMutation, OwnedPeerGroupMutationOutcome,
-    POLICY_EVENT_HISTORY_CAPACITY, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig,
-    PeerManagerReadinessQuery, PolicyDatasetStatusRow, PolicyEvent, SESSION_EVENT_HISTORY_CAPACITY,
-    SessionEvent, SessionLifecycleEvent, StageConfigSnapshotError,
+    ConfigEvent, DynamicNeighborInfo, OwnedCatalogMutation, OwnedNeighborMutation,
+    OwnedNeighborMutationError, OwnedNeighborMutationOutcome, POLICY_EVENT_HISTORY_CAPACITY,
+    PeerKey, PeerManagerCommand, PeerManagerNeighborConfig, PeerManagerReadinessQuery,
+    PolicyDatasetStatusRow, PolicyEvent, SESSION_EVENT_HISTORY_CAPACITY, SessionEvent,
+    SessionLifecycleEvent, StageConfigSnapshotError,
 };
 use rustbgpd_bmp::BmpEvent;
 use rustbgpd_fsm::PeerConfig;
@@ -1012,24 +1012,16 @@ impl PeerManager {
                             };
                             let _ = reply.send(outcome);
                         }
-                        PeerManagerCommand::OwnedPeerGroupMutation { mutation, reply } => {
+                        PeerManagerCommand::OwnedCatalogMutation { mutation, reply } => {
                             let outcome = match mutation {
-                                OwnedPeerGroupMutation::Set { name, definition } => {
+                                OwnedCatalogMutation::SetPeerGroup { name, definition } => {
                                     let event = ConfigEvent::SetPeerGroup {
                                         name: name.clone(),
                                         definition: (*definition).clone(),
                                         ack: None,
                                     };
                                     if self.peer_group_policy_only_update(&name, &definition) {
-                                        match self.apply_policy_change(event, None).await {
-                                            Ok(()) => OwnedPeerGroupMutationOutcome::Success,
-                                            Err(error) => {
-                                                // The existing policy hot-apply seam does not yet
-                                                // carry typed rollback proof. Never infer it from
-                                                // its message; Policy12 will close that boundary.
-                                                OwnedPeerGroupMutationOutcome::CompensationAmbiguous(error)
-                                            }
-                                        }
+                                        self.apply_policy_change_owned(event, None).await
                                     } else {
                                         let affected: Vec<IpAddr> = self.current_config
                                             .neighbors
@@ -1040,22 +1032,98 @@ impl PeerManager {
                                         self.apply_peer_group_change_owned(event, affected).await
                                     }
                                 }
-                                OwnedPeerGroupMutation::Delete { name } => {
+                                OwnedCatalogMutation::DeletePeerGroup { name } => {
                                     self.apply_peer_group_change_owned(
                                         ConfigEvent::DeletePeerGroup { name, ack: None },
                                         Vec::new(),
                                     ).await
                                 }
-                                OwnedPeerGroupMutation::SetNeighbor { address, peer_group } => {
+                                OwnedCatalogMutation::SetNeighborPeerGroup { address, peer_group } => {
                                     self.apply_peer_group_change_owned(
                                         ConfigEvent::SetNeighborPeerGroup { address, peer_group, ack: None },
                                         vec![address],
                                     ).await
                                 }
-                                OwnedPeerGroupMutation::ClearNeighbor { address } => {
+                                OwnedCatalogMutation::ClearNeighborPeerGroup { address } => {
                                     self.apply_peer_group_change_owned(
                                         ConfigEvent::ClearNeighborPeerGroup { address, ack: None },
                                         vec![address],
+                                    ).await
+                                }
+                                OwnedCatalogMutation::SetPolicy { name, definition } => {
+                                    self.apply_policy_change_owned(
+                                        ConfigEvent::SetPolicy {
+                                            name,
+                                            definition: *definition,
+                                            ack: None,
+                                        },
+                                        None,
+                                    ).await
+                                }
+                                OwnedCatalogMutation::DeletePolicy { name } => {
+                                    self.apply_policy_change_owned(
+                                        ConfigEvent::DeletePolicy { name, ack: None },
+                                        None,
+                                    ).await
+                                }
+                                OwnedCatalogMutation::SetNeighborSet { name, definition } => {
+                                    self.apply_policy_change_owned(
+                                        ConfigEvent::SetNeighborSet { name, definition, ack: None },
+                                        None,
+                                    ).await
+                                }
+                                OwnedCatalogMutation::DeleteNeighborSet { name } => {
+                                    self.apply_policy_change_owned(
+                                        ConfigEvent::DeleteNeighborSet { name, ack: None },
+                                        None,
+                                    ).await
+                                }
+                                OwnedCatalogMutation::SetGlobalImportChain { policy_names } => {
+                                    self.apply_policy_change_owned(
+                                        ConfigEvent::SetGlobalImportChain { policy_names, ack: None },
+                                        None,
+                                    ).await
+                                }
+                                OwnedCatalogMutation::SetGlobalExportChain { policy_names } => {
+                                    self.apply_policy_change_owned(
+                                        ConfigEvent::SetGlobalExportChain { policy_names, ack: None },
+                                        None,
+                                    ).await
+                                }
+                                OwnedCatalogMutation::ClearGlobalImportChain => {
+                                    self.apply_policy_change_owned(
+                                        ConfigEvent::ClearGlobalImportChain { ack: None },
+                                        None,
+                                    ).await
+                                }
+                                OwnedCatalogMutation::ClearGlobalExportChain => {
+                                    self.apply_policy_change_owned(
+                                        ConfigEvent::ClearGlobalExportChain { ack: None },
+                                        None,
+                                    ).await
+                                }
+                                OwnedCatalogMutation::SetNeighborImportChain { address, policy_names } => {
+                                    self.apply_policy_change_owned(
+                                        ConfigEvent::SetNeighborImportChain { address, policy_names, ack: None },
+                                        Some(vec![address]),
+                                    ).await
+                                }
+                                OwnedCatalogMutation::SetNeighborExportChain { address, policy_names } => {
+                                    self.apply_policy_change_owned(
+                                        ConfigEvent::SetNeighborExportChain { address, policy_names, ack: None },
+                                        Some(vec![address]),
+                                    ).await
+                                }
+                                OwnedCatalogMutation::ClearNeighborImportChain { address } => {
+                                    self.apply_policy_change_owned(
+                                        ConfigEvent::ClearNeighborImportChain { address, ack: None },
+                                        Some(vec![address]),
+                                    ).await
+                                }
+                                OwnedCatalogMutation::ClearNeighborExportChain { address } => {
+                                    self.apply_policy_change_owned(
+                                        ConfigEvent::ClearNeighborExportChain { address, ack: None },
+                                        Some(vec![address]),
                                     ).await
                                 }
                             };

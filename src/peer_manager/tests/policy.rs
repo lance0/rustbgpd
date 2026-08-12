@@ -957,13 +957,11 @@ async fn reconcile_sweep_rearms_dynamic_peer_on_group_duration_edit() {
     assert!(!mgr.max_prefix_latches.contains_key(&key(addr)));
 }
 
-/// A catalog mutation's fan-out is atomic: when applying the resolved
-/// chains to peer 2 fails mid-loop, peer 1 (already updated) is restored
-/// to its prior chains, peer 3 is never touched, and `current_config`
-/// does not advance — no split-brain where some sessions run the new
-/// policy and others the old.
+/// The owned actor restores peers it can prove, leaves the candidate snapshot
+/// unadopted, and reports ambiguity when the failing session cannot acknowledge
+/// restoration of its own possibly accepted update.
 #[tokio::test]
-async fn apply_policy_change_mid_fanout_failure_restores_prior_chains() {
+async fn owned_policy_change_fences_when_failing_peer_cannot_restore() {
     use rustbgpd_api::peer_types::{NamedPolicyDefinition, PolicyStatementDefinition};
 
     let mut mgr = live_policy_test_manager();
@@ -973,7 +971,7 @@ async fn apply_policy_change_mid_fanout_failure_restores_prior_chains() {
     insert_test_managed_peer(
         &mut mgr,
         a1,
-        acking_policy_handle(a1, SessionState::Idle),
+        acking_policy_handle(a1, SessionState::Established),
         false,
     );
     insert_test_managed_peer(&mut mgr, a2, closed_peer_handle(), false);
@@ -997,8 +995,8 @@ async fn apply_policy_change_mid_fanout_failure_restores_prior_chains() {
         mgr.peers.get_mut(&key(a)).unwrap().import_policy = Some(prior.clone());
     }
 
-    let result = mgr
-        .apply_policy_change(
+    let outcome = mgr
+        .apply_policy_change_owned(
             ConfigEvent::SetPolicy {
                 name: "edge-import".to_string(),
                 definition: NamedPolicyDefinition {
@@ -1012,8 +1010,11 @@ async fn apply_policy_change_mid_fanout_failure_restores_prior_chains() {
         )
         .await;
     assert!(
-        result.is_err(),
-        "a mid-fanout per-peer failure must surface as Err: {result:?}"
+        matches!(
+            &outcome,
+            rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::CompensationAmbiguous(_)
+        ),
+        "unexpected outcome: {outcome:?}"
     );
 
     let expect_prior = format!("{:?}", Some(prior));
@@ -1606,4 +1607,61 @@ async fn channel_full_disable_peer_returns_timeout_instead_of_wedging_manager() 
     );
 
     let _ = finish_tx.send(());
+}
+
+#[tokio::test]
+async fn owned_neighbor_chain_validation_rejects_before_runtime_effect() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(4);
+    let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(4);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let address = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
+    let outcome = mgr
+        .apply_policy_change_owned(
+            rustbgpd_api::peer_types::ConfigEvent::SetNeighborImportChain {
+                address,
+                policy_names: Vec::new(),
+                ack: None,
+            },
+            Some(vec![address]),
+        )
+        .await;
+    assert!(matches!(
+        outcome,
+        rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::RejectedNoEffect(_)
+    ));
+}
+
+#[tokio::test]
+async fn owned_policy_noop_is_typed_success_without_convergence_debt() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(4);
+    let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(4);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let outcome = mgr
+        .apply_policy_change_owned(
+            rustbgpd_api::peer_types::ConfigEvent::ClearGlobalImportChain { ack: None },
+            None,
+        )
+        .await;
+    assert!(matches!(
+        outcome,
+        rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::Success
+    ));
 }
