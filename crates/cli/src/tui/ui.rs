@@ -9,7 +9,6 @@ use crate::commands::neighbor::{
     optional_seconds_label, rfc8212_policy_status_label,
 };
 use crate::output::{format_duration, format_state_with_stale, neighbor_source_label};
-use crate::proto::{ExplainDecision, ExportGateVerdict};
 use crate::tui::app::{App, ExplainState, RibPageState, SortColumn, View, neighbor_key};
 use crate::tui::data::{Freshness, RouteEventEntry, RouteEventKind};
 use crate::tui::theme::Theme;
@@ -752,14 +751,14 @@ fn explain_lines(
     explain: &crate::proto::ExplainAdvertisedRouteResponse,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let decision =
-        match ExplainDecision::try_from(explain.decision).unwrap_or(ExplainDecision::Unspecified) {
-            ExplainDecision::Advertise => "Advertise",
-            ExplainDecision::Deny => "Deny",
-            ExplainDecision::NoBestRoute => "No Best Route",
-            ExplainDecision::UnsupportedFamily => "Unsupported",
-            ExplainDecision::Unspecified => "Unspecified",
-        };
+    let normalized = crate::commands::rib::explain_to_json(explain);
+    let decision = match normalized.decision.as_str() {
+        "advertise" => "Advertise",
+        "deny" => "Deny",
+        "no_best_route" => "No Best Route",
+        "unsupported_family" => "Unsupported",
+        _ => "Unspecified",
+    };
     let mut lines = vec![
         Line::styled(
             format!("Decision: {decision}"),
@@ -767,33 +766,30 @@ fn explain_lines(
                 .fg(theme.header_fg)
                 .add_modifier(Modifier::BOLD),
         ),
-        Line::from(format!("Peer: {}", explain.peer_address)),
-        Line::from(format!(
-            "Prefix: {}/{}",
-            explain.prefix, explain.prefix_length
-        )),
+        Line::from(format!("Peer: {}", normalized.peer_address)),
+        Line::from(format!("Prefix: {}", normalized.prefix)),
     ];
-    if !explain.route_peer_address.is_empty() {
+    if !normalized.route_peer_address.is_empty() {
         lines.push(Line::from(format!(
             "Route peer: {}",
-            explain.route_peer_address
+            normalized.route_peer_address
         )));
     }
-    if !explain.next_hop.is_empty() {
-        lines.push(Line::from(format!("Next hop: {}", explain.next_hop)));
+    if !normalized.next_hop.is_empty() {
+        lines.push(Line::from(format!("Next hop: {}", normalized.next_hop)));
     }
-    if let Some(group) = explain.update_group_id {
+    if let Some(group) = normalized.update_group_id {
         lines.push(Line::from(format!("Update group: {group}")));
     }
     lines.push(Line::from(format!(
         "Adj-RIB-Out sync: {}",
-        if explain.already_advertised {
+        if normalized.already_advertised {
             "already advertised"
         } else {
             "not already advertised"
         }
     )));
-    if !explain.reasons.is_empty() {
+    if !normalized.reasons.is_empty() {
         lines.push(Line::styled(
             "Reasons",
             Style::default()
@@ -801,35 +797,28 @@ fn explain_lines(
                 .add_modifier(Modifier::BOLD),
         ));
         lines.extend(
-            explain
+            normalized
                 .reasons
                 .iter()
                 .map(|r| Line::from(format!("  {}: {}", r.code, r.message))),
         );
     }
-    if !explain.gates.is_empty() {
+    if !normalized.gates.is_empty() {
         lines.push(Line::styled(
             "Export gates",
             Style::default()
                 .fg(theme.header_fg)
                 .add_modifier(Modifier::BOLD),
         ));
-        lines.extend(explain.gates.iter().map(|g| {
-            let verdict = match ExportGateVerdict::try_from(g.verdict)
-                .unwrap_or(ExportGateVerdict::Unspecified)
-            {
-                ExportGateVerdict::Pass => "pass",
-                ExportGateVerdict::Stop => "stop",
-                ExportGateVerdict::NotApplicable => "not applicable",
-                ExportGateVerdict::Unspecified => "unspecified",
-            };
+        lines.extend(normalized.gates.iter().map(|g| {
             Line::from(format!(
-                "  {} | {verdict} | {} | {}",
-                g.gate, g.code, g.detail
+                "  {} | {} | {} | {}",
+                g.gate, g.verdict, g.code, g.detail
             ))
         }));
     }
-    if let Some(m) = &explain.modifications {
+    {
+        let m = &normalized.modifications;
         let mut mods = Vec::new();
         if let Some(v) = m.set_local_pref {
             mods.push(format!("local-pref={v}"));
@@ -841,10 +830,10 @@ fn explain_lines(
             mods.push(format!("next-hop={}", m.set_next_hop));
         }
         if !m.communities_add.is_empty() {
-            mods.push(format!("communities+={:?}", m.communities_add));
+            mods.push(format!("communities+={}", m.communities_add.join(",")));
         }
         if !m.communities_remove.is_empty() {
-            mods.push(format!("communities-={:?}", m.communities_remove));
+            mods.push(format!("communities-={}", m.communities_remove.join(",")));
         }
         if !m.extended_communities_add.is_empty() {
             mods.push(format!(
@@ -1007,7 +996,10 @@ fn optional_u32(value: Option<u32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{GlobalState, HealthResponse, NeighborConfig, NeighborState};
+    use crate::proto::{
+        ExplainDecision, ExportGateVerdict, GlobalState, HealthResponse, NeighborConfig,
+        NeighborState,
+    };
     use crate::tui::data::DataSnapshot;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1613,9 +1605,11 @@ mod tests {
             "local-pref=200",
             "MED=0",
             "prepend=64512x2",
+            "communities+=65000:1",
         ] {
             assert!(rendered.contains(text), "missing {text}");
         }
+        assert!(!rendered.contains("4259840001"));
         app.explain = Some(ExplainState::Ready(Box::new(
             crate::proto::ExplainAdvertisedRouteResponse {
                 decision: ExplainDecision::Advertise as i32,
