@@ -97,7 +97,7 @@ use rustbgpd_api::peer_types::{
 };
 use rustbgpd_api::server::{
     AccessMode as GrpcServerAccessMode, ConfigMutationGateFn, ListenerConfig as GrpcListenerConfig,
-    ListenerEndpoint, ServeConfig,
+    ListenerEndpoint, RuntimeConfigCoordinator, ServeConfig,
 };
 use rustbgpd_wire::{Afi, Safi};
 
@@ -4467,7 +4467,7 @@ async fn run<T>(
     // catalog CRUD, and the SIGHUP reload path hold it across their
     // read/apply/persist sequence so stale TOML snapshots cannot clobber
     // accepted runtime changes.
-    let runtime_config_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let runtime_config_lock = RuntimeConfigCoordinator::new();
     let config_transaction_controller =
         config_transaction_control::ConfigTransactionController::new_accepted(
             fib_table_control::FibTableControlDeps {
@@ -5045,7 +5045,10 @@ async fn run<T>(
                 let accepted_rx = accepted_rx.clone();
                 let live_bindings = config.policy.dataset_bindings.clone();
                 reload_in_flight = Some(tokio::spawn(async move {
-                    let _runtime_config_guard = runtime_config_lock.lock().await;
+                    let Ok(_runtime_config_guard) = runtime_config_lock.acquire().await else {
+                        error!("SIGHUP reload rejected: runtime config coordinator is closed");
+                        return None;
+                    };
                     if let Err(error) = config_transaction_controller
                         .reject_if_pending("SIGHUP reload")
                         .await
@@ -5208,8 +5211,12 @@ async fn run<T>(
     if warm_checkpoint_on_shutdown {
         if let Some(directory) = warm_bundle_directory.clone() {
             let deadline = tokio::time::Instant::now() + WARM_CHECKPOINT_DEADLINE;
-            match tokio::time::timeout_at(deadline, runtime_config_lock.lock()).await {
-                Ok(guard) => _runtime_config_fence = Some(guard),
+            match tokio::time::timeout_at(deadline, runtime_config_lock.acquire()).await {
+                Ok(Ok(guard)) => _runtime_config_fence = Some(guard),
+                Ok(Err(_)) => {
+                    checkpoint_failure =
+                        Some("authoritative runtime-config coordinator is closed".to_string());
+                }
                 Err(_) => {
                     checkpoint_failure = Some(
                         "timed out acquiring the authoritative runtime-config fence".to_string(),

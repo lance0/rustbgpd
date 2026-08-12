@@ -2,12 +2,11 @@
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use rustbgpd_transport::RemovePrivateAs;
 use rustbgpd_wire::{Afi, BgpRole, Safi};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
 use crate::actor_read::{peer_manager_read, rib_manager_read};
@@ -18,8 +17,8 @@ use crate::peer_types::{
 };
 use crate::proto;
 use crate::server::{
-    AccessMode, ConfigMutationGateFn, check_config_mutation_gate, peer_manager_request,
-    persist_then_apply, read_only_rejection,
+    AccessMode, ConfigMutationGateFn, RuntimeConfigCoordinator, check_config_mutation_gate,
+    peer_manager_request, persist_then_apply, read_only_rejection,
 };
 use rustbgpd_rib::{
     EffectiveDistributionMode, NeighborRibSnapshot, NeighborRibSnapshotResponse, RibUpdate,
@@ -87,7 +86,7 @@ pub struct NeighborService {
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     rib_tx: mpsc::Sender<RibUpdate>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
-    runtime_config_lock: Arc<Mutex<()>>,
+    runtime_config_lock: RuntimeConfigCoordinator,
     config_mutation_gate: Option<ConfigMutationGateFn>,
 }
 
@@ -102,28 +101,29 @@ impl NeighborService {
         rib_tx: mpsc::Sender<RibUpdate>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
     ) -> Self {
-        Self::with_runtime_config_lock(
+        Self::with_runtime_config_coordinator(
             local_asn,
             access_mode,
             peer_mgr_tx,
             rib_tx,
             config_tx,
-            Arc::new(Mutex::new(())),
+            RuntimeConfigCoordinator::new(),
             None,
         )
     }
 
-    /// Create a new neighbor service using the shared runtime config lock.
+    /// Create a new neighbor service using the shared runtime config coordinator.
     ///
     /// The daemon wires the same lock into SIGHUP reload and FIB-table CRUD so
     /// persisted runtime mutations cannot interleave with a TOML reload.
-    pub fn with_runtime_config_lock(
+    #[must_use]
+    pub fn with_runtime_config_coordinator(
         _local_asn: u32,
         access_mode: AccessMode,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         rib_tx: mpsc::Sender<RibUpdate>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
-        runtime_config_lock: Arc<Mutex<()>>,
+        runtime_config_lock: RuntimeConfigCoordinator,
         config_mutation_gate: Option<ConfigMutationGateFn>,
     ) -> Self {
         Self {
@@ -147,7 +147,7 @@ impl NeighborService {
         let config_mutation_gate = self.config_mutation_gate.clone();
         let persisted_spec = spec.clone();
         let join = tokio::spawn(async move {
-            let _guard = runtime_config_lock.lock().await;
+            let _guard = runtime_config_lock.acquire().await?;
             check_config_mutation_gate(&config_mutation_gate, "NeighborService.AddNeighbor")
                 .await?;
             persist_then_apply(
@@ -1030,7 +1030,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let runtime_config_lock = self.runtime_config_lock.clone();
         let config_mutation_gate = self.config_mutation_gate.clone();
         let join = tokio::spawn(async move {
-            let _guard = runtime_config_lock.lock().await;
+            let _guard = runtime_config_lock.acquire().await?;
             check_config_mutation_gate(&config_mutation_gate, "NeighborService.DeleteNeighbor")
                 .await?;
             // The session teardown below is irreversible: re-adding the peer
@@ -1324,7 +1324,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let runtime_config_lock = self.runtime_config_lock.clone();
         let config_mutation_gate = self.config_mutation_gate.clone();
         let join = tokio::spawn(async move {
-            let _guard = runtime_config_lock.lock().await;
+            let _guard = runtime_config_lock.acquire().await?;
             check_config_mutation_gate(&config_mutation_gate, "NeighborService.AddDynamicNeighbor")
                 .await?;
             // Stage the write before the matcher changes, so a persistence
@@ -1378,7 +1378,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let runtime_config_lock = self.runtime_config_lock.clone();
         let config_mutation_gate = self.config_mutation_gate.clone();
         let join = tokio::spawn(async move {
-            let _guard = runtime_config_lock.lock().await;
+            let _guard = runtime_config_lock.acquire().await?;
             check_config_mutation_gate(
                 &config_mutation_gate,
                 "NeighborService.DeleteDynamicNeighbor",
@@ -1707,6 +1707,40 @@ mod tests {
                 }),
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn closed_coordinator_rejects_neighbor_before_actor_or_persistence() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let (config_tx, mut config_rx) = mpsc::channel(1);
+        let coordinator = RuntimeConfigCoordinator::new();
+        coordinator.close();
+        let service = NeighborService::with_runtime_config_coordinator(
+            65001,
+            AccessMode::ReadWrite,
+            peer_tx,
+            rib_tx,
+            Some(config_tx),
+            coordinator,
+            None,
+        );
+        let request = intent_request(
+            Some(proto::NeighborConfig {
+                address: "192.0.2.1".to_string(),
+                remote_asn: 65002,
+                ..Default::default()
+            }),
+            Some(Vec::new()),
+        );
+
+        let error = service
+            .add_neighbor(Request::new(request))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(config_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[derive(Clone, PartialEq, Message)]

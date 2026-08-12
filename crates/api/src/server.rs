@@ -11,7 +11,7 @@ use std::time::Duration;
 use futures::StreamExt as FuturesStreamExt;
 use futures::{Future, Stream};
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
@@ -61,6 +61,72 @@ use rustbgpd_telemetry::BgpMetrics;
 
 const MAX_CONCURRENT_GRPC_TLS_HANDSHAKES: usize = 64;
 const GRPC_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Closeable, one-permit serializer for persisted runtime-config mutations.
+#[derive(Clone, Debug)]
+pub struct RuntimeConfigCoordinator(Arc<Semaphore>);
+
+impl RuntimeConfigCoordinator {
+    /// Create an open coordinator.
+    #[must_use]
+    #[allow(
+        clippy::new_without_default,
+        reason = "Default is intentionally absent so coordinator creation stays explicit"
+    )]
+    pub fn new() -> Self {
+        Self(Arc::new(Semaphore::new(1)))
+    }
+
+    /// Wait for exclusive ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeConfigCoordinatorClosed`] after closure.
+    pub async fn acquire(
+        &self,
+    ) -> Result<RuntimeConfigCoordinatorPermit, RuntimeConfigCoordinatorClosed> {
+        self.0
+            .clone()
+            .acquire_owned()
+            .await
+            .map(RuntimeConfigCoordinatorPermit)
+            .map_err(|_| RuntimeConfigCoordinatorClosed)
+    }
+
+    /// Permanently reject queued and future acquisitions.
+    pub fn close(&self) {
+        self.0.close();
+    }
+
+    /// Whether the coordinator has been permanently closed.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
+}
+
+/// Error returned when the runtime-config coordinator is closed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeConfigCoordinatorClosed;
+
+impl std::fmt::Display for RuntimeConfigCoordinatorClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("runtime config coordinator is closed")
+    }
+}
+
+impl std::error::Error for RuntimeConfigCoordinatorClosed {}
+
+impl From<RuntimeConfigCoordinatorClosed> for Status {
+    fn from(error: RuntimeConfigCoordinatorClosed) -> Self {
+        Self::unavailable(error.to_string())
+    }
+}
+
+/// Opaque exclusive runtime-config ownership, released on drop.
+#[must_use = "dropping the runtime-config permit immediately releases ownership"]
+#[derive(Debug)]
+pub struct RuntimeConfigCoordinatorPermit(#[allow(dead_code)] OwnedSemaphorePermit);
 
 fn bounded_handshakes<S, F, T, E>(incoming: S) -> impl Stream<Item = Result<T, E>>
 where
@@ -114,6 +180,12 @@ impl std::fmt::Display for ConfigTransactionApplyError {
 }
 
 impl std::error::Error for ConfigTransactionApplyError {}
+
+impl From<RuntimeConfigCoordinatorClosed> for ConfigTransactionApplyError {
+    fn from(error: RuntimeConfigCoordinatorClosed) -> Self {
+        Self::Unavailable(error.to_string())
+    }
+}
 
 const MAX_CONFIG_CONFIRM_ID_CHARS: usize = 128;
 const MAX_CONFIG_CONFIRM_TIMEOUT_SECONDS: u32 = 86_400;
@@ -219,6 +291,12 @@ impl std::fmt::Display for GnmiSetError {
 }
 
 impl std::error::Error for GnmiSetError {}
+
+impl From<RuntimeConfigCoordinatorClosed> for GnmiSetError {
+    fn from(error: RuntimeConfigCoordinatorClosed) -> Self {
+        Self::Unavailable(error.to_string())
+    }
+}
 
 /// One normalized gNMI Set operation in the wire-mandated application order.
 #[derive(Clone, PartialEq)]
@@ -563,7 +641,7 @@ where
 /// Returns the gate's `FAILED_PRECONDITION`, the body's error, or
 /// `INTERNAL` if the detached task is lost.
 pub(crate) async fn run_shielded_catalog_mutation<F, Fut>(
-    runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
+    runtime_config_lock: RuntimeConfigCoordinator,
     config_mutation_gate: Option<ConfigMutationGateFn>,
     operation: &'static str,
     body: F,
@@ -573,7 +651,7 @@ where
     Fut: std::future::Future<Output = Result<(), Status>> + Send,
 {
     let join = tokio::spawn(async move {
-        let _guard = runtime_config_lock.lock().await;
+        let _guard = runtime_config_lock.acquire().await?;
         check_config_mutation_gate(&config_mutation_gate, operation).await?;
         body().await
     });
@@ -750,7 +828,7 @@ pub struct ServeConfig {
     /// SIGHUP reload. The daemon wires this to dynamic-neighbor CRUD and
     /// FIB-table CRUD so accepted runtime mutations cannot be clobbered by a
     /// reload that read stale TOML before the persistence acknowledgement.
-    pub runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
+    pub runtime_config_lock: RuntimeConfigCoordinator,
     /// Live ADR-0061 per-route FIB dataplane event source. This is
     /// separate from the aggregate dataplane poller so route events
     /// are not delayed by snapshot polling.
@@ -1368,7 +1446,7 @@ async fn run_tcp_listener(
     config_history_list: Option<ConfigHistoryListFn>,
     config_rollback: Option<ConfigRollbackFn>,
     config_mutation_gate: Option<ConfigMutationGateFn>,
-    runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
+    runtime_config_lock: RuntimeConfigCoordinator,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
     bfd_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
@@ -1477,7 +1555,7 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(NeighborServiceServer::with_interceptor(
-        NeighborService::with_runtime_config_lock(
+        NeighborService::with_runtime_config_coordinator(
             asn,
             access_mode,
             peer_mgr_tx.clone(),
@@ -1489,7 +1567,7 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(PeerGroupServiceServer::with_interceptor(
-        PeerGroupService::with_runtime_config_lock(
+        PeerGroupService::with_runtime_config_coordinator(
             access_mode,
             peer_mgr_tx.clone(),
             config_tx.clone(),
@@ -1499,7 +1577,7 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(PolicyServiceServer::with_interceptor(
-        PolicyService::with_runtime_config_lock(
+        PolicyService::with_runtime_config_coordinator(
             access_mode,
             peer_mgr_tx.clone(),
             config_tx.clone(),
@@ -1631,7 +1709,7 @@ async fn run_uds_listener(
     config_history_list: Option<ConfigHistoryListFn>,
     config_rollback: Option<ConfigRollbackFn>,
     config_mutation_gate: Option<ConfigMutationGateFn>,
-    runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
+    runtime_config_lock: RuntimeConfigCoordinator,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
     bfd_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
@@ -1701,7 +1779,7 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(NeighborServiceServer::with_interceptor(
-        NeighborService::with_runtime_config_lock(
+        NeighborService::with_runtime_config_coordinator(
             asn,
             access_mode,
             peer_mgr_tx.clone(),
@@ -1713,7 +1791,7 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(PeerGroupServiceServer::with_interceptor(
-        PeerGroupService::with_runtime_config_lock(
+        PeerGroupService::with_runtime_config_coordinator(
             access_mode,
             peer_mgr_tx.clone(),
             config_tx.clone(),
@@ -1723,7 +1801,7 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(PolicyServiceServer::with_interceptor(
-        PolicyService::with_runtime_config_lock(
+        PolicyService::with_runtime_config_coordinator(
             access_mode,
             peer_mgr_tx.clone(),
             config_tx.clone(),
@@ -1897,6 +1975,80 @@ mod tests {
             "config transaction timed out waiting for the runtime config coordinator; \
              coordinator ownership was not acquired and apply did not begin"
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_config_coordinator_close_rejects_waiters_and_future_acquirers() {
+        let coordinator = RuntimeConfigCoordinator::new();
+        let owner = coordinator.acquire().await.expect("initial owner");
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let mut waiters = Vec::new();
+        for _ in 0..2 {
+            let coordinator = coordinator.clone();
+            let started_tx = started_tx.clone();
+            waiters.push(tokio::spawn(async move {
+                started_tx.send(()).expect("started receiver");
+                coordinator.acquire().await
+            }));
+        }
+        drop(started_tx);
+        started_rx.recv().await.expect("first waiter started");
+        started_rx.recv().await.expect("second waiter started");
+        tokio::task::yield_now().await;
+
+        coordinator.close();
+        coordinator.close();
+        assert!(coordinator.is_closed());
+        for waiter in waiters {
+            assert_eq!(
+                waiter.await.expect("waiter task").unwrap_err(),
+                RuntimeConfigCoordinatorClosed
+            );
+        }
+
+        // Closure does not revoke the already-issued opaque owner, and
+        // releasing that owner cannot reopen the coordinator.
+        drop(owner);
+        assert!(coordinator.acquire().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn runtime_config_coordinator_preserves_fifo_acquisition() {
+        let coordinator = RuntimeConfigCoordinator::new();
+        let owner = coordinator.acquire().await.expect("initial owner");
+        let (order_tx, mut order_rx) = mpsc::unbounded_channel();
+        for index in 0..3 {
+            let coordinator = coordinator.clone();
+            let order_tx = order_tx.clone();
+            tokio::spawn(async move {
+                let _guard = coordinator.acquire().await.expect("queued owner");
+                order_tx.send(index).expect("order receiver");
+            });
+            tokio::task::yield_now().await;
+        }
+        drop(order_tx);
+        drop(owner);
+
+        assert_eq!(order_rx.recv().await, Some(0));
+        assert_eq!(order_rx.recv().await, Some(1));
+        assert_eq!(order_rx.recv().await, Some(2));
+    }
+
+    #[tokio::test]
+    async fn closed_coordinator_rejects_catalog_before_body() {
+        let coordinator = RuntimeConfigCoordinator::new();
+        coordinator.close();
+        let body_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let body_ran_task = body_ran.clone();
+        let result =
+            run_shielded_catalog_mutation(coordinator, None, "test.closed", move || async move {
+                body_ran_task.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .await;
+
+        assert_eq!(result.unwrap_err().code(), tonic::Code::Unavailable);
+        assert!(!body_ran.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
@@ -2312,8 +2464,8 @@ mod tests {
     /// A timeout that leaked the lock would leave the second mutation
     /// parked on `lock().await` until this test's own guard expires.
     #[tokio::test(start_paused = true)]
-    async fn catalog_mutation_after_peer_manager_timeout_acquires_lock() {
-        let lock = Arc::new(tokio::sync::Mutex::new(()));
+    async fn catalog_mutation_after_peer_manager_timeout_acquires_coordinator() {
+        let coordinator = RuntimeConfigCoordinator::new();
         let (tx, mut rx) = mpsc::channel(2);
         let responder = tokio::spawn(async move {
             // First mutation: accept the command but never answer it, so
@@ -2333,13 +2485,20 @@ mod tests {
         let wedged_tx = tx.clone();
         let first = tokio::time::timeout(
             Duration::from_hours(1),
-            run_shielded_catalog_mutation(lock.clone(), None, "test.wedged", move || async move {
-                apply_catalog_mutation(&wedged_tx, |reply| PeerManagerCommand::DeletePeerGroup {
-                    name: "wedged".into(),
-                    reply,
-                })
-                .await
-            }),
+            run_shielded_catalog_mutation(
+                coordinator.clone(),
+                None,
+                "test.wedged",
+                move || async move {
+                    apply_catalog_mutation(&wedged_tx, |reply| {
+                        PeerManagerCommand::DeletePeerGroup {
+                            name: "wedged".into(),
+                            reply,
+                        }
+                    })
+                    .await
+                },
+            ),
         )
         .await
         .expect("catalog mutation must be bounded server-side");
@@ -2348,7 +2507,7 @@ mod tests {
         let healthy_tx = tx.clone();
         let second = tokio::time::timeout(
             Duration::from_secs(5),
-            run_shielded_catalog_mutation(lock, None, "test.healthy", move || async move {
+            run_shielded_catalog_mutation(coordinator, None, "test.healthy", move || async move {
                 apply_catalog_mutation(&healthy_tx, |reply| PeerManagerCommand::DeletePeerGroup {
                     name: "healthy".into(),
                     reply,

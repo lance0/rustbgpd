@@ -463,7 +463,7 @@ impl ConfigTransactionController {
         let join = tokio::spawn(async move {
             let _guard = tokio::time::timeout(
                 CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT,
-                Arc::clone(&self.deps.lock).lock_owned(),
+                self.deps.lock.acquire(),
             )
             .await
             .map_err(|_| {
@@ -472,7 +472,7 @@ impl ConfigTransactionController {
                      coordinator ownership was not acquired and apply did not begin"
                         .to_string(),
                 )
-            })?;
+            })??;
             self.apply_locked(request, confirmed).await
         });
 
@@ -488,7 +488,7 @@ impl ConfigTransactionController {
         transaction: rustbgpd_api::server::GnmiSetTransaction,
     ) -> Result<GnmiSetOutcome, GnmiSetError> {
         let join = tokio::spawn(async move {
-            let _guard = self.deps.lock.lock().await;
+            let _guard = self.deps.lock.acquire().await?;
             match transaction.commit_action.clone() {
                 Some(GnmiSetCommitAction::Confirm { confirm_id }) => {
                     let confirm_id =
@@ -812,7 +812,7 @@ impl ConfigTransactionController {
     ) -> Result<proto::ConfirmConfigTransactionResponse, ConfigTransactionApplyError> {
         let confirm_id = validate_confirm_id(&request.confirm_id)?;
         let join = tokio::spawn(async move {
-            let _guard = self.deps.lock.lock().await;
+            let _guard = self.deps.lock.acquire().await?;
             self.confirm_locked(confirm_id).await
         });
         join.await.map_err(|_| {
@@ -869,7 +869,7 @@ impl ConfigTransactionController {
     ) -> Result<proto::AbortConfigTransactionResponse, ConfigTransactionApplyError> {
         let confirm_id = validate_confirm_id(&request.confirm_id)?;
         let join = tokio::spawn(async move {
-            let _guard = self.deps.lock.lock().await;
+            let _guard = self.deps.lock.acquire().await?;
             self.abort_locked(confirm_id).await
         });
         join.await.map_err(|_| {
@@ -1107,7 +1107,7 @@ impl ConfigTransactionController {
             ));
         }
         let join = tokio::spawn(async move {
-            let _guard = self.deps.lock.lock().await;
+            let _guard = self.deps.lock.acquire().await?;
             // Resolve the entry under the coordinator lock so a concurrent
             // commit cannot shift indexes between resolution and apply.
             let dir = self.history_dir()?;
@@ -1281,7 +1281,7 @@ impl ConfigTransactionController {
 
     async fn auto_revert(self, confirm_id: String) -> Result<(), ConfigTransactionApplyError> {
         let join = tokio::spawn(async move {
-            let _guard = self.deps.lock.lock().await;
+            let _guard = self.deps.lock.acquire().await?;
             let Some(pending) = self.pending_for_timeout(&confirm_id).await else {
                 return Ok(());
             };
@@ -1737,7 +1737,7 @@ async fn apply_config_transaction(
     validate_apply_request(&request)?;
 
     let join = tokio::spawn(async move {
-        let _guard = deps.lock.lock().await;
+        let _guard = deps.lock.acquire().await?;
         apply_config_transaction_locked(&deps, request, None)
             .await
             .map_err(|failure| failure.error)
@@ -1758,7 +1758,7 @@ async fn apply_config_transaction_with_internal(
 ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
     validate_apply_request(&request)?;
     let join = tokio::spawn(async move {
-        let _guard = deps.lock.lock().await;
+        let _guard = deps.lock.acquire().await?;
         apply_config_transaction_locked(&deps, request, Some(&peer_mgr_internal_tx))
             .await
             .map_err(|failure| failure.error)
@@ -3686,6 +3686,68 @@ remote_asn = 65002
         assert!(reload[..legacy].ends_with("#[cfg(test)]\n"));
     }
 
+    #[test]
+    fn runtime_config_coordinator_inventory_is_complete_and_closed() {
+        fn production(source: &'static str) -> &'static str {
+            source
+                .split_once("\n#[cfg(test)]\nmod tests")
+                .map_or(source, |v| v.0)
+        }
+
+        let server = production(include_str!("../crates/api/src/server.rs"));
+        let neighbor = production(include_str!("../crates/api/src/neighbor_service.rs"));
+        let peer_group = production(include_str!("../crates/api/src/peer_group_service.rs"));
+        let policy = production(include_str!("../crates/api/src/policy_service.rs"));
+        let fib = production(include_str!("fib_table_control.rs"));
+        let transaction = production(include_str!("config_transaction_control.rs"))
+            .split_once("\n#[cfg(test)]\nasync fn apply_config_transaction(")
+            .unwrap()
+            .0;
+        let main = production(include_str!("main.rs"));
+        let owners = [server, neighbor, peer_group, policy, fib, transaction, main];
+
+        #[rustfmt::skip]
+        let inventory = [
+            (main, "RuntimeConfigCoordinator::new()", 1),
+            (main, "\n                lock: runtime_config_lock.clone(),", 2),
+            (main, "runtime_config_lock: runtime_config_lock.clone(),", 1),
+            (main, "let Ok(_runtime_config_guard) = runtime_config_lock.acquire().await else {", 1),
+            (main, "tokio::time::timeout_at(deadline, runtime_config_lock.acquire()).await", 1),
+            (transaction, "self.deps.lock.acquire()", 6),
+            (fib, ".acquire()", 2),
+            (neighbor, "runtime_config_lock.acquire()", 4),
+            (server, "runtime_config_lock.acquire()", 1),
+            (peer_group, "run_shielded_catalog_mutation(", 1),
+            (policy, "run_shielded_catalog_mutation(", 1),
+            (peer_group, "self.run_mutation(", 4),
+            (policy, "self.run_mutation(", 12),
+        ];
+        for (source, shape, count) in inventory {
+            assert_eq!(source.matches(shape).count(), count, "{shape}");
+        }
+
+        #[rustfmt::skip]
+        let prohibited_apis = ["add_permits", "forget", "acquire_many", "wait_idle", "reopen", "pub fn reset", "impl Default for RuntimeConfigCoordinator"];
+        for prohibited in prohibited_apis {
+            assert!(!server.contains(prohibited), "{prohibited}");
+        }
+        assert_eq!(server.matches(".close();").count(), 1);
+        assert!(
+            owners[1..]
+                .iter()
+                .all(|source| !source.contains(".close();"))
+        );
+        let qualified_mutex = ["Arc<tokio::sync::Mutex<", "()>>"].concat();
+        let imported_mutex = ["Arc<Mutex<", "()>>"].concat();
+        for source in &owners[..6] {
+            assert!(!source.contains(&qualified_mutex));
+            assert!(!source.contains(&imported_mutex));
+        }
+        assert!(!main.contains(
+            "let runtime_config_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));"
+        ));
+    }
+
     /// LAN-910: the `[[dynamic_neighbors]]` executor commits by snapshot
     /// replacement, so this inventory comparison is its only listener fence —
     /// `delete_dynamic_range`'s per-range fence never runs for transactions.
@@ -5090,7 +5152,7 @@ peer_group = "{group}"
             peer_mgr_tx,
             rib_tx: None,
             config_tx,
-            lock: Arc::new(Mutex::new(())),
+            lock: rustbgpd_api::server::RuntimeConfigCoordinator::new(),
             config_mutation_gate: None,
             startup_tables,
             confirm_journal_path: None,
@@ -5114,8 +5176,8 @@ peer_group = "{group}"
 
     #[tokio::test(start_paused = true)]
     async fn apply_times_out_before_coordinator_ownership_without_mutation() {
-        let coordinator = Arc::new(Mutex::new(()));
-        let blocker = coordinator.lock().await;
+        let coordinator = rustbgpd_api::server::RuntimeConfigCoordinator::new();
+        let blocker = coordinator.acquire().await.expect("coordinator owner");
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (fib_tx, mut fib_rx) = mpsc::channel(1);
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
@@ -5124,7 +5186,7 @@ peer_group = "{group}"
         let journal = runtime.path().join("commit-confirm-journal.json");
         let controller = ConfigTransactionController::new(
             FibTableControlDeps {
-                lock: Arc::clone(&coordinator),
+                lock: coordinator.clone(),
                 rib_tx: Some(rib_tx),
                 confirm_journal_path: Some(journal.clone()),
                 ..deps_value(Some(fib_tx), peer_tx, Some(config_tx), Vec::new())
@@ -5203,6 +5265,57 @@ peer_group = "{group}"
         assert!(fib_rx.try_recv().is_err());
         assert!(rib_rx.try_recv().is_err());
         assert!(config_rx.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn apply_close_before_deadline_is_unavailable_without_mutation() {
+        let coordinator = rustbgpd_api::server::RuntimeConfigCoordinator::new();
+        let _owner = coordinator.acquire().await.expect("coordinator owner");
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (fib_tx, mut fib_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let (config_tx, mut config_rx) = mpsc::channel(1);
+        let runtime = tempfile::tempdir().unwrap();
+        let journal = runtime.path().join("commit-confirm-journal.json");
+        let controller = ConfigTransactionController::new(
+            FibTableControlDeps {
+                lock: coordinator.clone(),
+                rib_tx: Some(rib_tx),
+                confirm_journal_path: Some(journal.clone()),
+                ..deps_value(Some(fib_tx), peer_tx, Some(config_tx), Vec::new())
+            },
+            BgpMetrics::new(),
+        );
+        let apply = tokio::spawn(controller.clone().apply(confirmed_dynamic_request(
+            base_toml("[peer_groups.blocked]"),
+            "closed-apply",
+            60,
+        )));
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_secs(599)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !apply.is_finished(),
+            "apply ended before coordinator closure"
+        );
+        coordinator.close();
+        let error = apply.await.unwrap().unwrap_err();
+        assert!(
+            matches!(error, ConfigTransactionApplyError::Unavailable(ref message)
+                if message.contains("coordinator is closed")),
+            "{error:?}"
+        );
+        assert!(peer_rx.try_recv().is_err());
+        assert!(fib_rx.try_recv().is_err());
+        assert!(rib_rx.try_recv().is_err());
+        assert!(config_rx.try_recv().is_err());
+        assert!(!journal.exists());
+        let state = controller.state.lock().await;
+        assert!(state.applying_confirm_id.is_none());
+        assert!(state.pending.is_none());
+        assert!(state.last.is_none());
+        assert!(state.ambiguous_failure_confirm_id.is_none());
     }
 
     #[tokio::test]
@@ -6128,7 +6241,7 @@ families = ["ipv4_unicast"]
                 peer_mgr_tx: peer_tx,
                 rib_tx: None,
                 config_tx: Some(config_tx),
-                lock: Arc::new(Mutex::new(())),
+                lock: rustbgpd_api::server::RuntimeConfigCoordinator::new(),
                 config_mutation_gate: None,
                 startup_tables: vec![original],
                 confirm_journal_path: Some(journal.clone()),
