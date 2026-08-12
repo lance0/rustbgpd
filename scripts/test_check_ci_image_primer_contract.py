@@ -5,12 +5,13 @@ import os
 import shutil
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 from pathlib import Path
 
 from scripts import classify_heavy_ci_paths as heavy
-from scripts.check_ci_image_primer_contract import check
+from scripts.check_ci_image_primer_contract import INTEROP, KERNEL, _list_needs, check
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,12 +91,16 @@ class PrimerContractTests(unittest.TestCase):
             root = Path(temporary)
             for fixture in (
                 ".github/workflows",
+                ".github/actions/install-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
             ):
                 source = ROOT / fixture
                 target = root / fixture
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(source, target)
+            installer = root / ".github" / "scripts" / "install-grpcurl.sh"
+            installer.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / installer.relative_to(root), installer)
             shutil.copy2(ROOT / "Dockerfile", root / "Dockerfile")
             gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
             gobgp.parent.mkdir(parents=True, exist_ok=True)
@@ -114,6 +119,227 @@ class PrimerContractTests(unittest.TestCase):
 
     def test_live_contract(self):
         self.assertEqual([], check(ROOT))
+
+    def test_empty_flow_needs_is_empty(self):
+        self.assertEqual([], _list_needs("    needs: []\n"))
+        self.assertEqual(
+            ["producer", "primer"],
+            _list_needs("    needs: [producer, primer]\n"),
+        )
+
+    def test_missing_grpcurl_installer_returns_contract_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for fixture in (
+                ".github/workflows",
+                ".github/actions/install-grpcurl-artifact",
+                ".github/actions/setup-dataplane-host",
+            ):
+                shutil.copytree(ROOT / fixture, root / fixture)
+            shutil.copy2(ROOT / "Dockerfile", root / "Dockerfile")
+            gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
+            gobgp.parent.mkdir(parents=True)
+            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
+            self.assertIn("install-grpcurl.sh is missing", check(root))
+
+    def test_grpcurl_installer_executable_mode_is_load_bearing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for fixture in (
+                ".github/workflows",
+                ".github/actions/install-grpcurl-artifact",
+                ".github/actions/setup-dataplane-host",
+            ):
+                shutil.copytree(ROOT / fixture, root / fixture)
+            shutil.copy2(ROOT / "Dockerfile", root / "Dockerfile")
+            gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
+            gobgp.parent.mkdir(parents=True)
+            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
+            installer = root / ".github" / "scripts" / "install-grpcurl.sh"
+            installer.parent.mkdir(parents=True)
+            shutil.copy2(ROOT / installer.relative_to(root), installer)
+            installer.chmod(0o644)
+            self.assertIn(
+                "install-grpcurl.sh must have exact executable mode 100755",
+                check(root),
+            )
+
+    def run_aggregate(self, workflow, run_labs, results):
+        text = (ROOT / ".github" / "workflows" / workflow).read_text()
+        block = text.rsplit("\n  check:\n", 1)[1]
+        script = block.split("          python3 - <<'PY'\n", 1)[1].split(
+            "\n          PY", 1
+        )[0]
+        script = textwrap.dedent(script)
+        roster = INTEROP if workflow == "interop.yml" else KERNEL
+        expected = ["classify_changes", "grpcurl_archive", "prime_dev_image", *roster]
+        if workflow == "kernel-dataplane.yml":
+            expected.append("netns")
+        needs = {
+            job: {
+                "result": results.get(job, "success"),
+                "outputs": {"run_labs": run_labs} if job == "classify_changes" else {},
+            }
+            for job in expected
+        }
+        return subprocess.run(
+            ["python3", "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "NEEDS_CONTEXT": json.dumps(needs),
+                "EXPECTED_JOBS": " ".join(expected),
+            },
+        )
+
+    def test_heavy_workflow_aggregate_truth_table(self):
+        for workflow in ("interop.yml", "kernel-dataplane.yml"):
+            with self.subTest(workflow=workflow, state="labs run"):
+                self.assertEqual(0, self.run_aggregate(workflow, "true", {}).returncode)
+
+            roster = INTEROP if workflow == "interop.yml" else KERNEL
+            skipped = {
+                job: "skipped" for job in ["grpcurl_archive", "prime_dev_image", *roster]
+            }
+            if workflow == "kernel-dataplane.yml":
+                skipped["netns"] = "skipped"
+            with self.subTest(workflow=workflow, state="docs only"):
+                self.assertEqual(
+                    0, self.run_aggregate(workflow, "false", skipped).returncode
+                )
+
+            for result in ("failure", "cancelled", "skipped"):
+                with self.subTest(workflow=workflow, producer=result):
+                    self.assertNotEqual(
+                        0,
+                        self.run_aggregate(
+                            workflow, "true", {"grpcurl_archive": result}
+                        ).returncode,
+                    )
+            with self.subTest(workflow=workflow, state="producer red consumers skipped"):
+                failed = {job: "skipped" for job in roster}
+                failed.update({"grpcurl_archive": "failure"})
+                self.assertNotEqual(
+                    0, self.run_aggregate(workflow, "true", failed).returncode
+                )
+            for run_labs, results in (
+                ("", {}),
+                ("unknown", {}),
+                ("true", {"classify_changes": "failure"}),
+                ("false", {"grpcurl_archive": "success"}),
+            ):
+                with self.subTest(workflow=workflow, state=(run_labs, results)):
+                    self.assertNotEqual(
+                        0,
+                        self.run_aggregate(workflow, run_labs, results).returncode,
+                    )
+
+    def test_grpcurl_producers_are_load_bearing(self):
+        archive = "grpcurl_1.9.1_linux_x86_64.tar.gz"
+        checksum = "588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214"
+        for workflow in ("interop.yml", "kernel-dataplane.yml"):
+            relative = f".github/workflows/{workflow}"
+            cases = (
+                ("  grpcurl_archive:\n", "  removed_grpcurl_archive:\n", 0),
+                ("needs: classify_changes", "needs: []", 0),
+                (
+                    "if: needs.classify_changes.outputs.run_labs == 'true'",
+                    "if: false",
+                    0,
+                ),
+                ("timeout-minutes: 10", "timeout-minutes: 9", 0),
+                ("ref: ${{ github.sha }}", "ref: main", 0),
+                ("actions/cache@v6", "actions/cache@main", 0),
+                (f"key: grpcurl-v1.9.1-linux-x86_64-{checksum}", "key: grpcurl", 0),
+                ("--prepare-archive", "--install-archive", 0),
+                ("actions/upload-artifact@v7", "actions/upload-artifact@main", 0),
+                ("name: grpcurl-v1.9.1-linux-x86_64", "name: grpcurl-latest", 0),
+                ("if-no-files-found: error", "if-no-files-found: warn", 0),
+                ("retention-days: 1", "retention-days: 30", 0),
+                ("compression-level: 0", "compression-level: 6", 0),
+                (
+                    f"key: grpcurl-v1.9.1-linux-x86_64-{checksum}",
+                    f"key: grpcurl-v1.9.1-linux-x86_64-{checksum}\n          restore-keys: grpcurl-",
+                    0,
+                ),
+                (
+                    "uses: actions/cache@v6",
+                    "uses: actions/cache@v6\n        continue-on-error: true",
+                    0,
+                ),
+            )
+            for old, new, occurrence in cases:
+                with self.subTest(workflow=workflow, seam=old, occurrence=occurrence):
+                    self.mutate(relative, old, new, occurrence=occurrence)
+            for occurrence in (0, 1):
+                with self.subTest(workflow=workflow, path=occurrence):
+                    self.mutate(
+                        relative,
+                        f"path: ${{{{ runner.temp }}}}/grpcurl-cache/{archive}",
+                        "path: ${{ runner.temp }}/grpcurl-cache/wrong.tar.gz",
+                        occurrence=occurrence,
+                    )
+
+    def test_grpcurl_offline_consumer_is_load_bearing(self):
+        relative = ".github/actions/install-grpcurl-artifact/action.yml"
+        for old, new in (
+            ("actions/download-artifact@v8", "actions/download-artifact@main"),
+            ("name: grpcurl-v1.9.1-linux-x86_64", "name: grpcurl-latest"),
+            (
+                "path: ${{ runner.temp }}/grpcurl-artifact",
+                "path: ${{ runner.temp }}/wrong",
+            ),
+            ("--install-archive", "--prepare-archive"),
+            (
+                "set -euo pipefail",
+                "set -euo pipefail\n        curl https://example.invalid/grpcurl",
+            ),
+            (
+                "uses: actions/download-artifact@v8",
+                "uses: actions/download-artifact@v8\n    - uses: actions/cache@v6",
+            ),
+        ):
+            with self.subTest(seam=old):
+                self.mutate(relative, old, new)
+
+        self.mutate(
+            ".github/actions/setup-dataplane-host/action.yml",
+            "uses: ./.github/actions/install-grpcurl-artifact",
+            "uses: ./.github/actions/install-containerlab",
+        )
+        self.mutate(
+            ".github/workflows/interop.yml",
+            "uses: ./.github/actions/install-grpcurl-artifact",
+            "run: bash .github/scripts/install-grpcurl.sh",
+        )
+
+    def test_heavy_workflow_aggregate_source_is_load_bearing(self):
+        for workflow, lab in (
+            ("interop.yml", "m1"),
+            ("kernel-dataplane.yml", "m36"),
+        ):
+            relative = f".github/workflows/{workflow}"
+            needs_prefix = (
+                "needs: [classify_changes, grpcurl_archive, prime_dev_image, "
+            )
+            for old, new in (
+                ("if: ${{ always() }}", "if: success()"),
+                ("NEEDS_CONTEXT: ${{ toJSON(needs) }}", "NEEDS_CONTEXT: '{}'"),
+                (f"{needs_prefix}{lab},", needs_prefix),
+                (
+                    'classifier.get("result") != "success"',
+                    'classifier.get("result") == "success"',
+                ),
+                ("result != expected_result", "False"),
+                (
+                    "    if: ${{ always() }}",
+                    "    continue-on-error: true\n    if: ${{ always() }}",
+                ),
+            ):
+                with self.subTest(workflow=workflow, seam=old):
+                    self.mutate(relative, old, new)
 
     def test_classifier_workflow_wiring_is_load_bearing(self):
         for workflow in ("interop.yml", "kernel-dataplane.yml"):
@@ -142,7 +368,7 @@ class PrimerContractTests(unittest.TestCase):
                     ".github/workflows/kernel-dataplane.yml",
                     old,
                     f"# {old}",
-                    occurrence=1,
+                    occurrence=2,
                 )
 
     def test_destructive_workflow_seams(self):
@@ -184,7 +410,11 @@ class PrimerContractTests(unittest.TestCase):
                 "cancel-in-progress: false",
                 "cancel-in-progress: true",
             ),
-            (".github/workflows/interop.yml", "needs: prime_dev_image", "needs: []"),
+            (
+                ".github/workflows/interop.yml",
+                "needs: [grpcurl_archive, prime_dev_image]",
+                "needs: []",
+            ),
             (
                 ".github/workflows/interop.yml",
                 "cache-from: type=gha,scope=rustbgpd-dev",
@@ -300,7 +530,7 @@ class PrimerContractTests(unittest.TestCase):
                 interop,
                 "actions/checkout@v7",
                 "actions/checkout@main",
-                occurrence=1,
+                occurrence=3,
             )
 
         kernel = ".github/workflows/kernel-dataplane.yml"
@@ -309,10 +539,14 @@ class PrimerContractTests(unittest.TestCase):
                 kernel,
                 "actions/checkout@v7",
                 "actions/checkout@main",
-                occurrence=1,
+                occurrence=3,
             )
         with self.subTest(workflow=kernel, seam="consumer needs"):
-            self.mutate(kernel, "needs: prime_dev_image", "needs: []")
+            self.mutate(
+                kernel,
+                "needs: [grpcurl_archive, prime_dev_image]",
+                "needs: []",
+            )
 
     def test_destructive_consumer_action_seams(self):
         relative = ".github/actions/setup-dataplane-host/action.yml"
@@ -361,7 +595,7 @@ class PrimerContractTests(unittest.TestCase):
             count = (ROOT / relative).read_text().count("missing M92 seam")
             self.assertGreater(count, 0, "missing M92 seam: synthetic")
         for old in (
-            "          bash .github/scripts/install-grpcurl.sh\n",
+            "        uses: ./.github/actions/install-grpcurl-artifact\n",
             "      - name: Run M92\n        uses: ./.github/actions/run-interop-test\n",
             "      - name: Run M92 negative completeness proof\n        uses: ./.github/actions/run-interop-test\n",
             '          M92_COMPLETENESS_NEGATIVE: "1"\n',

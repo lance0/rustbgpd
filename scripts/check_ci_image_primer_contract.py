@@ -6,6 +6,7 @@ from __future__ import annotations
 import collections
 import hashlib
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -49,6 +50,11 @@ V064_SHA256 = "bd4829de08d0c50074f9ecd5c351399fae42be06d456b3880a04aa4a7cda1137"
 V064_ARCHIVE = "rustbgpd-linux-amd64.tar.gz"
 V064_ARTIFACT = "rustbgpd-v0.64.0-linux-amd64"
 V064_CACHE_KEY = f"rustbgpd-v0.64.0-linux-amd64-{V064_SHA256}"
+GRPCURL_SHA256 = "588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214"
+GRPCURL_ARCHIVE = "grpcurl_1.9.1_linux_x86_64.tar.gz"
+GRPCURL_ARTIFACT = "grpcurl-v1.9.1-linux-x86_64"
+GRPCURL_CACHE_KEY = f"grpcurl-v1.9.1-linux-x86_64-{GRPCURL_SHA256}"
+GRPCURL_ACTION = "uses: ./.github/actions/install-grpcurl-artifact"
 
 TRIGGER_HASHES = {
     "ci.yml": "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8",
@@ -68,15 +74,15 @@ CALL_HASHES = {
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 82,
+        "actions/checkout@v7": 84,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95": 2,
         "docker/setup-buildx-action@v4": 44,
         "docker/build-push-action@v7": 45,
-        "actions/cache@v6": 1,
-        "actions/upload-artifact@v7": 2,
-        "actions/download-artifact@v8": 2,
+        "actions/cache@v6": 3,
+        "actions/upload-artifact@v7": 4,
+        "actions/download-artifact@v8": 3,
         "rustsec/audit-check@v2.0.0": 1,
         "EmbarkStudios/cargo-deny-action@v2": 1,
     }
@@ -107,8 +113,31 @@ def _has_line(block: str, line: str) -> bool:
     return re.search(rf"(?m)^{re.escape(line)}$", block) is not None
 
 
+def _list_needs(block: str) -> list[str]:
+    flow = re.search(r"(?ms)^    needs: \[(.*?)\]\n", block)
+    if flow:
+        values = (value.strip() for value in flow.group(1).split(","))
+        return [value for value in values if value]
+    match = re.search(r"(?m)^    needs:\n((?:      - [\w-]+\n)+)", block)
+    if not match:
+        return []
+    return re.findall(r"(?m)^      - ([\w-]+)$", match.group(1))
+
+
+def _expected_jobs(block: str) -> list[str]:
+    match = re.search(
+        r"(?ms)^      EXPECTED_JOBS: >-\n(.*?)^    steps:\n", block
+    )
+    return match.group(1).split() if match else []
+
+
 def check(root: Path) -> list[str]:
     errors: list[str] = []
+    grpcurl_installer = root / ".github" / "scripts" / "install-grpcurl.sh"
+    if not grpcurl_installer.is_file():
+        errors.append("install-grpcurl.sh is missing")
+    elif stat.S_IMODE(grpcurl_installer.stat().st_mode) != 0o755:
+        errors.append("install-grpcurl.sh must have exact executable mode 100755")
     workflow_dir = root / ".github" / "workflows"
     texts = {name: (workflow_dir / name).read_text() for name in WORKFLOWS}
     for name, text in texts.items():
@@ -196,9 +225,14 @@ def check(root: Path) -> list[str]:
         ("kernel-dataplane.yml", KERNEL, True),
     ):
         jobs = _jobs(texts[name])
-        expected = ["classify_changes", "prime_dev_image", *roster] + (
-            ["netns"] if setup else []
-        )
+        heavy = [*roster] + (["netns"] if setup else [])
+        expected = [
+            "classify_changes",
+            "grpcurl_archive",
+            "prime_dev_image",
+            *heavy,
+            "check",
+        ]
         if list(jobs) != expected:
             errors.append(f"{name}: exact job roster/order drifted")
         classifier = jobs.get("classify_changes", "")
@@ -211,6 +245,54 @@ def check(root: Path) -> list[str]:
         for forbidden in ("continue-on-error:", "if:"):
             if re.search(rf"(?m)^ +{re.escape(forbidden)}", classifier):
                 errors.append(f"{name}: classifier permits active {forbidden}")
+        grpcurl_producer = jobs.get("grpcurl_archive", "")
+        for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
+            if not _has_line(grpcurl_producer, f"    {seam}"):
+                errors.append(
+                    f"{name}:grpcurl_archive missing job-level {seam}"
+                )
+        for seam in (
+            "name: Prepare exact grpcurl archive",
+            "runs-on: ubuntu-latest",
+            "timeout-minutes: 10",
+            CHECKOUT,
+            "ref: ${{ github.sha }}",
+            "uses: actions/cache@v6",
+            f"path: ${{{{ runner.temp }}}}/grpcurl-cache/{GRPCURL_ARCHIVE}",
+            f"key: {GRPCURL_CACHE_KEY}",
+            "--prepare-archive",
+            f'"$RUNNER_TEMP/grpcurl-cache/{GRPCURL_ARCHIVE}"',
+            "uses: actions/upload-artifact@v7",
+            f"name: {GRPCURL_ARTIFACT}",
+            "if-no-files-found: error",
+            "retention-days: 1",
+            "compression-level: 0",
+        ):
+            if seam not in grpcurl_producer:
+                errors.append(f"{name}:grpcurl_archive missing {seam}")
+        for forbidden in (
+            "restore-keys:",
+            "continue-on-error:",
+            "actions/download-artifact@",
+            "--install-archive",
+        ):
+            if forbidden in grpcurl_producer:
+                errors.append(f"{name}:grpcurl_archive permits {forbidden}")
+        if grpcurl_producer.count("uses: actions/cache@v6") != 1:
+            errors.append(f"{name}:grpcurl_archive must restore one exact cache")
+        if grpcurl_producer.count("--prepare-archive") != 1:
+            errors.append(f"{name}:grpcurl_archive must prepare one archive")
+        if grpcurl_producer.count("uses: actions/upload-artifact@v7") != 1:
+            errors.append(f"{name}:grpcurl_archive must upload one artifact")
+        exact_path = (
+            f"path: ${{{{ runner.temp }}}}/grpcurl-cache/{GRPCURL_ARCHIVE}"
+        )
+        if grpcurl_producer.count(exact_path) != 2:
+            errors.append(f"{name}:grpcurl_archive cache/artifact paths drifted")
+        if grpcurl_producer.count(f"key: {GRPCURL_CACHE_KEY}") != 1:
+            errors.append(f"{name}:grpcurl_archive cache key drifted")
+        if grpcurl_producer.count(f"name: {GRPCURL_ARTIFACT}") != 1:
+            errors.append(f"{name}:grpcurl_archive artifact name drifted")
         primer = jobs.get("prime_dev_image", "")
         for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
             if not _has_line(primer, f"    {seam}"):
@@ -236,19 +318,52 @@ def check(root: Path) -> list[str]:
             errors.append(f"{name}: primer must export cache, not load an image")
         for job_name in roster:
             job = jobs.get(job_name, "")
-            if "needs: prime_dev_image" not in job:
-                errors.append(f"{name}:{job_name}: missing primer dependency")
+            if not _has_line(
+                job, "    needs: [grpcurl_archive, prime_dev_image]"
+            ):
+                errors.append(
+                    f"{name}:{job_name}: missing exact grpcurl/primer dependencies"
+                )
             if CHECKOUT not in job:
                 errors.append(f"{name}:{job_name}: pinned checkout drifted")
             if setup:
                 if "uses: ./.github/actions/setup-dataplane-host" not in job:
                     errors.append(f"{name}:{job_name}: setup call drifted")
+                if GRPCURL_ACTION in job:
+                    errors.append(f"{name}:{job_name}: bypasses shared host setup")
             else:
+                if job.count(GRPCURL_ACTION) != 1:
+                    errors.append(
+                        f"{name}:{job_name}: must consume one grpcurl artifact"
+                    )
                 for seam in (IMPORT, "load: true", "tags: rustbgpd:dev", "target: dev"):
                     if seam not in job:
                         errors.append(f"{name}:{job_name}: consumer missing {seam}")
                 if "cache-to:" in job:
                     errors.append(f"{name}:{job_name}: consumer exports a cache")
+        aggregate = jobs.get("check", "")
+        aggregate_needs = ["classify_changes", "grpcurl_archive", "prime_dev_image", *heavy]
+        if _list_needs(aggregate) != aggregate_needs:
+            errors.append(f"{name}:check exact dependency roster drifted")
+        if _expected_jobs(aggregate) != aggregate_needs:
+            errors.append(f"{name}:check runtime expected roster drifted")
+        for seam in (
+            "name: check",
+            "runs-on: ubuntu-latest",
+            "timeout-minutes: 5",
+            "if: ${{ always() }}",
+            "NEEDS_CONTEXT: ${{ toJSON(needs) }}",
+            'classifier.get("result") != "success"',
+            'run_labs not in {"true", "false"}',
+            'expected_result = "success" if run_labs == "true" else "skipped"',
+            'result != expected_result',
+            "sys.exit(1)",
+        ):
+            if seam not in aggregate:
+                errors.append(f"{name}:check missing aggregate seam {seam}")
+        for forbidden in ("continue-on-error:", "if: success()"):
+            if forbidden in aggregate:
+                errors.append(f"{name}:check permits {forbidden}")
         calls = "\n".join(
             line.strip()
             for line in texts[name].splitlines()
@@ -261,7 +376,7 @@ def check(root: Path) -> list[str]:
             errors.append(f"{name}: existing test/setup calls drifted")
     m92 = _jobs(texts["interop.yml"]).get("m92", "")
     required = {
-        "bash .github/scripts/install-grpcurl.sh": 1,
+        GRPCURL_ACTION: 1,
         "docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop": 1,
         "docker build -t gobgp:v4.7.0-m92 -f tests/interop/Dockerfile.gobgp-v47 tests/interop": 1,
         "uses: ./.github/actions/run-interop-test": 2,
@@ -290,10 +405,41 @@ def check(root: Path) -> list[str]:
             errors.append(f"kernel-dataplane.yml:netns missing job-level {seam}")
     if "needs: prime_dev_image" in netns:
         errors.append("kernel-dataplane.yml:netns must remain independent")
+    if "grpcurl_archive" in netns or GRPCURL_ACTION in netns:
+        errors.append("kernel-dataplane.yml:netns must remain grpcurl-independent")
 
     action = (
         root / ".github" / "actions" / "setup-dataplane-host" / "action.yml"
     ).read_text()
+    grpcurl_action = (
+        root / ".github" / "actions" / "install-grpcurl-artifact" / "action.yml"
+    ).read_text()
+    for seam in (
+        "uses: actions/download-artifact@v8",
+        f"name: {GRPCURL_ARTIFACT}",
+        "path: ${{ runner.temp }}/grpcurl-artifact",
+        "--install-archive",
+        f'"$RUNNER_TEMP/grpcurl-artifact/{GRPCURL_ARCHIVE}"',
+        "/usr/local/bin",
+    ):
+        if seam not in grpcurl_action:
+            errors.append(f"install-grpcurl-artifact missing {seam}")
+    if grpcurl_action.count("uses: actions/download-artifact@v8") != 1:
+        errors.append("install-grpcurl-artifact must download one same-run artifact")
+    if grpcurl_action.count("--install-archive") != 1:
+        errors.append("install-grpcurl-artifact must perform one offline install")
+    for forbidden in (
+        "--prepare-archive",
+        "actions/cache@",
+        "actions/upload-artifact@",
+        "restore-keys:",
+        "continue-on-error:",
+        "releases/download/",
+    ):
+        if forbidden in grpcurl_action:
+            errors.append(f"install-grpcurl-artifact permits {forbidden}")
+    if re.search(r"(?m)^\s*curl\s", grpcurl_action):
+        errors.append("install-grpcurl-artifact permits curl")
     # split(...)[-1] returns the whole file when the step name drifts, which
     # turns every seam check below into a file-wide search that passes
     # vacuously. Scope the region only once the anchor is known to be present.
@@ -305,6 +451,10 @@ def check(root: Path) -> list[str]:
     build = action.split(build_step, 1)[-1] if build_step in action else ""
     if BUILDX not in action:
         errors.append(f"setup-dataplane-host: consumer missing {BUILDX}")
+    if action.count(GRPCURL_ACTION) != 1:
+        errors.append("setup-dataplane-host must consume one grpcurl artifact")
+    if "bash .github/scripts/install-grpcurl.sh" in action:
+        errors.append("setup-dataplane-host retains legacy grpcurl install")
     for seam in (
         BUILD_PUSH,
         "context: .",
@@ -318,8 +468,20 @@ def check(root: Path) -> list[str]:
     if "cache-to:" in build:
         errors.append("setup-dataplane-host: consumer must not export cache")
 
+    if texts["interop.yml"].count(GRPCURL_ACTION) != len(INTEROP):
+        errors.append("interop.yml: grpcurl consumer inventory drifted")
+    if texts["kernel-dataplane.yml"].count(GRPCURL_ACTION) != 0:
+        errors.append("kernel-dataplane.yml: grpcurl must flow through host setup")
+    grpcurl_surfaces = "\n".join(
+        (texts["interop.yml"], texts["kernel-dataplane.yml"], action, grpcurl_action)
+    )
+    if "bash .github/scripts/install-grpcurl.sh" in grpcurl_surfaces:
+        errors.append("legacy grpcurl installer invocation remains")
+    if "fullstorydev/grpcurl/releases" in grpcurl_surfaces:
+        errors.append("grpcurl release URL escaped the producer helper")
+
     pins = collections.Counter()
-    for text in [*texts.values(), action]:
+    for text in [*texts.values(), action, grpcurl_action]:
         for value in re.findall(r"^\s*(?:- )?uses:\s*(.+)$", text, re.MULTILINE):
             if not value.strip().startswith("./"):
                 pins[value.strip()] += 1

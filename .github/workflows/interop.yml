@@ -167,6 +167,35 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python3 scripts/classify_heavy_ci_paths.py
 
+  grpcurl_archive:
+    needs: classify_changes
+    if: needs.classify_changes.outputs.run_labs == 'true'
+    name: Prepare exact grpcurl archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Restore exact grpcurl archive cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/grpcurl-cache/grpcurl_1.9.1_linux_x86_64.tar.gz
+          key: grpcurl-v1.9.1-linux-x86_64-588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214
+      - name: Prepare exact grpcurl archive
+        run: |
+          .github/scripts/install-grpcurl.sh \
+            --prepare-archive \
+            "$RUNNER_TEMP/grpcurl-cache/grpcurl_1.9.1_linux_x86_64.tar.gz"
+      - name: Upload verified grpcurl archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: grpcurl-v1.9.1-linux-x86_64
+          path: ${{ runner.temp }}/grpcurl-cache/grpcurl_1.9.1_linux_x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   # Warm one fixed-scope cache per source SHA; jobs still build and load their
   # own image, falling back to an uncached build if the cache is unavailable.
   prime_dev_image:
@@ -195,7 +224,7 @@ jobs:
           cache-to: type=gha,scope=rustbgpd-dev,mode=max,ignore-error=true
 
   m1:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M1 — basic session + UPDATE (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -205,9 +234,8 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl
-        run: |
-          bash .github/scripts/install-grpcurl.sh
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -229,7 +257,7 @@ jobs:
           script: tests/interop/scripts/test-m1-frr.sh
 
   m13:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M13 — Policy Engine (FRR 10.3.1, 3-node)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -239,9 +267,8 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl
-        run: |
-          bash .github/scripts/install-grpcurl.sh
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -263,7 +290,7 @@ jobs:
           script: tests/interop/scripts/test-m13-policy-frr.sh
 
   m80:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M80 — rpol policy parity (ADR-0096, FRR 10.3.1, 4-node)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -273,11 +300,13 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         # jq drives the parity tuple comparisons (rustbgpd gRPC JSON
         # vs FRR vtysh JSON) and the policy test/stats assertions.
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -300,7 +329,7 @@ jobs:
           script: tests/interop/scripts/test-m80-rpol-policy-parity-frr.sh
 
   m15:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M15 — Route Refresh via gRPC SoftResetIn (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -310,9 +339,8 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl
-        run: |
-          bash .github/scripts/install-grpcurl.sh
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -334,7 +362,7 @@ jobs:
           script: tests/interop/scripts/test-m15-rr-frr.sh
 
   m10:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M10 — IPv6 dual-stack / MP-BGP (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -344,9 +372,8 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl
-        run: |
-          bash .github/scripts/install-grpcurl.sh
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -368,7 +395,7 @@ jobs:
           script: tests/interop/scripts/test-m10-frr-ipv6.sh
 
   m14:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M14 — Route Reflector (FRR 10.3.1, 3-node iBGP)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -378,9 +405,8 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl
-        run: |
-          bash .github/scripts/install-grpcurl.sh
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -402,7 +428,7 @@ jobs:
           script: tests/interop/scripts/test-m14-rr-frr.sh
 
   m17:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M17/M89 — Add-Path + experimental Paths-Limit (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -412,9 +438,11 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -444,7 +472,7 @@ jobs:
           script: tests/interop/scripts/test-m89-paths-limit-frr.sh
 
   m73:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M73/M87 — GoBGP BGP-LS + exact-export/BIRD
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -454,9 +482,11 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -492,7 +522,7 @@ jobs:
           script: tests/interop/scripts/test-m87-exact-export-rejection.sh
 
   m74:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M74 — VPNv4 route reflection (GoBGP 3.x)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -502,9 +532,11 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -530,7 +562,7 @@ jobs:
           script: tests/interop/scripts/test-m74-vpnv4-reflection-gobgp.sh
 
   m75:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M75 — RT-Constrain VPNv4 filtering (GoBGP 3.x)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -540,9 +572,11 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -568,7 +602,7 @@ jobs:
           script: tests/interop/scripts/test-m75-rtc-vpnv4-filter-gobgp.sh
 
   m76:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M76 — ORR divergent-best (GoBGP 4.6.0)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -578,9 +612,11 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -606,7 +642,7 @@ jobs:
           script: tests/interop/scripts/test-m76-orr-divergent-best-gobgp.sh
 
   m77:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M77 — GR/LLGR RR-family stale preservation (GoBGP 4.6.0)
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -616,9 +652,11 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -644,7 +682,7 @@ jobs:
           script: tests/interop/scripts/test-m77-gr-llgr-rr-gobgp.sh
 
   m78:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M78 — Multi-cluster ORR + inter-RR Add-Path (GoBGP 4.6.0)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -654,9 +692,11 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -682,7 +722,7 @@ jobs:
           script: tests/interop/scripts/test-m78-multicluster-orr-gobgp.sh
 
   m79:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M79 — Labeled-unicast route reflection + GR (GoBGP 4.6.0)
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -692,9 +732,11 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -720,7 +762,7 @@ jobs:
           script: tests/interop/scripts/test-m79-labeled-reflection-gobgp.sh
 
   m22:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M22 — FlowSpec (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -730,12 +772,14 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         # jq parses FRR's `show bgp ipv4 flowspec json` output for
         # the direct convergence checks and `show bgp summary json`
         # for the per-step flap-detection assertion.
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -758,7 +802,7 @@ jobs:
           script: tests/interop/scripts/test-m22-flowspec-frr.sh
 
   m24:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M24 — BMP (FRR 10.3.1, Python receiver)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -768,9 +812,8 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl
-        run: |
-          bash .github/scripts/install-grpcurl.sh
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -792,7 +835,7 @@ jobs:
           script: tests/interop/scripts/test-m24-bmp-frr.sh
 
   m81:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M81 — BMP trio + BMPv4 receipt (pmacct + gobmp + tshark)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -802,10 +845,12 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         # jq drives the pmacct-msglog and gobmp-JSON oracle assertions.
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -837,7 +882,7 @@ jobs:
           script: tests/interop/scripts/test-m81-bmp-trio-gobgp.sh
 
   m82:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     # Synthetic leg only. The SR Linux vendor leg
     # (m82-evpn-bundle-srlinux.clab.yml) stays local: the NOS image is
     # ~750 MB compressed / 3.2 GB on disk and boots a full chassis sim —
@@ -852,9 +897,11 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -880,7 +927,7 @@ jobs:
           script: tests/interop/scripts/test-m82-evpn-bundle-synthetic-gobgp.sh
 
   m83:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     # Full 3-stack leg in CI: BIRD 2 is a plain apt install on
     # bookworm-slim (deterministic build) and BIRD already runs in
     # hosted CI (M43, kernel-dataplane.yml) without flake history —
@@ -894,10 +941,12 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         # jq drives the FRR vtysh / GoBGP JSON client-view assertions.
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -937,7 +986,7 @@ jobs:
           retention-days: 14
 
   m85:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M85/M93/M95 — RR core, required families, and RFC 8212 presence transitions against BIRD 2
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -947,10 +996,12 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         # jq drives the rbgp JSON client-view assertions.
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -994,7 +1045,7 @@ jobs:
           script: tests/interop/scripts/test-m95-rfc8212-presence.sh
 
   m94:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M94 — RFC 6793 AS4 migration against OLD speakers
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1004,10 +1055,12 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         # jq drives the exact reconstructed-RIB and wire-receipt assertions.
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -1035,7 +1088,7 @@ jobs:
           script: tests/interop/scripts/test-m94-as4-migration-exabgp.sh
 
   m86:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M86 — RR core reflection + GR truth against OpenBGPD 9.1 clients
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -1045,10 +1098,12 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         # jq drives the bgpctl -j and rbgp JSON client-view assertions.
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -1078,7 +1133,7 @@ jobs:
           script: tests/interop/scripts/test-m86-rr-openbgpd.sh
 
   m25:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M25 — TCP MD5 + GTSM (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1088,9 +1143,8 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl
-        run: |
-          bash .github/scripts/install-grpcurl.sh
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1112,7 +1166,7 @@ jobs:
           script: tests/interop/scripts/test-m25-md5-gtsm-frr.sh
 
   m29:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M29 — EVPN cap negotiation (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1128,9 +1182,8 @@ jobs:
         # new version before merging.
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl
-        run: |
-          bash .github/scripts/install-grpcurl.sh
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
 
       # Buildx cache cuts the docker build step from ~6 min to ~30 s on
       # cache hits. The cargo registry / target dir gets reused via the
@@ -1157,7 +1210,7 @@ jobs:
           script: tests/interop/scripts/test-m29-evpn-rr-frr.sh
 
   m30:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M30 — EVPN Type 2 reflection (FRR 10.3.1, kernel VXLAN)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1167,12 +1220,14 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         # jq is required for M30 test 6's strict next_hop assertion
         # (scoped to the entry containing the test MAC); a substring
         # grep would let a malformed match slip past.
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -1195,7 +1250,7 @@ jobs:
           script: tests/interop/scripts/test-m30-evpn-type2-frr.sh
 
   m34:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M34 — SIGHUP policy soft-reset (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1205,11 +1260,13 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         # jq is required for the strict per-prefix counting + session
         # uptime epoch comparison in test-m34.
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -1232,7 +1289,7 @@ jobs:
           script: tests/interop/scripts/test-m34-policy-soft-reset-frr.sh
 
   m35:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M35 — RFC 8326 Graceful Shutdown (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1242,11 +1299,13 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         # jq parses NeighborState.localPref + FRR's `show ip bgp` JSON
         # for the community-presence assertion.
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -1269,7 +1328,7 @@ jobs:
           script: tests/interop/scripts/test-m35-graceful-shutdown-frr.sh
 
   m35b:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M35b — RFC 8326 GShut FlowSpec (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1279,11 +1338,13 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         # jq parses FRR's `show bgp ipv4 flowspec json` output for
         # the community-presence assertion.
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -1306,7 +1367,7 @@ jobs:
           script: tests/interop/scripts/test-m35b-graceful-shutdown-flowspec-frr.sh
 
   m35c:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M35c — RFC 8326 GShut EVPN (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1316,10 +1377,12 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         # jq pretty-prints EVPN diagnostics and parses grpcurl JSON.
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -1342,7 +1405,7 @@ jobs:
           script: tests/interop/scripts/test-m35c-graceful-shutdown-evpn-frr.sh
 
   m41:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M41 — RFC 7999 BLACKHOLE (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1352,12 +1415,14 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         # jq parses `ListReceivedRoutes` JSON for the per-prefix
         # community assertions (BLACKHOLE + implicit NO_ADVERTISE
         # on tagged /32, neither on untagged /32).
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -1380,7 +1445,7 @@ jobs:
           script: tests/interop/scripts/test-m41-blackhole-frr.sh
 
   m44:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M44 — ADR-0064 gRPC tier authorization (mTLS)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1390,9 +1455,8 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl
-        run: |
-          bash .github/scripts/install-grpcurl.sh
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1421,7 +1485,7 @@ jobs:
           script: tests/interop/scripts/test-m44-grpc-tier-authz.sh
 
   m54:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M54 — ADR-0070 gNMI / OpenConfig over mTLS
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1431,9 +1495,11 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl and gnmic
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Install gnmic
         run: |
-          bash .github/scripts/install-grpcurl.sh
           curl -sL https://github.com/openconfig/gnmic/releases/download/v0.46.0/gnmic_0.46.0_Linux_x86_64.tar.gz \
             | sudo tar -xz -C /usr/local/bin gnmic
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
@@ -1463,7 +1529,7 @@ jobs:
           script: tests/interop/scripts/test-m54-gnmi-openconfig.sh
 
   m55:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M55 — ADR-0071 BGP Roles + OTC (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1473,9 +1539,11 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl and jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -1498,7 +1566,7 @@ jobs:
           script: tests/interop/scripts/test-m55-bgp-roles-otc-frr.sh
 
   m56:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M56 — gNMI Subscribe ON_CHANGE (ADR-0070 deferral resolved)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1508,9 +1576,11 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl, gnmic, and jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Install gnmic and ensure jq
         run: |
-          bash .github/scripts/install-grpcurl.sh
           curl -sL https://github.com/openconfig/gnmic/releases/download/v0.46.0/gnmic_0.46.0_Linux_x86_64.tar.gz \
             | sudo tar -xz -C /usr/local/bin gnmic
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
@@ -1539,7 +1609,7 @@ jobs:
           script: tests/interop/scripts/test-m56-gnmi-onchange-frr.sh
 
   m45:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M45 — EVPN Type 5 injection (gRPC → FRR)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1549,9 +1619,8 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl
-        run: |
-          bash .github/scripts/install-grpcurl.sh
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1573,7 +1642,7 @@ jobs:
           script: tests/interop/scripts/test-m45-evpn-type5-injection.sh
 
   m57:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M57 — Outbound Route Filtering (RFC 5291/5292, FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1583,11 +1652,13 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         # grpcurl injects routes via InjectionService.AddPath; jq parses FRR's
         # `show bgp ipv4 unicast json` for the received-prefix-set assertions.
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -1610,7 +1681,7 @@ jobs:
           script: tests/interop/scripts/test-m57-orf-frr.sh
 
   m63:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M63 — ADR-0078 stalled-RIB hold-timer survival (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -1620,12 +1691,14 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         # jq parses GetNeighborState / ListReceivedRoutes JSON for the
         # survival-window and never-drop assertions; the Prometheus
         # counters come over plain HTTP.
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -1648,7 +1721,7 @@ jobs:
           script: tests/interop/scripts/test-m63-stalled-rib-hold-timer.sh
 
   m64:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M64 — IPv6-only peering via disable_ipv4_unicast (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1658,12 +1731,14 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         # jq parses FRR's `show bgp neighbors json` capability output for
         # the no-IPv4-MP assertion; grpcurl injects the bidirectional
         # route-exchange prefixes and reads rustbgpd's RIB.
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -1686,7 +1761,7 @@ jobs:
           script: tests/interop/scripts/test-m64-ipv6-only.sh
 
   m26_m27_m28_m59_m91:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M26/M27/M28/M59/M91 — cheap protocol interop (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1696,9 +1771,11 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -1749,7 +1826,7 @@ jobs:
           script: tests/interop/scripts/test-m91-rfc7606-malformed.sh
 
   m92:
-    needs: prime_dev_image
+    needs: [grpcurl_archive, prime_dev_image]
     name: M92 — GoBGP 4.7 route-server differential
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -1759,9 +1836,11 @@ jobs:
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
 
-      - name: Install grpcurl + jq
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
         run: |
-          bash .github/scripts/install-grpcurl.sh
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -1797,3 +1876,48 @@ jobs:
           label: M92-negative
           topology: tests/interop/m92-gobgp-v47-rs-differential.clab.yml
           script: tests/interop/scripts/test-m92-gobgp-v47-rs-differential.sh
+
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ always() }}
+    needs: [classify_changes, grpcurl_archive, prime_dev_image, m1, m13, m80,
+      m15, m10, m14, m17, m73, m74, m75, m76, m77, m78, m79, m22, m24,
+      m81, m82, m83, m85, m94, m86, m25, m29, m30, m34, m35, m35b, m35c,
+      m41, m44, m54, m55, m56, m45, m57, m63, m64,
+      m26_m27_m28_m59_m91, m92]
+    env:
+      NEEDS_CONTEXT: ${{ toJSON(needs) }}
+      EXPECTED_JOBS: >-
+        classify_changes grpcurl_archive prime_dev_image m1 m13 m80 m15 m10
+        m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 m24 m81 m82 m83 m85 m94
+        m86 m25 m29 m30 m34 m35 m35b m35c m41 m44 m54 m55 m56 m45 m57
+        m63 m64 m26_m27_m28_m59_m91 m92
+    steps:
+      - name: Aggregate required Interop result
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS_CONTEXT"])
+          expected = os.environ["EXPECTED_JOBS"].split()
+          if set(needs) != set(expected) or len(needs) != len(expected):
+              print(f"aggregate dependency drift: expected={expected} actual={sorted(needs)}")
+              sys.exit(1)
+
+          classifier = needs["classify_changes"]
+          run_labs = classifier.get("outputs", {}).get("run_labs")
+          failed = classifier.get("result") != "success" or run_labs not in {"true", "false"}
+          expected_result = "success" if run_labs == "true" else "skipped"
+          for job in expected:
+              result = needs[job].get("result")
+              print(f"{job}={result}")
+              if job != "classify_changes" and result != expected_result:
+                  failed = True
+          if failed:
+              sys.exit(1)
+          PY
