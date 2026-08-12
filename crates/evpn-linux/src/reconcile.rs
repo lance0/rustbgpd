@@ -7765,13 +7765,6 @@ fn op_to_applied(op: &DataplaneOp) -> AppliedOp {
     }
 }
 
-// Suppress dead-code on a potentially-unused snapshot return-path
-// helper used only when the dump errors.
-#[allow(dead_code)]
-fn empty_snapshot() -> KernelSnapshot {
-    KernelSnapshot::new()
-}
-
 #[cfg(test)]
 mod managed_netdev_tests {
     use super::*;

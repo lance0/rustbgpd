@@ -3869,7 +3869,7 @@ async fn run<T>(
     // Consumes the upward `LocalMacObservation` channel surfaced by
     // the dataplane (Phase D); kernel-learned MACs become BGP EVPN
     // Type 2 originations per RFC 7432 §15.1. RR-only deployments
-    // skip this entirely — `evpn_dataplane::spawn` returned `None`
+    // skip this entirely — `evpn_dataplane::spawn_with_quarantine` returned `None`
     // and `local_mac_rx` is therefore `None`.
     let evpn_originator_shutdown = tokio_util::sync::CancellationToken::new();
     let evpn_originated_local_mac_counts = evpn_originator::OriginatedLocalMacCounts::default();
