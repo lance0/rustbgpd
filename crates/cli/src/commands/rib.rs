@@ -1016,15 +1016,9 @@ fn fib_route_status_to_json(r: &crate::proto::FibRouteStatus) -> JsonFibRouteSta
     }
 }
 
-/// Render the next-hop column: comma-joined ECMP set when multipath, else the
-/// scalar. Falls back to the scalar `next_hop` when an older server returns no
-/// `next_hops` list.
+/// Render the next-hop column from the authoritative next-hop set.
 fn fib_next_hop_display(r: &crate::proto::FibRouteStatus) -> String {
-    if r.next_hops.len() > 1 {
-        r.next_hops.join(", ")
-    } else {
-        r.next_hop.clone()
-    }
+    r.next_hops.join(", ")
 }
 
 fn fib_sampling_metadata(
@@ -2841,14 +2835,14 @@ mod tests {
         assert_eq!(value["next_hops"][1], "192.0.2.2");
         assert_eq!(fib_next_hop_display(&route), "192.0.2.1, 192.0.2.2");
 
-        // A single-path row keeps the scalar shape and omits the list from JSON
-        // only when the server sent an empty list (older server back-compat).
+        // A single-path row keeps the scalar JSON shape while display uses the
+        // authoritative repeated field.
         let mut single = route.clone();
         single.next_hops = vec!["192.0.2.1".to_string()];
         assert_eq!(fib_next_hop_display(&single), "192.0.2.1");
         let mut legacy = route;
         legacy.next_hops = vec![];
-        assert_eq!(fib_next_hop_display(&legacy), "192.0.2.1");
+        assert_eq!(fib_next_hop_display(&legacy), "");
         let legacy_value = serde_json::to_value(fib_route_status_to_json(&legacy)).unwrap();
         assert!(legacy_value.get("next_hops").is_none());
     }
