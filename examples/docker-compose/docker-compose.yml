@@ -56,6 +56,9 @@ services:
       nofile:
         soft: 65536
         hard: 524288
+    # Let an explicit stop wait beyond the 30-minute runtime-config settlement
+    # watchdog. Compose intentionally leaves restart policy to the operator.
+    stop_grace_period: 32m
 
   frr:
     image: quay.io/frrouting/frr:10.3.1

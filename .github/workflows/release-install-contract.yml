@@ -9,12 +9,17 @@ on:
       - README.md
       - docs/deployment.md
       - docs/QUICKSTART.md
+      - docs/OPERATIONS.md
+      - docs/adr/0127-config-transaction-settlement-watchdog.md
       - docs/grafana/rustbgpd-overview.json
       - docs/cookbook/ixp-filter-pipeline.md
       - docs/cookbook/monitoring-feed.md
       - examples/birdwatcher-adapter/Cargo.toml
       - examples/birdwatcher-adapter/src/main.rs
       - examples/birdwatcher-adapter/README.md
+      - examples/docker-compose/docker-compose.yml
+      - examples/docker-compose/README.md
+      - examples/systemd/rustbgpd.service
       - examples/prometheus/rustbgpd-alerts.yml
       - examples/prometheus/rustbgpd-alerts_test.yml
       - tests/birdwatcher_adapter_smoke.rs
@@ -24,6 +29,7 @@ on:
       - scripts/check_release_install_contract.py
       - scripts/test_check_release_install_contract.py
       - .github/workflows/release-install-contract.yml
+      - CHANGELOG.md
   push:
     branches: [main]
     paths:
@@ -33,12 +39,17 @@ on:
       - README.md
       - docs/deployment.md
       - docs/QUICKSTART.md
+      - docs/OPERATIONS.md
+      - docs/adr/0127-config-transaction-settlement-watchdog.md
       - docs/grafana/rustbgpd-overview.json
       - docs/cookbook/ixp-filter-pipeline.md
       - docs/cookbook/monitoring-feed.md
       - examples/birdwatcher-adapter/Cargo.toml
       - examples/birdwatcher-adapter/src/main.rs
       - examples/birdwatcher-adapter/README.md
+      - examples/docker-compose/docker-compose.yml
+      - examples/docker-compose/README.md
+      - examples/systemd/rustbgpd.service
       - examples/prometheus/rustbgpd-alerts.yml
       - examples/prometheus/rustbgpd-alerts_test.yml
       - tests/birdwatcher_adapter_smoke.rs
@@ -48,6 +59,7 @@ on:
       - scripts/check_release_install_contract.py
       - scripts/test_check_release_install_contract.py
       - .github/workflows/release-install-contract.yml
+      - CHANGELOG.md
 permissions:
   contents: read
 jobs:
@@ -119,6 +131,21 @@ jobs:
             # installs. A textual check on the skeleton goes stale as the
             # config schema evolves; the daemon's own validator does not.
             "$tree/usr/bin/rustbgpd" --check "$tree/etc/rustbgpd/config.toml"
+            unit="$tree/lib/systemd/system/rustbgpd.service"
+            for directive in StartLimitIntervalSec=10min StartLimitBurst=5 Restart=on-failure RestartSec=5 TimeoutStopSec=32min; do
+              grep -qxF "$directive" "$unit"
+            done
+          python3 - "$unit" <<'PY'
+          import sys
+          from pathlib import Path
+          from scripts.check_release_install_contract import systemd_assignments, systemd_status_is_70
+
+          for _, key, value in systemd_assignments(Path(sys.argv[1]).read_text()):
+              if key in {"SuccessExitStatus", "RestartPreventExitStatus"} and any(
+                  systemd_status_is_70(token) for token in value.split()
+              ):
+                  raise SystemExit(f"exit 70/SOFTWARE must remain restartable: {sys.argv[1]}")
+          PY
           done
       - uses: docker/setup-buildx-action@v4
       - name: Build production runtime image
