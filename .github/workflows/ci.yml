@@ -21,7 +21,40 @@ on:
       - "**/*.md"
 
 jobs:
+  v064_validator:
+    name: prepare exact v0.64 config migration validator
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      # The cache avoids a release fetch across runs. Its key seals the exact
+      # release checksum and deliberately has no partial restore fallback.
+      - name: Restore exact v0.64 validator archive cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/rustbgpd-v064-cache/rustbgpd-linux-amd64.tar.gz
+          key: rustbgpd-v0.64.0-linux-amd64-bd4829de08d0c50074f9ecd5c351399fae42be06d456b3880a04aa4a7cda1137
+      - name: Prepare exact v0.64 validator archive
+        run: |
+          bash -n .github/scripts/install-rustbgpd-v064-validator.sh
+          shellcheck .github/scripts/install-rustbgpd-v064-validator.sh
+          .github/scripts/install-rustbgpd-v064-validator.sh --self-test
+          .github/scripts/install-rustbgpd-v064-validator.sh \
+            --prepare-archive \
+            "$RUNNER_TEMP/rustbgpd-v064-cache/rustbgpd-linux-amd64.tar.gz"
+      # Consumers use this same-run artifact instead of independently reaching
+      # GitHub Releases. They verify its pinned checksum again before extract.
+      - name: Upload verified v0.64 validator archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: rustbgpd-v0.64.0-linux-amd64
+          path: ${{ runner.temp }}/rustbgpd-v064-cache/rustbgpd-linux-amd64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   core:
+    needs: v064_validator
     runs-on: ubuntu-latest
     # Bound any wedge (e.g. a rustdoc hang) so a stuck step fails fast
     # instead of running to GitHub's 6-hour default. The last serial run
@@ -65,11 +98,17 @@ jobs:
           bash -n .github/scripts/install-grpcurl.sh
           shellcheck .github/scripts/install-grpcurl.sh
           bash .github/scripts/install-grpcurl.sh --self-test
-      - name: Install exact v0.64 config migration validator
+      - name: Download verified v0.64 validator archive
+        uses: actions/download-artifact@v8
+        with:
+          name: rustbgpd-v0.64.0-linux-amd64
+          path: ${{ runner.temp }}/rustbgpd-v064-artifact
+      - name: Install exact v0.64 config migration validator offline
         run: |
-          bash -n .github/scripts/install-rustbgpd-v064-validator.sh
-          shellcheck .github/scripts/install-rustbgpd-v064-validator.sh
-          .github/scripts/install-rustbgpd-v064-validator.sh "$RUNNER_TEMP/rustbgpd-v064"
+          .github/scripts/install-rustbgpd-v064-validator.sh \
+            --install-archive \
+            "$RUNNER_TEMP/rustbgpd-v064-artifact/rustbgpd-linux-amd64.tar.gz" \
+            "$RUNNER_TEMP/rustbgpd-v064"
       - name: Prove CI image-primer contract
         run: |
           python3 -m unittest -v scripts/test_check_ci_image_primer_contract.py
@@ -264,6 +303,7 @@ jobs:
 
   core_tests:
     name: core tests / rustdoc
+    needs: v064_validator
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -275,8 +315,17 @@ jobs:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
       - uses: Swatinem/rust-cache@v2
-      - name: Install exact v0.64 config migration validator
-        run: .github/scripts/install-rustbgpd-v064-validator.sh "$RUNNER_TEMP/rustbgpd-v064"
+      - name: Download verified v0.64 validator archive
+        uses: actions/download-artifact@v8
+        with:
+          name: rustbgpd-v0.64.0-linux-amd64
+          path: ${{ runner.temp }}/rustbgpd-v064-artifact
+      - name: Install exact v0.64 config migration validator offline
+        run: |
+          .github/scripts/install-rustbgpd-v064-validator.sh \
+            --install-archive \
+            "$RUNNER_TEMP/rustbgpd-v064-artifact/rustbgpd-linux-amd64.tar.gz" \
+            "$RUNNER_TEMP/rustbgpd-v064"
       - run: cargo test --workspace
         env:
           RUSTBGPD_V064_VALIDATOR: ${{ runner.temp }}/rustbgpd-v064/rustbgpd-v0.64.0
@@ -388,8 +437,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() }}
-    needs: [core, core_tests, scale_receipts]
+    needs: [v064_validator, core, core_tests, scale_receipts]
     env:
+      V064_VALIDATOR_RESULT: ${{ needs.v064_validator.result }}
       CORE_RESULT: ${{ needs.core.result }}
       CORE_TESTS_RESULT: ${{ needs.core_tests.result }}
       SCALE_RECEIPTS_RESULT: ${{ needs.scale_receipts.result }}
@@ -397,10 +447,11 @@ jobs:
       - name: Aggregate required CI result
         run: |
           set -euo pipefail
+          printf 'v064_validator=%s\n' "$V064_VALIDATOR_RESULT"
           printf 'core=%s\n' "$CORE_RESULT"
           printf 'core_tests=%s\n' "$CORE_TESTS_RESULT"
           printf 'scale_receipts=%s\n' "$SCALE_RECEIPTS_RESULT"
-          if [[ "$CORE_RESULT" != "success" || "$CORE_TESTS_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]; then
+          if [[ "$V064_VALIDATOR_RESULT" != "success" || "$CORE_RESULT" != "success" || "$CORE_TESTS_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]; then
             exit 1
           fi
 
