@@ -4725,6 +4725,9 @@ metric = 200
                     tables.len()
                 }
                 Some(FibRuntimeCommand::GetTables { .. }) => panic!("unexpected GetTables"),
+                Some(FibRuntimeCommand::OwnedReplaceTables { .. }) => {
+                    panic!("unexpected OwnedReplaceTables")
+                }
                 None => panic!("expected ReplaceTables"),
             }
         });

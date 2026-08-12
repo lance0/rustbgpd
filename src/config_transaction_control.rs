@@ -3964,7 +3964,7 @@ fn fib_error_to_apply_error(
 mod tests {
     use super::*;
     use crate::config::FibTableConfig;
-    use crate::fib_runtime::FibRuntimeCommand;
+    use crate::fib_runtime::{FibRuntimeCommand, OwnedFibReplaceOutcome};
     use crate::test_support::{
         assert_tier_authorized_test_config, tier_authorized_uds_test_config,
     };
@@ -4947,6 +4947,17 @@ peer_group = "edge"
                         *state.lock().await = tables;
                     }
                     let _ = reply.send(result);
+                }
+                FibRuntimeCommand::OwnedReplaceTables { tables, reply } => {
+                    let result = replace_result.clone().unwrap_or(Ok(()));
+                    let outcome = match result {
+                        Ok(()) => {
+                            *state.lock().await = tables;
+                            OwnedFibReplaceOutcome::Applied
+                        }
+                        Err(error) => OwnedFibReplaceOutcome::RejectedNoEffect(error),
+                    };
+                    let _ = reply.send(outcome);
                 }
             }
         }

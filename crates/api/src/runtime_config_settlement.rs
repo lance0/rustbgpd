@@ -30,6 +30,8 @@ pub enum RuntimeConfigOperationKind {
     NeighborDelete,
     DynamicNeighborAdd,
     DynamicNeighborDelete,
+    FibSet,
+    FibDelete,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -822,7 +824,7 @@ mod tests {
             async move {
                 watchdog
                     .execute_owned(
-                        RuntimeConfigOperationKind::NeighborAdd,
+                        RuntimeConfigOperationKind::FibSet,
                         coordinator,
                         gate,
                         context.response_attached(),
@@ -875,7 +877,7 @@ mod tests {
             async move {
                 watchdog
                     .execute_owned(
-                        RuntimeConfigOperationKind::NeighborDelete,
+                        RuntimeConfigOperationKind::FibDelete,
                         coordinator,
                         gate,
                         context.response_attached(),
