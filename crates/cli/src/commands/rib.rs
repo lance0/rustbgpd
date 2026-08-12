@@ -71,12 +71,57 @@ fn make_route_request(
     })
 }
 
-type RibClient = RibServiceClient<
+pub(crate) type RibClient = RibServiceClient<
     tonic::service::interceptor::InterceptedService<
         tonic::transport::Channel,
         crate::connection::AuthInterceptor,
     >,
 >;
+
+/// Fetch one bounded, unfiltered Best-RIB page for the interactive TUI.
+///
+/// Pagination tokens are opaque server state. Keep the caller's bytes intact
+/// and return the server response verbatim; navigation belongs to the view.
+#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
+pub(crate) async fn fetch_tui_best_route_page(
+    client: &mut RibClient,
+    page_token: String,
+) -> Result<crate::proto::ListRoutesResponse, tonic::Status> {
+    client
+        .list_best_routes(ListRoutesRequest {
+            page_size: 100,
+            page_token,
+            ..Default::default()
+        })
+        .await
+        .map(tonic::Response::into_inner)
+}
+
+/// Explain export of one Best-RIB prefix to the selected TUI peer.
+///
+/// This is deliberately the unicast winner form: no RD, label, or source
+/// identity. Scoped link-local peer rendering follows the CLI path exactly.
+#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
+pub(crate) async fn fetch_tui_explain_advertised(
+    client: &mut RibClient,
+    peer_address: &str,
+    prefix: String,
+    prefix_length: u32,
+) -> Result<crate::proto::ExplainAdvertisedRouteResponse, tonic::Status> {
+    let mut response = client
+        .explain_advertised_route(ExplainAdvertisedRouteRequest {
+            peer_address: bare_ip_rpc_address(peer_address).to_string(),
+            prefix,
+            prefix_length,
+            rd: String::new(),
+            labeled: false,
+            source: None,
+        })
+        .await?
+        .into_inner();
+    restore_matching_scoped_address(Some(peer_address), &mut response.peer_address);
+    Ok(response)
+}
 
 /// Which unicast route-listing RPC [`fetch_all_route_pages`] drives.
 enum RouteListRpc {
@@ -1075,7 +1120,7 @@ fn fib_state_label(state: i32) -> &'static str {
     }
 }
 
-fn explain_to_json(
+pub(crate) fn explain_to_json(
     explain: &crate::proto::ExplainAdvertisedRouteResponse,
 ) -> JsonExplainAdvertisedRoute {
     JsonExplainAdvertisedRoute {

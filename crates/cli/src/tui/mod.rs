@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::connection::Connection;
 use crate::error::CliError;
-use app::App;
+use app::{App, RibIntent};
 use theme::Theme;
 
 struct TerminalGuard;
@@ -44,6 +44,7 @@ pub async fn run(connection: Connection, interval: u64) -> Result<(), CliError> 
     let (data_tx, mut data_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let (event_watch_tx, event_watch_rx) = watch::channel(false);
+    let (rib_lane, mut rib_rx) = data::spawn_rib_query_lane(connection.clone());
 
     let _fetcher = data::spawn_fetcher(
         connection,
@@ -62,6 +63,8 @@ pub async fn run(connection: Connection, interval: u64) -> Result<(), CliError> 
         {
             app.on_key(key);
             if app.should_quit {
+                rib_lane.cancel();
+                rib_lane.close();
                 break;
             }
         }
@@ -72,6 +75,34 @@ pub async fn run(connection: Connection, interval: u64) -> Result<(), CliError> 
 
         while let Ok(route_event) = event_rx.try_recv() {
             app.on_route_event(route_event);
+        }
+
+        while let Ok(result) = rib_rx.try_recv() {
+            app.on_rib_result(result);
+        }
+
+        while let Some(intent) = app.take_rib_intent() {
+            match intent {
+                RibIntent::Cancel => rib_lane.cancel(),
+                RibIntent::Query {
+                    view_id,
+                    peer_address,
+                    query,
+                } => {
+                    let Some(request_id) =
+                        rib_lane.query(view_id, peer_address.clone(), query.clone())
+                    else {
+                        app.rib_unavailable("query lane closed");
+                        continue;
+                    };
+                    app.record_rib_request(data::RibQueryIdentity {
+                        request_id,
+                        view_id,
+                        peer_address,
+                        query,
+                    });
+                }
+            }
         }
 
         let should_watch_events = app.route_events_visible();

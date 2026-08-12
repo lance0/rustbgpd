@@ -4,8 +4,13 @@ use std::time::Instant;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 
-use crate::proto::{GlobalState, HealthResponse, NeighborState};
-use crate::tui::data::{DataSnapshot, Freshness, RouteEventEntry, RouteEventUpdate};
+use crate::proto::{
+    ExplainAdvertisedRouteResponse, GlobalState, HealthResponse, ListRoutesResponse, NeighborState,
+};
+use crate::tui::data::{
+    DataSnapshot, Freshness, RibQueryError, RibQueryIdentity, RibQueryKind, RibQueryResponse,
+    RibQueryResult, RouteEventEntry, RouteEventUpdate,
+};
 
 const MAX_EVENTS: usize = 100;
 
@@ -13,6 +18,32 @@ const MAX_EVENTS: usize = 100;
 pub enum View {
     PeerTable,
     PeerDetail(String),
+    BestRib(String),
+    AdvertisedExplain(String),
+}
+
+#[derive(Debug)]
+pub enum RibPageState {
+    Loading,
+    Ready(ListRoutesResponse),
+    Error(String),
+}
+
+#[derive(Debug)]
+pub enum ExplainState {
+    Loading,
+    Ready(Box<ExplainAdvertisedRouteResponse>),
+    Error(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RibIntent {
+    Query {
+        view_id: u64,
+        peer_address: String,
+        query: RibQueryKind,
+    },
+    Cancel,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -103,6 +134,18 @@ pub struct App {
     pub detail_scroll: usize,
     pub detail_max_scroll: usize,
     pub detail_page_height: usize,
+    pub view_id: u64,
+    pub rib_page: Option<RibPageState>,
+    pub rib_page_token: String,
+    pub rib_previous_tokens: Vec<String>,
+    pub rib_table_state: TableState,
+    pub active_rib_query: Option<RibQueryIdentity>,
+    pub explain: Option<ExplainState>,
+    pub explain_scroll: usize,
+    pub explain_max_scroll: usize,
+    pub explain_page_height: usize,
+    rib_intents: VecDeque<RibIntent>,
+    aborted_reset_used: bool,
 
     pub connected: bool,
     pub last_error: Option<String>,
@@ -137,6 +180,18 @@ impl App {
             detail_scroll: 0,
             detail_max_scroll: 0,
             detail_page_height: 0,
+            view_id: 1,
+            rib_page: None,
+            rib_page_token: String::new(),
+            rib_previous_tokens: Vec::new(),
+            rib_table_state: TableState::default(),
+            active_rib_query: None,
+            explain: None,
+            explain_scroll: 0,
+            explain_max_scroll: 0,
+            explain_page_height: 0,
+            rib_intents: VecDeque::new(),
+            aborted_reset_used: false,
             connected: false,
             last_error: None,
             last_poll: Instant::now(),
@@ -145,6 +200,7 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            self.cancel_rib();
             self.should_quit = true;
             return;
         }
@@ -157,12 +213,17 @@ impl App {
         match self.view {
             View::PeerTable => self.handle_table_key(key),
             View::PeerDetail(_) => self.handle_detail_key(key),
+            View::BestRib(_) => self.handle_rib_key(key),
+            View::AdvertisedExplain(_) => self.handle_explain_key(key),
         }
     }
 
     fn handle_table_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('q') => {
+                self.cancel_rib();
+                self.should_quit = true
+            }
             KeyCode::Char('h') => self.show_help = true,
             KeyCode::Char('e') => self.show_events = !self.show_events,
             KeyCode::Char('s') => self.sort_column = self.sort_column.next(),
@@ -183,8 +244,16 @@ impl App {
 
     fn handle_detail_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('q') => {
+                self.cancel_rib();
+                self.should_quit = true
+            }
             KeyCode::Esc | KeyCode::Backspace => self.return_to_table(),
+            KeyCode::Char('r') => {
+                if let View::PeerDetail(peer) = self.view.clone() {
+                    self.open_best_rib(peer);
+                }
+            }
             KeyCode::Char('j') | KeyCode::Down => self.scroll_detail_by(1),
             KeyCode::Char('k') | KeyCode::Up => self.scroll_detail_up(1),
             KeyCode::PageDown => self.scroll_detail_by(self.detail_page_height.max(1)),
@@ -193,6 +262,255 @@ impl App {
             KeyCode::End => self.detail_scroll = self.detail_max_scroll,
             _ => {}
         }
+    }
+
+    fn next_view_id(&mut self) -> u64 {
+        self.view_id = self.view_id.wrapping_add(1).max(1);
+        self.view_id
+    }
+
+    fn queue_query(&mut self, peer_address: String, query: RibQueryKind) {
+        self.active_rib_query = None;
+        self.rib_intents.push_back(RibIntent::Query {
+            view_id: self.view_id,
+            peer_address,
+            query,
+        });
+    }
+
+    fn open_best_rib(&mut self, peer: String) {
+        self.next_view_id();
+        self.view = View::BestRib(peer.clone());
+        self.rib_page_token.clear();
+        self.rib_previous_tokens.clear();
+        self.rib_table_state.select(None);
+        self.rib_page = Some(RibPageState::Loading);
+        self.aborted_reset_used = false;
+        self.queue_query(
+            peer,
+            RibQueryKind::BestPage {
+                page_token: String::new(),
+            },
+        );
+    }
+
+    fn request_page(&mut self, peer: String, token: String) {
+        self.rib_page = Some(RibPageState::Loading);
+        self.queue_query(peer, RibQueryKind::BestPage { page_token: token });
+    }
+
+    fn handle_rib_key(&mut self, key: KeyEvent) {
+        let peer = match &self.view {
+            View::BestRib(peer) => peer.clone(),
+            _ => return,
+        };
+        match key.code {
+            KeyCode::Char('q') => {
+                self.cancel_rib();
+                self.should_quit = true;
+            }
+            KeyCode::Esc | KeyCode::Backspace => {
+                self.cancel_rib();
+                self.view = View::PeerDetail(peer);
+            }
+            KeyCode::Char('j') | KeyCode::Down => self.select_next_route(),
+            KeyCode::Char('k') | KeyCode::Up => self.select_prev_route(),
+            KeyCode::Char('n') => {
+                if let Some(RibPageState::Ready(page)) = &self.rib_page
+                    && !page.next_page_token.is_empty()
+                {
+                    self.request_page(peer, page.next_page_token.clone());
+                }
+            }
+            KeyCode::Char('p') => {
+                if let Some(token) = self.rib_previous_tokens.last().cloned() {
+                    self.request_page(peer, token);
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self.rib_table_state.selected();
+                let route = match (&self.rib_page, selected) {
+                    (Some(RibPageState::Ready(page)), Some(i)) => page.routes.get(i),
+                    _ => None,
+                };
+                if let Some(route) = route {
+                    let prefix = route.prefix.clone();
+                    let prefix_length = route.prefix_length;
+                    self.next_view_id();
+                    self.view = View::AdvertisedExplain(peer.clone());
+                    self.explain = Some(ExplainState::Loading);
+                    self.explain_scroll = 0;
+                    self.queue_query(
+                        peer,
+                        RibQueryKind::ExplainAdvertised {
+                            prefix,
+                            prefix_length,
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_explain_key(&mut self, key: KeyEvent) {
+        let peer = match &self.view {
+            View::AdvertisedExplain(peer) => peer.clone(),
+            _ => return,
+        };
+        match key.code {
+            KeyCode::Char('q') => {
+                self.cancel_rib();
+                self.should_quit = true;
+            }
+            KeyCode::Esc | KeyCode::Backspace => {
+                self.cancel_rib();
+                self.view = View::BestRib(peer);
+                self.explain = None;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.explain_scroll = self
+                    .explain_scroll
+                    .saturating_add(1)
+                    .min(self.explain_max_scroll)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.explain_scroll = self.explain_scroll.saturating_sub(1)
+            }
+            KeyCode::PageDown => {
+                self.explain_scroll = self
+                    .explain_scroll
+                    .saturating_add(self.explain_page_height.max(1))
+                    .min(self.explain_max_scroll)
+            }
+            KeyCode::PageUp => {
+                self.explain_scroll = self
+                    .explain_scroll
+                    .saturating_sub(self.explain_page_height.max(1))
+            }
+            KeyCode::Home => self.explain_scroll = 0,
+            KeyCode::End => self.explain_scroll = self.explain_max_scroll,
+            _ => {}
+        }
+    }
+
+    fn route_count(&self) -> usize {
+        match &self.rib_page {
+            Some(RibPageState::Ready(p)) => p.routes.len(),
+            _ => 0,
+        }
+    }
+    fn select_next_route(&mut self) {
+        let n = self.route_count();
+        if n > 0 {
+            let i = self
+                .rib_table_state
+                .selected()
+                .map_or(0, |i| (i + 1).min(n - 1));
+            self.rib_table_state.select(Some(i));
+        }
+    }
+    fn select_prev_route(&mut self) {
+        if self.route_count() > 0 {
+            self.rib_table_state.select(Some(
+                self.rib_table_state
+                    .selected()
+                    .unwrap_or(0)
+                    .saturating_sub(1),
+            ));
+        }
+    }
+
+    pub(crate) fn take_rib_intent(&mut self) -> Option<RibIntent> {
+        self.rib_intents.pop_front()
+    }
+    pub(crate) fn record_rib_request(&mut self, identity: RibQueryIdentity) {
+        self.active_rib_query = Some(identity);
+    }
+    pub(crate) fn rib_unavailable(&mut self, message: impl Into<String>) {
+        let text = format!("RIB unavailable: {}", message.into());
+        match self.view {
+            View::AdvertisedExplain(_) => self.explain = Some(ExplainState::Error(text)),
+            _ => self.rib_page = Some(RibPageState::Error(text)),
+        }
+        self.active_rib_query = None;
+    }
+    fn cancel_rib(&mut self) {
+        if self.active_rib_query.take().is_some()
+            || matches!(self.view, View::BestRib(_) | View::AdvertisedExplain(_))
+        {
+            self.rib_intents.push_back(RibIntent::Cancel);
+        }
+    }
+
+    pub(crate) fn on_rib_result(&mut self, result: RibQueryResult) {
+        let Some(active) = self.active_rib_query.take() else {
+            return;
+        };
+        if result.identity != active
+            || result.identity.request_id != active.request_id
+            || result.identity.view_id != self.view_id
+        {
+            self.active_rib_query = Some(active);
+            return;
+        }
+        let expected_view = match (&self.view, &active.query) {
+            (View::BestRib(peer), RibQueryKind::BestPage { .. })
+            | (View::AdvertisedExplain(peer), RibQueryKind::ExplainAdvertised { .. }) => {
+                peer == &active.peer_address
+            }
+            _ => false,
+        };
+        if !expected_view {
+            self.active_rib_query = Some(active);
+            return;
+        }
+        match result.result {
+            Ok(RibQueryResponse::BestPage(page)) => {
+                let RibQueryKind::BestPage { page_token } = active.query else {
+                    return;
+                };
+                if page_token != self.rib_page_token {
+                    if self.rib_previous_tokens.last() == Some(&page_token) {
+                        self.rib_previous_tokens.pop();
+                    } else {
+                        self.rib_previous_tokens.push(self.rib_page_token.clone());
+                    }
+                    self.rib_page_token = page_token;
+                }
+                self.rib_table_state
+                    .select((!page.routes.is_empty()).then_some(0));
+                self.rib_page = Some(RibPageState::Ready(page));
+            }
+            Ok(RibQueryResponse::ExplainAdvertised(explain)) => {
+                self.explain = Some(ExplainState::Ready(explain))
+            }
+            Err(error)
+                if error.code == tonic::Code::Aborted
+                    && matches!(active.query, RibQueryKind::BestPage { ref page_token } if !page_token.is_empty())
+                    && !self.aborted_reset_used =>
+            {
+                self.aborted_reset_used = true;
+                self.rib_previous_tokens.clear();
+                self.rib_page_token.clear();
+                self.request_page(active.peer_address, String::new());
+            }
+            Err(error) => {
+                let text = format_rib_error(&error);
+                match active.query {
+                    RibQueryKind::ExplainAdvertised { .. } => {
+                        self.explain = Some(ExplainState::Error(text))
+                    }
+                    _ => self.rib_page = Some(RibPageState::Error(text)),
+                }
+            }
+        }
+    }
+
+    pub(crate) fn set_explain_layout(&mut self, rows: usize, page: usize) {
+        self.explain_page_height = page;
+        self.explain_max_scroll = rows.saturating_sub(page);
+        self.explain_scroll = self.explain_scroll.min(self.explain_max_scroll);
     }
 
     fn scroll_detail_by(&mut self, rows: usize) {
@@ -213,6 +531,7 @@ impl App {
     }
 
     pub(crate) fn return_to_table(&mut self) {
+        self.cancel_rib();
         self.view = View::PeerTable;
         self.reset_detail_scroll();
     }
@@ -322,15 +641,19 @@ impl App {
 
         if self.neighbors.is_empty() {
             self.peer_table_state.select(None);
-            if matches!(self.view, View::PeerDetail(_)) {
+            if !matches!(self.view, View::PeerTable) {
                 self.return_to_table();
             }
             return;
         }
 
-        if let View::PeerDetail(address) = &self.view
-            && !current_keys.contains(address)
-        {
+        let viewed_peer = match &self.view {
+            View::PeerDetail(peer) | View::BestRib(peer) | View::AdvertisedExplain(peer) => {
+                Some(peer)
+            }
+            View::PeerTable => None,
+        };
+        if viewed_peer.is_some_and(|peer| !current_keys.contains(peer)) {
             self.return_to_table();
         }
 
@@ -432,6 +755,36 @@ impl App {
 
     pub fn total_routes(&self) -> u32 {
         self.health.as_ref().map(|h| h.total_routes).unwrap_or(0)
+    }
+}
+
+fn format_rib_error(error: &RibQueryError) -> String {
+    let code = match error.code {
+        tonic::Code::Ok => "OK",
+        tonic::Code::Cancelled => "CANCELLED",
+        tonic::Code::Unknown => "UNKNOWN",
+        tonic::Code::InvalidArgument => "INVALID_ARGUMENT",
+        tonic::Code::DeadlineExceeded => "DEADLINE_EXCEEDED",
+        tonic::Code::NotFound => "NOT_FOUND",
+        tonic::Code::AlreadyExists => "ALREADY_EXISTS",
+        tonic::Code::PermissionDenied => "PERMISSION_DENIED",
+        tonic::Code::ResourceExhausted => "RESOURCE_EXHAUSTED",
+        tonic::Code::FailedPrecondition => "FAILED_PRECONDITION",
+        tonic::Code::Aborted => "ABORTED",
+        tonic::Code::OutOfRange => "OUT_OF_RANGE",
+        tonic::Code::Unimplemented => "UNIMPLEMENTED",
+        tonic::Code::Internal => "INTERNAL",
+        tonic::Code::Unavailable => "UNAVAILABLE",
+        tonic::Code::DataLoss => "DATA_LOSS",
+        tonic::Code::Unauthenticated => "UNAUTHENTICATED",
+    };
+    match error.code {
+        tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => {
+            format!("Authorization failed ({code}): {}", error.message)
+        }
+        tonic::Code::Unavailable => format!("RIB unavailable: {}", error.message),
+        tonic::Code::Aborted => format!("RIB snapshot expired: {}", error.message),
+        _ => format!("RIB query failed ({code}): {}", error.message),
     }
 }
 
@@ -786,5 +1139,250 @@ mod tests {
         assert_eq!(app.detail_max_scroll, usize::from(u16::MAX));
         app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         assert_eq!(app.detail_scroll, usize::from(u16::MAX));
+    }
+
+    fn open_rib(app: &mut App) -> RibQueryIdentity {
+        app.on_data(snapshot(vec![neighbor("198.51.100.1", 10)]));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        let RibIntent::Query {
+            view_id,
+            peer_address,
+            query,
+        } = app.take_rib_intent().unwrap()
+        else {
+            panic!("query")
+        };
+        assert_eq!(peer_address, "198.51.100.1");
+        assert!(view_id > 1);
+        assert_eq!(
+            query,
+            RibQueryKind::BestPage {
+                page_token: String::new()
+            }
+        );
+        let identity = RibQueryIdentity {
+            request_id: 7,
+            view_id,
+            peer_address,
+            query,
+        };
+        app.record_rib_request(identity.clone());
+        identity
+    }
+
+    fn page(prefix: &str, next: &str) -> ListRoutesResponse {
+        ListRoutesResponse {
+            routes: vec![crate::proto::Route {
+                prefix: prefix.into(),
+                prefix_length: 24,
+                next_hop: "192.0.2.1".into(),
+                peer_address: "192.0.2.2".into(),
+                ..Default::default()
+            }],
+            next_page_token: next.into(),
+            total_count: 2,
+            page_version: None,
+        }
+    }
+
+    #[test]
+    fn rib_scope_paging_selection_and_explain_identity_are_exact() {
+        let mut app = App::new();
+        let first = open_rib(&mut app);
+        app.on_rib_result(RibQueryResult {
+            identity: first,
+            result: Ok(RibQueryResponse::BestPage(page(
+                "203.0.113.0",
+                "next\0opaque",
+            ))),
+        });
+        assert_eq!(app.rib_table_state.selected(), Some(0));
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let RibIntent::Query {
+            view_id,
+            peer_address,
+            query,
+        } = app.take_rib_intent().unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            query,
+            RibQueryKind::BestPage {
+                page_token: "next\0opaque".into()
+            }
+        );
+        let next = RibQueryIdentity {
+            request_id: 8,
+            view_id,
+            peer_address,
+            query,
+        };
+        app.record_rib_request(next.clone());
+        app.on_rib_result(RibQueryResult {
+            identity: next,
+            result: Ok(RibQueryResponse::BestPage(page("203.0.114.0", ""))),
+        });
+        assert_eq!(app.rib_previous_tokens, vec![String::new()]);
+        assert_eq!(app.rib_page_token, "next\0opaque");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let RibIntent::Query {
+            peer_address,
+            query,
+            ..
+        } = app.take_rib_intent().unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(peer_address, "198.51.100.1");
+        assert_eq!(
+            query,
+            RibQueryKind::ExplainAdvertised {
+                prefix: "203.0.114.0".into(),
+                prefix_length: 24
+            }
+        );
+        assert!(matches!(app.view, View::AdvertisedExplain(_)));
+        assert!(!app.route_events_visible());
+    }
+
+    #[test]
+    fn stale_results_fail_every_identity_and_view_guard() {
+        let mut app = App::new();
+        let active = open_rib(&mut app);
+        for mutate in 0..5 {
+            let mut stale = active.clone();
+            match mutate {
+                0 => stale.request_id += 1,
+                1 => stale.view_id += 1,
+                2 => stale.peer_address.push('x'),
+                3 => {
+                    stale.query = RibQueryKind::BestPage {
+                        page_token: "x".into(),
+                    }
+                }
+                _ => app.view = View::PeerDetail(active.peer_address.clone()),
+            }
+            app.on_rib_result(RibQueryResult {
+                identity: stale,
+                result: Ok(RibQueryResponse::BestPage(page("203.0.113.0", ""))),
+            });
+            assert!(matches!(app.rib_page, Some(RibPageState::Loading)));
+            assert_eq!(app.active_rib_query, Some(active.clone()));
+            app.view = View::BestRib(active.peer_address.clone());
+        }
+    }
+
+    #[test]
+    fn aborted_page_resets_once_and_errors_are_exact() {
+        let mut app = App::new();
+        let first = open_rib(&mut app);
+        app.on_rib_result(RibQueryResult {
+            identity: first,
+            result: Ok(RibQueryResponse::BestPage(page("203.0.113.0", "opaque"))),
+        });
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let RibIntent::Query {
+            view_id,
+            peer_address,
+            query,
+        } = app.take_rib_intent().unwrap()
+        else {
+            panic!()
+        };
+        let paged = RibQueryIdentity {
+            request_id: 8,
+            view_id,
+            peer_address,
+            query,
+        };
+        app.record_rib_request(paged.clone());
+        app.on_rib_result(RibQueryResult {
+            identity: paged,
+            result: Err(RibQueryError {
+                code: tonic::Code::Aborted,
+                message: "changed".into(),
+            }),
+        });
+        let RibIntent::Query { query, .. } = app.take_rib_intent().unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            query,
+            RibQueryKind::BestPage {
+                page_token: String::new()
+            }
+        );
+        assert!(app.rib_previous_tokens.is_empty());
+        assert_eq!(
+            format_rib_error(&RibQueryError {
+                code: tonic::Code::PermissionDenied,
+                message: "no".into()
+            }),
+            "Authorization failed (PERMISSION_DENIED): no"
+        );
+        assert_eq!(
+            format_rib_error(&RibQueryError {
+                code: tonic::Code::Unavailable,
+                message: "down".into()
+            }),
+            "RIB unavailable: down"
+        );
+        assert_eq!(
+            format_rib_error(&RibQueryError {
+                code: tonic::Code::Aborted,
+                message: "old".into()
+            }),
+            "RIB snapshot expired: old"
+        );
+    }
+
+    #[test]
+    fn rib_departures_cancel_only_on_fresh_roster() {
+        let mut app = App::new();
+        open_rib(&mut app);
+        let mut stale = snapshot(Vec::new());
+        stale.neighbors_freshness = Freshness::Stale;
+        app.on_data(stale);
+        assert!(matches!(app.view, View::BestRib(_)));
+        assert!(app.take_rib_intent().is_none());
+        app.on_data(snapshot(Vec::new()));
+        assert_eq!(app.view, View::PeerTable);
+        assert_eq!(app.take_rib_intent(), Some(RibIntent::Cancel));
+    }
+
+    #[test]
+    fn every_rib_departure_cancels_and_explain_back_retains_page() {
+        for key in [
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            let mut app = App::new();
+            open_rib(&mut app);
+            app.on_key(key);
+            assert_eq!(app.take_rib_intent(), Some(RibIntent::Cancel));
+        }
+
+        let mut app = App::new();
+        let first = open_rib(&mut app);
+        app.on_rib_result(RibQueryResult {
+            identity: first,
+            result: Ok(RibQueryResponse::BestPage(page("203.0.113.0", ""))),
+        });
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let retained_prefix = match &app.rib_page {
+            Some(RibPageState::Ready(page)) => page.routes[0].prefix.clone(),
+            _ => panic!(),
+        };
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.view, View::BestRib("198.51.100.1".into()));
+        assert_eq!(retained_prefix, "203.0.113.0");
+        assert!(matches!(
+            app.take_rib_intent(),
+            Some(RibIntent::Query { .. })
+        ));
+        assert_eq!(app.take_rib_intent(), Some(RibIntent::Cancel));
     }
 }

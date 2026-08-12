@@ -145,6 +145,12 @@ rbgp bfd       # BFD sessions, if configured
 rbgp top       # live TUI dashboard
 ```
 
+From the TUI peer detail, press `r` to browse the point-in-time global unicast
+Best-RIB for that peer as an export target. Use `n`/`p` to page and `Enter` to
+show whether the selected prefix would be advertised or denied, including the
+ordered export gates and policy reasons. This is an on-demand export view, not
+a live RIB feed.
+
 If `prometheus_addr` is configured, HTTP probes share that listener:
 
 ```bash

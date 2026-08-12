@@ -11,6 +11,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The TUI peer detail now opens an on-demand unicast export-explain view with
+  `r`: page through the global Best-RIB and explain advertise/deny gates,
+  ordered policy reasons, and modifications for the selected peer. (LAN-995)
 - `rbgp` Bash completions now offer filesystem paths for file positionals,
   including filenames with spaces and repeatable `policy fmt` inputs. (LAN-938)
 - `rustbgpd --migrate-config ACTION --offline` now performs explicit Linux-only

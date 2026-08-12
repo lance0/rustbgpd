@@ -11,6 +11,14 @@ command.
 Every command below also takes `--json` for scripting and portal
 backends.
 
+The TUI exposes one focused part of this catalog: from a selected peer's detail,
+press `r` to browse the point-in-time global unicast Best-RIB, then `Enter` to
+explain the export decision for that prefix and peer. It shows advertise/deny,
+ordered gates and policy reasons, and modifications, including denials absent
+from Adj-RIB-Out. It is not a live RIB feed and does not cover import/rejected
+routes, best-path comparison, VPN, labeled-unicast, or source candidates; use
+the commands below for the full catalog.
+
 | Question | Command |
 |----------|---------|
 | Why was this path selected as best? | `rbgp rib --prefix <cidr> --explain` |

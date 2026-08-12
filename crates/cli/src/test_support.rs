@@ -124,6 +124,14 @@ pub(crate) struct MockState {
     pub(crate) list_best_route_calls: AtomicUsize,
     pub(crate) list_received_route_calls: AtomicUsize,
     pub(crate) list_advertised_route_calls: AtomicUsize,
+    pub(crate) list_best_route_error: Mutex<Option<(Code, String)>>,
+    pub(crate) explain_advertised_error: Mutex<Option<(Code, String)>>,
+    pub(crate) rib_query_pause: AtomicBool,
+    pub(crate) rib_query_active: AtomicUsize,
+    pub(crate) rib_query_max_active: AtomicUsize,
+    pub(crate) rib_query_cancellations: AtomicUsize,
+    pub(crate) rib_query_started: Notify,
+    pub(crate) rib_query_resume: Notify,
     pub(crate) add_path_calls: AtomicUsize,
     pub(crate) delete_path_calls: AtomicUsize,
     pub(crate) list_rejected_route_calls: AtomicUsize,
@@ -1186,6 +1194,46 @@ struct MockRibService {
     state: Arc<MockState>,
 }
 
+struct ActiveRibQuery<'a> {
+    state: &'a MockState,
+    completed: bool,
+}
+
+impl<'a> ActiveRibQuery<'a> {
+    fn start(state: &'a MockState) -> Self {
+        let active = state.rib_query_active.fetch_add(1, Ordering::SeqCst) + 1;
+        state
+            .rib_query_max_active
+            .fetch_max(active, Ordering::SeqCst);
+        state.rib_query_started.notify_waiters();
+        Self {
+            state,
+            completed: false,
+        }
+    }
+
+    fn complete(mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for ActiveRibQuery<'_> {
+    fn drop(&mut self) {
+        self.state.rib_query_active.fetch_sub(1, Ordering::SeqCst);
+        if !self.completed {
+            self.state
+                .rib_query_cancellations
+                .fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+async fn pause_rib_query_if_requested(state: &MockState) {
+    if state.rib_query_pause.load(Ordering::SeqCst) {
+        state.rib_query_resume.notified().await;
+    }
+}
+
 struct MockInjectionService {
     state: Arc<MockState>,
 }
@@ -1608,9 +1656,15 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         self.state
             .list_best_route_calls
             .fetch_add(1, Ordering::SeqCst);
-        Ok(Response::new(
-            self.next_route_page(request.into_inner()).await,
-        ))
+        let active = ActiveRibQuery::start(&self.state);
+        pause_rib_query_if_requested(&self.state).await;
+        if let Some((code, message)) = self.state.list_best_route_error.lock().await.clone() {
+            active.complete();
+            return Err(Status::new(code, message));
+        }
+        let response = self.next_route_page(request.into_inner()).await;
+        active.complete();
+        Ok(Response::new(response))
     }
 
     async fn list_advertised_routes(
@@ -1667,6 +1721,12 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         request: Request<server_proto::ExplainAdvertisedRouteRequest>,
     ) -> Result<Response<server_proto::ExplainAdvertisedRouteResponse>, Status> {
+        let active = ActiveRibQuery::start(&self.state);
+        pause_rib_query_if_requested(&self.state).await;
+        if let Some((code, message)) = self.state.explain_advertised_error.lock().await.clone() {
+            active.complete();
+            return Err(Status::new(code, message));
+        }
         let req = request.into_inner();
         *self.state.last_explain_advertised.lock().await = Some(req.clone());
         let response_peer = canonical_ip_or_original(&req.peer_address);
@@ -1681,65 +1741,65 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
             || "198.51.100.2".to_string(),
             |source| source.peer_address.clone(),
         );
-        Ok(Response::new(
-            server_proto::ExplainAdvertisedRouteResponse {
-                decision: server_proto::ExplainDecision::Advertise as i32,
-                peer_address: response_peer,
-                prefix: "203.0.113.0".to_string(),
-                prefix_length: 24,
-                next_hop: "198.51.100.1".to_string(),
-                path_id: 0,
-                route_peer_address,
-                route_type: "external".to_string(),
-                reasons: vec![server_proto::ExplainReason {
-                    code: "policy_permitted".to_string(),
-                    message: "export policy permitted this route".to_string(),
-                }],
-                modifications: Some(server_proto::ExplainModifications {
-                    set_local_pref: Some(200),
-                    set_med: None,
-                    set_next_hop: String::new(),
-                    communities_add: vec![],
-                    communities_remove: vec![],
-                    extended_communities_add: vec![],
-                    extended_communities_remove: vec![],
-                    large_communities_add: vec![],
-                    large_communities_remove: vec![],
-                    as_path_prepend_asn: None,
-                    as_path_prepend_count: None,
-                }),
-                orr_vantage: String::new(),
-                orr_candidates: vec![],
-                gates: vec![
-                    server_proto::ExportGateStep {
-                        gate: "best_route".to_string(),
-                        code: "ebgp_route".to_string(),
-                        verdict: server_proto::ExportGateVerdict::Pass as i32,
-                        detail: "best route was learned from an eBGP peer (Loc-RIB best \
+        let response = Response::new(server_proto::ExplainAdvertisedRouteResponse {
+            decision: server_proto::ExplainDecision::Advertise as i32,
+            peer_address: response_peer,
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            next_hop: "198.51.100.1".to_string(),
+            path_id: 0,
+            route_peer_address,
+            route_type: "external".to_string(),
+            reasons: vec![server_proto::ExplainReason {
+                code: "policy_permitted".to_string(),
+                message: "export policy permitted this route".to_string(),
+            }],
+            modifications: Some(server_proto::ExplainModifications {
+                set_local_pref: Some(200),
+                set_med: None,
+                set_next_hop: String::new(),
+                communities_add: vec![],
+                communities_remove: vec![],
+                extended_communities_add: vec![],
+                extended_communities_remove: vec![],
+                large_communities_add: vec![],
+                large_communities_remove: vec![],
+                as_path_prepend_asn: None,
+                as_path_prepend_count: None,
+            }),
+            orr_vantage: String::new(),
+            orr_candidates: vec![],
+            gates: vec![
+                server_proto::ExportGateStep {
+                    gate: "best_route".to_string(),
+                    code: "ebgp_route".to_string(),
+                    verdict: server_proto::ExportGateVerdict::Pass as i32,
+                    detail: "best route was learned from an eBGP peer (Loc-RIB best \
                                  from 198.51.100.2)"
-                            .to_string(),
-                    },
-                    server_proto::ExportGateStep {
-                        gate: "export_policy".to_string(),
-                        code: "policy_permitted".to_string(),
-                        verdict: server_proto::ExportGateVerdict::Pass as i32,
-                        detail: "export policy \"lp200\" permitted this route".to_string(),
-                    },
-                    server_proto::ExportGateStep {
-                        gate: "adj_rib_out".to_string(),
-                        code: "already_advertised".to_string(),
-                        verdict: server_proto::ExportGateVerdict::Pass as i32,
-                        detail: "identical route already advertised — Adj-RIB-Out in sync, no \
+                        .to_string(),
+                },
+                server_proto::ExportGateStep {
+                    gate: "export_policy".to_string(),
+                    code: "policy_permitted".to_string(),
+                    verdict: server_proto::ExportGateVerdict::Pass as i32,
+                    detail: "export policy \"lp200\" permitted this route".to_string(),
+                },
+                server_proto::ExportGateStep {
+                    gate: "adj_rib_out".to_string(),
+                    code: "already_advertised".to_string(),
+                    verdict: server_proto::ExportGateVerdict::Pass as i32,
+                    detail: "identical route already advertised — Adj-RIB-Out in sync, no \
                                  re-announcement; remote acceptance is not observable"
-                            .to_string(),
-                    },
-                ],
-                update_group_id: Some(1),
-                already_advertised: true,
-                rd: String::new(),
-                source: response_source,
-            },
-        ))
+                        .to_string(),
+                },
+            ],
+            update_group_id: Some(1),
+            already_advertised: true,
+            rd: String::new(),
+            source: response_source,
+        });
+        active.complete();
+        Ok(response)
     }
 
     async fn list_blackhole_discards(

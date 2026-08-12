@@ -1983,6 +1983,26 @@ initially unavailable inventory, and a retained stale count; failure of this
 optional inventory does not mark the core connection disconnected.
 Press `h` for keybindings.
 
+From peer detail, `r` opens the unicast export-explain browser. It takes a
+point-in-time page of the global Best-RIB (100 routes per page) while retaining
+the selected peer only as the export target. Use `n` and `p` to follow the
+server's opaque page tokens, and `Enter` to evaluate the highlighted prefix
+with `ExplainAdvertisedRoute`. The result shows advertise or deny, ordered
+gates and reasons, policy attribution, and route modifications. A denial is
+explainable even when the route is absent from Adj-RIB-Out.
+
+The browser does not poll the RIB or retry general failures automatically.
+Leaving or quitting the view, or removal of the selected peer on a fresh
+snapshot, cancels its request. If pagination becomes stale and the daemon
+returns `ABORTED`, the browser restarts at page 1 once. Both the Best-RIB list
+and export-explain requests use the existing bearer credentials and require
+`SensitiveRead` authorization.
+
+This view deliberately does not provide arbitrary search, import/rejected-route
+browsing, best-path comparison, VPN, labeled-unicast, or source-candidate
+explanations. It also does not imply that a route must exist in Adj-RIB-Out.
+Use the CLI explain catalog for those broader questions.
+
 ### Watch live events
 
 ```bash

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
@@ -5,16 +7,201 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::commands::control::rpki_vrp_count_sum;
+use crate::commands::rib::{RibClient, fetch_tui_best_route_page, fetch_tui_explain_advertised};
 use crate::connection::Connection;
 use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::event_service_client::EventServiceClient;
 use crate::proto::global_service_client::GlobalServiceClient;
 use crate::proto::neighbor_service_client::NeighborServiceClient;
+use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
-    BgpEvent, BgpEventType, EventCategory, GetGlobalRequest, GlobalState, HealthRequest,
-    HealthResponse, ListDynamicNeighborsRequest, ListNeighborsRequest, MetricsRequest,
-    NeighborState, RouteEvent, WatchEventsRequest, bgp_event,
+    BgpEvent, BgpEventType, EventCategory, ExplainAdvertisedRouteResponse, GetGlobalRequest,
+    GlobalState, HealthRequest, HealthResponse, ListDynamicNeighborsRequest, ListNeighborsRequest,
+    ListRoutesResponse, MetricsRequest, NeighborState, RouteEvent, WatchEventsRequest, bgp_event,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
+pub(super) enum RibQueryKind {
+    BestPage { page_token: String },
+    ExplainAdvertised { prefix: String, prefix_length: u32 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
+pub(super) struct RibQueryIdentity {
+    pub request_id: u64,
+    pub view_id: u64,
+    pub peer_address: String,
+    pub query: RibQueryKind,
+}
+
+#[derive(Debug)]
+#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
+pub(super) enum RibQueryResponse {
+    BestPage(ListRoutesResponse),
+    ExplainAdvertised(Box<ExplainAdvertisedRouteResponse>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
+pub(super) struct RibQueryError {
+    pub code: tonic::Code,
+    pub message: String,
+}
+
+impl From<tonic::Status> for RibQueryError {
+    fn from(status: tonic::Status) -> Self {
+        Self {
+            code: status.code(),
+            message: status.message().to_string(),
+        }
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
+pub(super) struct RibQueryResult {
+    pub identity: RibQueryIdentity,
+    pub result: Result<RibQueryResponse, RibQueryError>,
+}
+
+#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
+enum RibQueryCommand {
+    Query(RibQueryIdentity),
+    Cancel,
+    Close,
+}
+
+#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
+pub(super) struct RibQueryHandle {
+    command_tx: mpsc::UnboundedSender<RibQueryCommand>,
+    next_request_id: Arc<AtomicU64>,
+    task: JoinHandle<()>,
+}
+
+#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
+impl RibQueryHandle {
+    pub fn query(&self, view_id: u64, peer_address: String, query: RibQueryKind) -> Option<u64> {
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let identity = RibQueryIdentity {
+            request_id,
+            view_id,
+            peer_address,
+            query,
+        };
+        self.command_tx
+            .send(RibQueryCommand::Query(identity))
+            .ok()
+            .map(|()| request_id)
+    }
+
+    pub fn cancel(&self) {
+        let _ = self.command_tx.send(RibQueryCommand::Cancel);
+    }
+
+    pub fn close(&self) {
+        let _ = self.command_tx.send(RibQueryCommand::Close);
+    }
+}
+
+impl Drop for RibQueryHandle {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Spawn the TUI's isolated unary RIB lane.
+///
+/// The lane owns one client and one RPC future. Receiving another command
+/// drops that future before any replacement starts; results use an unbounded
+/// sender so a stopped UI can never hold shutdown open.
+#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
+pub(super) fn spawn_rib_query_lane(
+    connection: Connection,
+) -> (RibQueryHandle, mpsc::UnboundedReceiver<RibQueryResult>) {
+    let (command_tx, command_rx) = mpsc::unbounded_channel();
+    let (result_tx, result_rx) = mpsc::unbounded_channel();
+    let task = tokio::spawn(rib_query_loop(connection, command_rx, result_tx));
+    (
+        RibQueryHandle {
+            command_tx,
+            next_request_id: Arc::new(AtomicU64::new(1)),
+            task,
+        },
+        result_rx,
+    )
+}
+
+#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
+async fn run_rib_query(
+    client: &mut RibClient,
+    identity: &RibQueryIdentity,
+) -> Result<RibQueryResponse, tonic::Status> {
+    match &identity.query {
+        RibQueryKind::BestPage { page_token } => {
+            fetch_tui_best_route_page(client, page_token.clone())
+                .await
+                .map(RibQueryResponse::BestPage)
+        }
+        RibQueryKind::ExplainAdvertised {
+            prefix,
+            prefix_length,
+        } => fetch_tui_explain_advertised(
+            client,
+            &identity.peer_address,
+            prefix.clone(),
+            *prefix_length,
+        )
+        .await
+        .map(Box::new)
+        .map(RibQueryResponse::ExplainAdvertised),
+    }
+}
+
+#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
+async fn rib_query_loop(
+    connection: Connection,
+    mut command_rx: mpsc::UnboundedReceiver<RibQueryCommand>,
+    result_tx: mpsc::UnboundedSender<RibQueryResult>,
+) {
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut pending = None;
+    loop {
+        let command = match pending.take() {
+            Some(command) => command,
+            None => match command_rx.recv().await {
+                Some(command) => command,
+                None => return,
+            },
+        };
+        let RibQueryCommand::Query(identity) = command else {
+            if matches!(command, RibQueryCommand::Close) {
+                return;
+            }
+            continue;
+        };
+
+        let mut rpc = std::pin::pin!(run_rib_query(&mut client, &identity));
+        tokio::select! {
+            biased;
+            _ = result_tx.closed() => return,
+            command = command_rx.recv() => {
+                match command {
+                    Some(RibQueryCommand::Close) | None => return,
+                    Some(command) => pending = Some(command),
+                }
+            }
+            result = &mut rpc => {
+                let result = result.map_err(RibQueryError::from);
+                if result_tx.send(RibQueryResult { identity: identity.clone(), result }).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
 
 pub struct DataSnapshot {
     pub global: Option<GlobalState>,
@@ -399,6 +586,21 @@ mod tests {
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
 
+    fn best_query(token: &str) -> RibQueryKind {
+        RibQueryKind::BestPage {
+            page_token: token.to_string(),
+        }
+    }
+
+    async fn receive_result(
+        results: &mut mpsc::UnboundedReceiver<RibQueryResult>,
+    ) -> RibQueryResult {
+        tokio::time::timeout(Duration::from_secs(2), results.recv())
+            .await
+            .expect("RIB query result timed out")
+            .expect("RIB query lane closed")
+    }
+
     async fn wait_for(mut predicate: impl FnMut() -> bool) {
         for _ in 0..1_000 {
             if predicate() {
@@ -412,6 +614,248 @@ mod tests {
     async fn settle_tasks() {
         for _ in 0..100 {
             tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn rib_query_best_page_preserves_request_token_and_response() {
+        let server = spawn_mock_server(None).await;
+        *server.state.list_route_pages.lock().await =
+            vec![rustbgpd_api::proto::ListRoutesResponse {
+                routes: vec![rustbgpd_api::proto::Route {
+                    prefix: "203.0.113.0".into(),
+                    prefix_length: 24,
+                    ..Default::default()
+                }],
+                next_page_token: "opaque-next\0token".into(),
+                total_count: 501,
+                page_version: Some(rustbgpd_api::proto::RoutePageVersion {
+                    epoch: 7,
+                    generation: 77,
+                }),
+            }];
+        let connection = connect(&server.addr, None).await.unwrap();
+        let (lane, mut results) = spawn_rib_query_lane(connection);
+
+        let request_id = lane
+            .query(9, "fe80::1%eth0".into(), best_query("opaque-in\0token"))
+            .unwrap();
+        let result = receive_result(&mut results).await;
+
+        assert_eq!(request_id, 1);
+        assert_eq!(result.identity.request_id, request_id);
+        assert_eq!(result.identity.view_id, 9);
+        assert_eq!(result.identity.peer_address, "fe80::1%eth0");
+        assert_eq!(result.identity.query, best_query("opaque-in\0token"));
+        let RibQueryResponse::BestPage(page) = result.result.unwrap() else {
+            panic!("expected Best-RIB page");
+        };
+        assert_eq!(page.routes.len(), 1);
+        assert_eq!(page.total_count, 501);
+        assert_eq!(page.next_page_token, "opaque-next\0token");
+        assert_eq!(
+            page.page_version,
+            Some(crate::proto::RoutePageVersion {
+                epoch: 7,
+                generation: 77,
+            })
+        );
+        let requests = server.state.list_route_requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0],
+            rustbgpd_api::proto::ListRoutesRequest {
+                page_size: 100,
+                page_token: "opaque-in\0token".into(),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn rib_query_explain_uses_unicast_winner_shape_and_shared_json() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let (lane, mut results) = spawn_rib_query_lane(connection);
+        let query = RibQueryKind::ExplainAdvertised {
+            prefix: "203.0.113.0".into(),
+            prefix_length: 24,
+        };
+
+        lane.query(12, "fe80::1%eth0".into(), query.clone())
+            .unwrap();
+        let result = receive_result(&mut results).await;
+        assert_eq!(result.identity.query, query);
+        let RibQueryResponse::ExplainAdvertised(response) = result.result.unwrap() else {
+            panic!("expected advertised-route explain");
+        };
+        assert_eq!(response.peer_address, "fe80::1%eth0");
+        let request = server
+            .state
+            .last_explain_advertised
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        assert_eq!(request.peer_address, "fe80::1");
+        assert_eq!(request.prefix, "203.0.113.0");
+        assert_eq!(request.prefix_length, 24);
+        assert_eq!(request.rd, "");
+        assert!(!request.labeled);
+        assert!(request.source.is_none());
+
+        let shared_bytes = serde_json::to_vec(&crate::commands::rib::explain_to_json(&response))
+            .expect("shared CLI/TUI explain JSON serializes");
+        let shared_value: serde_json::Value = serde_json::from_slice(&shared_bytes).unwrap();
+        assert_eq!(shared_value["decision"], "advertise");
+        assert_eq!(shared_value["prefix"], "203.0.113.0/24");
+        assert_eq!(shared_value["peer_address"], "fe80::1%eth0");
+        assert_eq!(shared_value["gates"][1]["code"], "policy_permitted");
+    }
+
+    #[tokio::test]
+    async fn rib_query_lane_replaces_and_explicitly_cancels_without_overlap() {
+        let server = spawn_mock_server(None).await;
+        server.state.rib_query_pause.store(true, Ordering::SeqCst);
+        let connection = connect(&server.addr, None).await.unwrap();
+        let (lane, mut results) = spawn_rib_query_lane(connection);
+
+        lane.query(1, "192.0.2.1".into(), best_query("old"))
+            .unwrap();
+        wait_for(|| server.state.rib_query_active.load(Ordering::SeqCst) == 1).await;
+        server.state.rib_query_pause.store(false, Ordering::SeqCst);
+        let replacement = lane
+            .query(2, "192.0.2.2".into(), best_query("new"))
+            .unwrap();
+        let result = receive_result(&mut results).await;
+        assert_eq!(result.identity.request_id, replacement);
+        assert_eq!(result.identity.view_id, 2);
+        assert_eq!(server.state.rib_query_max_active.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            server.state.rib_query_cancellations.load(Ordering::SeqCst),
+            1
+        );
+
+        server.state.rib_query_pause.store(true, Ordering::SeqCst);
+        lane.query(3, "192.0.2.3".into(), best_query("cancel"))
+            .unwrap();
+        wait_for(|| server.state.rib_query_active.load(Ordering::SeqCst) == 1).await;
+        lane.cancel();
+        wait_for(|| server.state.rib_query_active.load(Ordering::SeqCst) == 0).await;
+        assert_eq!(
+            server.state.rib_query_cancellations.load(Ordering::SeqCst),
+            2
+        );
+        assert!(results.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn rib_query_lane_drop_and_receiver_close_cancel_inflight_rpc() {
+        for shutdown in ["drop", "receiver", "close"] {
+            let server = spawn_mock_server(None).await;
+            server.state.rib_query_pause.store(true, Ordering::SeqCst);
+            let connection = connect(&server.addr, None).await.unwrap();
+            let (lane, results) = spawn_rib_query_lane(connection);
+            lane.query(1, "192.0.2.1".into(), best_query("")).unwrap();
+            wait_for(|| server.state.rib_query_active.load(Ordering::SeqCst) == 1).await;
+            match shutdown {
+                "receiver" => drop(results),
+                "close" => lane.close(),
+                _ => drop(lane),
+            }
+            wait_for(|| server.state.rib_query_active.load(Ordering::SeqCst) == 0).await;
+            assert_eq!(
+                server.state.rib_query_cancellations.load(Ordering::SeqCst),
+                1
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rib_query_errors_are_exact_once_and_never_retried() {
+        for (code, message) in [
+            (tonic::Code::Aborted, "page version expired"),
+            (tonic::Code::Unavailable, "RIB unavailable"),
+        ] {
+            let server = spawn_mock_server(None).await;
+            *server.state.list_best_route_error.lock().await = Some((code, message.into()));
+            let connection = connect(&server.addr, None).await.unwrap();
+            let (lane, mut results) = spawn_rib_query_lane(connection);
+            lane.query(1, "192.0.2.1".into(), best_query("opaque"))
+                .unwrap();
+            let result = loop {
+                if let Ok(result) = results.try_recv() {
+                    break result;
+                }
+                tokio::task::yield_now().await;
+            };
+            let error = result.result.unwrap_err();
+            assert_eq!(error.code, code);
+            assert_eq!(error.message, message);
+            tokio::time::advance(Duration::from_secs(600)).await;
+            settle_tasks().await;
+            assert_eq!(server.state.list_best_route_calls.load(Ordering::SeqCst), 1);
+            assert!(results.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn rib_query_lane_preserves_bearer_auth_for_both_rpcs() {
+        let server = spawn_mock_server(Some("rib-secret")).await;
+        let token_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(token_file.path(), "rib-secret\n").unwrap();
+        let connection = connect(&server.addr, token_file.path().to_str())
+            .await
+            .unwrap();
+        let (lane, mut results) = spawn_rib_query_lane(connection);
+        lane.query(1, "192.0.2.1".into(), best_query("")).unwrap();
+        assert!(receive_result(&mut results).await.result.is_ok());
+        lane.query(
+            1,
+            "192.0.2.1".into(),
+            RibQueryKind::ExplainAdvertised {
+                prefix: "203.0.113.0".into(),
+                prefix_length: 24,
+            },
+        )
+        .unwrap();
+        assert!(receive_result(&mut results).await.result.is_ok());
+
+        for supplied in [None, Some("wrong-secret")] {
+            let token_file = supplied.map(|token| {
+                let file = tempfile::NamedTempFile::new().unwrap();
+                std::fs::write(file.path(), token).unwrap();
+                file
+            });
+            let connection = connect(
+                &server.addr,
+                token_file.as_ref().and_then(|file| file.path().to_str()),
+            )
+            .await
+            .unwrap();
+            let (lane, mut results) = spawn_rib_query_lane(connection);
+            lane.query(1, "192.0.2.1".into(), best_query("")).unwrap();
+            let error = receive_result(&mut results).await.result.unwrap_err();
+            assert_eq!(error.code, tonic::Code::Unauthenticated);
+            assert_eq!(
+                error.message,
+                if supplied.is_none() {
+                    "missing authorization metadata"
+                } else {
+                    "invalid bearer token"
+                }
+            );
+            lane.query(
+                1,
+                "192.0.2.1".into(),
+                RibQueryKind::ExplainAdvertised {
+                    prefix: "203.0.113.0".into(),
+                    prefix_length: 24,
+                },
+            )
+            .unwrap();
+            let explain_error = receive_result(&mut results).await.result.unwrap_err();
+            assert_eq!(explain_error, error);
         }
     }
 

@@ -17,6 +17,12 @@ rbgp metrics      # Prometheus metrics snapshot
 rbgp top          # live terminal dashboard
 ```
 
+In `rbgp top`, select a peer and open its detail, then press `r` to browse a
+point-in-time page of the global unicast Best-RIB with that peer retained as
+the export target. Use `n`/`p` for pages and `Enter` to run the existing export
+explanation for the highlighted prefix and peer. This view is on demand; it
+does not continuously poll the RIB.
+
 ### Config Transactions
 
 ```bash
