@@ -153,6 +153,8 @@ pub enum ConfigTransactionApplyError {
     DeadlineExceeded(String),
     /// Internal actor/rollback failure.
     Internal(String),
+    /// The daemon cannot prove whether the candidate took effect.
+    DetectedAmbiguousOutcome(String),
 }
 
 impl ConfigTransactionApplyError {
@@ -163,6 +165,7 @@ impl ConfigTransactionApplyError {
             Self::Unavailable(message) => Status::unavailable(message),
             Self::DeadlineExceeded(message) => Status::deadline_exceeded(message),
             Self::Internal(message) => Status::internal(message),
+            Self::DetectedAmbiguousOutcome(message) => Status::aborted(message),
         }
     }
 }
@@ -174,7 +177,8 @@ impl std::fmt::Display for ConfigTransactionApplyError {
             | Self::FailedPrecondition(message)
             | Self::Unavailable(message)
             | Self::DeadlineExceeded(message)
-            | Self::Internal(message) => f.write_str(message),
+            | Self::Internal(message)
+            | Self::DetectedAmbiguousOutcome(message) => f.write_str(message),
         }
     }
 }
@@ -373,11 +377,70 @@ pub type ConfigTransactionApplyFuture = Pin<
 /// The binary crate owns this because config transactions need runtime actor
 /// senders, config persistence, and the shared SIGHUP/runtime-CRUD lock.
 pub type ConfigTransactionApplyFn = Arc<
-    dyn Fn(crate::proto::ApplyConfigTransactionRequest) -> ConfigTransactionApplyFuture
+    dyn Fn(
+            crate::proto::ApplyConfigTransactionRequest,
+            ConfigTransactionApplyContext,
+        ) -> ConfigTransactionApplyFuture
         + Send
         + Sync
         + 'static,
 >;
+
+/// Transport state transferred to the daemon-owned Apply executor.
+pub struct ConfigTransactionApplyContext {
+    response_attached: Arc<std::sync::atomic::AtomicBool>,
+    stream: Option<StreamApplyOwnership>,
+}
+
+impl ConfigTransactionApplyContext {
+    #[must_use]
+    pub fn unary() -> (Self, ConfigTransactionResponseAttachment) {
+        let attached = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        (
+            Self {
+                response_attached: Arc::clone(&attached),
+                stream: None,
+            },
+            ConfigTransactionResponseAttachment(attached),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn streamed(
+        permit: OwnedSemaphorePermit,
+        admission: Arc<Semaphore>,
+    ) -> (Self, ConfigTransactionResponseAttachment) {
+        let (mut context, attachment) = Self::unary();
+        context.stream = Some(StreamApplyOwnership { permit, admission });
+        (context, attachment)
+    }
+
+    #[must_use]
+    pub fn response_attached(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.response_attached)
+    }
+
+    #[must_use]
+    pub fn take_stream_ownership(&mut self) -> Option<(OwnedSemaphorePermit, Arc<Semaphore>)> {
+        self.stream
+            .take()
+            .map(|stream| (stream.permit, stream.admission))
+    }
+}
+
+struct StreamApplyOwnership {
+    permit: OwnedSemaphorePermit,
+    admission: Arc<Semaphore>,
+}
+
+/// Response-lifetime sentinel; dropping it records transport cancellation.
+pub struct ConfigTransactionResponseAttachment(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for ConfigTransactionResponseAttachment {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
 
 /// Future returned by the daemon-owned config transaction confirm hook.
 pub type ConfigTransactionConfirmFuture = Pin<

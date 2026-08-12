@@ -69,6 +69,7 @@ pub enum RuntimeConfigSettlementTerminal {
 pub enum RuntimeConfigFenceReason {
     BudgetExpired,
     ExecutorLost,
+    DetectedAmbiguousOutcome,
 }
 
 const TERMINAL_OWNED: u8 = 0;
@@ -80,6 +81,7 @@ const PHASE_SETTLING: u8 = 2;
 const AMBIGUITY_REASON_NONE: u8 = 0;
 const AMBIGUITY_REASON_BUDGET: u8 = 1;
 const AMBIGUITY_REASON_EXECUTOR: u8 = 2;
+const AMBIGUITY_REASON_DETECTED: u8 = 3;
 const AMBIGUITY_NOT_READY: &str = "runtime config settlement is ambiguous";
 
 #[derive(Debug)]
@@ -96,7 +98,7 @@ struct OperationInner {
     phase: AtomicU8,
     terminal: AtomicU8,
     fence_reason: AtomicU8,
-    response_attached: AtomicBool,
+    response_attached: Arc<AtomicBool>,
     coordinator: RuntimeConfigCoordinator,
     daemon_gate: DaemonGate,
     resources: Mutex<Option<OwnedResources>>,
@@ -153,7 +155,7 @@ impl Registry {
 
     fn unregister(&self, id: u64) {
         self.lock().registrations.remove(&id);
-        self.wake.notify_one();
+        self.wake.notify_all();
     }
 
     fn advance_terminal(&self, id: u64, when: Instant) {
@@ -235,6 +237,10 @@ impl RuntimeConfigSettlementWatchdog {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the closed ownership registration lists every retained fail-stop resource explicitly"
+    )]
     pub fn register_owned(
         &self,
         kind: RuntimeConfigOperationKind,
@@ -243,6 +249,7 @@ impl RuntimeConfigSettlementWatchdog {
         daemon_gate: DaemonGate,
         stream_permit: Option<OwnedSemaphorePermit>,
         stream_admission: Option<Arc<Semaphore>>,
+        response_attached: Arc<AtomicBool>,
     ) -> (OwnedRuntimeConfigOperation, RuntimeConfigExecutorGuard) {
         let deadline = Instant::now() + self.registry.budget;
         let id = self.registry.next_id.fetch_add(1, Ordering::Relaxed);
@@ -253,7 +260,7 @@ impl RuntimeConfigSettlementWatchdog {
             phase: AtomicU8::new(PHASE_PREFLIGHT),
             terminal: AtomicU8::new(TERMINAL_OWNED),
             fence_reason: AtomicU8::new(AMBIGUITY_REASON_NONE),
-            response_attached: AtomicBool::new(true),
+            response_attached,
             coordinator,
             daemon_gate,
             resources: Mutex::new(Some(OwnedResources {
@@ -279,6 +286,19 @@ impl RuntimeConfigSettlementWatchdog {
                 inner: Some(operation),
             },
         )
+    }
+
+    /// Block the calling OS thread until every clean registration settles.
+    /// Ambiguous ownership deliberately never unregisters; its fail-stop wins.
+    pub fn wait_until_idle(&self) {
+        let mut state = self.registry.lock();
+        while !state.registrations.is_empty() {
+            state = self
+                .registry
+                .wake
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
     }
 }
 
@@ -332,6 +352,7 @@ impl OwnedRuntimeConfigOperation {
         match self.inner.fence_reason.load(Ordering::Acquire) {
             AMBIGUITY_REASON_BUDGET => Some(RuntimeConfigFenceReason::BudgetExpired),
             AMBIGUITY_REASON_EXECUTOR => Some(RuntimeConfigFenceReason::ExecutorLost),
+            AMBIGUITY_REASON_DETECTED => Some(RuntimeConfigFenceReason::DetectedAmbiguousOutcome),
             _ => None,
         }
     }
@@ -341,6 +362,15 @@ impl OwnedRuntimeConfigOperation {
         self.inner
             .response_attached
             .store(attached, Ordering::Release);
+    }
+
+    /// Fence a known ambiguous result before any response can be published.
+    #[must_use]
+    pub fn fence_ambiguous_outcome(&self) -> bool {
+        fence(
+            self.inner.as_ref(),
+            RuntimeConfigFenceReason::DetectedAmbiguousOutcome,
+        )
     }
 
     #[must_use]
@@ -391,7 +421,7 @@ impl Drop for RuntimeConfigExecutorGuard {
     }
 }
 
-fn fence(operation: &Arc<OperationInner>, reason: RuntimeConfigFenceReason) -> bool {
+fn fence(operation: &OperationInner, reason: RuntimeConfigFenceReason) -> bool {
     if operation
         .terminal
         .compare_exchange(
@@ -407,6 +437,7 @@ fn fence(operation: &Arc<OperationInner>, reason: RuntimeConfigFenceReason) -> b
     let reason_value = match reason {
         RuntimeConfigFenceReason::BudgetExpired => AMBIGUITY_REASON_BUDGET,
         RuntimeConfigFenceReason::ExecutorLost => AMBIGUITY_REASON_EXECUTOR,
+        RuntimeConfigFenceReason::DetectedAmbiguousOutcome => AMBIGUITY_REASON_DETECTED,
     };
     operation
         .fence_reason
@@ -599,6 +630,7 @@ mod tests {
             DaemonGate::new(),
             stream_permit,
             admission.clone(),
+            Arc::new(AtomicBool::new(true)),
         );
         (operation, guard, coordinator, admission)
     }
@@ -660,6 +692,37 @@ mod tests {
         assert!(admission.unwrap().is_closed());
         assert!(!operation.try_settle());
         assert_eq!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(), 70);
+    }
+
+    #[tokio::test]
+    async fn detected_ambiguity_closes_both_admission_resources() {
+        let (watchdog, receiver) = test_watchdog(Duration::from_secs(5), Duration::from_millis(20));
+        let (operation, guard, coordinator, admission) = operation(&watchdog, true).await;
+        assert!(operation.fence_ambiguous_outcome());
+        assert_eq!(
+            operation.fence_reason(),
+            Some(RuntimeConfigFenceReason::DetectedAmbiguousOutcome)
+        );
+        assert!(coordinator.is_closed());
+        assert!(admission.unwrap().is_closed());
+        assert!(!operation.try_settle());
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(), 70);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn wait_until_idle_returns_only_after_clean_settlement() {
+        let (watchdog, _receiver) = test_watchdog(Duration::from_secs(5), Duration::from_secs(1));
+        let (operation, guard, _, _) = operation(&watchdog, false).await;
+        let waiter = {
+            let watchdog = watchdog.clone();
+            thread::spawn(move || watchdog.wait_until_idle())
+        };
+        thread::sleep(Duration::from_millis(10));
+        assert!(!waiter.is_finished());
+        assert!(operation.try_settle());
+        drop(guard);
+        waiter.join().unwrap();
     }
 
     #[tokio::test(start_paused = true)]

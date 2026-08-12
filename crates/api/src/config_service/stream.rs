@@ -1291,9 +1291,10 @@ mod tests {
         let (peer_tx, _peer_rx) = mpsc::channel(1);
         let (hook_tx, mut hook_rx) =
             mpsc::channel::<(proto::ApplyConfigTransactionRequest, HookReply)>(2);
-        let hook: ConfigTransactionApplyFn = Arc::new(move |request| {
+        let hook: ConfigTransactionApplyFn = Arc::new(move |request, context| {
             let hook_tx = hook_tx.clone();
             Box::pin(async move {
+                let _context = context;
                 let (reply, receive) = oneshot::channel();
                 hook_tx.send((request, reply)).await.unwrap();
                 receive.await.unwrap()
@@ -1576,9 +1577,12 @@ mod tests {
             .unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let hook_calls = Arc::clone(&calls);
-        let hook: ConfigTransactionApplyFn = Arc::new(move |_request| {
+        let hook: ConfigTransactionApplyFn = Arc::new(move |_request, context| {
             hook_calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Ok(applied_response()) })
+            Box::pin(async move {
+                let _context = context;
+                Ok(applied_response())
+            })
         });
         let (peer_tx, _peer_rx) = mpsc::channel(1);
         let listener = spawn_listener_with_apply(
@@ -1681,9 +1685,12 @@ mod tests {
         drop(held);
         let calls = Arc::new(AtomicUsize::new(0));
         let hook_calls = Arc::clone(&calls);
-        let hook: ConfigTransactionApplyFn = Arc::new(move |_request| {
+        let hook: ConfigTransactionApplyFn = Arc::new(move |_request, context| {
             hook_calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Ok(applied_response()) })
+            Box::pin(async move {
+                let _context = context;
+                Ok(applied_response())
+            })
         });
         let (peer_tx, _peer_rx) = mpsc::channel(1);
         let listener = spawn_listener_with_apply(
@@ -1740,9 +1747,12 @@ mod tests {
             .unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let hook_calls = Arc::clone(&calls);
-        let hook: ConfigTransactionApplyFn = Arc::new(move |_request| {
+        let hook: ConfigTransactionApplyFn = Arc::new(move |_request, context| {
             hook_calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Ok(applied_response()) })
+            Box::pin(async move {
+                let _context = context;
+                Ok(applied_response())
+            })
         });
         let (peer_tx, _peer_rx) = mpsc::channel(1);
         let listener = spawn_listener_with_apply(
@@ -1816,9 +1826,10 @@ mod tests {
         let (peer_tx, _peer_rx) = mpsc::channel(1);
         let (hook_tx, mut hook_rx) =
             mpsc::channel::<(proto::ApplyConfigTransactionRequest, HookReply)>(1);
-        let hook: ConfigTransactionApplyFn = Arc::new(move |request| {
+        let hook: ConfigTransactionApplyFn = Arc::new(move |request, context| {
             let hook_tx = hook_tx.clone();
             Box::pin(async move {
+                let _context = context;
                 let (reply, receive) = oneshot::channel();
                 hook_tx.send((request, reply)).await.unwrap();
                 receive.await.unwrap()
@@ -1921,9 +1932,10 @@ mod tests {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (hook_tx, mut hook_rx) =
             mpsc::channel::<(proto::ApplyConfigTransactionRequest, HookReply)>(1);
-        let hook: ConfigTransactionApplyFn = Arc::new(move |request| {
+        let hook: ConfigTransactionApplyFn = Arc::new(move |request, context| {
             let hook_tx = hook_tx.clone();
             Box::pin(async move {
+                let _context = context;
                 let (reply, receive) = oneshot::channel();
                 hook_tx.send((request, reply)).await.unwrap();
                 receive.await.unwrap()
@@ -2108,9 +2120,10 @@ mod tests {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (hook_tx, mut hook_rx) =
             mpsc::channel::<(proto::ApplyConfigTransactionRequest, HookReply)>(1);
-        let hook: ConfigTransactionApplyFn = Arc::new(move |request| {
+        let hook: ConfigTransactionApplyFn = Arc::new(move |request, context| {
             let hook_tx = hook_tx.clone();
             Box::pin(async move {
+                let _context = context;
                 let (reply, receive) = oneshot::channel();
                 hook_tx.send((request, reply)).await.unwrap();
                 receive.await.unwrap()
