@@ -867,15 +867,11 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
     out
 }
 
-/// Render one MED table cell. `med_attr` is the honest absence marker
-/// (LAN-313): when the daemon supports it (populated anywhere in the
-/// response), an absent MED renders as "-"; against an older daemon the
-/// bare 0-defaulted `med` field is shown as-is.
-fn format_med(med: u32, med_attr: Option<u32>, med_attr_supported: bool) -> String {
+/// Render one MED table cell from the authoritative presence marker (LAN-313).
+fn format_med(med_attr: Option<u32>) -> String {
     match med_attr {
         Some(m) => m.to_string(),
-        None if med_attr_supported => "-".to_string(),
-        None => med.to_string(),
+        None => "-".to_string(),
     }
 }
 
@@ -931,10 +927,6 @@ fn render_route_table_at(
     // per RFC 9494), prepended to the best marker only when some route
     // carries a flag so the everyday table is unchanged.
     let any_stale = routes.iter().any(|r| r.stale || r.llgr_stale);
-    // A daemon that populates `med_attr` anywhere in the response is
-    // MED-absence-aware: render an absent MED as "-". Older daemons
-    // never set it, so fall back to the bare (0-defaulted) `med` field.
-    let med_attr_supported = routes.iter().any(|r| r.med_attr.is_some());
     let rows: Vec<Row> = routes
         .iter()
         .map(|r| {
@@ -971,7 +963,7 @@ fn render_route_table_at(
                 next_hop: r.next_hop.clone(),
                 as_path: format_as_path(&r.as_path),
                 lp: r.local_pref.to_string(),
-                med: format_med(r.med, r.med_attr, med_attr_supported),
+                med: format_med(r.med_attr),
                 origin: format_origin(r.origin).to_string(),
                 path_id,
                 age: show_age.then(|| match r.received_at_epoch_seconds {
@@ -1368,15 +1360,9 @@ mod tests {
 
     #[test]
     fn test_format_med() {
-        // MED-absence-aware daemon: explicit values (including 0) render
-        // as numbers, an absent MED renders as "-".
-        assert_eq!(format_med(0, Some(0), true), "0");
-        assert_eq!(format_med(50, Some(50), true), "50");
-        assert_eq!(format_med(0, None, true), "-");
-        // Older daemon (med_attr populated nowhere): the bare
-        // 0-defaulted field passes through unchanged.
-        assert_eq!(format_med(0, None, false), "0");
-        assert_eq!(format_med(50, None, false), "50");
+        assert_eq!(format_med(Some(0)), "0");
+        assert_eq!(format_med(Some(50)), "50");
+        assert_eq!(format_med(None), "-");
     }
 
     #[test]
@@ -2103,7 +2089,7 @@ Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx Description    Source      
             rendered,
             concat!(
                 "   Prefix      Next Hop  AS Path  LP MED  Origin PathID\n",
-                "*> 10.0.0.0/24 192.0.2.1 65001   100   0  igp    \n",
+                "*> 10.0.0.0/24 192.0.2.1 65001   100   -  igp    \n",
             )
         );
     }
@@ -2126,9 +2112,9 @@ Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx Description    Source      
             render_route_table_at(&[unknown, old, future], true, 4_000),
             concat!(
                 "   Prefix      Next Hop  AS Path  LP MED  Origin PathID Age\n",
-                "*> 10.0.0.0/24 192.0.2.1 65001   100   0  igp           -\n",
-                "*> 10.0.1.0/24 192.0.2.1 65001   100   0  igp           01:01:01\n",
-                "*> 10.0.2.0/24 192.0.2.1 65001   100   0  igp           00:00:00\n",
+                "*> 10.0.0.0/24 192.0.2.1 65001   100   -  igp           -\n",
+                "*> 10.0.1.0/24 192.0.2.1 65001   100   -  igp           01:01:01\n",
+                "*> 10.0.2.0/24 192.0.2.1 65001   100   -  igp           00:00:00\n",
             )
         );
     }
