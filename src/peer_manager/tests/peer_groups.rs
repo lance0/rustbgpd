@@ -90,6 +90,37 @@ async fn targeted_required_family_edit_revalidates_dynamic_consumers() {
     assert_eq!(mgr.current_config, prior);
 }
 
+#[tokio::test]
+async fn owned_peer_group_validation_rejection_is_typed_no_effect() {
+    let config = load_test_config(&format!(
+        "{}\n[[dynamic_neighbors]]\nprefix = \"192.0.2.0/24\"\npeer_group = \"edge\"\n",
+        EDGE_GROUP_TOML
+            .replace("10.0.0.2", "2001:db8::2")
+            .replace("10.0.0.3", "2001:db8::3")
+            .replace("10.0.0.4", "2001:db8::4")
+    ));
+    let prior = config.clone();
+    let mut mgr = peer_group_reshape_manager(config);
+    let mut definition = edge_group_definition(Some(90));
+    definition.required_families = vec!["ipv6_unicast".to_string()];
+
+    let outcome = mgr
+        .apply_peer_group_change_owned(
+            rustbgpd_api::peer_types::ConfigEvent::SetPeerGroup {
+                name: "edge".to_string(),
+                definition,
+                ack: None,
+            },
+            vec!["2001:db8::2".parse().unwrap()],
+        )
+        .await;
+    assert!(matches!(
+        outcome,
+        rustbgpd_api::peer_types::OwnedPeerGroupMutationOutcome::RejectedNoEffect(_)
+    ));
+    assert_eq!(mgr.current_config, prior);
+}
+
 const EDGE_GROUP_TOML: &str = r#"
 [global]
 asn = 65001
@@ -311,6 +342,37 @@ async fn peer_group_reshape_mid_fanout_failure_restores_prior_members() {
     );
 }
 
+#[tokio::test]
+async fn owned_peer_group_reshape_reports_fully_compensated_failure() {
+    let config = load_test_config(EDGE_GROUP_TOML);
+    let mut mgr = peer_group_reshape_manager(config.clone());
+    for resolved in config.resolved_neighbors().unwrap() {
+        mgr.add_peer(
+            PeerManager::peer_manager_config_from_resolved(resolved, false),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    let a1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let a2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    mgr.inject_reconfigure_failures.insert(key(a2), 0);
+
+    let outcome = mgr
+        .apply_peer_group_change_owned(set_edge_hold_time_event(45), vec![a1, a2])
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedPeerGroupMutationOutcome::FullyCompensated(_)
+        ),
+        "a restored fan-out must carry typed full-compensation proof"
+    );
+    assert_eq!(mgr.current_config, config);
+    assert_eq!(mgr.peers[&key(a1)].hold_time, Some(90));
+    assert_eq!(mgr.peers[&key(a2)].hold_time, Some(90));
+}
+
 /// ADR-0081: rollback of the captured priors is best-effort — a failed
 /// restore must not short-circuit the reverse sweep, so every earlier
 /// member is still attempted, and the compound error names exactly which
@@ -399,6 +461,39 @@ async fn peer_group_reshape_rollback_failure_still_restores_other_priors() {
         Some(90),
         "failed reshape must not advance current_config"
     );
+}
+
+#[tokio::test]
+async fn owned_peer_group_reshape_reports_ambiguous_rollback_failure() {
+    let config = load_test_config(EDGE_GROUP_TOML);
+    let mut mgr = peer_group_reshape_manager(config.clone());
+    for resolved in config.resolved_neighbors().unwrap() {
+        mgr.add_peer(
+            PeerManager::peer_manager_config_from_resolved(resolved, false),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    let a1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let a2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let a3 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    mgr.inject_reconfigure_failures.insert(key(a3), 0);
+    mgr.inject_reconfigure_failures.insert(key(a2), 1);
+
+    let outcome = mgr
+        .apply_peer_group_change_owned(set_edge_hold_time_event(45), vec![a1, a2, a3])
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedPeerGroupMutationOutcome::CompensationAmbiguous(_)
+        ),
+        "a failed restore must carry typed ambiguity"
+    );
+    assert_eq!(mgr.current_config, config);
+    assert_eq!(mgr.peers[&key(a1)].hold_time, Some(90));
+    assert_eq!(mgr.peers[&key(a2)].hold_time, Some(45));
 }
 
 /// ADR-0081 decision 2: a member whose resolved next config changes TCP-AO

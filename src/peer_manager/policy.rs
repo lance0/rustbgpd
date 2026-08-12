@@ -7,7 +7,8 @@ use std::time::Instant;
 
 use rustbgpd_api::peer_types::{
     CatalogMutationError, ConfigEvent, DynamicRangeTarget, ImportValidationDependency,
-    PeerGroupDefinition, PeerKey, PeerManagerNeighborConfig, ResolvedPeerPolicy,
+    OwnedPeerGroupMutationOutcome, PeerGroupDefinition, PeerKey, PeerManagerNeighborConfig,
+    ResolvedPeerPolicy,
 };
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
@@ -26,6 +27,7 @@ use crate::policy_admin::{
 
 use super::{
     ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager, RIB_REPLY_TIMEOUT,
+    lifecycle::PeerReshapeSnapshotOutcome,
 };
 
 /// Peers applied between cohort-setup progress lines. Sized so a
@@ -3078,6 +3080,130 @@ impl PeerManager {
         self.reconcile_stale_dynamic_max_prefix_restarts();
         self.publish_policy_config_event(&event, priors.len());
         Ok(())
+    }
+
+    /// Settlement-owned counterpart of [`Self::apply_peer_group_change`].
+    /// It preserves the legacy behavior while carrying explicit proof of
+    /// whether an error preceded all effects, was completely restored, or
+    /// left runtime state uncertain.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the typed peer-group path keeps validation, apply, and settlement classification in one auditable flow"
+    )]
+    pub(super) async fn apply_peer_group_change_owned(
+        &mut self,
+        event: ConfigEvent,
+        affected_peers: Vec<IpAddr>,
+    ) -> OwnedPeerGroupMutationOutcome {
+        if let ConfigEvent::DeletePeerGroup { name, .. } = &event {
+            let refs = peer_group_references(&self.current_config, name);
+            if !refs.is_empty() {
+                return OwnedPeerGroupMutationOutcome::RejectedNoEffect(
+                    CatalogMutationError::StillReferenced {
+                        kind: "peer group",
+                        name: name.clone(),
+                        references: refs,
+                    },
+                );
+            }
+        }
+
+        let mut next_config = self.current_config.clone();
+        if let Err(error) = apply_config_event(&mut next_config, &event) {
+            return OwnedPeerGroupMutationOutcome::RejectedNoEffect(catalog_config_error(error));
+        }
+        if next_config == self.current_config {
+            return OwnedPeerGroupMutationOutcome::Success;
+        }
+
+        if let ConfigEvent::SetPeerGroup { name, .. } = &event
+            && let Some(old_group) = self.current_config.peer_groups.get(name)
+            && let Some(new_group) = next_config.peer_groups.get(name)
+            && (old_group.md5_password != new_group.md5_password
+                || old_group.ttl_security != new_group.ttl_security)
+        {
+            return OwnedPeerGroupMutationOutcome::RejectedNoEffect(
+                CatalogMutationError::RestartRequired(format!(
+                    "peer group {name:?} changes md5_password or ttl_security; inbound listener \
+                     enforcement is updated only by startup or SIGHUP reload — apply this change \
+                     through the config file and SIGHUP"
+                )),
+            );
+        }
+
+        if let ConfigEvent::SetPeerGroup { name, .. } = &event
+            && let Some(old_group) = self.current_config.peer_groups.get(name)
+            && let Some(new_group) = next_config.peer_groups.get(name)
+            && crate::config::peer_group_change_hot_applicable(old_group, new_group)
+        {
+            let name = name.clone();
+            return match self
+                .apply_peer_group_hot_change(event, next_config, &name, affected_peers)
+                .await
+            {
+                Ok(()) => OwnedPeerGroupMutationOutcome::Success,
+                Err(error) => OwnedPeerGroupMutationOutcome::CompensationAmbiguous(error),
+            };
+        }
+
+        let mut seen = BTreeSet::new();
+        let mut targets: Vec<PeerManagerNeighborConfig> = Vec::new();
+        for peer_key in affected_peers
+            .into_iter()
+            .flat_map(|address| self.peer_keys_for_address(address))
+        {
+            if !seen.insert(peer_key.clone()) {
+                continue;
+            }
+            if self
+                .peers
+                .get(&peer_key)
+                .is_some_and(|managed| managed.is_dynamic)
+            {
+                continue;
+            }
+            let address = peer_key.address;
+            let Some(neighbor) = next_config.neighbors.iter().find(|neighbor| {
+                neighbor.address == address.to_string() && neighbor.interface == peer_key.interface
+            }) else {
+                return OwnedPeerGroupMutationOutcome::RejectedNoEffect(
+                    CatalogMutationError::internal(format!(
+                        "static peer {peer_key} affected by the peer-group change has no neighbor \
+                         record in the updated config; refusing to reshape an inconsistent snapshot"
+                    )),
+                );
+            };
+            let resolved = match next_config.resolve_neighbor(neighbor) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    return OwnedPeerGroupMutationOutcome::RejectedNoEffect(catalog_config_error(
+                        error,
+                    ));
+                }
+            };
+            targets.push(Self::peer_manager_config_from_resolved(resolved, false));
+        }
+
+        let priors = match self.apply_peer_reshape_snapshot_classified(targets).await {
+            PeerReshapeSnapshotOutcome::Success(priors) => priors,
+            PeerReshapeSnapshotOutcome::RejectedNoEffect(error) => {
+                return OwnedPeerGroupMutationOutcome::RejectedNoEffect(error.into());
+            }
+            PeerReshapeSnapshotOutcome::FullyCompensated(error) => {
+                return OwnedPeerGroupMutationOutcome::FullyCompensated(error.into());
+            }
+            PeerReshapeSnapshotOutcome::CompensationAmbiguous(error) => {
+                return OwnedPeerGroupMutationOutcome::CompensationAmbiguous(error.into());
+            }
+        };
+
+        self.current_config = next_config;
+        if let ConfigEvent::SetPeerGroup { name, .. } = &event {
+            self.sync_dynamic_max_prefix_restart_for_group(name);
+        }
+        self.reconcile_stale_dynamic_max_prefix_restarts();
+        self.publish_policy_config_event(&event, priors.len());
+        OwnedPeerGroupMutationOutcome::Success
     }
 
     /// The all-hot half of [`Self::apply_peer_group_change`]: apply the

@@ -1694,7 +1694,7 @@ async fn run_tcp_listener(
             runtime_config_lock.clone(),
             config_mutation_gate.clone(),
         )
-        .with_runtime_config_settlement(runtime_config_settlement, daemon_gate),
+        .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone()),
         interceptor.clone(),
     ));
     routes.add_service(PeerGroupServiceServer::with_interceptor(
@@ -1704,7 +1704,8 @@ async fn run_tcp_listener(
             config_tx.clone(),
             config_mutation_gate.clone(),
             runtime_config_lock.clone(),
-        ),
+        )
+        .with_runtime_config_settlement(runtime_config_settlement, daemon_gate),
         interceptor.clone(),
     ));
     routes.add_service(PolicyServiceServer::with_interceptor(
@@ -1921,7 +1922,7 @@ async fn run_uds_listener(
             runtime_config_lock.clone(),
             config_mutation_gate.clone(),
         )
-        .with_runtime_config_settlement(runtime_config_settlement, daemon_gate),
+        .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone()),
         interceptor.clone(),
     ));
     routes.add_service(PeerGroupServiceServer::with_interceptor(
@@ -1931,7 +1932,8 @@ async fn run_uds_listener(
             config_tx.clone(),
             config_mutation_gate.clone(),
             runtime_config_lock.clone(),
-        ),
+        )
+        .with_runtime_config_settlement(runtime_config_settlement, daemon_gate),
         interceptor.clone(),
     ));
     routes.add_service(PolicyServiceServer::with_interceptor(

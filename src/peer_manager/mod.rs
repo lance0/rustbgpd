@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 use futures::stream::{self, StreamExt};
 use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicNeighborInfo, OwnedNeighborMutation, OwnedNeighborMutationError,
-    OwnedNeighborMutationOutcome, POLICY_EVENT_HISTORY_CAPACITY, PeerKey, PeerManagerCommand,
-    PeerManagerNeighborConfig, PeerManagerReadinessQuery, PolicyDatasetStatusRow, PolicyEvent,
-    SESSION_EVENT_HISTORY_CAPACITY, SessionEvent, SessionLifecycleEvent, StageConfigSnapshotError,
+    OwnedNeighborMutationOutcome, OwnedPeerGroupMutation, OwnedPeerGroupMutationOutcome,
+    POLICY_EVENT_HISTORY_CAPACITY, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig,
+    PeerManagerReadinessQuery, PolicyDatasetStatusRow, PolicyEvent, SESSION_EVENT_HISTORY_CAPACITY,
+    SessionEvent, SessionLifecycleEvent, StageConfigSnapshotError,
 };
 use rustbgpd_bmp::BmpEvent;
 use rustbgpd_fsm::PeerConfig;
@@ -1007,6 +1008,55 @@ impl PeerManager {
                                             OwnedNeighborMutationError::Dynamic(error),
                                         ),
                                     }
+                                }
+                            };
+                            let _ = reply.send(outcome);
+                        }
+                        PeerManagerCommand::OwnedPeerGroupMutation { mutation, reply } => {
+                            let outcome = match mutation {
+                                OwnedPeerGroupMutation::Set { name, definition } => {
+                                    let event = ConfigEvent::SetPeerGroup {
+                                        name: name.clone(),
+                                        definition: (*definition).clone(),
+                                        ack: None,
+                                    };
+                                    if self.peer_group_policy_only_update(&name, &definition) {
+                                        match self.apply_policy_change(event, None).await {
+                                            Ok(()) => OwnedPeerGroupMutationOutcome::Success,
+                                            Err(error) => {
+                                                // The existing policy hot-apply seam does not yet
+                                                // carry typed rollback proof. Never infer it from
+                                                // its message; Policy12 will close that boundary.
+                                                OwnedPeerGroupMutationOutcome::CompensationAmbiguous(error)
+                                            }
+                                        }
+                                    } else {
+                                        let affected: Vec<IpAddr> = self.current_config
+                                            .neighbors
+                                            .iter()
+                                            .filter(|neighbor| neighbor.peer_group.as_deref() == Some(name.as_str()))
+                                            .filter_map(|neighbor| neighbor.address.parse().ok())
+                                            .collect();
+                                        self.apply_peer_group_change_owned(event, affected).await
+                                    }
+                                }
+                                OwnedPeerGroupMutation::Delete { name } => {
+                                    self.apply_peer_group_change_owned(
+                                        ConfigEvent::DeletePeerGroup { name, ack: None },
+                                        Vec::new(),
+                                    ).await
+                                }
+                                OwnedPeerGroupMutation::SetNeighbor { address, peer_group } => {
+                                    self.apply_peer_group_change_owned(
+                                        ConfigEvent::SetNeighborPeerGroup { address, peer_group, ack: None },
+                                        vec![address],
+                                    ).await
+                                }
+                                OwnedPeerGroupMutation::ClearNeighbor { address } => {
+                                    self.apply_peer_group_change_owned(
+                                        ConfigEvent::ClearNeighborPeerGroup { address, ack: None },
+                                        vec![address],
+                                    ).await
                                 }
                             };
                             let _ = reply.send(outcome);

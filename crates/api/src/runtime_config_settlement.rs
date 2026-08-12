@@ -32,6 +32,10 @@ pub enum RuntimeConfigOperationKind {
     DynamicNeighborDelete,
     FibSet,
     FibDelete,
+    PeerGroupSet,
+    PeerGroupDelete,
+    NeighborPeerGroupSet,
+    NeighborPeerGroupClear,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
