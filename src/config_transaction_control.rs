@@ -36,6 +36,7 @@ use crate::peer_manager::InternalCommand;
 use crate::reload::transaction_config_snapshot_accepted;
 
 const PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
+const CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT: Duration = Duration::from_mins(10);
 const DEFAULT_CONFIRM_TIMEOUT_SECONDS: u32 = 600;
 const MAX_CONFIRM_TIMEOUT_SECONDS: u32 = 86_400;
 const MAX_CONFIRM_ID_CHARS: usize = 128;
@@ -460,7 +461,18 @@ impl ConfigTransactionController {
         validate_apply_request(&request)?;
         let confirmed = parse_confirmed_apply_mode(&request)?;
         let join = tokio::spawn(async move {
-            let _guard = self.deps.lock.lock().await;
+            let _guard = tokio::time::timeout(
+                CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT,
+                Arc::clone(&self.deps.lock).lock_owned(),
+            )
+            .await
+            .map_err(|_| {
+                ConfigTransactionApplyError::DeadlineExceeded(
+                    "config transaction timed out waiting for the runtime config coordinator; \
+                     coordinator ownership was not acquired and apply did not begin"
+                        .to_string(),
+                )
+            })?;
             self.apply_locked(request, confirmed).await
         });
 
@@ -1618,6 +1630,9 @@ fn append_error_context(
         }
         ConfigTransactionApplyError::Unavailable(message) => {
             ConfigTransactionApplyError::Unavailable(format!("{message}; {context}"))
+        }
+        ConfigTransactionApplyError::DeadlineExceeded(message) => {
+            ConfigTransactionApplyError::DeadlineExceeded(format!("{message}; {context}"))
         }
         ConfigTransactionApplyError::Internal(message) => {
             ConfigTransactionApplyError::Internal(format!("{message}; {context}"))
@@ -3471,6 +3486,12 @@ fn apply_error_to_gnmi_set_error(error: ConfigTransactionApplyError) -> GnmiSetE
             GnmiSetError::FailedPrecondition(message)
         }
         ConfigTransactionApplyError::Unavailable(message) => GnmiSetError::Unavailable(message),
+        // gNMI Set owns the coordinator before it calls the locked apply helpers, so Apply's
+        // pre-ownership deadline is unreachable here. Keep the exhaustive mapping inside the
+        // existing gNMI vocabulary unless gNMI coordinator acquisition gains its own deadline.
+        ConfigTransactionApplyError::DeadlineExceeded(message) => {
+            GnmiSetError::Unavailable(message)
+        }
         ConfigTransactionApplyError::Internal(message) => GnmiSetError::Internal(message),
     }
 }
@@ -3552,6 +3573,9 @@ fn confirm_abort_rollback_error(
         }
         ConfigTransactionApplyError::Unavailable(_) => {
             ConfigTransactionApplyError::Unavailable(message)
+        }
+        ConfigTransactionApplyError::DeadlineExceeded(_) => {
+            ConfigTransactionApplyError::DeadlineExceeded(message)
         }
         ConfigTransactionApplyError::Internal(_) => ConfigTransactionApplyError::Internal(message),
     }
@@ -5086,6 +5110,99 @@ peer_group = "{group}"
             config_tx,
             startup_tables,
         ))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn apply_times_out_before_coordinator_ownership_without_mutation() {
+        let coordinator = Arc::new(Mutex::new(()));
+        let blocker = coordinator.lock().await;
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (fib_tx, mut fib_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let (config_tx, mut config_rx) = mpsc::channel(1);
+        let runtime = tempfile::tempdir().unwrap();
+        let journal = runtime.path().join("commit-confirm-journal.json");
+        let controller = ConfigTransactionController::new(
+            FibTableControlDeps {
+                lock: Arc::clone(&coordinator),
+                rib_tx: Some(rib_tx),
+                confirm_journal_path: Some(journal.clone()),
+                ..deps_value(Some(fib_tx), peer_tx, Some(config_tx), Vec::new())
+            },
+            BgpMetrics::new(),
+        );
+        let apply = tokio::spawn(controller.clone().apply(confirmed_dynamic_request(
+            base_toml("[peer_groups.blocked]"),
+            "blocked-apply",
+            60,
+        )));
+        tokio::task::yield_now().await;
+
+        // This wall-clock oracle intentionally does not use the implementation constant: any
+        // production drift from the ten-minute contract must make the test fail.
+        tokio::time::advance(Duration::from_secs(599)).await;
+        tokio::task::yield_now().await;
+        assert!(!apply.is_finished(), "apply timed out before ten minutes");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let error = apply.await.unwrap().unwrap_err();
+        assert_eq!(
+            error,
+            ConfigTransactionApplyError::DeadlineExceeded(
+                "config transaction timed out waiting for the runtime config coordinator; \
+                 coordinator ownership was not acquired and apply did not begin"
+                    .to_string()
+            )
+        );
+
+        assert!(peer_rx.try_recv().is_err());
+        assert!(fib_rx.try_recv().is_err());
+        assert!(rib_rx.try_recv().is_err());
+        assert!(config_rx.try_recv().is_err());
+        assert!(!journal.exists());
+        let state = controller.state.lock().await;
+        assert!(state.applying_confirm_id.is_none());
+        assert!(state.pending.is_none());
+        assert!(state.last.is_none());
+        assert!(state.ambiguous_failure_confirm_id.is_none());
+        drop(state);
+
+        drop(blocker);
+        let next = tokio::spawn(
+            controller
+                .clone()
+                .apply(proto::ApplyConfigTransactionRequest {
+                    candidate_toml: base_toml(""),
+                    expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                    client_request_id: "after-timeout".to_string(),
+                    comment: String::new(),
+                    confirm_id: String::new(),
+                    confirm_timeout_seconds: 0,
+                }),
+        );
+        let PeerManagerCommand::PlanConfigTransaction {
+            candidate_toml,
+            reply,
+            ..
+        } = peer_rx.recv().await.unwrap()
+        else {
+            panic!("unexpected peer-manager command after coordinator timeout");
+        };
+        assert_eq!(
+            candidate_toml,
+            base_toml(""),
+            "timed-out apply remained queued"
+        );
+        reply
+            .send(Ok(plan(RuntimeConfigTransactionStatus::Noop, Vec::new())))
+            .unwrap();
+        let response = next.await.unwrap().unwrap();
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Noop as i32
+        );
+        assert!(fib_rx.try_recv().is_err());
+        assert!(rib_rx.try_recv().is_err());
+        assert!(config_rx.try_recv().is_err());
     }
 
     #[tokio::test]

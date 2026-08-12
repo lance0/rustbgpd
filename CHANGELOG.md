@@ -108,6 +108,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Config transaction apply now bounds its pre-ownership wait for the shared runtime config coordinator at ten minutes. (LAN-974)
 - Ambiguous `rustbgpd` invocations now fail with exit 2 instead of silently
   overwriting a config path or option value, consuming a flag as a value, or
   letting a display or one-shot mode ignore companion arguments. (LAN-979)
