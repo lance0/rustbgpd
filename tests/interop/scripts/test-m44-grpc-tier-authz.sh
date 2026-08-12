@@ -7,8 +7,10 @@
 #   1. observer principal CAN call a sensitive_read RPC
 #      (ListReceivedRoutes) and CANNOT call a mutating RPC
 #      (AddNeighbor) — denied with PermissionDenied.
-#   2. automation principal CAN call a mutating RPC and CANNOT call an
-#      operator_only RPC (TriggerMrtDump) — denied.
+#   2. automation principal CAN call a mutating RPC (a duplicate
+#      AddNeighbor reaches the handler and returns AlreadyExists without
+#      changing runtime state) and CANNOT call an operator_only RPC
+#      (TriggerMrtDump) — denied.
 #   3. operator principal CAN call an operator_only RPC.
 #   4. A certificate whose principal is absent from
 #      [security.grpc.roles] is denied for any RPC.
@@ -67,6 +69,24 @@ assert_allowed() {
         printf '  grpcurl output: %s\n' "$out" >&2
     else
         ok "$desc"
+    fi
+}
+
+# Assert an authorized call reaches its handler and returns the expected
+# non-authz status. This is stronger than assert_allowed: connection failures
+# or an unrelated handler error cannot accidentally count as authorization.
+assert_allowed_status() {
+    local desc=$1 who=$2 method=$3 data=$4 expected_status=$5
+    local out
+    out=$(grpc_mtls "$who" -d "$data" "$GRPC_ADDR" "$method") || true
+    if printf '%s' "$out" | grep -q "PermissionDenied"; then
+        fail "$desc (expected allow, got PermissionDenied)"
+        printf '  grpcurl output: %s\n' "$out" >&2
+    elif printf '%s' "$out" | grep -Fq "Code: $expected_status"; then
+        ok "$desc"
+    else
+        fail "$desc (expected handler status $expected_status)"
+        printf '  grpcurl output: %s\n' "$out" >&2
     fi
 }
 
@@ -135,6 +155,26 @@ start_rustbgpd_mtls() {
     exit 1
 }
 
+# The settlement watchdog fences and exits the daemon five seconds after an
+# ambiguous runtime-config result. Prove the authorized no-effect mutation did
+# not arm that fail-stop path before continuing with the remaining auth checks.
+assert_daemon_healthy_after_settlement_window() {
+    log "Waiting beyond the 5s runtime-config settlement window..."
+    sleep 6
+    if docker exec "$RUSTBGPD" sh -c 'cat /proc/*/comm 2>/dev/null' \
+        | grep -q rustbgpd; then
+        ok "rustbgpd remains live after the settlement window"
+    else
+        fail "rustbgpd exited after the authorized no-effect mutation"
+    fi
+    if grpc_mtls operator "$GRPC_ADDR" \
+        "rustbgpd.v1.ControlService/GetHealth" >/dev/null 2>&1; then
+        ok "operator GetHealth succeeds after the settlement window"
+    else
+        fail "operator GetHealth failed after the settlement window"
+    fi
+}
+
 main() {
     log "M44 interop test: ADR-0064 gRPC tier authorization over mTLS"
     log "Topology: $TOPO"
@@ -142,7 +182,12 @@ main() {
     resolve_grpc_addr
     start_rustbgpd_mtls
 
-    local add_neighbor='{"intent":{"config":{"address":"10.0.0.3","remote_asn":65003,"hold_time":90},"overrideMask":{"paths":[]}}}'
+    # Target the already configured peer. Authorization still classifies and
+    # dispatches AddNeighbor as a mutating RPC, while the handler's typed
+    # AlreadyExists result proves the request has no runtime effect. That keeps
+    # this auth-only fixture valid with its deliberately read-only config bind:
+    # no successful mutation may reach the staged-write commit boundary.
+    local add_neighbor='{"intent":{"config":{"address":"10.0.0.2","remote_asn":65002,"hold_time":90},"overrideMask":{"paths":[]}}}'
 
     # observer: sensitive_read allowed, mutating denied.
     assert_allowed "observer CAN ListReceivedRoutes (sensitive_read)" \
@@ -152,8 +197,11 @@ main() {
         observer "rustbgpd.v1.NeighborService/AddNeighbor" "$add_neighbor"
 
     # automation: mutating allowed, operator_only denied.
-    assert_allowed "automation CAN AddNeighbor (mutating)" \
-        automation "rustbgpd.v1.NeighborService/AddNeighbor" "$add_neighbor"
+    assert_allowed_status \
+        "automation CAN AddNeighbor and gets no-effect AlreadyExists (mutating)" \
+        automation "rustbgpd.v1.NeighborService/AddNeighbor" "$add_neighbor" \
+        AlreadyExists
+    assert_daemon_healthy_after_settlement_window
     assert_denied "automation CANNOT TriggerMrtDump (operator_only)" \
         automation "rustbgpd.v1.ControlService/TriggerMrtDump" '{}'
 
