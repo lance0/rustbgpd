@@ -196,6 +196,35 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  gnmic_archive:
+    needs: classify_changes
+    if: needs.classify_changes.outputs.run_labs == 'true'
+    name: Prepare exact gnmic archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Restore exact gnmic archive cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/gnmic-cache/gnmic_0.46.0_Linux_x86_64.tar.gz
+          key: gnmic-v0.46.0-linux-x86_64-a3ded2f355a615df73900f31b9791f41e796e9c5c63b171e1ce041e8139ee00e
+      - name: Prepare exact gnmic archive
+        run: |
+          .github/scripts/install-gnmic.sh \
+            --prepare-archive \
+            "$RUNNER_TEMP/gnmic-cache/gnmic_0.46.0_Linux_x86_64.tar.gz"
+      - name: Upload verified gnmic archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: gnmic-v0.46.0-linux-x86_64
+          path: ${{ runner.temp }}/gnmic-cache/gnmic_0.46.0_Linux_x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   # Warm one fixed-scope cache per source SHA; jobs still build and load their
   # own image, falling back to an uncached build if the cache is unavailable.
   prime_dev_image:
@@ -1485,7 +1514,7 @@ jobs:
           script: tests/interop/scripts/test-m44-grpc-tier-authz.sh
 
   m54:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [grpcurl_archive, gnmic_archive, prime_dev_image]
     name: M54 — ADR-0070 gNMI / OpenConfig over mTLS
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1498,10 +1527,11 @@ jobs:
       - name: Install exact grpcurl offline
         uses: ./.github/actions/install-grpcurl-artifact
 
-      - name: Install gnmic
+      - name: Install exact gnmic offline
+        uses: ./.github/actions/install-gnmic-artifact
+
+      - name: Ensure jq
         run: |
-          curl -sL https://github.com/openconfig/gnmic/releases/download/v0.46.0/gnmic_0.46.0_Linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin gnmic
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -1566,7 +1596,7 @@ jobs:
           script: tests/interop/scripts/test-m55-bgp-roles-otc-frr.sh
 
   m56:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [grpcurl_archive, gnmic_archive, prime_dev_image]
     name: M56 — gNMI Subscribe ON_CHANGE (ADR-0070 deferral resolved)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1579,10 +1609,11 @@ jobs:
       - name: Install exact grpcurl offline
         uses: ./.github/actions/install-grpcurl-artifact
 
-      - name: Install gnmic and ensure jq
+      - name: Install exact gnmic offline
+        uses: ./.github/actions/install-gnmic-artifact
+
+      - name: Ensure jq
         run: |
-          curl -sL https://github.com/openconfig/gnmic/releases/download/v0.46.0/gnmic_0.46.0_Linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin gnmic
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
@@ -1882,7 +1913,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() }}
-    needs: [classify_changes, grpcurl_archive, prime_dev_image, m1, m13, m80,
+    needs: [classify_changes, grpcurl_archive, gnmic_archive, prime_dev_image, m1, m13, m80,
       m15, m10, m14, m17, m73, m74, m75, m76, m77, m78, m79, m22, m24,
       m81, m82, m83, m85, m94, m86, m25, m29, m30, m34, m35, m35b, m35c,
       m41, m44, m54, m55, m56, m45, m57, m63, m64,
@@ -1890,7 +1921,7 @@ jobs:
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
-        classify_changes grpcurl_archive prime_dev_image m1 m13 m80 m15 m10
+        classify_changes grpcurl_archive gnmic_archive prime_dev_image m1 m13 m80 m15 m10
         m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 m24 m81 m82 m83 m85 m94
         m86 m25 m29 m30 m34 m35 m35b m35c m41 m44 m54 m55 m56 m45 m57
         m63 m64 m26_m27_m28_m59_m91 m92

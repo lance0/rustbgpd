@@ -286,7 +286,7 @@ EOF
         "$repo_root/.github/actions/setup-dataplane-host/action.yml")
     [[ "$setup_calls" -eq 1 ]] \
         || fail_self_test "setup-dataplane-host must have one grpcurl consumer"
-    prepare_calls=$(grep -R -F -- '--prepare-archive' \
+    prepare_calls=$(grep -R -F -- '.github/scripts/install-grpcurl.sh' \
         "$repo_root/.github/workflows/interop.yml" \
         "$repo_root/.github/workflows/kernel-dataplane.yml" | wc -l)
     [[ "$prepare_calls" -eq 2 ]] \

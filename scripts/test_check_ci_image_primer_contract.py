@@ -91,6 +91,7 @@ class PrimerContractTests(unittest.TestCase):
             root = Path(temporary)
             for fixture in (
                 ".github/workflows",
+                ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
             ):
@@ -101,6 +102,8 @@ class PrimerContractTests(unittest.TestCase):
             installer = root / ".github" / "scripts" / "install-grpcurl.sh"
             installer.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / installer.relative_to(root), installer)
+            gnmic_installer = root / ".github" / "scripts" / "install-gnmic.sh"
+            shutil.copy2(ROOT / gnmic_installer.relative_to(root), gnmic_installer)
             shutil.copy2(ROOT / "Dockerfile", root / "Dockerfile")
             gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
             gobgp.parent.mkdir(parents=True, exist_ok=True)
@@ -132,6 +135,7 @@ class PrimerContractTests(unittest.TestCase):
             root = Path(temporary)
             for fixture in (
                 ".github/workflows",
+                ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
             ):
@@ -140,6 +144,9 @@ class PrimerContractTests(unittest.TestCase):
             gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
             gobgp.parent.mkdir(parents=True)
             shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
+            gnmic_installer = root / ".github" / "scripts" / "install-gnmic.sh"
+            gnmic_installer.parent.mkdir(parents=True)
+            shutil.copy2(ROOT / gnmic_installer.relative_to(root), gnmic_installer)
             self.assertIn("install-grpcurl.sh is missing", check(root))
 
     def test_grpcurl_installer_executable_mode_is_load_bearing(self):
@@ -147,6 +154,7 @@ class PrimerContractTests(unittest.TestCase):
             root = Path(temporary)
             for fixture in (
                 ".github/workflows",
+                ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
             ):
@@ -158,6 +166,8 @@ class PrimerContractTests(unittest.TestCase):
             installer = root / ".github" / "scripts" / "install-grpcurl.sh"
             installer.parent.mkdir(parents=True)
             shutil.copy2(ROOT / installer.relative_to(root), installer)
+            gnmic_installer = root / ".github" / "scripts" / "install-gnmic.sh"
+            shutil.copy2(ROOT / gnmic_installer.relative_to(root), gnmic_installer)
             installer.chmod(0o644)
             self.assertIn(
                 "install-grpcurl.sh must have exact executable mode 100755",
@@ -172,7 +182,10 @@ class PrimerContractTests(unittest.TestCase):
         )[0]
         script = textwrap.dedent(script)
         roster = INTEROP if workflow == "interop.yml" else KERNEL
-        expected = ["classify_changes", "grpcurl_archive", "prime_dev_image", *roster]
+        artifacts = ["grpcurl_archive"]
+        if workflow == "interop.yml":
+            artifacts.append("gnmic_archive")
+        expected = ["classify_changes", *artifacts, "prime_dev_image", *roster]
         if workflow == "kernel-dataplane.yml":
             expected.append("netns")
         needs = {
@@ -200,8 +213,11 @@ class PrimerContractTests(unittest.TestCase):
                 self.assertEqual(0, self.run_aggregate(workflow, "true", {}).returncode)
 
             roster = INTEROP if workflow == "interop.yml" else KERNEL
+            artifacts = ["grpcurl_archive"]
+            if workflow == "interop.yml":
+                artifacts.append("gnmic_archive")
             skipped = {
-                job: "skipped" for job in ["grpcurl_archive", "prime_dev_image", *roster]
+                job: "skipped" for job in [*artifacts, "prime_dev_image", *roster]
             }
             if workflow == "kernel-dataplane.yml":
                 skipped["netns"] = "skipped"
@@ -224,6 +240,20 @@ class PrimerContractTests(unittest.TestCase):
                 self.assertNotEqual(
                     0, self.run_aggregate(workflow, "true", failed).returncode
                 )
+            if workflow == "interop.yml":
+                with self.subTest(workflow=workflow, state="gnmic producer red"):
+                    self.assertNotEqual(
+                        0,
+                        self.run_aggregate(
+                            workflow,
+                            "true",
+                            {
+                                "gnmic_archive": "failure",
+                                "m54": "skipped",
+                                "m56": "skipped",
+                            },
+                        ).returncode,
+                    )
             for run_labs, results in (
                 ("", {}),
                 ("unknown", {}),
@@ -315,6 +345,96 @@ class PrimerContractTests(unittest.TestCase):
             "run: bash .github/scripts/install-grpcurl.sh",
         )
 
+    def test_gnmic_producer_and_offline_consumers_are_load_bearing(self):
+        workflow = ".github/workflows/interop.yml"
+        for old, new in (
+            ("  gnmic_archive:\n", "  removed_gnmic_archive:\n"),
+            (
+                "key: gnmic-v0.46.0-linux-x86_64-a3ded2f355a615df73900f31b9791f41e796e9c5c63b171e1ce041e8139ee00e",
+                "key: gnmic-latest",
+            ),
+            ("name: gnmic-v0.46.0-linux-x86_64", "name: gnmic-latest"),
+            (
+                "needs: [grpcurl_archive, gnmic_archive, prime_dev_image]",
+                "needs: [grpcurl_archive, prime_dev_image]",
+            ),
+            (
+                "uses: ./.github/actions/install-gnmic-artifact",
+                "run: curl https://example.invalid/gnmic | sudo tar -xz",
+            ),
+        ):
+            with self.subTest(seam=old):
+                self.mutate(workflow, old, new)
+        for seam, replacement in (
+            ("actions/cache@v6", "actions/cache@main"),
+            ("--prepare-archive", "--install-archive"),
+            ("actions/upload-artifact@v7", "actions/upload-artifact@main"),
+        ):
+            with self.subTest(seam=f"gnmic producer {seam}"):
+                self.mutate(workflow, seam, replacement, occurrence=1)
+        exact_path = (
+            "path: ${{ runner.temp }}/gnmic-cache/"
+            "gnmic_0.46.0_Linux_x86_64.tar.gz"
+        )
+        for occurrence in (0, 1):
+            with self.subTest(seam="gnmic exact path", occurrence=occurrence):
+                self.mutate(
+                    workflow,
+                    exact_path,
+                    "path: ${{ runner.temp }}/gnmic-cache/wrong.tar.gz",
+                    occurrence=occurrence,
+                )
+
+        action = ".github/actions/install-gnmic-artifact/action.yml"
+        for old, new in (
+            ("actions/download-artifact@v8", "actions/download-artifact@main"),
+            ("name: gnmic-v0.46.0-linux-x86_64", "name: gnmic-latest"),
+            ("--install-archive", "--prepare-archive"),
+            (
+                "set -euo pipefail",
+                "set -euo pipefail\n        curl https://example.invalid/gnmic",
+            ),
+        ):
+            with self.subTest(seam=old):
+                self.mutate(action, old, new)
+
+        installer = ".github/scripts/install-gnmic.sh"
+        for old, new in (
+            ('readonly GNMIC_VERSION="0.46.0"', 'readonly GNMIC_VERSION="latest"'),
+            (
+                "a3ded2f355a615df73900f31b9791f41e796e9c5c63b171e1ce041e8139ee00e",
+                "0" * 64,
+            ),
+            ("curl -fsSL", "curl -sL"),
+            ("--connect-timeout 10", "--connect-timeout 0"),
+        ):
+            with self.subTest(seam=old):
+                self.mutate(installer, old, new)
+
+    def test_gnmic_installer_executable_mode_is_load_bearing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for fixture in (
+                ".github/workflows",
+                ".github/actions/install-gnmic-artifact",
+                ".github/actions/install-grpcurl-artifact",
+                ".github/actions/setup-dataplane-host",
+            ):
+                shutil.copytree(ROOT / fixture, root / fixture)
+            shutil.copy2(ROOT / "Dockerfile", root / "Dockerfile")
+            gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
+            gobgp.parent.mkdir(parents=True)
+            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
+            scripts = root / ".github" / "scripts"
+            scripts.mkdir(parents=True)
+            for name in ("install-grpcurl.sh", "install-gnmic.sh"):
+                shutil.copy2(ROOT / ".github" / "scripts" / name, scripts / name)
+            (scripts / "install-gnmic.sh").chmod(0o644)
+            self.assertIn(
+                "install-gnmic.sh must have exact executable mode 100755",
+                check(root),
+            )
+
     def test_heavy_workflow_aggregate_source_is_load_bearing(self):
         for workflow, lab in (
             ("interop.yml", "m1"),
@@ -322,7 +442,9 @@ class PrimerContractTests(unittest.TestCase):
         ):
             relative = f".github/workflows/{workflow}"
             needs_prefix = (
-                "needs: [classify_changes, grpcurl_archive, prime_dev_image, "
+                "needs: [classify_changes, grpcurl_archive, "
+                + ("gnmic_archive, " if workflow == "interop.yml" else "")
+                + "prime_dev_image, "
             )
             for old, new in (
                 ("if: ${{ always() }}", "if: success()"),

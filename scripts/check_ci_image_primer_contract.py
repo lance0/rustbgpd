@@ -55,6 +55,11 @@ GRPCURL_ARCHIVE = "grpcurl_1.9.1_linux_x86_64.tar.gz"
 GRPCURL_ARTIFACT = "grpcurl-v1.9.1-linux-x86_64"
 GRPCURL_CACHE_KEY = f"grpcurl-v1.9.1-linux-x86_64-{GRPCURL_SHA256}"
 GRPCURL_ACTION = "uses: ./.github/actions/install-grpcurl-artifact"
+GNMIC_SHA256 = "a3ded2f355a615df73900f31b9791f41e796e9c5c63b171e1ce041e8139ee00e"
+GNMIC_ARCHIVE = "gnmic_0.46.0_Linux_x86_64.tar.gz"
+GNMIC_ARTIFACT = "gnmic-v0.46.0-linux-x86_64"
+GNMIC_CACHE_KEY = f"gnmic-v0.46.0-linux-x86_64-{GNMIC_SHA256}"
+GNMIC_ACTION = "uses: ./.github/actions/install-gnmic-artifact"
 
 TRIGGER_HASHES = {
     "ci.yml": "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8",
@@ -74,15 +79,15 @@ CALL_HASHES = {
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 84,
+        "actions/checkout@v7": 85,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95": 2,
         "docker/setup-buildx-action@v4": 44,
         "docker/build-push-action@v7": 45,
-        "actions/cache@v6": 3,
-        "actions/upload-artifact@v7": 4,
-        "actions/download-artifact@v8": 3,
+        "actions/cache@v6": 4,
+        "actions/upload-artifact@v7": 5,
+        "actions/download-artifact@v8": 4,
         "rustsec/audit-check@v2.0.0": 1,
         "EmbarkStudios/cargo-deny-action@v2": 1,
     }
@@ -138,6 +143,33 @@ def check(root: Path) -> list[str]:
         errors.append("install-grpcurl.sh is missing")
     elif stat.S_IMODE(grpcurl_installer.stat().st_mode) != 0o755:
         errors.append("install-grpcurl.sh must have exact executable mode 100755")
+    gnmic_installer = root / ".github" / "scripts" / "install-gnmic.sh"
+    if not gnmic_installer.is_file():
+        errors.append("install-gnmic.sh is missing")
+    elif stat.S_IMODE(gnmic_installer.stat().st_mode) != 0o755:
+        errors.append("install-gnmic.sh must have exact executable mode 100755")
+    gnmic_installer_text = (
+        gnmic_installer.read_text() if gnmic_installer.is_file() else ""
+    )
+    for seam in (
+        'readonly GNMIC_VERSION="0.46.0"',
+        f'readonly GNMIC_SHA256="{GNMIC_SHA256}"',
+        'readonly GNMIC_ASSET="gnmic_${GNMIC_VERSION}_Linux_x86_64.tar.gz"',
+        "https://github.com/openconfig/gnmic/releases/download/v${GNMIC_VERSION}/${GNMIC_ASSET}",
+        "readonly GNMIC_ATTEMPTS=3",
+        "curl -fsSL",
+        "--connect-timeout 10",
+        "--max-time 120",
+        "--prepare-archive",
+        "--install-archive",
+        "--self-test",
+    ):
+        if seam not in gnmic_installer_text:
+            errors.append(f"install-gnmic.sh missing {seam}")
+    if gnmic_installer_text.count("openconfig/gnmic/releases/download/") != 1:
+        errors.append("install-gnmic.sh release URL inventory drifted")
+    if re.search(r"curl[^\n]*\|\s*(?:sudo\s+)?tar", gnmic_installer_text):
+        errors.append("install-gnmic.sh streams network bytes into tar")
     workflow_dir = root / ".github" / "workflows"
     texts = {name: (workflow_dir / name).read_text() for name in WORKFLOWS}
     for name, text in texts.items():
@@ -226,9 +258,10 @@ def check(root: Path) -> list[str]:
     ):
         jobs = _jobs(texts[name])
         heavy = [*roster] + (["netns"] if setup else [])
+        artifact_jobs = ["grpcurl_archive"] + ([] if setup else ["gnmic_archive"])
         expected = [
             "classify_changes",
-            "grpcurl_archive",
+            *artifact_jobs,
             "prime_dev_image",
             *heavy,
             "check",
@@ -293,6 +326,47 @@ def check(root: Path) -> list[str]:
             errors.append(f"{name}:grpcurl_archive cache key drifted")
         if grpcurl_producer.count(f"name: {GRPCURL_ARTIFACT}") != 1:
             errors.append(f"{name}:grpcurl_archive artifact name drifted")
+        if not setup:
+            gnmic_producer = jobs.get("gnmic_archive", "")
+            for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
+                if not _has_line(gnmic_producer, f"    {seam}"):
+                    errors.append(f"{name}:gnmic_archive missing job-level {seam}")
+            for seam in (
+                "name: Prepare exact gnmic archive",
+                "runs-on: ubuntu-latest",
+                "timeout-minutes: 10",
+                CHECKOUT,
+                "ref: ${{ github.sha }}",
+                "uses: actions/cache@v6",
+                f"path: ${{{{ runner.temp }}}}/gnmic-cache/{GNMIC_ARCHIVE}",
+                f"key: {GNMIC_CACHE_KEY}",
+                "--prepare-archive",
+                f'"$RUNNER_TEMP/gnmic-cache/{GNMIC_ARCHIVE}"',
+                "uses: actions/upload-artifact@v7",
+                f"name: {GNMIC_ARTIFACT}",
+                "if-no-files-found: error",
+                "retention-days: 1",
+                "compression-level: 0",
+            ):
+                if seam not in gnmic_producer:
+                    errors.append(f"{name}:gnmic_archive missing {seam}")
+            for forbidden in (
+                "restore-keys:",
+                "continue-on-error:",
+                "actions/download-artifact@",
+                "--install-archive",
+            ):
+                if forbidden in gnmic_producer:
+                    errors.append(f"{name}:gnmic_archive permits {forbidden}")
+            if gnmic_producer.count("uses: actions/cache@v6") != 1:
+                errors.append(f"{name}:gnmic_archive must restore one exact cache")
+            if gnmic_producer.count("uses: actions/upload-artifact@v7") != 1:
+                errors.append(f"{name}:gnmic_archive must upload one artifact")
+            exact_gnmic_path = (
+                f"path: ${{{{ runner.temp }}}}/gnmic-cache/{GNMIC_ARCHIVE}"
+            )
+            if gnmic_producer.count(exact_gnmic_path) != 2:
+                errors.append(f"{name}:gnmic_archive cache/artifact paths drifted")
         primer = jobs.get("prime_dev_image", "")
         for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
             if not _has_line(primer, f"    {seam}"):
@@ -318,11 +392,14 @@ def check(root: Path) -> list[str]:
             errors.append(f"{name}: primer must export cache, not load an image")
         for job_name in roster:
             job = jobs.get(job_name, "")
-            if not _has_line(
-                job, "    needs: [grpcurl_archive, prime_dev_image]"
-            ):
+            expected_needs = (
+                "    needs: [grpcurl_archive, gnmic_archive, prime_dev_image]"
+                if not setup and job_name in ("m54", "m56")
+                else "    needs: [grpcurl_archive, prime_dev_image]"
+            )
+            if not _has_line(job, expected_needs):
                 errors.append(
-                    f"{name}:{job_name}: missing exact grpcurl/primer dependencies"
+                    f"{name}:{job_name}: missing exact artifact/primer dependencies"
                 )
             if CHECKOUT not in job:
                 errors.append(f"{name}:{job_name}: pinned checkout drifted")
@@ -341,8 +418,16 @@ def check(root: Path) -> list[str]:
                         errors.append(f"{name}:{job_name}: consumer missing {seam}")
                 if "cache-to:" in job:
                     errors.append(f"{name}:{job_name}: consumer exports a cache")
+                expected_gnmic = 1 if job_name in ("m54", "m56") else 0
+                if job.count(GNMIC_ACTION) != expected_gnmic:
+                    errors.append(f"{name}:{job_name}: gnmic consumer drifted")
         aggregate = jobs.get("check", "")
-        aggregate_needs = ["classify_changes", "grpcurl_archive", "prime_dev_image", *heavy]
+        aggregate_needs = [
+            "classify_changes",
+            *artifact_jobs,
+            "prime_dev_image",
+            *heavy,
+        ]
         if _list_needs(aggregate) != aggregate_needs:
             errors.append(f"{name}:check exact dependency roster drifted")
         if _expected_jobs(aggregate) != aggregate_needs:
@@ -414,6 +499,9 @@ def check(root: Path) -> list[str]:
     grpcurl_action = (
         root / ".github" / "actions" / "install-grpcurl-artifact" / "action.yml"
     ).read_text()
+    gnmic_action = (
+        root / ".github" / "actions" / "install-gnmic-artifact" / "action.yml"
+    ).read_text()
     for seam in (
         "uses: actions/download-artifact@v8",
         f"name: {GRPCURL_ARTIFACT}",
@@ -440,6 +528,31 @@ def check(root: Path) -> list[str]:
             errors.append(f"install-grpcurl-artifact permits {forbidden}")
     if re.search(r"(?m)^\s*curl\s", grpcurl_action):
         errors.append("install-grpcurl-artifact permits curl")
+    for seam in (
+        "uses: actions/download-artifact@v8",
+        f"name: {GNMIC_ARTIFACT}",
+        "path: ${{ runner.temp }}/gnmic-artifact",
+        "--install-archive",
+        f'"$RUNNER_TEMP/gnmic-artifact/{GNMIC_ARCHIVE}"',
+        "/usr/local/bin",
+    ):
+        if seam not in gnmic_action:
+            errors.append(f"install-gnmic-artifact missing {seam}")
+    if gnmic_action.count("uses: actions/download-artifact@v8") != 1:
+        errors.append("install-gnmic-artifact must download one same-run artifact")
+    if gnmic_action.count("--install-archive") != 1:
+        errors.append("install-gnmic-artifact must perform one offline install")
+    for forbidden in (
+        "--prepare-archive",
+        "actions/cache@",
+        "actions/upload-artifact@",
+        "restore-keys:",
+        "continue-on-error:",
+        "releases/download/",
+        "curl ",
+    ):
+        if forbidden in gnmic_action:
+            errors.append(f"install-gnmic-artifact permits {forbidden}")
     # split(...)[-1] returns the whole file when the step name drifts, which
     # turns every seam check below into a file-wide search that passes
     # vacuously. Scope the region only once the anchor is known to be present.
@@ -472,6 +585,10 @@ def check(root: Path) -> list[str]:
         errors.append("interop.yml: grpcurl consumer inventory drifted")
     if texts["kernel-dataplane.yml"].count(GRPCURL_ACTION) != 0:
         errors.append("kernel-dataplane.yml: grpcurl must flow through host setup")
+    if texts["interop.yml"].count(GNMIC_ACTION) != 2:
+        errors.append("interop.yml: gnmic consumer inventory drifted")
+    if texts["kernel-dataplane.yml"].count(GNMIC_ACTION) != 0:
+        errors.append("kernel-dataplane.yml: gnmic must remain interop-only")
     grpcurl_surfaces = "\n".join(
         (texts["interop.yml"], texts["kernel-dataplane.yml"], action, grpcurl_action)
     )
@@ -479,9 +596,14 @@ def check(root: Path) -> list[str]:
         errors.append("legacy grpcurl installer invocation remains")
     if "fullstorydev/grpcurl/releases" in grpcurl_surfaces:
         errors.append("grpcurl release URL escaped the producer helper")
+    gnmic_surfaces = "\n".join((texts["interop.yml"], gnmic_action))
+    if "openconfig/gnmic/releases" in gnmic_surfaces:
+        errors.append("gnmic release URL escaped the producer helper")
+    if re.search(r"curl\s.*gnmic|curl\s.*\|\s*(?:sudo\s+)?tar", gnmic_surfaces):
+        errors.append("interop.yml retains a streaming gnmic download")
 
     pins = collections.Counter()
-    for text in [*texts.values(), action, grpcurl_action]:
+    for text in [*texts.values(), action, grpcurl_action, gnmic_action]:
         for value in re.findall(r"^\s*(?:- )?uses:\s*(.+)$", text, re.MULTILINE):
             if not value.strip().startswith("./"):
                 pins[value.strip()] += 1
