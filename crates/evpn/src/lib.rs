@@ -108,6 +108,7 @@ pub mod origination_macip;
 pub mod projection;
 pub mod route_target;
 pub mod runtime;
+pub mod runtime_plan_shape;
 pub mod segment;
 
 pub use aliasing::{

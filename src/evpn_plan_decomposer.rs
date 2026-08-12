@@ -67,7 +67,7 @@ use rustbgpd_evpn::{
 };
 use rustbgpd_wire::EthernetSegmentIdentifier;
 
-use crate::evpn_runtime_converger::validate_supported_plan_shape;
+use rustbgpd_evpn::runtime_plan_shape::validate_supported_plan_shape;
 
 /// One primitive step of a decomposed mixed candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]

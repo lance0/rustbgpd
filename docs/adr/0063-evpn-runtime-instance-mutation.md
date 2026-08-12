@@ -64,6 +64,14 @@ bindings, and serializes every add, delete, or redefine operation. The
 first implementation must not mutate the shared `Arc<EvpnInstanceTable>`
 directly with `ArcSwap`, `RwLock`, or ad hoc per-service locks.
 
+The pure supported-plan-shape classifier and validators live in
+`rustbgpd-evpn`. Both the daemon actor converger and the plan decomposer call
+that single policy source. Actor availability, execution, and rollback remain
+binary-owned; the domain crate gains no Tokio, API, RIB, transport, telemetry,
+or netlink dependency. This removes the former `bench-internals` workaround
+that mirrored ten EVPN actor modules into `src/lib.rs` solely to compile the
+library target; it does not claim a default-build or runtime improvement.
+
 The coordinator is the only component allowed to publish a new effective
 EVPN runtime generation. Per-feature actors consume coordinator commands
 or generation snapshots and report completion/failure back to the
