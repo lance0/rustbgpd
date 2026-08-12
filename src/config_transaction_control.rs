@@ -6,6 +6,7 @@
 
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
@@ -60,6 +61,9 @@ pub struct ConfigTransactionController {
     accepted_rx: Option<watch::Receiver<Arc<AcceptedConfigSnapshot>>>,
     peer_mgr_internal_tx: Option<mpsc::UnboundedSender<InternalCommand>>,
     confirm_v3_launch: Option<crate::confirm_journal::v3::LaunchIdentity>,
+    v3_residue_cleanup_active: Arc<AtomicBool>,
+    #[cfg(test)]
+    v3_residue_cleanup_spawn_fail: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -130,6 +134,8 @@ impl ConfigTransactionController {
             accepted_rx: None,
             peer_mgr_internal_tx: None,
             confirm_v3_launch: None,
+            v3_residue_cleanup_active: Arc::new(AtomicBool::new(false)),
+            v3_residue_cleanup_spawn_fail: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -146,6 +152,9 @@ impl ConfigTransactionController {
             accepted_rx: Some(accepted_rx),
             peer_mgr_internal_tx: None,
             confirm_v3_launch: None,
+            v3_residue_cleanup_active: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            v3_residue_cleanup_spawn_fail: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -832,17 +841,17 @@ impl ConfigTransactionController {
         // timer stay armed — a leftover journal would boot-revert a config
         // the operator explicitly confirmed.
         let matched = self.matching_pending(&confirm_id).await?;
-        if let Some(files) = &matched.v3_files {
-            let residue_cleanup_failed = files.terminal_cleanup().map_err(|error| {
+        let residue_cleanup = if let Some(files) = &matched.v3_files {
+            files.remove_locator_authority().map_err(|error| {
                 ConfigTransactionApplyError::Internal(format!(
                     "confirm not recorded: durable v3 locator removal failed ({:?}); the transaction is still pending and will roll back on timeout",
                     error.kind()
                 ))
             })?;
-            if residue_cleanup_failed {
-                warn!("confirmed transaction is terminal, but exact v3 residue cleanup failed");
-            }
-        }
+            self.claim_v3(files, "confirmed transaction")
+        } else {
+            None
+        };
         let pending = self.take_matching_pending(&confirm_id).await?;
         let record = ConfirmedTransactionRecord {
             confirm_id: pending.confirm_id,
@@ -855,6 +864,7 @@ impl ConfigTransactionController {
         };
         let confirmation = record_confirmation_proto(&record);
         self.set_last_record(record).await;
+        self.hand_off_v3(residue_cleanup, "confirmed transaction");
         self.metrics
             .record_config_transaction_lifecycle("confirm", "success");
         Ok(proto::ConfirmConfigTransactionResponse {
@@ -1446,14 +1456,15 @@ impl ConfigTransactionController {
         let Some(files) = files else {
             return Ok(());
         };
-        match files.terminal_cleanup() {
-            Ok(residue_cleanup_failed) => {
-                if residue_cleanup_failed {
-                    warn!(
-                        context,
-                        "v3 locator is durably absent, but exact pending residue cleanup failed"
-                    );
+        match files.remove_locator_authority() {
+            Ok(()) => {
+                let cleanup = self.claim_v3(files, context);
+                let mut state = self.state.lock().await;
+                if state.applying_confirm_id.as_deref() == Some(confirm_id) {
+                    state.applying_confirm_id = None;
                 }
+                drop(state);
+                self.hand_off_v3(cleanup, context);
                 Ok(())
             }
             Err(error) => {
@@ -1481,17 +1492,17 @@ impl ConfigTransactionController {
         abort_timer: bool,
     ) -> Result<(), ConfigTransactionApplyError> {
         let matched = self.matching_pending(confirm_id).await?;
-        if let Some(files) = &matched.v3_files {
-            let residue_cleanup_failed = files.terminal_cleanup().map_err(|error| {
+        let residue_cleanup = if let Some(files) = &matched.v3_files {
+            files.remove_locator_authority().map_err(|error| {
                 ConfigTransactionApplyError::Internal(format!(
                     "rollback restored the prior config but remains nonterminal because durable v3 locator removal failed ({:?})",
                     error.kind()
                 ))
             })?;
-            if residue_cleanup_failed {
-                warn!("rollback is terminal, but exact v3 residue cleanup failed");
-            }
-        }
+            self.claim_v3(files, "confirmed rollback")
+        } else {
+            None
+        };
         let mut state = self.state.lock().await;
         let Some(pending) = state.pending.take() else {
             return Ok(());
@@ -1513,7 +1524,58 @@ impl ConfigTransactionController {
             runtime_snapshot_token,
             human_text: human_text.to_string(),
         });
+        drop(state);
+        self.hand_off_v3(residue_cleanup, "confirmed rollback");
         Ok(())
+    }
+
+    fn claim_v3(
+        &self,
+        files: &crate::confirm_journal::v3::PendingFiles,
+        context: &'static str,
+    ) -> Option<V3Handoff> {
+        let active = Arc::clone(&self.v3_residue_cleanup_active);
+        if active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            warn!(context, "v3 terminal residue cleanup is already active");
+            return None;
+        }
+        let reservation = V3Reservation(active);
+        let (cleanup, failed) = files.claim_terminal_residue();
+        failed.then(|| warn!(context, "v3 terminal residue claim was incomplete"));
+        cleanup.map(|cleanup| (cleanup, reservation))
+    }
+
+    fn hand_off_v3(&self, handoff: Option<V3Handoff>, context: &'static str) {
+        let Some((cleanup, reservation)) = handoff else {
+            return;
+        };
+        debug_assert!(self.v3_residue_cleanup_active.load(Ordering::Acquire));
+        #[cfg(test)]
+        if self
+            .v3_residue_cleanup_spawn_fail
+            .swap(false, Ordering::AcqRel)
+        {
+            warn!(context, "v3 residue cleanup could not start");
+            return;
+        }
+        if let Err(error) = std::thread::Builder::new()
+            .name("rustbgpd-v3-cleanup".to_string())
+            .spawn(move || {
+                let _reservation = reservation;
+                if cleanup.cleanup() {
+                    warn!(context, "v3 residue cleanup failed");
+                }
+            })
+        {
+            warn!(
+                context,
+                error_kind = ?error.kind(),
+                "v3 locator is durably absent, but residue cleanup could not start"
+            );
+        }
     }
 
     /// LAN-277: record a FAILED abort/auto-revert rollback on the still-pending
@@ -1560,6 +1622,19 @@ impl ConfigTransactionController {
             .last
             .as_ref()
             .map(record_confirmation_proto)
+    }
+}
+
+type V3Handoff = (
+    crate::confirm_journal::v3::TerminalResidueCleanup,
+    V3Reservation,
+);
+
+struct V3Reservation(Arc<AtomicBool>);
+
+impl Drop for V3Reservation {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -6404,12 +6479,7 @@ families = ["ipv4_unicast"]
             harness.seen_preloaded.lock().await.as_ref().unwrap()
         ));
         assert_eq!(*harness.fib_state.lock().await, vec![table("edge", 1000)]);
-        assert!(
-            !harness.locator.exists()
-                && !harness.metadata.exists()
-                && !harness.raw.exists()
-                && !harness.journal.exists()
-        );
+        assert!(!harness.locator.exists() && !harness.journal.exists());
         harness.ack_task.abort();
     }
 
@@ -6502,6 +6572,184 @@ families = ["ipv4_unicast"]
         assert!(!harness.locator.exists());
         assert!(!harness.journal.exists());
         assert_eq!(*harness.fib_state.lock().await, vec![table("core", 1001)]);
+        harness.ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn v3_locator_sync_failure_keeps_confirm_pending_until_retry() {
+        let harness = external_fib_harness(60, None).await;
+        let files = harness
+            .controller
+            .state
+            .lock()
+            .await
+            .pending
+            .as_ref()
+            .unwrap()
+            .v3_files
+            .clone()
+            .unwrap();
+        files.fail_locator_directory_sync_once_for_test();
+        assert!(
+            harness
+                .controller
+                .clone()
+                .confirm(proto::ConfirmConfigTransactionRequest {
+                    confirm_id: "external-fib".to_string(),
+                })
+                .await
+                .is_err()
+        );
+        assert!(harness.controller.state.lock().await.pending.is_some());
+        assert!(!harness.locator.exists());
+        assert!(harness.raw.exists() && harness.metadata.exists());
+
+        harness
+            .controller
+            .clone()
+            .confirm(proto::ConfirmConfigTransactionRequest {
+                confirm_id: "external-fib".to_string(),
+            })
+            .await
+            .expect("retry must record terminal confirmation");
+        assert!(harness.controller.state.lock().await.pending.is_none());
+        harness.ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn stalled_v3_residue_cleanup_releases_terminal_paths_and_is_singleton() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let harness = external_fib_harness(60, None).await;
+        let files = harness
+            .controller
+            .state
+            .lock()
+            .await
+            .pending
+            .as_ref()
+            .unwrap()
+            .v3_files
+            .clone()
+            .unwrap();
+        let stall = crate::confirm_journal::v3::ResidueCleanupStall::default();
+        files.stall_residue_cleanup_for_test(stall.clone());
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            harness
+                .controller
+                .clone()
+                .confirm(proto::ConfirmConfigTransactionRequest {
+                    confirm_id: "external-fib".to_string(),
+                }),
+        )
+        .await
+        .expect("residue cleanup must not delay confirm")
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !stall.started() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached residue cleanup must start");
+        assert!(!harness.locator.exists());
+        assert!(!harness.raw.exists() && !harness.metadata.exists());
+        assert!(harness.controller.state.lock().await.pending.is_none());
+        harness
+            .controller
+            .reject_if_pending("ordinary or streamed config mutation")
+            .await
+            .expect("terminal state must reopen config admission");
+        let _coordinator = tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.controller.deps.lock.acquire(),
+        )
+        .await
+        .expect("cleanup must not retain the coordinator")
+        .unwrap();
+        assert!(
+            harness
+                .controller
+                .v3_residue_cleanup_active
+                .load(Ordering::Acquire)
+        );
+
+        let second_root = tempfile::tempdir().unwrap();
+        let second_state = second_root.path().join("state");
+        std::fs::create_dir(&second_state).unwrap();
+        std::fs::set_permissions(second_root.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::set_permissions(&second_state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let second_config = second_root.path().join("rustbgpd.toml");
+        std::fs::write(&second_config, base_toml("")).unwrap();
+        let second_prior = AcceptedConfigSnapshot::load(&second_config, None).unwrap();
+        let second_launch =
+            crate::confirm_journal::v3::LaunchIdentity::resolve(&second_config).unwrap();
+        let second_files = second_launch
+            .publish(&second_state, "second", 9, &second_prior)
+            .unwrap();
+        second_files.remove_locator_authority().unwrap();
+        let second_handoff = harness
+            .controller
+            .claim_v3(&second_files, "second terminal transaction");
+        assert!(second_handoff.is_none());
+        let residue = [
+            crate::confirm_journal::v3::RAW_FILE_NAME,
+            crate::confirm_journal::v3::METADATA_FILE_NAME,
+        ];
+        assert!(residue.iter().all(|name| second_state.join(name).exists()));
+
+        let cleanup_active = Arc::clone(&harness.controller.v3_residue_cleanup_active);
+        harness.ack_task.abort();
+        let drop_started = std::time::Instant::now();
+        drop(harness.controller);
+        assert!(drop_started.elapsed() < Duration::from_secs(1));
+        stall.release();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while cleanup_active.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached cleanup must finish after release");
+    }
+
+    #[tokio::test]
+    async fn residue_thread_spawn_failure_is_terminal_and_releases_singleton() {
+        let harness = external_fib_harness(60, None).await;
+        harness
+            .controller
+            .v3_residue_cleanup_spawn_fail
+            .store(true, Ordering::Release);
+        harness
+            .controller
+            .clone()
+            .confirm(proto::ConfirmConfigTransactionRequest {
+                confirm_id: "external-fib".to_string(),
+            })
+            .await
+            .expect("thread spawn failure must be terminal warning-only");
+        assert!(!harness.locator.exists());
+        assert!(harness.controller.state.lock().await.pending.is_none());
+        assert!(
+            !harness
+                .controller
+                .v3_residue_cleanup_active
+                .load(Ordering::Acquire)
+        );
+        assert!(!harness.raw.exists() && !harness.metadata.exists());
+        assert!(
+            harness
+                .raw
+                .with_file_name("commit-confirm-v3-prior.cleanup")
+                .exists()
+                || harness
+                    .metadata
+                    .with_file_name("commit-confirm-v3-metadata.cleanup")
+                    .exists()
+        );
         harness.ack_task.abort();
     }
 
