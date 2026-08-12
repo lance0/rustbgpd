@@ -4682,7 +4682,7 @@ async fn run<T>(
                     .collect()
             })
         },
-        fib_table_control: Some(fib_table_control::make_fib_table_control_fn(
+        fib_table_control: Some(fib_table_control::make_owned_fib_table_control_fn(
             fib_table_control::FibTableControlDeps {
                 fib_cmd_tx: fib_cmd_tx.clone(),
                 peer_mgr_tx: peer_mgr_tx.clone(),
@@ -4697,6 +4697,8 @@ async fn run<T>(
                 confirm_journal_path: None,
                 config_history_dir: None,
             },
+            runtime_config_settlement.clone(),
+            daemon_gate.clone(),
         )),
         gnmi_set: Some(config_transaction_controller.gnmi_set_fn()),
         config_transaction_apply: Some(config_transaction_controller.apply_fn()),

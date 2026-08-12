@@ -64,8 +64,12 @@ impl FibRuntimeConfig {
 }
 
 /// Runtime control messages for the FIB reconciler actor. Sent by the SIGHUP
-/// reload path (and, later, the gRPC FIB-table CRUD handlers) to mutate the
-/// live `[[fib_tables]]` set without a restart.
+/// reload path and the gRPC FIB-table CRUD handlers to mutate the live
+/// `[[fib_tables]]` set without a restart.
+#[expect(
+    clippy::enum_variant_names,
+    reason = "the closed actor protocol names each operation's FIB-table scope explicitly"
+)]
 pub enum FibRuntimeCommand {
     /// Replace the desired table set and run an immediate reconcile.
     ///
@@ -86,6 +90,16 @@ pub enum FibRuntimeCommand {
         tables: Vec<FibTableConfig>,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Replace the desired table set for an owned FIB CRUD mutation.
+    ///
+    /// Unlike the legacy reply, this preserves whether rejection happened
+    /// before any reconcile effect or after the actor had to self-revert a
+    /// partially applied candidate. The owner uses that distinction directly;
+    /// it never infers settlement from an error string.
+    OwnedReplaceTables {
+        tables: Vec<FibTableConfig>,
+        reply: oneshot::Sender<OwnedFibReplaceOutcome>,
+    },
     /// Return the actor's current desired table set — its live source of truth.
     /// The gRPC CRUD control path reads this, applies the upsert/delete,
     /// validates the candidate, then issues a `ReplaceTables`, all while
@@ -94,6 +108,44 @@ pub enum FibRuntimeCommand {
     GetTables {
         reply: oneshot::Sender<Vec<FibTableConfig>>,
     },
+}
+
+/// Typed terminality of an owned FIB table-set replacement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnedFibReplaceOutcome {
+    /// The desired set is active and the reconcile reached its apply phase.
+    Applied,
+    /// Reconcile stopped before its apply phase and the desired set was
+    /// restored without an externally visible effect.
+    RejectedNoEffect(String),
+    /// Reconcile reached its apply phase, then restored the desired set after
+    /// detecting an orphan. Kernel and owned-route compensation is not proved.
+    CompensationAmbiguous(String),
+}
+
+enum FibRuntimeReplaceReply {
+    Legacy(oneshot::Sender<Result<(), String>>),
+    Owned(oneshot::Sender<OwnedFibReplaceOutcome>),
+}
+
+impl FibRuntimeReplaceReply {
+    fn send(self, outcome: OwnedFibReplaceOutcome) {
+        match (self, outcome) {
+            (Self::Legacy(reply), OwnedFibReplaceOutcome::Applied) => {
+                let _ = reply.send(Ok(()));
+            }
+            (
+                Self::Legacy(reply),
+                OwnedFibReplaceOutcome::RejectedNoEffect(reason)
+                | OwnedFibReplaceOutcome::CompensationAmbiguous(reason),
+            ) => {
+                let _ = reply.send(Err(reason));
+            }
+            (Self::Owned(reply), outcome) => {
+                let _ = reply.send(outcome);
+            }
+        }
+    }
 }
 
 /// Operator-visible state for one projected FIB row.
@@ -330,7 +382,17 @@ async fn run_loop<F>(
             // sustained route-event stream while a caller awaits the ack.
             maybe_cmd = cmd_rx.recv(), if cmd_open => {
                 match maybe_cmd {
-                    Some(FibRuntimeCommand::ReplaceTables { tables, reply }) => {
+                    Some(command @ (FibRuntimeCommand::ReplaceTables { .. }
+                        | FibRuntimeCommand::OwnedReplaceTables { .. })) => {
+                        let (tables, reply) = match command {
+                            FibRuntimeCommand::ReplaceTables { tables, reply } => {
+                                (tables, FibRuntimeReplaceReply::Legacy(reply))
+                            }
+                            FibRuntimeCommand::OwnedReplaceTables { tables, reply } => {
+                                (tables, FibRuntimeReplaceReply::Owned(reply))
+                            }
+                            FibRuntimeCommand::GetTables { .. } => unreachable!(),
+                        };
                         // Tentatively swap to the new desired set and reconcile.
                         let previous = std::mem::replace(&mut config.tables, tables);
                         let reached_apply = reconcile_once_with_events(
@@ -371,7 +433,7 @@ async fn run_loop<F>(
                             // signature — otherwise a later restart sees a config
                             // mismatch and quarantines valid owned state.
                             persist_owned_state(&config, &owned);
-                            let _ = reply.send(Ok(()));
+                            reply.send(OwnedFibReplaceOutcome::Applied);
                         } else {
                             // Revert. A pre-plan bail (`!reached_apply`) never
                             // touched `owned` and never persisted, so the on-disk
@@ -386,7 +448,7 @@ async fn run_loop<F>(
                             if reached_apply {
                                 persist_owned_state(&config, &owned);
                             }
-                            let _ = reply.send(Err(if reached_apply {
+                            let reason = if reached_apply {
                                 "FIB table change left owned routes outside the new \
                                  set (a withdraw failed); reverted to keep them owned"
                                     .to_string()
@@ -394,7 +456,12 @@ async fn run_loop<F>(
                                 "FIB reconcile did not reach the apply phase (RIB \
                                  query or kernel dump failed); table set unchanged"
                                     .to_string()
-                            }));
+                            };
+                            reply.send(if reached_apply {
+                                OwnedFibReplaceOutcome::CompensationAmbiguous(reason)
+                            } else {
+                                OwnedFibReplaceOutcome::RejectedNoEffect(reason)
+                            });
                         }
                     }
                     Some(FibRuntimeCommand::GetTables { reply }) => {
@@ -2251,6 +2318,7 @@ mod tests {
         kernel: FibKernelSnapshot,
         fail_dump: Option<String>,
         fail_apply: Vec<String>,
+        fail_apply_signal: Option<Arc<std::sync::atomic::AtomicBool>>,
         applied: Vec<FibOp>,
         kernel_events: Option<mpsc::Receiver<KernelRouteEvent>>,
     }
@@ -2275,6 +2343,13 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
             self.applied.push(op.clone());
             Box::pin(async move {
+                if self
+                    .fail_apply_signal
+                    .as_ref()
+                    .is_some_and(|signal| signal.load(Ordering::SeqCst))
+                {
+                    return Err("signaled apply failure".to_string());
+                }
                 if let Some(error) = self.fail_apply.pop() {
                     return Err(error);
                 }
@@ -3442,18 +3517,77 @@ mod tests {
         let (reply_tx, reply_rx) = oneshot::channel();
         handle
             .command_sender()
-            .send(FibRuntimeCommand::ReplaceTables {
+            .send(FibRuntimeCommand::OwnedReplaceTables {
                 tables: vec![table("edge2", 1001, 200, &["ipv4_unicast"])],
                 reply: reply_tx,
             })
             .await
             .unwrap();
         let result = reply_rx.await.unwrap();
-        assert!(result.is_err(), "pre-apply bail must reject the swap");
+        assert!(matches!(
+            result,
+            OwnedFibReplaceOutcome::RejectedNoEffect(_)
+        ));
         assert!(
             !path.exists(),
             "pre-apply bail must not rewrite the owned-state file"
         );
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn owned_replace_self_revert_is_typed_compensation_ambiguity() {
+        let tables = vec![table("edge", 1000, 200, &["ipv4_unicast"])];
+        let route = route(v4(24), ip("198.51.100.1"));
+        let fail_apply = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fib = FakeFib {
+            fail_apply_signal: Some(fail_apply.clone()),
+            ..FakeFib::default()
+        };
+
+        let (rib_tx, _count, _events) = rib_with_events(vec![route]);
+        let (status_tx, mut status_rx) = watch::channel(Vec::new());
+        let (event_tx, _) = broadcast::channel(16);
+        let shutdown = CancellationToken::new();
+        let handle = spawn_with_fib(
+            config_with(tables.clone()),
+            rib_tx.clone(),
+            rib_tx,
+            fib,
+            metrics(),
+            status_tx,
+            event_tx,
+            shutdown,
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while status_rx.borrow().is_empty() {
+                status_rx.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        fail_apply.store(true, Ordering::SeqCst);
+
+        let (reply, outcome) = oneshot::channel();
+        handle
+            .command_sender()
+            .send(FibRuntimeCommand::OwnedReplaceTables {
+                tables: Vec::new(),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome.await.unwrap(),
+            OwnedFibReplaceOutcome::CompensationAmbiguous(_)
+        ));
+        let (reply, current) = oneshot::channel();
+        handle
+            .command_sender()
+            .send(FibRuntimeCommand::GetTables { reply })
+            .await
+            .unwrap();
+        assert_eq!(current.await.unwrap(), tables);
         handle.shutdown().await;
     }
 
