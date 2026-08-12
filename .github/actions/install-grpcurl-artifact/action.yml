@@ -1,0 +1,21 @@
+name: "Install verified grpcurl artifact"
+description: >-
+  Download the same-run grpcurl archive, verify its immutable checksum and
+  version offline, and install it on the hosted runner.
+runs:
+  using: "composite"
+  steps:
+    - name: Download verified grpcurl archive
+      uses: actions/download-artifact@v8
+      with:
+        name: grpcurl-v1.9.1-linux-x86_64
+        path: ${{ runner.temp }}/grpcurl-artifact
+
+    - name: Install exact grpcurl offline
+      shell: bash
+      run: |
+        set -euo pipefail
+        .github/scripts/install-grpcurl.sh \
+          --install-archive \
+          "$RUNNER_TEMP/grpcurl-artifact/grpcurl_1.9.1_linux_x86_64.tar.gz" \
+          /usr/local/bin

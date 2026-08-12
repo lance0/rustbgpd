@@ -8,62 +8,103 @@ readonly GRPCURL_ASSET="grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz"
 readonly GRPCURL_URL="https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/${GRPCURL_ASSET}"
 readonly GRPCURL_ATTEMPTS=3
 
-install_grpcurl() (
-    local version=${1:?version}
-    local sha256=${2:?sha256}
-    local url=${3:?url}
-    local install_dir=${4:?install directory}
-    local work_dir archive reported_version
+verify_archive() {
+    local sha256=${1:?sha256}
+    local archive=${2:?archive}
 
-    work_dir=$(mktemp -d)
-    trap 'rm -rf -- "$work_dir"' EXIT
-    archive="$work_dir/grpcurl.tar.gz"
-
-    # Download to a file rather than streaming into tar, so extraction cannot
-    # see unverified bytes. Single retry mechanism: the caller's loop owns
-    # retry and backoff, because only the checksum below catches a truncated
-    # or corrupted 200-OK body that `curl --retry` treats as success. Nesting
-    # `curl --retry` inside that loop would multiply the worst case past the
-    # interop job timeout.
-    curl -fsSL \
-        --connect-timeout 10 \
-        --max-time 120 \
-        --output "$archive" \
-        "$url"
-
-    if ! printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --status; then
-        echo "grpcurl ${version} archive checksum mismatch" >&2
+    [[ -f "$archive" ]] || return 1
+    if ! printf '%s  %s\n' "$sha256" "$archive" \
+        | sha256sum --check --status; then
+        echo "grpcurl archive checksum mismatch: ${archive}" >&2
         return 1
     fi
+}
 
-    if [[ -w "$install_dir" ]]; then
-        tar -xzf "$archive" -C "$install_dir" grpcurl
-    else
-        sudo tar -xzf "$archive" -C "$install_dir" grpcurl
-    fi
+install_from_archive() (
+    local version=${1:?version}
+    local sha256=${2:?sha256}
+    local archive=${3:?archive}
+    local install_dir=${4:?install directory}
+    local work_dir staged_target reported_version
 
-    reported_version=$("$install_dir/grpcurl" -version 2>&1)
+    # This path is deliberately offline. Producers are the only workflow jobs
+    # allowed to fetch the release archive; consumers re-verify the same-run
+    # artifact before tar sees any bytes.
+    verify_archive "$sha256" "$archive" || return 1
+
+    work_dir=$(mktemp -d) || return 1
+    trap 'rm -rf -- "$work_dir"' EXIT
+    tar -xzf "$archive" -C "$work_dir" grpcurl || return 1
+    [[ -f "$work_dir/grpcurl" ]] || {
+        echo "grpcurl archive did not contain grpcurl" >&2
+        return 1
+    }
+    chmod 0755 "$work_dir/grpcurl" || return 1
+    reported_version=$("$work_dir/grpcurl" -version 2>&1) || return 1
     if [[ "$reported_version" != "grpcurl v${version}" ]]; then
         echo "unexpected grpcurl version: ${reported_version}" >&2
         return 1
     fi
+
+    if [[ -d "$install_dir" && -w "$install_dir" ]] \
+        || { [[ ! -e "$install_dir" ]] && [[ -w "$(dirname "$install_dir")" ]]; }; then
+        mkdir -p "$install_dir"
+        staged_target=$(mktemp "${install_dir}/.grpcurl.XXXXXX")
+        trap 'rm -rf -- "$work_dir"; rm -f -- "$staged_target"' EXIT
+        install -m 0755 "$work_dir/grpcurl" "$staged_target"
+        mv -f -- "$staged_target" "$install_dir/grpcurl"
+    else
+        staged_target="${install_dir}/.grpcurl.$$.${RANDOM}"
+        sudo mkdir -p "$install_dir"
+        sudo install -m 0755 "$work_dir/grpcurl" "$staged_target"
+        trap 'rm -rf -- "$work_dir"; sudo rm -f -- "$staged_target"' EXIT
+        sudo mv -f -- "$staged_target" "$install_dir/grpcurl"
+    fi
+
+    reported_version=$("$install_dir/grpcurl" -version 2>&1) || return 1
+    [[ "$reported_version" == "grpcurl v${version}" ]] || {
+        echo "installed grpcurl version check failed: ${reported_version}" >&2
+        return 1
+    }
     printf '%s\n' "$reported_version"
 )
 
-# The hosted release download is the only external fetch every Interop job
-# shares, so one CDN hiccup reds a ~38-job run. Retry download *and*
-# verification as a unit: a truncated or corrupted archive is re-fetched
-# rather than accepted, because each attempt re-runs the checksum and version
-# checks and a rejected archive is never installed. Persistent failure still
-# fails closed after the bounded attempts, naming the URL.
-install_grpcurl_with_retry() {
-    local url=${3:?url}
-    local attempt
+download_archive_once() {
+    local url=${1:?url}
+    local destination=${2:?destination}
 
+    curl -fsSL \
+        --connect-timeout 10 \
+        --max-time 120 \
+        --output "$destination" \
+        "$url"
+}
+
+prepare_archive() {
+    local sha256=${1:?sha256}
+    local url=${2:?url}
+    local archive=${3:?archive}
+    local attempt staged_archive
+
+    if verify_archive "$sha256" "$archive" 2>/dev/null; then
+        echo "using verified cached grpcurl archive"
+        return 0
+    fi
+    if [[ -e "$archive" ]]; then
+        echo "::warning::discarding invalid cached grpcurl archive" >&2
+        rm -f -- "$archive"
+    fi
+
+    mkdir -p "$(dirname "$archive")"
     for ((attempt = 1; attempt <= GRPCURL_ATTEMPTS; attempt++)); do
-        if install_grpcurl "$@"; then
+        staged_archive=$(mktemp "${archive}.download.XXXXXX")
+        if download_archive_once "$url" "$staged_archive" \
+            && verify_archive "$sha256" "$staged_archive"; then
+            mv -f -- "$staged_archive" "$archive"
+            echo "downloaded and verified grpcurl archive"
             return 0
         fi
+        rm -f -- "$staged_archive"
         if ((attempt < GRPCURL_ATTEMPTS)); then
             echo "::warning::grpcurl download/verify attempt ${attempt}/${GRPCURL_ATTEMPTS} failed; retrying" >&2
             sleep $((attempt * 5))
@@ -80,15 +121,24 @@ fail_self_test() {
 }
 
 self_test() (
-    local repo_root fixture_dir source_dir base_archive archive checksum truncated_size
-    local wrong_version_archive wrong_version_checksum retry_counter
-    local named_steps workflow_calls setup_calls
+    local repo_root fixture_dir source_dir base_archive valid_archive checksum
+    local truncated_size wrong_source wrong_archive wrong_checksum counter
+    local cache_path target_path interop_calls setup_calls prepare_calls install_calls
 
     repo_root=$(git rev-parse --show-toplevel)
     fixture_dir=$(mktemp -d)
     trap 'rm -rf -- "$fixture_dir"' EXIT
+    [[ "$GRPCURL_VERSION" == "1.9.1" ]] \
+        || fail_self_test "version pin drifted"
     [[ "$GRPCURL_SHA256" == "588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214" ]] \
-        || fail_self_test "pinned grpcurl v1.9.1 checksum drifted"
+        || fail_self_test "checksum pin drifted"
+    [[ "$GRPCURL_ASSET" == "grpcurl_1.9.1_linux_x86_64.tar.gz" ]] \
+        || fail_self_test "archive name drifted"
+    [[ "$GRPCURL_URL" == "https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz" ]] \
+        || fail_self_test "release URL drifted"
+    [[ "$GRPCURL_ATTEMPTS" -eq 3 ]] \
+        || fail_self_test "retry bound drifted"
+
     source_dir="$fixture_dir/source"
     mkdir -p "$source_dir"
     cat >"$source_dir/grpcurl" <<'EOF'
@@ -96,137 +146,189 @@ self_test() (
 printf '%s\n' 'grpcurl v1.9.1' >&2
 EOF
     chmod +x "$source_dir/grpcurl"
-    # A second empty gzip member makes the full fixture distinct while the
-    # prefix remains a valid, extractable archive. Removing that final member
-    # therefore models a truncated transfer that tar alone would accept; only
-    # the checksum can make the negative case fail before extraction.
-    base_archive="$fixture_dir/grpcurl-base.tar.gz"
-    archive="$fixture_dir/grpcurl-valid.tar.gz"
+    # The extra gzip member makes the full fixture distinct while its prefix
+    # remains extractable. Only the checksum rejects that plausible truncation.
+    base_archive="$fixture_dir/base.tar.gz"
+    valid_archive="$fixture_dir/valid.tar.gz"
     tar -czf "$base_archive" -C "$source_dir" grpcurl
-    cp "$base_archive" "$archive"
-    printf '' | gzip >>"$archive"
-    checksum=$(sha256sum "$archive" | awk '{print $1}')
+    cp "$base_archive" "$valid_archive"
+    printf '' | gzip >>"$valid_archive"
+    checksum=$(sha256sum "$valid_archive" | awk '{print $1}')
 
-    mkdir "$fixture_dir/valid-install"
-    install_grpcurl \
-        "$GRPCURL_VERSION" \
-        "$checksum" \
-        "file://$archive" \
+    install_from_archive \
+        "$GRPCURL_VERSION" "$checksum" "$valid_archive" \
         "$fixture_dir/valid-install"
     [[ -x "$fixture_dir/valid-install/grpcurl" ]] \
         || fail_self_test "verified archive was not installed"
 
     truncated_size=$(wc -c <"$base_archive")
-    head -c "$truncated_size" "$archive" >"$fixture_dir/grpcurl-truncated.tar.gz"
-    mkdir "$fixture_dir/truncated-install"
-    if install_grpcurl \
-        "$GRPCURL_VERSION" \
-        "$checksum" \
-        "file://$fixture_dir/grpcurl-truncated.tar.gz" \
+    head -c "$truncated_size" "$valid_archive" >"$fixture_dir/truncated.tar.gz"
+    if install_from_archive \
+        "$GRPCURL_VERSION" "$checksum" "$fixture_dir/truncated.tar.gz" \
         "$fixture_dir/truncated-install" 2>/dev/null; then
         fail_self_test "truncated archive was accepted"
     fi
     [[ ! -e "$fixture_dir/truncated-install/grpcurl" ]] \
-        || fail_self_test "truncated archive was extracted"
+        || fail_self_test "truncated archive installed a binary"
 
-    mkdir "$fixture_dir/wrong-checksum-install"
-    if install_grpcurl \
+    if install_from_archive \
         "$GRPCURL_VERSION" \
-        "0000000000000000000000000000000000000000000000000000000000000000" \
-        "file://$archive" \
-        "$fixture_dir/wrong-checksum-install" 2>/dev/null; then
+        0000000000000000000000000000000000000000000000000000000000000000 \
+        "$valid_archive" "$fixture_dir/wrong-checksum-install" 2>/dev/null; then
         fail_self_test "wrong checksum was accepted"
     fi
     [[ ! -e "$fixture_dir/wrong-checksum-install/grpcurl" ]] \
-        || fail_self_test "wrong-checksum archive was extracted"
+        || fail_self_test "wrong-checksum archive installed a binary"
 
-    mkdir "$fixture_dir/wrong-version-source" "$fixture_dir/wrong-version-install"
-    cat >"$fixture_dir/wrong-version-source/grpcurl" <<'EOF'
+    wrong_source="$fixture_dir/wrong-source"
+    mkdir -p "$wrong_source"
+    cat >"$wrong_source/grpcurl" <<'EOF'
 #!/usr/bin/env sh
 printf '%s\n' 'grpcurl v1.9.0' >&2
 EOF
-    chmod +x "$fixture_dir/wrong-version-source/grpcurl"
-    wrong_version_archive="$fixture_dir/grpcurl-wrong-version.tar.gz"
-    tar -czf "$wrong_version_archive" \
-        -C "$fixture_dir/wrong-version-source" grpcurl
-    wrong_version_checksum=$(sha256sum "$wrong_version_archive" | awk '{print $1}')
-    if install_grpcurl \
-        "$GRPCURL_VERSION" \
-        "$wrong_version_checksum" \
-        "file://$wrong_version_archive" \
+    chmod +x "$wrong_source/grpcurl"
+    wrong_archive="$fixture_dir/wrong-version.tar.gz"
+    tar -czf "$wrong_archive" -C "$wrong_source" grpcurl
+    wrong_checksum=$(sha256sum "$wrong_archive" | awk '{print $1}')
+    if install_from_archive \
+        "$GRPCURL_VERSION" "$wrong_checksum" "$wrong_archive" \
         "$fixture_dir/wrong-version-install" 2>/dev/null; then
         fail_self_test "wrong grpcurl version was accepted"
     fi
+    [[ ! -e "$fixture_dir/wrong-version-install/grpcurl" ]] \
+        || fail_self_test "wrong-version binary reached the install path"
 
-    # Retry cases stub the installer and `sleep` so the loop is exercised
-    # without network access or real backoff waits.
-    retry_counter="$fixture_dir/retry-attempts"
-    printf '0' >"$retry_counter"
+    # Cache and retry cases replace only the network primitive and sleep, so
+    # the self-test remains offline while exercising the real selection logic.
+    counter="$fixture_dir/download-count"
+    cache_path="$fixture_dir/cache/$GRPCURL_ASSET"
+    mkdir -p "$(dirname "$cache_path")"
+    cp "$valid_archive" "$cache_path"
+    printf '0' >"$counter"
     (
-        sleep() { :; }
-        install_grpcurl() {
-            local count
-            count=$(($(cat "$retry_counter") + 1))
-            printf '%s' "$count" >"$retry_counter"
-            [[ "$count" -ge 2 ]]
-        }
-        install_grpcurl_with_retry \
-            "$GRPCURL_VERSION" "$GRPCURL_SHA256" "$GRPCURL_URL" /usr/local/bin
-    ) 2>/dev/null || fail_self_test "retry did not recover from a transient failure"
-    [[ "$(cat "$retry_counter")" -eq 2 ]] \
-        || fail_self_test "retry did not stop on the first success"
-
-    printf '0' >"$retry_counter"
-    if (
-        sleep() { :; }
-        install_grpcurl() {
-            printf '%s' "$(($(cat "$retry_counter") + 1))" >"$retry_counter"
+        download_archive_once() {
+            printf '%s' "$(($(cat "$counter") + 1))" >"$counter"
             return 1
         }
-        install_grpcurl_with_retry \
-            "$GRPCURL_VERSION" "$GRPCURL_SHA256" "$GRPCURL_URL" /usr/local/bin
-    ) 2>/dev/null; then
-        fail_self_test "persistent download failure was not surfaced"
+        prepare_archive "$checksum" unused://cache-hit "$cache_path"
+    ) >/dev/null || fail_self_test "valid cache hit failed"
+    [[ $(cat "$counter") -eq 0 ]] \
+        || fail_self_test "valid cache hit used the network"
+
+    printf 'corrupt' >"$cache_path"
+    printf '0' >"$counter"
+    (
+        sleep() { :; }
+        download_archive_once() {
+            printf '%s' "$(($(cat "$counter") + 1))" >"$counter"
+            cp "$valid_archive" "$2"
+        }
+        prepare_archive "$checksum" unused://corrupt-cache "$cache_path"
+    ) >/dev/null 2>&1 || fail_self_test "corrupt cache was not replaced"
+    [[ $(cat "$counter") -eq 1 ]] \
+        || fail_self_test "corrupt cache did not perform one download"
+    verify_archive "$checksum" "$cache_path" \
+        || fail_self_test "corrupt cache replacement was not verified"
+
+    target_path="$fixture_dir/transient/$GRPCURL_ASSET"
+    printf '0' >"$counter"
+    (
+        sleep() { :; }
+        download_archive_once() {
+            local count
+            count=$(($(cat "$counter") + 1))
+            printf '%s' "$count" >"$counter"
+            if [[ "$count" -eq 1 ]]; then
+                printf 'truncated' >"$2"
+            else
+                cp "$valid_archive" "$2"
+            fi
+        }
+        prepare_archive "$checksum" unused://transient "$target_path"
+    ) >/dev/null 2>&1 || fail_self_test "retry did not recover"
+    [[ $(cat "$counter") -eq 2 ]] \
+        || fail_self_test "retry did not stop on first verified success"
+    verify_archive "$checksum" "$target_path" \
+        || fail_self_test "retry published unverified bytes"
+
+    target_path="$fixture_dir/persistent/$GRPCURL_ASSET"
+    printf '0' >"$counter"
+    if (
+        sleep() { :; }
+        download_archive_once() {
+            printf '%s' "$(($(cat "$counter") + 1))" >"$counter"
+            printf 'corrupt' >"$2"
+        }
+        prepare_archive "$checksum" unused://persistent "$target_path"
+    ) >/dev/null 2>&1; then
+        fail_self_test "persistent corruption was not surfaced"
     fi
-    [[ "$(cat "$retry_counter")" -eq "$GRPCURL_ATTEMPTS" ]] \
-        || fail_self_test "retry did not stop after ${GRPCURL_ATTEMPTS} attempts"
+    [[ $(cat "$counter") -eq "$GRPCURL_ATTEMPTS" ]] \
+        || fail_self_test "persistent failure escaped retry bound"
+    [[ ! -e "$target_path" ]] \
+        || fail_self_test "persistent failure published an archive"
 
-    named_steps=$(grep -cE '^[[:space:]]+- name: Install grpcurl' \
-        "$repo_root/.github/workflows/interop.yml")
-    workflow_calls=$(grep -cF 'bash .github/scripts/install-grpcurl.sh' \
-        "$repo_root/.github/workflows/interop.yml")
-    [[ "$workflow_calls" -eq "$named_steps" && "$workflow_calls" -gt 0 ]] \
-        || fail_self_test \
-            "every Interop grpcurl install step must call the shared helper (steps=${named_steps}, calls=${workflow_calls})"
+    (
+        # shellcheck disable=SC2317
+        curl() { fail_self_test "offline install invoked curl"; }
+        # shellcheck disable=SC2317
+        download_archive_once() { fail_self_test "offline install downloaded"; }
+        install_from_archive \
+            "$GRPCURL_VERSION" "$checksum" "$valid_archive" \
+            "$fixture_dir/offline-install"
+    ) || fail_self_test "offline artifact install failed"
 
-    setup_calls=$(grep -cF 'bash .github/scripts/install-grpcurl.sh' \
+    interop_calls=$(grep -cF 'uses: ./.github/actions/install-grpcurl-artifact' \
+        "$repo_root/.github/workflows/interop.yml")
+    [[ "$interop_calls" -eq 40 ]] \
+        || fail_self_test "Interop must have 40 offline grpcurl consumers"
+    setup_calls=$(grep -cF 'uses: ./.github/actions/install-grpcurl-artifact' \
         "$repo_root/.github/actions/setup-dataplane-host/action.yml")
     [[ "$setup_calls" -eq 1 ]] \
-        || fail_self_test "setup-dataplane-host must call the shared helper exactly once"
+        || fail_self_test "setup-dataplane-host must have one grpcurl consumer"
+    prepare_calls=$(grep -R -F -- '--prepare-archive' \
+        "$repo_root/.github/workflows/interop.yml" \
+        "$repo_root/.github/workflows/kernel-dataplane.yml" | wc -l)
+    [[ "$prepare_calls" -eq 2 ]] \
+        || fail_self_test "heavy workflows must have two grpcurl producers"
+    install_calls=$(grep -cF -- '--install-archive' \
+        "$repo_root/.github/actions/install-grpcurl-artifact/action.yml")
+    [[ "$install_calls" -eq 1 ]] \
+        || fail_self_test "consumer action must have one offline install"
 
-    if grep -R -E -n \
-        'fullstorydev/grpcurl/releases|grpcurl_.*linux_x86_64\.tar\.gz' \
-        "$repo_root/.github/workflows" \
+    if grep -R -F -n 'fullstorydev/grpcurl/releases' \
+        "$repo_root/.github/workflows" "$repo_root/.github/actions"; then
+        fail_self_test "grpcurl release URL remains outside the installer"
+    fi
+    if grep -R -F -n 'bash .github/scripts/install-grpcurl.sh' \
+        "$repo_root/.github/workflows/interop.yml" \
+        "$repo_root/.github/workflows/kernel-dataplane.yml" \
         "$repo_root/.github/actions"; then
-        fail_self_test "legacy grpcurl download call site remains outside the helper"
+        fail_self_test "legacy grpcurl installer invocation remains"
     fi
 
     printf '%s\n' 'grpcurl installer self-test passed'
 )
 
+usage() {
+    echo "usage: $0 --prepare-archive ARCHIVE | --install-archive ARCHIVE INSTALL_DIR | --self-test" >&2
+    exit 2
+}
+
 case ${1:-} in
-    "")
-        install_grpcurl_with_retry \
-            "$GRPCURL_VERSION" \
-            "$GRPCURL_SHA256" \
-            "$GRPCURL_URL" \
-            /usr/local/bin
+    --prepare-archive)
+        [[ $# -eq 2 ]] || usage
+        prepare_archive "$GRPCURL_SHA256" "$GRPCURL_URL" "$2"
+        ;;
+    --install-archive)
+        [[ $# -eq 3 ]] || usage
+        install_from_archive "$GRPCURL_VERSION" "$GRPCURL_SHA256" "$2" "$3"
         ;;
     --self-test)
+        [[ $# -eq 1 ]] || usage
         self_test
         ;;
     *)
-        echo "usage: $0 [--self-test]" >&2
-        exit 2
+        usage
         ;;
 esac

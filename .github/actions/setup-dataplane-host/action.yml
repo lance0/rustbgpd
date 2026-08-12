@@ -32,7 +32,10 @@ runs:
       with:
         version: ${{ inputs.containerlab-version }}
 
-    - name: Install grpcurl + jq
+    - name: Install exact grpcurl offline
+      uses: ./.github/actions/install-grpcurl-artifact
+
+    - name: Ensure jq
       shell: bash
       run: |
         set -euo pipefail
@@ -45,7 +48,6 @@ runs:
             echo "::warning::apt-get update reported repo errors; installing jq from cache"
           sudo apt-get install -y jq
         fi
-        bash .github/scripts/install-grpcurl.sh
 
     - name: Load kernel dataplane modules (vrf / vxlan / bridge / bonding)
       id: dataplane-modules
