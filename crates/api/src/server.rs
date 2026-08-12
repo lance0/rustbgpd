@@ -83,6 +83,8 @@ pub enum ConfigTransactionApplyError {
     FailedPrecondition(String),
     /// Required runtime actor or persistence channel is unavailable.
     Unavailable(String),
+    /// The request could not acquire the runtime config coordinator in time.
+    DeadlineExceeded(String),
     /// Internal actor/rollback failure.
     Internal(String),
 }
@@ -93,6 +95,7 @@ impl ConfigTransactionApplyError {
             Self::InvalidArgument(message) => Status::invalid_argument(message),
             Self::FailedPrecondition(message) => Status::failed_precondition(message),
             Self::Unavailable(message) => Status::unavailable(message),
+            Self::DeadlineExceeded(message) => Status::deadline_exceeded(message),
             Self::Internal(message) => Status::internal(message),
         }
     }
@@ -104,6 +107,7 @@ impl std::fmt::Display for ConfigTransactionApplyError {
             Self::InvalidArgument(message)
             | Self::FailedPrecondition(message)
             | Self::Unavailable(message)
+            | Self::DeadlineExceeded(message)
             | Self::Internal(message) => f.write_str(message),
         }
     }
@@ -1873,6 +1877,27 @@ mod tests {
     use crate::proto::global_service_client::GlobalServiceClient;
     use crate::proto::{EventCategory, WatchEventsRequest};
     use crate::test_support::{session_event, spawn_fake_peer_manager, spawn_fake_rib};
+
+    #[test]
+    fn config_transaction_deadline_maps_exactly_to_grpc() {
+        let error = ConfigTransactionApplyError::DeadlineExceeded(
+            "config transaction timed out waiting for the runtime config coordinator; \
+             coordinator ownership was not acquired and apply did not begin"
+                .to_string(),
+        );
+        assert_eq!(
+            error.to_string(),
+            "config transaction timed out waiting for the runtime config coordinator; \
+             coordinator ownership was not acquired and apply did not begin"
+        );
+        let status = error.into_status();
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+        assert_eq!(
+            status.message(),
+            "config transaction timed out waiting for the runtime config coordinator; \
+             coordinator ownership was not acquired and apply did not begin"
+        );
+    }
 
     #[test]
     fn streamed_config_production_wiring_is_singleton_and_authentication_is_explicit() {
