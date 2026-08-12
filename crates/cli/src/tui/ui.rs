@@ -9,7 +9,8 @@ use crate::commands::neighbor::{
     optional_seconds_label, rfc8212_policy_status_label,
 };
 use crate::output::{format_duration, format_state_with_stale, neighbor_source_label};
-use crate::tui::app::{App, SortColumn, View, neighbor_key};
+use crate::proto::{ExplainDecision, ExportGateVerdict};
+use crate::tui::app::{App, ExplainState, RibPageState, SortColumn, View, neighbor_key};
 use crate::tui::data::{Freshness, RouteEventEntry, RouteEventKind};
 use crate::tui::theme::Theme;
 
@@ -17,6 +18,8 @@ pub fn draw(f: &mut Frame, app: &mut App, theme: &Theme) {
     match app.view.clone() {
         View::PeerTable => draw_main(f, app, theme),
         View::PeerDetail(address) => draw_peer_detail(f, app, &address, theme),
+        View::BestRib(peer) => draw_best_rib(f, app, &peer, theme),
+        View::AdvertisedExplain(peer) => draw_advertised_explain(f, app, &peer, theme),
     }
 
     if app.show_help {
@@ -622,6 +625,267 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
     f.render_widget(paragraph, inner);
 }
 
+fn draw_best_rib(f: &mut Frame, app: &mut App, peer: &str, theme: &Theme) {
+    let block = Block::default()
+        .title(format!(" Best RIB (point-in-time) | target {peer} "))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(f.area());
+    f.render_widget(block, f.area());
+    match app.rib_page.as_ref() {
+        Some(RibPageState::Loading) | None => {
+            f.render_widget(Paragraph::new("Loading routes..."), inner)
+        }
+        Some(RibPageState::Error(message)) => f.render_widget(
+            Paragraph::new(message.as_str()).style(Style::default().fg(theme.error)),
+            inner,
+        ),
+        Some(RibPageState::Ready(page)) if page.routes.is_empty() => {
+            let message = if page.total_count == 0 {
+                "No best routes"
+            } else {
+                "Empty page"
+            };
+            f.render_widget(Paragraph::new(format!("{message}\n\nEsc Back")), inner);
+        }
+        Some(RibPageState::Ready(page)) => {
+            let rows = page.routes.iter().take(100).map(|route| {
+                Row::new(vec![
+                    Cell::from(format!("{}/{}", route.prefix, route.prefix_length)),
+                    Cell::from(route.next_hop.clone()),
+                    Cell::from(route.peer_address.clone()),
+                    Cell::from(
+                        route
+                            .as_path
+                            .iter()
+                            .map(u32::to_string)
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    ),
+                    Cell::from(route.local_pref.to_string()),
+                    Cell::from(route.med_attr.map_or_else(|| "-".into(), |v| v.to_string())),
+                    Cell::from(route.validation_state.clone()),
+                    Cell::from(route.aspa_state.clone()),
+                ])
+            });
+            let footer = format!(
+                "row {}/{} | page rows {} | total {} | n Next | p Previous | Enter Explain | Esc Back",
+                app.rib_table_state.selected().map_or(0, |i| i + 1),
+                page.routes.len(),
+                page.routes.len(),
+                page.total_count
+            );
+            let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+            let table = Table::new(
+                rows,
+                [
+                    Constraint::Min(16),
+                    Constraint::Min(13),
+                    Constraint::Min(13),
+                    Constraint::Min(12),
+                    Constraint::Length(9),
+                    Constraint::Length(7),
+                    Constraint::Length(9),
+                    Constraint::Length(8),
+                ],
+            )
+            .header(
+                Row::new([
+                    "Prefix",
+                    "Next Hop",
+                    "Source Peer",
+                    "AS Path",
+                    "LocalPref",
+                    "MED",
+                    "RPKI",
+                    "ASPA",
+                ])
+                .style(
+                    Style::default()
+                        .fg(theme.header_fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            )
+            .row_highlight_style(
+                Style::default()
+                    .fg(theme.highlight)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("> ");
+            f.render_stateful_widget(table, chunks[0], &mut app.rib_table_state);
+            f.render_widget(
+                Paragraph::new(footer).style(Style::default().fg(theme.text_dim)),
+                chunks[1],
+            );
+        }
+    }
+}
+
+fn draw_advertised_explain(f: &mut Frame, app: &mut App, peer: &str, theme: &Theme) {
+    let block = Block::default()
+        .title(format!(" Advertised Route Explain | target {peer} "))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(f.area());
+    f.render_widget(block, f.area());
+    let mut lines = match app.explain.as_ref() {
+        Some(ExplainState::Loading) | None => vec![Line::from("Loading route explanation...")],
+        Some(ExplainState::Error(message)) => vec![Line::styled(
+            message.clone(),
+            Style::default().fg(theme.error),
+        )],
+        Some(ExplainState::Ready(explain)) => explain_lines(explain, theme),
+    };
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "j/k/Pg/Home/End Scroll | Esc Back",
+        Style::default().fg(theme.text_dim),
+    ));
+    app.set_explain_layout(lines.len(), usize::from(inner.height));
+    f.render_widget(
+        Paragraph::new(lines).scroll((u16::try_from(app.explain_scroll).unwrap_or(u16::MAX), 0)),
+        inner,
+    );
+}
+
+fn explain_lines(
+    explain: &crate::proto::ExplainAdvertisedRouteResponse,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let decision =
+        match ExplainDecision::try_from(explain.decision).unwrap_or(ExplainDecision::Unspecified) {
+            ExplainDecision::Advertise => "Advertise",
+            ExplainDecision::Deny => "Deny",
+            ExplainDecision::NoBestRoute => "No Best Route",
+            ExplainDecision::UnsupportedFamily => "Unsupported",
+            ExplainDecision::Unspecified => "Unspecified",
+        };
+    let mut lines = vec![
+        Line::styled(
+            format!("Decision: {decision}"),
+            Style::default()
+                .fg(theme.header_fg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from(format!("Peer: {}", explain.peer_address)),
+        Line::from(format!(
+            "Prefix: {}/{}",
+            explain.prefix, explain.prefix_length
+        )),
+    ];
+    if !explain.route_peer_address.is_empty() {
+        lines.push(Line::from(format!(
+            "Route peer: {}",
+            explain.route_peer_address
+        )));
+    }
+    if !explain.next_hop.is_empty() {
+        lines.push(Line::from(format!("Next hop: {}", explain.next_hop)));
+    }
+    if let Some(group) = explain.update_group_id {
+        lines.push(Line::from(format!("Update group: {group}")));
+    }
+    lines.push(Line::from(format!(
+        "Adj-RIB-Out sync: {}",
+        if explain.already_advertised {
+            "already advertised"
+        } else {
+            "not already advertised"
+        }
+    )));
+    if !explain.reasons.is_empty() {
+        lines.push(Line::styled(
+            "Reasons",
+            Style::default()
+                .fg(theme.header_fg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        lines.extend(
+            explain
+                .reasons
+                .iter()
+                .map(|r| Line::from(format!("  {}: {}", r.code, r.message))),
+        );
+    }
+    if !explain.gates.is_empty() {
+        lines.push(Line::styled(
+            "Export gates",
+            Style::default()
+                .fg(theme.header_fg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        lines.extend(explain.gates.iter().map(|g| {
+            let verdict = match ExportGateVerdict::try_from(g.verdict)
+                .unwrap_or(ExportGateVerdict::Unspecified)
+            {
+                ExportGateVerdict::Pass => "pass",
+                ExportGateVerdict::Stop => "stop",
+                ExportGateVerdict::NotApplicable => "not applicable",
+                ExportGateVerdict::Unspecified => "unspecified",
+            };
+            Line::from(format!(
+                "  {} | {verdict} | {} | {}",
+                g.gate, g.code, g.detail
+            ))
+        }));
+    }
+    if let Some(m) = &explain.modifications {
+        let mut mods = Vec::new();
+        if let Some(v) = m.set_local_pref {
+            mods.push(format!("local-pref={v}"));
+        }
+        if let Some(v) = m.set_med {
+            mods.push(format!("MED={v}"));
+        }
+        if !m.set_next_hop.is_empty() {
+            mods.push(format!("next-hop={}", m.set_next_hop));
+        }
+        if !m.communities_add.is_empty() {
+            mods.push(format!("communities+={:?}", m.communities_add));
+        }
+        if !m.communities_remove.is_empty() {
+            mods.push(format!("communities-={:?}", m.communities_remove));
+        }
+        if !m.extended_communities_add.is_empty() {
+            mods.push(format!(
+                "extended-communities+={:?}",
+                m.extended_communities_add
+            ));
+        }
+        if !m.extended_communities_remove.is_empty() {
+            mods.push(format!(
+                "extended-communities-={:?}",
+                m.extended_communities_remove
+            ));
+        }
+        if !m.large_communities_add.is_empty() {
+            mods.push(format!(
+                "large-communities+={}",
+                m.large_communities_add.join(",")
+            ));
+        }
+        if !m.large_communities_remove.is_empty() {
+            mods.push(format!(
+                "large-communities-={}",
+                m.large_communities_remove.join(",")
+            ));
+        }
+        if let (Some(asn), Some(count)) = (m.as_path_prepend_asn, m.as_path_prepend_count) {
+            mods.push(format!("prepend={asn}x{count}"));
+        }
+        if !mods.is_empty() {
+            lines.push(Line::styled(
+                "Modifications",
+                Style::default()
+                    .fg(theme.header_fg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            lines.extend(mods.into_iter().map(|m| Line::from(format!("  {m}"))));
+        }
+    }
+    lines
+}
+
 fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
     let area = centered_rect(50, 60, f.area());
     f.render_widget(Clear, area);
@@ -674,7 +938,21 @@ fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
         ]),
         Line::from(vec![
             Span::styled("  Enter       ", Style::default().fg(theme.accent)),
-            Span::styled("Show peer detail", Style::default().fg(theme.text)),
+            Span::styled(
+                "Show detail / explain selected route",
+                Style::default().fg(theme.text),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  r           ", Style::default().fg(theme.accent)),
+            Span::styled(
+                "Open point-in-time Best RIB",
+                Style::default().fg(theme.text),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  n / p       ", Style::default().fg(theme.accent)),
+            Span::styled("Next / previous RIB page", Style::default().fg(theme.text)),
         ]),
         Line::from(vec![
             Span::styled("  Esc         ", Style::default().fg(theme.accent)),
@@ -1210,5 +1488,131 @@ mod tests {
                 assert!(!rendered.contains("no peers or dynamic ranges configured"));
             }
         }
+    }
+
+    fn rendered_app(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, app, &Theme::default()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn best_rib_test_backend_renders_all_states_and_columns_without_tiny_panic() {
+        let mut app = App::new();
+        app.view = View::BestRib("198.51.100.1".into());
+        app.rib_page = Some(RibPageState::Loading);
+        assert!(rendered_app(&mut app, 100, 8).contains("Loading routes"));
+        app.rib_page = Some(RibPageState::Error("RIB unavailable: down".into()));
+        assert!(rendered_app(&mut app, 100, 8).contains("RIB unavailable: down"));
+        app.rib_page = Some(RibPageState::Ready(crate::proto::ListRoutesResponse {
+            total_count: 0,
+            ..Default::default()
+        }));
+        assert!(rendered_app(&mut app, 100, 8).contains("No best routes"));
+        app.rib_page = Some(RibPageState::Ready(crate::proto::ListRoutesResponse {
+            routes: vec![crate::proto::Route {
+                prefix: "203.0.113.0".into(),
+                prefix_length: 24,
+                next_hop: "192.0.2.1".into(),
+                peer_address: "192.0.2.2".into(),
+                as_path: vec![64512, 64496],
+                local_pref: 100,
+                med_attr: Some(0),
+                validation_state: "valid".into(),
+                aspa_state: "unknown".into(),
+                ..Default::default()
+            }],
+            total_count: 1,
+            ..Default::default()
+        }));
+        app.rib_table_state.select(Some(0));
+        let rendered = rendered_app(&mut app, 150, 8);
+        for text in [
+            "Best RIB (point-in-time)",
+            "203.0.113.0/24",
+            "192.0.2.1",
+            "64512 64496",
+            "LocalPref",
+            "MED",
+            "RPKI",
+            "ASPA",
+            "Enter Explain",
+        ] {
+            assert!(rendered.contains(text), "missing {text}");
+        }
+        let _ = rendered_app(&mut app, 1, 1);
+    }
+
+    #[test]
+    fn explain_test_backend_renders_verdict_reasons_gates_and_modifications() {
+        let mut app = App::new();
+        app.view = View::AdvertisedExplain("198.51.100.1".into());
+        app.explain = Some(ExplainState::Ready(Box::new(
+            crate::proto::ExplainAdvertisedRouteResponse {
+                decision: ExplainDecision::Deny as i32,
+                peer_address: "198.51.100.1".into(),
+                prefix: "203.0.113.0".into(),
+                prefix_length: 24,
+                next_hop: "192.0.2.1".into(),
+                route_peer_address: "192.0.2.2".into(),
+                update_group_id: Some(7),
+                already_advertised: true,
+                reasons: vec![crate::proto::ExplainReason {
+                    code: "policy_denied".into(),
+                    message: "term reject-bogon".into(),
+                }],
+                gates: vec![crate::proto::ExportGateStep {
+                    gate: "export_policy".into(),
+                    code: "policy_denied".into(),
+                    verdict: ExportGateVerdict::Stop as i32,
+                    detail: "term reject-bogon".into(),
+                }],
+                modifications: Some(crate::proto::ExplainModifications {
+                    set_local_pref: Some(200),
+                    set_med: Some(0),
+                    set_next_hop: "192.0.2.9".into(),
+                    communities_add: vec![4_259_840_001],
+                    large_communities_add: vec!["64512:1:2".into()],
+                    as_path_prepend_asn: Some(64512),
+                    as_path_prepend_count: Some(2),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )));
+        let rendered = rendered_app(&mut app, 160, 24);
+        for text in [
+            "Decision: Deny",
+            "Route peer: 192.0.2.2",
+            "Update group: 7",
+            "already advertised",
+            "Reasons",
+            "policy_denied",
+            "Export gates",
+            "export_policy",
+            "stop",
+            "Modifications",
+            "local-pref=200",
+            "MED=0",
+            "prepend=64512x2",
+        ] {
+            assert!(rendered.contains(text), "missing {text}");
+        }
+        app.explain = Some(ExplainState::Ready(Box::new(
+            crate::proto::ExplainAdvertisedRouteResponse {
+                decision: ExplainDecision::Advertise as i32,
+                ..Default::default()
+            },
+        )));
+        assert!(rendered_app(&mut app, 40, 4).contains("Decision: Advertise"));
+        let _ = rendered_app(&mut app, 1, 1);
     }
 }
