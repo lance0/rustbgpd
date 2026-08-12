@@ -1,6 +1,6 @@
 //! Daemon-side EVPN local-MAC originator (Gate 7b+1).
 //!
-//! Mirrors `crate::evpn_dataplane::spawn` but on the **opposite
+//! Mirrors `crate::evpn_dataplane::spawn_with_quarantine` but on the **opposite
 //! flow**: kernel `LocalMacObservation` events become BGP EVPN Type 2
 //! originations (RFC 7432 §7.2 + §15.1).
 //!
@@ -40,7 +40,7 @@
 //!
 //! ## RR-only deployments
 //!
-//! When `[[evpn_instances]]` is empty, [`spawn`] returns `None`. No
+//! When `[[evpn_instances]]` is empty, [`spawn_with_quarantine`] returns `None`. No
 //! background task is created; the EVPN originator counters remain at
 //! zero-label-vector state until an originator action is observed.
 //!
@@ -394,14 +394,13 @@ pub(crate) fn vni_is_drained(
         .is_some_and(|esi| drained_esis.contains(esi))
 }
 
-/// Spawn the originator. Returns `None` for RR-only deployments
-/// (empty `evpn_instances`).
+/// Test helper that spawns the originator with an empty duplicate-MAC quarantine.
+/// Returns `None` for RR-only deployments (empty `evpn_instances`).
 #[allow(
     clippy::too_many_arguments,
     reason = "originator spawn keeps each explicit actor dependency visible"
 )]
-// ESI-aware origination nudged the count over the threshold; the daemon-side spawn is the only caller.
-#[allow(dead_code)]
+#[cfg(test)]
 #[must_use = "call `EvpnOriginatorHandle::shutdown` to stop the originator — \
               dropping the handle leaves the task running"]
 pub fn spawn(

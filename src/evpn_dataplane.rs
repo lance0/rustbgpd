@@ -44,7 +44,7 @@
 //!
 //! ## RR-only deployments
 //!
-//! When `[[evpn_instances]]` is empty, [`spawn`] returns `None` and no
+//! When `[[evpn_instances]]` is empty, [`spawn_with_quarantine`] returns `None` and no
 //! background tasks are created. Route-reflector deployments incur
 //! zero cost from this module.
 //!
@@ -67,7 +67,7 @@ use rustbgpd_evpn::{
 use rustbgpd_evpn_linux::{Dataplane, ReconcileActor, ReconcileActorConfig};
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{EvpnRoute, ExtendedCommunity, PathAttribute};
+use rustbgpd_wire::{EvpnRoute, PathAttribute};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -345,47 +345,6 @@ impl EvpnDataplaneHandle {
     }
 }
 
-/// Spawn the EVPN dataplane stack. Returns `None` if
-/// `evpn_instances`, `ip_vrfs`, and `managed_netdevs` are all empty
-/// (RR-only deployments take this path — no netlink socket is opened,
-/// no background task is spawned).
-///
-/// Otherwise spawns:
-///
-/// 1. The polling supervisor task that periodically queries the RIB
-///    via `rib_tx`, projects best-path Type 2 routes into a
-///    [`RemoteMacTable`], and publishes a [`DataplaneIntent`].
-/// 2. The [`ReconcileActor`] consuming intents, driving the
-///    [`rustbgpd_evpn_linux::Dataplane`] implementation. On Linux
-///    this is the real `LinuxDataplane` (rtnetlink-backed FDB
-///    program/withdraw against the bridge/master path); on other
-///    platforms the function returns `None` because the dataplane
-///    is meaningless.
-#[must_use = "drop the handle to shut down the EVPN dataplane stack"]
-#[allow(dead_code)]
-pub async fn spawn(
-    config: SupervisorConfig,
-    evpn_instances: &Arc<EvpnInstanceTable>,
-    ip_vrfs: &Arc<IpVrfTable>,
-    managed_netdevs: &Arc<ManagedNetdevTable>,
-    rib_tx: mpsc::Sender<RibUpdate>,
-    metrics: BgpMetrics,
-    daemon_shutdown: CancellationToken,
-) -> Option<EvpnDataplaneHandle> {
-    let (_, duplicate_mac_quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
-    spawn_with_quarantine(
-        config,
-        evpn_instances,
-        ip_vrfs,
-        managed_netdevs,
-        rib_tx,
-        metrics,
-        daemon_shutdown,
-        duplicate_mac_quarantine_rx,
-    )
-    .await
-}
-
 /// Spawn the EVPN dataplane stack with an external duplicate-MAC
 /// quarantine feed from the local originator.
 ///
@@ -454,7 +413,7 @@ pub async fn spawn_with_quarantine(
 /// Generic spawn shared by the production path and the integration
 /// tests (which inject [`rustbgpd_evpn_linux::InMemoryDataplane`]).
 ///
-/// On the production path, [`spawn`] takes ownership of the dataplane,
+/// On the production path, [`spawn_with_quarantine`] takes ownership of the dataplane,
 /// extracts the local-MAC observation receiver via
 /// [`rustbgpd_evpn_linux::Dataplane::take_local_mac_rx`], and stamps
 /// it onto the returned handle. Tests calling this function directly
@@ -1787,13 +1746,6 @@ enum RibQueryError {
     SendFailed,
     #[error("RIB query reply channel dropped")]
     ReplyDropped,
-}
-
-// Suppress dead-code on a helper that may be unused on platforms
-// where the dataplane spawn returns None.
-#[allow(dead_code)]
-const fn _force_link() -> &'static dyn Fn(&[ExtendedCommunity]) -> Option<u32> {
-    &|_ecs| None
 }
 
 #[cfg(test)]
@@ -3304,7 +3256,8 @@ mod tests {
         let managed_netdevs = Arc::new(ManagedNetdevTable::new());
         let (rib_tx, _rib_rx) = mpsc::channel(8);
         let shutdown = CancellationToken::new();
-        let h = spawn(
+        let (_, duplicate_mac_quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let h = spawn_with_quarantine(
             SupervisorConfig::default(),
             &instances,
             &ip_vrfs,
@@ -3312,6 +3265,7 @@ mod tests {
             rib_tx,
             BgpMetrics::new(),
             shutdown,
+            duplicate_mac_quarantine_rx,
         )
         .await;
         assert!(h.is_none(), "RR-only path should not spawn the actor");
