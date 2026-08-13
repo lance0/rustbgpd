@@ -10,7 +10,7 @@
 //! Safety properties (see ADR-0061):
 //! - **Atomic read-modify-write.** A single coordinator `Mutex`, shared with
 //!   the SIGHUP reload path, is held across read (`GetTables`) → validate →
-//!   apply (`ReplaceTables`) → persist. Concurrent CRUD calls and SIGHUP FIB
+//!   apply (typed `OwnedReplaceTables`) → persist. Concurrent CRUD calls and SIGHUP FIB
 //!   reloads can't interleave and clobber each other.
 //! - **Validate before dispatch.** The candidate set is validated against the
 //!   live config (peer-group references, reserved/duplicate ids, families, ECMP
@@ -28,6 +28,8 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::config::FibTableConfig;
+use crate::fib_runtime::{FibRuntimeCommand, OwnedFibReplaceOutcome};
 use rustbgpd_api::health_probe::DaemonGate;
 use rustbgpd_api::peer_types::ConfigPersistCommitOutcome;
 use rustbgpd_api::peer_types::{
@@ -46,13 +48,6 @@ use rustbgpd_api::runtime_config_settlement::{
 use rustbgpd_api::server::{
     ConfigMutationGateFn, RuntimeConfigCoordinator, RuntimeConfigCoordinatorClosed,
 };
-#[cfg(test)]
-use std::fmt::Write as _;
-#[cfg(test)]
-use tracing::error;
-
-use crate::config::FibTableConfig;
-use crate::fib_runtime::{FibRuntimeCommand, OwnedFibReplaceOutcome};
 
 /// How long to wait for a config-persistence permit before refusing the
 /// mutation (mirrors the dynamic-neighbor CRUD reserve deadline).
@@ -112,22 +107,6 @@ impl From<RuntimeConfigCoordinatorClosed> for OwnedFibControlError {
 impl From<FibTableControlError> for OwnedFibControlError {
     fn from(error: FibTableControlError) -> Self {
         Self(error)
-    }
-}
-
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "test-only legacy rollback harness is retained for focused transaction regression construction"
-)]
-pub(crate) struct FibCommitFailure {
-    pub(crate) error: FibTableControlError,
-}
-
-#[cfg(test)]
-impl From<FibTableControlError> for FibCommitFailure {
-    fn from(error: FibTableControlError) -> Self {
-        Self { error }
     }
 }
 
@@ -274,7 +253,8 @@ async fn mutate(
             let _guard = coordinator.acquire().await?;
             match body(None).await {
                 OwnedRuntimeConfigOutcome::CleanNoEffect(result) => result,
-                OwnedRuntimeConfigOutcome::PublishedDurable(value) => Ok(value),
+                OwnedRuntimeConfigOutcome::PublishedDurable(value)
+                | OwnedRuntimeConfigOutcome::AcknowledgedAuthority(value) => Ok(value),
                 OwnedRuntimeConfigOutcome::Fenced { error, .. } => {
                     let _ = error;
                     std::future::pending().await
@@ -708,107 +688,6 @@ async fn compensate_fib_not_published(
     )
 }
 
-/// Legacy rollback harness retained for the config-transaction regression
-/// tests. Production targeted CRUD uses the typed owned path above; production
-/// config transactions preserve their separate legacy `ReplaceTables` flow.
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "test-only legacy rollback harness is retained for focused transaction regression construction"
-)]
-pub(crate) async fn commit_fib_tables_locked(
-    fib_cmd_tx: &mpsc::Sender<FibRuntimeCommand>,
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    config_tx: &mpsc::Sender<ConfigEvent>,
-    candidate: Vec<FibTableConfig>,
-) -> Result<proto::ListFibTablesResponse, FibCommitFailure> {
-    let previous_tables = read_current_tables(Some(fib_cmd_tx), FibTableControlError::Internal)
-        .await?
-        .unwrap_or_default();
-    let previous_snapshots: Vec<FibTableSnapshot> =
-        previous_tables.iter().map(config_to_snapshot).collect();
-    let snapshots: Vec<FibTableSnapshot> = candidate.iter().map(config_to_snapshot).collect();
-
-    // Validate AND stage the candidate into the peer manager's live config in
-    // one atomic command. This closes the TOCTOU against peer-group deletion:
-    // once staged, the candidate's `allowed_peer_groups` are visible to
-    // `peer_group_references`, so a concurrent delete is rejected (and if a
-    // delete raced ahead, the candidate fails validation here). The peer manager
-    // processes commands one at a time, so the check and commit cannot
-    // interleave with another config mutation.
-    stage_candidate(peer_mgr_tx, snapshots.clone()).await?;
-
-    // From here the candidate is staged in the live config, so every early exit
-    // must roll it back to `previous` to keep the snapshot from drifting ahead
-    // of the runtime/disk state.
-    let permit = match reserve_persist_permit(config_tx).await {
-        Ok(permit) => permit,
-        Err(error) => {
-            return Err(rollback_snapshot_after_error(
-                peer_mgr_tx,
-                previous_snapshots,
-                error.into(),
-            )
-            .await);
-        }
-    };
-
-    // Apply to the reconciler and wait for its acknowledgement.
-    if let Err(error) = replace_tables(fib_cmd_tx, candidate.clone()).await {
-        return Err(
-            rollback_snapshot_after_error(peer_mgr_tx, previous_snapshots, error.into()).await,
-        );
-    }
-
-    // Persist exactly the accepted set, only after the ack. The live config
-    // snapshot already holds the candidate (staged above). Await the bridge and
-    // persister acknowledgement before releasing the coordinator lock, otherwise
-    // an immediate SIGHUP can reload stale disk and overwrite the accepted
-    // runtime snapshot.
-    let (persist_ack_tx, persist_ack_rx) = oneshot::channel();
-    // Single-phase on purpose: FIB-table CRUD owns a rollback that restores
-    // the exact prior table set and already reports an ambiguous outcome when
-    // it cannot.
-    permit.send(ConfigEvent::FibTablesReplaced {
-        tables: snapshots,
-        ack: Some(ConfigPersistAck::immediate(persist_ack_tx)),
-    });
-    // LAN-277 window (b): a lost acknowledgement means the on-disk outcome of
-    // the persistence attempt is unknowable from here.
-    let Ok(persist_result) = persist_ack_rx.await else {
-        return Err(FibCommitFailure {
-            error: FibTableControlError::Internal(
-                "config bridge dropped FIB-table persistence acknowledgement".to_string(),
-            ),
-        });
-    };
-    match persist_result {
-        ConfigPersistCommitOutcome::PublishedDurable => {}
-        ConfigPersistCommitOutcome::NotPublished(error) => {
-            return Err(rollback_applied_tables_after_error(
-                fib_cmd_tx,
-                peer_mgr_tx,
-                previous_tables,
-                previous_snapshots,
-                FibTableControlError::FailedPrecondition(error).into(),
-            )
-            .await);
-        }
-        ConfigPersistCommitOutcome::PublicationAmbiguous(error) => {
-            return Err(FibCommitFailure {
-                error: FibTableControlError::Internal(format!(
-                    "FIB publication durability is ambiguous: {error}"
-                )),
-            });
-        }
-    }
-
-    Ok(proto::ListFibTablesResponse {
-        tables: candidate.iter().map(config_to_proto).collect(),
-        runtime_available: true,
-    })
-}
-
 /// Read the reconciler's current table set. `Ok(None)` means no reconciler is
 /// running (used by `List` to report `runtime_available = false`).
 pub(crate) async fn read_current_tables(
@@ -854,142 +733,6 @@ fn apply_mutation(
     }
 }
 
-/// Atomically validate the candidate against the live config and, on success,
-/// stage it into the peer manager's `current_config.fib_tables`. Returns
-/// `InvalidArgument` if it doesn't validate (nothing is staged in that case).
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "reachable only through the test-only legacy rollback harness"
-)]
-async fn stage_candidate(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    tables: Vec<FibTableSnapshot>,
-) -> Result<(), FibTableControlError> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    peer_mgr_tx
-        .send(PeerManagerCommand::StageFibTables {
-            tables,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| {
-            FibTableControlError::Internal("peer manager command channel closed".to_string())
-        })?;
-    reply_rx
-        .await
-        .map_err(|_| {
-            FibTableControlError::Internal(
-                "peer manager dropped the StageFibTables reply".to_string(),
-            )
-        })?
-        .map_err(FibTableControlError::InvalidArgument)
-}
-
-/// Restore the peer manager's staged `current_config.fib_tables` to `previous`
-/// after a post-stage failure (reserve or reconciler apply), so the live
-/// config snapshot can't drift ahead of the runtime/disk state.
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "reachable only through the test-only legacy rollback harness"
-)]
-async fn rollback_snapshot(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    previous: Vec<FibTableSnapshot>,
-) -> Result<(), FibTableControlError> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    peer_mgr_tx
-        .send(PeerManagerCommand::SetFibTablesSnapshot {
-            tables: previous,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| {
-            FibTableControlError::Internal(
-                "peer manager command channel closed during FIB-table snapshot rollback"
-                    .to_string(),
-            )
-        })?;
-    reply_rx.await.map_err(|_| {
-        FibTableControlError::Internal(
-            "peer manager dropped the SetFibTablesSnapshot rollback reply".to_string(),
-        )
-    })
-}
-
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "reachable only through the test-only legacy rollback harness"
-)]
-async fn rollback_snapshot_after_error(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    previous_snapshots: Vec<FibTableSnapshot>,
-    original: FibCommitFailure,
-) -> FibCommitFailure {
-    match rollback_snapshot(peer_mgr_tx, previous_snapshots).await {
-        Ok(()) => original,
-        Err(snapshot_rollback) => {
-            combine_fib_rollback_errors(&original.error, None, Some(snapshot_rollback))
-        }
-    }
-}
-
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "reachable only through the test-only legacy rollback harness"
-)]
-async fn rollback_applied_tables_after_error(
-    fib_cmd_tx: &mpsc::Sender<FibRuntimeCommand>,
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    previous_tables: Vec<FibTableConfig>,
-    previous_snapshots: Vec<FibTableSnapshot>,
-    original: FibCommitFailure,
-) -> FibCommitFailure {
-    if let Err(runtime_rollback) = replace_tables(fib_cmd_tx, previous_tables).await {
-        return combine_fib_rollback_errors(&original.error, Some(runtime_rollback), None);
-    }
-    match rollback_snapshot(peer_mgr_tx, previous_snapshots).await {
-        Ok(()) => original,
-        Err(snapshot_rollback) => {
-            combine_fib_rollback_errors(&original.error, None, Some(snapshot_rollback))
-        }
-    }
-}
-
-/// LAN-277 window (c): only reached when a rollback component failed, so the
-/// runtime/staged state is left part-candidate — always an ambiguous
-/// completion.
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "reachable only through the test-only legacy rollback harness"
-)]
-fn combine_fib_rollback_errors(
-    original: &FibTableControlError,
-    runtime_rollback: Option<FibTableControlError>,
-    snapshot_rollback: Option<FibTableControlError>,
-) -> FibCommitFailure {
-    error!(
-        %original,
-        ?runtime_rollback,
-        ?snapshot_rollback,
-        "FIB-table rollback failed"
-    );
-    let mut message = format!("{original}; rollback failed");
-    if let Some(error) = runtime_rollback {
-        let _ = write!(message, "; runtime rollback: {error}");
-    }
-    if let Some(error) = snapshot_rollback {
-        let _ = write!(message, "; snapshot rollback: {error}");
-    }
-    FibCommitFailure {
-        error: FibTableControlError::Internal(message),
-    }
-}
-
 async fn reserve_persist_permit(
     config_tx: &mpsc::Sender<ConfigEvent>,
 ) -> Result<mpsc::OwnedPermit<ConfigEvent>, FibTableControlError> {
@@ -1003,33 +746,6 @@ async fn reserve_persist_permit(
         .map_err(|_| {
             FibTableControlError::Unavailable("config persistence unavailable".to_string())
         })
-}
-
-#[cfg(test)]
-pub(crate) async fn replace_tables(
-    fib_cmd_tx: &mpsc::Sender<FibRuntimeCommand>,
-    tables: Vec<FibTableConfig>,
-) -> Result<(), FibTableControlError> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    fib_cmd_tx
-        .send(FibRuntimeCommand::ReplaceTables {
-            tables,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| {
-            FibTableControlError::Internal("FIB reconciler command channel closed".to_string())
-        })?;
-    reply_rx
-        .await
-        .map_err(|_| {
-            FibTableControlError::Internal(
-                "FIB reconciler dropped the ReplaceTables reply".to_string(),
-            )
-        })?
-        // The reconciler reverted (RIB/dump bail or a removed-table withdraw
-        // that would orphan a kernel row) — surface it without persisting.
-        .map_err(FibTableControlError::FailedPrecondition)
 }
 
 pub(crate) fn runtime_unavailable_error(startup_had_tables: bool) -> FibTableControlError {
@@ -1327,10 +1043,6 @@ mod tests {
                 match cmd {
                     FibRuntimeCommand::GetTables { reply } => {
                         let _ = reply.send(fib_state_for_task.lock().await.clone());
-                    }
-                    FibRuntimeCommand::ReplaceTables { tables, reply } => {
-                        *fib_state_for_task.lock().await = tables;
-                        let _ = reply.send(Ok(()));
                     }
                     FibRuntimeCommand::OwnedReplaceTables { tables, reply } => {
                         *fib_state_for_task.lock().await = tables;
@@ -1743,7 +1455,7 @@ mod tests {
             .split_once("async fn owned_fib_mutation_body")
             .unwrap()
             .1
-            .split_once("/// Legacy rollback harness")
+            .split_once("async fn compensate_fib_not_published")
             .unwrap()
             .0;
         for forbidden in [".code()", ".message()", "to_string().contains"] {
@@ -1752,7 +1464,6 @@ mod tests {
                 "typed settlement bypass: {forbidden}"
             );
         }
-        assert!(!body.contains("FibRuntimeCommand::ReplaceTables"));
         let disk = body.find("stage_fib_persistence(").unwrap();
         let pm = body.find("stage_pm_candidate(").unwrap();
         let actor = body.find("dispatch_owned_replace(").unwrap();

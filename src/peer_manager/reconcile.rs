@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use rustbgpd_api::peer_types::{
-    FibTableSnapshot, PeerKey, PeerManagerNeighborConfig, ReconcileFailure, ReconcileFailureKind,
-    ReconcileResult, RuntimeConfigDiff, RuntimeConfigDiffError, RuntimeConfigTransactionPlan,
+    FibTableSnapshot, PeerKey, PeerManagerNeighborConfig, PeerReconcileAuthority,
+    PeerReconcileEffect, PeerReconcileOutcome, ReconcileFailure, ReconcileFailureKind,
+    RuntimeConfigDiff, RuntimeConfigDiffError, RuntimeConfigTransactionPlan,
     RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus,
 };
 use tracing::{info, warn};
@@ -18,8 +19,10 @@ impl PeerManager {
         added: Vec<PeerManagerNeighborConfig>,
         removed: Vec<PeerKey>,
         changed: Vec<PeerManagerNeighborConfig>,
-    ) -> ReconcileResult {
-        let mut result = ReconcileResult::default();
+    ) -> PeerReconcileOutcome {
+        let mut effects = Vec::new();
+        let mut failures = Vec::new();
+        let mut authority = PeerReconcileAuthority::Known;
         let added_count = added.len();
         let removed_count = removed.len();
         let changed_count = changed.len();
@@ -41,11 +44,13 @@ impl PeerManager {
         for addr in &removed {
             if let Err(e) = self.delete_peer(addr.clone(), false).await {
                 warn!(peer = %addr, error = %e, "reconcile: failed to remove peer");
-                result.failures.push(ReconcileFailure {
+                failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::Remove,
                     peer: addr.clone(),
                     error: e.to_string(),
                 });
+            } else {
+                effects.push(PeerReconcileEffect::Removed(addr.clone()));
             }
         }
         // Changed peers: delete then re-add
@@ -56,9 +61,9 @@ impl PeerManager {
                 .await
             {
                 warn!(peer = %addr, error = %e, "reconcile: failed to remove changed peer");
-                result.failures.push(ReconcileFailure {
+                failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::ChangeRemove,
-                    peer: addr,
+                    peer: addr.clone(),
                     error: e.to_string(),
                 });
                 continue;
@@ -71,11 +76,14 @@ impl PeerManager {
                 .await
             {
                 warn!(peer = %addr, error = %e, "reconcile: failed to re-add changed peer");
-                result.failures.push(ReconcileFailure {
+                failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::ChangeAdd,
-                    peer: addr,
+                    peer: addr.clone(),
                     error: e.to_string(),
                 });
+                effects.push(PeerReconcileEffect::RemovedForFailedReplacement(addr));
+            } else {
+                effects.push(PeerReconcileEffect::Replaced(addr));
             }
         }
         // Replay preserved RFC 8326 toggles onto the freshly added peers. This
@@ -95,6 +103,7 @@ impl PeerManager {
                     error = %e,
                     "reconcile: failed to replay graceful-shutdown toggle on changed peer"
                 );
+                authority = PeerReconcileAuthority::Diverged;
             }
         }
         // Add new peers
@@ -102,21 +111,27 @@ impl PeerManager {
             let addr = PeerKey::new(cfg.address, cfg.interface.clone());
             if let Err(e) = self.add_peer(cfg, false).await {
                 warn!(peer = %addr, error = %e, "reconcile: failed to add new peer");
-                result.failures.push(ReconcileFailure {
+                failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::Add,
                     peer: addr,
                     error: e.to_string(),
                 });
+            } else {
+                effects.push(PeerReconcileEffect::Added(addr));
             }
         }
         info!(
             added = added_count,
             removed = removed_count,
             changed = changed_count,
-            failures = result.failures.len(),
+            failures = failures.len(),
             "peer reconciliation complete"
         );
-        result
+        PeerReconcileOutcome {
+            effects,
+            failures,
+            authority,
+        }
     }
 
     pub(super) fn diff_runtime_config(

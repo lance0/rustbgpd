@@ -123,10 +123,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Persisted runtime-config owners now fail stop with exit 70 five seconds after
   settlement ambiguity is detected, or when an owner remains unsettled for the
   fixed 30-minute budget plus that grace. Transaction/Apply, Neighbor4, FIB2,
-  PeerGroup4, and Policy12 are wired; SIGHUP, observability, and final recovery
-  proofs remain before LAN-974 is complete. The shipped systemd unit keeps exit
-  70 restartable, caps recovery at five starts per ten minutes, and gives
-  explicit stops 32 minutes to settle.
+  PeerGroup4, Policy12, and SIGHUP are wired; observability and final
+  cross-roster recovery proofs remain before LAN-974 is complete. A SIGHUP now
+  retains one cancellation-shielded owner through peer reconciliation,
+  snapshot/persister adoption, tracing, and dial-out finalization; lost
+  acknowledgement fences instead of inferring success. Shutdown closes and
+  drains mutation admission, then awaits an owned reload before checkpointing
+  or actor teardown. The shipped systemd unit keeps exit 70 restartable, caps
+  recovery at five starts per ten minutes, and gives explicit stops 32 minutes
+  to settle. (LAN-1004)
 - Config transaction apply now bounds its pre-ownership wait for the shared runtime config coordinator at ten minutes. (LAN-974)
 - Ambiguous `rustbgpd` invocations now fail with exit 2 instead of silently
   overwriting a config path or option value, consuming a flag as a value, or

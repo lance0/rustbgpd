@@ -55,14 +55,13 @@ pub enum ConfigMutation {
     /// Drop the staged snapshot. The caller's runtime change did not land, so
     /// neither may the write.
     DiscardStagedConfig,
-    /// Refresh the persister's base snapshot without writing to disk.
-    ///
-    /// SIGHUP reload uses this for operator-authored TOML that
-    /// contains restart-required fields. Runtime keeps a pinned live
-    /// snapshot, but future gRPC mutations must still apply on top of
-    /// the operator's desired file rather than writing the pinned
-    /// runtime snapshot back to disk.
-    RefreshSnapshotNoPersist(Arc<AcceptedConfigSnapshot>),
+    /// Adopt an operator-authored SIGHUP snapshot without rewriting its file.
+    /// The acknowledgement is sent only after the persister and history view
+    /// both observe the replacement.
+    AdoptReloadSnapshot {
+        snapshot: Arc<AcceptedConfigSnapshot>,
+        adopted: oneshot::Sender<()>,
+    },
 }
 
 /// Listens for config mutations and persists them atomically.
@@ -154,6 +153,14 @@ impl ConfigPersister {
                 }
                 ConfigMutation::DiscardStagedConfig => {
                     self.discard_staged();
+                    continue;
+                }
+                ConfigMutation::AdoptReloadSnapshot { snapshot, adopted } => {
+                    self.discard_staged();
+                    info!("adopting SIGHUP config snapshot without rewriting the operator file");
+                    self.current = snapshot;
+                    self.record_current_history();
+                    let _ = adopted.send(());
                     continue;
                 }
                 _ => {}
@@ -250,7 +257,8 @@ impl ConfigPersister {
             // single-phase applier.
             ConfigMutation::StageConfigAck(..)
             | ConfigMutation::CommitStagedConfig(_)
-            | ConfigMutation::DiscardStagedConfig => false,
+            | ConfigMutation::DiscardStagedConfig
+            | ConfigMutation::AdoptReloadSnapshot { .. } => false,
             ConfigMutation::AddNeighbor(neighbor) => {
                 if self
                     .current
@@ -296,16 +304,6 @@ impl ConfigPersister {
                 info!("replacing persister config snapshot and persisting it");
                 self.current = new_config;
                 true
-            }
-            ConfigMutation::RefreshSnapshotNoPersist(new_config) => {
-                info!("refreshing persister config snapshot without writing to disk");
-                self.current = new_config;
-                // The operator already persisted and successfully reloaded
-                // this desired config. Record the validated snapshot without
-                // writing it back: otherwise history index 0 still names the
-                // pre-SIGHUP config and `rollback 1` cannot restore it.
-                self.record_current_history();
-                false
             }
         }
     }
@@ -692,40 +690,8 @@ remote_asn = 65002
         );
     }
 
-    /// Load-bearing SIGHUP-history proof: refreshing the validated desired
-    /// snapshot without a daemon write must still make that snapshot the
-    /// newest rollback entry. Removing the history record from
-    /// `RefreshSnapshotNoPersist` leaves this list at one entry.
-    #[test]
-    fn refresh_snapshot_no_persist_records_validated_config_history() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        let state_dir = dir.path().to_path_buf();
-        let history = crate::config_history::history_dir(&state_dir);
-        let config = minimal_config();
-        std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
-
-        let (_tx, rx) = mpsc::channel(1);
-        let mut persister = ConfigPersister::new(rx, path, config, Some(state_dir));
-        persister.record_current_history();
-
-        let mut refreshed = minimal_config();
-        refreshed.neighbors.push(test_neighbor("10.0.0.2", 65002));
-        let refreshed_snapshot = persister.current.derive_config(refreshed.clone()).unwrap();
-        assert!(!persister.apply(ConfigMutation::RefreshSnapshotNoPersist(refreshed_snapshot)));
-
-        let entries = crate::config_history::v2::scan_mixed(&history).unwrap();
-        assert_eq!(entries.len(), 2);
-        let crate::config_history::v2::StoredPayload::V2(newest) =
-            crate::config_history::v2::read_mixed(&history, &entries[0]).unwrap();
-        assert_eq!(
-            newest.normalized_toml,
-            persisted_config_document(&refreshed).unwrap()
-        );
-    }
-
     #[tokio::test]
-    async fn refresh_snapshot_no_persist_updates_base_without_writing() {
+    async fn adopt_reload_snapshot_acks_before_following_write() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let config = minimal_config();
@@ -738,11 +704,16 @@ remote_asn = 65002
         let persister = ConfigPersister::new(rx, path.clone(), config, None);
         let handle = tokio::spawn(persister.run());
 
-        tx.send(ConfigMutation::RefreshSnapshotNoPersist(
-            AcceptedConfigSnapshot::from_config_for_test(refreshed),
-        ))
+        let (adopted, adopted_rx) = oneshot::channel();
+        tx.send(ConfigMutation::AdoptReloadSnapshot {
+            snapshot: AcceptedConfigSnapshot::from_config_for_test(refreshed),
+            adopted,
+        })
         .await
         .unwrap();
+        adopted_rx
+            .await
+            .expect("persister adoption acknowledgement");
         tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
             "10.0.0.3", 65003,
         ))))

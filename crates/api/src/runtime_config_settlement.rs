@@ -20,6 +20,7 @@ pub const AMBIGUOUS_CONFIG_EXIT_STATUS: i32 = 70;
 /// Closed roster of runtime-config operations wired into settlement ownership.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeConfigOperationKind {
+    Sighup,
     Apply,
     GnmiSet,
     Confirm,
@@ -338,7 +339,8 @@ impl RuntimeConfigSettlementWatchdog {
                     drop(executor_guard);
                     result
                 }
-                OwnedRuntimeConfigOutcome::PublishedDurable(value) => {
+                OwnedRuntimeConfigOutcome::PublishedDurable(value)
+                | OwnedRuntimeConfigOutcome::AcknowledgedAuthority(value) => {
                     if !operation.try_settle() {
                         std::future::pending::<()>().await;
                     }
@@ -378,6 +380,9 @@ pub enum OwnedRuntimeConfigOutcome<T, E> {
     CleanNoEffect(Result<T, E>),
     /// The requested candidate is fully applied and durable.
     PublishedDurable(T),
+    /// A non-publication operation whose authority was acknowledged by every
+    /// runtime consumer.
+    AcknowledgedAuthority(T),
     /// An accepted effect whose final state cannot be proved.
     /// Ownership must be retained until supervised recovery.
     Fenced {
@@ -858,14 +863,14 @@ mod tests {
             async move {
                 watchdog
                     .execute_owned(
-                        RuntimeConfigOperationKind::FibSet,
+                        RuntimeConfigOperationKind::Sighup,
                         coordinator,
                         gate,
                         context.response_attached(),
                         move |operation| async move {
                             let _ = operation_tx.send(operation);
                             let _ = release_rx.await;
-                            OwnedRuntimeConfigOutcome::<(), tonic::Status>::PublishedDurable(())
+                            OwnedRuntimeConfigOutcome::<(), tonic::Status>::AcknowledgedAuthority(())
                         },
                     )
                     .await

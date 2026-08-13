@@ -425,7 +425,7 @@ bfd = {{ profile = "nope" }}
 fn fib_tables_diff_marks_reload_applied() {
     // N→M edit: a table already exists at startup (so the reconciler is live),
     // and the new config tweaks it. These hot-apply via SIGHUP / gRPC
-    // (`FibRuntimeCommand::ReplaceTables`), so the static diff classifies them
+    // (`FibRuntimeCommand::OwnedReplaceTables`), so the static diff classifies them
     // reload-applied, not restart-required.
     let with_table = |metric: u32| {
         format!(

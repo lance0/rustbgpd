@@ -9,6 +9,9 @@ use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
+
 const FIRST_NEIGHBOR: &str = "192.0.2.1";
 const SECOND_NEIGHBOR: &str = "192.0.2.2";
 const FAILSTOP_GRACE_WITH_JITTER: Duration = Duration::from_secs(7);
@@ -20,6 +23,14 @@ struct Daemon {
 
 impl Daemon {
     fn spawn(config: &Path, log_path: PathBuf, fault: Option<&str>) -> Self {
+        Self::spawn_with_fault(
+            config,
+            log_path,
+            fault.map(|value| ("RUSTBGPD_TEST_CONFIG_PUBLISH_FAILURE", value)),
+        )
+    }
+
+    fn spawn_with_fault(config: &Path, log_path: PathBuf, fault: Option<(&str, &str)>) -> Self {
         let stderr = File::create(&log_path).expect("create daemon log");
         let stdout = stderr.try_clone().expect("clone daemon log handle");
         let mut command = Command::new(env!("CARGO_BIN_EXE_rustbgpd"));
@@ -27,8 +38,8 @@ impl Daemon {
             .arg(config)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
-        if let Some(fault) = fault {
-            command.env("RUSTBGPD_TEST_CONFIG_PUBLISH_FAILURE", fault);
+        if let Some((name, value)) = fault {
+            command.env(name, value);
         }
         let child = command.spawn().expect("spawn rustbgpd");
         Self { child, log_path }
@@ -57,6 +68,11 @@ impl Daemon {
 
     fn log(&self) -> String {
         std::fs::read_to_string(&self.log_path).unwrap_or_default()
+    }
+
+    fn sighup(&self) {
+        let pid = i32::try_from(self.child.id()).expect("daemon PID fits i32");
+        kill(Pid::from_raw(pid), Signal::SIGHUP).expect("send SIGHUP");
     }
 }
 
@@ -268,4 +284,50 @@ fn pre_rename_failure_fences_and_restart_loads_prior_config() {
 #[test]
 fn post_rename_failure_fences_and_restart_loads_complete_candidate() {
     exercise("publication_ambiguous", true);
+}
+
+fn exercise_sighup_ack_loss(fault: &str) {
+    let dir = tempfile::tempdir().expect("create test dir");
+    let runtime_dir = dir.path().join("runtime");
+    std::fs::create_dir(&runtime_dir).unwrap();
+    let config_path = dir.path().join("rustbgpd.toml");
+    let metrics = unused_loopback_addr();
+    let initial = config(&runtime_dir, metrics);
+    std::fs::write(&config_path, &initial).unwrap();
+    let grpc_addr = format!("unix://{}", runtime_dir.join("grpc.sock").display());
+    let mut daemon = Daemon::spawn_with_fault(
+        &config_path,
+        dir.path().join("sighup-fault-daemon.log"),
+        Some(("RUSTBGPD_TEST_SIGHUP_ACK_LOSS", fault)),
+    );
+    wait_until_serving(&grpc_addr, &mut daemon);
+    wait_until_ready(metrics, &mut daemon, 200);
+
+    std::fs::write(
+        &config_path,
+        format!("{initial}\n[[neighbors]]\naddress = \"{FIRST_NEIGHBOR}\"\nremote_asn = 65002\n"),
+    )
+    .unwrap();
+    daemon.sighup();
+    wait_until_ready(metrics, &mut daemon, 503);
+    let fenced_at = Instant::now();
+    let rejected = rbgp(
+        &grpc_addr,
+        &["neighbor", SECOND_NEIGHBOR, "add", "--remote-asn", "65003"],
+    );
+    assert!(!rejected.status.success());
+    daemon.assert_running();
+    let status =
+        daemon.wait_for_exit(FAILSTOP_GRACE_WITH_JITTER.saturating_sub(fenced_at.elapsed()));
+    assert_eq!(status.code(), Some(70), "log:\n{}", daemon.log());
+}
+
+#[test]
+fn sighup_reconcile_ack_loss_fences_and_exits_once() {
+    exercise_sighup_ack_loss("reconcile");
+}
+
+#[test]
+fn sighup_bridge_persister_ack_loss_fences_and_exits_once() {
+    exercise_sighup_ack_loss("bridge");
 }

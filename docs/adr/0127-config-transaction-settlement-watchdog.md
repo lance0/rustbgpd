@@ -30,20 +30,24 @@ before ownership and does not close the underlying settlement-liveness issue.
 
 This ADR defines the post-ownership contract. Transaction-watchdog substrate
 exists in current source, but Proposed status does not claim the complete owner
-roster, SIGHUP settlement/shutdown rules, or required recovery proof has
-shipped.
+roster, observability, or required cross-roster recovery proof has shipped.
 
 ### Implementation status (2026-08-12)
 
 The shared watchdog, readiness/admission fence, Linux exit-70 terminal action,
 and typed settlement wiring have shipped for transaction/Apply owners,
-Neighbor4, FIB2, PeerGroup4, and Policy12. That is a partial roster, not
-acceptance of this ADR or closure of the underlying issue.
+Neighbor4, FIB2, PeerGroup4, Policy12, and SIGHUP. SIGHUP now has one owner from
+post-acquire validation through peer-manager, config-bridge/persister, tracing,
+and dial-out acknowledgement. Its accepted authority may be complete or an
+explicit known-partial runtime projection; lost acknowledgement or a
+non-authoritative reconcile fences instead of guessing.
 
-SIGHUP ownership remains incomplete. The bounded metrics/log observability
-described below and the final cross-roster recovery proofs also remain
-incomplete. Until those land, this ADR stays Proposed and the source inventory
-must distinguish shipped owners from the decision's full target roster.
+Shutdown closes coordinator admission, physically drains queued owners, and
+awaits an already-owned SIGHUP before checkpointing or actor teardown. Real
+daemon faults prove reconcile and bridge/persister acknowledgement loss make
+readiness red, reject a second mutation, and exit 70. The bounded metrics/log
+observability described below and final cross-roster recovery proofs remain
+incomplete, so this ADR stays Proposed.
 
 ### Typed publication and recovery classification
 

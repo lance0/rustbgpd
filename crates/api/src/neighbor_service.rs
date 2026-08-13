@@ -226,7 +226,8 @@ impl NeighborService {
                 let _permit = coordinator.acquire().await?;
                 match body(None).await {
                     OwnedRuntimeConfigOutcome::CleanNoEffect(result) => result,
-                    OwnedRuntimeConfigOutcome::PublishedDurable(()) => Ok(()),
+                    OwnedRuntimeConfigOutcome::PublishedDurable(())
+                    | OwnedRuntimeConfigOutcome::AcknowledgedAuthority(()) => Ok(()),
                     OwnedRuntimeConfigOutcome::Fenced { error, .. } => {
                         let _ = error;
                         std::future::pending().await

@@ -1032,6 +1032,13 @@ impl PeerManager {
                                         self.apply_peer_group_change_owned(event, affected).await
                                     }
                                 }
+                                OwnedCatalogMutation::SyncRpolPolicies {
+                                    rpol_files,
+                                    rpol,
+                                    dataset_bindings,
+                                } => self
+                                    .sync_rpol_policies_owned(rpol_files, rpol, dataset_bindings)
+                                    .await,
                                 OwnedCatalogMutation::DeletePeerGroup { name } => {
                                     self.apply_peer_group_change_owned(
                                         ConfigEvent::DeletePeerGroup { name, ack: None },
@@ -1356,8 +1363,7 @@ impl PeerManager {
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::HotUpdatePeer { config, reply } => {
-                            let result = self.hot_update_peer(config).await;
-                            let _ = reply.send(result);
+                            let _ = reply.send(self.hot_update_peer_owned(config).await);
                         }
                         PeerManagerCommand::SyncExplainConfig {
                             enabled,
@@ -1377,13 +1383,6 @@ impl PeerManager {
                             self.current_config.policy.reject_retention.capacity =
                                 reject_retention_capacity;
                             let _ = reply.send(());
-                        }
-                        PeerManagerCommand::SyncRpolPolicies { rpol_files, rpol, dataset_bindings, reply } => {
-                            // LAN-888: receipt stamp — the gap back to the
-                            // reload flow's dispatch log is FIFO queue wait.
-                            info!("rpol policy sync command received");
-                            let result = self.sync_rpol_policies(rpol_files, rpol, dataset_bindings).await;
-                            let _ = reply.send(result);
                         }
                         PeerManagerCommand::RefreshDatasetDependents { swapped, failed, reply } => {
                             let result = self.refresh_dataset_dependents(&swapped, &failed).await;

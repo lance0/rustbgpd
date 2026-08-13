@@ -82,19 +82,29 @@ pub struct ReconcileFailure {
     pub error: String,
 }
 
-/// Result of a peer reconciliation run.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ReconcileResult {
-    /// List of individual failures (empty means success).
-    pub failures: Vec<ReconcileFailure>,
+/// One peer-table effect acknowledged by the manager during reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerReconcileEffect {
+    Added(PeerKey),
+    Removed(PeerKey),
+    Replaced(PeerKey),
+    RemovedForFailedReplacement(PeerKey),
 }
 
-impl ReconcileResult {
-    /// Returns `true` if all reconciliation operations succeeded.
-    #[must_use]
-    pub fn is_success(&self) -> bool {
-        self.failures.is_empty()
-    }
+/// Whether the receipt is sufficient to reconstruct the live peer table.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PeerReconcileAuthority {
+    #[default]
+    Known,
+    Diverged,
+}
+
+/// Typed reconciliation receipt used by cancellation-safe SIGHUP settlement.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PeerReconcileOutcome {
+    pub effects: Vec<PeerReconcileEffect>,
+    pub failures: Vec<ReconcileFailure>,
+    pub authority: PeerReconcileAuthority,
 }
 
 /// Session lifecycle event type published by `PeerManager`.
@@ -1088,7 +1098,7 @@ pub enum PeerManagerCommand {
         /// Neighbors whose config changed (remove + re-add).
         changed: Vec<PeerManagerNeighborConfig>,
         /// Reply channel with reconciliation results.
-        reply: oneshot::Sender<ReconcileResult>,
+        reply: oneshot::Sender<PeerReconcileOutcome>,
     },
     /// LAN-341: apply a config change whose every edited field is
     /// reload-matrix `live` (hot-applied) to an existing static peer in
@@ -1104,7 +1114,7 @@ pub enum PeerManagerCommand {
         /// fields may differ from the live peer's).
         config: PeerManagerNeighborConfig,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), PeerLifecycleError>>,
+        reply: oneshot::Sender<OwnedHotUpdatePeerOutcome>,
     },
     /// ADR-0073: refresh the peer manager's `[policy.explain]` snapshot
     /// (`enabled` / `cache_size`) ahead of any reload step that
@@ -1128,25 +1138,6 @@ pub enum PeerManagerCommand {
         reject_retention_capacity: usize,
         /// Reply channel acknowledging the snapshot update.
         reply: oneshot::Sender<()>,
-    },
-    /// ADR-0096: replace the compiled `.rpol` policy registry
-    /// (SIGHUP reload of `[policy] rpol_files` or of a referenced
-    /// file's content) and re-resolve every live peer's chains
-    /// through it. Route Refresh fires for peers whose import chain
-    /// materially changed, via the same rollback-capable resolved-policy
-    /// snapshot path as `[policy.definitions]` edits.
-    SyncRpolPolicies {
-        /// New `[policy] rpol_files` list (paths already absolute).
-        rpol_files: Vec<String>,
-        /// New compiled registry.
-        rpol: rustbgpd_policy::rpol::RpolPolicySet,
-        /// Dataset bindings the new registry's `dataset` declarations
-        /// resolve through (LAN-305) — handles reused from the running
-        /// config where declarations are unchanged, so a
-        /// content-equal reload still diffs chains as no-ops.
-        dataset_bindings: rustbgpd_policy::datasets::DatasetBindings,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// LAN-305: one or more external dataset snapshots swapped content
     /// during a reload. Refresh exactly the peers whose chains
@@ -1477,6 +1468,16 @@ pub enum OwnedNeighborMutationOutcome {
 
 /// One of the catalog mutations protected by settlement ownership.
 pub enum OwnedCatalogMutation {
+    /// ADR-0096: replace the compiled `.rpol` registry and re-resolve every
+    /// live peer through the rollback-capable policy snapshot path.
+    SyncRpolPolicies {
+        /// New `[policy] rpol_files` list (paths already absolute).
+        rpol_files: Vec<String>,
+        /// New compiled registry.
+        rpol: rustbgpd_policy::rpol::RpolPolicySet,
+        /// Live handles used to resolve the registry's dataset declarations.
+        dataset_bindings: rustbgpd_policy::datasets::DatasetBindings,
+    },
     SetPeerGroup {
         name: String,
         definition: Box<PeerGroupDefinition>,
@@ -1540,6 +1541,14 @@ pub enum OwnedCatalogMutationOutcome {
     FullyCompensated(CatalogMutationError),
     /// A forward or compensation effect left final runtime state unknown.
     CompensationAmbiguous(CatalogMutationError),
+}
+
+/// Actor-owned settlement proof for a SIGHUP hot peer update.
+#[derive(Debug)]
+pub enum OwnedHotUpdatePeerOutcome {
+    Success,
+    RejectedNoEffect(PeerLifecycleError),
+    KnownDivergence(PeerLifecycleError),
 }
 
 /// Read-only peer-manager queries admitted between bounded policy-transaction

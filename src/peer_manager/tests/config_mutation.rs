@@ -487,6 +487,30 @@ async fn rejected_hot_update_preserves_old_restart_countdown() {
 }
 
 #[tokio::test]
+async fn owned_hot_update_classifies_precheck_and_post_effect_failure() {
+    use rustbgpd_api::peer_types::{OwnedHotUpdatePeerOutcome, PeerLifecycleError};
+
+    let mut mgr = test_peer_manager();
+    let missing = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 88));
+    assert!(matches!(
+        mgr.hot_update_peer_owned(make_config(missing, 65002)).await,
+        OwnedHotUpdatePeerOutcome::RejectedNoEffect(PeerLifecycleError::NotFound(_))
+    ));
+
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 89));
+    let (rib_tx, rib_rx) = mpsc::channel(1);
+    mgr.rib_tx = rib_tx;
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+    drop(rib_rx);
+    let mut update = make_config(addr, 65002);
+    update.local_ipv6_nexthop = Some("2001:db8::89".parse().unwrap());
+    assert!(matches!(
+        mgr.hot_update_peer_owned(update).await,
+        OwnedHotUpdatePeerOutcome::KnownDivergence(_)
+    ));
+}
+
+#[tokio::test]
 async fn hot_update_peer_refreshes_outbound_for_export_affecting_knobs() {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, mut rib_rx) = mpsc::channel(64);
@@ -657,6 +681,16 @@ async fn reconcile_changed_peer_still_rebuilds_session_task() {
         .reconcile_peers(Vec::new(), Vec::new(), vec![changed])
         .await;
     assert!(result.failures.is_empty(), "{:?}", result.failures);
+    assert_eq!(
+        result.authority,
+        rustbgpd_api::peer_types::PeerReconcileAuthority::Known
+    );
+    assert_eq!(
+        result.effects,
+        vec![rustbgpd_api::peer_types::PeerReconcileEffect::Replaced(
+            key(addr)
+        )]
+    );
 
     let managed = mgr.peers.get(&key(addr)).expect("rebuilt peer");
     assert_ne!(managed.session_id, session_id_before);
@@ -1192,6 +1226,16 @@ async fn reconcile_changed_peer_preserves_disabled_state() {
         .await;
 
     assert!(result.failures.is_empty(), "{:?}", result.failures);
+    assert_eq!(
+        result.authority,
+        rustbgpd_api::peer_types::PeerReconcileAuthority::Known
+    );
+    assert_eq!(
+        result.effects,
+        vec![rustbgpd_api::peer_types::PeerReconcileEffect::Replaced(
+            key(addr)
+        )]
+    );
     let managed = mgr.peers.get(&key(addr)).expect("reconciled peer");
     assert_eq!(managed.description, "reloaded description");
     assert_eq!(managed.hold_time, Some(45));

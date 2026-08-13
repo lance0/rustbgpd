@@ -10,6 +10,7 @@ mod inbound_auth {
     use std::net::{IpAddr, SocketAddr};
     use std::time::Duration;
 
+    use rustbgpd_transport::listener::ReloadDispatch;
     use rustbgpd_transport::{
         AcceptedConnection, BgpListener, ListenerSocketOptions, Md5ListenerKey,
         TcpAoListenerOwnerKind, TtlSecurityListenerPolicy, set_gtsm, set_tcp_md5sig,
@@ -352,7 +353,7 @@ mod inbound_auth {
         let accepted = expect_accept(&mut accept_rx).await;
         expect_data_flows(signed_old, accepted).await;
 
-        control
+        let outcome = control
             .replace_inbound_auth(
                 vec![Md5ListenerKey {
                     peer,
@@ -361,8 +362,8 @@ mod inbound_auth {
                 }],
                 Vec::new(),
             )
-            .await
-            .expect("replace listener MD5 inventory");
+            .await;
+        assert!(matches!(outcome, ReloadDispatch::Replied(Ok(()))));
 
         let stale = spawn_connect(addr, None, Some("old-secret".to_string()), None).await;
         assert!(
@@ -375,10 +376,8 @@ mod inbound_auth {
         let accepted = expect_accept(&mut accept_rx).await;
         expect_data_flows(signed_new, accepted).await;
 
-        control
-            .replace_inbound_auth(Vec::new(), Vec::new())
-            .await
-            .expect("remove listener MD5 inventory");
+        let outcome = control.replace_inbound_auth(Vec::new(), Vec::new()).await;
+        assert!(matches!(outcome, ReloadDispatch::Replied(Ok(()))));
         let plaintext = spawn_connect(addr, None, None, None)
             .await
             .expect("plaintext inbound after key removal");
@@ -404,7 +403,7 @@ mod inbound_auth {
         let control = listener.tcp_ao_rotation_handle();
         tokio::spawn(listener.run());
 
-        control
+        let outcome = control
             .replace_inbound_auth(
                 Vec::new(),
                 vec![TtlSecurityListenerPolicy {
@@ -414,8 +413,8 @@ mod inbound_auth {
                     enforce: true,
                 }],
             )
-            .await
-            .expect("add GTSM policy to live listener");
+            .await;
+        assert!(matches!(outcome, ReloadDispatch::Replied(Ok(()))));
 
         let client = spawn_gtsm_connect(addr, None)
             .await
@@ -524,7 +523,7 @@ mod inbound_auth {
         };
         let (v4_addr, v6_addr, mut accept_rx, control) = bind_dual_listener(options).await;
 
-        control
+        let outcome = control
             .replace_inbound_auth(
                 vec![
                     Md5ListenerKey {
@@ -540,8 +539,8 @@ mod inbound_auth {
                 ],
                 Vec::new(),
             )
-            .await
-            .expect("replace dual-family listener MD5 inventory");
+            .await;
+        assert!(matches!(outcome, ReloadDispatch::Replied(Ok(()))));
 
         let stale = spawn_connect(v6_addr, None, Some("v6-old".to_string()), None).await;
         assert!(
