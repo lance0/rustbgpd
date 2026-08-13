@@ -82,7 +82,6 @@ pub(crate) type RibClient = RibServiceClient<
 ///
 /// Pagination tokens are opaque server state. Keep the caller's bytes intact
 /// and return the server response verbatim; navigation belongs to the view.
-#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
 pub(crate) async fn fetch_tui_best_route_page(
     client: &mut RibClient,
     page_token: String,
@@ -101,7 +100,6 @@ pub(crate) async fn fetch_tui_best_route_page(
 ///
 /// This is deliberately the unicast winner form: no RD, label, or source
 /// identity. Scoped link-local peer rendering follows the CLI path exactly.
-#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
 pub(crate) async fn fetch_tui_explain_advertised(
     client: &mut RibClient,
     peer_address: &str,
@@ -1234,11 +1232,11 @@ fn gate_verdict_label(verdict: i32) -> &'static str {
 }
 
 /// Render an ORR vantage cost for text output (`12` / `unreachable`).
-fn orr_cost_label(cost: Option<u64>) -> String {
+pub(crate) fn orr_cost_label(cost: Option<u64>) -> String {
     cost.map_or_else(|| "unreachable".to_string(), |c| c.to_string())
 }
 
-fn advertised_path_id_line(
+pub(crate) fn advertised_path_id_line(
     explain: &crate::proto::ExplainAdvertisedRouteResponse,
 ) -> Option<String> {
     if explain.source.is_some() {

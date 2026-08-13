@@ -21,14 +21,12 @@ use crate::proto::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
 pub(super) enum RibQueryKind {
     BestPage { page_token: String },
     ExplainAdvertised { prefix: String, prefix_length: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
 pub(super) struct RibQueryIdentity {
     pub request_id: u64,
     pub view_id: u64,
@@ -37,14 +35,12 @@ pub(super) struct RibQueryIdentity {
 }
 
 #[derive(Debug)]
-#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
 pub(super) enum RibQueryResponse {
     BestPage(ListRoutesResponse),
     ExplainAdvertised(Box<ExplainAdvertisedRouteResponse>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
 pub(super) struct RibQueryError {
     pub code: tonic::Code,
     pub message: String,
@@ -60,27 +56,23 @@ impl From<tonic::Status> for RibQueryError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
 pub(super) struct RibQueryResult {
     pub identity: RibQueryIdentity,
     pub result: Result<RibQueryResponse, RibQueryError>,
 }
 
-#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
 enum RibQueryCommand {
     Query(RibQueryIdentity),
     Cancel,
     Close,
 }
 
-#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
 pub(super) struct RibQueryHandle {
     command_tx: mpsc::UnboundedSender<RibQueryCommand>,
     next_request_id: Arc<AtomicU64>,
     task: JoinHandle<()>,
 }
 
-#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
 impl RibQueryHandle {
     pub fn query(&self, view_id: u64, peer_address: String, query: RibQueryKind) -> Option<u64> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
@@ -116,7 +108,6 @@ impl Drop for RibQueryHandle {
 /// The lane owns one client and one RPC future. Receiving another command
 /// drops that future before any replacement starts; results use an unbounded
 /// sender so a stopped UI can never hold shutdown open.
-#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
 pub(super) fn spawn_rib_query_lane(
     connection: Connection,
 ) -> (RibQueryHandle, mpsc::UnboundedReceiver<RibQueryResult>) {
@@ -133,7 +124,6 @@ pub(super) fn spawn_rib_query_lane(
     )
 }
 
-#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
 async fn run_rib_query(
     client: &mut RibClient,
     identity: &RibQueryIdentity,
@@ -159,7 +149,6 @@ async fn run_rib_query(
     }
 }
 
-#[allow(dead_code, reason = "wired into the interactive view by LAN-995 W2")]
 async fn rib_query_loop(
     connection: Connection,
     mut command_rx: mpsc::UnboundedReceiver<RibQueryCommand>,
