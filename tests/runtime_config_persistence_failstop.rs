@@ -323,8 +323,10 @@ fn exercise(fault: &str, published: bool) {
     );
     daemon.assert_running();
 
-    let status = daemon
-        .wait_for_exit(FAILSTOP_GRACE_WITH_JITTER.saturating_sub(recovery_fenced_at.elapsed()));
+    let remaining_grace = FAILSTOP_GRACE_WITH_JITTER
+        .checked_sub(recovery_fenced_at.elapsed())
+        .expect("daemon exceeded the five-second fail-stop grace plus test jitter before wait");
+    let status = daemon.wait_for_exit(remaining_grace);
     assert_eq!(status.code(), Some(70), "log:\n{}", daemon.log());
     assert_one_redacted_diagnostic(&daemon);
     assert!(
@@ -405,8 +407,10 @@ fn exercise_sighup_ack_loss(fault: &str) {
     assert!(!rejected.status.success());
     daemon.assert_running();
     daemon.sigterm();
-    let status =
-        daemon.wait_for_exit(FAILSTOP_GRACE_WITH_JITTER.saturating_sub(fenced_at.elapsed()));
+    let remaining_grace = FAILSTOP_GRACE_WITH_JITTER
+        .checked_sub(fenced_at.elapsed())
+        .expect("daemon exceeded the five-second fail-stop grace plus test jitter before wait");
+    let status = daemon.wait_for_exit(remaining_grace);
     assert_eq!(status.code(), Some(70), "log:\n{}", daemon.log());
     assert_one_redacted_diagnostic(&daemon);
 
