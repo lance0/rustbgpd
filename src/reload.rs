@@ -433,6 +433,46 @@ fn preflight_dispatch_failure(bucket: &'static str, error: ReloadStepError) -> S
     SighupReloadOutcome::CleanNoEffect(sighup_error(bucket, String::new(), error))
 }
 
+fn tcp_ao_awaiting_peer_outcome(
+    progress: &SighupMutationProgress<'_>,
+    mut runtime: Config,
+    desired: &Arc<AcceptedConfigSnapshot>,
+    desired_file_path: Option<&std::path::PathBuf>,
+    awaiting_error: ReloadStepError,
+    marker: ReloadDispatch<std::io::Result<()>, std::io::Error>,
+) -> SighupReloadOutcome {
+    match marker {
+        ReloadDispatch::Replied(Ok(())) => {
+            runtime.file_path = desired_file_path.cloned();
+            acknowledge_partial(
+                progress,
+                runtime,
+                desired,
+                ReloadStepFailure {
+                    bucket: "tcp_ao.awaiting_peer",
+                    target: String::new(),
+                    error: awaiting_error,
+                },
+            )
+        }
+        ReloadDispatch::AcknowledgementLost => fenced_reload_failure(
+            "tcp_ao.awaiting_peer_marker",
+            ReloadStepError::AcknowledgementLost,
+            RuntimeConfigFenceReason::AcknowledgementLost,
+        ),
+        ReloadDispatch::NotAccepted(error) => fenced_reload_failure(
+            "tcp_ao.awaiting_peer_marker",
+            ReloadStepError::NotAccepted(error.to_string()),
+            RuntimeConfigFenceReason::KnownDivergence,
+        ),
+        ReloadDispatch::Replied(Err(error)) => fenced_reload_failure(
+            "tcp_ao.awaiting_peer_marker",
+            ReloadStepError::Rejected(error.to_string()),
+            RuntimeConfigFenceReason::KnownDivergence,
+        ),
+    }
+}
+
 fn acknowledged_reload(
     runtime: Config,
     desired: Arc<AcceptedConfigSnapshot>,
@@ -2041,18 +2081,26 @@ pub(crate) async fn reload_config_with_tcp_ao(
             if plan.operation == TcpAoRotationOperation::Selection
                 && matches!(&error, ReloadStepError::Rejected(message) if message.starts_with(crate::peer_manager::TCP_AO_AWAITING_PEER_PREFIX))
             {
-                if let Err(marker_error) = listener_step(
-                    listener
-                        .mark_awaiting_peer(plan.generation, error.to_string())
-                        .await,
-                ) {
-                    warn!(error = %marker_error, "TCP-AO listener awaiting-peer marker was not acknowledged");
+                let marker = listener
+                    .mark_awaiting_peer(plan.generation, error.to_string())
+                    .await;
+                if matches!(&marker, ReloadDispatch::Replied(Ok(()))) {
+                    info!(error = %error, generation = plan.generation.as_u64(), "TCP-AO successor selected; peer-use observation remains pending until a later identical SIGHUP");
+                } else {
+                    warn!(
+                        awaiting_error = %error,
+                        marker = ?marker,
+                        generation = plan.generation.as_u64(),
+                        "TCP-AO listener awaiting-peer marker was not authoritatively acknowledged"
+                    );
                 }
-                info!(error = %error, generation = plan.generation.as_u64(), "TCP-AO successor selected; peer-use observation remains pending until a later identical SIGHUP");
-                return fenced_reload_failure(
-                    "tcp_ao.awaiting_peer",
+                return tcp_ao_awaiting_peer_outcome(
+                    &progress,
+                    current.clone(),
+                    &desired_snapshot,
+                    desired_config.file_path.as_ref(),
                     error,
-                    RuntimeConfigFenceReason::KnownDivergence,
+                    marker,
                 );
             }
             if let Err(marker_error) = listener_step(
@@ -6818,6 +6866,124 @@ tcp_ao = [
         assert_eq!(retry.generation, plan.generation);
         assert_eq!(retry.listener_keys, plan.listener_keys);
         assert_eq!(retry.static_keyrings, plan.static_keyrings);
+    }
+
+    #[test]
+    fn tcp_ao_awaiting_peer_acknowledges_baseline_authority_for_identical_retry() {
+        let current_toml = baseline_toml().replace(
+            "hold_time = 90",
+            r#"hold_time = 90
+tcp_ao = [
+  { key = "old", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)" },
+  { key = "successor", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)" }
+]"#,
+        );
+        let desired_toml = baseline_toml().replace(
+            "hold_time = 90",
+            r#"hold_time = 90
+tcp_ao = [
+  { key = "old", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)", deprecated = true },
+  { key = "successor", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)", preferred = true }
+]"#,
+        );
+        let mut current = Config::load_toml_with_diagnostics(&current_toml, "current").unwrap();
+        current.file_path = Some(PathBuf::from("/runtime/baseline.toml"));
+        let mut desired = Config::load_toml_with_diagnostics(&desired_toml, "desired").unwrap();
+        desired.file_path = Some(PathBuf::from("/operator/candidate.toml"));
+        let desired_snapshot = AcceptedConfigSnapshot::from_config_for_test(desired.clone());
+        let mut progress = SighupMutationProgress::new(None);
+        progress.mark_accepted_effect();
+        let detail = format!(
+            "{} peer 10.0.0.2 has not observed successor traffic",
+            crate::peer_manager::TCP_AO_AWAITING_PEER_PREFIX
+        );
+
+        let outcome = tcp_ao_awaiting_peer_outcome(
+            &progress,
+            current.clone(),
+            &desired_snapshot,
+            desired.file_path.as_ref(),
+            ReloadStepError::Rejected(detail.clone()),
+            ReloadDispatch::Replied(Ok(())),
+        );
+        let SighupReloadOutcome::Acknowledged(authority) = outcome else {
+            panic!("acknowledged awaiting-peer marker must not recovery-fence");
+        };
+        assert_eq!(authority.runtime.neighbors, current.neighbors);
+        assert_eq!(authority.runtime.file_path, desired.file_path);
+        assert_eq!(authority.desired.config().neighbors, desired.neighbors);
+        let SighupCompletion::KnownPartial { failures } = &authority.completion else {
+            panic!("awaiting-peer must retain a known-partial receipt");
+        };
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].bucket, "tcp_ao.awaiting_peer");
+        assert_eq!(failures[0].error.to_string(), detail);
+
+        let awaiting = TcpAoRotationStatus {
+            desired: TcpAoRotationGeneration::new(2).unwrap(),
+            applied: TcpAoRotationGeneration::STARTUP,
+            phase: TcpAoRotationPhase::AwaitingPeer,
+            last_error: Some("awaiting successor traffic".to_string()),
+        };
+        let TcpAoReloadPlan::Rotation(retry) = prepare_tcp_ao_rotation_plan(
+            &authority.runtime,
+            &authority.desired.config(),
+            &awaiting,
+        )
+        .unwrap() else {
+            panic!("acknowledged awaiting authority must retry the retained selection");
+        };
+        assert_eq!(retry.operation, TcpAoRotationOperation::Selection);
+        assert_eq!(retry.generation, awaiting.desired);
+    }
+
+    #[test]
+    fn tcp_ao_awaiting_peer_marker_uncertainty_still_recovery_fences() {
+        let current = Config::load_toml_with_diagnostics(baseline_toml(), "current").unwrap();
+        let desired = AcceptedConfigSnapshot::from_config_for_test(current.clone());
+        let mut progress = SighupMutationProgress::new(None);
+        progress.mark_accepted_effect();
+        let awaiting = || {
+            ReloadStepError::Rejected(format!(
+                "{} waiting",
+                crate::peer_manager::TCP_AO_AWAITING_PEER_PREFIX
+            ))
+        };
+
+        let lost = tcp_ao_awaiting_peer_outcome(
+            &progress,
+            current.clone(),
+            &desired,
+            current.file_path.as_ref(),
+            awaiting(),
+            ReloadDispatch::AcknowledgementLost,
+        );
+        assert!(matches!(
+            lost,
+            SighupReloadOutcome::RecoveryFenced {
+                reason: RuntimeConfigFenceReason::AcknowledgementLost,
+                ..
+            }
+        ));
+        for marker in [
+            ReloadDispatch::NotAccepted(std::io::Error::other("listener stopped")),
+            ReloadDispatch::Replied(Err(std::io::Error::other("generation rejected"))),
+        ] {
+            assert!(matches!(
+                tcp_ao_awaiting_peer_outcome(
+                    &progress,
+                    current.clone(),
+                    &desired,
+                    current.file_path.as_ref(),
+                    awaiting(),
+                    marker,
+                ),
+                SighupReloadOutcome::RecoveryFenced {
+                    reason: RuntimeConfigFenceReason::KnownDivergence,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]
