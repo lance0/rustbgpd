@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_wire::{Afi, Prefix, Safi};
@@ -1568,7 +1569,7 @@ impl RibManager {
     }
     pub(super) fn handle_subscribe_route_events(
         &mut self,
-        reply: tokio::sync::oneshot::Sender<broadcast::Receiver<RouteEvent>>,
+        reply: tokio::sync::oneshot::Sender<broadcast::Receiver<Arc<RouteEvent>>>,
     ) {
         let rx = self.route_events_tx.subscribe();
         let _ = reply.send(rx);
@@ -1610,14 +1611,14 @@ impl RibManager {
                 None => true,
             })
             .take(limit)
-            .cloned()
+            .map(|event| event.as_ref().clone())
             .collect();
         events.reverse();
         let _ = reply.send(events);
     }
     pub(super) fn handle_subscribe_evpn_route_events(
         &mut self,
-        reply: tokio::sync::oneshot::Sender<broadcast::Receiver<crate::event::EvpnRouteEvent>>,
+        reply: tokio::sync::oneshot::Sender<broadcast::Receiver<Arc<crate::event::EvpnRouteEvent>>>,
     ) {
         let rx = self.evpn_events_tx.subscribe();
         let _ = reply.send(rx);
@@ -1651,7 +1652,7 @@ impl RibManager {
                 None => true,
             })
             .take(limit)
-            .cloned()
+            .map(|event| event.as_ref().clone())
             .collect();
         events.reverse();
         let _ = reply.send(events);

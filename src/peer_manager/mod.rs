@@ -1,15 +1,15 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
 use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicNeighborInfo, OwnedCatalogMutation, OwnedNeighborMutation,
-    OwnedNeighborMutationError, OwnedNeighborMutationOutcome, POLICY_EVENT_HISTORY_CAPACITY,
-    PeerKey, PeerManagerCommand, PeerManagerNeighborConfig, PeerManagerReadinessQuery,
-    PolicyDatasetStatusRow, PolicyEvent, SESSION_EVENT_HISTORY_CAPACITY, SessionEvent,
-    SessionLifecycleEvent, StageConfigSnapshotError,
+    OwnedNeighborMutationError, OwnedNeighborMutationOutcome, PeerKey, PeerManagerCommand,
+    PeerManagerNeighborConfig, PeerManagerReadinessQuery, PolicyDatasetStatusRow, PolicyEvent,
+    SessionEvent, SessionLifecycleEvent, StageConfigSnapshotError,
 };
 use rustbgpd_bmp::BmpEvent;
 use rustbgpd_fsm::PeerConfig;
@@ -337,10 +337,10 @@ pub struct PeerManager {
     session_lifecycle_rx: mpsc::Receiver<SessionLifecycleNotification>,
     session_notification_event_tx: mpsc::Sender<TransportNotificationEvent>,
     session_notification_event_rx: mpsc::Receiver<TransportNotificationEvent>,
-    session_events_tx: broadcast::Sender<SessionEvent>,
+    session_events_tx: broadcast::Sender<Arc<SessionEvent>>,
     session_event_history: VecDeque<SessionLifecycleEvent>,
-    policy_events_tx: broadcast::Sender<PolicyEvent>,
-    policy_event_history: VecDeque<PolicyEvent>,
+    policy_events_tx: broadcast::Sender<Arc<PolicyEvent>>,
+    policy_event_history: VecDeque<Arc<PolicyEvent>>,
     current_config: Config,
     /// True between `StageConfigSnapshot` and the transaction controller's
     /// persist/rollback completion signal. Dynamic inbound accepts are refused
@@ -689,9 +689,9 @@ impl PeerManager {
             session_notification_event_tx,
             session_notification_event_rx,
             session_events_tx,
-            session_event_history: VecDeque::with_capacity(SESSION_EVENT_HISTORY_CAPACITY),
+            session_event_history: VecDeque::new(),
             policy_events_tx,
-            policy_event_history: VecDeque::with_capacity(POLICY_EVENT_HISTORY_CAPACITY),
+            policy_event_history: VecDeque::new(),
             config_snapshot_staged: false,
             dynamic_ranges: Self::parse_dynamic_ranges(&current_config),
             dynamic_peer_count: 0,

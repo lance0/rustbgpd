@@ -1,5 +1,46 @@
 use super::*;
 
+use rustbgpd_api::peer_types::{POLICY_EVENT_HISTORY_CAPACITY, SESSION_EVENT_HISTORY_CAPACITY};
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn event_storage_layout_savings_and_lazy_history_capacity_are_pinned() {
+    use std::mem::size_of;
+
+    assert_eq!(size_of::<SessionEvent>(), 168);
+    assert_eq!(size_of::<SessionLifecycleEvent>(), 120);
+    assert_eq!(size_of::<PolicyEvent>(), 160);
+    assert_eq!(size_of::<Arc<SessionEvent>>(), 8);
+    assert_eq!(size_of::<Arc<PolicyEvent>>(), 8);
+
+    let manager = test_peer_manager();
+    assert_eq!(manager.session_event_history.capacity(), 0);
+    assert_eq!(manager.policy_event_history.capacity(), 0);
+
+    let eager_history_bytes = (136 + 400 + 120 + 160) * 4096;
+    assert_eq!(eager_history_bytes, 3_342_336);
+    let broadcast_payload_savings = (136 + 400 + 168 + 160 - 4 * 8) * 4096;
+    assert_eq!(broadcast_payload_savings, 3_407_872);
+}
+
+#[tokio::test]
+async fn session_history_queries_return_owned_events() {
+    let mut manager = test_peer_manager();
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    manager.publish_peer_lifecycle_event(
+        &key(peer),
+        SessionLifecycleEventType::PeerEnabled,
+        "original".to_string(),
+    );
+
+    let mut queried = query_session_event_history(&manager, None, BTreeSet::new(), 0).await;
+    queried[0].reason = "caller mutation".to_string();
+    assert_eq!(
+        manager.session_event_history.back().unwrap().reason,
+        "original"
+    );
+}
+
 fn test_policy_event(target: &str, peer: Option<IpAddr>) -> PolicyEvent {
     PolicyEvent {
         operation: "set",
@@ -159,7 +200,7 @@ async fn lifecycle_notification_matches_scoped_static_peer_by_session_id() {
         .await
         .expect("session event timeout")
         .expect("session event channel closed");
-    let SessionEvent::Lifecycle(event) = event else {
+    let SessionEvent::Lifecycle(event) = event.as_ref() else {
         panic!("expected lifecycle event");
     };
     assert_eq!(event.peer, peer);
@@ -248,6 +289,7 @@ async fn notification_event_reason_includes_bounded_failure_cause() {
     let mut mgr = test_peer_manager();
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let mut events = mgr.session_events_tx.subscribe();
+    assert!(mgr.session_event_history.is_empty());
     mgr.publish_notification_event(rustbgpd_transport::SessionNotificationEvent {
         session_id: 1,
         peer_addr: addr,
@@ -260,10 +302,14 @@ async fn notification_event_reason_includes_bounded_failure_cause() {
         failure_cause: Some(rustbgpd_transport::handle::SessionFailureCause::OutboundSaturation),
     });
 
-    let rustbgpd_api::peer_types::SessionEvent::Notification(event) = events.try_recv().unwrap()
-    else {
+    let event = events.try_recv().unwrap();
+    let rustbgpd_api::peer_types::SessionEvent::Notification(event) = event.as_ref() else {
         panic!("expected notification event");
     };
+    assert!(
+        mgr.session_event_history.is_empty(),
+        "notifications must remain excluded from lifecycle history"
+    );
     assert_eq!(
         event.reason,
         "BGP NOTIFICATION sent for peer 10.0.0.2: 6/8 (Out of Resources); transport failure: outbound writer queue saturated"
@@ -307,8 +353,8 @@ async fn notification_event_uses_scoped_peer_label_for_interface_scoped_peer() {
         failure_cause: None,
     });
 
-    let rustbgpd_api::peer_types::SessionEvent::Notification(event) = events.try_recv().unwrap()
-    else {
+    let event = events.try_recv().unwrap();
+    let rustbgpd_api::peer_types::SessionEvent::Notification(event) = event.as_ref() else {
         panic!("expected notification event");
     };
     assert!(

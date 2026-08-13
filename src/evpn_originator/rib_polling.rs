@@ -1,6 +1,6 @@
 use super::{
-    BTreeMap, BTreeSet, BgpMetrics, EthernetSegmentIdentifier, EvpnInstanceId, EvpnInstanceTable,
-    EvpnRibRoute, EvpnRoute, EvpnRouteEvent, EvpnRouteKey, IpAddr, MacAddress,
+    Arc, BTreeMap, BTreeSet, BgpMetrics, EthernetSegmentIdentifier, EvpnInstanceId,
+    EvpnInstanceTable, EvpnRibRoute, EvpnRoute, EvpnRouteEvent, EvpnRouteKey, IpAddr, MacAddress,
     OriginatedLocalMacCounts, OriginatorState, PathAttribute, ProjectedEvpnRoute, RemoteMacIpView,
     RemoteMacIpViewMap, RemoteMacView, RemoteMacViewMap, RibQueryError, RibUpdate, broadcast, mpsc,
     oneshot, project_evpn_routes, warn,
@@ -17,7 +17,7 @@ type StickyMacWinnerKey = (EvpnInstanceId, MacAddress, IpAddr, Option<u32>);
 /// the originator's 5 s poll backstop covers both cases.
 pub(super) async fn subscribe_evpn_events(
     rib_tx: &mpsc::Sender<RibUpdate>,
-) -> Option<broadcast::Receiver<EvpnRouteEvent>> {
+) -> Option<broadcast::Receiver<Arc<EvpnRouteEvent>>> {
     let (reply_tx, reply_rx) = oneshot::channel();
     rib_tx
         .send(RibUpdate::SubscribeEvpnRouteEvents { reply: reply_tx })
@@ -30,8 +30,8 @@ pub(super) async fn subscribe_evpn_events(
 /// (poll-only mode). Parking on `pending` lets the surrounding
 /// `tokio::select!` continue to service the other arms.
 pub(super) async fn recv_evpn_event(
-    rx: &mut Option<broadcast::Receiver<EvpnRouteEvent>>,
-) -> Result<EvpnRouteEvent, broadcast::error::RecvError> {
+    rx: &mut Option<broadcast::Receiver<Arc<EvpnRouteEvent>>>,
+) -> Result<Arc<EvpnRouteEvent>, broadcast::error::RecvError> {
     match rx {
         Some(r) => r.recv().await,
         None => std::future::pending().await,
@@ -54,7 +54,7 @@ pub(super) fn evpn_event_requires_repoll(event: &EvpnRouteEvent) -> bool {
 }
 
 pub(super) fn drain_ready_evpn_events(
-    rx: &mut broadcast::Receiver<EvpnRouteEvent>,
+    rx: &mut broadcast::Receiver<Arc<EvpnRouteEvent>>,
 ) -> ReadyEvpnEventDrain {
     let mut drain = ReadyEvpnEventDrain::default();
     loop {
@@ -281,8 +281,8 @@ pub(super) async fn handle_evpn_event(
     reason = "RIB poll reconciliation needs the snapshot, generation, and actor outputs"
 )]
 pub(super) async fn handle_evpn_event_coalesced(
-    event: EvpnRouteEvent,
-    rx: &mut Option<broadcast::Receiver<EvpnRouteEvent>>,
+    event: Arc<EvpnRouteEvent>,
+    rx: &mut Option<broadcast::Receiver<Arc<EvpnRouteEvent>>>,
     instances: &EvpnInstanceTable,
     state: &mut OriginatorState,
     rib_tx: &mpsc::Sender<RibUpdate>,

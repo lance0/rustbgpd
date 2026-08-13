@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv6Addr};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
@@ -747,12 +748,12 @@ pub enum PeerManagerCommand {
     /// Subscribe to live session lifecycle events.
     SubscribeSessionEvents {
         /// Reply channel returning a fresh broadcast receiver.
-        reply: oneshot::Sender<broadcast::Receiver<SessionEvent>>,
+        reply: oneshot::Sender<broadcast::Receiver<Arc<SessionEvent>>>,
     },
     /// Subscribe to live policy mutation events.
     SubscribePolicyEvents {
         /// Reply channel returning a fresh broadcast receiver.
-        reply: oneshot::Sender<broadcast::Receiver<PolicyEvent>>,
+        reply: oneshot::Sender<broadcast::Receiver<Arc<PolicyEvent>>>,
     },
     /// Query recent policy mutation events from the bounded in-memory history.
     QueryPolicyEventHistory {

@@ -465,7 +465,7 @@ pub struct RibManager {
     vrp_table: Option<Arc<VrpTable>>,
     /// Current ASPA table for path verification. `None` = no ASPA data.
     aspa_table: Option<Arc<rustbgpd_rpki::AspaTable>>,
-    route_events_tx: broadcast::Sender<RouteEvent>,
+    route_events_tx: broadcast::Sender<Arc<RouteEvent>>,
     /// Currently surfaced unicast export-policy denials. This keeps
     /// route-level policy-filtered events transition-based instead of
     /// re-emitting on every dirty or forced outbound resync.
@@ -474,7 +474,7 @@ pub struct RibManager {
     export_policy_stats: HashMap<IpAddr, NeighborPolicyStats>,
     /// Bounded recent route-event history for after-the-fact operator
     /// timeline queries. Live streaming still uses `route_events_tx`.
-    route_event_history: VecDeque<RouteEvent>,
+    route_event_history: VecDeque<Arc<RouteEvent>>,
     /// Monotonic process-local id assigned before route events are recorded in
     /// history and broadcast to live subscribers.
     next_route_event_id: u64,
@@ -489,11 +489,11 @@ pub struct RibManager {
     /// (unicast-only) and EVPN consumers (the daemon's local-MAC
     /// originator) need an `EvpnRouteKey`-shaped event with the full
     /// new best path attached. ADR-0055 §5 — Gate 7c.
-    evpn_events_tx: broadcast::Sender<crate::event::EvpnRouteEvent>,
+    evpn_events_tx: broadcast::Sender<Arc<crate::event::EvpnRouteEvent>>,
     /// Bounded recent EVPN best-path event history for after-the-fact
     /// operator timeline queries. Live streaming still uses
     /// `evpn_events_tx`.
-    evpn_route_event_history: VecDeque<crate::event::EvpnRouteEvent>,
+    evpn_route_event_history: VecDeque<Arc<crate::event::EvpnRouteEvent>>,
     /// Sink for the durable event outbox (ADR-0072). Fires AFTER the
     /// process-local ring + broadcast at every publish site. Defaults
     /// to [`crate::event_sink::NoopRibEventSink`] so callers that
@@ -1165,11 +1165,11 @@ impl RibManager {
             route_events_tx,
             policy_filtered_routes: HashMap::new(),
             export_policy_stats: HashMap::new(),
-            route_event_history: VecDeque::with_capacity(ROUTE_EVENT_HISTORY_CAPACITY),
+            route_event_history: VecDeque::new(),
             next_route_event_id: 1,
             route_event_id_exhausted: false,
             evpn_events_tx,
-            evpn_route_event_history: VecDeque::with_capacity(EVPN_ROUTE_EVENT_HISTORY_CAPACITY),
+            evpn_route_event_history: VecDeque::new(),
             event_sink: std::sync::Arc::new(crate::event_sink::NoopRibEventSink),
             bmp_tx: None,
             metrics,
@@ -2615,7 +2615,8 @@ impl RibManager {
         if self.route_event_history.len() == ROUTE_EVENT_HISTORY_CAPACITY {
             self.route_event_history.pop_front();
         }
-        self.route_event_history.push_back(event.clone());
+        let event = Arc::new(event);
+        self.route_event_history.push_back(Arc::clone(&event));
         self.metrics.set_route_event_history_depth(
             i64::try_from(self.route_event_history.len()).unwrap_or(i64::MAX),
         );
@@ -2629,7 +2630,7 @@ impl RibManager {
         // not load-bearing for correctness; pick the order that
         // avoids the second clone (sink first, then move into
         // broadcast).
-        self.event_sink.publish_route_event(&event);
+        self.event_sink.publish_route_event(event.as_ref());
         let _ = self.route_events_tx.send(event);
     }
 
@@ -2686,10 +2687,11 @@ impl RibManager {
         if self.evpn_route_event_history.len() == EVPN_ROUTE_EVENT_HISTORY_CAPACITY {
             self.evpn_route_event_history.pop_front();
         }
-        self.evpn_route_event_history.push_back(event.clone());
+        let event = Arc::new(event);
+        self.evpn_route_event_history.push_back(Arc::clone(&event));
         // ADR-0072: durable outbox sink fires alongside the legacy
         // broadcast. See `publish_route_event` for the ordering note.
-        self.event_sink.publish_evpn_event(&event);
+        self.event_sink.publish_evpn_event(event.as_ref());
         let _ = self.evpn_events_tx.send(event);
     }
 

@@ -48,9 +48,10 @@ pub struct RouteEvent {
 /// daemon's local-MAC originator — need the full new best to build a
 /// `RemoteMacView` without a follow-up RIB query. Carrying the full
 /// [`EvpnRibRoute`] on the event side keeps the consumer's hot path
-/// allocation-free: path attributes are already `Arc`-shared, so the
-/// per-subscriber broadcast clone copies a `~120` B struct plus a
-/// pointer increment.
+/// allocation-free: the 400 B event is allocated once, then the
+/// history and live broadcast share that allocation through `Arc`.
+/// Each subscriber clone copies one `Arc`; nested path attributes
+/// remain shared, and the hot path still avoids a follow-up query.
 ///
 /// Both `best` and `previous_best` are carried so consumers can derive
 /// per-VNI context (the RFC 8365 §5 raw-24-bit VNI lives in

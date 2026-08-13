@@ -11,6 +11,7 @@ use std::future::Future;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use rustbgpd_rib::{FibInstallCandidate, RibUpdate, RouteOrigin};
@@ -539,7 +540,7 @@ fn kernel_route_drift_wakes(
 
 async fn subscribe_route_events(
     rib_tx: &mpsc::Sender<RibUpdate>,
-) -> Option<broadcast::Receiver<rustbgpd_rib::RouteEvent>> {
+) -> Option<broadcast::Receiver<Arc<rustbgpd_rib::RouteEvent>>> {
     let (reply, rx) = oneshot::channel();
     if rib_tx
         .send(RibUpdate::SubscribeRouteEvents { reply })
@@ -558,7 +559,7 @@ async fn subscribe_route_events(
 }
 
 async fn recv_route_event(
-    rx: &mut Option<broadcast::Receiver<rustbgpd_rib::RouteEvent>>,
+    rx: &mut Option<broadcast::Receiver<Arc<rustbgpd_rib::RouteEvent>>>,
 ) -> Option<()> {
     let Some(rx) = rx.as_mut() else {
         std::future::pending::<()>().await;
@@ -2486,7 +2487,7 @@ mod tests {
     ) -> (
         mpsc::Sender<RibUpdate>,
         Arc<AtomicUsize>,
-        broadcast::Sender<RouteEvent>,
+        broadcast::Sender<Arc<RouteEvent>>,
     ) {
         let (tx, mut rx) = mpsc::channel(8);
         let query_count = Arc::new(AtomicUsize::new(0));
@@ -3559,7 +3560,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let initial = query_count.load(Ordering::SeqCst);
-        events_tx.send(route_event(v4(24))).unwrap();
+        events_tx.send(Arc::new(route_event(v4(24)))).unwrap();
         tokio::time::sleep(ROUTE_EVENT_DEBOUNCE + Duration::from_millis(50)).await;
         tokio::task::yield_now().await;
 
@@ -3812,7 +3813,7 @@ mod tests {
         assert_eq!(query_count.load(Ordering::SeqCst), 1);
 
         tokio::time::sleep(ROUTE_EVENT_DEBOUNCE + Duration::from_millis(50)).await;
-        events_tx.send(route_event(v4(24))).unwrap();
+        events_tx.send(Arc::new(route_event(v4(24)))).unwrap();
         tokio::time::sleep(ROUTE_EVENT_DEBOUNCE / 2).await;
         tokio::task::yield_now().await;
 

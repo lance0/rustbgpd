@@ -2031,12 +2031,49 @@ fn make_evpn_macip(
 
 async fn subscribe_evpn_events(
     tx: &mpsc::Sender<RibUpdate>,
-) -> tokio::sync::broadcast::Receiver<crate::event::EvpnRouteEvent> {
+) -> tokio::sync::broadcast::Receiver<Arc<crate::event::EvpnRouteEvent>> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::SubscribeEvpnRouteEvents { reply: reply_tx })
         .await
         .unwrap();
     reply_rx.await.unwrap()
+}
+
+#[test]
+fn evpn_history_and_live_broadcast_share_arc() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let mut live = manager.evpn_events_tx.subscribe();
+    let route = make_evpn_macip(
+        Ipv4Addr::new(10, 0, 0, 1),
+        [0x02, 0, 0, 0, 0, 1],
+        None,
+        false,
+    );
+    manager.publish_evpn_route_event(crate::event::EvpnRouteEvent {
+        event_type: RouteEventType::Added,
+        key: route.key(),
+        peer: Some(route.peer),
+        previous_peer: None,
+        best: Some(route),
+        previous_best: None,
+        timestamp: "1".to_string(),
+    });
+
+    let broadcast = live.try_recv().unwrap();
+    assert!(Arc::ptr_eq(
+        manager.evpn_route_event_history.back().unwrap(),
+        &broadcast
+    ));
+
+    let (reply, result) = oneshot::channel();
+    manager.handle_query_evpn_route_event_history(None, None, None, &BTreeSet::new(), 0, reply);
+    let mut owned = result.blocking_recv().unwrap();
+    owned[0].timestamp = "caller mutation".to_string();
+    assert_eq!(
+        manager.evpn_route_event_history.back().unwrap().timestamp,
+        "1"
+    );
 }
 
 async fn query_evpn_event_history(
@@ -2291,10 +2328,14 @@ async fn evpn_route_event_best_changed_on_higher_mobility() {
     assert_eq!(event.event_type, crate::event::RouteEventType::BestChanged);
     assert_eq!(event.peer, Some(IpAddr::V4(new_peer)));
     assert_eq!(event.previous_peer, Some(IpAddr::V4(original_peer)));
-    let best = event.best.expect("BestChanged must carry a best path");
+    let best = event
+        .best
+        .as_ref()
+        .expect("BestChanged must carry a best path");
     assert_eq!(best.peer, IpAddr::V4(new_peer));
     let prior = event
         .previous_best
+        .as_ref()
         .expect("BestChanged must carry the prior best path");
     assert_eq!(prior.peer, IpAddr::V4(original_peer));
 
@@ -2357,6 +2398,7 @@ async fn evpn_route_event_withdrawn_on_last_removed() {
     assert!(event.best.is_none(), "Withdrawn must not carry a best");
     let prior = event
         .previous_best
+        .as_ref()
         .expect("Withdrawn must carry the prior best so consumers recover VNI");
     assert_eq!(prior.peer, peer);
 

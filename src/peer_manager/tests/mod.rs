@@ -105,7 +105,7 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
 
 async fn subscribe_session_events(
     tx: &mpsc::Sender<PeerManagerCommand>,
-) -> broadcast::Receiver<SessionEvent> {
+) -> broadcast::Receiver<Arc<SessionEvent>> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::SubscribeSessionEvents { reply: reply_tx })
         .await
@@ -125,7 +125,7 @@ async fn skip_destination_prestage(rib_rx: &mut mpsc::Receiver<RibUpdate>) {
 }
 
 async fn wait_for_session_event(
-    rx: &mut broadcast::Receiver<SessionEvent>,
+    rx: &mut broadcast::Receiver<Arc<SessionEvent>>,
     event_type: SessionLifecycleEventType,
 ) -> SessionLifecycleEvent {
     for _ in 0..20 {
@@ -133,10 +133,10 @@ async fn wait_for_session_event(
             .await
             .expect("session event timeout")
             .expect("session event channel closed");
-        if let SessionEvent::Lifecycle(event) = event
+        if let SessionEvent::Lifecycle(event) = event.as_ref()
             && event.event_type == event_type
         {
-            return event;
+            return event.clone();
         }
     }
     panic!("session event {event_type:?} did not arrive");

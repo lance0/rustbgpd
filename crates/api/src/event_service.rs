@@ -242,7 +242,7 @@ impl proto::event_service_server::EventService for EventService {
                         Ok(event) => {
                             let _subscriber_guard = &route_subscriber_guard;
                             if route_filter.matches_route_event(&event) {
-                                Some(Ok(route_event_to_bgp_event(event)))
+                                Some(Ok(route_event_to_bgp_event(event.as_ref().clone())))
                             } else {
                                 None
                             }
@@ -284,7 +284,7 @@ impl proto::event_service_server::EventService for EventService {
                         Ok(event) => {
                             let _subscriber_guard = &session_subscriber_guard;
                             if session_filter.matches_session_event(&event) {
-                                Some(Ok(session_event_to_bgp_event(event)))
+                                Some(Ok(session_event_to_bgp_event(event.as_ref().clone())))
                             } else {
                                 None
                             }
@@ -326,7 +326,7 @@ impl proto::event_service_server::EventService for EventService {
                         Ok(event) => {
                             let _subscriber_guard = &policy_subscriber_guard;
                             if policy_filter.matches_policy_event(&event) {
-                                Some(Ok(policy_event_to_bgp_event(event)))
+                                Some(Ok(policy_event_to_bgp_event(event.as_ref().clone())))
                             } else {
                                 None
                             }
@@ -442,7 +442,7 @@ impl proto::event_service_server::EventService for EventService {
                         Ok(event) => {
                             let _subscriber_guard = &evpn_subscriber_guard;
                             if evpn_filter.matches_evpn_event(&event) {
-                                Some(Ok(evpn_event_to_bgp_event(event)))
+                                Some(Ok(evpn_event_to_bgp_event(event.as_ref().clone())))
                             } else {
                                 None
                             }
@@ -1015,10 +1015,10 @@ mod tests {
         let mut stream = response.into_inner();
 
         events_tx
-            .send(route_event(
+            .send(Arc::new(route_event(
                 Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            ))
+            )))
             .unwrap();
 
         let event = stream.next().await.unwrap().unwrap();
@@ -1204,11 +1204,11 @@ mod tests {
         let mut stream = response.into_inner();
 
         evpn_events_tx
-            .send(evpn_event(
+            .send(Arc::new(evpn_event(
                 RouteEventType::Added,
                 Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
                 None,
-            ))
+            )))
             .unwrap();
 
         let event = stream.next().await.unwrap().unwrap();
@@ -1825,22 +1825,22 @@ mod tests {
         let mut stream = response.into_inner();
 
         events_tx
-            .send(route_event(
+            .send(Arc::new(route_event(
                 Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)),
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            ))
+            )))
             .unwrap();
         events_tx
-            .send(route_event(
+            .send(Arc::new(route_event(
                 Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-            ))
+            )))
             .unwrap();
         events_tx
-            .send(route_event(
+            .send(Arc::new(route_event(
                 Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            ))
+            )))
             .unwrap();
 
         let event = stream.next().await.unwrap().unwrap();
@@ -1865,16 +1865,16 @@ mod tests {
         let mut stream = response.into_inner();
 
         session_events_tx
-            .send(session_event(
+            .send(Arc::new(session_event(
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
                 SessionLifecycleEventType::Established,
-            ))
+            )))
             .unwrap();
         session_events_tx
-            .send(session_event(
+            .send(Arc::new(session_event(
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 SessionLifecycleEventType::Established,
-            ))
+            )))
             .unwrap();
 
         let event = stream.next().await.unwrap().unwrap();
@@ -1907,16 +1907,16 @@ mod tests {
         let mut stream = response.into_inner();
 
         session_events_tx
-            .send(notification_event(
+            .send(Arc::new(notification_event(
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
                 SessionNotificationEventType::Sent,
-            ))
+            )))
             .unwrap();
         session_events_tx
-            .send(notification_event(
+            .send(Arc::new(notification_event(
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 SessionNotificationEventType::Sent,
-            ))
+            )))
             .unwrap();
 
         let event = stream.next().await.unwrap().unwrap();
@@ -2118,10 +2118,10 @@ mod tests {
         assert_eq!(session_events_tx.receiver_count(), 0);
         assert!(
             session_events_tx
-                .send(session_event(
+                .send(Arc::new(session_event(
                     IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                     SessionLifecycleEventType::Established,
-                ))
+                )))
                 .is_err()
         );
         assert!(stream.next().await.is_none());
@@ -2178,7 +2178,7 @@ mod tests {
             .unwrap();
         let mut stream = response.into_inner();
 
-        policy_events_tx.send(policy_event(None)).unwrap();
+        policy_events_tx.send(Arc::new(policy_event(None))).unwrap();
         let event = stream.next().await.unwrap().unwrap();
         assert_eq!(event.category, proto::EventCategory::Policy as i32);
         assert_eq!(event.event_type, proto::BgpEventType::PolicyChanged as i32);
@@ -2204,7 +2204,7 @@ mod tests {
             .unwrap();
         let mut stream = response.into_inner();
 
-        policy_events_tx.send(policy_event(None)).unwrap();
+        policy_events_tx.send(Arc::new(policy_event(None))).unwrap();
         let event = stream.next().await.unwrap().unwrap();
         assert_eq!(event.category, proto::EventCategory::Policy as i32);
         assert_eq!(event.event_type, proto::BgpEventType::PolicyChanged as i32);
@@ -2225,12 +2225,16 @@ mod tests {
             .unwrap();
         let mut stream = response.into_inner();
 
-        policy_events_tx.send(policy_event(None)).unwrap();
+        policy_events_tx.send(Arc::new(policy_event(None))).unwrap();
         policy_events_tx
-            .send(policy_event(Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))))
+            .send(Arc::new(policy_event(Some(IpAddr::V4(Ipv4Addr::new(
+                10, 0, 0, 2,
+            ))))))
             .unwrap();
         policy_events_tx
-            .send(policy_event(Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))))
+            .send(Arc::new(policy_event(Some(IpAddr::V4(Ipv4Addr::new(
+                10, 0, 0, 1,
+            ))))))
             .unwrap();
 
         let event = stream.next().await.unwrap().unwrap();
@@ -2374,10 +2378,10 @@ mod tests {
 
         for i in 0..32 {
             events_tx
-                .send(route_event(
+                .send(Arc::new(route_event(
                     Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, i), 32)),
                     IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-                ))
+                )))
                 .unwrap();
         }
 
@@ -2409,10 +2413,10 @@ mod tests {
 
         for _ in 0..32 {
             session_events_tx
-                .send(session_event(
+                .send(Arc::new(session_event(
                     IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                     SessionLifecycleEventType::Established,
-                ))
+                )))
                 .unwrap();
         }
 
@@ -2470,7 +2474,7 @@ mod tests {
         let mut stream = response.into_inner();
 
         for _ in 0..32 {
-            policy_events_tx.send(policy_event(None)).unwrap();
+            policy_events_tx.send(Arc::new(policy_event(None))).unwrap();
         }
 
         let event = stream.next().await.unwrap().unwrap();
@@ -2501,11 +2505,11 @@ mod tests {
 
         for _ in 0..32 {
             evpn_events_tx
-                .send(evpn_event(
+                .send(Arc::new(evpn_event(
                     RouteEventType::Added,
                     Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
                     None,
-                ))
+                )))
                 .unwrap();
         }
 
@@ -2586,10 +2590,10 @@ mod tests {
 
         for index in 0..20 {
             events_tx
-                .send(route_event(
+                .send(Arc::new(route_event(
                     Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, index), 32)),
                     IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-                ))
+                )))
                 .unwrap();
         }
 

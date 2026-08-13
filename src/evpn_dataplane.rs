@@ -1132,7 +1132,7 @@ async fn supervisor_loop(
 /// convergence at the old cadence.
 async fn subscribe_evpn_route_events(
     rib_tx: &mpsc::Sender<RibUpdate>,
-) -> Option<broadcast::Receiver<rustbgpd_rib::EvpnRouteEvent>> {
+) -> Option<broadcast::Receiver<Arc<rustbgpd_rib::EvpnRouteEvent>>> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if rib_tx
         .send(RibUpdate::SubscribeEvpnRouteEvents { reply: reply_tx })
@@ -1153,7 +1153,7 @@ async fn subscribe_evpn_route_events(
 /// (poll-only mode), letting the surrounding `select!` service the
 /// other arms.
 async fn recv_evpn_route_event(
-    rx: &mut Option<broadcast::Receiver<rustbgpd_rib::EvpnRouteEvent>>,
+    rx: &mut Option<broadcast::Receiver<Arc<rustbgpd_rib::EvpnRouteEvent>>>,
 ) -> Option<()> {
     let Some(rx) = rx.as_mut() else {
         std::future::pending::<()>().await;
@@ -3913,7 +3913,7 @@ mod tests {
     ) -> (
         mpsc::Sender<RibUpdate>,
         Arc<AtomicUsize>,
-        broadcast::Sender<rustbgpd_rib::EvpnRouteEvent>,
+        broadcast::Sender<Arc<rustbgpd_rib::EvpnRouteEvent>>,
     ) {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
         let query_count = Arc::new(AtomicUsize::new(0));
@@ -4018,7 +4018,7 @@ mod tests {
         assert!(initial.remote_macs.get(vni(100), mac(1)).is_some());
         assert!(initial.remote_macs.get(vni(100), mac(2)).is_none());
 
-        events_tx.send(evpn_route_event(2)).unwrap();
+        events_tx.send(Arc::new(evpn_route_event(2))).unwrap();
 
         // Debounce is 200 ms; 2 s of headroom is generous and still
         // far below the 60 s poll, so a pass proves the event path
@@ -4086,7 +4086,7 @@ mod tests {
         // the supervisor dirty (re-arm semantics — no query per event,
         // nothing queued)…
         for _ in 0..25 {
-            events_tx.send(evpn_route_event(2)).unwrap();
+            events_tx.send(Arc::new(evpn_route_event(2))).unwrap();
         }
         tokio::task::yield_now().await;
         assert_eq!(

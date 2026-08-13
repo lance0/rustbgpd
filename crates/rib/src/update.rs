@@ -1824,7 +1824,7 @@ pub enum RibUpdate {
     /// Subscribe to route change events via broadcast channel.
     SubscribeRouteEvents {
         /// Response channel carrying the broadcast receiver.
-        reply: oneshot::Sender<broadcast::Receiver<RouteEvent>>,
+        reply: oneshot::Sender<broadcast::Receiver<Arc<RouteEvent>>>,
     },
     /// Query recent route change events from the bounded in-memory history.
     QueryRouteEventHistory {
@@ -1850,7 +1850,7 @@ pub enum RibUpdate {
     /// build a `RemoteMacView`.
     SubscribeEvpnRouteEvents {
         /// Response channel carrying the broadcast receiver.
-        reply: oneshot::Sender<broadcast::Receiver<EvpnRouteEvent>>,
+        reply: oneshot::Sender<broadcast::Receiver<Arc<EvpnRouteEvent>>>,
     },
     /// Query recent EVPN best-path change events from the bounded in-memory history.
     QueryEvpnRouteEventHistory {

@@ -1,8 +1,57 @@
 use super::*;
 
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn event_storage_layout_and_lazy_history_capacity_are_pinned() {
+    use std::mem::size_of;
+
+    assert_eq!(size_of::<crate::event::RouteEvent>(), 136);
+    assert_eq!(size_of::<crate::event::EvpnRouteEvent>(), 400);
+    assert_eq!(size_of::<Arc<crate::event::RouteEvent>>(), 8);
+    assert_eq!(size_of::<Arc<crate::event::EvpnRouteEvent>>(), 8);
+
+    let (_tx, rx) = mpsc::channel(1);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    assert_eq!(manager.route_event_history.capacity(), 0);
+    assert_eq!(manager.evpn_route_event_history.capacity(), 0);
+}
+
+#[tokio::test]
+async fn route_history_and_live_broadcast_share_arc_but_queries_are_owned() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let mut live = manager.route_events_tx.subscribe();
+    manager.publish_route_event(crate::event::RouteEvent {
+        event_id: 0,
+        event_type: RouteEventType::Added,
+        prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24)),
+        peer: None,
+        previous_peer: None,
+        target_peer: None,
+        timestamp: "1".to_string(),
+        path_id: 0,
+        reason: "original".to_string(),
+    });
+
+    let broadcast = live.try_recv().unwrap();
+    assert!(Arc::ptr_eq(
+        manager.route_event_history.back().unwrap(),
+        &broadcast
+    ));
+
+    let (reply, result) = oneshot::channel();
+    manager.handle_query_route_event_history(None, None, None, 0, reply);
+    let mut owned = result.await.unwrap();
+    owned[0].reason = "caller mutation".to_string();
+    assert_eq!(
+        manager.route_event_history.back().unwrap().reason,
+        "original"
+    );
+}
+
 async fn subscribe_events(
     tx: &mpsc::Sender<RibUpdate>,
-) -> tokio::sync::broadcast::Receiver<crate::event::RouteEvent> {
+) -> tokio::sync::broadcast::Receiver<Arc<crate::event::RouteEvent>> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::SubscribeRouteEvents { reply: reply_tx })
         .await
