@@ -532,6 +532,38 @@ advertise_svi_mac = true
 }
 
 #[test]
+fn evpn_runtime_diff_uses_only_the_domain_plan_shape_classifier() {
+    let source = include_str!("../mod.rs");
+    assert_eq!(
+        source.matches("validate_supported_plan_shape(").count(),
+        1,
+        "config diff must contain exactly one domain classifier call"
+    );
+    assert!(
+        source.contains("validate_supported_plan_shape(&current, &candidate, &plan).is_ok()"),
+        "config diff must classify the exact generated plan directly"
+    );
+    let helpers: Vec<_> = source
+        .lines()
+        .filter_map(|line| line.strip_prefix("fn evpn_runtime_"))
+        .map(|signature| signature.split(['(', '<']).next().unwrap())
+        .collect();
+    assert_eq!(
+        helpers,
+        [
+            "config_changed",
+            "model_from_config",
+            "candidate_from_config",
+        ],
+        "a config-local EVPN plan-shape ladder must not return"
+    );
+    assert!(
+        !source.contains("EvpnRuntimePlan"),
+        "config diff must not retain the plan type used by the deleted ladder"
+    );
+}
+
+#[test]
 fn evpn_instance_single_add_diff_marks_reload_applied() {
     let without_evi = parse(&evpn_toml_with("")).unwrap();
     let with_evi = parse(&evpn_toml_with(
