@@ -123,9 +123,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Persisted runtime-config owners now fail stop with exit 70 five seconds after
   settlement ambiguity is detected, or when an owner remains unsettled for the
   fixed 30-minute budget plus that grace. Transaction/Apply, Neighbor4, FIB2,
-  PeerGroup4, Policy12, and SIGHUP are wired; observability and final
-  cross-roster recovery proofs remain before LAN-974 is complete. A SIGHUP now
-  retains one cancellation-shielded owner through peer reconciliation,
+  PeerGroup4, Policy12, and SIGHUP are wired with bounded metrics, warnings, and
+  a prestarted fatal clock independent of Tokio and blocked observers. The
+  repeated real-daemon cross-roster matrix and composed recovery proofs cover
+  client detach, acknowledgement loss, restart authority, and exit 70. A SIGHUP
+  now retains one cancellation-shielded owner through peer reconciliation,
   snapshot/persister adoption, tracing, and dial-out finalization; lost
   acknowledgement fences instead of inferring success. Shutdown closes and
   drains mutation admission, then awaits an owned reload before checkpointing

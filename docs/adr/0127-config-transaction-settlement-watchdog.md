@@ -1,7 +1,8 @@
 # ADR-0127: Persisted Runtime-Config Settlement Watchdog
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-11
+**Accepted:** 2026-08-13
 
 ## Context
 
@@ -29,10 +30,10 @@ That precursor does not bound rollback, confirm, abort, gNMI, or auto-revert
 before ownership and does not close the underlying settlement-liveness issue.
 
 This ADR defines the post-ownership contract. Transaction-watchdog substrate
-exists in current source, but Proposed status does not claim the complete owner
-roster, observability, or required cross-roster recovery proof has shipped.
+and the complete owner roster, observability, and composed recovery proof have
+shipped.
 
-### Implementation status (2026-08-12)
+### Implementation and acceptance status (2026-08-13)
 
 The shared watchdog, readiness/admission fence, Linux exit-70 terminal action,
 and typed settlement wiring have shipped for transaction/Apply owners,
@@ -42,12 +43,21 @@ and dial-out acknowledgement. Its accepted authority may be complete or an
 explicit known-partial runtime projection; lost acknowledgement or a
 non-authoritative reconcile fences instead of guessing.
 
-Shutdown closes coordinator admission, physically drains queued owners, and
+One prestarted OS fatal-clock thread enforces the immutable 30-minute budget and
+five-second grace independently of Tokio, propagation, logging, metrics, and
+retained-resource locks. The shipped telemetry exposes one coherent bounded
+`active`, `elapsed_seconds`, `budget_seconds`, and `fail_stops_total` tuple with
+closed kind/phase/attachment/reason labels, warnings at 15/25/29 minutes, and
+the half-budget alert.
+
+Shutdown closes coordinator admission, rejects queued owners, and physically
+drains the current owner. In the SIGHUP case, it
 awaits an already-owned SIGHUP before checkpointing or actor teardown. Real
 daemon faults prove reconcile and bridge/persister acknowledgement loss make
-readiness red, reject a second mutation, and exit 70. The bounded metrics/log
-observability described below and final cross-roster recovery proofs remain
-incomplete, so this ADR stays Proposed.
+readiness red, reject a second mutation, and exit 70. The same drain rule
+applies to any current owner. The systemd unit keeps exit 70 restartable,
+rate-limits restarts, and gives an explicit stop 32 minutes to settle. The
+representative real-daemon matrix and composed evidence below have shipped.
 
 ### Typed publication and recovery classification
 
@@ -154,9 +164,10 @@ arms the watchdog before any further await or side effect.
 ### Independent terminal watchdog
 
 The 30-minute budget, five-second grace, and exit status 70 are implemented for
-the shipped partial roster, but remain Proposed as complete-roster acceptance
+the complete persisted-owner roster and enforced by the shared watchdog. The
+proposal treated them as complete-roster acceptance
 criteria. Existing watchdog code does not by itself satisfy this amended
-contract or its gates.
+contract or its gates. The composed evidence ledger does.
 
 An owned operation gets one fixed, non-resettable 30-minute monotonic
 settlement budget. This is the latest normal settlement deadline; independently
@@ -174,7 +185,7 @@ waiting for ownership, 30 minutes owned, and 5 seconds of fail-stop grace.
 One process-wide Linux OS thread owns all terminal clocks. After the grace
 below it invokes audited `libc::_exit(70)`, a no-handler process primitive.
 This is a deliberate Linux implementation contract, not a portable-standard
-claim, and requires owner acceptance with this ADR. Before that call, the
+claim, and is accepted by this ADR. Before that call, the
 user-space terminal wrapper performs no allocation, lock acquisition, tracing,
 filesystem I/O, async work, handler dispatch, or unwinding; kernel descriptor
 and process teardown can still occur and are outside that guarantee. A
@@ -307,40 +318,67 @@ nonzero fail-stop path; it is not converted to a successful shutdown. All
 queued coordinator waiters are rejected before teardown and cannot begin after
 the owner settles or dies.
 
-### Required proof before acceptance
+### Acceptance evidence and proof design
 
-Implementation is not complete until deterministic tests cover the phase and
-recovery contract:
+Acceptance uses the composed evidence ledger below. This numbered checklist is
+the original design taxonomy, not a claim that every entry-path/failure pairing
+ran as a real-daemon scenario. Its verbs describe proposed evidence goals:
 
-1. An injected deterministic watchdog driver holds each actor and persistence
+1. **Fatal-clock isolation:** proposed deterministic control of each actor and persistence
    reply used by every persisted owner family. At 29 minutes 59 seconds the
    owner, coordinator, admission, and watchdog remain live; at 30 minutes the
    state becomes `RecoveryFenced` exactly once. Tokio paused time cannot
    drive an OS-thread condition variable, so real OS-thread and subprocess
-   tests must separately prove wake-up and terminal behavior.
-2. Caller-`JoinHandle` wait/drop tests prove the operation remains owned/running.
-   Executor `JoinError`, panic/unwind/task-abort, and owner-guard-drop tests prove
+   wake-up and terminal evidence were separate risk dimensions.
+2. **Cancellation ownership:** proposed caller-`JoinHandle` wait/drop and
+   executor `JoinError`, panic/unwind/task-abort, and owner-guard-drop coverage;
    immediate fencing before coordinator/permit release, OS thread still armed,
    and no new admission.
-3. Adversarial tests stall owned preflight, first mutation, persistence before
+3. **Phase/authority ambiguity:** proposed stalls in owned preflight, first mutation, persistence before
    and after atomic publication, finalization, rollback, confirm, abort,
-   auto-revert, and SIGHUP reconcile/bridge adoption. Each produces either a
+   auto-revert, and SIGHUP reconcile/bridge adoption, with each outcome either a
    proved `clean_settled` result or the same fail-stop transition.
-4. Real-binary subprocess tests prove readiness goes red, queued/new mutations
+4. **Process fencing:** proposed subprocess coverage where readiness goes red
+   and queued/new mutations
    reject, exit 70 occurs by the grace, and no second transaction begins.
-5. Restart/fault tests cover unconfirmed persistence; v3 before, after, and
+5. **Restart authority:** proposed fault coverage for unconfirmed persistence and
+   v3 before, after, and
    ambiguous locator publication; confirmed Apply/confirm/abort/auto-revert;
    nonterminal locator unlink/fsync failure; and stalled post-terminal cleanup.
-   They assert config and authority state, watchdog disarm, and lock release.
-6. Fault injection must prove the watchdog still exits when the Tokio runtime,
+   Config authority, watchdog disarm, and lock release were included dimensions.
+6. **Independent blockage risks:** the Tokio runtime,
    transaction task, relevant actor mailbox, persistence acknowledgement, and
-   graceful-shutdown path are independently stalled.
+   graceful-shutdown path independently stalled.
 
-The test matrix must exercise every roster family with a finite pairwise matrix
-of owner family, phase, and failure class. Each family appears in normal,
+The original design called for every roster family to appear in a finite
+pairwise matrix of owner family, phase, and failure class, including normal,
 rollback where applicable, lost-ack, and shutdown pairings, but no full
 owner-entry-path by phase by failure-class Cartesian product is required. A
-single synthetic oneshot test is necessary but insufficient.
+single synthetic oneshot test was considered necessary but insufficient.
+
+The accepted composed ledger combines shared kernel/race/cancellation/fatal-
+clock unit and subprocess tests; a source-closed roster and phase inventory;
+family-specific typed/unit authority and rollback tests; and representative
+real-daemon recovery. PR [#1642](https://github.com/lance0/rustbgpd/pull/1642)
+records that representative matrix: Apply transaction client detach plus a
+queued second owner, detached auto-revert, PeerGroup actor acceptance, and
+Policy staged commit, each repeated three times (12 scenarios). Every row proves
+its exact phase, attachment, budget-expiry metrics, readiness fence, strict
+shutdown resistance, exit 70, durable authority, and clean restart. Its local
+receipt is representative, not a universal per-family real-daemon matrix, and
+also passed the bounded matrix, composition inventory, persistence
+fail-stop, commit-confirm, and strict workspace Clippy gates.
+
+The composition inventory pins repeated SIGHUP acknowledgement loss, Neighbor
+pre/post-rename authority, v3 commit-confirm crash/restart, production
+executor-loss exit, and FIB unit plus M58 CRUD/restart evidence. Separately, the
+pre-matrix main `3756b1cef47dd1020c1feb13f28acd5cad342e71` hosted Actions run
+[31694852480](https://github.com/lance0/rustbgpd/actions/runs/31694852480)
+passed M43's 25 live rotations and 21 crash/restart cycles and M58's 27 FIB
+CRUD/restart checks. It is supporting composition evidence, not a hosted
+`#1642` matrix or full-suite receipt.
+Post-matrix main `a4f65ec23486016a2f73455b07bfb6f724e9ac1e` CI, Kernel,
+and Interop runs also completed successfully.
 
 ### Rejected alternatives
 
@@ -367,6 +405,7 @@ single synthetic oneshot test is necessary but insufficient.
 - Systemd and other supervisors must treat exit 70 as failure and restartable.
   Deployment documentation and shipped supervisor examples must be updated as
   part of implementation; this ADR makes no portable supervisor claim.
+  The shipped unit and deployment documentation satisfy this requirement.
 - The bound is deliberately fail-stop, so BGP sessions can be interrupted after
   a severe control-plane ambiguity. Supervision and graceful-restart behavior
   mitigate but do not erase that operational cost.
@@ -384,5 +423,4 @@ single synthetic oneshot test is necessary but insufficient.
   bound; it does not weaken either contract.
 - No public API or protobuf change is required. Internal readiness wiring,
   mutation fencing, supervision, metrics, and subprocess recovery tests are
-  required before this ADR can be accepted or the underlying issue called
-  fixed.
+  the accepted contract's evidence and enforcement mechanisms.

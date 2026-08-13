@@ -1946,6 +1946,12 @@ branch is between features.
   abort or timer expiry rolls back by applying the captured pre-commit runtime
   snapshot through the same transaction executor. Persisted runtime config
   mutators are fenced while a confirmed transaction is applying or pending.
+- [x] **Persisted runtime-config settlement watchdog (ADR-0127).**
+  Every transaction, SIGHUP, Neighbor4, FIB2, PeerGroup4, and Policy12 owner has
+  one typed phase-aware settlement record, bounded telemetry, and an independent
+  30-minute-plus-five-second exit-70 fail-stop. Repeated real-daemon recovery
+  proofs cover client detach, queued-owner rejection, persistence authority,
+  commit-confirm restart, and supervised shutdown.
 - [x] **`rbgp` commit-confirmed workflow.**
   The CLI can now run safe deploys end to end: `config apply --confirm-id
   --confirm-timeout`, `config status`, `config confirm`, and `config abort`
