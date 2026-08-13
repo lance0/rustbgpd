@@ -73,6 +73,24 @@ async fn dispatch_rib_step<T, E>(
     }
 }
 
+async fn dispatch_rib_mutation_step<T, E>(
+    rib_tx: &mpsc::Sender<rustbgpd_rib::RibUpdate>,
+    progress: &SighupMutationProgress<'_>,
+    build: impl FnOnce(oneshot::Sender<Result<T, E>>) -> rustbgpd_rib::RibUpdate,
+) -> ReloadDispatch<Result<T, E>, String> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let permit = match rib_tx.reserve().await {
+        Ok(permit) => permit,
+        Err(error) => return ReloadDispatch::NotAccepted(error.to_string()),
+    };
+    progress.begin_mutation();
+    permit.send(build(reply_tx));
+    match reply_rx.await {
+        Ok(result) => ReloadDispatch::Replied(result),
+        Err(_) => ReloadDispatch::AcknowledgementLost,
+    }
+}
+
 /// Preflight `config`'s outbound prefix maxima across every live peer and
 /// hold them as an inactive prepared transaction (ADR-0113).
 ///
@@ -277,6 +295,7 @@ impl std::fmt::Display for ReloadStepError {
 pub(crate) struct SighupReloadPlan {
     pub(crate) baseline_runtime: Config,
     pub(crate) desired: Arc<AcceptedConfigSnapshot>,
+    pub(crate) accepted_effect: bool,
 }
 
 #[derive(Clone)]
@@ -348,17 +367,20 @@ struct SighupMutationProgress<'a> {
 }
 
 impl<'a> SighupMutationProgress<'a> {
-    fn new(operation: Option<&'a OwnedRuntimeConfigOperation>) -> Self {
+    fn new(operation: Option<&'a OwnedRuntimeConfigOperation>, accepted_effect: bool) -> Self {
         Self {
             operation,
-            accepted_effect: false,
+            accepted_effect,
+        }
+    }
+
+    fn begin_mutation(&self) {
+        if let Some(operation) = self.operation {
+            operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
         }
     }
 
     fn mark_accepted_effect(&mut self) {
-        if let Some(operation) = self.operation {
-            operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
-        }
         self.accepted_effect = true;
     }
 }
@@ -898,9 +920,10 @@ async fn mark_tcp_ao_failed(
     generation: TcpAoRotationGeneration,
     operation: TcpAoRotationOperation,
     error: String,
+    progress: &SighupMutationProgress<'_>,
 ) {
     let result = step_result(
-        dispatch_peer_step(peer_mgr_tx, |reply| {
+        dispatch_actor_mutation_step(peer_mgr_tx, progress, |reply| {
             PeerManagerCommand::MarkTcpAoRotationFailed {
                 generation,
                 operation,
@@ -989,6 +1012,24 @@ async fn dispatch_peer_step<E>(
     dispatch_actor_step(peer_mgr_tx, build).await
 }
 
+async fn dispatch_actor_mutation_step<T>(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    progress: &SighupMutationProgress<'_>,
+    build: impl FnOnce(oneshot::Sender<T>) -> PeerManagerCommand,
+) -> ReloadDispatch<T, String> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let permit = match peer_mgr_tx.reserve().await {
+        Ok(permit) => permit,
+        Err(error) => return ReloadDispatch::NotAccepted(error.to_string()),
+    };
+    progress.begin_mutation();
+    permit.send(build(reply_tx));
+    match reply_rx.await {
+        Ok(result) => ReloadDispatch::Replied(result),
+        Err(_) => ReloadDispatch::AcknowledgementLost,
+    }
+}
+
 fn step_result<E: std::fmt::Display>(
     dispatch: ReloadDispatch<Result<(), E>, String>,
 ) -> Result<(), ReloadStepError> {
@@ -1005,8 +1046,8 @@ async fn peer_step<E: std::fmt::Display>(
     progress: &mut SighupMutationProgress<'_>,
     build: impl FnOnce(oneshot::Sender<Result<(), E>>) -> PeerManagerCommand,
 ) -> Result<(), ReloadStepError> {
-    let dispatch = dispatch_peer_step(peer_mgr_tx, build).await;
-    if !matches!(dispatch, ReloadDispatch::NotAccepted(_)) {
+    let dispatch = dispatch_actor_mutation_step(peer_mgr_tx, progress, build).await;
+    if matches!(dispatch, ReloadDispatch::Replied(Ok(()))) {
         progress.mark_accepted_effect();
     }
     step_result(dispatch)
@@ -1025,7 +1066,7 @@ async fn catalog_step(
     progress: &mut SighupMutationProgress<'_>,
     mutation: OwnedCatalogMutation,
 ) -> Result<(), OwnedStepFailure> {
-    match dispatch_actor_step(peer_mgr_tx, |reply| {
+    match dispatch_actor_mutation_step(peer_mgr_tx, progress, |reply| {
         PeerManagerCommand::OwnedCatalogMutation { mutation, reply }
     })
     .await
@@ -1044,19 +1085,15 @@ async fn catalog_step(
             error.to_string(),
         ))),
         ReloadDispatch::Replied(OwnedCatalogMutationOutcome::CompensationAmbiguous(error)) => {
-            progress.mark_accepted_effect();
             Err(OwnedStepFailure::Fenced {
                 error: ReloadStepError::Rejected(error.to_string()),
                 reason: RuntimeConfigFenceReason::KnownDivergence,
             })
         }
-        ReloadDispatch::AcknowledgementLost => {
-            progress.mark_accepted_effect();
-            Err(OwnedStepFailure::Fenced {
-                error: ReloadStepError::AcknowledgementLost,
-                reason: RuntimeConfigFenceReason::AcknowledgementLost,
-            })
-        }
+        ReloadDispatch::AcknowledgementLost => Err(OwnedStepFailure::Fenced {
+            error: ReloadStepError::AcknowledgementLost,
+            reason: RuntimeConfigFenceReason::AcknowledgementLost,
+        }),
     }
 }
 
@@ -1088,9 +1125,8 @@ async fn hot_peer_step(
     progress: &mut SighupMutationProgress<'_>,
     config: PeerManagerNeighborConfig,
 ) -> Result<(), OwnedStepFailure> {
-    match dispatch_actor_step(peer_mgr_tx, |reply| PeerManagerCommand::HotUpdatePeer {
-        config,
-        reply,
+    match dispatch_actor_mutation_step(peer_mgr_tx, progress, |reply| {
+        PeerManagerCommand::HotUpdatePeer { config, reply }
     })
     .await
     {
@@ -1105,19 +1141,15 @@ async fn hot_peer_step(
             OwnedStepFailure::Partial(ReloadStepError::Rejected(error.to_string())),
         ),
         ReloadDispatch::Replied(OwnedHotUpdatePeerOutcome::KnownDivergence(error)) => {
-            progress.mark_accepted_effect();
             Err(OwnedStepFailure::Fenced {
                 error: ReloadStepError::Rejected(error.to_string()),
                 reason: RuntimeConfigFenceReason::KnownDivergence,
             })
         }
-        ReloadDispatch::AcknowledgementLost => {
-            progress.mark_accepted_effect();
-            Err(OwnedStepFailure::Fenced {
-                error: ReloadStepError::AcknowledgementLost,
-                reason: RuntimeConfigFenceReason::AcknowledgementLost,
-            })
-        }
+        ReloadDispatch::AcknowledgementLost => Err(OwnedStepFailure::Fenced {
+            error: ReloadStepError::AcknowledgementLost,
+            reason: RuntimeConfigFenceReason::AcknowledgementLost,
+        }),
     }
 }
 
@@ -1136,7 +1168,7 @@ fn listener_mutation_step<T>(
     dispatch: ReloadDispatch<std::io::Result<T>, std::io::Error>,
     progress: &mut SighupMutationProgress<'_>,
 ) -> Result<T, ReloadStepError> {
-    if !matches!(dispatch, ReloadDispatch::NotAccepted(_)) {
+    if matches!(dispatch, ReloadDispatch::Replied(Ok(_))) {
         progress.mark_accepted_effect();
     }
     listener_step(dispatch)
@@ -1830,6 +1862,7 @@ pub(crate) async fn reload_config(
         SighupReloadPlan {
             baseline_runtime: current.clone(),
             desired,
+            accepted_effect: false,
         },
         live_grpc_tcp,
         live_grpc_uds,
@@ -1861,7 +1894,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
 ) -> SighupReloadOutcome {
     let current = &plan.baseline_runtime;
     let desired_snapshot = plan.desired;
-    let mut progress = SighupMutationProgress::new(operation);
+    let mut progress = SighupMutationProgress::new(operation, plan.accepted_effect);
     // LAN-305: parse dataset contents against the running binding schema, but
     // stage changed data and refresh errors on detached candidate handles.
     // Shared live handles are committed only after the complete no-side-effect
@@ -2047,6 +2080,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 plan.generation,
                 plan.operation,
                 error.to_string(),
+                &progress,
             )
             .await;
             error!(error = %error, "TCP-AO generation rejected during complete listener kernel preflight");
@@ -2057,9 +2091,21 @@ pub(crate) async fn reload_config_with_tcp_ao(
             return preflight_dispatch_failure("tcp_ao.peer_preflight", error);
         }
         let listener_apply = match plan.operation {
-            TcpAoRotationOperation::AddOnly => listener.apply_add_only(desired_listener).await,
-            TcpAoRotationOperation::Selection => listener.begin_selection(desired_listener).await,
-            TcpAoRotationOperation::Delete => listener.apply_delete(desired_listener).await,
+            TcpAoRotationOperation::AddOnly => {
+                listener
+                    .apply_add_only(desired_listener, || progress.begin_mutation())
+                    .await
+            }
+            TcpAoRotationOperation::Selection => {
+                listener
+                    .begin_selection(desired_listener, || progress.begin_mutation())
+                    .await
+            }
+            TcpAoRotationOperation::Delete => {
+                listener
+                    .apply_delete(desired_listener, || progress.begin_mutation())
+                    .await
+            }
         };
         if let Err(error) = listener_mutation_step(listener_apply, &mut progress) {
             mark_tcp_ao_failed(
@@ -2067,6 +2113,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 plan.generation,
                 plan.operation,
                 error.to_string(),
+                &progress,
             )
             .await;
             error!(error = %error, "TCP-AO generation failed on listener; retry the identical generation unless the error reports failed exact prior-inventory restoration, in which case restart rustbgpd");
@@ -2082,7 +2129,9 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 && matches!(&error, ReloadStepError::Rejected(message) if message.starts_with(crate::peer_manager::TCP_AO_AWAITING_PEER_PREFIX))
             {
                 let marker = listener
-                    .mark_awaiting_peer(plan.generation, error.to_string())
+                    .mark_awaiting_peer(plan.generation, error.to_string(), || {
+                        progress.begin_mutation();
+                    })
                     .await;
                 if matches!(&marker, ReloadDispatch::Replied(Ok(()))) {
                     info!(error = %error, generation = plan.generation.as_u64(), "TCP-AO successor selected; peer-use observation remains pending until a later identical SIGHUP");
@@ -2105,7 +2154,9 @@ pub(crate) async fn reload_config_with_tcp_ao(
             }
             if let Err(marker_error) = listener_step(
                 listener
-                    .mark_dependent_failure(plan.generation, error.to_string())
+                    .mark_dependent_failure(plan.generation, error.to_string(), || {
+                        progress.begin_mutation();
+                    })
                     .await,
             ) {
                 warn!(error = %marker_error, "TCP-AO listener dependent-failure marker was not acknowledged; staged generation remains globally uncommitted");
@@ -2119,13 +2170,18 @@ pub(crate) async fn reload_config_with_tcp_ao(
             return fenced_reload_failure("tcp_ao.peer_apply", error, reason);
         }
         if plan.operation == TcpAoRotationOperation::Selection
-            && let Err(error) = listener_step(listener.finalize_selection(plan.generation).await)
+            && let Err(error) = listener_step(
+                listener
+                    .finalize_selection(plan.generation, || progress.begin_mutation())
+                    .await,
+            )
         {
             mark_tcp_ao_failed(
                 peer_mgr_tx,
                 plan.generation,
                 plan.operation,
                 error.to_string(),
+                &progress,
             )
             .await;
             error!(error = %error, "TCP-AO session cohort observed successor use, but listener metadata commit failed; retrying the identical generation is required");
@@ -2136,13 +2192,17 @@ pub(crate) async fn reload_config_with_tcp_ao(
             };
             return fenced_reload_failure("tcp_ao.listener_finalize", error, reason);
         }
-        if let Err(error) = listener_step(listener.acknowledge_global_commit(plan.generation).await)
-        {
+        if let Err(error) = listener_step(
+            listener
+                .acknowledge_global_commit(plan.generation, || progress.begin_mutation())
+                .await,
+        ) {
             mark_tcp_ao_failed(
                 peer_mgr_tx,
                 plan.generation,
                 plan.operation,
                 error.to_string(),
+                &progress,
             )
             .await;
             error!(error = %error, "TCP-AO generation reached sessions but listener global commit acknowledgement failed; retrying the same immutable generation is required");
@@ -2185,7 +2245,9 @@ pub(crate) async fn reload_config_with_tcp_ao(
         if current_inventory != desired_inventory {
             let (md5_keys, ttl_security) = desired_inventory;
             if let Err(error) = listener_mutation_step(
-                listener.replace_inbound_auth(md5_keys, ttl_security).await,
+                listener
+                    .replace_inbound_auth(md5_keys, ttl_security, || progress.begin_mutation())
+                    .await,
                 &mut progress,
             ) {
                 error!(
@@ -2210,8 +2272,13 @@ pub(crate) async fn reload_config_with_tcp_ao(
     new_config.policy.dataset_events = desired_config.policy.dataset_events.clone();
 
     if let Some(apply) = evpn_runtime_apply {
+        let evpn_operation = operation.cloned();
         let attempt = apply
-            .apply_config_if_changed(&new_config, evpn_runtime_changed)
+            .apply_config_if_changed(&new_config, evpn_runtime_changed, move || {
+                if let Some(operation) = evpn_operation.as_ref() {
+                    operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+                }
+            })
             .await;
         match attempt.terminal {
             EvpnRuntimeReloadTerminal::Applied(result) => {
@@ -2487,7 +2554,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
             );
         }
 
-        let activation = dispatch_rib_step(rib_tx, |reply| {
+        let activation = dispatch_rib_mutation_step(rib_tx, &progress, |reply| {
             rustbgpd_rib::RibUpdate::ApplyOutboundPrefixLimits {
                 txn,
                 activate: true,
@@ -2557,15 +2624,16 @@ pub(crate) async fn reload_config_with_tcp_ao(
         // command channel and awaited, so it is applied before every
         // subsequent step. A send failure means the peer manager is gone and
         // returns the authority accumulated before this step.
-        let outcome =
-            dispatch_actor_step(peer_mgr_tx, |reply| PeerManagerCommand::SyncExplainConfig {
+        let outcome = dispatch_actor_mutation_step(peer_mgr_tx, &progress, |reply| {
+            PeerManagerCommand::SyncExplainConfig {
                 enabled: new_config.policy.explain.enabled,
                 cache_size: new_config.policy.explain.cache_size,
                 reject_retention_enabled: new_config.policy.reject_retention.enabled,
                 reject_retention_capacity: new_config.policy.reject_retention.capacity,
                 reply,
-            })
-            .await;
+            }
+        })
+        .await;
         match outcome {
             ReloadDispatch::Replied(()) => {
                 progress.mark_accepted_effect();
@@ -2665,6 +2733,9 @@ pub(crate) async fn reload_config_with_tcp_ao(
     // fallible peer-manager registry/snapshot step has succeeded. Commit the
     // staged contents/errors now, then publish honest snapshot bookkeeping and
     // dependency-scoped refreshes. Its acknowledgement is part of the owner.
+    if dataset_commit_pending {
+        progress.begin_mutation();
+    }
     dataset_commit.commit();
     if dataset_commit_pending {
         progress.mark_accepted_effect();
@@ -2676,7 +2747,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
     working_config.policy.dataset_bindings = new_config.policy.dataset_bindings.clone();
     let dataset_events = &new_config.policy.dataset_events;
     if !dataset_events.swapped.is_empty() || !dataset_events.failed.is_empty() {
-        let outcome = dispatch_actor_step(peer_mgr_tx, |reply| {
+        let outcome = dispatch_actor_mutation_step(peer_mgr_tx, &progress, |reply| {
             PeerManagerCommand::RefreshDatasetDependents {
                 swapped: dataset_events.swapped.clone(),
                 failed: dataset_events.failed.clone(),
@@ -3212,6 +3283,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                     );
                 }
             };
+            progress.begin_mutation();
             permit.send(PeerManagerCommand::ReconcilePeers {
                 added: resolve(&diff.added),
                 removed: diff.removed.clone(),
@@ -3407,6 +3479,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                         );
                     }
                 };
+                progress.begin_mutation();
                 permit.send(FibRuntimeCommand::OwnedReplaceTables {
                     tables: new_config.fib_tables.clone(),
                     reply: reply_tx,
@@ -4656,11 +4729,10 @@ originator_ip = "10.0.0.1"
     )]
     async fn reload_fences_decomposed_evpn_failure_before_later_command() {
         // #268: an ES delete + its (surviving) member L2VNI redefine + a new
-        // L2VNI add in ONE SIGHUP. The converge of the mixed whole rejects it
-        // (scripted `Unsupported`, as the real dispatch would), and the
-        // decomposer commits the delete, then the redefine fails after
-        // effects and pins the coordinator. The reload must fence without
-        // dispatching the later honor-graceful-shutdown mutation.
+        // L2VNI add in ONE SIGHUP. Pure shape planning decomposes the mixed
+        // whole before mutation begins; the delete commits, then the redefine
+        // fails after effects and pins the coordinator. The reload must fence
+        // without dispatching the later honor-graceful-shutdown mutation.
         let path = unique_temp_path("reload-evpn-decomposed-mixed");
         std::fs::write(
             &path,
@@ -4692,11 +4764,6 @@ originator_ip = "10.0.0.1"
         let (apply, coordinator) = evpn_reload_apply_sequence(
             &initial,
             vec![
-                Err(
-                    crate::evpn_runtime_converger::DaemonEvpnRuntimeConvergeError::Unsupported(
-                        "mixed shape rejected by the dispatch".to_string(),
-                    ),
-                ),
                 Ok(()),
                 Err(
                     crate::evpn_runtime_converger::DaemonEvpnRuntimeConvergeError::Failed(
@@ -5488,6 +5555,7 @@ hold_time = 90
             SighupReloadPlan {
                 baseline_runtime: current,
                 desired: AcceptedConfigSnapshot::from_config_for_test(desired),
+                accepted_effect: false,
             },
             None,
             None,
@@ -6140,7 +6208,7 @@ hold_time = 90
                     CatalogMutationError::internal("injected ambiguous compensation"),
                 ));
             });
-            let mut progress = SighupMutationProgress::new(None);
+            let mut progress = SighupMutationProgress::new(None, false);
             assert!(matches!(
                 catalog_step(&tx, &mut progress, mutation).await,
                 Err(OwnedStepFailure::Fenced {
@@ -6168,7 +6236,7 @@ hold_time = 90
                 };
                 drop(reply);
             });
-            let mut progress = SighupMutationProgress::new(None);
+            let mut progress = SighupMutationProgress::new(None, false);
             assert!(matches!(
                 catalog_step(&tx, &mut progress, mutation).await,
                 Err(OwnedStepFailure::Fenced {
@@ -6176,6 +6244,40 @@ hold_time = 90
                     ..
                 })
             ));
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_and_compensated_catalog_outcomes_do_not_claim_authority() {
+        for outcome in [
+            OwnedCatalogMutationOutcome::RejectedNoEffect(CatalogMutationError::internal(
+                "injected rejection",
+            )),
+            OwnedCatalogMutationOutcome::FullyCompensated(CatalogMutationError::internal(
+                "injected compensation",
+            )),
+        ] {
+            let (tx, mut rx) = mpsc::channel(1);
+            tokio::spawn(async move {
+                let Some(PeerManagerCommand::OwnedCatalogMutation { reply, .. }) = rx.recv().await
+                else {
+                    panic!("expected owned catalog mutation");
+                };
+                let _ = reply.send(outcome);
+            });
+            let mut progress = SighupMutationProgress::new(None, false);
+            assert!(matches!(
+                catalog_step(
+                    &tx,
+                    &mut progress,
+                    OwnedCatalogMutation::DeletePolicy {
+                        name: "rejected".to_string(),
+                    },
+                )
+                .await,
+                Err(OwnedStepFailure::Partial(_))
+            ));
+            assert!(!progress.accepted_effect);
         }
     }
 
@@ -6188,7 +6290,7 @@ hold_time = 90
             };
             drop(reply);
         });
-        let mut progress = SighupMutationProgress::new(None);
+        let mut progress = SighupMutationProgress::new(None, false);
         let config = load_config_from_toml("hot-reply-loss", baseline_toml());
         let resolved = config.resolved_neighbors().unwrap().remove(0);
         assert!(matches!(
@@ -6891,7 +6993,7 @@ tcp_ao = [
         let mut desired = Config::load_toml_with_diagnostics(&desired_toml, "desired").unwrap();
         desired.file_path = Some(PathBuf::from("/operator/candidate.toml"));
         let desired_snapshot = AcceptedConfigSnapshot::from_config_for_test(desired.clone());
-        let mut progress = SighupMutationProgress::new(None);
+        let mut progress = SighupMutationProgress::new(None, false);
         progress.mark_accepted_effect();
         let detail = format!(
             "{} peer 10.0.0.2 has not observed successor traffic",
@@ -6941,7 +7043,7 @@ tcp_ao = [
     fn tcp_ao_awaiting_peer_marker_uncertainty_still_recovery_fences() {
         let current = Config::load_toml_with_diagnostics(baseline_toml(), "current").unwrap();
         let desired = AcceptedConfigSnapshot::from_config_for_test(current.clone());
-        let mut progress = SighupMutationProgress::new(None);
+        let mut progress = SighupMutationProgress::new(None, false);
         progress.mark_accepted_effect();
         let awaiting = || {
             ReloadStepError::Rejected(format!(

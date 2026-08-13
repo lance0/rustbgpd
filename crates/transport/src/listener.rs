@@ -303,11 +303,15 @@ pub enum ReloadDispatch<T, E> {
 }
 
 impl TcpAoListenerHandle {
-    async fn dispatch<T>(
+    async fn dispatch<T, F>(
         &self,
         build: impl FnOnce(oneshot::Sender<std::io::Result<T>>) -> TcpAoListenerCommand,
         operation: &'static str,
-    ) -> ReloadDispatch<std::io::Result<T>, std::io::Error> {
+        before_dispatch: F,
+    ) -> ReloadDispatch<std::io::Result<T>, std::io::Error>
+    where
+        F: FnOnce(),
+    {
         let deadline = tokio::time::Instant::now() + TCP_AO_ROTATION_CONTROL_TIMEOUT;
         let permit = match tokio::time::timeout_at(deadline, self.tx.reserve()).await {
             Ok(Ok(permit)) => permit,
@@ -325,7 +329,9 @@ impl TcpAoListenerHandle {
             }
         };
         let (reply, response) = oneshot::channel();
-        permit.send(build(reply));
+        let command = build(reply);
+        before_dispatch();
+        permit.send(command);
         match tokio::time::timeout_at(deadline, response).await {
             Ok(Ok(result)) => ReloadDispatch::Replied(result),
             Ok(Err(_)) | Err(_) => ReloadDispatch::AcknowledgementLost,
@@ -346,6 +352,7 @@ impl TcpAoListenerHandle {
         self.dispatch(
             |reply| TcpAoListenerCommand::PreflightAddOnly { desired, reply },
             "TCP-AO listener preflight",
+            || {},
         )
         .await
     }
@@ -358,13 +365,18 @@ impl TcpAoListenerHandle {
     /// Returns an error when the listener task is unavailable or times out,
     /// the candidate is not a strict add-only successor, an MKT cannot be
     /// installed, or the complete kernel inventory cannot be verified.
-    pub async fn apply_add_only(
+    pub async fn apply_add_only<F>(
         &self,
         desired: TcpAoListenerGeneration,
-    ) -> ReloadDispatch<std::io::Result<TcpAoRotationStatus>, std::io::Error> {
+        before_dispatch: F,
+    ) -> ReloadDispatch<std::io::Result<TcpAoRotationStatus>, std::io::Error>
+    where
+        F: FnOnce(),
+    {
         self.dispatch(
             |reply| TcpAoListenerCommand::ApplyAddOnly { desired, reply },
             "TCP-AO listener rotation",
+            before_dispatch,
         )
         .await
     }
@@ -383,6 +395,7 @@ impl TcpAoListenerHandle {
         self.dispatch(
             |reply| TcpAoListenerCommand::PreflightSelection { desired, reply },
             "TCP-AO listener selection preflight",
+            || {},
         )
         .await
     }
@@ -393,13 +406,18 @@ impl TcpAoListenerHandle {
     ///
     /// Returns an error when the candidate is invalid or listener control
     /// delivery, acknowledgement, or completion times out.
-    pub async fn begin_selection(
+    pub async fn begin_selection<F>(
         &self,
         desired: TcpAoListenerGeneration,
-    ) -> ReloadDispatch<std::io::Result<TcpAoRotationStatus>, std::io::Error> {
+        before_dispatch: F,
+    ) -> ReloadDispatch<std::io::Result<TcpAoRotationStatus>, std::io::Error>
+    where
+        F: FnOnce(),
+    {
         self.dispatch(
             |reply| TcpAoListenerCommand::BeginSelection { desired, reply },
             "TCP-AO listener selection",
+            before_dispatch,
         )
         .await
     }
@@ -411,13 +429,18 @@ impl TcpAoListenerHandle {
     ///
     /// Returns an error when the generation cannot commit or listener control
     /// delivery, acknowledgement, or completion times out.
-    pub async fn finalize_selection(
+    pub async fn finalize_selection<F>(
         &self,
         generation: TcpAoRotationGeneration,
-    ) -> ReloadDispatch<std::io::Result<TcpAoRotationStatus>, std::io::Error> {
+        before_dispatch: F,
+    ) -> ReloadDispatch<std::io::Result<TcpAoRotationStatus>, std::io::Error>
+    where
+        F: FnOnce(),
+    {
         self.dispatch(
             |reply| TcpAoListenerCommand::FinalizeSelection { generation, reply },
             "TCP-AO listener metadata commit",
+            before_dispatch,
         )
         .await
     }
@@ -437,6 +460,7 @@ impl TcpAoListenerHandle {
         self.dispatch(
             |reply| TcpAoListenerCommand::PreflightDelete { desired, reply },
             "TCP-AO listener deletion preflight",
+            || {},
         )
         .await
     }
@@ -448,13 +472,18 @@ impl TcpAoListenerHandle {
     ///
     /// Returns an error when control fails or exact pre/post-delete kernel
     /// inventory cannot be proved.
-    pub async fn apply_delete(
+    pub async fn apply_delete<F>(
         &self,
         desired: TcpAoListenerGeneration,
-    ) -> ReloadDispatch<std::io::Result<TcpAoRotationStatus>, std::io::Error> {
+        before_dispatch: F,
+    ) -> ReloadDispatch<std::io::Result<TcpAoRotationStatus>, std::io::Error>
+    where
+        F: FnOnce(),
+    {
         self.dispatch(
             |reply| TcpAoListenerCommand::ApplyDelete { desired, reply },
             "TCP-AO listener deletion",
+            before_dispatch,
         )
         .await
     }
@@ -465,11 +494,15 @@ impl TcpAoListenerHandle {
     ///
     /// Returns an error when the generation is invalid or listener control
     /// delivery, acknowledgement, or completion times out.
-    pub async fn mark_awaiting_peer(
+    pub async fn mark_awaiting_peer<F>(
         &self,
         generation: TcpAoRotationGeneration,
         detail: String,
-    ) -> ReloadDispatch<std::io::Result<()>, std::io::Error> {
+        before_dispatch: F,
+    ) -> ReloadDispatch<std::io::Result<()>, std::io::Error>
+    where
+        F: FnOnce(),
+    {
         self.dispatch(
             |reply| TcpAoListenerCommand::MarkAwaitingPeer {
                 generation,
@@ -477,6 +510,7 @@ impl TcpAoListenerHandle {
                 reply,
             },
             "TCP-AO listener awaiting-peer marker",
+            before_dispatch,
         )
         .await
     }
@@ -497,11 +531,15 @@ impl TcpAoListenerHandle {
     /// Returns an error when the listener task is unavailable, the control
     /// deadline expires, or a kernel key install/remove fails (a partial
     /// application is safe to retry with the identical inventory).
-    pub async fn replace_inbound_auth(
+    pub async fn replace_inbound_auth<F>(
         &self,
         md5_keys: Vec<Md5ListenerKey>,
         ttl_security: Vec<TtlSecurityListenerPolicy>,
-    ) -> ReloadDispatch<std::io::Result<()>, std::io::Error> {
+        before_dispatch: F,
+    ) -> ReloadDispatch<std::io::Result<()>, std::io::Error>
+    where
+        F: FnOnce(),
+    {
         self.dispatch(
             |reply| TcpAoListenerCommand::ReplaceInboundAuth {
                 md5_keys,
@@ -509,6 +547,7 @@ impl TcpAoListenerHandle {
                 reply,
             },
             "BGP listener inbound-auth replacement",
+            before_dispatch,
         )
         .await
     }
@@ -521,11 +560,15 @@ impl TcpAoListenerHandle {
     ///
     /// Returns an error when the listener task is unavailable, the control
     /// deadline expires, or the generation is stale/already committed.
-    pub async fn mark_dependent_failure(
+    pub async fn mark_dependent_failure<F>(
         &self,
         generation: TcpAoRotationGeneration,
         error: String,
-    ) -> ReloadDispatch<std::io::Result<()>, std::io::Error> {
+        before_dispatch: F,
+    ) -> ReloadDispatch<std::io::Result<()>, std::io::Error>
+    where
+        F: FnOnce(),
+    {
         self.dispatch(
             |reply| TcpAoListenerCommand::MarkDependentFailure {
                 generation,
@@ -533,6 +576,7 @@ impl TcpAoListenerHandle {
                 reply,
             },
             "TCP-AO listener dependent-failure marker",
+            before_dispatch,
         )
         .await
     }
@@ -545,13 +589,18 @@ impl TcpAoListenerHandle {
     /// Returns an error when the listener task is unavailable, the control
     /// deadline expires, or the installed inventory does not exactly match
     /// the generation being committed.
-    pub async fn acknowledge_global_commit(
+    pub async fn acknowledge_global_commit<F>(
         &self,
         generation: TcpAoRotationGeneration,
-    ) -> ReloadDispatch<std::io::Result<TcpAoRotationStatus>, std::io::Error> {
+        before_dispatch: F,
+    ) -> ReloadDispatch<std::io::Result<TcpAoRotationStatus>, std::io::Error>
+    where
+        F: FnOnce(),
+    {
         self.dispatch(
             |reply| TcpAoListenerCommand::AcknowledgeGlobalCommit { generation, reply },
             "TCP-AO listener commit acknowledgement",
+            before_dispatch,
         )
         .await
     }
@@ -2692,26 +2741,41 @@ mod tests {
 
     #[tokio::test]
     async fn reload_dispatch_distinguishes_rejection_from_lost_acknowledgement() {
+        let phase_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (tx, rx) = mpsc::channel(1);
         let (_status_tx, status_rx) = watch::channel(TcpAoRotationStatus::default());
         let rejected = TcpAoListenerHandle { tx, status_rx };
         drop(rx);
+        let rejected_phase = phase_calls.clone();
         assert!(matches!(
-            rejected.replace_inbound_auth(Vec::new(), Vec::new()).await,
+            rejected
+                .replace_inbound_auth(Vec::new(), Vec::new(), move || {
+                    rejected_phase.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+                .await,
             ReloadDispatch::NotAccepted(_)
         ));
+        assert_eq!(phase_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
 
         let (tx, mut rx) = mpsc::channel(1);
         let (_status_tx, status_rx) = watch::channel(TcpAoRotationStatus::default());
         let accepted = TcpAoListenerHandle { tx, status_rx };
+        let handler_phase = phase_calls.clone();
         let actor = tokio::spawn(async move {
             let command = rx.recv().await.expect("accepted listener command");
+            assert_eq!(handler_phase.load(std::sync::atomic::Ordering::SeqCst), 1);
             drop(command);
         });
+        let accepted_phase = phase_calls.clone();
         assert!(matches!(
-            accepted.replace_inbound_auth(Vec::new(), Vec::new()).await,
+            accepted
+                .replace_inbound_auth(Vec::new(), Vec::new(), move || {
+                    accepted_phase.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+                .await,
             ReloadDispatch::AcknowledgementLost
         ));
+        assert_eq!(phase_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         actor.await.unwrap();
     }
 
@@ -2733,8 +2797,11 @@ mod tests {
         .unwrap();
 
         let started = tokio::time::Instant::now();
-        let pending =
-            tokio::spawn(async move { handle.replace_inbound_auth(Vec::new(), Vec::new()).await });
+        let pending = tokio::spawn(async move {
+            handle
+                .replace_inbound_auth(Vec::new(), Vec::new(), || {})
+                .await
+        });
         tokio::task::yield_now().await;
         tokio::time::advance(
             TCP_AO_ROTATION_CONTROL_TIMEOUT
@@ -3586,7 +3653,7 @@ mod tests {
         let task = tokio::spawn(listener.run());
 
         let outcome = handle
-            .mark_dependent_failure(generation, "session apply failed".to_string())
+            .mark_dependent_failure(generation, "session apply failed".to_string(), || {})
             .await;
         assert!(matches!(outcome, ReloadDispatch::Replied(Ok(()))));
         assert_eq!(handle.status().phase, TcpAoRotationPhase::AddOnlyFailed);
@@ -3596,7 +3663,8 @@ mod tests {
             Some("session apply failed")
         );
 
-        let ReloadDispatch::Replied(Ok(status)) = handle.apply_add_only(desired).await else {
+        let ReloadDispatch::Replied(Ok(status)) = handle.apply_add_only(desired, || {}).await
+        else {
             panic!("same-generation retry must return an authoritative success");
         };
         assert_eq!(status.phase, TcpAoRotationPhase::AddOnly);
@@ -3747,7 +3815,7 @@ mod tests {
             drop(reply);
         });
 
-        let status = handle.acknowledge_global_commit(generation).await;
+        let status = handle.acknowledge_global_commit(generation, || {}).await;
         assert!(matches!(status, ReloadDispatch::AcknowledgementLost));
         let status = handle.status();
         assert_eq!(status.phase, TcpAoRotationPhase::Idle);

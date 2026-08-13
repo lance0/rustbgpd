@@ -97,7 +97,8 @@ use rustbgpd_api::peer_types::{
     PeerManagerReadinessQuery, WarmCheckpointCapture, WarmCheckpointSession,
 };
 use rustbgpd_api::runtime_config_settlement::{
-    OwnedRuntimeConfigOutcome, RuntimeConfigOperationKind, RuntimeConfigSettlementWatchdog,
+    OwnedRuntimeConfigOutcome, OwnedRuntimeConfigRequestContext, RuntimeConfigOperationKind,
+    RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
 };
 use rustbgpd_api::server::{
     AccessMode as GrpcServerAccessMode, ConfigMutationGateFn, ListenerConfig as GrpcListenerConfig,
@@ -5066,7 +5067,7 @@ async fn run<T>(
                         RuntimeConfigOperationKind::Sighup,
                         runtime_config_lock,
                         daemon_gate,
-                        Arc::new(AtomicBool::new(true)),
+                        OwnedRuntimeConfigRequestContext::detached().response_attached(),
                         move |operation| async move {
                     if let Err(error) = config_transaction_controller.reject_if_pending("SIGHUP reload").await {
                         return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(
@@ -5118,9 +5119,12 @@ async fn run<T>(
                             ));
                         }
                     };
+                    let mut accepted_effect = false;
                     if let Some(credentials) = grpc_credentials {
                         match credentials.reload() {
                             Ok(generation) => {
+                                operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+                                accepted_effect = true;
                                 reload_metrics.record_grpc_credential_reload("success");
                                 info!(generation, "gRPC credential generation reloaded");
                             }
@@ -5131,7 +5135,11 @@ async fn run<T>(
                         }
                     }
                     let outcome = reload_config_with_tcp_ao(
-                        SighupReloadPlan { baseline_runtime: snapshot, desired },
+                        SighupReloadPlan {
+                            baseline_runtime: snapshot,
+                            desired,
+                            accepted_effect,
+                        },
                         live_tcp.as_ref(),
                         live_uds.as_ref(),
                         &pm_tx,

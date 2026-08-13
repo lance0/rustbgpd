@@ -4,6 +4,56 @@ use rustbgpd_transport::BgpListener;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+#[tokio::test]
+async fn mutation_phase_waits_for_listener_command_admission() {
+    let (accept_tx, _accept_rx) = mpsc::channel(1);
+    let listener = BgpListener::bind("127.0.0.1:0".parse().unwrap(), accept_tx)
+        .await
+        .unwrap();
+    let control = listener.tcp_ao_rotation_handle();
+    let admitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut queued = Vec::new();
+    for _ in 0..4 {
+        let handle = control.clone();
+        let phase = admitted.clone();
+        queued.push(tokio::spawn(async move {
+            handle
+                .replace_inbound_auth(Vec::new(), Vec::new(), move || {
+                    phase.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+                .await
+        }));
+    }
+    while admitted.load(std::sync::atomic::Ordering::SeqCst) != 4 {
+        tokio::task::yield_now().await;
+    }
+
+    let blocked_phase = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let phase = blocked_phase.clone();
+    let blocked = tokio::spawn(async move {
+        control
+            .replace_inbound_auth(Vec::new(), Vec::new(), move || {
+                phase.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(blocked_phase.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    drop(listener);
+    assert!(matches!(
+        blocked.await.unwrap(),
+        rustbgpd_transport::listener::ReloadDispatch::NotAccepted(_)
+    ));
+    assert_eq!(blocked_phase.load(std::sync::atomic::Ordering::SeqCst), 0);
+    for task in queued {
+        assert!(matches!(
+            task.await.unwrap(),
+            rustbgpd_transport::listener::ReloadDispatch::AcknowledgementLost
+        ));
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod inbound_auth {
     use std::io::Write;
@@ -353,6 +403,8 @@ mod inbound_auth {
         let accepted = expect_accept(&mut accept_rx).await;
         expect_data_flows(signed_old, accepted).await;
 
+        let phase_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let phase = phase_calls.clone();
         let outcome = control
             .replace_inbound_auth(
                 vec![Md5ListenerKey {
@@ -361,9 +413,13 @@ mod inbound_auth {
                     password: "new-secret".into(),
                 }],
                 Vec::new(),
+                move || {
+                    phase.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                },
             )
             .await;
         assert!(matches!(outcome, ReloadDispatch::Replied(Ok(()))));
+        assert_eq!(phase_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         let stale = spawn_connect(addr, None, Some("old-secret".to_string()), None).await;
         assert!(
@@ -376,7 +432,9 @@ mod inbound_auth {
         let accepted = expect_accept(&mut accept_rx).await;
         expect_data_flows(signed_new, accepted).await;
 
-        let outcome = control.replace_inbound_auth(Vec::new(), Vec::new()).await;
+        let outcome = control
+            .replace_inbound_auth(Vec::new(), Vec::new(), || {})
+            .await;
         assert!(matches!(outcome, ReloadDispatch::Replied(Ok(()))));
         let plaintext = spawn_connect(addr, None, None, None)
             .await
@@ -412,6 +470,7 @@ mod inbound_auth {
                     prefix_len: 32,
                     enforce: true,
                 }],
+                || {},
             )
             .await;
         assert!(matches!(outcome, ReloadDispatch::Replied(Ok(()))));
@@ -538,6 +597,7 @@ mod inbound_auth {
                     },
                 ],
                 Vec::new(),
+                || {},
             )
             .await;
         assert!(matches!(outcome, ReloadDispatch::Replied(Ok(()))));

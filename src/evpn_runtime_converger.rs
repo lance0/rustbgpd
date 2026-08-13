@@ -304,7 +304,7 @@ impl EvpnRuntimeReloadApply {
         let join = tokio::spawn(async move {
             let _apply_guard = this.apply_lock.lock().await;
             let response = this
-                .apply_candidate_config_locked(&config, validate_only)
+                .apply_candidate_config_locked(&config, validate_only, || {})
                 .await?;
             if !validate_only
                 && matches!(
@@ -321,13 +321,15 @@ impl EvpnRuntimeReloadApply {
             .map_err(|error| apply_task_join_error("apply", &error))?
     }
 
-    pub(crate) async fn apply_config_if_changed<F>(
+    pub(crate) async fn apply_config_if_changed<F, M>(
         &self,
         config: &Config,
         changed: F,
+        begin_mutation: M,
     ) -> EvpnRuntimeReloadAttempt
     where
         F: FnOnce(&Config, &Config) -> bool + Send + 'static,
+        M: FnOnce() + Send + 'static,
     {
         let this = self.clone();
         let config = config.clone();
@@ -352,7 +354,9 @@ impl EvpnRuntimeReloadApply {
                     };
                 }
             };
-            let result = this.apply_candidate_config_locked(&config, false).await;
+            let result = this
+                .apply_candidate_config_locked(&config, false, begin_mutation)
+                .await;
             let terminal = match this.reload_state() {
                 Ok(after) => classify_reload_terminal(before, after, result),
                 Err(error) => EvpnRuntimeReloadTerminal::PublicationAmbiguous(error),
@@ -390,11 +394,15 @@ impl EvpnRuntimeReloadApply {
         })
     }
 
-    async fn apply_candidate_config_locked(
+    async fn apply_candidate_config_locked<M>(
         &self,
         config: &Config,
         validate_only: bool,
-    ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
+        begin_mutation: M,
+    ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError>
+    where
+        M: FnOnce(),
+    {
         let candidate = evpn_runtime_candidate_from_config(config)?;
         apply_evpn_runtime_candidate_locked(
             candidate,
@@ -402,6 +410,7 @@ impl EvpnRuntimeReloadApply {
             &self.coordinator,
             self.converger.as_ref(),
             &self.metrics,
+            begin_mutation,
         )
         .await
     }
@@ -2511,6 +2520,7 @@ pub(crate) async fn apply_evpn_runtime_request_with_metrics(
         coordinator,
         converger,
         metrics,
+        || {},
     )
     .await
 }
@@ -2519,13 +2529,17 @@ pub(crate) async fn apply_evpn_runtime_request_with_metrics(
     clippy::too_many_lines,
     reason = "the plan/validate-only/converge/decompose/commit sequence reads clearest as one flow"
 )]
-async fn apply_evpn_runtime_candidate_locked(
+async fn apply_evpn_runtime_candidate_locked<M>(
     candidate: rustbgpd_evpn::EvpnRuntimeCandidate,
     validate_only: bool,
     coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
     converger: &dyn DaemonEvpnRuntimeConverger,
     metrics: &BgpMetrics,
-) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
+    begin_mutation: M,
+) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError>
+where
+    M: FnOnce(),
+{
     let (current, plan, snapshot) = {
         let coordinator = coordinator.lock().map_err(|_| {
             GrpcEvpnRuntimeApplyError::Internal(
@@ -2657,6 +2671,75 @@ async fn apply_evpn_runtime_candidate_locked(
         });
     }
 
+    // Reject unsupported shapes and unavailable actor routes while this is
+    // still a pure plan. Once the phase callback fires, the next awaited work
+    // is a mutation-capable converge (direct or decomposed).
+    match validate_supported_plan_shape(&current, &candidate, &plan) {
+        Ok(()) => {
+            if let Err(error) = converger.validate_availability(&current, &candidate, &plan) {
+                return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(format!(
+                    "EVPN runtime mutation failed: {}; generation {} remains committed",
+                    error.message(),
+                    snapshot.generation.as_u64()
+                )));
+            }
+        }
+        Err(shape_error) => {
+            match crate::evpn_plan_decomposer::decompose_evpn_runtime_candidate(
+                &current, &candidate, &plan,
+            ) {
+                Ok(steps) => {
+                    let total = steps.len();
+                    let mut model = current.clone();
+                    for (index, step) in steps.iter().enumerate() {
+                        let step_plan = model.plan_candidate(&step.candidate);
+                        if !step_plan.is_noop()
+                            && let Err(error) =
+                                converger.validate_availability(&model, &step.candidate, &step_plan)
+                        {
+                            return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(format!(
+                                "EVPN runtime mutation failed: decomposed step {}/{total} ({}) \
+                                 would fail: {}; generation {} remains committed",
+                                index + 1,
+                                step.description,
+                                error.message(),
+                                snapshot.generation.as_u64()
+                            )));
+                        }
+                        model = rustbgpd_evpn::EvpnRuntimeModel::startup(
+                            step.candidate.instances().clone(),
+                            step.candidate.ip_vrfs().clone(),
+                            step.candidate.ethernet_segments().to_vec(),
+                        );
+                    }
+                    begin_mutation();
+                    return apply_decomposed_evpn_runtime_steps(
+                        steps,
+                        &plan,
+                        coordinator,
+                        converger,
+                        metrics,
+                    )
+                    .await;
+                }
+                Err(crate::evpn_plan_decomposer::EvpnDecomposeError::AlreadyPrimitive) => {
+                    return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(format!(
+                        "EVPN runtime mutation failed: {}; generation {} remains committed",
+                        shape_error.message(),
+                        snapshot.generation.as_u64()
+                    )));
+                }
+                Err(crate::evpn_plan_decomposer::EvpnDecomposeError::Unsupported(reason)) => {
+                    return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(format!(
+                        "EVPN runtime mutation failed: {reason}; generation {} remains committed",
+                        snapshot.generation.as_u64()
+                    )));
+                }
+            }
+        }
+    }
+
+    begin_mutation();
     if let Err(error) = converger.converge(&current, &candidate, &plan).await {
         // #268: a candidate the dispatch rejects as an unsupported *mixed*
         // composition may still converge as an ordered sequence of
@@ -3001,7 +3084,11 @@ mod tests {
             baseline,
         );
         let attempt = reload_apply
-            .apply_config_if_changed(&candidate, |_, _| panic!("join-error proof"))
+            .apply_config_if_changed(
+                &candidate,
+                |_, _| panic!("join-error proof"),
+                || panic!("join-error must fail before mutation"),
+            )
             .await;
         assert!(matches!(
             attempt.terminal,
@@ -5191,13 +5278,26 @@ local_vtep_ip = "10.0.0.1"
             baseline,
         );
 
+        let mutation_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let apply = reload_apply.clone();
-        let mut caller =
-            Box::pin(async move { apply.apply_config_if_changed(&candidate, |_, _| true).await });
+        let phase = mutation_started.clone();
+        let mut caller = Box::pin(async move {
+            apply
+                .apply_config_if_changed(
+                    &candidate,
+                    |_, _| true,
+                    move || phase.store(true, std::sync::atomic::Ordering::SeqCst),
+                )
+                .await
+        });
         tokio::select! {
             _ = &mut caller => panic!("reload apply must still be blocked in converge"),
             () = entered.notified() => {}
         }
+        assert!(
+            mutation_started.load(std::sync::atomic::Ordering::SeqCst),
+            "blocked converge must observe the mutation phase"
+        );
         // Simulate an outer reload waiter going away.
         drop(caller);
         release.add_permits(1);
@@ -5254,7 +5354,9 @@ local_vtep_ip = "10.0.0.1"
 
         // Bind: SIGHUP-shaped apply commits (Noop) and republishes.
         let attempt = reload_apply
-            .apply_config_if_changed(&bound, evpn_runtime_changed_for_test)
+            .apply_config_if_changed(&bound, evpn_runtime_changed_for_test, || {
+                panic!("planner no-op must remain preflight")
+            })
             .await;
         assert!(matches!(
             attempt.terminal,
@@ -5273,7 +5375,9 @@ local_vtep_ip = "10.0.0.1"
         let unbound =
             load_runtime_test_config(l2vni_one_es_runtime_candidate_toml(), "test candidate");
         let attempt = reload_apply
-            .apply_config_if_changed(&unbound, evpn_runtime_changed_for_test)
+            .apply_config_if_changed(&unbound, evpn_runtime_changed_for_test, || {
+                panic!("planner no-op must remain preflight")
+            })
             .await;
         assert!(matches!(
             attempt.terminal,
@@ -10973,6 +11077,52 @@ local_vtep_ip = "10.0.0.1"
             guard.model().mutation_state(),
             rustbgpd_evpn::EvpnRuntimeMutationState::Idle,
             "an unsupported candidate must not pin/degrade the runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_undecomposable_candidate_stays_preflight() {
+        let baseline = load_runtime_test_config(ip_vrf_runtime_candidate_toml(), "test baseline");
+        let mut candidate_toml = ip_vrf_redefined_l3vni_runtime_candidate_toml().to_string();
+        candidate_toml.push_str(
+            r#"
+[[evpn_instances]]
+vni = 300
+rd = "65000:300"
+route_targets = ["65000:300"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        );
+        let candidate = load_runtime_test_config(&candidate_toml, "test candidate");
+        let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            baseline.resolve_evpn_instances().unwrap(),
+            baseline.resolve_evpn_ip_vrfs().unwrap(),
+            baseline.resolve_ethernet_segments().unwrap(),
+        )));
+        let reload_apply = EvpnRuntimeReloadApply::new(
+            coordinator,
+            Arc::new(tokio::sync::Mutex::new(())),
+            Arc::new(ShapeCheckingConverger::new()),
+            baseline,
+        );
+        let mutation_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let phase = mutation_started.clone();
+
+        let attempt = reload_apply
+            .apply_config_if_changed(
+                &candidate,
+                |_, _| true,
+                move || phase.store(true, std::sync::atomic::Ordering::SeqCst),
+            )
+            .await;
+
+        assert!(matches!(
+            attempt.terminal,
+            EvpnRuntimeReloadTerminal::RejectedNoEffect(_)
+        ));
+        assert!(
+            !mutation_started.load(std::sync::atomic::Ordering::SeqCst),
+            "rejected candidate must remain preflight"
         );
     }
 }

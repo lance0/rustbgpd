@@ -802,7 +802,7 @@ impl PeerManager {
     }
 
     pub(super) async fn preflight_tcp_ao_rotation(
-        &mut self,
+        &self,
         generation: TcpAoRotationGeneration,
         operation: TcpAoRotationOperation,
         listener_keys: &[TcpAoListenerKey],
@@ -864,63 +864,15 @@ impl PeerManager {
     }
 
     async fn preflight_tcp_ao_add_only(
-        &mut self,
+        &self,
         generation: TcpAoRotationGeneration,
         listener_keys: &[TcpAoListenerKey],
         static_keyrings: &[(PeerKey, TcpAoKeyring)],
     ) -> Result<(), String> {
-        let desired_inventory = canonical_desired_inventory(
-            generation,
-            TcpAoRotationOperation::AddOnly,
-            listener_keys,
-            static_keyrings,
-        );
-        if let Err(error) =
-            retain_desired_inventory(&mut self.tcp_ao_desired_inventory, desired_inventory)
-        {
-            self.mark_tcp_ao_rotation_failed(generation, TcpAoRotationOperation::AddOnly, &error);
-            return Err(error);
-        }
-        self.tcp_ao_rotation = TcpAoRotationStatus {
-            desired: generation,
-            applied: self.tcp_ao_generation,
-            phase: TcpAoRotationPhase::AddOnly,
-            last_error: None,
-        };
-        let plan = match self.build_tcp_ao_add_only_plan(generation, listener_keys, static_keyrings)
-        {
-            Ok(plan) => plan,
-            Err(error) => {
-                self.mark_tcp_ao_rotation_failed(
-                    generation,
-                    TcpAoRotationOperation::AddOnly,
-                    &error,
-                );
-                return Err(error);
-            }
-        };
-        for (peer, _, _) in &plan {
-            let applied = self.peers[peer].tcp_ao_rotation.applied;
-            self.peers
-                .get_mut(peer)
-                .expect("peer came from current map")
-                .tcp_ao_rotation = TcpAoRotationStatus {
-                desired: generation,
-                applied,
-                phase: TcpAoRotationPhase::AddOnly,
-                last_error: None,
-            };
-        }
+        let plan = self.build_tcp_ao_add_only_plan(generation, listener_keys, static_keyrings)?;
         for (_, desired, sessions) in plan {
             for commands in sessions {
-                if let Err(error) = preflight_session(commands, desired.clone()).await {
-                    self.mark_tcp_ao_rotation_failed(
-                        generation,
-                        TcpAoRotationOperation::AddOnly,
-                        &error,
-                    );
-                    return Err(error);
-                }
+                preflight_session(commands, desired.clone()).await?;
             }
         }
         Ok(())
@@ -990,6 +942,13 @@ impl PeerManager {
                 );
                 return Err(error);
             }
+        };
+
+        self.tcp_ao_rotation = TcpAoRotationStatus {
+            desired: generation,
+            applied: self.tcp_ao_generation,
+            phase: TcpAoRotationPhase::AddOnly,
+            last_error: None,
         };
 
         for (peer, _, _) in &plan {
@@ -1100,59 +1059,20 @@ impl PeerManager {
     }
 
     async fn preflight_tcp_ao_delete(
-        &mut self,
+        &self,
         generation: TcpAoRotationGeneration,
         current_listener_keys: &[TcpAoListenerKey],
         desired_listener_keys: &[TcpAoListenerKey],
         current_static_keyrings: &[(PeerKey, TcpAoKeyring)],
         desired_static_keyrings: &[(PeerKey, TcpAoKeyring)],
     ) -> Result<(), String> {
-        let inventory = canonical_desired_inventory(
-            generation,
-            TcpAoRotationOperation::Delete,
-            desired_listener_keys,
-            desired_static_keyrings,
-        );
-        if let Err(error) = retain_desired_inventory(&mut self.tcp_ao_desired_inventory, inventory)
-        {
-            self.mark_tcp_ao_rotation_failed(generation, TcpAoRotationOperation::Delete, &error);
-            return Err(error);
-        }
-        let plan = match self.build_tcp_ao_deletion_plan(
+        let plan = self.build_tcp_ao_deletion_plan(
             generation,
             current_listener_keys,
             desired_listener_keys,
             current_static_keyrings,
             desired_static_keyrings,
-        ) {
-            Ok(plan) => plan,
-            Err(error) => {
-                self.mark_tcp_ao_rotation_failed(
-                    generation,
-                    TcpAoRotationOperation::Delete,
-                    &error,
-                );
-                return Err(error);
-            }
-        };
-        self.tcp_ao_rotation = TcpAoRotationStatus {
-            desired: generation,
-            applied: self.tcp_ao_generation,
-            phase: TcpAoRotationPhase::Deleting,
-            last_error: None,
-        };
-        for entry in &plan {
-            let applied = self.peers[&entry.peer].tcp_ao_rotation.applied;
-            self.peers
-                .get_mut(&entry.peer)
-                .expect("peer came from current map")
-                .tcp_ao_rotation = TcpAoRotationStatus {
-                desired: generation,
-                applied,
-                phase: TcpAoRotationPhase::Deleting,
-                last_error: None,
-            };
-        }
+        )?;
         let mut preflights = Vec::new();
         for entry in &plan {
             for commands in &entry.sessions {
@@ -1165,13 +1085,9 @@ impl PeerManager {
         }
         for (peer, result) in join_all(preflights).await {
             if let Err(error) = result {
-                let error = format!("TCP-AO deletion preflight failed for {peer:?}: {error}");
-                self.mark_tcp_ao_rotation_failed(
-                    generation,
-                    TcpAoRotationOperation::Delete,
-                    &error,
-                );
-                return Err(error);
+                return Err(format!(
+                    "TCP-AO deletion preflight failed for {peer:?}: {error}"
+                ));
             }
         }
         Ok(())
@@ -1216,6 +1132,12 @@ impl PeerManager {
                 );
                 return Err(error);
             }
+        };
+        self.tcp_ao_rotation = TcpAoRotationStatus {
+            desired: generation,
+            applied: self.tcp_ao_generation,
+            phase: TcpAoRotationPhase::Deleting,
+            last_error: None,
         };
         for entry in &plan {
             let applied = self.peers[&entry.peer].tcp_ao_rotation.applied;
@@ -1312,52 +1234,12 @@ impl PeerManager {
     }
 
     async fn preflight_tcp_ao_selection(
-        &mut self,
+        &self,
         generation: TcpAoRotationGeneration,
         listener_keys: &[TcpAoListenerKey],
         static_keyrings: &[(PeerKey, TcpAoKeyring)],
     ) -> Result<(), String> {
-        let inventory = canonical_desired_inventory(
-            generation,
-            TcpAoRotationOperation::Selection,
-            listener_keys,
-            static_keyrings,
-        );
-        if let Err(error) = retain_desired_inventory(&mut self.tcp_ao_desired_inventory, inventory)
-        {
-            self.mark_tcp_ao_rotation_failed(generation, TcpAoRotationOperation::Selection, &error);
-            return Err(error);
-        }
-        let plan =
-            match self.build_tcp_ao_selection_plan(generation, listener_keys, static_keyrings) {
-                Ok(plan) => plan,
-                Err(error) => {
-                    self.mark_tcp_ao_rotation_failed(
-                        generation,
-                        TcpAoRotationOperation::Selection,
-                        &error,
-                    );
-                    return Err(error);
-                }
-            };
-        self.tcp_ao_rotation = TcpAoRotationStatus {
-            desired: generation,
-            applied: self.tcp_ao_generation,
-            phase: TcpAoRotationPhase::Selecting,
-            last_error: None,
-        };
-        for entry in &plan {
-            let applied = self.peers[&entry.peer].tcp_ao_rotation.applied;
-            self.peers
-                .get_mut(&entry.peer)
-                .expect("peer came from current map")
-                .tcp_ao_rotation = TcpAoRotationStatus {
-                desired: generation,
-                applied,
-                phase: TcpAoRotationPhase::Selecting,
-                last_error: None,
-            };
-        }
+        let plan = self.build_tcp_ao_selection_plan(generation, listener_keys, static_keyrings)?;
         let mut preflights = Vec::new();
         for entry in plan.iter().filter(|entry| entry.selection_changed) {
             for commands in &entry.sessions {
@@ -1371,13 +1253,9 @@ impl PeerManager {
         }
         for (peer, result) in join_all(preflights).await {
             if let Err(error) = result {
-                let error = format!("TCP-AO selection preflight failed for {peer:?}: {error}");
-                self.mark_tcp_ao_rotation_failed(
-                    generation,
-                    TcpAoRotationOperation::Selection,
-                    &error,
-                );
-                return Err(error);
+                return Err(format!(
+                    "TCP-AO selection preflight failed for {peer:?}: {error}"
+                ));
             }
         }
         Ok(())
@@ -1443,6 +1321,13 @@ impl PeerManager {
                     return Err(error);
                 }
             };
+
+        self.tcp_ao_rotation = TcpAoRotationStatus {
+            desired: generation,
+            applied: self.tcp_ao_generation,
+            phase: TcpAoRotationPhase::Selecting,
+            last_error: None,
+        };
 
         for entry in &plan {
             let applied = self.peers[&entry.peer].tcp_ao_rotation.applied;
@@ -2043,6 +1928,130 @@ mod tests {
         );
         manager.register_session(session_id, &peer);
         peer
+    }
+
+    fn preflight_only_peer_handle(result: Result<(), PeerCommandError>) -> PeerHandle {
+        let (commands, mut rx) = mpsc::channel(4);
+        let task = tokio::spawn(async move {
+            while let Some(command) = rx.recv().await {
+                match command {
+                    PeerCommand::PreflightTcpAoAddOnly { reply, .. }
+                    | PeerCommand::PreflightTcpAoSelection { reply, .. }
+                    | PeerCommand::PreflightTcpAoDelete { reply, .. } => {
+                        let _ = reply.send(result.clone());
+                    }
+                    PeerCommand::Shutdown
+                    | PeerCommand::Stop { .. }
+                    | PeerCommand::CollisionDump => break,
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+        PeerHandle::from_parts(commands, task)
+    }
+
+    async fn assert_preflight_state_unchanged(
+        operation: TcpAoRotationOperation,
+        result: Result<(), PeerCommandError>,
+    ) {
+        let generation = TcpAoRotationGeneration::STARTUP.next().unwrap();
+        let (_manager_tx, manager_rx) = mpsc::channel(4);
+        let (rib_tx, _rib_rx) = mpsc::channel(4);
+        let mut manager = PeerManager::new(
+            manager_rx,
+            65_001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+        let mut current = TcpAoKeyring(vec![key(1, 11), key(2, 12)]);
+        let desired = match operation {
+            TcpAoRotationOperation::AddOnly => {
+                let mut desired = current.clone();
+                desired.0.push(key(3, 13));
+                desired
+            }
+            TcpAoRotationOperation::Selection => {
+                let mut desired = current.clone();
+                desired.0[0].deprecated = true;
+                desired.0[1].preferred = true;
+                desired
+            }
+            TcpAoRotationOperation::Delete => {
+                current.0[0].deprecated = true;
+                current.0[1].preferred = true;
+                TcpAoKeyring(vec![current.0[1].clone()])
+            }
+        };
+        let peer = install_rotation_peer(
+            &mut manager,
+            "192.0.2.1".parse().unwrap(),
+            1,
+            preflight_only_peer_handle(result.clone()),
+            current.clone(),
+        );
+        let before = (
+            manager.tcp_ao_generation,
+            manager.tcp_ao_desired_inventory.clone(),
+            manager.tcp_ao_rotation.clone(),
+            manager.peers[&peer].tcp_ao_rotation.clone(),
+            manager.peers[&peer].transport_config.tcp_ao.clone(),
+        );
+
+        let attempt = manager
+            .preflight_tcp_ao_rotation(
+                generation,
+                operation,
+                &[],
+                &[],
+                &[(peer.clone(), desired)],
+                &[(peer.clone(), current)],
+            )
+            .await;
+        assert_eq!(attempt.is_ok(), result.is_ok());
+        assert_eq!(
+            (
+                manager.tcp_ao_generation,
+                manager.tcp_ao_desired_inventory.clone(),
+                manager.tcp_ao_rotation.clone(),
+                manager.peers[&peer].tcp_ao_rotation.clone(),
+                manager.peers[&peer].transport_config.tcp_ao.clone(),
+            ),
+            before,
+            "{operation:?} preflight changed peer-manager authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn tcp_ao_preflight_success_is_read_only_for_every_operation() {
+        for operation in [
+            TcpAoRotationOperation::AddOnly,
+            TcpAoRotationOperation::Selection,
+            TcpAoRotationOperation::Delete,
+        ] {
+            assert_preflight_state_unchanged(operation, Ok(())).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn tcp_ao_preflight_rejection_is_read_only_for_every_operation() {
+        for operation in [
+            TcpAoRotationOperation::AddOnly,
+            TcpAoRotationOperation::Selection,
+            TcpAoRotationOperation::Delete,
+        ] {
+            assert_preflight_state_unchanged(
+                operation,
+                Err(PeerCommandError::CommandFailed(
+                    "injected read-only preflight rejection".to_string(),
+                )),
+            )
+            .await;
+        }
     }
 
     #[tokio::test]
