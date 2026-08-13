@@ -1639,7 +1639,7 @@ impl proto::rib_service_server::RibService for RibService {
             Ok(event) => {
                 let _subscriber_guard = &subscriber_guard;
                 route_event_matches_watch_filter(&event, afi_safi_filter, peer_filter)
-                    .then(|| Ok(route_event_to_proto(event)))
+                    .then(|| Ok(route_event_to_proto(event.as_ref().clone())))
             }
             Err(BroadcastStreamRecvError::Lagged(missed)) => {
                 let _subscriber_guard = &subscriber_guard;
@@ -1684,7 +1684,7 @@ impl proto::rib_service_server::RibService for RibService {
             Ok(event) => {
                 let _subscriber_guard = &subscriber_guard;
                 route_event_matches_watch_filter(&event, afi_safi_filter, peer_filter)
-                    .then(|| Ok(route_event_to_bgp_event(event)))
+                    .then(|| Ok(route_event_to_bgp_event(event.as_ref().clone())))
             }
             Err(BroadcastStreamRecvError::Lagged(missed)) => {
                 let _subscriber_guard = &subscriber_guard;
@@ -3940,7 +3940,7 @@ mod tests {
 
     fn make_watch_routes_service(
         metrics: BgpMetrics,
-    ) -> (RibService, broadcast::Sender<rustbgpd_rib::RouteEvent>) {
+    ) -> (RibService, broadcast::Sender<Arc<rustbgpd_rib::RouteEvent>>) {
         let (tx, mut rx) = mpsc::channel(16);
         let (events_tx, _) = broadcast::channel(16);
         let events_tx_for_task = events_tx.clone();
@@ -4003,10 +4003,10 @@ mod tests {
 
         for index in 0..20 {
             events_tx
-                .send(route_event(
+                .send(Arc::new(route_event(
                     Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, index), 32)),
                     IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-                ))
+                )))
                 .unwrap();
         }
 
@@ -4050,22 +4050,22 @@ mod tests {
         let mut stream = response.into_inner();
 
         events_tx
-            .send(route_event(
+            .send(Arc::new(route_event(
                 Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 64)),
                 IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-            ))
+            )))
             .unwrap();
         events_tx
-            .send(route_event(
+            .send(Arc::new(route_event(
                 Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24)),
                 IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
-            ))
+            )))
             .unwrap();
         events_tx
-            .send(route_event(
+            .send(Arc::new(route_event(
                 Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 2, 0, 0), 24)),
                 IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-            ))
+            )))
             .unwrap();
 
         let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
@@ -4101,7 +4101,7 @@ mod tests {
         let mut stream = response.into_inner();
 
         events_tx
-            .send(rustbgpd_rib::RouteEvent {
+            .send(Arc::new(rustbgpd_rib::RouteEvent {
                 event_id: 0,
                 event_type: RouteEventType::PolicyFiltered,
                 prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 3, 0, 0), 24)),
@@ -4111,7 +4111,7 @@ mod tests {
                 timestamp: "123".to_string(),
                 path_id: 0,
                 reason: "policy_denied".to_string(),
-            })
+            }))
             .unwrap();
 
         let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
@@ -4147,10 +4147,10 @@ mod tests {
 
         for index in 0..20 {
             events_tx
-                .send(route_event(
+                .send(Arc::new(route_event(
                     Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 3, 0, index), 32)),
                     IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-                ))
+                )))
                 .unwrap();
         }
 

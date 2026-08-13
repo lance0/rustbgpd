@@ -2320,7 +2320,7 @@ async fn handle_evpn_event_coalesces_ready_type2_events_into_one_repoll() {
     let (event_tx, event_rx) = broadcast::channel(16);
     let mut event_rx = Some(event_rx);
     event_tx
-        .send(evpn_event_macip(
+        .send(Arc::new(evpn_event_macip(
             100,
             0xAA,
             "10.0.0.2",
@@ -2328,10 +2328,10 @@ async fn handle_evpn_event_coalesces_ready_type2_events_into_one_repoll() {
             false,
             rustbgpd_rib::RouteEventType::Added,
             None,
-        ))
+        )))
         .unwrap();
     event_tx
-        .send(evpn_event_macip(
+        .send(Arc::new(evpn_event_macip(
             100,
             0xBB,
             "10.0.0.3",
@@ -2339,10 +2339,10 @@ async fn handle_evpn_event_coalesces_ready_type2_events_into_one_repoll() {
             false,
             rustbgpd_rib::RouteEventType::Added,
             None,
-        ))
+        )))
         .unwrap();
 
-    let trigger = evpn_event_macip(
+    let trigger = Arc::new(evpn_event_macip(
         100,
         0xCC,
         "10.0.0.4",
@@ -2350,7 +2350,7 @@ async fn handle_evpn_event_coalesces_ready_type2_events_into_one_repoll() {
         false,
         rustbgpd_rib::RouteEventType::Added,
         None,
-    );
+    ));
     handle_evpn_event_coalesced(
         trigger,
         &mut event_rx,

@@ -161,7 +161,7 @@ pub(crate) fn evpn_event(
     }
 }
 
-pub(crate) fn spawn_fake_rib() -> (mpsc::Sender<RibUpdate>, broadcast::Sender<RouteEvent>) {
+pub(crate) fn spawn_fake_rib() -> (mpsc::Sender<RibUpdate>, broadcast::Sender<Arc<RouteEvent>>) {
     let (rib_tx, mut rib_rx) = mpsc::channel(16);
     let (events_tx, _) = broadcast::channel(16);
     let (evpn_events_tx, _) = broadcast::channel(16);
@@ -240,8 +240,10 @@ pub(crate) fn spawn_fake_rib_with_evpn_history(
     rib_tx
 }
 
-pub(crate) fn spawn_fake_evpn_rib() -> (mpsc::Sender<RibUpdate>, broadcast::Sender<EvpnRouteEvent>)
-{
+pub(crate) fn spawn_fake_evpn_rib() -> (
+    mpsc::Sender<RibUpdate>,
+    broadcast::Sender<Arc<EvpnRouteEvent>>,
+) {
     let (rib_tx, mut rib_rx) = mpsc::channel(16);
     let (route_events_tx, _) = broadcast::channel(16);
     let (evpn_events_tx, _) = broadcast::channel(16);
@@ -267,8 +269,8 @@ pub(crate) fn spawn_fake_evpn_rib() -> (mpsc::Sender<RibUpdate>, broadcast::Send
 
 pub(crate) fn spawn_fake_peer_manager() -> (
     mpsc::Sender<PeerManagerCommand>,
-    broadcast::Sender<SessionEvent>,
-    broadcast::Sender<PolicyEvent>,
+    broadcast::Sender<Arc<SessionEvent>>,
+    broadcast::Sender<Arc<PolicyEvent>>,
 ) {
     let (peer_tx, mut peer_rx) = mpsc::channel(16);
     let (session_events_tx, _) = broadcast::channel(16);

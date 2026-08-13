@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, POLICY_EVENT_HISTORY_CAPACITY, PeerKey, PolicyEvent,
@@ -68,7 +69,7 @@ impl PeerManager {
             );
             rustbgpd_api::event_history_sinks::try_send_envelope(handle, &self.metrics, envelope);
         }
-        let _ = self.session_events_tx.send(event);
+        let _ = self.session_events_tx.send(Arc::new(event));
     }
 
     pub(super) fn publish_lifecycle_event(&mut self, event: SessionLifecycleEvent) {
@@ -79,14 +80,15 @@ impl PeerManager {
         if self.policy_event_history.len() >= POLICY_EVENT_HISTORY_CAPACITY {
             self.policy_event_history.pop_front();
         }
-        self.policy_event_history.push_back(event.clone());
+        let event = Arc::new(event);
+        self.policy_event_history.push_back(Arc::clone(&event));
         // ADR-0072 durable outbox enqueue; legacy ring + broadcast
         // above remain authoritative for `ListPolicyEvents` /
         // `WatchEvents`.
         if let Some(handle) = &self.event_history {
             let peer = event.peer;
             let proto_event =
-                rustbgpd_api::event_converters::policy_event_to_bgp_event(event.clone());
+                rustbgpd_api::event_converters::policy_event_to_bgp_event(event.as_ref().clone());
             let envelope = rustbgpd_api::event_history_sinks::envelope_from_bgp_event(
                 &proto_event,
                 Category::Policy,
@@ -373,7 +375,7 @@ impl PeerManager {
                 None => true,
             })
             .take(limit)
-            .cloned()
+            .map(|event| event.as_ref().clone())
             .collect();
         events.reverse();
         let _ = reply.send(events);

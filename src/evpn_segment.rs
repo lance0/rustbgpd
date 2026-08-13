@@ -655,7 +655,7 @@ async fn apply_runtime_segment_snapshot(
 
 async fn subscribe_evpn_events(
     rib_tx: &mpsc::Sender<RibUpdate>,
-) -> Option<broadcast::Receiver<EvpnRouteEvent>> {
+) -> Option<broadcast::Receiver<Arc<EvpnRouteEvent>>> {
     let (reply_tx, reply_rx) = oneshot::channel();
     rib_tx
         .send(RibUpdate::SubscribeEvpnRouteEvents { reply: reply_tx })
@@ -665,8 +665,8 @@ async fn subscribe_evpn_events(
 }
 
 async fn recv_evpn_event(
-    rx: &mut Option<broadcast::Receiver<EvpnRouteEvent>>,
-) -> Result<EvpnRouteEvent, broadcast::error::RecvError> {
+    rx: &mut Option<broadcast::Receiver<Arc<EvpnRouteEvent>>>,
+) -> Result<Arc<EvpnRouteEvent>, broadcast::error::RecvError> {
     match rx {
         Some(r) => r.recv().await,
         None => std::future::pending().await,
@@ -3599,7 +3599,7 @@ mod tests {
         injects: Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
         withdraws: Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
         routes: Arc<tokio::sync::Mutex<Vec<EvpnRibRoute>>>,
-        events_tx: broadcast::Sender<EvpnRouteEvent>,
+        events_tx: broadcast::Sender<Arc<EvpnRouteEvent>>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             while let Some(update) = rib_rx.recv().await {
@@ -3724,7 +3724,7 @@ mod tests {
         let remote_type4 = type_4_es_route(id, "10.0.0.2", attrs_with_es_import_rt(id));
         routes.lock().await.push(remote_type4.clone());
         events_tx
-            .send(EvpnRouteEvent {
+            .send(Arc::new(EvpnRouteEvent {
                 event_type: rustbgpd_rib::RouteEventType::Added,
                 key: EvpnRouteKey::Es {
                     rd: rd(65000, 100),
@@ -3736,7 +3736,7 @@ mod tests {
                 peer: Some(ipa("10.0.0.2")),
                 previous_peer: None,
                 timestamp: rustbgpd_rib::event::unix_timestamp_now(),
-            })
+            }))
             .expect("segment actor subscribed");
 
         wait_for_dataplane_state(&bias_rx, &bum_rx, "post-flip snapshots", |bias, bum| {

@@ -2576,10 +2576,10 @@ mod tests {
             .insert("authorization", "Bearer new".parse().unwrap());
         client.get_global(new).await.unwrap();
         session_events
-            .send(session_event(
+            .send(Arc::new(session_event(
                 "192.0.2.9".parse().unwrap(),
                 SessionLifecycleEventType::Established,
-            ))
+            )))
             .unwrap();
         let event = tokio::time::timeout(Duration::from_secs(1), stream.message())
             .await

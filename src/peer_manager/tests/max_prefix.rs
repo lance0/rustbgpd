@@ -359,7 +359,7 @@ async fn due_max_prefix_restarts_share_one_readiness_serving_deadline() {
     );
 
     let enabled: Vec<IpAddr> = std::iter::from_fn(|| events.try_recv().ok())
-        .filter_map(|event| match event {
+        .filter_map(|event| match event.as_ref() {
             SessionEvent::Lifecycle(event)
                 if event.event_type == SessionLifecycleEventType::PeerEnabled =>
             {

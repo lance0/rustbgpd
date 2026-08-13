@@ -2,7 +2,7 @@ use super::*;
 
 async fn subscribe_policy_events(
     tx: &mpsc::Sender<PeerManagerCommand>,
-) -> broadcast::Receiver<PolicyEvent> {
+) -> broadcast::Receiver<Arc<PolicyEvent>> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::SubscribePolicyEvents { reply: reply_tx })
         .await
@@ -42,6 +42,37 @@ fn assert_validation_import_refresh_metric(
     assert!(
         (actual - expected).abs() < f64::EPSILON,
         "metric dependency={dependency} outcome={outcome}: got {actual}, expected {expected}"
+    );
+}
+
+#[tokio::test]
+async fn policy_history_and_live_broadcast_share_arc_but_queries_are_owned() {
+    let mut manager = test_peer_manager();
+    let mut live = manager.policy_events_tx.subscribe();
+    manager.publish_policy_event(PolicyEvent {
+        operation: "set",
+        target_type: "policy",
+        target: "shared".to_string(),
+        peer: None,
+        peer_label: None,
+        affected_peer_count: 0,
+        timestamp: "1".to_string(),
+        reason: "original".to_string(),
+    });
+
+    let broadcast = live.try_recv().unwrap();
+    assert!(Arc::ptr_eq(
+        manager.policy_event_history.back().unwrap(),
+        &broadcast
+    ));
+
+    let (reply, result) = oneshot::channel();
+    manager.handle_query_policy_event_history(None, 0, reply);
+    let mut owned = result.await.unwrap();
+    owned[0].reason = "caller mutation".to_string();
+    assert_eq!(
+        manager.policy_event_history.back().unwrap().reason,
+        "original"
     );
 }
 
