@@ -62,9 +62,31 @@ A recovery-fenced owner immediately makes `/readyz` fail, closes admission for
 new persisted mutations, and retains ownership until process death. Detected
 divergence, publication ambiguity, acknowledgement loss, or executor loss exits
 with status 70 after a five-second fencing grace. A silent owner is fenced after
-the fixed 30-minute owned-settlement budget and exits five seconds later. Do not
+the fixed 30-minute owned-settlement budget and exits five seconds later. The
+fatal clock is a prestarted OS thread independent of the mutation executor,
+readiness propagation, metric collection, logging, and retained-resource locks;
+none of those paths can postpone the 30-minute-plus-five-second deadline. Do not
 classify 70 as success or suppress its restart: the new process re-establishes
 authority from durable state.
+
+While one owner exists, `/metrics` exposes exactly one series for each of
+`bgp_runtime_config_settlement_active`, `_elapsed_seconds`, and
+`_budget_seconds`. `bgp_runtime_config_settlement_fail_stops_total` becomes 1
+when recovery fencing wins. All four use the bounded labels `kind`, `phase`
+(`owned_preflight`, `mutating`, or `settling_rollback`), `response_attached`
+(`attached` or `detached`), and `fence_reason` (`none`, `budget_expired`,
+`executor_lost`, `known_divergence`, `publication_ambiguous`, or
+`acknowledgement_lost`). They emit no idle tuple. Detached means the daemon owns
+the work without a live RPC response; it does not weaken the deadline.
+
+The daemon warns once at 15, 25, and 29 minutes without extending or resetting
+the deadline. `BgpRuntimeConfigSettlementHalfBudget` fires at 50%; at that point
+identify the labeled owner and inspect the owning actor rather than retrying the
+mutation. Fencing produces one redacted diagnostic containing only operation
+identity/classification, phase, elapsed/budget seconds, attachment, terminal,
+optional fence reason, and exit status. It never includes config contents,
+tokens, confirm IDs, comments, credentials, paths, digests, candidates, or raw
+error text.
 
 The shipped systemd unit uses `Restart=on-failure`, but caps recovery at five
 starts per ten minutes so a deterministic persistence fault cannot flap every

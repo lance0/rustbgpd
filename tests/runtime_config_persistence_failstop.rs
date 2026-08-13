@@ -124,23 +124,84 @@ fn unused_loopback_addr() -> SocketAddr {
         .expect("read loopback port")
 }
 
-fn ready_status(addr: SocketAddr) -> Option<u16> {
+fn http_get(addr: SocketAddr, path: &str) -> Option<String> {
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(100)).ok()?;
     stream
         .set_read_timeout(Some(Duration::from_millis(200)))
         .ok()?;
     stream
-        .write_all(b"GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
         .ok()?;
     let mut response = String::new();
     stream.read_to_string(&mut response).ok()?;
-    response
+    Some(response)
+}
+
+fn ready_status(addr: SocketAddr) -> Option<u16> {
+    http_get(addr, "/readyz")?
         .lines()
         .next()?
         .split_whitespace()
         .nth(1)?
         .parse()
         .ok()
+}
+
+fn settlement_metrics(addr: SocketAddr) -> String {
+    http_get(addr, "/metrics")
+        .and_then(|response| {
+            response
+                .split_once("\r\n\r\n")
+                .map(|(_, body)| body.to_string())
+        })
+        .expect("scrape settlement metrics")
+}
+
+fn assert_settlement_metrics(text: &str, kind: &str, phase: &str, attachment: &str, reason: &str) {
+    for (name, value) in [
+        ("bgp_runtime_config_settlement_active", "1"),
+        ("bgp_runtime_config_settlement_elapsed_seconds", ""),
+        ("bgp_runtime_config_settlement_budget_seconds", "1800"),
+        ("bgp_runtime_config_settlement_fail_stops_total", "1"),
+    ] {
+        let lines = text
+            .lines()
+            .filter(|line| line.starts_with(&format!("{name}{{")))
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1, "expected one {name} tuple:\n{text}");
+        let line = lines[0];
+        for label in [
+            format!("kind=\"{kind}\""),
+            format!("phase=\"{phase}\""),
+            format!("response_attached=\"{attachment}\""),
+            format!("fence_reason=\"{reason}\""),
+        ] {
+            assert!(line.contains(&label), "missing {label} in {line}");
+        }
+        assert!(
+            value.is_empty() || line.ends_with(value),
+            "unexpected value in {line}"
+        );
+    }
+}
+
+fn assert_one_redacted_diagnostic(daemon: &Daemon) {
+    let matching = daemon
+        .log()
+        .lines()
+        .filter(|line| line.contains("runtime config settlement fail-stop armed"))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(matching.len(), 1, "log:\n{}", daemon.log());
+    for forbidden in ["injected", "rustbgpd.toml", "grpc.sock", FIRST_NEIGHBOR] {
+        assert!(
+            !matching[0].contains(forbidden),
+            "diagnostic leaked {forbidden}"
+        );
+    }
 }
 
 fn wait_until_ready(addr: SocketAddr, daemon: &mut Daemon, expected: u16) {
@@ -227,6 +288,17 @@ fn exercise(fault: &str, published: bool) {
     .expect("start first mutation");
     wait_until_ready(metrics, &mut daemon, 503);
     let recovery_fenced_at = Instant::now();
+    assert_settlement_metrics(
+        &settlement_metrics(metrics),
+        "neighbor_add",
+        "settling_rollback",
+        "attached",
+        if fault == "not_published" {
+            "known_divergence"
+        } else {
+            "publication_ambiguous"
+        },
+    );
 
     let second = rbgp_command(
         &grpc_addr,
@@ -249,6 +321,7 @@ fn exercise(fault: &str, published: bool) {
     let status = daemon
         .wait_for_exit(FAILSTOP_GRACE_WITH_JITTER.saturating_sub(recovery_fenced_at.elapsed()));
     assert_eq!(status.code(), Some(70), "log:\n{}", daemon.log());
+    assert_one_redacted_diagnostic(&daemon);
     assert!(
         recovery_fenced_at.elapsed() <= FAILSTOP_GRACE_WITH_JITTER,
         "exit 70 exceeded the five-second grace plus test jitter"
@@ -311,6 +384,17 @@ fn exercise_sighup_ack_loss(fault: &str) {
     daemon.sighup();
     wait_until_ready(metrics, &mut daemon, 503);
     let fenced_at = Instant::now();
+    assert_settlement_metrics(
+        &settlement_metrics(metrics),
+        "sighup",
+        if fault == "reconcile" {
+            "mutating"
+        } else {
+            "settling_rollback"
+        },
+        "detached",
+        "acknowledgement_lost",
+    );
     let rejected = rbgp(
         &grpc_addr,
         &["neighbor", SECOND_NEIGHBOR, "add", "--remote-asn", "65003"],
@@ -320,6 +404,7 @@ fn exercise_sighup_ack_loss(fault: &str) {
     let status =
         daemon.wait_for_exit(FAILSTOP_GRACE_WITH_JITTER.saturating_sub(fenced_at.elapsed()));
     assert_eq!(status.code(), Some(70), "log:\n{}", daemon.log());
+    assert_one_redacted_diagnostic(&daemon);
 }
 
 #[test]

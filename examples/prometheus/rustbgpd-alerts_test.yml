@@ -41,6 +41,57 @@ tests:
                 edge1:9179 for 2 minutes. The daemon is down,
                 unreachable, or `prometheus_addr` is no longer configured.
 
+  # ── BgpRuntimeConfigSettlementHalfBudget ──────────────────────
+  - interval: 1s
+    input_series:
+      - series: 'bgp_runtime_config_settlement_active{instance="edge1:9179",kind="apply",phase="mutating",response_attached="attached",fence_reason="none"}'
+        values: "1x902"
+      - series: 'bgp_runtime_config_settlement_elapsed_seconds{instance="edge1:9179",kind="apply",phase="mutating",response_attached="attached",fence_reason="none"}'
+        values: "0+1x902"
+      - series: 'bgp_runtime_config_settlement_budget_seconds{instance="edge1:9179",kind="apply",phase="mutating",response_attached="attached",fence_reason="none"}'
+        values: "1800x902"
+      # Inactive, fenced, and still-under-half owners must not fire.
+      - series: 'bgp_runtime_config_settlement_active{instance="edge2:9179",kind="confirm",phase="owned_preflight",response_attached="detached",fence_reason="none"}'
+        values: "0x902"
+      - series: 'bgp_runtime_config_settlement_elapsed_seconds{instance="edge2:9179",kind="confirm",phase="owned_preflight",response_attached="detached",fence_reason="none"}'
+        values: "900x902"
+      - series: 'bgp_runtime_config_settlement_budget_seconds{instance="edge2:9179",kind="confirm",phase="owned_preflight",response_attached="detached",fence_reason="none"}'
+        values: "1800x902"
+      - series: 'bgp_runtime_config_settlement_active{instance="edge3:9179",kind="sighup",phase="settling_rollback",response_attached="detached",fence_reason="acknowledgement_lost"}'
+        values: "1x902"
+      - series: 'bgp_runtime_config_settlement_elapsed_seconds{instance="edge3:9179",kind="sighup",phase="settling_rollback",response_attached="detached",fence_reason="acknowledgement_lost"}'
+        values: "901x902"
+      - series: 'bgp_runtime_config_settlement_budget_seconds{instance="edge3:9179",kind="sighup",phase="settling_rollback",response_attached="detached",fence_reason="acknowledgement_lost"}'
+        values: "1800x902"
+      - series: 'bgp_runtime_config_settlement_active{instance="edge4:9179",kind="rollback",phase="settling_rollback",response_attached="attached",fence_reason="none"}'
+        values: "1x902"
+      - series: 'bgp_runtime_config_settlement_elapsed_seconds{instance="edge4:9179",kind="rollback",phase="settling_rollback",response_attached="attached",fence_reason="none"}'
+        values: "899x902"
+      - series: 'bgp_runtime_config_settlement_budget_seconds{instance="edge4:9179",kind="rollback",phase="settling_rollback",response_attached="attached",fence_reason="none"}'
+        values: "1800x902"
+    alert_rule_test:
+      - eval_time: 14m59s
+        alertname: BgpRuntimeConfigSettlementHalfBudget
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: BgpRuntimeConfigSettlementHalfBudget
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: edge1:9179
+              kind: apply
+              phase: mutating
+              response_attached: attached
+              fence_reason: none
+            exp_annotations:
+              summary: "Runtime-config settlement consumed half its budget"
+              description: >-
+                The apply runtime-config operation on edge1:9179 remains in
+                mutating with its response attached after consuming at least
+                half of the fail-stop budget. Inspect the owning actor now;
+                the daemon exits independently when the 30-minute budget plus
+                five-second grace expires.
+
   # ── Session rules ─────────────────────────────────────────────
   # Every series carries the bare neighbor address in `peer`, matching
   # the daemon's real export, so the session/RIB join needs no rewrite.
