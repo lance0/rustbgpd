@@ -36,6 +36,28 @@ groups:
             {{ $labels.instance }} for 2 minutes. The daemon is down,
             unreachable, or `prometheus_addr` is no longer configured.
 
+      - alert: BgpRuntimeConfigSettlementHalfBudget
+        # The owner has consumed half of the fixed 30-minute settlement
+        # budget. Recovery-fenced owners are already committed to exit 70 and
+        # are deliberately excluded from this early operator warning.
+        expr: >-
+          bgp_runtime_config_settlement_active{fence_reason="none"} == 1
+          and
+          (bgp_runtime_config_settlement_elapsed_seconds{fence_reason="none"}
+          / bgp_runtime_config_settlement_budget_seconds{fence_reason="none"}) >= 0.5
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Runtime-config settlement consumed half its budget"
+          description: >-
+            The {{ $labels.kind }} runtime-config operation on
+            {{ $labels.instance }} remains in {{ $labels.phase }} with its
+            response {{ $labels.response_attached }} after consuming at least
+            half of the fail-stop budget. Inspect the owning actor now; the
+            daemon exits independently when the 30-minute budget plus
+            five-second grace expires.
+
       - alert: BgpSessionNotEstablished
         # Exact configured identity join: catches enabled peers that have never
         # Established as well as peers that established previously and went

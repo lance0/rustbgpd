@@ -4477,6 +4477,7 @@ async fn run<T>(
     // runtime-config owner and the readiness/admission surfaces.
     let daemon_gate = DaemonGate::new();
     let runtime_config_settlement = RuntimeConfigSettlementWatchdog::new();
+    runtime_config_settlement.register_metrics(metrics.registry());
     let config_transaction_controller =
         config_transaction_control::ConfigTransactionController::new_accepted(
             fib_table_control::FibTableControlDeps {
