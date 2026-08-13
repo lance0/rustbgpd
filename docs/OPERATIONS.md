@@ -92,7 +92,10 @@ The shipped systemd unit uses `Restart=on-failure`, but caps recovery at five
 starts per ten minutes so a deterministic persistence fault cannot flap every
 five seconds forever. `TimeoutStopSec=32min` lets an explicit stop wait through
 the watchdog; systemd suppresses automatic restart for an explicit
-`systemctl stop`. After inspecting and fixing the config directory, bind mount,
+`systemctl stop`. A wedge that consumes the full 30-minute budget intentionally
+does not reach five starts in ten minutes; the limit bounds fast deterministic
+failures, while the independent fatal clock still bounds each slow wedge. After
+inspecting and fixing the config directory, bind mount,
 and on-disk authority, recover a rate-limited unit with:
 
 ```bash

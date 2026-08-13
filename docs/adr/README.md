@@ -135,7 +135,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0124](0124-bounded-config-history-retention.md) | Bounded config-history retention for oversized snapshots | Proposed (owner decisions recorded; implementation pending) | 2026-08-04 |
 | [0125](0125-v1-stability-contract.md) | v1.0 stability contract | Accepted (tagging remains evidence-gated; no tag is scheduled) | 2026-08-04 |
 | [0126](0126-shared-group-per-client-best.md) | Shared-group per-client best-path — path-hiding mitigation inside update groups | Accepted | 2026-08-05 |
-| [0127](0127-config-transaction-settlement-watchdog.md) | Persisted runtime-config settlement watchdog | Proposed | 2026-08-11 |
+| [0127](0127-config-transaction-settlement-watchdog.md) | Persisted runtime-config settlement watchdog | Accepted | 2026-08-11 |
 
 ## Template
 
