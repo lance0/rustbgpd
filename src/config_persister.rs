@@ -123,6 +123,11 @@ impl ConfigPersister {
         while let Some(mutation) = self.rx.recv().await {
             match mutation {
                 ConfigMutation::ReplaceConfigAck(new_config, ack) => {
+                    #[cfg(debug_assertions)]
+                    let drop_ack = rustbgpd_api::runtime_config_settlement::settlement_test_control::persister_checkpoint(
+                        rustbgpd_api::runtime_config_settlement::settlement_test_control::Checkpoint::ReplaceBeforePublish,
+                    )
+                    .await;
                     self.discard_staged();
                     let previous = Arc::clone(&self.current);
                     info!("replacing persister config snapshot and persisting it");
@@ -140,7 +145,11 @@ impl ConfigPersister {
                         error!(path = %self.config_path.display(), error = %error,
                             "config is visible but crash durability is unproved");
                     }
-                    let _ = ack.send(result);
+                    #[cfg(not(debug_assertions))]
+                    let drop_ack = false;
+                    if !drop_ack {
+                        let _ = ack.send(result);
+                    }
                     continue;
                 }
                 ConfigMutation::StageConfigAck(new_config, ack) => {
@@ -148,7 +157,17 @@ impl ConfigPersister {
                     continue;
                 }
                 ConfigMutation::CommitStagedConfig(ack) => {
-                    let _ = ack.send(self.commit_staged());
+                    #[cfg(debug_assertions)]
+                    let drop_ack = rustbgpd_api::runtime_config_settlement::settlement_test_control::persister_checkpoint(
+                        rustbgpd_api::runtime_config_settlement::settlement_test_control::Checkpoint::StagedCommitBeforePublish,
+                    )
+                    .await;
+                    let result = self.commit_staged();
+                    #[cfg(not(debug_assertions))]
+                    let drop_ack = false;
+                    if !drop_ack {
+                        let _ = ack.send(result);
+                    }
                     continue;
                 }
                 ConfigMutation::DiscardStagedConfig => {

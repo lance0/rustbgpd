@@ -16,6 +16,580 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::health_probe::DaemonGate;
 use crate::server::{RuntimeConfigCoordinator, RuntimeConfigCoordinatorPermit};
 
+/// Debug-only, filesystem-mediated control for deterministic settlement tests.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub mod settlement_test_control {
+    use nix::unistd::Uid;
+    use std::collections::BTreeMap;
+    use std::fs::{self, OpenOptions};
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    const CONTROL_ENV: &str = "RUSTBGPD_TEST_SETTLEMENT_CONTROL_DIR";
+    const CONTROL_VERSION: &str = "settlement-control-v1";
+    const SETTINGS: &str = "settings.v1";
+    const ARM: &str = "arm.v1";
+    const CLAIMED: &str = "claimed.v1";
+    const RECEIPT: &str = "receipt.v1";
+    const RELEASE: &str = "release.v1";
+    const MIN_BUDGET_MS: u64 = 250;
+    const MAX_BUDGET_MS: u64 = 10_000;
+    const MIN_GRACE_MS: u64 = 100;
+    const MAX_GRACE_MS: u64 = 5_000;
+    const MAX_CONTROL_FILE_BYTES: usize = 1_024;
+    const MAX_CONTROL_FILE_BYTES_U64: u64 = 1_024;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Checkpoint {
+        TransactionAfterBeginMutation,
+        CatalogActorCommandAccepted,
+        ReplaceBeforePublish,
+        StagedCommitBeforePublish,
+    }
+
+    impl Checkpoint {
+        const fn as_str(self) -> &'static str {
+            match self {
+                Self::TransactionAfterBeginMutation => "transaction_after_begin_mutation",
+                Self::CatalogActorCommandAccepted => "catalog_actor_command_accepted",
+                Self::ReplaceBeforePublish => "replace_before_publish",
+                Self::StagedCommitBeforePublish => "staged_commit_before_publish",
+            }
+        }
+
+        fn parse(value: &str) -> Result<Self, String> {
+            match value {
+                "transaction_after_begin_mutation" => Ok(Self::TransactionAfterBeginMutation),
+                "catalog_actor_command_accepted" => Ok(Self::CatalogActorCommandAccepted),
+                "replace_before_publish" => Ok(Self::ReplaceBeforePublish),
+                "staged_commit_before_publish" => Ok(Self::StagedCommitBeforePublish),
+                _ => Err(format!("unknown checkpoint {value:?}")),
+            }
+        }
+
+        const fn allows_drop_ack(self) -> bool {
+            matches!(
+                self,
+                Self::ReplaceBeforePublish | Self::StagedCommitBeforePublish
+            )
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Action {
+        Hold,
+        DropAck,
+    }
+
+    impl Action {
+        const fn as_str(self) -> &'static str {
+            match self {
+                Self::Hold => "hold",
+                Self::DropAck => "drop_ack",
+            }
+        }
+
+        fn parse(value: &str) -> Result<Self, String> {
+            match value {
+                "hold" => Ok(Self::Hold),
+                "drop_ack" => Ok(Self::DropAck),
+                _ => Err(format!("unknown action {value:?}")),
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct Settings {
+        budget: Duration,
+        grace: Duration,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct Command {
+        nonce: String,
+        checkpoint: Checkpoint,
+        action: Action,
+    }
+
+    struct ControlDirectory {
+        path: PathBuf,
+        settings: Settings,
+    }
+
+    impl ControlDirectory {
+        fn from_environment(setup: bool) -> Result<Option<Self>, String> {
+            let Some(value) = std::env::var_os(CONTROL_ENV) else {
+                return Ok(None);
+            };
+            let path = PathBuf::from(value);
+            let control = Self::open(path)?;
+            if setup {
+                for name in [ARM, CLAIMED, RECEIPT, RELEASE] {
+                    if read_optional(&control.path, name)?.is_some() {
+                        return Err(format!(
+                            "settlement control {name} must be absent during setup"
+                        ));
+                    }
+                }
+            }
+            Ok(Some(control))
+        }
+
+        fn open(path: PathBuf) -> Result<Self, String> {
+            if !path.is_absolute() {
+                return Err("settlement control directory must be absolute".to_string());
+            }
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("cannot inspect settlement control directory: {error}"))?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err("settlement control directory must be a non-symlink directory".into());
+            }
+            let canonical = fs::canonicalize(&path).map_err(|error| {
+                format!("cannot canonicalize settlement control directory: {error}")
+            })?;
+            if canonical != path {
+                return Err("settlement control directory must be canonical".into());
+            }
+            if metadata.permissions().mode() & 0o777 != 0o700 {
+                return Err("settlement control directory mode must be 0700".into());
+            }
+            if metadata.uid() != Uid::effective().as_raw() {
+                return Err("settlement control directory must belong to the current uid".into());
+            }
+            let settings = parse_settings(&read_required(&path, SETTINGS)?)?;
+            Ok(Self { path, settings })
+        }
+
+        fn read_arm(&self) -> Result<Option<Command>, String> {
+            read_optional(&self.path, ARM)?
+                .map(|contents| parse_command(&contents))
+                .transpose()
+        }
+
+        fn claim(&self, expected: Checkpoint) -> Result<Option<Command>, String> {
+            let Some(command) = self.read_arm()? else {
+                return Ok(None);
+            };
+            if read_optional(&self.path, CLAIMED)?.is_some()
+                || read_optional(&self.path, RECEIPT)?.is_some()
+            {
+                return Err("duplicate settlement control claim".into());
+            }
+            if command.checkpoint != expected {
+                return Ok(None);
+            }
+            if command.action == Action::DropAck && !expected.allows_drop_ack() {
+                return Err(format!(
+                    "drop_ack is not valid at checkpoint {}",
+                    expected.as_str()
+                ));
+            }
+            match fs::rename(self.path.join(ARM), self.path.join(CLAIMED)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(format!("cannot claim settlement control arm: {error}")),
+            }
+            let receipt = format!(
+                "version={CONTROL_VERSION}\nnonce={}\ncheckpoint={}\naction={}\npid={}\n",
+                command.nonce,
+                command.checkpoint.as_str(),
+                command.action.as_str(),
+                std::process::id()
+            );
+            atomic_write(&self.path, RECEIPT, receipt.as_bytes())?;
+            Ok(Some(command))
+        }
+
+        async fn wait_for_release(&self, command: &Command) -> Result<(), String> {
+            let deadline = tokio::time::Instant::now()
+                + self.settings.budget
+                + self.settings.grace
+                + Duration::from_secs(5);
+            loop {
+                if let Some(contents) = read_optional(&self.path, RELEASE)?
+                    && parse_command(&contents)? == *command
+                {
+                    return Ok(());
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err("settlement control hold timed out".into());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn duration_override() -> Option<(Duration, Duration)> {
+        ControlDirectory::from_environment(true)
+            .unwrap_or_else(|error| panic!("settlement_test_control setup error: {error}"))
+            .map(|control| (control.settings.budget, control.settings.grace))
+    }
+
+    pub async fn hold(checkpoint: Checkpoint) {
+        let Some(control) = ControlDirectory::from_environment(false)
+            .unwrap_or_else(|error| panic!("settlement_test_control error: {error}"))
+        else {
+            return;
+        };
+        let Some(command) = control
+            .claim(checkpoint)
+            .unwrap_or_else(|error| panic!("settlement_test_control claim error: {error}"))
+        else {
+            return;
+        };
+        control
+            .wait_for_release(&command)
+            .await
+            .unwrap_or_else(|error| panic!("settlement_test_control release error: {error}"));
+    }
+
+    pub async fn persister_checkpoint(checkpoint: Checkpoint) -> bool {
+        let Some(control) = ControlDirectory::from_environment(false)
+            .unwrap_or_else(|error| panic!("settlement_test_control error: {error}"))
+        else {
+            return false;
+        };
+        let Some(command) = control
+            .claim(checkpoint)
+            .unwrap_or_else(|error| panic!("settlement_test_control claim error: {error}"))
+        else {
+            return false;
+        };
+        match command.action {
+            Action::Hold => {
+                control
+                    .wait_for_release(&command)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("settlement_test_control release error: {error}")
+                    });
+                false
+            }
+            Action::DropAck => true,
+        }
+    }
+
+    fn read_required(directory: &Path, name: &str) -> Result<String, String> {
+        read_optional(directory, name)?
+            .ok_or_else(|| format!("settlement control {name} is missing"))
+    }
+
+    fn read_optional(directory: &Path, name: &str) -> Result<Option<String>, String> {
+        let path = directory.join(name);
+        let mut file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("cannot open settlement control {name}: {error}")),
+        };
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("cannot inspect settlement control {name}: {error}"))?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
+            return Err(format!(
+                "settlement control {name} must be a regular mode-0600 file"
+            ));
+        }
+        if metadata.uid() != Uid::effective().as_raw() {
+            return Err(format!("settlement control {name} has the wrong owner"));
+        }
+        if metadata.len() > MAX_CONTROL_FILE_BYTES_U64 {
+            return Err(format!("settlement control {name} exceeds the size limit"));
+        }
+        let mut bytes = Vec::with_capacity(MAX_CONTROL_FILE_BYTES + 1);
+        std::io::Read::by_ref(&mut file)
+            .take(MAX_CONTROL_FILE_BYTES_U64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("cannot read settlement control {name}: {error}"))?;
+        if bytes.len() > MAX_CONTROL_FILE_BYTES {
+            return Err(format!(
+                "settlement control {name} changed beyond the size limit"
+            ));
+        }
+        String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| format!("settlement control {name} must be UTF-8"))
+    }
+
+    fn parse_fields(contents: &str, expected: &[&str]) -> Result<BTreeMap<String, String>, String> {
+        let mut fields = BTreeMap::new();
+        for line in contents.lines() {
+            let (key, value) = line
+                .split_once('=')
+                .ok_or_else(|| format!("malformed settlement control line {line:?}"))?;
+            if key.is_empty()
+                || value.is_empty()
+                || fields.insert(key.into(), value.into()).is_some()
+            {
+                return Err(format!(
+                    "malformed or duplicate settlement control field {key:?}"
+                ));
+            }
+        }
+        if fields.len() != expected.len() || expected.iter().any(|key| !fields.contains_key(*key)) {
+            return Err("settlement control fields do not match the closed schema".into());
+        }
+        Ok(fields)
+    }
+
+    fn parse_settings(contents: &str) -> Result<Settings, String> {
+        let fields = parse_fields(contents, &["version", "budget_ms", "grace_ms"])?;
+        require_version(&fields)?;
+        let budget_ms = parse_bounded(&fields, "budget_ms", MIN_BUDGET_MS, MAX_BUDGET_MS)?;
+        let grace_ms = parse_bounded(&fields, "grace_ms", MIN_GRACE_MS, MAX_GRACE_MS)?;
+        Ok(Settings {
+            budget: Duration::from_millis(budget_ms),
+            grace: Duration::from_millis(grace_ms),
+        })
+    }
+
+    fn parse_command(contents: &str) -> Result<Command, String> {
+        let fields = parse_fields(contents, &["version", "nonce", "checkpoint", "action"])?;
+        require_version(&fields)?;
+        let nonce = fields["nonce"].clone();
+        if nonce.len() != 32
+            || !nonce
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("settlement control nonce must be 32 lowercase hex characters".into());
+        }
+        Ok(Command {
+            nonce,
+            checkpoint: Checkpoint::parse(&fields["checkpoint"])?,
+            action: Action::parse(&fields["action"])?,
+        })
+    }
+
+    fn require_version(fields: &BTreeMap<String, String>) -> Result<(), String> {
+        if fields["version"] == CONTROL_VERSION {
+            Ok(())
+        } else {
+            Err("unsupported settlement control version".into())
+        }
+    }
+
+    fn parse_bounded(
+        fields: &BTreeMap<String, String>,
+        name: &str,
+        minimum: u64,
+        maximum: u64,
+    ) -> Result<u64, String> {
+        let value = fields[name]
+            .parse::<u64>()
+            .map_err(|_| format!("settlement control {name} must be an integer"))?;
+        if (minimum..=maximum).contains(&value) {
+            Ok(value)
+        } else {
+            Err(format!(
+                "settlement control {name} is outside {minimum}..={maximum}"
+            ))
+        }
+    }
+
+    fn atomic_write(directory: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
+        let temporary = directory.join(format!(".{name}.{}.tmp", std::process::id()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(|error| format!("cannot create settlement control {name}: {error}"))?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| format!("cannot write settlement control {name}: {error}"))?;
+        fs::rename(&temporary, directory.join(name))
+            .map_err(|error| format!("cannot publish settlement control {name}: {error}"))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const NONCE: &str = "0123456789abcdef0123456789abcdef";
+
+        fn control_directory() -> (tempfile::TempDir, ControlDirectory) {
+            let directory = tempfile::tempdir().unwrap();
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(
+                directory.path().join(SETTINGS),
+                format!("version={CONTROL_VERSION}\nbudget_ms=250\ngrace_ms=100\n"),
+            )
+            .unwrap();
+            fs::set_permissions(
+                directory.path().join(SETTINGS),
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            let control = ControlDirectory::open(directory.path().to_path_buf()).unwrap();
+            (directory, control)
+        }
+
+        fn command(checkpoint: Checkpoint, action: Action, nonce: &str) -> String {
+            format!(
+                "version={CONTROL_VERSION}\nnonce={nonce}\ncheckpoint={}\naction={}\n",
+                checkpoint.as_str(),
+                action.as_str()
+            )
+        }
+
+        #[test]
+        fn parsers_enforce_closed_version_bounds_nonce_checkpoints_and_actions() {
+            assert!(!Checkpoint::TransactionAfterBeginMutation.allows_drop_ack());
+            assert!(!Checkpoint::CatalogActorCommandAccepted.allows_drop_ack());
+            assert!(Checkpoint::ReplaceBeforePublish.allows_drop_ack());
+            assert!(Checkpoint::StagedCommitBeforePublish.allows_drop_ack());
+            let settings = parse_settings(&format!(
+                "version={CONTROL_VERSION}\nbudget_ms=10000\ngrace_ms=5000\n"
+            ))
+            .unwrap();
+            assert_eq!(settings.budget, Duration::from_secs(10));
+            assert_eq!(settings.grace, Duration::from_secs(5));
+            for invalid in [
+                "version=wrong\nbudget_ms=250\ngrace_ms=100\n",
+                &format!("version={CONTROL_VERSION}\nbudget_ms=249\ngrace_ms=100\n"),
+                &format!("version={CONTROL_VERSION}\nbudget_ms=250\ngrace_ms=5001\n"),
+                &format!("version={CONTROL_VERSION}\nbudget_ms=250\nbudget_ms=251\ngrace_ms=100\n"),
+            ] {
+                assert!(parse_settings(invalid).is_err(), "accepted {invalid:?}");
+            }
+            for checkpoint in [
+                Checkpoint::TransactionAfterBeginMutation,
+                Checkpoint::CatalogActorCommandAccepted,
+                Checkpoint::ReplaceBeforePublish,
+                Checkpoint::StagedCommitBeforePublish,
+            ] {
+                for action in [Action::Hold, Action::DropAck] {
+                    assert_eq!(
+                        parse_command(&command(checkpoint, action, NONCE)).unwrap(),
+                        Command {
+                            nonce: NONCE.into(),
+                            checkpoint,
+                            action
+                        }
+                    );
+                }
+            }
+            for invalid in [
+                command(Checkpoint::ReplaceBeforePublish, Action::Hold, "ABC"),
+                format!(
+                    "version={CONTROL_VERSION}\nnonce={NONCE}\ncheckpoint=other\naction=hold\n"
+                ),
+                format!(
+                    "version={CONTROL_VERSION}\nnonce={NONCE}\ncheckpoint=replace_before_publish\naction=other\n"
+                ),
+            ] {
+                assert!(parse_command(&invalid).is_err(), "accepted {invalid:?}");
+            }
+        }
+
+        #[test]
+        fn directory_must_be_absolute_canonical_private_owned_and_not_symlinked() {
+            assert!(ControlDirectory::open(PathBuf::from("relative")).is_err());
+            let (directory, _) = control_directory();
+            let settings = directory.path().join(SETTINGS);
+            fs::set_permissions(&settings, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(ControlDirectory::open(directory.path().to_path_buf()).is_err());
+            fs::set_permissions(settings, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(ControlDirectory::open(directory.path().to_path_buf()).is_err());
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let link = directory.path().with_extension("settlement-control-link");
+            std::os::unix::fs::symlink(directory.path(), &link).unwrap();
+            assert!(ControlDirectory::open(link.clone()).is_err());
+            fs::remove_file(link).unwrap();
+            fs::write(directory.path().join(SETTINGS), vec![b'x'; 1_025]).unwrap();
+            assert!(ControlDirectory::open(directory.path().to_path_buf()).is_err());
+        }
+
+        #[tokio::test]
+        async fn mismatch_is_not_consumed_and_claim_receipt_release_are_exact_and_one_shot() {
+            let (directory, control) = control_directory();
+            let armed = command(Checkpoint::ReplaceBeforePublish, Action::Hold, NONCE);
+            atomic_write(directory.path(), ARM, armed.as_bytes()).unwrap();
+            assert_eq!(
+                control
+                    .claim(Checkpoint::CatalogActorCommandAccepted)
+                    .unwrap(),
+                None
+            );
+            assert_eq!(
+                fs::read_to_string(directory.path().join(ARM)).unwrap(),
+                armed
+            );
+            let claimed = control
+                .claim(Checkpoint::ReplaceBeforePublish)
+                .unwrap()
+                .unwrap();
+            assert!(!directory.path().join(ARM).exists());
+            assert_eq!(
+                fs::read_to_string(directory.path().join(CLAIMED)).unwrap(),
+                armed
+            );
+            let receipt = fs::read_to_string(directory.path().join(RECEIPT)).unwrap();
+            assert!(receipt.contains(&format!("version={CONTROL_VERSION}\n")));
+            assert!(receipt.contains(&format!("nonce={NONCE}\n")));
+            assert!(receipt.contains("checkpoint=replace_before_publish\naction=hold\n"));
+            assert!(receipt.contains(&format!("pid={}\n", std::process::id())));
+
+            let mismatch = command(
+                Checkpoint::ReplaceBeforePublish,
+                Action::Hold,
+                "ffffffffffffffffffffffffffffffff",
+            );
+            atomic_write(directory.path(), RELEASE, mismatch.as_bytes()).unwrap();
+            let path = directory.path().to_path_buf();
+            let release = armed.clone();
+            let writer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(30));
+                atomic_write(&path, RELEASE, release.as_bytes()).unwrap();
+            });
+            control.wait_for_release(&claimed).await.unwrap();
+            writer.join().unwrap();
+
+            atomic_write(directory.path(), ARM, armed.as_bytes()).unwrap();
+            assert!(control.claim(Checkpoint::ReplaceBeforePublish).is_err());
+
+            let (drop_directory, drop_control) = control_directory();
+            let drop_ack = command(
+                Checkpoint::StagedCommitBeforePublish,
+                Action::DropAck,
+                NONCE,
+            );
+            atomic_write(drop_directory.path(), ARM, drop_ack.as_bytes()).unwrap();
+            assert_eq!(
+                drop_control
+                    .claim(Checkpoint::StagedCommitBeforePublish)
+                    .unwrap()
+                    .unwrap()
+                    .action,
+                Action::DropAck
+            );
+
+            let (forbidden_directory, forbidden_control) = control_directory();
+            let forbidden = command(
+                Checkpoint::CatalogActorCommandAccepted,
+                Action::DropAck,
+                NONCE,
+            );
+            atomic_write(forbidden_directory.path(), ARM, forbidden.as_bytes()).unwrap();
+            assert!(
+                forbidden_control
+                    .claim(Checkpoint::CatalogActorCommandAccepted)
+                    .is_err()
+            );
+            assert!(forbidden_directory.path().join(ARM).exists());
+        }
+    }
+}
+
 pub const OWNED_SETTLEMENT_BUDGET: Duration = Duration::from_mins(30);
 pub const AMBIGUITY_FENCE_GRACE: Duration = Duration::from_secs(5);
 pub const AMBIGUOUS_CONFIG_EXIT_STATUS: i32 = 70;
@@ -475,7 +1049,8 @@ impl std::fmt::Debug for RuntimeConfigSettlementWatchdog {
 }
 
 impl RuntimeConfigSettlementWatchdog {
-    /// Start the process watchdog using fixed production durations.
+    /// Start the process watchdog with fixed production durations. Debug
+    /// builds may accept a validated settlement-test duration override.
     #[must_use]
     #[cfg(not(test))]
     #[allow(
@@ -483,7 +1058,12 @@ impl RuntimeConfigSettlementWatchdog {
         reason = "construction starts the process watchdog thread, so Default would hide lifecycle side effects"
     )]
     pub fn new() -> Self {
-        Self::start(OWNED_SETTLEMENT_BUDGET, AMBIGUITY_FENCE_GRACE)
+        #[cfg(debug_assertions)]
+        let (budget, grace) = settlement_test_control::duration_override()
+            .unwrap_or((OWNED_SETTLEMENT_BUDGET, AMBIGUITY_FENCE_GRACE));
+        #[cfg(not(debug_assertions))]
+        let (budget, grace) = (OWNED_SETTLEMENT_BUDGET, AMBIGUITY_FENCE_GRACE);
+        Self::start(budget, grace)
     }
 
     #[cfg(not(test))]
@@ -1947,6 +2527,71 @@ mod tests {
         assert_eq!(
             operation.fence_reason(),
             Some(RuntimeConfigFenceReason::ExecutorLost)
+        );
+    }
+
+    #[test]
+    fn debug_settlement_control_source_inventory_is_closed_and_ordered() {
+        let runtime = include_str!("runtime_config_settlement.rs");
+        let server = include_str!("server.rs");
+        let controller = include_str!("../../../src/config_transaction_control.rs");
+        let persister = include_str!("../../../src/config_persister.rs");
+        let environment = ["RUSTBGPD_TEST_SETTLEMENT_", "CONTROL_DIR"].concat();
+        assert_eq!(
+            [runtime, server, controller, persister]
+                .iter()
+                .map(|source| source.matches(&environment).count())
+                .sum::<usize>(),
+            1
+        );
+        assert!(runtime.contains("settlement_test_control::duration_override()"));
+        let ordered = |source: &str, needles: &[&str]| {
+            let mut remainder = source;
+            for needle in needles {
+                remainder = remainder.split_once(needle).unwrap().1;
+            }
+        };
+        ordered(
+            controller
+                .split_once("commit_candidate_snapshot_locked")
+                .unwrap()
+                .1,
+            &[
+                "progress.begin_mutation();",
+                "Checkpoint::TransactionAfterBeginMutation",
+                "stage_config_snapshot(",
+            ],
+        );
+        ordered(
+            server
+                .split_once("dispatch_owned_catalog_mutation")
+                .unwrap()
+                .1,
+            &[
+                "peer_mgr_tx.send(command)",
+                "Checkpoint::CatalogActorCommandAccepted",
+                "timeout(timeout, reply_rx)",
+            ],
+        );
+        ordered(
+            persister
+                .split_once("ReplaceConfigAck(new_config, ack)")
+                .unwrap()
+                .1,
+            &[
+                "Checkpoint::ReplaceBeforePublish",
+                "self.discard_staged()",
+                "let result = self.persist();",
+                "if !drop_ack",
+            ],
+        );
+        ordered(
+            persister.split_once("CommitStagedConfig(ack)").unwrap().1,
+            &[
+                "Checkpoint::StagedCommitBeforePublish",
+                "self.commit_staged()",
+                "if !drop_ack",
+            ],
         );
     }
 }

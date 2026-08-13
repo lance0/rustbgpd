@@ -2852,6 +2852,11 @@ async fn commit_candidate_snapshot_locked(
 ) -> Result<(), ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
     progress.begin_mutation();
+    #[cfg(debug_assertions)]
+    rustbgpd_api::runtime_config_settlement::settlement_test_control::hold(
+        rustbgpd_api::runtime_config_settlement::settlement_test_control::Checkpoint::TransactionAfterBeginMutation,
+    )
+    .await;
     let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
     progress.begin_settling();
     if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
