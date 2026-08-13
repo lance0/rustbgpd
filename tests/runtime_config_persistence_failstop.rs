@@ -74,6 +74,11 @@ impl Daemon {
         let pid = i32::try_from(self.child.id()).expect("daemon PID fits i32");
         kill(Pid::from_raw(pid), Signal::SIGHUP).expect("send SIGHUP");
     }
+
+    fn sigterm(&self) {
+        let pid = i32::try_from(self.child.id()).expect("daemon PID fits i32");
+        kill(Pid::from_raw(pid), Signal::SIGTERM).expect("send SIGTERM");
+    }
 }
 
 impl Drop for Daemon {
@@ -376,11 +381,9 @@ fn exercise_sighup_ack_loss(fault: &str) {
     wait_until_serving(&grpc_addr, &mut daemon);
     wait_until_ready(metrics, &mut daemon, 200);
 
-    std::fs::write(
-        &config_path,
-        format!("{initial}\n[[neighbors]]\naddress = \"{FIRST_NEIGHBOR}\"\nremote_asn = 65002\n"),
-    )
-    .unwrap();
+    let operator_candidate =
+        format!("{initial}\n[[neighbors]]\naddress = \"{FIRST_NEIGHBOR}\"\nremote_asn = 65002\n");
+    std::fs::write(&config_path, &operator_candidate).unwrap();
     daemon.sighup();
     wait_until_ready(metrics, &mut daemon, 503);
     let fenced_at = Instant::now();
@@ -401,18 +404,60 @@ fn exercise_sighup_ack_loss(fault: &str) {
     );
     assert!(!rejected.status.success());
     daemon.assert_running();
+    daemon.sigterm();
     let status =
         daemon.wait_for_exit(FAILSTOP_GRACE_WITH_JITTER.saturating_sub(fenced_at.elapsed()));
     assert_eq!(status.code(), Some(70), "log:\n{}", daemon.log());
     assert_one_redacted_diagnostic(&daemon);
+
+    let bytes = std::fs::read(&config_path).expect("read operator config");
+    assert_eq!(bytes, operator_candidate.as_bytes());
+    let parsed: toml::Value = toml::from_slice(&bytes).expect("operator config must parse");
+    let neighbors = parsed
+        .get("neighbors")
+        .and_then(toml::Value::as_array)
+        .expect("operator config retains neighbors");
+    assert_eq!(neighbors.len(), 1);
+    let text = String::from_utf8(bytes).expect("operator config is UTF-8");
+    assert!(text.contains(FIRST_NEIGHBOR));
+    assert!(!text.contains(SECOND_NEIGHBOR));
+
+    let mut restarted = Daemon::spawn(
+        &config_path,
+        dir.path().join("sighup-restart-daemon.log"),
+        None,
+    );
+    wait_until_serving(&grpc_addr, &mut restarted);
+    wait_until_ready(metrics, &mut restarted, 200);
+    assert!(
+        rbgp(&grpc_addr, &["--json", "neighbor", FIRST_NEIGHBOR])
+            .status
+            .success()
+    );
+    assert!(
+        !rbgp(&grpc_addr, &["--json", "neighbor", SECOND_NEIGHBOR])
+            .status
+            .success()
+    );
+    let restarted_metrics = settlement_metrics(metrics);
+    assert!(
+        !restarted_metrics
+            .lines()
+            .any(|line| line.starts_with("bgp_runtime_config_settlement_active{")),
+        "restarted daemon exposed an active settlement tuple:\n{restarted_metrics}"
+    );
 }
 
 #[test]
 fn sighup_reconcile_ack_loss_fences_and_exits_once() {
-    exercise_sighup_ack_loss("reconcile");
+    for _ in 0..3 {
+        exercise_sighup_ack_loss("reconcile");
+    }
 }
 
 #[test]
 fn sighup_bridge_persister_ack_loss_fences_and_exits_once() {
-    exercise_sighup_ack_loss("bridge");
+    for _ in 0..3 {
+        exercise_sighup_ack_loss("bridge");
+    }
 }
