@@ -8798,8 +8798,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   default; restart-required, as the runtime is built once at startup). This
   reduces virtual-address reservation and scheduler footprint and gives
   operators a knob for constrained containers; same-host bgperf2 showed **no
-  RSS change and no performance regression** at 8 workers. No change on hosts
-  with ≤ 8 cores.
+  raw cgroup-usage change and no performance regression** at 8 workers. No
+  change on hosts with ≤ 8 cores.
 
 - **Compact trie-backed RIB prefix indexes.** The two prefix-keyed secondary
   indexes — `AdjRibIn::prefix_index` and `AdjRibOut::prefix_path_ids`, each
@@ -9000,8 +9000,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Event-history durable outbox is now opt-in (default `false`).** ADR-0072's
   outbox shipped default-on in v0.31.0; v0.32.0 bgperf2 benchmarking showed the
-  always-on cost was material — ~62 MB RSS and roughly double the peak CPU at
-  2p/100k — a tax every operator paid before asking for replay semantics. The
+  always-on cost was material — ~62 MB peak raw container cgroup usage and
+  roughly double the peak CPU at 2p/100k — a tax every operator paid before
+  asking for replay semantics. The
   safer default for a routing daemon is fast-and-lean, so operators who want
   restart-safe event replay must now set `[event_history].enabled = true` and
   restart. With it off, `SubscribeFromEvent` and gNMI `Subscribe ON_CHANGE`
@@ -9014,7 +9015,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Arc` across same-UPDATE NLRI when policy makes no modifications
   (`RouteAttrBundle`) instead of deep-cloning per accepted route.
   Behaviour-identical; cuts per-UPDATE allocation churn and dropped 2p/100k
-  full-daemon RSS ~21% (lower jemalloc allocator high-water mark).
+  peak raw container cgroup usage ~21%. This historical bgperf2 surface is
+  Docker `memory_stats.usage`, not process-tree RSS or Docker working set.
 - Inlined the per-peer Adj-RIB-In secondary prefix index
   (`HashMap<Prefix, HashSet<u32>>` → `HashMap<Prefix, SmallVec<[u32; 1]>>`),
   eliminating one heap-allocated `HashSet` per prefix for the common

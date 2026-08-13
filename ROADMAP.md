@@ -1517,11 +1517,14 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
     short-circuiting (#343) now landed and measured, the cheap policy wins are
     already captured, so a result cache stays deferred on invalidation-risk
     grounds unless a profile shows policy evaluation is still hot.
-  The bgperf2 cross-stack comparison was refreshed for v0.32.0 (full-daemon RSS
-  dropped ~21% from the inbound clone-churn fix, but now exceeds GoBGP's ~203 MB
-  at 200k; see `docs/BENCHMARKS.md`), and that re-run drove the **v0.32.0
+  The bgperf2 cross-stack comparison was refreshed for v0.32.0 (peak raw
+  container cgroup usage dropped ~21% from the inbound clone-churn fix; at that
+  pinned run it exceeded GoBGP's ~203 MiB at 200k; see `docs/BENCHMARKS.md`),
+  and that re-run drove the **v0.32.0
   event-history default flip to opt-in / off** (done — the always-on outbox cost
-  ~62 MB RSS + ~2× peak CPU at 2p/100k). Later whole-daemon dhat profiling
+  ~62 MB raw cgroup usage + ~2× peak CPU at 2p/100k). That historical bgperf2
+  surface is Docker `memory_stats.usage`, not process-tree RSS or Docker working
+  set. Later whole-daemon dhat profiling
   showed the durable heap is dominated by the three-layer RIB route/index
   storage, especially hash bucket arrays, not operational surfaces. Stage-1
   trie-backed prefix indexes shipped; the larger LocRib trie swap remains

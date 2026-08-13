@@ -8,6 +8,11 @@ three runs each, on one host through one harness.
 Every published median in the receipt is recomputed from `raw/`. Every
 establishment-versus-flood progression is read from `logs/`.
 
+The raw CSV memory field comes from Docker's container cgroup
+`memory_stats.usage` counter. It is peak raw container cgroup usage, not
+process-tree RSS or Docker working set, and may include anonymous, file/cache,
+kernel, and socket memory depending on the cgroup.
+
 ## Contents
 
 | Path | What it is |
