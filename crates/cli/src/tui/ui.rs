@@ -367,7 +367,7 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
     };
 
     let cfg = neighbor.config.as_ref();
-    let title = format!(" Peer Detail: {address} | Esc back | j/k scroll ");
+    let title = format!(" Peer Detail: {address} | r Best RIB | Esc back | j/k scroll ");
 
     let block = Block::default()
         .title(title)
@@ -769,17 +769,59 @@ fn explain_lines(
         Line::from(format!("Peer: {}", normalized.peer_address)),
         Line::from(format!("Prefix: {}", normalized.prefix)),
     ];
+    if !normalized.rd.is_empty() {
+        lines.push(Line::from(format!("RD: {}", normalized.rd)));
+    }
+    if let Some(source) = normalized.source.as_ref() {
+        lines.push(Line::from(format!(
+            "Source path: {} inbound path ID {}",
+            source.peer_address, source.path_id
+        )));
+    }
     if !normalized.route_peer_address.is_empty() {
         lines.push(Line::from(format!(
             "Route peer: {}",
             normalized.route_peer_address
         )));
     }
+    if !normalized.route_type.is_empty() {
+        lines.push(Line::from(format!("Route type: {}", normalized.route_type)));
+    }
     if !normalized.next_hop.is_empty() {
         lines.push(Line::from(format!("Next hop: {}", normalized.next_hop)));
     }
+    if let Some(path_id) = crate::commands::rib::advertised_path_id_line(explain) {
+        lines.push(Line::from(path_id));
+    }
     if let Some(group) = normalized.update_group_id {
         lines.push(Line::from(format!("Update group: {group}")));
+    }
+    if !normalized.orr_vantage.is_empty() {
+        lines.push(Line::from(format!(
+            "ORR vantage: {}",
+            normalized.orr_vantage
+        )));
+    }
+    if !normalized.orr_candidates.is_empty() {
+        lines.push(Line::styled(
+            "ORR candidates (per-vantage best first)",
+            Style::default()
+                .fg(theme.header_fg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        lines.extend(normalized.orr_candidates.iter().map(|candidate| {
+            Line::from(format!(
+                "  {} next-hop {} cost={}{}",
+                candidate.peer_address,
+                candidate.next_hop,
+                crate::commands::rib::orr_cost_label(candidate.cost),
+                if candidate.selected {
+                    " (selected)"
+                } else {
+                    ""
+                }
+            ))
+        }));
     }
     lines.push(Line::from(format!(
         "Adj-RIB-Out sync: {}",
@@ -1257,6 +1299,7 @@ mod tests {
         rich.on_data(snapshot(vec![safety_neighbor()], Freshness::Fresh));
         rich.view = View::PeerDetail("192.0.2.2".into());
         let rendered = rendered_detail(&mut rich, 130, 50);
+        assert!(rendered.contains("r Best RIB"));
 
         for (label, expected) in [
             ("Configured Hold Time:", "90s"),
@@ -1573,6 +1616,30 @@ mod tests {
                 prefix_length: 24,
                 next_hop: "192.0.2.1".into(),
                 route_peer_address: "192.0.2.2".into(),
+                route_type: "external".into(),
+                path_id: 42,
+                rd: "65000:100".into(),
+                source: Some(crate::proto::RouteSourceIdentity {
+                    peer_address: "192.0.2.9".into(),
+                    path_id: 7,
+                }),
+                orr_vantage: "10.0.1.1".into(),
+                orr_candidates: vec![
+                    crate::proto::OrrExplainCandidate {
+                        peer_address: "192.0.2.2".into(),
+                        next_hop: "192.0.2.1".into(),
+                        cost: Some(10),
+                        selected: true,
+                        ..Default::default()
+                    },
+                    crate::proto::OrrExplainCandidate {
+                        peer_address: "192.0.2.3".into(),
+                        next_hop: "192.0.2.254".into(),
+                        cost: None,
+                        selected: false,
+                        ..Default::default()
+                    },
+                ],
                 update_group_id: Some(7),
                 already_advertised: true,
                 reasons: vec![crate::proto::ExplainReason {
@@ -1597,14 +1664,21 @@ mod tests {
                     as_path_prepend_count: Some(2),
                     ..Default::default()
                 }),
-                ..Default::default()
             },
         )));
-        let rendered = rendered_app(&mut app, 160, 24);
+        let rendered = rendered_app(&mut app, 160, 40);
         for text in [
             "Decision: Deny",
+            "RD: 65000:100",
+            "Source path: 192.0.2.9 inbound path ID 7",
             "Route peer: 192.0.2.2",
+            "Route type: external",
+            "Outbound path ID: 42",
             "Update group: 7",
+            "ORR vantage: 10.0.1.1",
+            "ORR candidates (per-vantage best first)",
+            "192.0.2.2 next-hop 192.0.2.1 cost=10 (selected)",
+            "192.0.2.3 next-hop 192.0.2.254 cost=unreachable",
             "already advertised",
             "Reasons",
             "policy_denied",
