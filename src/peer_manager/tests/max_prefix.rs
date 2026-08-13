@@ -841,6 +841,16 @@ async fn reconcile_preserves_max_prefix_emitted_during_old_actor_shutdown() {
         .await;
 
     assert!(result.failures.is_empty(), "{:?}", result.failures);
+    assert_eq!(
+        result.authority,
+        rustbgpd_api::peer_types::PeerReconcileAuthority::Known
+    );
+    assert_eq!(
+        result.effects,
+        vec![rustbgpd_api::peer_types::PeerReconcileEffect::Replaced(
+            key(addr)
+        )]
+    );
     assert_eq!(counters.shutdown.load(Ordering::SeqCst), 1);
     let managed = mgr.peers.get(&key(addr)).expect("replacement peer");
     assert_ne!(managed.session_id, 1);

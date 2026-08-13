@@ -66,30 +66,7 @@ impl FibRuntimeConfig {
 /// Runtime control messages for the FIB reconciler actor. Sent by the SIGHUP
 /// reload path and the gRPC FIB-table CRUD handlers to mutate the live
 /// `[[fib_tables]]` set without a restart.
-#[expect(
-    clippy::enum_variant_names,
-    reason = "the closed actor protocol names each operation's FIB-table scope explicitly"
-)]
 pub enum FibRuntimeCommand {
-    /// Replace the desired table set and run an immediate reconcile.
-    ///
-    /// The reply distinguishes "the actor applied the new set" from "it
-    /// couldn't act on it":
-    /// - `Ok(())` — the new set is in effect and the immediate reconcile
-    ///   reached the apply phase. Per-route kernel failures within the plan
-    ///   stay best-effort + observable via statuses/metrics; they do not fail
-    ///   the ack. The caller may advance its config snapshot / persist.
-    /// - `Err(_)` — the caller must NOT advance its snapshot. Two shapes:
-    ///   (a) the reconcile bailed before the apply phase (RIB-candidate or
-    ///   peer-group query failed, or the kernel dump failed); or (b) it reached
-    ///   the apply phase but a removed table's withdraw failed, leaving an owned
-    ///   route outside the new set — the desired set is reverted to keep that
-    ///   route owned (and retried on the next reconcile). Either way the live
-    ///   table set is unchanged from the caller's perspective.
-    ReplaceTables {
-        tables: Vec<FibTableConfig>,
-        reply: oneshot::Sender<Result<(), String>>,
-    },
     /// Replace the desired table set for an owned FIB CRUD mutation.
     ///
     /// Unlike the legacy reply, this preserves whether rejection happened
@@ -102,7 +79,7 @@ pub enum FibRuntimeCommand {
     },
     /// Return the actor's current desired table set — its live source of truth.
     /// The gRPC CRUD control path reads this, applies the upsert/delete,
-    /// validates the candidate, then issues a `ReplaceTables`, all while
+    /// validates the candidate, then issues an `OwnedReplaceTables`, all while
     /// holding the FIB-config coordinator lock so the read-modify-write is
     /// atomic against concurrent CRUD and SIGHUP reloads.
     GetTables {
@@ -121,31 +98,6 @@ pub enum OwnedFibReplaceOutcome {
     /// Reconcile reached its apply phase, then restored the desired set after
     /// detecting an orphan. Kernel and owned-route compensation is not proved.
     CompensationAmbiguous(String),
-}
-
-enum FibRuntimeReplaceReply {
-    Legacy(oneshot::Sender<Result<(), String>>),
-    Owned(oneshot::Sender<OwnedFibReplaceOutcome>),
-}
-
-impl FibRuntimeReplaceReply {
-    fn send(self, outcome: OwnedFibReplaceOutcome) {
-        match (self, outcome) {
-            (Self::Legacy(reply), OwnedFibReplaceOutcome::Applied) => {
-                let _ = reply.send(Ok(()));
-            }
-            (
-                Self::Legacy(reply),
-                OwnedFibReplaceOutcome::RejectedNoEffect(reason)
-                | OwnedFibReplaceOutcome::CompensationAmbiguous(reason),
-            ) => {
-                let _ = reply.send(Err(reason));
-            }
-            (Self::Owned(reply), outcome) => {
-                let _ = reply.send(outcome);
-            }
-        }
-    }
 }
 
 /// Operator-visible state for one projected FIB row.
@@ -382,17 +334,7 @@ async fn run_loop<F>(
             // sustained route-event stream while a caller awaits the ack.
             maybe_cmd = cmd_rx.recv(), if cmd_open => {
                 match maybe_cmd {
-                    Some(command @ (FibRuntimeCommand::ReplaceTables { .. }
-                        | FibRuntimeCommand::OwnedReplaceTables { .. })) => {
-                        let (tables, reply) = match command {
-                            FibRuntimeCommand::ReplaceTables { tables, reply } => {
-                                (tables, FibRuntimeReplaceReply::Legacy(reply))
-                            }
-                            FibRuntimeCommand::OwnedReplaceTables { tables, reply } => {
-                                (tables, FibRuntimeReplaceReply::Owned(reply))
-                            }
-                            FibRuntimeCommand::GetTables { .. } => unreachable!(),
-                        };
+                    Some(FibRuntimeCommand::OwnedReplaceTables { tables, reply }) => {
                         // Tentatively swap to the new desired set and reconcile.
                         let previous = std::mem::replace(&mut config.tables, tables);
                         let reached_apply = reconcile_once_with_events(
@@ -433,7 +375,7 @@ async fn run_loop<F>(
                             // signature — otherwise a later restart sees a config
                             // mismatch and quarantines valid owned state.
                             persist_owned_state(&config, &owned);
-                            reply.send(OwnedFibReplaceOutcome::Applied);
+                            let _ = reply.send(OwnedFibReplaceOutcome::Applied);
                         } else {
                             // Revert. A pre-plan bail (`!reached_apply`) never
                             // touched `owned` and never persisted, so the on-disk
@@ -457,7 +399,7 @@ async fn run_loop<F>(
                                  query or kernel dump failed); table set unchanged"
                                     .to_string()
                             };
-                            reply.send(if reached_apply {
+                            let _ = reply.send(if reached_apply {
                                 OwnedFibReplaceOutcome::CompensationAmbiguous(reason)
                             } else {
                                 OwnedFibReplaceOutcome::RejectedNoEffect(reason)
@@ -725,7 +667,7 @@ async fn query_peer_groups(
 /// Returns `true` when the reconcile reached the apply phase (a plan was
 /// computed against a successful RIB query + kernel dump), `false` when it
 /// bailed before that — shutdown, RIB-candidate query failure, peer-group
-/// query failure, or kernel dump failure. The `ReplaceTables` command path
+/// query failure, or kernel dump failure. The `OwnedReplaceTables` command path
 /// uses this to decide whether the new desired table set was actually
 /// applied: per-route apply failures inside the plan are best-effort and do
 /// NOT flip this to `false` (they stay observable via statuses/metrics), but a
@@ -2865,7 +2807,7 @@ mod tests {
         }
     }
 
-    // The next three tests model the runtime `ReplaceTables` path (SIGHUP /
+    // The next three tests model the typed runtime table-replacement path (SIGHUP /
     // gRPC hot-swap): the actor swaps its desired table set and reconciles
     // against persistent owned + kernel state. Two successive
     // `reconcile_config_for_test` calls sharing `fib` + `owned` reproduce
@@ -2943,7 +2885,7 @@ mod tests {
     async fn failed_withdraw_on_table_removal_keeps_route_owned_outside_set() {
         // Regression for the orphan bug: removing a table whose kernel Remove
         // fails leaves the route owned but outside the (now-empty) configured
-        // set. The ReplaceTables command guard detects exactly this — an owned
+        // set. The typed command guard detects exactly this — an owned
         // route not covered by the new table set — and reverts rather than
         // persisting a signature that would quarantine the still-present kernel
         // row on the next restart.
@@ -3488,7 +3430,7 @@ mod tests {
 
     #[tokio::test]
     async fn replace_tables_pre_apply_bail_does_not_rewrite_owned_state() {
-        // A ReplaceTables whose reconcile bails before the apply phase (kernel
+        // A table replacement whose reconcile bails before the apply phase (kernel
         // dump failure here) leaves `owned` untouched, so the cancel path must
         // not rewrite the owned-state file: persisting would stamp a signature
         // the reconcile never acted on.

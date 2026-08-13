@@ -1927,7 +1927,7 @@ pub struct ConfigDiff {
     /// `[[fib_tables]]` blocks added/removed/modified between old and new.
     /// Reload-applied in the common case: the ADR-0061 general-FIB actor
     /// accepts a runtime table-set swap on SIGHUP
-    /// (`FibRuntimeCommand::ReplaceTables`), so edits hot-apply when the
+    /// (`FibRuntimeCommand::OwnedReplaceTables`), so edits hot-apply when the
     /// reconciler is running. The one exception the static diff *can* know is
     /// the startup-from-empty case — see [`Self::fib_tables_requires_restart`].
     pub fib_tables_changed: bool,

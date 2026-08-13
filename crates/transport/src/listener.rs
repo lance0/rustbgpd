@@ -291,7 +291,47 @@ pub struct TcpAoListenerHandle {
     status_rx: watch::Receiver<TcpAoRotationStatus>,
 }
 
+/// Typed delivery boundary for SIGHUP listener mutations.
+#[derive(Debug)]
+pub enum ReloadDispatch<T, E> {
+    /// The actor definitely did not accept the command.
+    NotAccepted(E),
+    /// The actor returned an authoritative reply.
+    Replied(T),
+    /// The actor accepted the command but its reply was lost or late.
+    AcknowledgementLost,
+}
+
 impl TcpAoListenerHandle {
+    async fn dispatch<T>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<std::io::Result<T>>) -> TcpAoListenerCommand,
+        operation: &'static str,
+    ) -> ReloadDispatch<std::io::Result<T>, std::io::Error> {
+        let deadline = tokio::time::Instant::now() + TCP_AO_ROTATION_CONTROL_TIMEOUT;
+        let permit = match tokio::time::timeout_at(deadline, self.tx.reserve()).await {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => {
+                return ReloadDispatch::NotAccepted(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    format!("{operation} listener task exited before accepting command"),
+                ));
+            }
+            Err(_) => {
+                return ReloadDispatch::NotAccepted(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("{operation} timed out before listener accepted command"),
+                ));
+            }
+        };
+        let (reply, response) = oneshot::channel();
+        permit.send(build(reply));
+        match tokio::time::timeout_at(deadline, response).await {
+            Ok(Ok(result)) => ReloadDispatch::Replied(result),
+            Ok(Err(_)) | Err(_) => ReloadDispatch::AcknowledgementLost,
+        }
+    }
+
     /// Validate the complete desired listener inventory against kernel state
     /// without issuing a target-socket `setsockopt`.
     ///
@@ -302,32 +342,12 @@ impl TcpAoListenerHandle {
     pub async fn preflight_add_only(
         &self,
         desired: TcpAoListenerGeneration,
-    ) -> std::io::Result<()> {
-        tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
-            let (reply, response) = oneshot::channel();
-            self.tx
-                .send(TcpAoListenerCommand::PreflightAddOnly { desired, reply })
-                .await
-                .map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "TCP-AO listener rotation task exited",
-                    )
-                })?;
-            response.await.map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "TCP-AO listener preflight reply dropped",
-                )
-            })?
-        })
+    ) -> ReloadDispatch<std::io::Result<()>, std::io::Error> {
+        self.dispatch(
+            |reply| TcpAoListenerCommand::PreflightAddOnly { desired, reply },
+            "TCP-AO listener preflight",
+        )
         .await
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "TCP-AO listener preflight timed out",
-            )
-        })?
     }
 
     /// Apply one immutable successor generation. Current/RNext are untouched;
@@ -341,32 +361,12 @@ impl TcpAoListenerHandle {
     pub async fn apply_add_only(
         &self,
         desired: TcpAoListenerGeneration,
-    ) -> std::io::Result<TcpAoRotationStatus> {
-        tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
-            let (reply, response) = oneshot::channel();
-            self.tx
-                .send(TcpAoListenerCommand::ApplyAddOnly { desired, reply })
-                .await
-                .map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "TCP-AO listener rotation task exited",
-                    )
-                })?;
-            response.await.map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "TCP-AO listener rotation reply dropped",
-                )
-            })?
-        })
+    ) -> ReloadDispatch<std::io::Result<TcpAoRotationStatus>, std::io::Error> {
+        self.dispatch(
+            |reply| TcpAoListenerCommand::ApplyAddOnly { desired, reply },
+            "TCP-AO listener rotation",
+        )
         .await
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "TCP-AO listener rotation control timed out",
-            )
-        })?
     }
 
     /// Validate an already-installed successor-selection generation without
@@ -379,32 +379,12 @@ impl TcpAoListenerHandle {
     pub async fn preflight_selection(
         &self,
         desired: TcpAoListenerGeneration,
-    ) -> std::io::Result<()> {
-        tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
-            let (reply, response) = oneshot::channel();
-            self.tx
-                .send(TcpAoListenerCommand::PreflightSelection { desired, reply })
-                .await
-                .map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "TCP-AO listener rotation task exited",
-                    )
-                })?;
-            response.await.map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "TCP-AO listener selection preflight reply dropped",
-                )
-            })?
-        })
+    ) -> ReloadDispatch<std::io::Result<()>, std::io::Error> {
+        self.dispatch(
+            |reply| TcpAoListenerCommand::PreflightSelection { desired, reply },
+            "TCP-AO listener selection preflight",
+        )
         .await
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "TCP-AO listener selection preflight timed out",
-            )
-        })?
     }
 
     /// Stage successor preference metadata for future accepted children.
@@ -416,32 +396,12 @@ impl TcpAoListenerHandle {
     pub async fn begin_selection(
         &self,
         desired: TcpAoListenerGeneration,
-    ) -> std::io::Result<TcpAoRotationStatus> {
-        tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
-            let (reply, response) = oneshot::channel();
-            self.tx
-                .send(TcpAoListenerCommand::BeginSelection { desired, reply })
-                .await
-                .map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "TCP-AO listener rotation task exited",
-                    )
-                })?;
-            response.await.map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "TCP-AO listener selection reply dropped",
-                )
-            })?
-        })
+    ) -> ReloadDispatch<std::io::Result<TcpAoRotationStatus>, std::io::Error> {
+        self.dispatch(
+            |reply| TcpAoListenerCommand::BeginSelection { desired, reply },
+            "TCP-AO listener selection",
+        )
         .await
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "TCP-AO listener selection control timed out",
-            )
-        })?
     }
 
     /// Commit final declaration metadata after every affected session has
@@ -454,32 +414,12 @@ impl TcpAoListenerHandle {
     pub async fn finalize_selection(
         &self,
         generation: TcpAoRotationGeneration,
-    ) -> std::io::Result<TcpAoRotationStatus> {
-        tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
-            let (reply, response) = oneshot::channel();
-            self.tx
-                .send(TcpAoListenerCommand::FinalizeSelection { generation, reply })
-                .await
-                .map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "TCP-AO listener rotation task exited",
-                    )
-                })?;
-            response.await.map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "TCP-AO listener metadata commit reply dropped",
-                )
-            })?
-        })
+    ) -> ReloadDispatch<std::io::Result<TcpAoRotationStatus>, std::io::Error> {
+        self.dispatch(
+            |reply| TcpAoListenerCommand::FinalizeSelection { generation, reply },
+            "TCP-AO listener metadata commit",
+        )
         .await
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "TCP-AO listener metadata commit timed out",
-            )
-        })?
     }
 
     /// Validate a strict current-to-survivor listener generation without
@@ -490,32 +430,15 @@ impl TcpAoListenerHandle {
     /// Returns an error when owner identity changes, a survivor is reordered
     /// or redefined, a non-deprecated/selected key would be removed, or the
     /// exact kernel inventory cannot be proved before the control deadline.
-    pub async fn preflight_delete(&self, desired: TcpAoListenerGeneration) -> std::io::Result<()> {
-        tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
-            let (reply, response) = oneshot::channel();
-            self.tx
-                .send(TcpAoListenerCommand::PreflightDelete { desired, reply })
-                .await
-                .map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "TCP-AO listener rotation task exited",
-                    )
-                })?;
-            response.await.map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "TCP-AO listener deletion preflight reply dropped",
-                )
-            })?
-        })
+    pub async fn preflight_delete(
+        &self,
+        desired: TcpAoListenerGeneration,
+    ) -> ReloadDispatch<std::io::Result<()>, std::io::Error> {
+        self.dispatch(
+            |reply| TcpAoListenerCommand::PreflightDelete { desired, reply },
+            "TCP-AO listener deletion preflight",
+        )
         .await
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "TCP-AO listener deletion preflight timed out",
-            )
-        })?
     }
 
     /// Remove one immutable set of deprecated, unselected listener MKTs and
@@ -528,32 +451,12 @@ impl TcpAoListenerHandle {
     pub async fn apply_delete(
         &self,
         desired: TcpAoListenerGeneration,
-    ) -> std::io::Result<TcpAoRotationStatus> {
-        tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
-            let (reply, response) = oneshot::channel();
-            self.tx
-                .send(TcpAoListenerCommand::ApplyDelete { desired, reply })
-                .await
-                .map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "TCP-AO listener rotation task exited",
-                    )
-                })?;
-            response.await.map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "TCP-AO listener deletion reply dropped",
-                )
-            })?
-        })
+    ) -> ReloadDispatch<std::io::Result<TcpAoRotationStatus>, std::io::Error> {
+        self.dispatch(
+            |reply| TcpAoListenerCommand::ApplyDelete { desired, reply },
+            "TCP-AO listener deletion",
+        )
         .await
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "TCP-AO listener deletion control timed out",
-            )
-        })?
     }
 
     /// Publish a one-shot observation miss without polling in the actor.
@@ -566,36 +469,16 @@ impl TcpAoListenerHandle {
         &self,
         generation: TcpAoRotationGeneration,
         detail: String,
-    ) -> std::io::Result<()> {
-        tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
-            let (reply, response) = oneshot::channel();
-            self.tx
-                .send(TcpAoListenerCommand::MarkAwaitingPeer {
-                    generation,
-                    detail,
-                    reply,
-                })
-                .await
-                .map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "TCP-AO listener rotation task exited",
-                    )
-                })?;
-            response.await.map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "TCP-AO listener awaiting-peer reply dropped",
-                )
-            })?
-        })
+    ) -> ReloadDispatch<std::io::Result<()>, std::io::Error> {
+        self.dispatch(
+            |reply| TcpAoListenerCommand::MarkAwaitingPeer {
+                generation,
+                detail,
+                reply,
+            },
+            "TCP-AO listener awaiting-peer marker",
+        )
         .await
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "TCP-AO listener awaiting-peer marker timed out",
-            )
-        })?
     }
 
     /// Latest secret-free desired/applied listener status.
@@ -618,36 +501,16 @@ impl TcpAoListenerHandle {
         &self,
         md5_keys: Vec<Md5ListenerKey>,
         ttl_security: Vec<TtlSecurityListenerPolicy>,
-    ) -> std::io::Result<()> {
-        tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
-            let (reply, response) = oneshot::channel();
-            self.tx
-                .send(TcpAoListenerCommand::ReplaceInboundAuth {
-                    md5_keys,
-                    ttl_security,
-                    reply,
-                })
-                .await
-                .map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "BGP listener control task exited",
-                    )
-                })?;
-            response.await.map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "BGP listener inbound-auth reply dropped",
-                )
-            })?
-        })
+    ) -> ReloadDispatch<std::io::Result<()>, std::io::Error> {
+        self.dispatch(
+            |reply| TcpAoListenerCommand::ReplaceInboundAuth {
+                md5_keys,
+                ttl_security,
+                reply,
+            },
+            "BGP listener inbound-auth replacement",
+        )
         .await
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "BGP listener inbound-auth replacement timed out",
-            )
-        })?
     }
 
     /// Mark a later global phase (currently established-session apply) failed
@@ -662,36 +525,16 @@ impl TcpAoListenerHandle {
         &self,
         generation: TcpAoRotationGeneration,
         error: String,
-    ) -> std::io::Result<()> {
-        tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
-            let (reply, response) = oneshot::channel();
-            self.tx
-                .send(TcpAoListenerCommand::MarkDependentFailure {
-                    generation,
-                    error,
-                    reply,
-                })
-                .await
-                .map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "TCP-AO listener rotation task exited",
-                    )
-                })?;
-            response.await.map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "TCP-AO listener dependent-failure reply dropped",
-                )
-            })?
-        })
+    ) -> ReloadDispatch<std::io::Result<()>, std::io::Error> {
+        self.dispatch(
+            |reply| TcpAoListenerCommand::MarkDependentFailure {
+                generation,
+                error,
+                reply,
+            },
+            "TCP-AO listener dependent-failure marker",
+        )
         .await
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "TCP-AO listener dependent-failure marker timed out",
-            )
-        })?
     }
 
     /// Publish a listener generation as applied only after every established
@@ -705,46 +548,12 @@ impl TcpAoListenerHandle {
     pub async fn acknowledge_global_commit(
         &self,
         generation: TcpAoRotationGeneration,
-    ) -> std::io::Result<TcpAoRotationStatus> {
-        let result = tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
-            let (reply, response) = oneshot::channel();
-            self.tx
-                .send(TcpAoListenerCommand::AcknowledgeGlobalCommit { generation, reply })
-                .await
-                .map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "TCP-AO listener rotation task exited",
-                    )
-                })?;
-            response.await.map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "TCP-AO listener commit reply dropped",
-                )
-            })?
-        })
+    ) -> ReloadDispatch<std::io::Result<TcpAoRotationStatus>, std::io::Error> {
+        self.dispatch(
+            |reply| TcpAoListenerCommand::AcknowledgeGlobalCommit { generation, reply },
+            "TCP-AO listener commit acknowledgement",
+        )
         .await
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "TCP-AO listener commit acknowledgement timed out",
-            )
-        });
-        match result {
-            Ok(Ok(status)) => Ok(status),
-            Ok(Err(error)) | Err(error) => {
-                let status = self.status();
-                if status.phase == TcpAoRotationPhase::Idle
-                    && status.desired == generation
-                    && status.applied == generation
-                {
-                    Ok(status)
-                } else {
-                    Err(error)
-                }
-            }
-        }
     }
 }
 
@@ -2881,6 +2690,74 @@ mod tests {
     use std::cell::RefCell;
     use std::net::Ipv4Addr;
 
+    #[tokio::test]
+    async fn reload_dispatch_distinguishes_rejection_from_lost_acknowledgement() {
+        let (tx, rx) = mpsc::channel(1);
+        let (_status_tx, status_rx) = watch::channel(TcpAoRotationStatus::default());
+        let rejected = TcpAoListenerHandle { tx, status_rx };
+        drop(rx);
+        assert!(matches!(
+            rejected.replace_inbound_auth(Vec::new(), Vec::new()).await,
+            ReloadDispatch::NotAccepted(_)
+        ));
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let (_status_tx, status_rx) = watch::channel(TcpAoRotationStatus::default());
+        let accepted = TcpAoListenerHandle { tx, status_rx };
+        let actor = tokio::spawn(async move {
+            let command = rx.recv().await.expect("accepted listener command");
+            drop(command);
+        });
+        assert!(matches!(
+            accepted.replace_inbound_auth(Vec::new(), Vec::new()).await,
+            ReloadDispatch::AcknowledgementLost
+        ));
+        actor.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reload_dispatch_uses_one_deadline_across_admission_and_reply() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let (_status_tx, status_rx) = watch::channel(TcpAoRotationStatus::default());
+        let handle = TcpAoListenerHandle {
+            tx: tx.clone(),
+            status_rx,
+        };
+        let (blocking_reply, _blocking_response) = oneshot::channel();
+        tx.send(TcpAoListenerCommand::ReplaceInboundAuth {
+            md5_keys: Vec::new(),
+            ttl_security: Vec::new(),
+            reply: blocking_reply,
+        })
+        .await
+        .unwrap();
+
+        let started = tokio::time::Instant::now();
+        let pending =
+            tokio::spawn(async move { handle.replace_inbound_auth(Vec::new(), Vec::new()).await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(
+            TCP_AO_ROTATION_CONTROL_TIMEOUT
+                .checked_sub(std::time::Duration::from_millis(100))
+                .expect("timeout exceeds the test margin"),
+        )
+        .await;
+        assert!(!pending.is_finished());
+
+        drop(rx.recv().await.expect("blocking command"));
+        tokio::task::yield_now().await;
+        let accepted = rx.recv().await.expect("admitted reload command");
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+
+        assert!(matches!(
+            pending.await.unwrap(),
+            ReloadDispatch::AcknowledgementLost
+        ));
+        assert_eq!(started.elapsed(), TCP_AO_ROTATION_CONTROL_TIMEOUT);
+        drop(accepted);
+    }
+
     #[test]
     fn accept_errors_classify_by_errno() {
         for errno in [libc::EMFILE, libc::ENFILE, libc::ENOMEM, libc::ENOBUFS] {
@@ -3708,10 +3585,10 @@ mod tests {
         let handle = listener.tcp_ao_rotation_handle();
         let task = tokio::spawn(listener.run());
 
-        handle
+        let outcome = handle
             .mark_dependent_failure(generation, "session apply failed".to_string())
-            .await
-            .unwrap();
+            .await;
+        assert!(matches!(outcome, ReloadDispatch::Replied(Ok(()))));
         assert_eq!(handle.status().phase, TcpAoRotationPhase::AddOnlyFailed);
         assert_eq!(handle.status().applied, TcpAoRotationGeneration::STARTUP);
         assert_eq!(
@@ -3719,7 +3596,9 @@ mod tests {
             Some("session apply failed")
         );
 
-        let status = handle.apply_add_only(desired).await.unwrap();
+        let ReloadDispatch::Replied(Ok(status)) = handle.apply_add_only(desired).await else {
+            panic!("same-generation retry must return an authoritative success");
+        };
         assert_eq!(status.phase, TcpAoRotationPhase::AddOnly);
         assert_eq!(status.desired, generation);
         assert_eq!(status.applied, TcpAoRotationGeneration::STARTUP);
@@ -3840,7 +3719,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lost_commit_ack_reply_uses_published_committed_status() {
+    async fn lost_commit_ack_remains_lost_when_status_looks_committed() {
         let generation = TcpAoRotationGeneration::new(2).unwrap();
         let (tx, mut rx) = mpsc::channel(1);
         let (status_tx, status_rx) = watch::channel(TcpAoRotationStatus {
@@ -3868,7 +3747,9 @@ mod tests {
             drop(reply);
         });
 
-        let status = handle.acknowledge_global_commit(generation).await.unwrap();
+        let status = handle.acknowledge_global_commit(generation).await;
+        assert!(matches!(status, ReloadDispatch::AcknowledgementLost));
+        let status = handle.status();
         assert_eq!(status.phase, TcpAoRotationPhase::Idle);
         assert_eq!(status.applied, generation);
         task.await.unwrap();

@@ -5,21 +5,26 @@
 //! and ordered peer-manager reconciliation.
 
 use std::collections::BTreeMap;
-use std::fmt::Display;
 use std::net::IpAddr;
-use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Instant;
 
 use rustbgpd_api::peer_types::ConfigPersistCommitOutcome;
 use rustbgpd_api::peer_types::{
     CatalogMutationError, ConfigEvent, ConfigPersistAck, ConfigPersistError, FibTableSnapshot,
-    PeerManagerCommand, PeerManagerNeighborConfig,
+    OwnedCatalogMutation, OwnedCatalogMutationOutcome, OwnedHotUpdatePeerOutcome,
+    PeerManagerCommand, PeerManagerNeighborConfig, PeerReconcileAuthority, PeerReconcileEffect,
 };
 use rustbgpd_policy::PolicyChain;
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{error, info, warn};
 
+use rustbgpd_api::gnmi_dialout::DialoutTarget;
+use rustbgpd_api::runtime_config_settlement::{
+    OwnedRuntimeConfigOperation, OwnedRuntimeConfigOutcome, RuntimeConfigFenceReason,
+    RuntimeConfigSettlementPhase,
+};
+use rustbgpd_transport::listener::ReloadDispatch;
 use rustbgpd_transport::{
     TcpAoKeyring, TcpAoListenerGeneration, TcpAoListenerHandle, TcpAoListenerKey,
     TcpAoListenerOwnerKind, TcpAoRotationGeneration, TcpAoRotationOperation, TcpAoRotationPhase,
@@ -28,10 +33,20 @@ use rustbgpd_transport::{
 
 use crate::config::{self, AcceptedConfigSnapshot, Config};
 use crate::config_persister::ConfigMutation;
-use crate::evpn_runtime_converger::EvpnRuntimeReloadApply;
-use crate::fib_runtime::FibRuntimeCommand;
+use crate::evpn_runtime_converger::{EvpnRuntimeReloadApply, EvpnRuntimeReloadTerminal};
+use crate::fib_runtime::{FibRuntimeCommand, OwnedFibReplaceOutcome};
 use crate::peer_manager::InternalCommand;
 use crate::policy_admin::{self, apply_config_event, catalog_config_error};
+
+#[cfg(debug_assertions)]
+fn sighup_ack_fault(point: &str) -> bool {
+    std::env::var("RUSTBGPD_TEST_SIGHUP_ACK_LOSS").is_ok_and(|value| value == point)
+}
+
+#[cfg(not(debug_assertions))]
+fn sighup_ack_fault(_point: &str) -> bool {
+    false
+}
 
 /// Monotonic identity for one outbound prefix-limit transaction. Activation
 /// is idempotent by it, so a retry cannot apply two recovery transitions.
@@ -40,6 +55,22 @@ pub(crate) fn next_outbound_prefix_limit_txn() -> u64 {
 
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+async fn dispatch_rib_step<T, E>(
+    rib_tx: &mpsc::Sender<rustbgpd_rib::RibUpdate>,
+    build: impl FnOnce(oneshot::Sender<Result<T, E>>) -> rustbgpd_rib::RibUpdate,
+) -> ReloadDispatch<Result<T, E>, String> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let permit = match rib_tx.reserve().await {
+        Ok(permit) => permit,
+        Err(error) => return ReloadDispatch::NotAccepted(error.to_string()),
+    };
+    permit.send(build(reply_tx));
+    match reply_rx.await {
+        Ok(result) => ReloadDispatch::Replied(result),
+        Err(_) => ReloadDispatch::AcknowledgementLost,
+    }
 }
 
 /// Preflight `config`'s outbound prefix maxima across every live peer and
@@ -53,18 +84,17 @@ pub(crate) async fn prepare_outbound_prefix_limits(
     txn: u64,
     config: &Config,
 ) -> Result<(), String> {
-    let (reply, rx) = oneshot::channel();
-    rib_tx
-        .send(rustbgpd_rib::RibUpdate::PrepareOutboundPrefixLimits {
+    match dispatch_rib_step(rib_tx, |reply| {
+        rustbgpd_rib::RibUpdate::PrepareOutboundPrefixLimits {
             txn,
             config: config.outbound_prefix_limits(),
             reply,
-        })
-        .await
-        .map_err(|_| "RIB manager unavailable".to_string())?;
-    match rx.await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(violations)) => Err(format!(
+        }
+    })
+    .await
+    {
+        ReloadDispatch::Replied(Ok(())) => Ok(()),
+        ReloadDispatch::Replied(Err(violations)) => Err(format!(
             "outbound prefix limit rejected: {}",
             violations
                 .iter()
@@ -72,7 +102,10 @@ pub(crate) async fn prepare_outbound_prefix_limits(
                 .collect::<Vec<_>>()
                 .join("; ")
         )),
-        Err(_) => Err("RIB manager dropped the outbound prefix-limit preflight".to_string()),
+        ReloadDispatch::NotAccepted(_) => Err("RIB manager unavailable".to_string()),
+        ReloadDispatch::AcknowledgementLost => {
+            Err("RIB manager dropped the outbound prefix-limit preflight".to_string())
+        }
     }
 }
 
@@ -82,17 +115,21 @@ pub(crate) async fn finish_outbound_prefix_limits(
     txn: u64,
     activate: bool,
 ) -> Result<(), String> {
-    let (reply, rx) = oneshot::channel();
-    rib_tx
-        .send(rustbgpd_rib::RibUpdate::ApplyOutboundPrefixLimits {
+    match dispatch_rib_step(rib_tx, |reply| {
+        rustbgpd_rib::RibUpdate::ApplyOutboundPrefixLimits {
             txn,
             activate,
             reply,
-        })
-        .await
-        .map_err(|_| "RIB manager unavailable".to_string())?;
-    rx.await
-        .map_err(|_| "RIB manager dropped the outbound prefix-limit activation".to_string())?
+        }
+    })
+    .await
+    {
+        ReloadDispatch::NotAccepted(_) => Err("RIB manager unavailable".to_string()),
+        ReloadDispatch::Replied(result) => result,
+        ReloadDispatch::AcknowledgementLost => {
+            Err("RIB manager dropped the outbound prefix-limit activation".to_string())
+        }
+    }
 }
 
 /// Preflight and activate `config`'s outbound prefix maxima as one
@@ -128,6 +165,7 @@ pub(crate) async fn apply_outbound_prefix_limits(
 /// preflight is a no-op by construction; activation would re-install the
 /// identical set. The common rpol-content-only reload therefore never
 /// touches the RIB here.
+#[cfg(test)]
 pub(crate) async fn apply_outbound_prefix_limits_if_changed(
     rib_tx: &mpsc::Sender<rustbgpd_rib::RibUpdate>,
     live: &Config,
@@ -201,8 +239,8 @@ pub(crate) fn build_peer_mgr_config(
 
 /// One reconcile-step failure during a SIGHUP reload, surfaced in
 /// the structured failure log when the new config is rejected.
-#[derive(Debug)]
-struct ReloadStepFailure {
+#[derive(Clone, Debug)]
+pub(crate) struct ReloadStepFailure {
     /// Which delta bucket the command came from
     /// (e.g., `"policy.set"`, `"peer_group.delete"`).
     bucket: &'static str,
@@ -210,7 +248,203 @@ struct ReloadStepFailure {
     /// or neighbor address). Empty for global-chain operations.
     target: String,
     /// Human-readable failure reason.
-    error: String,
+    error: ReloadStepError,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ReloadStepError {
+    NotAccepted(String),
+    Rejected(String),
+    AcknowledgementLost,
+}
+
+impl From<String> for ReloadStepError {
+    fn from(error: String) -> Self {
+        Self::Rejected(error)
+    }
+}
+
+impl std::fmt::Display for ReloadStepError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAccepted(error) | Self::Rejected(error) => formatter.write_str(error),
+            Self::AcknowledgementLost => formatter.write_str("acknowledgement lost"),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SighupReloadPlan {
+    pub(crate) baseline_runtime: Config,
+    pub(crate) desired: Arc<AcceptedConfigSnapshot>,
+}
+
+#[derive(Clone)]
+pub(crate) struct SighupAuthority {
+    pub(crate) runtime: Config,
+    pub(crate) desired: Arc<AcceptedConfigSnapshot>,
+    pub(crate) dialout_targets: Vec<DialoutTarget>,
+    pub(crate) completion: SighupCompletion,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum SighupCompletion {
+    Complete,
+    KnownPartial { failures: Vec<ReloadStepFailure> },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum SighupReloadError {
+    CoordinatorClosed,
+    Failed(ReloadStepFailure),
+}
+
+impl From<rustbgpd_api::server::RuntimeConfigCoordinatorClosed> for SighupReloadError {
+    fn from(_: rustbgpd_api::server::RuntimeConfigCoordinatorClosed) -> Self {
+        Self::CoordinatorClosed
+    }
+}
+
+impl std::fmt::Display for SighupReloadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CoordinatorClosed => formatter.write_str("runtime config coordinator is closed"),
+            Self::Failed(failure) => write!(
+                formatter,
+                "{} {}: {}",
+                failure.bucket, failure.target, failure.error
+            ),
+        }
+    }
+}
+
+impl SighupReloadError {
+    pub(crate) fn preflight(bucket: &'static str, error: impl Into<String>) -> Self {
+        sighup_error(
+            bucket,
+            String::new(),
+            ReloadStepError::Rejected(error.into()),
+        )
+    }
+
+    pub(crate) fn step(bucket: &'static str, error: ReloadStepError) -> Self {
+        sighup_error(bucket, String::new(), error)
+    }
+}
+
+#[expect(clippy::large_enum_variant, reason = "T288 keeps authority unboxed")]
+pub(crate) enum SighupReloadOutcome {
+    CleanNoEffect(SighupReloadError),
+    Acknowledged(SighupAuthority),
+    RecoveryFenced {
+        error: SighupReloadError,
+        reason: RuntimeConfigFenceReason,
+    },
+}
+
+struct SighupMutationProgress<'a> {
+    operation: Option<&'a OwnedRuntimeConfigOperation>,
+    accepted_effect: bool,
+}
+
+impl<'a> SighupMutationProgress<'a> {
+    fn new(operation: Option<&'a OwnedRuntimeConfigOperation>) -> Self {
+        Self {
+            operation,
+            accepted_effect: false,
+        }
+    }
+
+    fn mark_accepted_effect(&mut self) {
+        if let Some(operation) = self.operation {
+            operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+        }
+        self.accepted_effect = true;
+    }
+}
+
+#[cfg(test)]
+impl SighupReloadOutcome {
+    fn as_ref(&self) -> Option<&SighupAuthority> {
+        match self {
+            Self::Acknowledged(authority) => Some(authority),
+            Self::CleanNoEffect(_) | Self::RecoveryFenced { .. } => None,
+        }
+    }
+    fn expect(self, message: &str) -> SighupAuthority {
+        match self {
+            Self::Acknowledged(authority) => authority,
+            Self::CleanNoEffect(error) | Self::RecoveryFenced { error, .. } => {
+                panic!("{message}: {error}")
+            }
+        }
+    }
+
+    fn is_some(&self) -> bool {
+        matches!(self, Self::Acknowledged(_))
+    }
+
+    fn is_none(&self) -> bool {
+        matches!(self, Self::CleanNoEffect(_))
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for SighupAuthority {
+    type Target = Config;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
+fn sighup_error(
+    bucket: &'static str,
+    target: impl Into<String>,
+    error: ReloadStepError,
+) -> SighupReloadError {
+    SighupReloadError::Failed(ReloadStepFailure {
+        bucket,
+        target: target.into(),
+        error,
+    })
+}
+
+fn clean_reload_failure(bucket: &'static str, error: impl Into<String>) -> SighupReloadOutcome {
+    SighupReloadOutcome::CleanNoEffect(sighup_error(
+        bucket,
+        String::new(),
+        ReloadStepError::Rejected(error.into()),
+    ))
+}
+
+fn fenced_reload_failure(
+    bucket: &'static str,
+    error: ReloadStepError,
+    reason: RuntimeConfigFenceReason,
+) -> SighupReloadOutcome {
+    SighupReloadOutcome::RecoveryFenced {
+        error: sighup_error(bucket, String::new(), error),
+        reason,
+    }
+}
+
+fn preflight_dispatch_failure(bucket: &'static str, error: ReloadStepError) -> SighupReloadOutcome {
+    SighupReloadOutcome::CleanNoEffect(sighup_error(bucket, String::new(), error))
+}
+
+fn acknowledged_reload(
+    runtime: Config,
+    desired: Arc<AcceptedConfigSnapshot>,
+    dialout_targets: Vec<DialoutTarget>,
+    completion: SighupCompletion,
+) -> SighupReloadOutcome {
+    SighupReloadOutcome::Acknowledged(SighupAuthority {
+        runtime,
+        desired,
+        dialout_targets,
+        completion,
+    })
 }
 
 struct TcpAoRotationPlan {
@@ -583,26 +817,29 @@ fn prepare_tcp_ao_rotation_plan(
 async fn send_tcp_ao_preflight(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     plan: &TcpAoRotationPlan,
-) -> Result<(), String> {
-    send_pm_step(peer_mgr_tx, |reply| {
-        PeerManagerCommand::PreflightTcpAoRotation {
-            generation: plan.generation,
-            operation: plan.operation,
-            listener_keys: plan.listener_keys.clone(),
-            current_listener_keys: plan.current_listener_keys.clone(),
-            static_keyrings: plan.static_keyrings.clone(),
-            current_static_keyrings: plan.current_static_keyrings.clone(),
-            reply,
-        }
-    })
-    .await
+) -> Result<(), ReloadStepError> {
+    step_result(
+        dispatch_peer_step(peer_mgr_tx, |reply| {
+            PeerManagerCommand::PreflightTcpAoRotation {
+                generation: plan.generation,
+                operation: plan.operation,
+                listener_keys: plan.listener_keys.clone(),
+                current_listener_keys: plan.current_listener_keys.clone(),
+                static_keyrings: plan.static_keyrings.clone(),
+                current_static_keyrings: plan.current_static_keyrings.clone(),
+                reply,
+            }
+        })
+        .await,
+    )
 }
 
 async fn send_tcp_ao_apply(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     plan: &TcpAoRotationPlan,
-) -> Result<(), String> {
-    send_pm_step(peer_mgr_tx, |reply| {
+    progress: &mut SighupMutationProgress<'_>,
+) -> Result<(), ReloadStepError> {
+    peer_step(peer_mgr_tx, progress, |reply| {
         PeerManagerCommand::ApplyTcpAoRotation {
             generation: plan.generation,
             operation: plan.operation,
@@ -622,15 +859,17 @@ async fn mark_tcp_ao_failed(
     operation: TcpAoRotationOperation,
     error: String,
 ) {
-    let result = send_pm_step(peer_mgr_tx, |reply| {
-        PeerManagerCommand::MarkTcpAoRotationFailed {
-            generation,
-            operation,
-            error,
-            reply,
-        }
-    })
-    .await;
+    let result = step_result(
+        dispatch_peer_step(peer_mgr_tx, |reply| {
+            PeerManagerCommand::MarkTcpAoRotationFailed {
+                generation,
+                operation,
+                error,
+                reply,
+            }
+        })
+        .await,
+    );
     if let Err(mark_error) = result {
         warn!(%mark_error, "failed to publish TCP-AO rotation failure to peer status");
     }
@@ -656,26 +895,6 @@ fn copy_tcp_ao_runtime_fields(target: &mut Config, source: &Config) {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct ReloadedConfig {
-    runtime: Config,
-    desired: Arc<AcceptedConfigSnapshot>,
-}
-
-impl ReloadedConfig {
-    fn new(runtime: Config, desired: Arc<AcceptedConfigSnapshot>) -> Self {
-        Self { runtime, desired }
-    }
-}
-
-impl Deref for ReloadedConfig {
-    type Target = Config;
-
-    fn deref(&self) -> &Self::Target {
-        &self.runtime
-    }
-}
-
 fn evpn_runtime_changed(new_config: &Config, current: &Config) -> bool {
     new_config.evpn_instances != current.evpn_instances
         || new_config.evpn_ip_vrfs != current.evpn_ip_vrfs
@@ -690,38 +909,197 @@ fn copy_evpn_runtime_fields(target: &mut Config, source: &Config) {
         .clone_from(&source.ethernet_segments);
 }
 
-async fn send_pm_result_step<E: Display>(
+fn copy_outbound_prefix_limit_fields(target: &mut Config, source: &Config) {
+    for neighbor in &mut target.neighbors {
+        if let Some(desired) = source.neighbors.iter().find(|desired| {
+            desired.address == neighbor.address && desired.interface == neighbor.interface
+        }) {
+            neighbor.max_prefixes_out_ipv4 = desired.max_prefixes_out_ipv4;
+            neighbor.max_prefixes_out_ipv6 = desired.max_prefixes_out_ipv6;
+        }
+    }
+    for (name, group) in &mut target.peer_groups {
+        if let Some(desired) = source.peer_groups.get(name) {
+            group.max_prefixes_out_ipv4 = desired.max_prefixes_out_ipv4;
+            group.max_prefixes_out_ipv6 = desired.max_prefixes_out_ipv6;
+        }
+    }
+}
+
+async fn dispatch_actor_step<T>(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    build: impl FnOnce(oneshot::Sender<T>) -> PeerManagerCommand,
+) -> ReloadDispatch<T, String> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let permit = match peer_mgr_tx.reserve().await {
+        Ok(permit) => permit,
+        Err(error) => return ReloadDispatch::NotAccepted(error.to_string()),
+    };
+    permit.send(build(reply_tx));
+    match reply_rx.await {
+        Ok(result) => ReloadDispatch::Replied(result),
+        Err(_) => ReloadDispatch::AcknowledgementLost,
+    }
+}
+
+async fn dispatch_peer_step<E>(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     build: impl FnOnce(oneshot::Sender<Result<(), E>>) -> PeerManagerCommand,
-) -> Result<(), String> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    if let Err(e) = peer_mgr_tx.send(build(reply_tx)).await {
-        return Err(format!("send to peer manager failed: {e}"));
-    }
-    match reply_rx.await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(error.to_string()),
-        Err(e) => Err(format!("peer manager dropped reply: {e}")),
+) -> ReloadDispatch<Result<(), E>, String> {
+    dispatch_actor_step(peer_mgr_tx, build).await
+}
+
+fn step_result<E: std::fmt::Display>(
+    dispatch: ReloadDispatch<Result<(), E>, String>,
+) -> Result<(), ReloadStepError> {
+    match dispatch {
+        ReloadDispatch::NotAccepted(error) => Err(ReloadStepError::NotAccepted(error)),
+        ReloadDispatch::Replied(Ok(())) => Ok(()),
+        ReloadDispatch::Replied(Err(error)) => Err(ReloadStepError::Rejected(error.to_string())),
+        ReloadDispatch::AcknowledgementLost => Err(ReloadStepError::AcknowledgementLost),
     }
 }
 
-/// Send a single `PeerManagerCommand` and await its `Result<(), String>`
-/// reply. Maps both channel-send and dropped-reply errors to a single
-/// `String` so callers can record one structured failure per step.
-async fn send_pm_step(
+async fn peer_step<E: std::fmt::Display>(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    build: impl FnOnce(oneshot::Sender<Result<(), String>>) -> PeerManagerCommand,
-) -> Result<(), String> {
-    send_pm_result_step(peer_mgr_tx, build).await
+    progress: &mut SighupMutationProgress<'_>,
+    build: impl FnOnce(oneshot::Sender<Result<(), E>>) -> PeerManagerCommand,
+) -> Result<(), ReloadStepError> {
+    let dispatch = dispatch_peer_step(peer_mgr_tx, build).await;
+    if !matches!(dispatch, ReloadDispatch::NotAccepted(_)) {
+        progress.mark_accepted_effect();
+    }
+    step_result(dispatch)
 }
 
-/// Send a catalog mutation command and convert its typed error to reload's
-/// existing string-shaped step failure.
-async fn send_catalog_pm_step(
+enum OwnedStepFailure {
+    Partial(ReloadStepError),
+    Fenced {
+        error: ReloadStepError,
+        reason: RuntimeConfigFenceReason,
+    },
+}
+
+async fn catalog_step(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    build: impl FnOnce(oneshot::Sender<Result<(), CatalogMutationError>>) -> PeerManagerCommand,
-) -> Result<(), String> {
-    send_pm_result_step(peer_mgr_tx, build).await
+    progress: &mut SighupMutationProgress<'_>,
+    mutation: OwnedCatalogMutation,
+) -> Result<(), OwnedStepFailure> {
+    match dispatch_actor_step(peer_mgr_tx, |reply| {
+        PeerManagerCommand::OwnedCatalogMutation { mutation, reply }
+    })
+    .await
+    {
+        ReloadDispatch::NotAccepted(error) => Err(OwnedStepFailure::Partial(
+            ReloadStepError::NotAccepted(error),
+        )),
+        ReloadDispatch::Replied(OwnedCatalogMutationOutcome::Success) => {
+            progress.mark_accepted_effect();
+            Ok(())
+        }
+        ReloadDispatch::Replied(
+            OwnedCatalogMutationOutcome::RejectedNoEffect(error)
+            | OwnedCatalogMutationOutcome::FullyCompensated(error),
+        ) => Err(OwnedStepFailure::Partial(ReloadStepError::Rejected(
+            error.to_string(),
+        ))),
+        ReloadDispatch::Replied(OwnedCatalogMutationOutcome::CompensationAmbiguous(error)) => {
+            progress.mark_accepted_effect();
+            Err(OwnedStepFailure::Fenced {
+                error: ReloadStepError::Rejected(error.to_string()),
+                reason: RuntimeConfigFenceReason::KnownDivergence,
+            })
+        }
+        ReloadDispatch::AcknowledgementLost => {
+            progress.mark_accepted_effect();
+            Err(OwnedStepFailure::Fenced {
+                error: ReloadStepError::AcknowledgementLost,
+                reason: RuntimeConfigFenceReason::AcknowledgementLost,
+            })
+        }
+    }
+}
+
+fn owned_step_failure(
+    progress: &SighupMutationProgress<'_>,
+    working_config: Config,
+    desired: &Arc<AcceptedConfigSnapshot>,
+    bucket: &'static str,
+    target: String,
+    failure: OwnedStepFailure,
+) -> SighupReloadOutcome {
+    match failure {
+        OwnedStepFailure::Partial(error) => acknowledge_partial(
+            progress,
+            working_config,
+            desired,
+            ReloadStepFailure {
+                bucket,
+                target,
+                error,
+            },
+        ),
+        OwnedStepFailure::Fenced { error, reason } => fenced_reload_failure(bucket, error, reason),
+    }
+}
+
+async fn hot_peer_step(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    progress: &mut SighupMutationProgress<'_>,
+    config: PeerManagerNeighborConfig,
+) -> Result<(), OwnedStepFailure> {
+    match dispatch_actor_step(peer_mgr_tx, |reply| PeerManagerCommand::HotUpdatePeer {
+        config,
+        reply,
+    })
+    .await
+    {
+        ReloadDispatch::NotAccepted(error) => Err(OwnedStepFailure::Partial(
+            ReloadStepError::NotAccepted(error),
+        )),
+        ReloadDispatch::Replied(OwnedHotUpdatePeerOutcome::Success) => {
+            progress.mark_accepted_effect();
+            Ok(())
+        }
+        ReloadDispatch::Replied(OwnedHotUpdatePeerOutcome::RejectedNoEffect(error)) => Err(
+            OwnedStepFailure::Partial(ReloadStepError::Rejected(error.to_string())),
+        ),
+        ReloadDispatch::Replied(OwnedHotUpdatePeerOutcome::KnownDivergence(error)) => {
+            progress.mark_accepted_effect();
+            Err(OwnedStepFailure::Fenced {
+                error: ReloadStepError::Rejected(error.to_string()),
+                reason: RuntimeConfigFenceReason::KnownDivergence,
+            })
+        }
+        ReloadDispatch::AcknowledgementLost => {
+            progress.mark_accepted_effect();
+            Err(OwnedStepFailure::Fenced {
+                error: ReloadStepError::AcknowledgementLost,
+                reason: RuntimeConfigFenceReason::AcknowledgementLost,
+            })
+        }
+    }
+}
+
+fn listener_step<T>(
+    dispatch: ReloadDispatch<std::io::Result<T>, std::io::Error>,
+) -> Result<T, ReloadStepError> {
+    match dispatch {
+        ReloadDispatch::NotAccepted(error) => Err(ReloadStepError::NotAccepted(error.to_string())),
+        ReloadDispatch::Replied(Ok(value)) => Ok(value),
+        ReloadDispatch::Replied(Err(error)) => Err(ReloadStepError::Rejected(error.to_string())),
+        ReloadDispatch::AcknowledgementLost => Err(ReloadStepError::AcknowledgementLost),
+    }
+}
+
+fn listener_mutation_step<T>(
+    dispatch: ReloadDispatch<std::io::Result<T>, std::io::Error>,
+    progress: &mut SighupMutationProgress<'_>,
+) -> Result<T, ReloadStepError> {
+    if !matches!(dispatch, ReloadDispatch::NotAccepted(_)) {
+        progress.mark_accepted_effect();
+    }
+    listener_step(dispatch)
 }
 
 /// Read the peer manager's current runtime config snapshot.
@@ -753,21 +1131,23 @@ pub(crate) async fn runtime_config_snapshot_accepted(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     accepted: &AcceptedConfigSnapshot,
     live_bindings: &rustbgpd_policy::datasets::DatasetBindings,
-) -> Result<Config, String> {
+) -> ReloadDispatch<Result<Config, String>, String> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    peer_mgr_tx
-        .send(PeerManagerCommand::RuntimeConfigSnapshot { reply: reply_tx })
-        .await
-        .map_err(|e| format!("send to peer manager failed: {e}"))?;
-    let snapshot = reply_rx
-        .await
-        .map_err(|e| format!("peer manager dropped runtime snapshot reply: {e}"))??;
-    accepted.runtime_config_without_sources(
-        &snapshot.toml,
-        &snapshot.rpol_files,
-        snapshot.rpol,
-        live_bindings,
-    )
+    let permit = match peer_mgr_tx.reserve().await {
+        Ok(permit) => permit,
+        Err(error) => return ReloadDispatch::NotAccepted(error.to_string()),
+    };
+    permit.send(PeerManagerCommand::RuntimeConfigSnapshot { reply: reply_tx });
+    match reply_rx.await {
+        Ok(Ok(snapshot)) => ReloadDispatch::Replied(accepted.runtime_config_without_sources(
+            &snapshot.toml,
+            &snapshot.rpol_files,
+            snapshot.rpol,
+            live_bindings,
+        )),
+        Ok(Err(error)) => ReloadDispatch::Replied(Err(error)),
+        Err(_) => ReloadDispatch::AcknowledgementLost,
+    }
 }
 
 /// Reconstruct the transaction-editing document without external-source reads
@@ -837,18 +1217,14 @@ fn take_config_event_ack(event: &mut ConfigEvent) -> Option<ConfigPersistAck> {
 async fn set_pm_fib_tables_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     tables: &[config::FibTableConfig],
-) -> Result<(), String> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    peer_mgr_tx
-        .send(PeerManagerCommand::SetFibTablesSnapshot {
+) -> ReloadDispatch<(), String> {
+    dispatch_actor_step(peer_mgr_tx, |reply| {
+        PeerManagerCommand::SetFibTablesSnapshot {
             tables: fib_table_snapshots(tables),
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|e| format!("send to peer manager failed: {e}"))?;
-    reply_rx
-        .await
-        .map_err(|e| format!("peer manager dropped reply: {e}"))
+            reply,
+        }
+    })
+    .await
 }
 
 /// What the bridge should do with its held snapshot after an acknowledged
@@ -994,7 +1370,7 @@ async fn persist_acknowledged(
 /// left to do here.
 pub(crate) struct AcceptedBridgeReplacement {
     snapshot: Arc<AcceptedConfigSnapshot>,
-    adopted: oneshot::Sender<()>,
+    adopted: oneshot::Sender<ReloadDispatch<(), String>>,
 }
 
 #[expect(
@@ -1021,18 +1397,29 @@ pub(crate) async fn run_config_bridge_accepted(
                 match replace {
                     Some(replacement) => {
                         let new_snapshot = replacement.snapshot;
-                        if mutation_tx
-                            .send(ConfigMutation::RefreshSnapshotNoPersist(Arc::clone(
-                                &new_snapshot,
-                            )))
-                            .await
-                            .is_err()
-                        {
+                        let permit = match mutation_tx.reserve().await {
+                            Ok(permit) => permit,
+                            Err(error) => {
+                                let _ = replacement.adopted.send(ReloadDispatch::NotAccepted(error.to_string()));
+                                break;
+                            }
+                        };
+                        let (persister_adopted, persister_adopted_rx) = oneshot::channel();
+                        permit.send(ConfigMutation::AdoptReloadSnapshot {
+                            snapshot: Arc::clone(&new_snapshot),
+                            adopted: persister_adopted,
+                        });
+                        if persister_adopted_rx.await.is_err() {
+                            let _ = replacement.adopted.send(ReloadDispatch::AcknowledgementLost);
                             break;
                         }
                         current = new_snapshot;
                         accepted_tx.send_replace(Arc::clone(&current));
-                        let _ = replacement.adopted.send(());
+                        if sighup_ack_fault("bridge") {
+                            drop(replacement.adopted);
+                            continue;
+                        }
+                        let _ = replacement.adopted.send(ReloadDispatch::Replied(()));
                     }
                     None => bridge_replace_rx_open = false,
                 }
@@ -1159,10 +1546,7 @@ pub(crate) async fn run_config_bridge(
     run_config_bridge_accepted(event_rx, accepted_replace_rx, mutation_tx, accepted_tx).await;
 }
 
-/// Forward a freshly reloaded config to the peer manager and the
-/// config bridge, in that order. Returns the runtime `Config` on success
-/// so the caller can advance its in-memory snapshot in one step
-/// (`config = apply_reload_outcome(...).await?;`).
+/// Acknowledge a freshly reloaded authority across every runtime consumer.
 ///
 /// Order matters. `peer_mgr_internal_tx` is unbounded and can only fail
 /// on receiver-drop (peer manager task is dead — fatal anyway). The
@@ -1188,11 +1572,22 @@ pub(crate) async fn run_config_bridge(
 ///
 /// This remains async because it waits for both the peer-manager snapshot
 /// assignment and the bridge's accepted-snapshot adoption acknowledgements.
-pub(crate) async fn apply_reload_outcome(
-    reloaded: ReloadedConfig,
+pub(crate) async fn finalize_sighup_authority(
+    operation: &OwnedRuntimeConfigOperation,
+    authority: SighupAuthority,
     peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
-    bridge_replace_tx: Option<&mpsc::UnboundedSender<AcceptedBridgeReplacement>>,
-) -> Result<Config, &'static str> {
+    bridge_replace_tx: &mpsc::UnboundedSender<AcceptedBridgeReplacement>,
+    dialout_manager: &Arc<tokio::sync::Mutex<rustbgpd_api::gnmi_dialout::DialoutManager>>,
+) -> OwnedRuntimeConfigOutcome<SighupAuthority, SighupReloadError> {
+    operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
+    let fenced = |bucket, reason, fence_reason| OwnedRuntimeConfigOutcome::Fenced {
+        error: SighupReloadError::Failed(ReloadStepFailure {
+            bucket,
+            target: String::new(),
+            error: reason,
+        }),
+        reason: fence_reason,
+    };
     // Acknowledge the snapshot so the caller (holding the FIB coordinator lock)
     // doesn't release the lock until the peer manager has actually assigned
     // `current_config`. Otherwise a following gRPC FIB-table CRUD could enqueue
@@ -1201,27 +1596,53 @@ pub(crate) async fn apply_reload_outcome(
     let (ack_tx, ack_rx) = oneshot::channel();
     if peer_mgr_internal_tx
         .send(InternalCommand::ReplaceConfigSnapshot {
-            config: Box::new(reloaded.runtime.clone()),
+            config: Box::new(authority.runtime.clone()),
             ack: Some(ack_tx),
         })
         .is_err()
     {
-        return Err("peer_mgr_snapshot");
+        return fenced(
+            "peer_mgr_snapshot",
+            ReloadStepError::NotAccepted("peer manager snapshot command was not accepted".into()),
+            RuntimeConfigFenceReason::KnownDivergence,
+        );
     }
     if ack_rx.await.is_err() {
-        return Err("peer_mgr_snapshot");
+        return fenced(
+            "peer_mgr_snapshot",
+            ReloadStepError::AcknowledgementLost,
+            RuntimeConfigFenceReason::AcknowledgementLost,
+        );
     }
-    if let Some(tx) = bridge_replace_tx {
-        let (adopted, adopted_rx) = oneshot::channel();
-        if tx
-            .send(AcceptedBridgeReplacement {
-                snapshot: Arc::clone(&reloaded.desired),
-                adopted,
-            })
-            .is_err()
-            || adopted_rx.await.is_err()
-        {
-            return Err("config_bridge");
+    let (adopted, adopted_rx) = oneshot::channel();
+    if bridge_replace_tx
+        .send(AcceptedBridgeReplacement {
+            snapshot: Arc::clone(&authority.desired),
+            adopted,
+        })
+        .is_err()
+    {
+        return fenced(
+            "config_bridge",
+            ReloadStepError::NotAccepted("config bridge adoption was not accepted".into()),
+            RuntimeConfigFenceReason::KnownDivergence,
+        );
+    }
+    match adopted_rx.await {
+        Ok(ReloadDispatch::Replied(())) => {}
+        Ok(ReloadDispatch::NotAccepted(error)) => {
+            return fenced(
+                "config_persister",
+                ReloadStepError::NotAccepted(error),
+                RuntimeConfigFenceReason::KnownDivergence,
+            );
+        }
+        Ok(ReloadDispatch::AcknowledgementLost) | Err(_) => {
+            return fenced(
+                "config_bridge",
+                ReloadStepError::AcknowledgementLost,
+                RuntimeConfigFenceReason::AcknowledgementLost,
+            );
         }
     }
 
@@ -1234,15 +1655,23 @@ pub(crate) async fn apply_reload_outcome(
     // full filter (RUST_LOG base + all per-peer directives), so the global
     // base level always survives. Reapplying identical directives is a
     // no-op; a malformed directive leaves the live filter untouched. A
-    // failure here is non-fatal — the config is already committed — so warn
-    // rather than unwind the reload.
+    // failure here leaves the adopted config and tracing projection divergent,
+    // so the owner fences rather than claiming acknowledged authority.
     if let Err(error) =
-        rustbgpd_telemetry::reload_per_peer_directives(&reloaded.desired.per_peer_log_directives())
+        rustbgpd_telemetry::reload_per_peer_directives(&authority.desired.per_peer_log_directives())
     {
-        warn!(error = %error, "failed to re-apply per-peer log_level filter on config reload");
+        return fenced(
+            "peer_tracing",
+            ReloadStepError::Rejected(error.to_string()),
+            RuntimeConfigFenceReason::KnownDivergence,
+        );
     }
 
-    Ok(reloaded.runtime)
+    dialout_manager
+        .lock()
+        .await
+        .apply(&authority.dialout_targets);
+    OwnedRuntimeConfigOutcome::AcknowledgedAuthority(authority)
 }
 
 /// Reload configuration from disk and reconcile runtime state.
@@ -1344,7 +1773,7 @@ pub(crate) async fn reload_config(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     fib_cmd_tx: Option<&mpsc::Sender<FibRuntimeCommand>>,
     evpn_runtime_apply: Option<&EvpnRuntimeReloadApply>,
-) -> Option<ReloadedConfig> {
+) -> SighupReloadOutcome {
     let config_path = std::path::Path::new(config_path);
     let source = std::fs::read_to_string(config_path).unwrap();
     write_tier_test_config(config_path, &source);
@@ -1355,16 +1784,20 @@ pub(crate) async fn reload_config(
             &prior,
             &current.policy.dataset_bindings,
         )
-        .ok()?,
+        .expect("test reload config must parse"),
     );
     reload_config_with_tcp_ao(
-        desired,
-        current,
+        SighupReloadPlan {
+            baseline_runtime: current.clone(),
+            desired,
+        },
         live_grpc_tcp,
         live_grpc_uds,
         peer_mgr_tx,
+        None,
         fib_cmd_tx,
         evpn_runtime_apply,
+        None,
         None,
     )
     .await
@@ -1376,15 +1809,19 @@ pub(crate) async fn reload_config(
     reason = "reload threads live subsystem handles, ordered reconciliation, and failure aggregation through one transaction coordinator"
 )]
 pub(crate) async fn reload_config_with_tcp_ao(
-    desired_snapshot: Arc<AcceptedConfigSnapshot>,
-    current: &Config,
+    plan: SighupReloadPlan,
     live_grpc_tcp: Option<&config::GrpcTcpListenerConfig>,
     live_grpc_uds: Option<&config::GrpcUdsListenerConfig>,
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    rib_tx: Option<&mpsc::Sender<rustbgpd_rib::RibUpdate>>,
     fib_cmd_tx: Option<&mpsc::Sender<FibRuntimeCommand>>,
     evpn_runtime_apply: Option<&EvpnRuntimeReloadApply>,
     tcp_ao_listener: Option<&TcpAoListenerHandle>,
-) -> Option<ReloadedConfig> {
+    operation: Option<&OwnedRuntimeConfigOperation>,
+) -> SighupReloadOutcome {
+    let current = &plan.baseline_runtime;
+    let desired_snapshot = plan.desired;
+    let mut progress = SighupMutationProgress::new(operation);
     // LAN-305: parse dataset contents against the running binding schema, but
     // stage changed data and refresh errors on detached candidate handles.
     // Shared live handles are committed only after the complete no-side-effect
@@ -1465,7 +1902,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
             Ok(plan) => plan,
             Err(error) => {
                 error!(%error, "failed to compile TCP-AO rotation generation");
-                return None;
+                return clean_reload_failure("tcp_ao.plan", error);
             }
         }
     } else {
@@ -1486,7 +1923,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         });
         if retained {
             error!(%reason, "TCP-AO reload changed a retained immutable generation; halting before unrelated reload work");
-            return None;
+            return clean_reload_failure("tcp_ao.plan", reason.clone());
         }
         error!(%reason, "TCP-AO reload is outside the ordered live-rotation phases; retaining restart-pinned runtime inventory");
     }
@@ -1537,8 +1974,13 @@ pub(crate) async fn reload_config_with_tcp_ao(
             error = %error,
             "reload pinning produced an invalid runtime configuration; refusing reload before any runtime actor mutation. Restart rustbgpd to change TCP-AO authentication boundaries"
         );
-        return None;
+        return clean_reload_failure("reload.validate", error.to_string());
     }
+
+    let dialout_targets = match config::gnmi_dialout_targets(&new_config) {
+        Ok(targets) => targets,
+        Err(error) => return clean_reload_failure("gnmi_dialout.plan", error),
+    };
 
     // TCP-AO rotation is the first fallible external apply. The
     // complete pinned candidate is valid now; preflight every managed session,
@@ -1559,7 +2001,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 listener.preflight_delete(desired_listener.clone()).await
             }
         };
-        if let Err(error) = listener_preflight {
+        if let Err(error) = listener_step(listener_preflight) {
             mark_tcp_ao_failed(
                 peer_mgr_tx,
                 plan.generation,
@@ -1568,18 +2010,18 @@ pub(crate) async fn reload_config_with_tcp_ao(
             )
             .await;
             error!(error = %error, "TCP-AO generation rejected during complete listener kernel preflight");
-            return None;
+            return preflight_dispatch_failure("tcp_ao.listener_preflight", error);
         }
         if let Err(error) = send_tcp_ao_preflight(peer_mgr_tx, plan).await {
             error!(error = %error, "TCP-AO generation rejected during global session preflight");
-            return None;
+            return preflight_dispatch_failure("tcp_ao.peer_preflight", error);
         }
         let listener_apply = match plan.operation {
             TcpAoRotationOperation::AddOnly => listener.apply_add_only(desired_listener).await,
             TcpAoRotationOperation::Selection => listener.begin_selection(desired_listener).await,
             TcpAoRotationOperation::Delete => listener.apply_delete(desired_listener).await,
         };
-        if let Err(error) = listener_apply {
+        if let Err(error) = listener_mutation_step(listener_apply, &mut progress) {
             mark_tcp_ao_failed(
                 peer_mgr_tx,
                 plan.generation,
@@ -1588,32 +2030,48 @@ pub(crate) async fn reload_config_with_tcp_ao(
             )
             .await;
             error!(error = %error, "TCP-AO generation failed on listener; retry the identical generation unless the error reports failed exact prior-inventory restoration, in which case restart rustbgpd");
-            return None;
+            let reason = if matches!(error, ReloadStepError::AcknowledgementLost) {
+                RuntimeConfigFenceReason::AcknowledgementLost
+            } else {
+                RuntimeConfigFenceReason::KnownDivergence
+            };
+            return fenced_reload_failure("tcp_ao.listener_apply", error, reason);
         }
-        if let Err(error) = send_tcp_ao_apply(peer_mgr_tx, plan).await {
+        if let Err(error) = send_tcp_ao_apply(peer_mgr_tx, plan, &mut progress).await {
             if plan.operation == TcpAoRotationOperation::Selection
-                && error.starts_with(crate::peer_manager::TCP_AO_AWAITING_PEER_PREFIX)
+                && matches!(&error, ReloadStepError::Rejected(message) if message.starts_with(crate::peer_manager::TCP_AO_AWAITING_PEER_PREFIX))
             {
-                if let Err(marker_error) = listener
-                    .mark_awaiting_peer(plan.generation, error.clone())
-                    .await
-                {
+                if let Err(marker_error) = listener_step(
+                    listener
+                        .mark_awaiting_peer(plan.generation, error.to_string())
+                        .await,
+                ) {
                     warn!(error = %marker_error, "TCP-AO listener awaiting-peer marker was not acknowledged");
                 }
                 info!(error = %error, generation = plan.generation.as_u64(), "TCP-AO successor selected; peer-use observation remains pending until a later identical SIGHUP");
-                return None;
+                return fenced_reload_failure(
+                    "tcp_ao.awaiting_peer",
+                    error,
+                    RuntimeConfigFenceReason::KnownDivergence,
+                );
             }
-            if let Err(marker_error) = listener
-                .mark_dependent_failure(plan.generation, error.clone())
-                .await
-            {
+            if let Err(marker_error) = listener_step(
+                listener
+                    .mark_dependent_failure(plan.generation, error.to_string())
+                    .await,
+            ) {
                 warn!(error = %marker_error, "TCP-AO listener dependent-failure marker was not acknowledged; staged generation remains globally uncommitted");
             }
             error!(error = %error, "TCP-AO generation failed on an established session; listener accepts remain generation-fenced until retry");
-            return None;
+            let reason = if matches!(error, ReloadStepError::AcknowledgementLost) {
+                RuntimeConfigFenceReason::AcknowledgementLost
+            } else {
+                RuntimeConfigFenceReason::KnownDivergence
+            };
+            return fenced_reload_failure("tcp_ao.peer_apply", error, reason);
         }
         if plan.operation == TcpAoRotationOperation::Selection
-            && let Err(error) = listener.finalize_selection(plan.generation).await
+            && let Err(error) = listener_step(listener.finalize_selection(plan.generation).await)
         {
             mark_tcp_ao_failed(
                 peer_mgr_tx,
@@ -1623,9 +2081,15 @@ pub(crate) async fn reload_config_with_tcp_ao(
             )
             .await;
             error!(error = %error, "TCP-AO session cohort observed successor use, but listener metadata commit failed; retrying the identical generation is required");
-            return None;
+            let reason = if matches!(error, ReloadStepError::AcknowledgementLost) {
+                RuntimeConfigFenceReason::AcknowledgementLost
+            } else {
+                RuntimeConfigFenceReason::KnownDivergence
+            };
+            return fenced_reload_failure("tcp_ao.listener_finalize", error, reason);
         }
-        if let Err(error) = listener.acknowledge_global_commit(plan.generation).await {
+        if let Err(error) = listener_step(listener.acknowledge_global_commit(plan.generation).await)
+        {
             mark_tcp_ao_failed(
                 peer_mgr_tx,
                 plan.generation,
@@ -1634,7 +2098,12 @@ pub(crate) async fn reload_config_with_tcp_ao(
             )
             .await;
             error!(error = %error, "TCP-AO generation reached sessions but listener global commit acknowledgement failed; retrying the same immutable generation is required");
-            return None;
+            let reason = if matches!(error, ReloadStepError::AcknowledgementLost) {
+                RuntimeConfigFenceReason::AcknowledgementLost
+            } else {
+                RuntimeConfigFenceReason::KnownDivergence
+            };
+            return fenced_reload_failure("tcp_ao.listener_commit", error, reason);
         }
         tcp_ao_rotation_applied = true;
         info!(
@@ -1655,25 +2124,33 @@ pub(crate) async fn reload_config_with_tcp_ao(
             Ok(inventory) => inventory,
             Err(error) => {
                 error!(%error, "failed to compute the live listener inbound-auth inventory");
-                return None;
+                return clean_reload_failure("listener_auth.plan", error);
             }
         };
         let desired_inventory = match listener_inbound_auth_inventory(&new_config) {
             Ok(inventory) => inventory,
             Err(error) => {
                 error!(%error, "failed to compute the desired listener inbound-auth inventory");
-                return None;
+                return clean_reload_failure("listener_auth.plan", error);
             }
         };
         if current_inventory != desired_inventory {
             let (md5_keys, ttl_security) = desired_inventory;
-            if let Err(error) = listener.replace_inbound_auth(md5_keys, ttl_security).await {
+            if let Err(error) = listener_mutation_step(
+                listener.replace_inbound_auth(md5_keys, ttl_security).await,
+                &mut progress,
+            ) {
                 error!(
                     error = %error,
                     "listener inbound MD5/GTSM inventory replacement failed; \
                      refusing reload (retrying the identical reload converges)"
                 );
-                return None;
+                let reason = if matches!(error, ReloadStepError::AcknowledgementLost) {
+                    RuntimeConfigFenceReason::AcknowledgementLost
+                } else {
+                    RuntimeConfigFenceReason::KnownDivergence
+                };
+                return fenced_reload_failure("listener_auth.apply", error, reason);
             }
             info!("listener inbound MD5/GTSM inventory replaced");
         }
@@ -1688,16 +2165,17 @@ pub(crate) async fn reload_config_with_tcp_ao(
         let attempt = apply
             .apply_config_if_changed(&new_config, evpn_runtime_changed)
             .await;
-        match attempt.result {
-            Ok(Some(result)) => {
+        match attempt.terminal {
+            EvpnRuntimeReloadTerminal::Applied(result) => {
+                progress.mark_accepted_effect();
                 info!(
                     outcome = ?result.outcome,
                     message = %result.message,
                     "reload: EVPN runtime model hot-applied through ADR-0063 coordinator"
                 );
             }
-            Ok(None) => {}
-            Err(error) => {
+            EvpnRuntimeReloadTerminal::Unchanged => {}
+            EvpnRuntimeReloadTerminal::RejectedNoEffect(error) => {
                 error!(
                     error = ?error,
                     "reload: EVPN runtime model differs but the ADR-0063 coordinator \
@@ -1706,6 +2184,31 @@ pub(crate) async fn reload_config_with_tcp_ao(
                      restart-required EVPN identity changes."
                 );
                 copy_evpn_runtime_fields(&mut new_config, &attempt.baseline);
+            }
+            EvpnRuntimeReloadTerminal::KnownPartial(error)
+            | EvpnRuntimeReloadTerminal::KnownDivergence(error) => {
+                error!(
+                    error = ?error,
+                    "reload: EVPN runtime apply changed or degraded coordinator authority; \
+                     fencing before later reload mutations"
+                );
+                return fenced_reload_failure(
+                    "evpn_runtime.apply",
+                    ReloadStepError::Rejected(format!("{error:?}")),
+                    RuntimeConfigFenceReason::KnownDivergence,
+                );
+            }
+            EvpnRuntimeReloadTerminal::PublicationAmbiguous(error) => {
+                error!(
+                    error = ?error,
+                    "reload: EVPN runtime apply publication is ambiguous; \
+                     fencing before later reload mutations"
+                );
+                return fenced_reload_failure(
+                    "evpn_runtime.apply",
+                    ReloadStepError::Rejected(format!("{error:?}")),
+                    RuntimeConfigFenceReason::PublicationAmbiguous,
+                );
             }
         }
     } else if evpn_runtime_changed(&new_config, current) {
@@ -1859,7 +2362,12 @@ pub(crate) async fn reload_config_with_tcp_ao(
         } else {
             info!("config reloaded — no neighbor / policy / peer-group changes detected");
         }
-        return Some(ReloadedConfig::new(new_config, desired_snapshot));
+        return acknowledged_reload(
+            new_config,
+            desired_snapshot,
+            dialout_targets,
+            SighupCompletion::Complete,
+        );
     }
 
     if explain_changed {
@@ -1870,19 +2378,10 @@ pub(crate) async fn reload_config_with_tcp_ao(
         );
     }
 
-    // working_config is the honest snapshot of runtime state. We
-    // start from `current` and apply each ConfigEvent locally as the
-    // matching peer-manager command succeeds. On any failure we
-    // halt and return Some(working_config) — the caller's in-memory
-    // config then matches what's actually live on the peer manager,
-    // instead of pretending the prior config is in effect when half
-    // of it has already been mutated. Returning the partial state is
-    // honest at the cost of leaving the operator with a half-applied
-    // reload; they re-edit the failing TOML and reload again to
-    // converge. Captured under "SIGHUP reconcile is not transactional"
-    // in KNOWN_ISSUES — this fix moves the snapshot from "lying about
-    // prior state" to "matching live state", which is the practical
-    // step short of true rollback.
+    // `working_config` is the authoritative runtime projection. Each
+    // acknowledged actor effect advances it. A known failure returns that
+    // explicit known-partial authority for composite finalization; a lost
+    // acknowledgement or non-authoritative reconcile fences instead.
     let mut working_config = current.clone();
     if tcp_ao_rotation_applied {
         copy_tcp_ao_runtime_fields(&mut working_config, &new_config);
@@ -1899,8 +2398,78 @@ pub(crate) async fn reload_config_with_tcp_ao(
         .clone_from(&desired_config.file_path);
     // EVPN runtime edits are applied before the staged peer-manager/FIB
     // sequence. Carry their accepted-or-pinned state into partial snapshots
-    // returned by halt_partial paths.
+    // returned by authoritative partial receipts.
     copy_evpn_runtime_fields(&mut working_config, &new_config);
+
+    if let Some(rib_tx) = rib_tx
+        && current.outbound_prefix_limits() != new_config.outbound_prefix_limits()
+    {
+        let txn = next_outbound_prefix_limit_txn();
+        let preparation = dispatch_rib_step(rib_tx, |reply| {
+            rustbgpd_rib::RibUpdate::PrepareOutboundPrefixLimits {
+                txn,
+                config: new_config.outbound_prefix_limits(),
+                reply,
+            }
+        })
+        .await;
+        let preparation = match preparation {
+            ReloadDispatch::NotAccepted(error) => Err(ReloadStepError::NotAccepted(error)),
+            ReloadDispatch::Replied(Ok(())) => Ok(()),
+            ReloadDispatch::Replied(Err(violations)) => Err(ReloadStepError::Rejected(format!(
+                "outbound prefix limit rejected: {}",
+                violations
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ))),
+            ReloadDispatch::AcknowledgementLost => Err(ReloadStepError::AcknowledgementLost),
+        };
+        if let Err(error) = preparation {
+            return acknowledge_partial(
+                &progress,
+                working_config,
+                &desired_snapshot,
+                ReloadStepFailure {
+                    bucket: "prefix_limit.prepare",
+                    target: String::new(),
+                    error,
+                },
+            );
+        }
+
+        let activation = dispatch_rib_step(rib_tx, |reply| {
+            rustbgpd_rib::RibUpdate::ApplyOutboundPrefixLimits {
+                txn,
+                activate: true,
+                reply,
+            }
+        })
+        .await;
+        let activation = match activation {
+            ReloadDispatch::NotAccepted(error) => Err(ReloadStepError::NotAccepted(error)),
+            ReloadDispatch::Replied(Ok(())) => {
+                progress.mark_accepted_effect();
+                Ok(())
+            }
+            ReloadDispatch::Replied(Err(error)) => Err(ReloadStepError::Rejected(error)),
+            ReloadDispatch::AcknowledgementLost => Err(ReloadStepError::AcknowledgementLost),
+        };
+        if let Err(error) = activation {
+            return acknowledge_partial(
+                &progress,
+                working_config,
+                &desired_snapshot,
+                ReloadStepFailure {
+                    bucket: "prefix_limit.activate",
+                    target: String::new(),
+                    error,
+                },
+            );
+        }
+        copy_outbound_prefix_limit_fields(&mut working_config, &new_config);
+    }
 
     // `[[dynamic_neighbors]]` edits are applied by the peer manager's
     // accept-matcher rebuild when the returned snapshot is swapped in
@@ -1930,41 +2499,55 @@ pub(crate) async fn reload_config_with_tcp_ao(
     // explicitly. Safe: no ConfigEvent mutates `policy.explain`, and the
     // explain-only reload already returns `new_config` directly above.
     if explain_changed {
-        working_config.policy.explain = new_config.policy.explain.clone();
-        working_config.policy.reject_retention = new_config.policy.reject_retention.clone();
-
         // Push the new explain snapshot to the peer manager *before* any
         // reconcile step below constructs a session. `build_transport_config`
         // reads `[policy.explain]` from the peer manager's `current_config`,
-        // which is otherwise replaced only after this whole reload completes
-        // (`apply_reload_outcome`). Without this, a peer re-added by a
+        // which is otherwise replaced only after this whole reload completes.
+        // Without this, a peer re-added by a
         // neighbor reconcile or peer-group change in *this same* reload would
         // be built with the stale explain settings. Sent on the same FIFO
         // command channel and awaited, so it is applied before every
-        // subsequent step. A send failure means the peer manager is gone —
-        // halt with the honest partial snapshot like any other step.
-        let (ack_tx, ack_rx) = oneshot::channel();
-        if peer_mgr_tx
-            .send(PeerManagerCommand::SyncExplainConfig {
+        // subsequent step. A send failure means the peer manager is gone and
+        // returns the authority accumulated before this step.
+        let outcome =
+            dispatch_actor_step(peer_mgr_tx, |reply| PeerManagerCommand::SyncExplainConfig {
                 enabled: new_config.policy.explain.enabled,
                 cache_size: new_config.policy.explain.cache_size,
                 reject_retention_enabled: new_config.policy.reject_retention.enabled,
                 reject_retention_capacity: new_config.policy.reject_retention.capacity,
-                reply: ack_tx,
+                reply,
             })
-            .await
-            .is_err()
-            || ack_rx.await.is_err()
-        {
-            return halt_partial(
-                working_config,
-                &desired_snapshot,
-                ReloadStepFailure {
-                    bucket: "policy.explain.sync",
-                    target: "[policy.explain]".to_string(),
-                    error: "peer manager unavailable while syncing explain snapshot".to_string(),
-                },
-            );
+            .await;
+        match outcome {
+            ReloadDispatch::Replied(()) => {
+                progress.mark_accepted_effect();
+                working_config.policy.explain = new_config.policy.explain.clone();
+                working_config.policy.reject_retention = new_config.policy.reject_retention.clone();
+            }
+            ReloadDispatch::NotAccepted(error) => {
+                return acknowledge_partial(
+                    &progress,
+                    working_config,
+                    &desired_snapshot,
+                    ReloadStepFailure {
+                        bucket: "policy.explain.sync",
+                        target: "[policy.explain]".to_string(),
+                        error: ReloadStepError::NotAccepted(error),
+                    },
+                );
+            }
+            ReloadDispatch::AcknowledgementLost => {
+                return acknowledge_partial(
+                    &progress,
+                    working_config,
+                    &desired_snapshot,
+                    ReloadStepFailure {
+                        bucket: "policy.explain.sync",
+                        target: "[policy.explain]".to_string(),
+                        error: ReloadStepError::AcknowledgementLost,
+                    },
+                );
+            }
         }
     }
 
@@ -1980,7 +2563,6 @@ pub(crate) async fn reload_config_with_tcp_ao(
         // LAN-888: stamp the registry-clone cost and the dispatch moment.
         // The gap between this line and the peer manager's receipt log is
         // pure command-channel queue wait — the only piece of the
-        // SIGHUP→snapshot window no other span can see.
         let clone_started = Instant::now();
         let rpol_files = new_config.policy.rpol_files.clone();
         let rpol = new_config.policy.rpol.clone();
@@ -1989,25 +2571,16 @@ pub(crate) async fn reload_config_with_tcp_ao(
             clone_ms = u64::try_from(clone_started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "rpol policy sync dispatched"
         );
-        let (ack_tx, ack_rx) = oneshot::channel();
-        let send_failed = peer_mgr_tx
-            .send(PeerManagerCommand::SyncRpolPolicies {
+        let result = catalog_step(
+            peer_mgr_tx,
+            &mut progress,
+            OwnedCatalogMutation::SyncRpolPolicies {
                 rpol_files,
                 rpol,
                 dataset_bindings,
-                reply: ack_tx,
-            })
-            .await
-            .is_err();
-        let result = if send_failed {
-            Err("peer manager unavailable while syncing rpol policies".to_string())
-        } else {
-            match ack_rx.await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(error)) => Err(error.to_string()),
-                Err(_) => Err("peer manager dropped rpol sync reply".to_string()),
-            }
-        };
+            },
+        )
+        .await;
         match result {
             // LAN-284: adopt the candidate registry into the runtime
             // snapshot ONLY after the peer manager committed it. The
@@ -2015,7 +2588,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
             // its `current_config` and every live chain on the old
             // registry), so absorbing the candidate before the ack
             // would ship the REJECTED registry to the runtime snapshot
-            // via halt_partial → ReplaceConfigSnapshot — new sessions
+            // via the authoritative partial receipt — new sessions
             // would then resolve against a registry no live session
             // runs. On failure the candidate survives only as on-disk
             // `.rpol` intent; the next successful reload adopts it.
@@ -2027,15 +2600,14 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 working_config.policy.rpol = new_config.policy.rpol.clone();
                 info!("reload: rpol policy registry synced");
             }
-            Err(error) => {
-                return halt_partial(
+            Err(failure) => {
+                return owned_step_failure(
+                    &progress,
                     working_config,
                     &desired_snapshot,
-                    ReloadStepFailure {
-                        bucket: "policy.rpol.sync",
-                        target: "[policy] rpol_files".to_string(),
-                        error,
-                    },
+                    "policy.rpol.sync",
+                    "[policy] rpol_files".to_string(),
+                    failure,
                 );
             }
         }
@@ -2044,10 +2616,11 @@ pub(crate) async fn reload_config_with_tcp_ao(
     // LAN-305: this is the first point after preflight where every earlier
     // fallible peer-manager registry/snapshot step has succeeded. Commit the
     // staged contents/errors now, then publish honest snapshot bookkeeping and
-    // dependency-scoped refreshes. A refresh failure is warned, not halted:
-    // an accepted swap is durable, and stale evaluations converge on the next
-    // churn or refresh.
+    // dependency-scoped refreshes. Its acknowledgement is part of the owner.
     dataset_commit.commit();
+    if dataset_commit_pending {
+        progress.mark_accepted_effect();
+    }
     working_config
         .policy
         .datasets
@@ -2055,28 +2628,53 @@ pub(crate) async fn reload_config_with_tcp_ao(
     working_config.policy.dataset_bindings = new_config.policy.dataset_bindings.clone();
     let dataset_events = &new_config.policy.dataset_events;
     if !dataset_events.swapped.is_empty() || !dataset_events.failed.is_empty() {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        let send_failed = peer_mgr_tx
-            .send(PeerManagerCommand::RefreshDatasetDependents {
+        let outcome = dispatch_actor_step(peer_mgr_tx, |reply| {
+            PeerManagerCommand::RefreshDatasetDependents {
                 swapped: dataset_events.swapped.clone(),
                 failed: dataset_events.failed.clone(),
-                reply: ack_tx,
-            })
-            .await
-            .is_err();
-        let outcome = if send_failed {
-            Err("peer manager unavailable".to_string())
-        } else {
-            match ack_rx.await {
-                Ok(result) => result,
-                Err(_) => Err("peer manager dropped dataset refresh reply".to_string()),
+                reply,
             }
-        };
-        if let Err(error) = outcome {
-            warn!(
-                error = %error,
-                "dataset-swap dependency-scoped refresh incomplete; affected peers converge on next churn or manual refresh"
-            );
+        })
+        .await;
+        match outcome {
+            ReloadDispatch::Replied(Ok(())) => progress.mark_accepted_effect(),
+            ReloadDispatch::NotAccepted(error) => {
+                return acknowledge_partial(
+                    &progress,
+                    working_config,
+                    &desired_snapshot,
+                    ReloadStepFailure {
+                        bucket: "policy.dataset.refresh",
+                        target: "[policy.datasets]".to_string(),
+                        error: ReloadStepError::NotAccepted(error),
+                    },
+                );
+            }
+            ReloadDispatch::Replied(Err(error)) => {
+                return acknowledge_partial(
+                    &progress,
+                    working_config,
+                    &desired_snapshot,
+                    ReloadStepFailure {
+                        bucket: "policy.dataset.refresh",
+                        target: "[policy.datasets]".to_string(),
+                        error: ReloadStepError::Rejected(error),
+                    },
+                );
+            }
+            ReloadDispatch::AcknowledgementLost => {
+                progress.mark_accepted_effect();
+                return acknowledge_partial(
+                    &progress,
+                    working_config,
+                    &desired_snapshot,
+                    ReloadStepFailure {
+                        bucket: "policy.dataset.refresh",
+                        target: "[policy.datasets]".to_string(),
+                        error: ReloadStepError::AcknowledgementLost,
+                    },
+                );
+            }
         }
     }
 
@@ -2096,7 +2694,8 @@ pub(crate) async fn reload_config_with_tcp_ao(
         // diff and the config snapshot disagree — treat as halt.
         let Some(definition) = policy_admin::named_neighbor_set_from_config(&new_config, name)
         else {
-            return halt_partial(
+            return acknowledge_partial(
+                &progress,
                 working_config,
                 &desired_snapshot,
                 ReloadStepFailure {
@@ -2104,7 +2703,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                     target: name.clone(),
                     error: format!(
                         "internal: neighbor_set {name:?} present in diff but not resolvable from new config"
-                    ),
+                    ).into(),
                 },
             );
         };
@@ -2113,17 +2712,20 @@ pub(crate) async fn reload_config_with_tcp_ao(
             definition: definition.clone(),
             ack: None,
         };
-        let cmd_name = name.clone();
-        match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetNeighborSet {
-            name: cmd_name,
-            definition,
-            reply,
-        })
+        match catalog_step(
+            peer_mgr_tx,
+            &mut progress,
+            OwnedCatalogMutation::SetNeighborSet {
+                name: name.clone(),
+                definition,
+            },
+        )
         .await
         {
             Ok(()) => {
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
-                    return halt_partial(
+                    return acknowledge_partial(
+                        &progress,
                         working_config,
                         &desired_snapshot,
                         ReloadStepFailure {
@@ -2131,21 +2733,20 @@ pub(crate) async fn reload_config_with_tcp_ao(
                             target: name.clone(),
                             error: format!(
                                 "applied at peer manager but local snapshot rejected the event: {error}"
-                            ),
+                            ).into(),
                         },
                     );
                 }
                 info!(name = %name, %bucket, "reload: neighbor_set applied");
             }
-            Err(error) => {
-                return halt_partial(
+            Err(failure) => {
+                return owned_step_failure(
+                    &progress,
                     working_config,
                     &desired_snapshot,
-                    ReloadStepFailure {
-                        bucket,
-                        target: name.clone(),
-                        error,
-                    },
+                    bucket,
+                    name.clone(),
+                    failure,
                 );
             }
         }
@@ -2163,7 +2764,8 @@ pub(crate) async fn reload_config_with_tcp_ao(
             "policy.change"
         };
         let Some(definition) = policy_admin::named_policy_from_config(&new_config, name) else {
-            return halt_partial(
+            return acknowledge_partial(
+                &progress,
                 working_config,
                 &desired_snapshot,
                 ReloadStepFailure {
@@ -2171,7 +2773,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                     target: name.clone(),
                     error: format!(
                         "internal: policy {name:?} present in diff but not resolvable from new config"
-                    ),
+                    ).into(),
                 },
             );
         };
@@ -2180,17 +2782,20 @@ pub(crate) async fn reload_config_with_tcp_ao(
             definition: definition.clone(),
             ack: None,
         };
-        let cmd_name = name.clone();
-        match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetPolicy {
-            name: cmd_name,
-            definition,
-            reply,
-        })
+        match catalog_step(
+            peer_mgr_tx,
+            &mut progress,
+            OwnedCatalogMutation::SetPolicy {
+                name: name.clone(),
+                definition: Box::new(definition),
+            },
+        )
         .await
         {
             Ok(()) => {
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
-                    return halt_partial(
+                    return acknowledge_partial(
+                        &progress,
                         working_config,
                         &desired_snapshot,
                         ReloadStepFailure {
@@ -2198,21 +2803,20 @@ pub(crate) async fn reload_config_with_tcp_ao(
                             target: name.clone(),
                             error: format!(
                                 "applied at peer manager but local snapshot rejected the event: {error}"
-                            ),
+                            ).into(),
                         },
                     );
                 }
                 info!(name = %name, %bucket, "reload: policy applied");
             }
-            Err(error) => {
-                return halt_partial(
+            Err(failure) => {
+                return owned_step_failure(
+                    &progress,
                     working_config,
                     &desired_snapshot,
-                    ReloadStepFailure {
-                        bucket,
-                        target: name.clone(),
-                        error,
-                    },
+                    bucket,
+                    name.clone(),
+                    failure,
                 );
             }
         }
@@ -2230,7 +2834,8 @@ pub(crate) async fn reload_config_with_tcp_ao(
             "peer_group.change"
         };
         let Some(definition) = policy_admin::named_peer_group_from_config(&new_config, name) else {
-            return halt_partial(
+            return acknowledge_partial(
+                &progress,
                 working_config,
                 &desired_snapshot,
                 ReloadStepFailure {
@@ -2238,7 +2843,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                     target: name.clone(),
                     error: format!(
                         "internal: peer_group {name:?} present in diff but not resolvable from new config"
-                    ),
+                    ).into(),
                 },
             );
         };
@@ -2247,17 +2852,20 @@ pub(crate) async fn reload_config_with_tcp_ao(
             definition: definition.clone(),
             ack: None,
         };
-        let cmd_name = name.clone();
-        match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetPeerGroup {
-            name: cmd_name,
-            definition,
-            reply,
-        })
+        match catalog_step(
+            peer_mgr_tx,
+            &mut progress,
+            OwnedCatalogMutation::SetPeerGroup {
+                name: name.clone(),
+                definition: Box::new(definition),
+            },
+        )
         .await
         {
             Ok(()) => {
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
-                    return halt_partial(
+                    return acknowledge_partial(
+                        &progress,
                         working_config,
                         &desired_snapshot,
                         ReloadStepFailure {
@@ -2265,21 +2873,20 @@ pub(crate) async fn reload_config_with_tcp_ao(
                             target: name.clone(),
                             error: format!(
                                 "applied at peer manager but local snapshot rejected the event: {error}"
-                            ),
+                            ).into(),
                         },
                     );
                 }
                 info!(name = %name, %bucket, "reload: peer_group applied");
             }
-            Err(error) => {
-                return halt_partial(
+            Err(failure) => {
+                return owned_step_failure(
+                    &progress,
                     working_config,
                     &desired_snapshot,
-                    ReloadStepFailure {
-                        bucket,
-                        target: name.clone(),
-                        error,
-                    },
+                    bucket,
+                    name.clone(),
+                    failure,
                 );
             }
         }
@@ -2298,23 +2905,27 @@ pub(crate) async fn reload_config_with_tcp_ao(
             }
         };
         let res = if chain.is_empty() {
-            send_catalog_pm_step(peer_mgr_tx, |reply| {
-                PeerManagerCommand::ClearGlobalImportChain { reply }
-            })
+            catalog_step(
+                peer_mgr_tx,
+                &mut progress,
+                OwnedCatalogMutation::ClearGlobalImportChain,
+            )
             .await
         } else {
-            send_catalog_pm_step(peer_mgr_tx, |reply| {
-                PeerManagerCommand::SetGlobalImportChain {
+            catalog_step(
+                peer_mgr_tx,
+                &mut progress,
+                OwnedCatalogMutation::SetGlobalImportChain {
                     policy_names: chain,
-                    reply,
-                }
-            })
+                },
+            )
             .await
         };
         match res {
             Ok(()) => {
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
-                    return halt_partial(
+                    return acknowledge_partial(
+                        &progress,
                         working_config,
                         &desired_snapshot,
                         ReloadStepFailure {
@@ -2322,21 +2933,20 @@ pub(crate) async fn reload_config_with_tcp_ao(
                             target: String::new(),
                             error: format!(
                                 "applied at peer manager but local snapshot rejected the event: {error}"
-                            ),
+                            ).into(),
                         },
                     );
                 }
                 info!("reload: global import_chain applied");
             }
-            Err(error) => {
-                return halt_partial(
+            Err(failure) => {
+                return owned_step_failure(
+                    &progress,
                     working_config,
                     &desired_snapshot,
-                    ReloadStepFailure {
-                        bucket: "global_chain.import",
-                        target: String::new(),
-                        error,
-                    },
+                    "global_chain.import",
+                    String::new(),
+                    failure,
                 );
             }
         }
@@ -2352,23 +2962,27 @@ pub(crate) async fn reload_config_with_tcp_ao(
             }
         };
         let res = if chain.is_empty() {
-            send_catalog_pm_step(peer_mgr_tx, |reply| {
-                PeerManagerCommand::ClearGlobalExportChain { reply }
-            })
+            catalog_step(
+                peer_mgr_tx,
+                &mut progress,
+                OwnedCatalogMutation::ClearGlobalExportChain,
+            )
             .await
         } else {
-            send_catalog_pm_step(peer_mgr_tx, |reply| {
-                PeerManagerCommand::SetGlobalExportChain {
+            catalog_step(
+                peer_mgr_tx,
+                &mut progress,
+                OwnedCatalogMutation::SetGlobalExportChain {
                     policy_names: chain,
-                    reply,
-                }
-            })
+                },
+            )
             .await
         };
         match res {
             Ok(()) => {
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
-                    return halt_partial(
+                    return acknowledge_partial(
+                        &progress,
                         working_config,
                         &desired_snapshot,
                         ReloadStepFailure {
@@ -2376,21 +2990,20 @@ pub(crate) async fn reload_config_with_tcp_ao(
                             target: String::new(),
                             error: format!(
                                 "applied at peer manager but local snapshot rejected the event: {error}"
-                            ),
+                            ).into(),
                         },
                     );
                 }
                 info!("reload: global export_chain applied");
             }
-            Err(error) => {
-                return halt_partial(
+            Err(failure) => {
+                return owned_step_failure(
+                    &progress,
                     working_config,
                     &desired_snapshot,
-                    ReloadStepFailure {
-                        bucket: "global_chain.export",
-                        target: String::new(),
-                        error,
-                    },
+                    "global_chain.export",
+                    String::new(),
+                    failure,
                 );
             }
         }
@@ -2454,13 +3067,14 @@ pub(crate) async fn reload_config_with_tcp_ao(
         let peer_configs = match new_config.resolved_neighbors() {
             Ok(p) => p,
             Err(e) => {
-                return halt_partial(
+                return acknowledge_partial(
+                    &progress,
                     working_config,
                     &desired_snapshot,
                     ReloadStepFailure {
                         bucket: "neighbors.resolve",
                         target: "new_config.resolved_neighbors".to_string(),
-                        error: e.to_string(),
+                        error: ReloadStepError::Rejected(e.to_string()),
                     },
                 );
             }
@@ -2511,19 +3125,14 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 );
                 continue;
             };
-            if let Err(error) = send_pm_result_step(peer_mgr_tx, |reply| {
-                PeerManagerCommand::HotUpdatePeer { config: cfg, reply }
-            })
-            .await
-            {
-                return halt_partial(
+            if let Err(failure) = hot_peer_step(peer_mgr_tx, &mut progress, cfg).await {
+                return owned_step_failure(
+                    &progress,
                     working_config,
                     &desired_snapshot,
-                    ReloadStepFailure {
-                        bucket: "neighbors.hot_update",
-                        target: n.address.clone(),
-                        error,
-                    },
+                    "neighbors.hot_update",
+                    n.address.clone(),
+                    failure,
                 );
             }
             if let Some(entry) = working_config
@@ -2540,49 +3149,78 @@ pub(crate) async fn reload_config_with_tcp_ao(
             !diff.added.is_empty() || !diff.removed.is_empty() || !rebuild_changed.is_empty();
         if needs_rebuild_pass {
             let (reply_tx, reply_rx) = oneshot::channel();
-            if let Err(e) = peer_mgr_tx
-                .send(PeerManagerCommand::ReconcilePeers {
-                    added: resolve(&diff.added),
-                    removed: diff.removed.clone(),
-                    changed: resolve(&rebuild_changed),
-                    reply: reply_tx,
-                })
-                .await
-            {
-                return halt_partial(
-                    working_config,
-                    &desired_snapshot,
-                    ReloadStepFailure {
-                        bucket: "neighbors.reconcile",
-                        target: String::new(),
-                        error: format!("send: {e}"),
-                    },
+            let permit = match peer_mgr_tx.reserve().await {
+                Ok(permit) => permit,
+                Err(error) => {
+                    return acknowledge_partial(
+                        &progress,
+                        working_config,
+                        &desired_snapshot,
+                        ReloadStepFailure {
+                            bucket: "neighbors.reconcile",
+                            target: String::new(),
+                            error: ReloadStepError::NotAccepted(error.to_string()),
+                        },
+                    );
+                }
+            };
+            permit.send(PeerManagerCommand::ReconcilePeers {
+                added: resolve(&diff.added),
+                removed: diff.removed.clone(),
+                changed: resolve(&rebuild_changed),
+                reply: reply_tx,
+            });
+            if sighup_ack_fault("reconcile") {
+                drop(reply_rx);
+                return fenced_reload_failure(
+                    "neighbors.reconcile",
+                    ReloadStepError::AcknowledgementLost,
+                    RuntimeConfigFenceReason::AcknowledgementLost,
                 );
             }
             match reply_rx.await {
-                Ok(reconcile) if reconcile.is_success() => {
-                    working_config.neighbors = new_config.neighbors.clone();
-                }
                 Ok(reconcile) => {
-                    // Reconcile is the one step where partial failure
-                    // leaves the live state genuinely ambiguous: it
-                    // sequences delete-then-readd for changed peers,
-                    // independent removes, and adds — any subset can
-                    // succeed before the failure point, the manager
-                    // doesn't update its own `current_config` during the
-                    // run, and `delete_peer` / `add_peer` of the wrong
-                    // ordering can leave orphaned `PeerHandle`s. Returning
-                    // a guessed snapshot here would let the next reload
-                    // diff against state that doesn't match live, which is
-                    // worse than just bailing.
-                    //
-                    // Preserve the last-known neighbor config in the honest
-                    // partial snapshot while retaining every earlier step
-                    // that definitely landed (including dataset generations,
-                    // policy, and EVPN state). The live peer table remains
-                    // explicitly ambiguous either way; discarding the partial
-                    // snapshot would additionally make all known-successful
-                    // state look unapplied and corrupt the next reload's diff.
+                    if reconcile.authority == PeerReconcileAuthority::Diverged {
+                        return fenced_reload_failure(
+                            "neighbors.reconcile",
+                            ReloadStepError::Rejected(
+                                "peer reconcile returned non-authoritative state".into(),
+                            ),
+                            RuntimeConfigFenceReason::KnownDivergence,
+                        );
+                    }
+                    for effect in &reconcile.effects {
+                        progress.mark_accepted_effect();
+                        let key = match effect {
+                            PeerReconcileEffect::Added(key)
+                            | PeerReconcileEffect::Removed(key)
+                            | PeerReconcileEffect::Replaced(key)
+                            | PeerReconcileEffect::RemovedForFailedReplacement(key) => key,
+                        };
+                        working_config.neighbors.retain(|neighbor| {
+                            rustbgpd_api::peer_types::PeerKey::new(
+                                neighbor
+                                    .address
+                                    .parse()
+                                    .expect("validated neighbor address"),
+                                neighbor.interface.clone(),
+                            ) != *key
+                        });
+                        if matches!(
+                            effect,
+                            PeerReconcileEffect::Added(_) | PeerReconcileEffect::Replaced(_)
+                        ) && let Some(neighbor) = new_config.neighbors.iter().find(|neighbor| {
+                            rustbgpd_api::peer_types::PeerKey::new(
+                                neighbor
+                                    .address
+                                    .parse()
+                                    .expect("validated neighbor address"),
+                                neighbor.interface.clone(),
+                            ) == *key
+                        }) {
+                            working_config.neighbors.push(neighbor.clone());
+                        }
+                    }
                     for failure in &reconcile.failures {
                         warn!(
                             bucket = "neighbors.reconcile",
@@ -2592,26 +3230,25 @@ pub(crate) async fn reload_config_with_tcp_ao(
                             "config reload step failed"
                         );
                     }
-                    error!(
-                        failures = reconcile.failures.len(),
-                        "config reload halted at neighbor reconcile — live peer-manager state \
-                     may differ from the in-memory config snapshot. Inspect live state via \
-                     `rbgp neighbor list` and re-edit the failing TOML before \
-                     reloading again. Earlier reload steps (policy / peer-group / chain \
-                     edits) DID land at the manager and remain in effect."
-                    );
-                    return Some(ReloadedConfig::new(working_config, desired_snapshot));
+                    if let Some(failure) = reconcile.failures.first() {
+                        return acknowledge_partial(
+                            &progress,
+                            working_config,
+                            &desired_snapshot,
+                            ReloadStepFailure {
+                                bucket: "neighbors.reconcile",
+                                target: failure.peer.to_string(),
+                                error: ReloadStepError::Rejected(failure.error.clone()),
+                            },
+                        );
+                    }
                 }
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        "config reload halted: peer manager dropped reconcile reply — live \
-                         state may differ from the in-memory config snapshot. Inspect via \
-                         `rbgp neighbor list` before reloading again. Earlier reload \
-                         steps (policy / peer-group / chain edits) DID land at the manager \
-                         and remain in effect."
+                Err(_) => {
+                    return fenced_reload_failure(
+                        "neighbors.reconcile",
+                        ReloadStepError::AcknowledgementLost,
+                        RuntimeConfigFenceReason::AcknowledgementLost,
                     );
-                    return Some(ReloadedConfig::new(working_config, desired_snapshot));
                 }
             }
         }
@@ -2623,7 +3260,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
     //    same live snapshot the rest of this reload has just shaped.
     if honor_graceful_shutdown_changed {
         let enabled = new_config.global.honor_graceful_shutdown;
-        match send_pm_step(peer_mgr_tx, |reply| {
+        match peer_step(peer_mgr_tx, &mut progress, |reply| {
             PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply }
         })
         .await
@@ -2633,6 +3270,13 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 info!(
                     enabled,
                     "reload: [global] honor_graceful_shutdown hot-applied"
+                );
+            }
+            Err(error @ ReloadStepError::AcknowledgementLost) => {
+                return fenced_reload_failure(
+                    "honor_graceful_shutdown.apply",
+                    error,
+                    RuntimeConfigFenceReason::AcknowledgementLost,
                 );
             }
             Err(error) => {
@@ -2653,7 +3297,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 // `pending_export_apply`).
                 warn!(
                     enabled,
-                    error,
+                    error = %error,
                     "reload: [global] honor_graceful_shutdown partial-apply — snapshot \
                      advanced anyway; bail-and-carry will retry failed peers on next \
                      policy edit"
@@ -2664,9 +3308,8 @@ pub(crate) async fn reload_config_with_tcp_ao(
     }
     if honor_blackhole_changed {
         let enabled = new_config.global.honor_blackhole;
-        match send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetHonorBlackhole {
-            enabled,
-            reply,
+        match peer_step(peer_mgr_tx, &mut progress, |reply| {
+            PeerManagerCommand::SetHonorBlackhole { enabled, reply }
         })
         .await
         {
@@ -2674,10 +3317,17 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 working_config.global.honor_blackhole = enabled;
                 info!(enabled, "reload: [global] honor_blackhole hot-applied");
             }
+            Err(error @ ReloadStepError::AcknowledgementLost) => {
+                return fenced_reload_failure(
+                    "honor_blackhole.apply",
+                    error,
+                    RuntimeConfigFenceReason::AcknowledgementLost,
+                );
+            }
             Err(error) => {
                 warn!(
                     enabled,
-                    error,
+                    error = %error,
                     "reload: [global] honor_blackhole partial-apply — snapshot \
                      advanced anyway; bail-and-carry will retry failed peers on next \
                      policy edit"
@@ -2694,56 +3344,88 @@ pub(crate) async fn reload_config_with_tcp_ao(
         match fib_cmd_tx {
             Some(tx) => {
                 let (reply_tx, reply_rx) = oneshot::channel();
-                match tx
-                    .send(FibRuntimeCommand::ReplaceTables {
-                        tables: new_config.fib_tables.clone(),
-                        reply: reply_tx,
-                    })
-                    .await
-                {
-                    Ok(()) => match reply_rx.await {
-                        Ok(Ok(())) => {
-                            if let Err(error) =
-                                set_pm_fib_tables_snapshot(peer_mgr_tx, &new_config.fib_tables)
-                                    .await
-                            {
-                                working_config.fib_tables.clone_from(&new_config.fib_tables);
-                                return halt_partial(
+                let permit = match tx.reserve().await {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        return acknowledge_partial(
+                            &progress,
+                            working_config,
+                            &desired_snapshot,
+                            ReloadStepFailure {
+                                bucket: "fib_tables.apply",
+                                target: "[[fib_tables]]".to_string(),
+                                error: ReloadStepError::NotAccepted(error.to_string()),
+                            },
+                        );
+                    }
+                };
+                permit.send(FibRuntimeCommand::OwnedReplaceTables {
+                    tables: new_config.fib_tables.clone(),
+                    reply: reply_tx,
+                });
+                match reply_rx.await {
+                    Ok(OwnedFibReplaceOutcome::Applied) => {
+                        progress.mark_accepted_effect();
+                        working_config.fib_tables.clone_from(&new_config.fib_tables);
+                        match set_pm_fib_tables_snapshot(peer_mgr_tx, &new_config.fib_tables).await
+                        {
+                            ReloadDispatch::Replied(()) => {
+                                progress.mark_accepted_effect();
+                                info!(
+                                    tables = new_config.fib_tables.len(),
+                                    "reload: [[fib_tables]] hot-applied"
+                                );
+                            }
+                            ReloadDispatch::NotAccepted(error) => {
+                                return acknowledge_partial(
+                                    &progress,
                                     working_config,
                                     &desired_snapshot,
                                     ReloadStepFailure {
                                         bucket: "fib_tables.snapshot",
                                         target: "[[fib_tables]]".to_string(),
-                                        error,
+                                        error: ReloadStepError::NotAccepted(error),
                                     },
                                 );
                             }
-                            working_config.fib_tables.clone_from(&new_config.fib_tables);
-                            info!(
-                                tables = new_config.fib_tables.len(),
-                                "reload: [[fib_tables]] hot-applied"
-                            );
+                            ReloadDispatch::AcknowledgementLost => {
+                                return acknowledge_partial(
+                                    &progress,
+                                    working_config,
+                                    &desired_snapshot,
+                                    ReloadStepFailure {
+                                        bucket: "fib_tables.snapshot",
+                                        target: "[[fib_tables]]".to_string(),
+                                        error: ReloadStepError::AcknowledgementLost,
+                                    },
+                                );
+                            }
                         }
-                        Ok(Err(reason)) => {
-                            error!(
-                                %reason,
-                                "reload: FIB runtime could not apply the [[fib_tables]] update \
-                                 (reverted); runtime unchanged"
-                            );
-                        }
-                        Err(error) => {
-                            error!(
-                                %error,
-                                "reload: FIB runtime did not acknowledge the [[fib_tables]] \
-                                 update; reverting (runtime unchanged)"
-                            );
-                        }
-                    },
-                    Err(error) => {
-                        error!(
-                            %error,
-                            "reload: FIB runtime command channel closed; [[fib_tables]] not \
-                             applied, reverting (runtime unchanged)"
+                    }
+                    Ok(OwnedFibReplaceOutcome::RejectedNoEffect(error)) => {
+                        return acknowledge_partial(
+                            &progress,
+                            working_config,
+                            &desired_snapshot,
+                            ReloadStepFailure {
+                                bucket: "fib_tables.apply",
+                                target: "[[fib_tables]]".to_string(),
+                                error: ReloadStepError::Rejected(error),
+                            },
+                        );
+                    }
+                    Ok(OwnedFibReplaceOutcome::CompensationAmbiguous(error)) => {
+                        return fenced_reload_failure(
+                            "fib_tables.apply",
+                            ReloadStepError::Rejected(error),
+                            RuntimeConfigFenceReason::KnownDivergence,
+                        );
+                    }
+                    Err(_) => {
+                        return fenced_reload_failure(
+                            "fib_tables.apply",
+                            ReloadStepError::AcknowledgementLost,
+                            RuntimeConfigFenceReason::AcknowledgementLost,
                         );
                     }
                 }
@@ -2775,16 +3457,17 @@ pub(crate) async fn reload_config_with_tcp_ao(
             name: name.clone(),
             ack: None,
         };
-        let cmd_name = name.clone();
-        match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeletePeerGroup {
-            name: cmd_name,
-            reply,
-        })
+        match catalog_step(
+            peer_mgr_tx,
+            &mut progress,
+            OwnedCatalogMutation::DeletePeerGroup { name: name.clone() },
+        )
         .await
         {
             Ok(()) => {
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
-                    return halt_partial(
+                    return acknowledge_partial(
+                        &progress,
                         working_config,
                         &desired_snapshot,
                         ReloadStepFailure {
@@ -2792,21 +3475,20 @@ pub(crate) async fn reload_config_with_tcp_ao(
                             target: name.clone(),
                             error: format!(
                                 "applied at peer manager but local snapshot rejected the event: {error}"
-                            ),
+                            ).into(),
                         },
                     );
                 }
                 info!(name = %name, "reload: peer_group removed");
             }
-            Err(error) => {
-                return halt_partial(
+            Err(failure) => {
+                return owned_step_failure(
+                    &progress,
                     working_config,
                     &desired_snapshot,
-                    ReloadStepFailure {
-                        bucket: "peer_group.delete",
-                        target: name.clone(),
-                        error,
-                    },
+                    "peer_group.delete",
+                    name.clone(),
+                    failure,
                 );
             }
         }
@@ -2816,16 +3498,17 @@ pub(crate) async fn reload_config_with_tcp_ao(
             name: name.clone(),
             ack: None,
         };
-        let cmd_name = name.clone();
-        match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeletePolicy {
-            name: cmd_name,
-            reply,
-        })
+        match catalog_step(
+            peer_mgr_tx,
+            &mut progress,
+            OwnedCatalogMutation::DeletePolicy { name: name.clone() },
+        )
         .await
         {
             Ok(()) => {
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
-                    return halt_partial(
+                    return acknowledge_partial(
+                        &progress,
                         working_config,
                         &desired_snapshot,
                         ReloadStepFailure {
@@ -2833,21 +3516,20 @@ pub(crate) async fn reload_config_with_tcp_ao(
                             target: name.clone(),
                             error: format!(
                                 "applied at peer manager but local snapshot rejected the event: {error}"
-                            ),
+                            ).into(),
                         },
                     );
                 }
                 info!(name = %name, "reload: policy removed");
             }
-            Err(error) => {
-                return halt_partial(
+            Err(failure) => {
+                return owned_step_failure(
+                    &progress,
                     working_config,
                     &desired_snapshot,
-                    ReloadStepFailure {
-                        bucket: "policy.delete",
-                        target: name.clone(),
-                        error,
-                    },
+                    "policy.delete",
+                    name.clone(),
+                    failure,
                 );
             }
         }
@@ -2857,16 +3539,17 @@ pub(crate) async fn reload_config_with_tcp_ao(
             name: name.clone(),
             ack: None,
         };
-        let cmd_name = name.clone();
-        match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeleteNeighborSet {
-            name: cmd_name,
-            reply,
-        })
+        match catalog_step(
+            peer_mgr_tx,
+            &mut progress,
+            OwnedCatalogMutation::DeleteNeighborSet { name: name.clone() },
+        )
         .await
         {
             Ok(()) => {
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
-                    return halt_partial(
+                    return acknowledge_partial(
+                        &progress,
                         working_config,
                         &desired_snapshot,
                         ReloadStepFailure {
@@ -2874,21 +3557,20 @@ pub(crate) async fn reload_config_with_tcp_ao(
                             target: name.clone(),
                             error: format!(
                                 "applied at peer manager but local snapshot rejected the event: {error}"
-                            ),
+                            ).into(),
                         },
                     );
                 }
                 info!(name = %name, "reload: neighbor_set removed");
             }
-            Err(error) => {
-                return halt_partial(
+            Err(failure) => {
+                return owned_step_failure(
+                    &progress,
                     working_config,
                     &desired_snapshot,
-                    ReloadStepFailure {
-                        bucket: "neighbor_set.delete",
-                        target: name.clone(),
-                        error,
-                    },
+                    "neighbor_set.delete",
+                    name.clone(),
+                    failure,
                 );
             }
         }
@@ -2905,48 +3587,59 @@ pub(crate) async fn reload_config_with_tcp_ao(
     // reaches dynamic peers (which live only in the manager's
     // runtime table, not in `[[neighbors]]`). A soft-reset failure
     // there bubbles up through the SetPolicy / etc command result
-    // handled above, halting this reload via `halt_partial` so the
+    // handled above, returning an authoritative partial receipt so the
     // failure is surfaced rather than logged-and-forgotten.
 
     info!("config reload complete");
-    Some(ReloadedConfig::new(working_config, desired_snapshot))
+    acknowledged_reload(
+        working_config,
+        desired_snapshot,
+        dialout_targets,
+        SighupCompletion::Complete,
+    )
 }
 
-/// Halt a SIGHUP reload at the first failed step. Logs the failure
-/// at error level and returns the partially-applied config snapshot
-/// so the caller's in-memory config tracks live runtime state
-/// instead of lying that the prior config is still in effect. The
-/// daemon converges by the operator fixing the failing TOML and
-/// reloading again — at that point the diff runs against the
-/// half-applied state and only the remaining steps fire.
+/// Record the first known SIGHUP step failure and return its explicit
+/// known-partial authority. Composite finalization must acknowledge the same
+/// peer-manager snapshot, bridge/persister snapshot, tracing projection, and
+/// dial-out targets before the owner can settle.
 ///
-/// Returned wrapped in `Option<ReloadedConfig>` so the call sites can use
-/// `return halt_partial(...)` directly inside `reload_config`,
-/// matching its `Option<ReloadedConfig>` return shape.
-#[expect(
-    clippy::needless_pass_by_value,
-    clippy::unnecessary_wraps,
-    reason = "owned ReloadStepFailure simplifies call sites that build the value inline; Option<ReloadedConfig> return matches reload_config's signature so call sites can `return halt_partial(...)` directly"
-)]
-fn halt_partial(
+fn acknowledge_partial(
+    progress: &SighupMutationProgress<'_>,
     working_config: Config,
     desired_config: &Arc<AcceptedConfigSnapshot>,
     failure: ReloadStepFailure,
-) -> Option<ReloadedConfig> {
+) -> SighupReloadOutcome {
     error!(
         bucket = failure.bucket,
         target = %failure.target,
         error = %failure.error,
-        "config reload halted at this step — runtime state matches the in-memory snapshot returned by reload (partial). Re-edit TOML and reload again to converge."
+        "config reload stopped at this step; settling the acknowledged partial runtime authority before another reload may begin"
     );
-    Some(ReloadedConfig::new(
+    if matches!(failure.error, ReloadStepError::AcknowledgementLost) {
+        return SighupReloadOutcome::RecoveryFenced {
+            error: SighupReloadError::Failed(failure),
+            reason: RuntimeConfigFenceReason::AcknowledgementLost,
+        };
+    }
+    if !progress.accepted_effect {
+        return SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure));
+    }
+    let dialout_targets = config::gnmi_dialout_targets(&working_config).unwrap_or_default();
+    acknowledged_reload(
         working_config,
         Arc::clone(desired_config),
-    ))
+        dialout_targets,
+        SighupCompletion::KnownPartial {
+            failures: vec![failure],
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::large_futures, reason = "T288 keeps authority unboxed")]
+
     use std::fmt::Write as _;
     use std::path::PathBuf;
 
@@ -2997,7 +3690,7 @@ mod tests {
             (concat!("load_tier", "_test_config("), 29),
             (concat!("load_tier", "_test_toml("), 9),
             (concat!("tier_authorized_uds", "_test_config("), 2),
-            (concat!("assert_tier_authorized", "_test_config("), 17),
+            (concat!("assert_tier_authorized", "_test_config("), 15),
         ];
 
         assert!(!source.contains(legacy_toml));
@@ -3384,7 +4077,7 @@ hold_time = 90
 
     /// Regression: `[[dynamic_neighbors]]` edits must be carried into the
     /// runtime snapshot returned by `reload_config`. The accept-matcher is
-    /// rebuilt from that snapshot when `apply_reload_outcome` swaps it into
+    /// rebuilt from that snapshot when finalization swaps it into
     /// the peer manager (#338) — previously the main reload path never
     /// copied the new range set into `working_config`, so the swap
     /// re-parsed the OLD ranges, the SIGHUP edit silently never took
@@ -3913,12 +4606,13 @@ originator_ip = "10.0.0.1"
         clippy::too_many_lines,
         reason = "reload hot-apply test keeps initial/candidate EVPN TOML fixtures inline"
     )]
-    async fn reload_decomposes_mixed_evpn_runtime_edit_across_generations() {
+    async fn reload_fences_decomposed_evpn_failure_before_later_command() {
         // #268: an ES delete + its (surviving) member L2VNI redefine + a new
         // L2VNI add in ONE SIGHUP. The converge of the mixed whole rejects it
         // (scripted `Unsupported`, as the real dispatch would), and the
-        // decomposer then applies deletes → redefine → add as three
-        // primitive steps — three committed generations for one SIGHUP.
+        // decomposer commits the delete, then the redefine fails after
+        // effects and pins the coordinator. The reload must fence without
+        // dispatching the later honor-graceful-shutdown mutation.
         let path = unique_temp_path("reload-evpn-decomposed-mixed");
         std::fs::write(
             &path,
@@ -3956,8 +4650,13 @@ originator_ip = "10.0.0.1"
                     ),
                 ),
                 Ok(()),
-                Ok(()),
-                Ok(()),
+                Err(
+                    crate::evpn_runtime_converger::DaemonEvpnRuntimeConvergeError::Failed(
+                        rustbgpd_evpn::EvpnRuntimeConvergeError::new(
+                            "decomposed redefine failed after effects",
+                        ),
+                    ),
+                ),
             ],
         );
 
@@ -3968,6 +4667,7 @@ originator_ip = "10.0.0.1"
 asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
+honor_graceful_shutdown = true
 
 [global.telemetry]
 log_format = "json"
@@ -3987,8 +4687,8 @@ local_vtep_ip = "10.0.0.1"
         )
         .unwrap();
 
-        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
-        let returned = reload_config(
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+        let outcome = reload_config(
             path.to_str().unwrap(),
             &initial,
             live_grpc_tcp.as_ref(),
@@ -3997,20 +4697,24 @@ local_vtep_ip = "10.0.0.1"
             None,
             Some(&apply),
         )
-        .await
-        .expect("reload should hot-apply the decomposed mixed EVPN edit");
+        .await;
 
-        assert_eq!(
-            returned.evpn_instances.len(),
-            2,
-            "the reload snapshot must advance to the mixed candidate"
-        );
-        assert!(returned.ethernet_segments.is_empty());
+        assert!(matches!(
+            outcome,
+            SighupReloadOutcome::RecoveryFenced {
+                reason: RuntimeConfigFenceReason::KnownDivergence,
+                ..
+            }
+        ));
+        assert!(matches!(
+            peer_mgr_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
         let guard = coordinator.lock().unwrap();
         assert_eq!(
             guard.model().generation().as_u64(),
-            4,
-            "one SIGHUP must commit three generations (deletes, redefine, add)"
+            2,
+            "the committed delete remains authoritative after the later step fails"
         );
         assert!(guard.model().ethernet_segments().is_empty());
         assert_eq!(
@@ -4021,14 +4725,14 @@ local_vtep_ip = "10.0.0.1"
                 .unwrap()
                 .rd
                 .to_string(),
-            "65000:101"
+            "65000:100"
         );
         assert!(
             guard
                 .model()
                 .instances()
                 .get(rustbgpd_evpn::EvpnInstanceId::new(200).unwrap())
-                .is_some()
+                .is_none()
         );
         std::fs::remove_file(&path).ok();
     }
@@ -4274,7 +4978,7 @@ local_vtep_ip = "10.0.0.1"
     }
 
     #[tokio::test]
-    async fn reload_rejected_evpn_candidate_pins_to_committed_runtime_baseline() {
+    async fn reload_failed_evpn_candidate_fences_at_committed_runtime_baseline() {
         let path = unique_temp_path("reload-evpn-reject-committed-baseline");
         std::fs::write(&path, EVPN_VNI_100_TOML).unwrap();
         let initial = load_tier_test_config(&path);
@@ -4302,7 +5006,7 @@ local_vtep_ip = "10.0.0.1"
 
         std::fs::write(&path, EVPN_VNI_100_200_300_TOML).unwrap();
         let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
-        let returned = reload_config(
+        let outcome = reload_config(
             path.to_str().unwrap(),
             &initial,
             live_grpc_tcp.as_ref(),
@@ -4311,15 +5015,18 @@ local_vtep_ip = "10.0.0.1"
             None,
             Some(&apply),
         )
-        .await
-        .expect("reload should pin when the committed-baseline candidate fails to converge");
+        .await;
+
+        assert!(matches!(
+            outcome,
+            SighupReloadOutcome::RecoveryFenced {
+                reason: RuntimeConfigFenceReason::KnownDivergence,
+                ..
+            }
+        ));
 
         let committed = rustbgpd_evpn::EvpnInstanceId::new(200).unwrap();
         let rejected = rustbgpd_evpn::EvpnInstanceId::new(300).unwrap();
-        assert_eq!(
-            returned.evpn_instances, runtime_config.evpn_instances,
-            "rejected EVPN reload must pin to the coordinator's committed config, not stale startup tables"
-        );
         assert!(
             coordinator
                 .lock()
@@ -4713,6 +5420,61 @@ hold_time = 90
         std::fs::remove_file(&path).ok();
     }
 
+    async fn assert_honor_reply_loss_fences(graceful: bool, bucket: &'static str) {
+        let current = load_config_from_toml("honor-reply-loss", baseline_toml());
+        let mut desired = current.clone();
+        if graceful {
+            desired.global.honor_graceful_shutdown = true;
+        } else {
+            desired.global.honor_blackhole = true;
+        }
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+        let actor = tokio::spawn(async move {
+            match (graceful, peer_mgr_rx.recv().await.expect("honor command")) {
+                (true, PeerManagerCommand::SetHonorGracefulShutdown { reply, .. })
+                | (false, PeerManagerCommand::SetHonorBlackhole { reply, .. }) => drop(reply),
+                _ => panic!("unexpected honor command"),
+            }
+        });
+        let outcome = reload_config_with_tcp_ao(
+            SighupReloadPlan {
+                baseline_runtime: current,
+                desired: AcceptedConfigSnapshot::from_config_for_test(desired),
+            },
+            None,
+            None,
+            &peer_mgr_tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        actor.await.unwrap();
+        assert!(matches!(
+            outcome,
+            SighupReloadOutcome::RecoveryFenced {
+                error: SighupReloadError::Failed(ReloadStepFailure {
+                    bucket: actual,
+                    error: ReloadStepError::AcknowledgementLost,
+                    ..
+                }),
+                reason: RuntimeConfigFenceReason::AcknowledgementLost,
+            } if actual == bucket
+        ));
+    }
+
+    #[tokio::test]
+    async fn honor_graceful_shutdown_reply_loss_recovery_fences() {
+        assert_honor_reply_loss_fences(true, "honor_graceful_shutdown.apply").await;
+    }
+
+    #[tokio::test]
+    async fn honor_blackhole_reply_loss_recovery_fences() {
+        assert_honor_reply_loss_fences(false, "honor_blackhole.apply").await;
+    }
+
     const FIB_ONE_TABLE_TOML: &str = r#"
 [global]
 asn = 65001
@@ -4773,15 +5535,12 @@ metric = 200
         let (fib_tx, mut fib_rx) = mpsc::channel(8);
         let actor = tokio::spawn(async move {
             match fib_rx.recv().await {
-                Some(FibRuntimeCommand::ReplaceTables { tables, reply }) => {
-                    let _ = reply.send(Ok(()));
+                Some(FibRuntimeCommand::OwnedReplaceTables { tables, reply }) => {
+                    let _ = reply.send(OwnedFibReplaceOutcome::Applied);
                     tables.len()
                 }
                 Some(FibRuntimeCommand::GetTables { .. }) => panic!("unexpected GetTables"),
-                Some(FibRuntimeCommand::OwnedReplaceTables { .. }) => {
-                    panic!("unexpected OwnedReplaceTables")
-                }
-                None => panic!("expected ReplaceTables"),
+                None => panic!("expected OwnedReplaceTables"),
             }
         });
 
@@ -4864,8 +5623,8 @@ metric = 200
                     PeerManagerCommand::SetFibTablesSnapshot { reply, .. } => {
                         let _ = reply.send(());
                     }
-                    PeerManagerCommand::DeletePeerGroup { reply, .. } => {
-                        let _ = reply.send(Ok(()));
+                    PeerManagerCommand::OwnedCatalogMutation { reply, .. } => {
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
                     _ => panic!("unexpected peer manager command"),
                 }
@@ -4875,11 +5634,11 @@ metric = 200
         let (fib_tx, mut fib_rx) = mpsc::channel(8);
         let actor = tokio::spawn(async move {
             match fib_rx.recv().await {
-                Some(FibRuntimeCommand::ReplaceTables { tables, reply }) => {
+                Some(FibRuntimeCommand::OwnedReplaceTables { tables, reply }) => {
                     assert!(tables[0].allowed_peer_groups.is_empty());
-                    let _ = reply.send(Ok(()));
+                    let _ = reply.send(OwnedFibReplaceOutcome::Applied);
                 }
-                _ => panic!("expected ReplaceTables"),
+                _ => panic!("expected OwnedReplaceTables"),
             }
         });
 
@@ -4928,7 +5687,7 @@ metric = 200
         let (fib_tx, fib_rx) = mpsc::channel::<FibRuntimeCommand>(8);
         drop(fib_rx); // actor gone — the send fails, so the snapshot must not advance
 
-        let returned = reload_config(
+        let outcome = reload_config(
             path.to_str().unwrap(),
             &initial,
             tcp.as_ref(),
@@ -4937,14 +5696,8 @@ metric = 200
             Some(&fib_tx),
             None,
         )
-        .await
-        .expect("reload returns a config even when the FIB actor is unreachable");
-
-        assert_eq!(
-            returned.fib_tables.len(),
-            1,
-            "no ack ⇒ snapshot must stay on the live table set"
-        );
+        .await;
+        assert!(matches!(outcome, SighupReloadOutcome::CleanNoEffect(_)));
         std::fs::remove_file(&path).ok();
     }
 
@@ -5038,12 +5791,14 @@ log_format = "json"
         let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
         let (fib_tx, mut fib_rx) = mpsc::channel(8);
         let actor = tokio::spawn(async move {
-            if let Some(FibRuntimeCommand::ReplaceTables { reply, .. }) = fib_rx.recv().await {
-                let _ = reply.send(Err("simulated reconcile failure".to_string()));
+            if let Some(FibRuntimeCommand::OwnedReplaceTables { reply, .. }) = fib_rx.recv().await {
+                let _ = reply.send(OwnedFibReplaceOutcome::RejectedNoEffect(
+                    "simulated reconcile failure".to_string(),
+                ));
             }
         });
 
-        let returned = reload_config(
+        let outcome = reload_config(
             path.to_str().unwrap(),
             &initial,
             tcp.as_ref(),
@@ -5052,14 +5807,8 @@ log_format = "json"
             Some(&fib_tx),
             None,
         )
-        .await
-        .expect("reload returns a config even when the actor reports failure");
-
-        assert_eq!(
-            returned.fib_tables.len(),
-            1,
-            "an Err ack must not advance the snapshot"
-        );
+        .await;
+        assert!(matches!(outcome, SighupReloadOutcome::CleanNoEffect(_)));
         let _ = actor.await;
         std::fs::remove_file(&path).ok();
     }
@@ -5230,6 +5979,38 @@ hold_time = 90
     /// to the full command struct.
     fn cmd_tag(cmd: &PeerManagerCommand) -> String {
         match cmd {
+            PeerManagerCommand::OwnedCatalogMutation { mutation, .. } => match mutation {
+                OwnedCatalogMutation::SetPolicy { name, .. } => format!("SetPolicy({name})"),
+                OwnedCatalogMutation::DeletePolicy { name } => format!("DeletePolicy({name})"),
+                OwnedCatalogMutation::SetNeighborSet { name, .. } => {
+                    format!("SetNeighborSet({name})")
+                }
+                OwnedCatalogMutation::DeleteNeighborSet { name } => {
+                    format!("DeleteNeighborSet({name})")
+                }
+                OwnedCatalogMutation::SetPeerGroup { name, .. } => {
+                    format!("SetPeerGroup({name})")
+                }
+                OwnedCatalogMutation::DeletePeerGroup { name } => {
+                    format!("DeletePeerGroup({name})")
+                }
+                OwnedCatalogMutation::SetGlobalImportChain { policy_names } => {
+                    format!("SetGlobalImportChain({})", policy_names.join(","))
+                }
+                OwnedCatalogMutation::SetGlobalExportChain { policy_names } => {
+                    format!("SetGlobalExportChain({})", policy_names.join(","))
+                }
+                OwnedCatalogMutation::ClearGlobalImportChain => {
+                    "ClearGlobalImportChain".to_string()
+                }
+                OwnedCatalogMutation::ClearGlobalExportChain => {
+                    "ClearGlobalExportChain".to_string()
+                }
+                OwnedCatalogMutation::SyncRpolPolicies { rpol, .. } => {
+                    format!("SyncRpolPolicies({})", rpol.policies.len())
+                }
+                _ => "OwnedCatalogMutation".to_string(),
+            },
             PeerManagerCommand::SetPolicy { name, .. } => format!("SetPolicy({name})"),
             PeerManagerCommand::DeletePolicy { name, .. } => format!("DeletePolicy({name})"),
             PeerManagerCommand::SetNeighborSet { name, .. } => format!("SetNeighborSet({name})"),
@@ -5273,9 +6054,6 @@ hold_time = 90
             } => {
                 format!("SyncExplainConfig(enabled={enabled},cache_size={cache_size})")
             }
-            PeerManagerCommand::SyncRpolPolicies { rpol, .. } => {
-                format!("SyncRpolPolicies({})", rpol.policies.len())
-            }
             PeerManagerCommand::SetFibTablesSnapshot { tables, .. } => {
                 format!("SetFibTablesSnapshot({})", tables.len())
             }
@@ -5289,6 +6067,149 @@ hold_time = 90
         }
     }
 
+    #[tokio::test]
+    async fn owned_catalog_ambiguity_and_accepted_reply_loss_fence() {
+        let mutations = [
+            OwnedCatalogMutation::DeletePolicy {
+                name: "policy".to_string(),
+            },
+            OwnedCatalogMutation::DeleteNeighborSet {
+                name: "set".to_string(),
+            },
+            OwnedCatalogMutation::DeletePeerGroup {
+                name: "group".to_string(),
+            },
+            OwnedCatalogMutation::ClearGlobalImportChain,
+        ];
+        for mutation in mutations {
+            let (tx, mut rx) = mpsc::channel(1);
+            tokio::spawn(async move {
+                let Some(PeerManagerCommand::OwnedCatalogMutation { reply, .. }) = rx.recv().await
+                else {
+                    panic!("expected owned catalog mutation");
+                };
+                let _ = reply.send(OwnedCatalogMutationOutcome::CompensationAmbiguous(
+                    CatalogMutationError::internal("injected ambiguous compensation"),
+                ));
+            });
+            let mut progress = SighupMutationProgress::new(None);
+            assert!(matches!(
+                catalog_step(&tx, &mut progress, mutation).await,
+                Err(OwnedStepFailure::Fenced {
+                    reason: RuntimeConfigFenceReason::KnownDivergence,
+                    ..
+                })
+            ));
+        }
+
+        for mutation in [
+            OwnedCatalogMutation::DeletePolicy {
+                name: "reply-loss".to_string(),
+            },
+            OwnedCatalogMutation::SyncRpolPolicies {
+                rpol_files: Vec::new(),
+                rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+                dataset_bindings: rustbgpd_policy::datasets::DatasetBindings::default(),
+            },
+        ] {
+            let (tx, mut rx) = mpsc::channel(1);
+            tokio::spawn(async move {
+                let Some(PeerManagerCommand::OwnedCatalogMutation { reply, .. }) = rx.recv().await
+                else {
+                    panic!("expected owned catalog mutation");
+                };
+                drop(reply);
+            });
+            let mut progress = SighupMutationProgress::new(None);
+            assert!(matches!(
+                catalog_step(&tx, &mut progress, mutation).await,
+                Err(OwnedStepFailure::Fenced {
+                    reason: RuntimeConfigFenceReason::AcknowledgementLost,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_hot_update_reply_loss_fences() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let Some(PeerManagerCommand::HotUpdatePeer { reply, .. }) = rx.recv().await else {
+                panic!("expected hot update");
+            };
+            drop(reply);
+        });
+        let mut progress = SighupMutationProgress::new(None);
+        let config = load_config_from_toml("hot-reply-loss", baseline_toml());
+        let resolved = config.resolved_neighbors().unwrap().remove(0);
+        assert!(matches!(
+            hot_peer_step(
+                &tx,
+                &mut progress,
+                build_peer_mgr_config(
+                    &resolved.transport_config,
+                    None,
+                    &resolved.label,
+                    resolved.import_policy.as_ref(),
+                    resolved.export_policy.as_ref(),
+                    None,
+                ),
+            )
+            .await,
+            Err(OwnedStepFailure::Fenced {
+                reason: RuntimeConfigFenceReason::AcknowledgementLost,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn preflight_ack_loss_is_clean_and_runtime_snapshot_retries() {
+        for bucket in ["tcp_ao.listener_preflight", "tcp_ao.peer_preflight"] {
+            assert!(matches!(
+                preflight_dispatch_failure(bucket, ReloadStepError::AcknowledgementLost),
+                SighupReloadOutcome::CleanNoEffect(_)
+            ));
+        }
+        assert!(matches!(
+            fenced_reload_failure(
+                "tcp_ao.peer_apply",
+                ReloadStepError::AcknowledgementLost,
+                RuntimeConfigFenceReason::AcknowledgementLost,
+            ),
+            SighupReloadOutcome::RecoveryFenced {
+                reason: RuntimeConfigFenceReason::AcknowledgementLost,
+                ..
+            }
+        ));
+
+        let config = load_config_from_toml("snapshot-retry", baseline_toml());
+        let accepted = AcceptedConfigSnapshot::from_config_for_test(config.clone());
+        let bindings = config.policy.dataset_bindings.clone();
+        let (tx, mut rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            if let Some(PeerManagerCommand::RuntimeConfigSnapshot { reply }) = rx.recv().await {
+                drop(reply);
+            }
+            if let Some(PeerManagerCommand::RuntimeConfigSnapshot { reply }) = rx.recv().await {
+                let _ = reply.send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                    toml: toml::to_string(&config).unwrap(),
+                    rpol_files: Vec::new(),
+                    rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+                }));
+            }
+        });
+        assert!(matches!(
+            runtime_config_snapshot_accepted(&tx, &accepted, &bindings).await,
+            ReloadDispatch::AcknowledgementLost
+        ));
+        assert!(matches!(
+            runtime_config_snapshot_accepted(&tx, &accepted, &bindings).await,
+            ReloadDispatch::Replied(Ok(_))
+        ));
+    }
+
     /// Drive sequential reloads against the given initial+next TOML and return
     /// the outcomes plus commands the mock peer manager observed, in order.
     /// Replies `Ok(())` to every command that carries a reply channel.
@@ -5296,7 +6217,7 @@ hold_time = 90
         initial_toml: &str,
         new_toml: &str,
         reloads: usize,
-    ) -> (Vec<Option<ReloadedConfig>>, Vec<String>) {
+    ) -> (Vec<SighupReloadOutcome>, Vec<String>) {
         let path = unique_temp_path("reload-driver");
         write_tier_test_config(&path, initial_toml);
         let mut current = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
@@ -5308,13 +6229,16 @@ hold_time = 90
 
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
         let mock = tokio::spawn(async move {
-            use rustbgpd_api::peer_types::ReconcileResult;
+            use rustbgpd_api::peer_types::PeerReconcileOutcome;
             let mut tags = Vec::new();
             while let Some(cmd) = peer_mgr_rx.recv().await {
                 tags.push(cmd_tag(&cmd));
                 // Respond Ok(()) to every command that has a reply
                 // channel so reload_config doesn't hang.
                 match cmd {
+                    PeerManagerCommand::OwnedCatalogMutation { reply, .. } => {
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
+                    }
                     PeerManagerCommand::SetPolicy { reply, .. }
                     | PeerManagerCommand::DeletePolicy { reply, .. }
                     | PeerManagerCommand::SetNeighborSet { reply, .. }
@@ -5324,15 +6248,40 @@ hold_time = 90
                     | PeerManagerCommand::SetGlobalImportChain { reply, .. }
                     | PeerManagerCommand::SetGlobalExportChain { reply, .. }
                     | PeerManagerCommand::ClearGlobalImportChain { reply }
-                    | PeerManagerCommand::ClearGlobalExportChain { reply }
-                    | PeerManagerCommand::SyncRpolPolicies { reply, .. } => {
+                    | PeerManagerCommand::ClearGlobalExportChain { reply } => {
                         let _ = reply.send(Ok(()));
                     }
                     PeerManagerCommand::SoftResetIn { reply, .. } => {
                         let _ = reply.send(Ok(()));
                     }
-                    PeerManagerCommand::ReconcilePeers { reply, .. } => {
-                        let _ = reply.send(ReconcileResult::default());
+                    PeerManagerCommand::ReconcilePeers {
+                        added,
+                        removed,
+                        changed,
+                        reply,
+                    } => {
+                        let effects = removed
+                            .into_iter()
+                            .map(PeerReconcileEffect::Removed)
+                            .chain(added.into_iter().map(|peer| {
+                                PeerReconcileEffect::Added(rustbgpd_api::peer_types::PeerKey::new(
+                                    peer.address,
+                                    peer.interface,
+                                ))
+                            }))
+                            .chain(changed.into_iter().map(|peer| {
+                                PeerReconcileEffect::Replaced(
+                                    rustbgpd_api::peer_types::PeerKey::new(
+                                        peer.address,
+                                        peer.interface,
+                                    ),
+                                )
+                            }))
+                            .collect();
+                        let _ = reply.send(PeerReconcileOutcome {
+                            effects,
+                            ..PeerReconcileOutcome::default()
+                        });
                     }
                     PeerManagerCommand::SetFibTablesSnapshot { reply, .. }
                     | PeerManagerCommand::SyncExplainConfig { reply, .. } => {
@@ -5376,7 +6325,7 @@ hold_time = 90
     async fn drive_reload(
         initial_toml: &str,
         new_toml: &str,
-    ) -> (Option<ReloadedConfig>, Vec<String>) {
+    ) -> (SighupReloadOutcome, Vec<String>) {
         let (mut outcomes, tags) = drive_reloads(initial_toml, new_toml, 1).await;
         (outcomes.pop().unwrap(), tags)
     }
@@ -5445,8 +6394,8 @@ hold_time = 90
             let mut tags = Vec::new();
             while let Some(cmd) = peer_mgr_rx.recv().await {
                 tags.push(cmd_tag(&cmd));
-                if let PeerManagerCommand::SyncRpolPolicies { reply, .. } = cmd {
-                    let _ = reply.send(Ok(()));
+                if let PeerManagerCommand::OwnedCatalogMutation { reply, .. } = cmd {
+                    let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                 }
             }
             tags
@@ -5548,8 +6497,8 @@ hold_time = 90
                     let mut tags = Vec::new();
                     while let Some(cmd) = peer_mgr_rx.recv().await {
                         tags.push(cmd_tag(&cmd));
-                        if let PeerManagerCommand::SyncRpolPolicies { reply, .. } = cmd {
-                            let _ = reply.send(Ok(()));
+                        if let PeerManagerCommand::OwnedCatalogMutation { reply, .. } = cmd {
+                            let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                         }
                     }
                     tags
@@ -5689,10 +6638,10 @@ hold_time = 90
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
         let mock = tokio::spawn(async move {
             while let Some(cmd) = peer_mgr_rx.recv().await {
-                if let PeerManagerCommand::SyncRpolPolicies { reply, .. } = cmd {
-                    let _ = reply.send(Err(CatalogMutationError::internal(
-                        "mid-apply chain resolution failed",
-                    )));
+                if let PeerManagerCommand::OwnedCatalogMutation { reply, .. } = cmd {
+                    let _ = reply.send(OwnedCatalogMutationOutcome::RejectedNoEffect(
+                        CatalogMutationError::internal("mid-apply chain resolution failed"),
+                    ));
                 }
             }
         });
@@ -5705,14 +6654,21 @@ hold_time = 90
             None,
             None,
         )
-        .await
-        .expect("halted reload still returns the honest partial snapshot");
+        .await;
         drop(peer_mgr_tx);
         mock.await.unwrap();
+        assert!(matches!(
+            rejected,
+            SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(ReloadStepFailure {
+                bucket: "policy.rpol.sync",
+                error: ReloadStepError::Rejected(_),
+                ..
+            }))
+        ));
 
-        // The runtime snapshot — what a session created after the failed
-        // reload resolves against — still evaluates the OLD decision.
-        let chain = rejected
+        // A session created after the rejected no-effect reload still resolves
+        // the OLD decision.
+        let chain = initial
             .import_chain()
             .expect("chain resolves")
             .expect("chain configured");
@@ -5721,14 +6677,14 @@ hold_time = 90
         // Reload 2 (operator retries; peer manager now accepts): the
         // diff re-detects the on-disk candidate against the reverted
         // runtime snapshot and adopts it for everyone.
-        let current: Config = (*rejected).clone();
+        let current = initial.clone();
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
         let mock = tokio::spawn(async move {
             let mut synced = 0_u32;
             while let Some(cmd) = peer_mgr_rx.recv().await {
-                if let PeerManagerCommand::SyncRpolPolicies { reply, .. } = cmd {
+                if let PeerManagerCommand::OwnedCatalogMutation { reply, .. } = cmd {
                     synced += 1;
-                    let _ = reply.send(Ok(()));
+                    let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                 }
             }
             synced
@@ -6956,7 +7912,7 @@ import_policy_chain = ["origin-guard"]
         let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel(1);
         drop(peer_mgr_rx);
 
-        let returned = reload_config(
+        let outcome = reload_config(
             config_path.to_str().unwrap(),
             &initial,
             initial.global.telemetry.grpc_tcp.as_ref(),
@@ -6965,22 +7921,22 @@ import_policy_chain = ["origin-guard"]
             None,
             None,
         )
-        .await
-        .expect("explain-sync failure returns the honest partial snapshot");
-        assert_tier_authorized_test_config(&returned);
-        assert_tier_authorized_test_config(&returned.desired);
+        .await;
+        assert!(matches!(outcome, SighupReloadOutcome::CleanNoEffect(_)));
 
         assert_eq!(live.pin().generation, 1);
         assert_eq!(live.pin().data.records(), 1);
         assert!(std::sync::Arc::ptr_eq(
             &live,
-            returned.policy.dataset_bindings.get("customers").unwrap()
+            initial.policy.dataset_bindings.get("customers").unwrap()
         ));
     }
 
     #[tokio::test]
     async fn reload_neighbor_reconcile_failure_retains_committed_dataset_snapshot() {
-        use rustbgpd_api::peer_types::{ReconcileFailure, ReconcileFailureKind, ReconcileResult};
+        use rustbgpd_api::peer_types::{
+            PeerReconcileAuthority, PeerReconcileOutcome, ReconcileFailure, ReconcileFailureKind,
+        };
 
         let initial_toml = r#"
 [global]
@@ -7023,7 +7979,8 @@ remote_asn = 65099
                         let _ = reply.send(Ok(()));
                     }
                     PeerManagerCommand::ReconcilePeers { reply, .. } => {
-                        let _ = reply.send(ReconcileResult {
+                        let _ = reply.send(PeerReconcileOutcome {
+                            effects: Vec::new(),
                             failures: vec![ReconcileFailure {
                                 kind: ReconcileFailureKind::Add,
                                 peer: rustbgpd_api::peer_types::PeerKey::new(
@@ -7032,6 +7989,7 @@ remote_asn = 65099
                                 ),
                                 error: "injected add failure".to_string(),
                             }],
+                            authority: PeerReconcileAuthority::Known,
                         });
                     }
                     other => panic!("unexpected command: {}", cmd_tag(&other)),
@@ -7464,7 +8422,9 @@ peer_group = "secure"
     /// new policy but not the new neighbors.
     #[tokio::test]
     async fn reload_halts_on_failure_with_honest_partial_snapshot() {
-        use rustbgpd_api::peer_types::{ReconcileFailure, ReconcileFailureKind, ReconcileResult};
+        use rustbgpd_api::peer_types::{
+            PeerReconcileAuthority, PeerReconcileOutcome, ReconcileFailure, ReconcileFailureKind,
+        };
 
         let initial_toml = baseline_toml().to_string();
         let new_toml = format!(
@@ -7491,6 +8451,9 @@ peer_group = "secure"
             while let Some(cmd) = peer_mgr_rx.recv().await {
                 tags.push(cmd_tag(&cmd));
                 match cmd {
+                    PeerManagerCommand::OwnedCatalogMutation { reply, .. } => {
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
+                    }
                     PeerManagerCommand::SetPolicy { reply, .. }
                     | PeerManagerCommand::DeletePolicy { reply, .. }
                     | PeerManagerCommand::SetNeighborSet { reply, .. }
@@ -7504,7 +8467,8 @@ peer_group = "secure"
                         let _ = reply.send(Ok(()));
                     }
                     PeerManagerCommand::ReconcilePeers { reply, .. } => {
-                        let result = ReconcileResult {
+                        let result = PeerReconcileOutcome {
+                            effects: Vec::new(),
                             failures: vec![ReconcileFailure {
                                 kind: ReconcileFailureKind::Add,
                                 peer: rustbgpd_api::peer_types::PeerKey::new(
@@ -7513,6 +8477,7 @@ peer_group = "secure"
                                 ),
                                 error: "simulated reconcile failure".to_string(),
                             }],
+                            authority: PeerReconcileAuthority::Known,
                         };
                         let _ = reply.send(result);
                     }
@@ -7553,143 +8518,6 @@ peer_group = "secure"
             tags.contains(&"SetPolicy(block-private)".to_string()),
             "earlier reload steps must still have fired before the reconcile failure — saw {tags:?}"
         );
-    }
-
-    /// `apply_reload_outcome` must send to the peer manager FIRST, so
-    /// the authoritative runtime view always advances even if the
-    /// optional bridge channel later fails. Drives the helper directly
-    /// with a closed bridge channel to assert the failure stage name
-    /// matches and the peer manager already received the snapshot
-    /// before the bridge send was attempted.
-    #[tokio::test]
-    async fn apply_reload_outcome_bridge_failure_after_peer_mgr_snapshot() {
-        let (peer_mgr_internal_tx, mut peer_mgr_internal_rx) =
-            mpsc::unbounded_channel::<InternalCommand>();
-        let (bridge_tx, bridge_rx) = mpsc::unbounded_channel::<AcceptedBridgeReplacement>();
-        // Drop the bridge rx so the helper's send fails immediately
-        // with a closed-channel error.
-        drop(bridge_rx);
-
-        let path = unique_temp_path("apply-reload-outcome");
-        std::fs::write(&path, baseline_toml()).unwrap();
-        let cfg = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
-        std::fs::remove_file(&path).ok();
-
-        // Stand in for the peer manager: receive the snapshot and ack it so
-        // apply_reload_outcome proceeds to the (failing) bridge send.
-        let expected_asn = cfg.global.asn;
-        let pm = tokio::spawn(async move {
-            match peer_mgr_internal_rx.recv().await {
-                Some(InternalCommand::ReplaceConfigSnapshot { config, ack }) => {
-                    if let Some(ack) = ack {
-                        let _ = ack.send(());
-                    }
-                    config.global.asn
-                }
-                Some(InternalCommand::PlanAcceptedSnapshot { .. }) => {
-                    panic!("reload test expected only ReplaceConfigSnapshot")
-                }
-                Some(
-                    InternalCommand::StageTransactionConfig { .. }
-                    | InternalCommand::RestoreTransactionConfig { .. },
-                ) => panic!("reload test expected no config transaction snapshot command"),
-                None => panic!("peer manager must receive the snapshot"),
-            }
-        });
-
-        let result = apply_reload_outcome(
-            ReloadedConfig::new(
-                cfg.clone(),
-                AcceptedConfigSnapshot::from_config_for_test(cfg.clone()),
-            ),
-            &peer_mgr_internal_tx,
-            Some(&bridge_tx),
-        )
-        .await;
-
-        assert_eq!(
-            result.err(),
-            Some("config_bridge"),
-            "bridge failure must surface as the named stage so the caller's log line is actionable"
-        );
-        assert_eq!(
-            pm.await.unwrap(),
-            expected_asn,
-            "peer manager must receive the snapshot before the bridge send is attempted"
-        );
-    }
-
-    #[tokio::test]
-    async fn apply_reload_outcome_waits_for_bridge_adoption() {
-        let cfg = Config::load_toml_with_diagnostics(baseline_toml(), "adoption test").unwrap();
-        let desired = AcceptedConfigSnapshot::from_config_for_test(cfg.clone());
-        let (peer_tx, mut peer_rx) = mpsc::unbounded_channel::<InternalCommand>();
-        let (bridge_tx, mut bridge_rx) = mpsc::unbounded_channel::<AcceptedBridgeReplacement>();
-        let apply_peer_tx = peer_tx.clone();
-        let apply_bridge_tx = bridge_tx.clone();
-        let apply_desired = Arc::clone(&desired);
-        let apply = tokio::spawn(async move {
-            apply_reload_outcome(
-                ReloadedConfig::new(cfg, apply_desired),
-                &apply_peer_tx,
-                Some(&apply_bridge_tx),
-            )
-            .await
-        });
-
-        let Some(InternalCommand::ReplaceConfigSnapshot { ack: Some(ack), .. }) =
-            peer_rx.recv().await
-        else {
-            panic!("reload outcome must request peer-manager adoption");
-        };
-        ack.send(()).unwrap();
-        let replacement = bridge_rx.recv().await.unwrap();
-        assert!(Arc::ptr_eq(&replacement.snapshot, &desired));
-        tokio::task::yield_now().await;
-        assert!(
-            !apply.is_finished(),
-            "reload must retain its coordinator barrier until bridge adoption"
-        );
-        replacement.adopted.send(()).unwrap();
-        assert!(apply.await.unwrap().is_ok());
-    }
-
-    /// Bridge-disabled mode (no persister, so no bridge) must succeed: the
-    /// helper takes `Option<&Sender>`, and a `None` bridge is the shape an
-    /// embedder or a unit test wires when nothing persists gRPC mutations.
-    /// The daemon itself always has a bridge.
-    #[tokio::test]
-    async fn apply_reload_outcome_succeeds_without_bridge() {
-        let (peer_mgr_internal_tx, mut peer_mgr_internal_rx) =
-            mpsc::unbounded_channel::<InternalCommand>();
-
-        let path = unique_temp_path("apply-reload-outcome-nobridge");
-        std::fs::write(&path, baseline_toml()).unwrap();
-        let cfg = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
-        std::fs::remove_file(&path).ok();
-
-        // Stand in for the peer manager: receive the snapshot and ack it.
-        let pm = tokio::spawn(async move {
-            match peer_mgr_internal_rx.recv().await {
-                Some(InternalCommand::ReplaceConfigSnapshot { ack: Some(ack), .. }) => {
-                    ack.send(()).is_ok()
-                }
-                _ => false,
-            }
-        });
-
-        let advanced = apply_reload_outcome(
-            ReloadedConfig::new(
-                cfg.clone(),
-                AcceptedConfigSnapshot::from_config_for_test(cfg.clone()),
-            ),
-            &peer_mgr_internal_tx,
-            None,
-        )
-        .await
-        .expect("no-bridge mode must succeed");
-        assert_eq!(advanced.global.asn, cfg.global.asn);
-        assert!(pm.await.unwrap(), "peer manager must receive the snapshot");
     }
 
     /// Regression test for the bridge stale-snapshot bug. The bridge
@@ -7751,7 +8579,20 @@ peer_group = "secure"
                 adopted,
             })
             .unwrap();
-        adopted_rx.await.unwrap();
+        let replace_msg = mutation_rx.recv().await.expect("replacement forwarded");
+        let ConfigMutation::AdoptReloadSnapshot {
+            snapshot: received_replace,
+            adopted: persister_ack,
+        } = replace_msg
+        else {
+            panic!("bridge must forward replacement as AdoptReloadSnapshot");
+        };
+        assert!(received_replace.peer_groups.contains_key("upstream"));
+        persister_ack.send(()).unwrap();
+        assert!(matches!(
+            adopted_rx.await.unwrap(),
+            ReloadDispatch::Replied(())
+        ));
         // Then a gRPC mutation that adds a policy definition. If the
         // bridge missed the swap, this would compute against `stale`
         // and the resulting ReplaceConfig wouldn't carry the new
@@ -7767,19 +8608,6 @@ peer_group = "secure"
             })
             .await
             .unwrap();
-
-        // First persister message is the replacement itself, but as a
-        // no-persist refresh. The on-disk TOML is already the
-        // operator's desired snapshot; rewriting it here would clobber
-        // restart-required edits that runtime intentionally pinned.
-        let replace_msg = mutation_rx.recv().await.expect("replacement forwarded");
-        let ConfigMutation::RefreshSnapshotNoPersist(received_replace) = replace_msg else {
-            panic!("bridge must forward replacement as RefreshSnapshotNoPersist");
-        };
-        assert!(
-            received_replace.peer_groups.contains_key("upstream"),
-            "replacement message must carry the new peer_groups.upstream"
-        );
 
         // Second persister message is the post-event snapshot — must
         // contain BOTH the replacement-supplied peer_groups.upstream
@@ -8536,20 +9364,18 @@ remote_asn = 65002
         .await
         .expect("reload should return pinned runtime plus desired config");
 
-        let (peer_mgr_internal_tx, mut peer_mgr_internal_rx) =
-            mpsc::unbounded_channel::<InternalCommand>();
-        let pm = tokio::spawn(async move {
-            match peer_mgr_internal_rx.recv().await {
-                Some(InternalCommand::ReplaceConfigSnapshot { ack: Some(ack), .. }) => {
-                    ack.send(()).is_ok()
-                }
-                _ => false,
-            }
-        });
-        let runtime = apply_reload_outcome(reloaded, &peer_mgr_internal_tx, Some(&replace_tx))
-            .await
-            .expect("post-reload sync should succeed");
-        assert!(pm.await.unwrap(), "peer manager snapshot must be refreshed");
+        let runtime = reloaded.runtime.clone();
+        let (adopted, adopted_rx) = oneshot::channel();
+        replace_tx
+            .send(AcceptedBridgeReplacement {
+                snapshot: Arc::clone(&reloaded.desired),
+                adopted,
+            })
+            .unwrap();
+        assert!(matches!(
+            adopted_rx.await.unwrap(),
+            ReloadDispatch::Replied(())
+        ));
 
         event_tx
             .send(ConfigEvent::SetPolicy {

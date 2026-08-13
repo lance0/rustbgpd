@@ -11,7 +11,7 @@ use std::time::Duration;
 use futures::StreamExt as FuturesStreamExt;
 use futures::{Future, Stream};
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
@@ -68,8 +68,14 @@ const MAX_CONCURRENT_GRPC_TLS_HANDSHAKES: usize = 64;
 const GRPC_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Closeable, one-permit serializer for persisted runtime-config mutations.
+#[derive(Debug)]
+struct RuntimeConfigCoordinatorInner {
+    semaphore: Arc<Semaphore>,
+    drained: Notify,
+}
+
 #[derive(Clone, Debug)]
-pub struct RuntimeConfigCoordinator(Arc<Semaphore>);
+pub struct RuntimeConfigCoordinator(Arc<RuntimeConfigCoordinatorInner>);
 
 impl RuntimeConfigCoordinator {
     /// Create an open coordinator.
@@ -79,7 +85,10 @@ impl RuntimeConfigCoordinator {
         reason = "Default is intentionally absent so coordinator creation stays explicit"
     )]
     pub fn new() -> Self {
-        Self(Arc::new(Semaphore::new(1)))
+        Self(Arc::new(RuntimeConfigCoordinatorInner {
+            semaphore: Arc::new(Semaphore::new(1)),
+            drained: Notify::new(),
+        }))
     }
 
     /// Wait for exclusive ownership.
@@ -91,22 +100,37 @@ impl RuntimeConfigCoordinator {
         &self,
     ) -> Result<RuntimeConfigCoordinatorPermit, RuntimeConfigCoordinatorClosed> {
         self.0
+            .semaphore
             .clone()
             .acquire_owned()
             .await
-            .map(RuntimeConfigCoordinatorPermit)
+            .map(|permit| RuntimeConfigCoordinatorPermit {
+                permit: Some(permit),
+                coordinator: self.clone(),
+            })
             .map_err(|_| RuntimeConfigCoordinatorClosed)
     }
 
     /// Permanently reject queued and future acquisitions.
     pub fn close(&self) {
-        self.0.close();
+        self.0.semaphore.close();
     }
 
     /// Whether the coordinator has been permanently closed.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.0.is_closed()
+        self.0.semaphore.is_closed()
+    }
+
+    /// Wait until the physical owner has released the permit.
+    pub async fn wait_until_drained(&self) {
+        loop {
+            let notified = self.0.drained.notified();
+            if self.0.semaphore.available_permits() == 1 {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -131,7 +155,17 @@ impl From<RuntimeConfigCoordinatorClosed> for Status {
 /// Opaque exclusive runtime-config ownership, released on drop.
 #[must_use = "dropping the runtime-config permit immediately releases ownership"]
 #[derive(Debug)]
-pub struct RuntimeConfigCoordinatorPermit(#[allow(dead_code)] OwnedSemaphorePermit);
+pub struct RuntimeConfigCoordinatorPermit {
+    permit: Option<OwnedSemaphorePermit>,
+    coordinator: RuntimeConfigCoordinator,
+}
+
+impl Drop for RuntimeConfigCoordinatorPermit {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        self.coordinator.0.drained.notify_waiters();
+    }
+}
 
 fn bounded_handshakes<S, F, T, E>(incoming: S) -> impl Stream<Item = Result<T, E>>
 where
@@ -2222,6 +2256,23 @@ mod tests {
         // Closure does not revoke the already-issued opaque owner, and
         // releasing that owner cannot reopen the coordinator.
         drop(owner);
+        assert!(coordinator.acquire().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn runtime_config_coordinator_close_drains_physical_owner() {
+        let coordinator = RuntimeConfigCoordinator::new();
+        let owner = coordinator.acquire().await.expect("initial owner");
+        coordinator.close();
+        let drain = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.wait_until_drained().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!drain.is_finished());
+        drop(owner);
+        drain.await.expect("drain waiter");
+        coordinator.wait_until_drained().await;
         assert!(coordinator.acquire().await.is_err());
     }
 

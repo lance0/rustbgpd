@@ -2547,7 +2547,7 @@ impl PeerManager {
         //
         // Failure for an Established peer bubbles up to
         // `apply_policy_change`'s caller — for SIGHUP reloads, that
-        // halts the reload via `halt_partial` so the failure is
+        // returns acknowledged partial SIGHUP authority so the failure is
         // surfaced rather than logged-and-forgotten. Before bubbling
         // up, set `pending_refresh` so the next operator action
         // retries the refresh — otherwise a single transient send
@@ -2773,6 +2773,7 @@ impl PeerManager {
     /// resolve-first, rollback-capable fan-out as catalog policy edits. Peers
     /// whose import chain materially changed get a Route Refresh inside
     /// `apply_resolved_policy_snapshot`.
+    #[cfg(test)]
     pub(super) async fn sync_rpol_policies(
         &mut self,
         rpol_files: Vec<String>,
@@ -2799,6 +2800,42 @@ impl PeerManager {
             "rpol policy registry replaced; live peer chains re-resolved"
         );
         Ok(())
+    }
+
+    pub(super) async fn sync_rpol_policies_owned(
+        &mut self,
+        rpol_files: Vec<String>,
+        rpol: rustbgpd_policy::rpol::RpolPolicySet,
+        dataset_bindings: rustbgpd_policy::datasets::DatasetBindings,
+    ) -> OwnedCatalogMutationOutcome {
+        let mut next_config = self.current_config.clone();
+        next_config.policy.rpol_files = rpol_files;
+        next_config.policy.rpol = rpol;
+        next_config.policy.dataset_bindings = dataset_bindings;
+        match self
+            .refresh_policies_for_config_classified(next_config, None, true)
+            .await
+        {
+            Ok(_) => OwnedCatalogMutationOutcome::Success,
+            Err(PolicySnapshotFailure {
+                kind: PolicySnapshotFailureKind::RejectedNoEffect,
+                message,
+            }) => OwnedCatalogMutationOutcome::RejectedNoEffect(CatalogMutationError::internal(
+                message,
+            )),
+            Err(PolicySnapshotFailure {
+                kind: PolicySnapshotFailureKind::FullyCompensated,
+                message,
+            }) => OwnedCatalogMutationOutcome::FullyCompensated(CatalogMutationError::internal(
+                message,
+            )),
+            Err(PolicySnapshotFailure {
+                kind: PolicySnapshotFailureKind::CompensationAmbiguous,
+                message,
+            }) => OwnedCatalogMutationOutcome::CompensationAmbiguous(
+                CatalogMutationError::internal(message),
+            ),
+        }
     }
 
     /// Shared catalog-change fan-out: resolve every affected peer's

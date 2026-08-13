@@ -475,12 +475,20 @@ What happens (in dependency order):
    `AdjRibIn` get re-evaluated against the new policy. Operators no
    longer need to run `softreset` manually after a chain swap.
 
-Reload halts at the first step failure and returns a partial-state
-snapshot, so the daemon's in-memory config tracks what actually
-landed at the peer manager. Operator fixes the failing TOML and
-reloads again to converge against the half-applied state. Per-step
-errors are logged with structured `bucket` / `target` / `error`
-fields.
+Reload halts at the first step failure. A typed authoritative receipt records
+the exact successful peer effects, and the peer-manager snapshot, config
+bridge/persister, tracing projection, and gNMI dial-out targets all adopt that
+same complete or known-partial runtime state before the owner settles. The
+operator can then fix the failing TOML and reload again to converge. A command
+that was definitely not accepted before any prior effect is a clean rejection;
+an accepted reply loss or non-authoritative reconcile instead recovery-fences
+the daemon, makes `/readyz` fail, rejects another persisted mutation, and exits
+70 after the five-second grace. Per-step errors are logged with structured
+`bucket` / `target` / `error` fields.
+
+Coordinated shutdown closes new SIGHUP and runtime-mutation admission first.
+It does not abort an already-owned reload: the daemon waits for its typed
+settlement before taking the warm checkpoint or tearing down required actors.
 
 **Restart-required surfaces** (logged at reload, surfaced under
 "Restart-required" in `--diff`): `[global]` ASN/router-id/families,

@@ -4178,8 +4178,9 @@ remote_asn = 65002
             (main, "RuntimeConfigCoordinator::new()", 1),
             (main, "\n                lock: runtime_config_lock.clone(),", 2),
             (main, "runtime_config_lock: runtime_config_lock.clone(),", 1),
-            (main, "let Ok(_runtime_config_guard) = runtime_config_lock.acquire().await else {", 1),
-            (main, "tokio::time::timeout_at(runtime_config_deadline, runtime_config_lock.acquire())", 1),
+            (main, "runtime_config_lock.acquire()", 0),
+            (main, "RuntimeConfigOperationKind::Sighup,", 1),
+            (main, "tokio::time::timeout_at(runtime_config_deadline, runtime_config_lock.acquire())", 0),
             (main, "RuntimeConfigSettlementWatchdog::new()", 1),
             (main, ".with_runtime_config_settlement(", 1),
             (main, "move || settlement_wait.wait_until_idle()", 1),
@@ -4422,13 +4423,11 @@ remote_asn = 65002
         let watched_idle = main
             .find("move || settlement_wait.wait_until_idle()")
             .unwrap();
-        let bounded_fence = main
-            .find("tokio::time::timeout_at(runtime_config_deadline, runtime_config_lock.acquire())")
+        let drained = main
+            .find("runtime_config_lock.wait_until_drained().await;")
             .unwrap();
         let closed = main.find("runtime_config_lock.close();").unwrap();
-        assert!(
-            shutdown_gate < watched_idle && watched_idle < bounded_fence && bounded_fence < closed
-        );
+        assert!(shutdown_gate < closed && closed < watched_idle && watched_idle < drained);
         assert!(
             owners[1..6]
                 .iter()
@@ -5167,13 +5166,6 @@ peer_group = "edge"
             match cmd {
                 FibRuntimeCommand::GetTables { reply } => {
                     let _ = reply.send(state.lock().await.clone());
-                }
-                FibRuntimeCommand::ReplaceTables { tables, reply } => {
-                    let result = replace_result.clone().unwrap_or(Ok(()));
-                    if result.is_ok() {
-                        *state.lock().await = tables;
-                    }
-                    let _ = reply.send(result);
                 }
                 FibRuntimeCommand::OwnedReplaceTables { tables, reply } => {
                     let result = replace_result.clone().unwrap_or(Ok(()));
@@ -10446,7 +10438,7 @@ families = ["ipv4_unicast"]
             reply.send(vec![edge]).unwrap();
             assert!(
                 fib_rx.recv().await.is_none(),
-                "stage rejection must precede ReplaceTables"
+                "stage rejection must precede typed FIB replacement"
             );
         });
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();

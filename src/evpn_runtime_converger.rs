@@ -143,7 +143,24 @@ pub(crate) struct EvpnRuntimeReloadApplyResult {
 
 pub(crate) struct EvpnRuntimeReloadAttempt {
     pub(crate) baseline: Config,
-    pub(crate) result: Result<Option<EvpnRuntimeReloadApplyResult>, GrpcEvpnRuntimeApplyError>,
+    pub(crate) terminal: EvpnRuntimeReloadTerminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EvpnRuntimeReloadTerminal {
+    Unchanged,
+    Applied(EvpnRuntimeReloadApplyResult),
+    RejectedNoEffect(GrpcEvpnRuntimeApplyError),
+    KnownPartial(GrpcEvpnRuntimeApplyError),
+    KnownDivergence(GrpcEvpnRuntimeApplyError),
+    PublicationAmbiguous(GrpcEvpnRuntimeApplyError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EvpnRuntimeReloadState {
+    generation: rustbgpd_evpn::EvpnRuntimeGeneration,
+    lifecycle: rustbgpd_evpn::EvpnRuntimeLifecycle,
+    mutation_state: rustbgpd_evpn::EvpnRuntimeMutationState,
 }
 
 #[derive(Clone)]
@@ -314,41 +331,63 @@ impl EvpnRuntimeReloadApply {
     {
         let this = self.clone();
         let config = config.clone();
-        // Same ADR-0080 shield as `apply_candidate_config`: shutdown aborts
-        // an in-flight reload task, and that abort must not cancel a
-        // converge mid-flight.
+        // Same ADR-0080 shield as `apply_candidate_config`: losing an outer
+        // reload waiter must not cancel a converge mid-flight.
         let join = tokio::spawn(async move {
             let _apply_guard = this.apply_lock.lock().await;
             let baseline = this.committed_config_locked();
             if !changed(&config, &baseline) {
                 return EvpnRuntimeReloadAttempt {
                     baseline,
-                    result: Ok(None),
+                    terminal: EvpnRuntimeReloadTerminal::Unchanged,
                 };
             }
 
-            let result = match this.apply_candidate_config_locked(&config, false).await {
-                Ok(response) => response_to_reload_outcome(response.outcome).map(|outcome| {
-                    Some(EvpnRuntimeReloadApplyResult {
-                        outcome,
-                        message: response.message,
-                    })
-                }),
-                Err(error) => Err(error),
+            let before = match this.reload_state() {
+                Ok(state) => state,
+                Err(error) => {
+                    return EvpnRuntimeReloadAttempt {
+                        baseline,
+                        terminal: EvpnRuntimeReloadTerminal::PublicationAmbiguous(error),
+                    };
+                }
             };
-            if matches!(result, Ok(Some(_))) {
+            let result = this.apply_candidate_config_locked(&config, false).await;
+            let terminal = match this.reload_state() {
+                Ok(after) => classify_reload_terminal(before, after, result),
+                Err(error) => EvpnRuntimeReloadTerminal::PublicationAmbiguous(error),
+            };
+            if matches!(terminal, EvpnRuntimeReloadTerminal::Applied(_)) {
                 this.set_committed_config(&config);
             }
 
-            EvpnRuntimeReloadAttempt { baseline, result }
+            EvpnRuntimeReloadAttempt { baseline, terminal }
         });
         match join.await {
             Ok(attempt) => attempt,
             Err(error) => EvpnRuntimeReloadAttempt {
                 baseline: self.committed_config_locked(),
-                result: Err(apply_task_join_error("reload apply", &error)),
+                terminal: EvpnRuntimeReloadTerminal::PublicationAmbiguous(apply_task_join_error(
+                    "reload apply",
+                    &error,
+                )),
             },
         }
+    }
+
+    fn reload_state(&self) -> Result<EvpnRuntimeReloadState, GrpcEvpnRuntimeApplyError> {
+        let coordinator = self.coordinator.lock().map_err(|_| {
+            GrpcEvpnRuntimeApplyError::Internal(
+                "EVPN runtime coordinator lock poisoned while classifying reload settlement"
+                    .to_string(),
+            )
+        })?;
+        let model = coordinator.model();
+        Ok(EvpnRuntimeReloadState {
+            generation: model.generation(),
+            lifecycle: model.lifecycle(),
+            mutation_state: model.mutation_state(),
+        })
     }
 
     async fn apply_candidate_config_locked(
@@ -365,6 +404,60 @@ impl EvpnRuntimeReloadApply {
             &self.metrics,
         )
         .await
+    }
+}
+
+fn classify_reload_terminal(
+    before: EvpnRuntimeReloadState,
+    after: EvpnRuntimeReloadState,
+    result: Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError>,
+) -> EvpnRuntimeReloadTerminal {
+    match result {
+        Ok(_)
+            if after.mutation_state == rustbgpd_evpn::EvpnRuntimeMutationState::Failed
+                || after.lifecycle == rustbgpd_evpn::EvpnRuntimeLifecycle::Degraded
+                || (before.mutation_state != rustbgpd_evpn::EvpnRuntimeMutationState::Idle
+                    && after.mutation_state != rustbgpd_evpn::EvpnRuntimeMutationState::Idle) =>
+        {
+            EvpnRuntimeReloadTerminal::KnownDivergence(GrpcEvpnRuntimeApplyError::Internal(
+                "EVPN runtime returned success while coordinator authority remained degraded"
+                    .to_string(),
+            ))
+        }
+        Ok(response) => match response_to_reload_outcome(response.outcome) {
+            Ok(outcome) => EvpnRuntimeReloadTerminal::Applied(EvpnRuntimeReloadApplyResult {
+                outcome,
+                message: response.message,
+            }),
+            Err(error) => EvpnRuntimeReloadTerminal::PublicationAmbiguous(error),
+        },
+        Err(error) if after.generation != before.generation => {
+            EvpnRuntimeReloadTerminal::KnownPartial(error)
+        }
+        Err(error)
+            if after.mutation_state == rustbgpd_evpn::EvpnRuntimeMutationState::Failed
+                || after.lifecycle == rustbgpd_evpn::EvpnRuntimeLifecycle::Degraded
+                || (before.mutation_state != rustbgpd_evpn::EvpnRuntimeMutationState::Idle
+                    && after.mutation_state != rustbgpd_evpn::EvpnRuntimeMutationState::Idle) =>
+        {
+            EvpnRuntimeReloadTerminal::KnownDivergence(error)
+        }
+        Err(error)
+            if after.generation == before.generation
+                && after.mutation_state == rustbgpd_evpn::EvpnRuntimeMutationState::Idle
+                && matches!(
+                    error,
+                    GrpcEvpnRuntimeApplyError::InvalidArgument(_)
+                        | GrpcEvpnRuntimeApplyError::FailedPrecondition(_)
+                ) =>
+        {
+            EvpnRuntimeReloadTerminal::RejectedNoEffect(error)
+        }
+        Err(
+            error @ (GrpcEvpnRuntimeApplyError::Internal(_)
+            | GrpcEvpnRuntimeApplyError::Unavailable(_)),
+        ) => EvpnRuntimeReloadTerminal::PublicationAmbiguous(error),
+        Err(error) => EvpnRuntimeReloadTerminal::KnownDivergence(error),
     }
 }
 
@@ -2800,6 +2893,122 @@ mod tests {
         }
     }
 
+    fn reload_test_state(
+        generation: rustbgpd_evpn::EvpnRuntimeGeneration,
+        lifecycle: rustbgpd_evpn::EvpnRuntimeLifecycle,
+        mutation_state: rustbgpd_evpn::EvpnRuntimeMutationState,
+    ) -> EvpnRuntimeReloadState {
+        EvpnRuntimeReloadState {
+            generation,
+            lifecycle,
+            mutation_state,
+        }
+    }
+
+    #[test]
+    fn reload_classifier_reports_determinate_idle_rejection() {
+        let state = reload_test_state(
+            rustbgpd_evpn::EvpnRuntimeGeneration::STARTUP,
+            rustbgpd_evpn::EvpnRuntimeLifecycle::Active,
+            rustbgpd_evpn::EvpnRuntimeMutationState::Idle,
+        );
+        let terminal = classify_reload_terminal(
+            state,
+            state,
+            Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(
+                "unsupported candidate".to_string(),
+            )),
+        );
+        assert!(matches!(
+            terminal,
+            EvpnRuntimeReloadTerminal::RejectedNoEffect(_)
+        ));
+    }
+
+    #[test]
+    fn reload_classifier_reports_advanced_generation_as_known_partial() {
+        let before = reload_test_state(
+            rustbgpd_evpn::EvpnRuntimeGeneration::STARTUP,
+            rustbgpd_evpn::EvpnRuntimeLifecycle::Active,
+            rustbgpd_evpn::EvpnRuntimeMutationState::Idle,
+        );
+        let after = reload_test_state(
+            rustbgpd_evpn::EvpnRuntimeGeneration::STARTUP.next(),
+            rustbgpd_evpn::EvpnRuntimeLifecycle::Active,
+            rustbgpd_evpn::EvpnRuntimeMutationState::Idle,
+        );
+        let terminal = classify_reload_terminal(
+            before,
+            after,
+            Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(
+                "decomposed step failed".to_string(),
+            )),
+        );
+        assert!(matches!(
+            terminal,
+            EvpnRuntimeReloadTerminal::KnownPartial(_)
+        ));
+    }
+
+    #[test]
+    fn reload_classifier_reports_failed_or_degraded_state_as_divergence() {
+        let before = reload_test_state(
+            rustbgpd_evpn::EvpnRuntimeGeneration::STARTUP,
+            rustbgpd_evpn::EvpnRuntimeLifecycle::Active,
+            rustbgpd_evpn::EvpnRuntimeMutationState::Idle,
+        );
+        let after = reload_test_state(
+            before.generation,
+            rustbgpd_evpn::EvpnRuntimeLifecycle::Degraded,
+            rustbgpd_evpn::EvpnRuntimeMutationState::Failed,
+        );
+        let terminal = classify_reload_terminal(
+            before,
+            after,
+            Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(
+                "converger failed after effects".to_string(),
+            )),
+        );
+        assert!(matches!(
+            terminal,
+            EvpnRuntimeReloadTerminal::KnownDivergence(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn reload_classifier_reports_transport_and_join_uncertainty_as_ambiguous() {
+        let state = reload_test_state(
+            rustbgpd_evpn::EvpnRuntimeGeneration::STARTUP,
+            rustbgpd_evpn::EvpnRuntimeLifecycle::Active,
+            rustbgpd_evpn::EvpnRuntimeMutationState::Idle,
+        );
+        for error in [
+            GrpcEvpnRuntimeApplyError::Internal("internal".to_string()),
+            GrpcEvpnRuntimeApplyError::Unavailable("unavailable".to_string()),
+        ] {
+            assert!(matches!(
+                classify_reload_terminal(state, state, Err(error)),
+                EvpnRuntimeReloadTerminal::PublicationAmbiguous(_)
+            ));
+        }
+
+        let baseline = load_runtime_test_config(minimal_runtime_candidate_toml(), "test baseline");
+        let candidate = load_runtime_test_config(l2vni_runtime_candidate_toml(), "test candidate");
+        let reload_apply = EvpnRuntimeReloadApply::new(
+            empty_evpn_runtime_coordinator(),
+            Arc::new(tokio::sync::Mutex::new(())),
+            Arc::new(TestRuntimeConverger::ok()),
+            baseline,
+        );
+        let attempt = reload_apply
+            .apply_config_if_changed(&candidate, |_, _| panic!("join-error proof"))
+            .await;
+        assert!(matches!(
+            attempt.terminal,
+            EvpnRuntimeReloadTerminal::PublicationAmbiguous(GrpcEvpnRuntimeApplyError::Internal(_))
+        ));
+    }
+
     /// Signals entry into `converge` and then blocks until the test grants
     /// a permit — lets a test drop the caller's future mid-converge.
     struct GatedRuntimeConverger {
@@ -4962,8 +5171,8 @@ local_vtep_ip = "10.0.0.1"
         }
     }
 
-    /// ADR-0080, SIGHUP flavor: shutdown aborts an in-flight reload task;
-    /// the abort must not cancel an EVPN converge already past planning.
+    /// ADR-0080, SIGHUP flavor: losing the outer reload waiter must not
+    /// cancel an EVPN converge already past planning.
     #[tokio::test]
     async fn reload_apply_dropped_mid_converge_still_commits_and_advances_baseline() {
         let baseline = load_runtime_test_config(minimal_runtime_candidate_toml(), "test baseline");
@@ -4989,7 +5198,7 @@ local_vtep_ip = "10.0.0.1"
             _ = &mut caller => panic!("reload apply must still be blocked in converge"),
             () = entered.notified() => {}
         }
-        // Simulate the shutdown-time `JoinHandle::abort` of the reload task.
+        // Simulate an outer reload waiter going away.
         drop(caller);
         release.add_permits(1);
 
@@ -5002,7 +5211,7 @@ local_vtep_ip = "10.0.0.1"
             }
             assert!(
                 StdInstant::now() < deadline,
-                "aborted reload cancelled the apply: generation/baseline never advanced"
+                "dropped reload waiter cancelled the apply: generation/baseline never advanced"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -5048,11 +5257,11 @@ local_vtep_ip = "10.0.0.1"
             .apply_config_if_changed(&bound, evpn_runtime_changed_for_test)
             .await;
         assert!(matches!(
-            attempt.result,
-            Ok(Some(EvpnRuntimeReloadApplyResult {
+            attempt.terminal,
+            EvpnRuntimeReloadTerminal::Applied(EvpnRuntimeReloadApplyResult {
                 outcome: EvpnRuntimeReloadOutcome::Noop,
                 ..
-            }))
+            })
         ));
         assert!(bindings_rx.has_changed().unwrap(), "binding add published");
         let published = bindings_rx.borrow_and_update().clone();
@@ -5066,7 +5275,10 @@ local_vtep_ip = "10.0.0.1"
         let attempt = reload_apply
             .apply_config_if_changed(&unbound, evpn_runtime_changed_for_test)
             .await;
-        assert!(matches!(attempt.result, Ok(Some(_))));
+        assert!(matches!(
+            attempt.terminal,
+            EvpnRuntimeReloadTerminal::Applied(_)
+        ));
         assert!(
             bindings_rx.has_changed().unwrap(),
             "binding removal published"

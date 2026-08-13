@@ -356,16 +356,20 @@ async fn sync_rpol_policies_rejection_keeps_old_registry_for_live_and_new_sessio
     // Candidate registry renames the policy, so the static peer's
     // `import_policy_chain = ["edge-in"]` no longer resolves: the sync
     // is rejected mid-apply with zero peers touched.
-    mgr.sync_rpol_policies(
-        vec!["policies/core.rpol".to_string()],
-        registry(
-            "edge-in-renamed",
-            "policy edge-in-renamed { term all { set local-pref 250; accept } }",
-        ),
-        rustbgpd_policy::datasets::DatasetBindings::default(),
-    )
-    .await
-    .expect_err("chain resolution failure must reject the sync");
+    let outcome = mgr
+        .sync_rpol_policies_owned(
+            vec!["policies/core.rpol".to_string()],
+            registry(
+                "edge-in-renamed",
+                "policy edge-in-renamed { term all { set local-pref 250; accept } }",
+            ),
+            rustbgpd_policy::datasets::DatasetBindings::default(),
+        )
+        .await;
+    assert!(matches!(
+        outcome,
+        rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::RejectedNoEffect(_)
+    ));
 
     // Existing session: the live chain still evaluates the OLD decision.
     let managed = mgr.peers.values().next().expect("peer present");
@@ -1035,6 +1039,41 @@ async fn owned_policy_change_fences_when_failing_peer_cannot_restore() {
             .contains_key("edge-import"),
         "a failed catalog mutation must not advance current_config"
     );
+}
+
+#[tokio::test]
+async fn owned_rpol_sync_reports_ambiguous_failed_session() {
+    use rustbgpd_policy::rpol::{RpolFile, RpolPolicyEntry, RpolPolicySet};
+
+    let mut mgr = live_policy_test_manager();
+    let peer: IpAddr = "10.0.0.9".parse().unwrap();
+    insert_test_managed_peer(&mut mgr, peer, closed_peer_handle(), false);
+    let mut neighbor = config_neighbor(peer, 65002);
+    neighbor.import_policy_chain = vec!["edge-in".to_string()];
+    mgr.current_config.neighbors = vec![neighbor];
+
+    let file =
+        Arc::new(RpolFile::parse("policy edge-in { term all { accept } }").expect("clean rpol"));
+    let mut rpol = RpolPolicySet::default();
+    rpol.policies.insert(
+        "edge-in".to_string(),
+        RpolPolicyEntry {
+            file,
+            params: 0,
+            path: "policies/core.rpol".to_string(),
+        },
+    );
+    let outcome = mgr
+        .sync_rpol_policies_owned(
+            vec!["policies/core.rpol".to_string()],
+            rpol,
+            rustbgpd_policy::datasets::DatasetBindings::default(),
+        )
+        .await;
+    assert!(matches!(
+        outcome,
+        rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::CompensationAmbiguous(_)
+    ));
 }
 
 #[tokio::test]

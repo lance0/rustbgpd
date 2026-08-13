@@ -87,7 +87,8 @@ use crate::config::{
 use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::PeerManager;
 use crate::reload::{
-    apply_reload_outcome, reload_config_with_tcp_ao, run_config_bridge_accepted,
+    ReloadStepError, SighupAuthority, SighupReloadError, SighupReloadOutcome, SighupReloadPlan,
+    finalize_sighup_authority, reload_config_with_tcp_ao, run_config_bridge_accepted,
     runtime_config_snapshot_accepted,
 };
 use rustbgpd_api::health_probe::DaemonGate;
@@ -95,7 +96,9 @@ use rustbgpd_api::peer_types::{
     ImportValidationDependency, PeerManagerCommand, PeerManagerNeighborConfig,
     PeerManagerReadinessQuery, WarmCheckpointCapture, WarmCheckpointSession,
 };
-use rustbgpd_api::runtime_config_settlement::RuntimeConfigSettlementWatchdog;
+use rustbgpd_api::runtime_config_settlement::{
+    OwnedRuntimeConfigOutcome, RuntimeConfigOperationKind, RuntimeConfigSettlementWatchdog,
+};
 use rustbgpd_api::server::{
     AccessMode as GrpcServerAccessMode, ConfigMutationGateFn, ListenerConfig as GrpcListenerConfig,
     ListenerEndpoint, RuntimeConfigCoordinator, ServeConfig,
@@ -4966,19 +4969,21 @@ async fn run<T>(
     // surface) and reconciles targets again after every successful SIGHUP
     // reload in the outcome arm below. A collector being down never affects
     // the daemon: each target retries independently with capped backoff.
-    let mut gnmi_dialout_manager = rustbgpd_api::gnmi_dialout::DialoutManager::new(
-        rustbgpd_api::gnmi_dialout::GnmiService::new(
-            config.global.asn,
-            config.global.router_id.clone(),
-            // Dial-out only renders Subscribe snapshots; it never serves Set.
-            rustbgpd_api::server::AccessMode::ReadOnly,
-            peer_mgr_tx.clone(),
-        )
-        .with_event_history(event_history_handle.clone()),
-        metrics.clone(),
-    );
+    let gnmi_dialout_manager = Arc::new(tokio::sync::Mutex::new(
+        rustbgpd_api::gnmi_dialout::DialoutManager::new(
+            rustbgpd_api::gnmi_dialout::GnmiService::new(
+                config.global.asn,
+                config.global.router_id.clone(),
+                // Dial-out only renders Subscribe snapshots; it never serves Set.
+                rustbgpd_api::server::AccessMode::ReadOnly,
+                peer_mgr_tx.clone(),
+            )
+            .with_event_history(event_history_handle.clone()),
+            metrics.clone(),
+        ),
+    ));
     match config::gnmi_dialout_targets(&config) {
-        Ok(targets) => gnmi_dialout_manager.apply(&targets),
+        Ok(targets) => gnmi_dialout_manager.lock().await.apply(&targets),
         // Unreachable in practice: Config::load validated the section.
         Err(reason) => error!(error = %reason, "invalid [gnmi_dialout] section; dial-out disabled"),
     }
@@ -5000,7 +5005,7 @@ async fn run<T>(
     // running is logged and dropped — the operator-facing back-pressure
     // surface.
     let mut reload_in_flight: Option<
-        tokio::task::JoinHandle<Option<Result<Config, &'static str>>>,
+        tokio::task::JoinHandle<Result<SighupAuthority, SighupReloadError>>,
     > = None;
     let mut grpc_server_failed = false;
     loop {
@@ -5053,52 +5058,43 @@ async fn run<T>(
                 let limits_rib_tx = rib_tx.clone();
                 let accepted_rx = accepted_rx.clone();
                 let live_bindings = config.policy.dataset_bindings.clone();
+                let runtime_config_settlement = runtime_config_settlement.clone();
+                let daemon_gate = daemon_gate.clone();
+                let dialout_manager = Arc::clone(&gnmi_dialout_manager);
                 reload_in_flight = Some(tokio::spawn(async move {
-                    let Ok(_runtime_config_guard) = runtime_config_lock.acquire().await else {
-                        error!("SIGHUP reload rejected: runtime config coordinator is closed");
-                        return None;
-                    };
-                    if let Err(error) = config_transaction_controller
-                        .reject_if_pending("SIGHUP reload")
-                        .await
-                    {
-                        warn!(
-                            error = %error,
-                            "SIGHUP reload ignored while confirmed config transaction is applying or pending"
-                        );
-                        return None;
-                    }
-                    if let Some(credentials) = grpc_credentials {
-                        match credentials.reload() {
-                            Ok(generation) => {
-                                reload_metrics.record_grpc_credential_reload("success");
-                                info!(generation, "gRPC credential generation reloaded");
-                            }
-                            Err(error) => {
-                                reload_metrics.record_grpc_credential_reload("failure");
-                                error!(error = %error, "gRPC credential reload rejected; last-known-good generation remains active");
-                            }
-                        }
+                    runtime_config_settlement.execute_owned(
+                        RuntimeConfigOperationKind::Sighup,
+                        runtime_config_lock,
+                        daemon_gate,
+                        Arc::new(AtomicBool::new(true)),
+                        move |operation| async move {
+                    if let Err(error) = config_transaction_controller.reject_if_pending("SIGHUP reload").await {
+                        return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(
+                            SighupReloadError::preflight("transaction.preflight", error.to_string()),
+                        ));
                     }
                     let Some(accepted_rx) = accepted_rx else {
-                        error!("SIGHUP reload has no accepted-config authority");
-                        return None;
+                        return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(
+                            SighupReloadError::preflight("authority.preflight", "accepted-config authority unavailable"),
+                        ));
                     };
                     let prior_accepted = accepted_rx.borrow().clone();
-                    let snapshot = match runtime_config_snapshot_accepted(
-                        &pm_tx,
-                        &prior_accepted,
-                        &live_bindings,
-                    )
-                    .await
-                    {
-                        Ok(snapshot) => snapshot,
-                        Err(error) => {
-                            error!(
-                                error = %error,
-                                "failed to read live runtime config snapshot for SIGHUP reload"
-                            );
-                            return None;
+                    let snapshot = match runtime_config_snapshot_accepted(&pm_tx, &prior_accepted, &live_bindings).await {
+                        rustbgpd_transport::listener::ReloadDispatch::NotAccepted(error) => {
+                            return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(
+                                SighupReloadError::step("runtime_snapshot.preflight", ReloadStepError::NotAccepted(error)),
+                            ));
+                        }
+                        rustbgpd_transport::listener::ReloadDispatch::Replied(Ok(snapshot)) => snapshot,
+                        rustbgpd_transport::listener::ReloadDispatch::Replied(Err(error)) => {
+                            return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(
+                                SighupReloadError::step("runtime_snapshot.preflight", ReloadStepError::Rejected(error)),
+                            ));
+                        }
+                        rustbgpd_transport::listener::ReloadDispatch::AcknowledgementLost => {
+                            return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(
+                                SighupReloadError::step("runtime_snapshot.preflight", ReloadStepError::AcknowledgementLost),
+                            ));
                         }
                     };
                     // ADR-0113: preflight every live peer's outbound prefix
@@ -5117,32 +5113,56 @@ async fn run<T>(
                     ) {
                         Ok(snapshot) => Arc::new(snapshot),
                         Err(diagnostic) => {
-                            error!("{diagnostic}");
-                            return None;
+                            return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(
+                                SighupReloadError::preflight("parse.preflight", diagnostic.clone()),
+                            ));
                         }
                     };
-                    if let Err(error) = reload::apply_outbound_prefix_limits_if_changed(
-                        &limits_rib_tx,
-                        &snapshot,
-                        desired.config_ref(),
-                    )
-                    .await
-                    {
-                        error!(error = %error, "SIGHUP reload rejected");
-                        return None;
+                    if let Some(credentials) = grpc_credentials {
+                        match credentials.reload() {
+                            Ok(generation) => {
+                                reload_metrics.record_grpc_credential_reload("success");
+                                info!(generation, "gRPC credential generation reloaded");
+                            }
+                            Err(error) => {
+                                reload_metrics.record_grpc_credential_reload("failure");
+                                error!(error = %error, "gRPC credential reload rejected; last-known-good generation remains active");
+                            }
+                        }
                     }
-                    let reloaded = reload_config_with_tcp_ao(
-                        desired,
-                        &snapshot,
+                    let outcome = reload_config_with_tcp_ao(
+                        SighupReloadPlan { baseline_runtime: snapshot, desired },
                         live_tcp.as_ref(),
                         live_uds.as_ref(),
                         &pm_tx,
+                        Some(&limits_rib_tx),
                         fib_cmd.as_ref(),
                         Some(&evpn_runtime_reload_apply),
                         tcp_ao_listener.as_ref(),
+                        Some(&operation),
                     )
-                    .await?;
-                    Some(apply_reload_outcome(reloaded, &pm_internal, bridge_replace.as_ref()).await)
+                    .await;
+                    match outcome {
+                        SighupReloadOutcome::CleanNoEffect(error) => OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error)),
+                        SighupReloadOutcome::RecoveryFenced { error, reason } => OwnedRuntimeConfigOutcome::Fenced { error, reason },
+                        SighupReloadOutcome::Acknowledged(authority) => {
+                            let Some(bridge_replace) = bridge_replace.as_ref() else {
+                                return OwnedRuntimeConfigOutcome::Fenced {
+                                    error: SighupReloadError::preflight("config_bridge", "bridge authority unavailable after runtime effects"),
+                                    reason: rustbgpd_api::runtime_config_settlement::RuntimeConfigFenceReason::KnownDivergence,
+                                };
+                            };
+                            finalize_sighup_authority(
+                                &operation,
+                                authority,
+                                &pm_internal,
+                                bridge_replace,
+                                &dialout_manager,
+                            ).await
+                        }
+                    }
+                        },
+                    ).await
                 }));
             }
             // Only polled when a reload is in flight. Standard tokio
@@ -5159,80 +5179,46 @@ async fn run<T>(
             } => {
                 reload_in_flight = None;
                 match outcome {
-                    Ok(Some(Ok(advanced))) => {
-                        config = advanced;
-                        // [gnmi_dialout] is reload-applied: reconcile the
-                        // dial-out targets against the advanced config —
-                        // removed targets stop (gauge series reaped), added
-                        // start, changed redial, unchanged keep their live
-                        // collector connections.
-                        match config::gnmi_dialout_targets(&config) {
-                            Ok(targets) => gnmi_dialout_manager.apply(&targets),
-                            // Unreachable in practice: the reload path
-                            // re-validated the config before advancing.
-                            Err(reason) => error!(
-                                error = %reason,
-                                "invalid [gnmi_dialout] after reload; dial-out targets unchanged"
+                    Ok(Ok(authority)) => {
+                        match &authority.completion {
+                            reload::SighupCompletion::Complete => {}
+                            reload::SighupCompletion::KnownPartial { failures } => warn!(
+                                failures = failures.len(),
+                                "SIGHUP settled with an authoritative partial runtime receipt"
                             ),
                         }
+                        config = authority.runtime;
                     }
-                    Ok(Some(Err(stage))) => error!(
-                        stage,
-                        "post-reload sync failed mid-flight; in-memory config not advanced — next SIGHUP will retry"
-                    ),
-                    Ok(None) => {
-                        // reload_config returned None (failure) or short-circuited.
-                    }
+                    Ok(Err(error)) => error!(error = %error, "SIGHUP reload rejected without runtime effect"),
                     Err(e) => error!(error = %e, "reload task panicked"),
                 }
             }
         }
     }
 
-    // If a reload is still in flight at shutdown, abort it before
-    // tearing down the peer manager. Letting it run would race the
-    // peer manager's Shutdown command and potentially queue commands
-    // against an already-draining manager. An EVPN runtime apply the
-    // reload already started keeps running on its ADR-0080 detached
-    // task; the apply-lock fence below serializes with it.
+    // Coordinated shutdown closes admission first, then drains both logical
+    // watchdog registrations and the acquire-to-registration physical gap.
+    daemon_gate.begin_shutdown();
+    runtime_config_lock.close();
+    info!("initiating coordinated shutdown");
+    let settlement_wait = runtime_config_settlement.clone();
+    tokio::task::spawn_blocking(move || settlement_wait.wait_until_idle())
+        .await
+        .expect("runtime-config settlement wait task must not panic");
+    runtime_config_lock.wait_until_drained().await;
     if let Some(handle) = reload_in_flight.take() {
-        handle.abort();
-        let _ = handle.await;
+        match handle.await {
+            Ok(Ok(authority)) => config = authority.runtime,
+            Ok(Err(error)) => warn!(error = %error, "SIGHUP rejected during shutdown drain"),
+            Err(error) => error!(error = %error, "SIGHUP task failed during shutdown drain"),
+        }
     }
 
     // Drop the profiler now while all data structures are still alive,
     // so the heap snapshot captures the live working set.
     drop(profiler);
 
-    // Coordinated shutdown:
-    // 0. Flip the availability gate FIRST: readiness goes red, persisted
-    //    config mutations are rejected, and new inbound BGP sessions are
-    //    dropped — nothing new is admitted into the teardown below.
-    // 1. Tell PeerManager to shut down (sends NOTIFICATIONs to all peers)
-    daemon_gate.begin_shutdown();
-    info!("initiating coordinated shutdown");
-    let settlement_wait = runtime_config_settlement.clone();
-    tokio::task::spawn_blocking(move || settlement_wait.wait_until_idle())
-        .await
-        .expect("runtime-config settlement wait task must not panic");
     let runtime_config_deadline = tokio::time::Instant::now() + WARM_CHECKPOINT_DEADLINE;
-    let mut runtime_config_fence_failure = None;
-    let runtime_config_fence =
-        match tokio::time::timeout_at(runtime_config_deadline, runtime_config_lock.acquire()).await
-        {
-            Ok(Ok(permit)) => Some(permit),
-            Ok(Err(_)) => {
-                runtime_config_fence_failure =
-                    Some("authoritative runtime-config coordinator is closed".to_string());
-                None
-            }
-            Err(_) => {
-                runtime_config_fence_failure =
-                    Some("timed out acquiring the authoritative runtime-config fence".to_string());
-                None
-            }
-        };
-    runtime_config_lock.close();
     let mut restart_time_secs = max_gr_restart_time_secs(&config);
     let mut checkpoint_generation = None;
     let mut checkpoint_failure = None;
@@ -5241,8 +5227,7 @@ async fn run<T>(
     if warm_checkpoint_on_shutdown {
         if let Some(directory) = warm_bundle_directory.clone() {
             let deadline = runtime_config_deadline;
-            checkpoint_failure = runtime_config_fence_failure.take();
-            if checkpoint_failure.is_none() && runtime_config_fence.is_some() {
+            if checkpoint_failure.is_none() {
                 match tokio::time::timeout_at(deadline, evpn_runtime_apply_lock.lock()).await {
                     Ok(guard) => evpn_apply_fence = Some(guard),
                     Err(_) => {
@@ -5250,9 +5235,6 @@ async fn run<T>(
                             Some("timed out waiting for the EVPN runtime-apply fence".to_string());
                     }
                 }
-            } else if checkpoint_failure.is_none() {
-                checkpoint_failure =
-                    Some("authoritative runtime-config coordinator is closed".to_string());
             }
             if checkpoint_failure.is_none() {
                 match tokio::time::timeout_at(deadline, query_warm_checkpoint_capture(&peer_mgr_tx))

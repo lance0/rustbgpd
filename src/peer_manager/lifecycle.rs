@@ -967,6 +967,7 @@ impl PeerManager {
     /// socket-scoped fields are copied from `config` into the stored
     /// transport config by the next rebuild path, which resolves from the
     /// config snapshot anyway).
+    #[cfg(test)]
     pub(super) async fn hot_update_peer(
         &mut self,
         config: PeerManagerNeighborConfig,
@@ -983,6 +984,29 @@ impl PeerManager {
             )));
         }
         self.hot_update_peer_in_place(config).await
+    }
+
+    pub(super) async fn hot_update_peer_owned(
+        &mut self,
+        config: PeerManagerNeighborConfig,
+    ) -> rustbgpd_api::peer_types::OwnedHotUpdatePeerOutcome {
+        use rustbgpd_api::peer_types::OwnedHotUpdatePeerOutcome;
+
+        let peer = PeerKey::new(config.address, config.interface.clone());
+        let Some(managed) = self.peers.get(&peer) else {
+            return OwnedHotUpdatePeerOutcome::RejectedNoEffect(PeerLifecycleError::NotFound(peer));
+        };
+        if managed.is_dynamic {
+            return OwnedHotUpdatePeerOutcome::RejectedNoEffect(PeerLifecycleError::Invalid(
+                format!(
+                    "hot update target {peer} is a dynamic peer; reload reconciles static neighbors only"
+                ),
+            ));
+        }
+        match self.hot_update_peer_in_place(config).await {
+            Ok(()) => OwnedHotUpdatePeerOutcome::Success,
+            Err(error) => OwnedHotUpdatePeerOutcome::KnownDivergence(error),
+        }
     }
 
     /// The applier half of [`Self::hot_update_peer`], without the
