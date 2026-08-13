@@ -4,7 +4,8 @@ This receipt answers one bounded question: on one host, through one harness,
 how does rustbgpd compare to three incumbent BGP daemons across five fleet
 shapes? The short version is that rustbgpd is the fastest of the four on total
 time at every shape measured, wins convergence decisively at the route-server
-shape, and **is the largest of the four in resident memory at 100 peers ×
+shape, and **has the largest of the four peak raw container cgroup-usage
+values at 100 peers ×
 1,000 prefixes — the route-server shape rustbgpd is built for.**
 
 Both halves of that are the result. A comparison table that only gets
@@ -56,9 +57,14 @@ phases). Every table below reports the *measured* median, with the per-run
 values printed underneath so a reader can see the spread rather than trust the
 midpoint.
 
-**Units:** bgperf2 prints memory labelled "MB" but computes it 1024-based. Its
-`max mem (GB)` column times 1024 is the figure this receipt calls **MiB**, and
-it is the maximum resident set of the *target container* over the run.
+**Units and memory surface:** bgperf2 prints memory labelled "MB" but computes
+it 1024-based. Its `max mem (GB)` column times 1024 is the figure this receipt
+calls **MiB**. The source is Docker's raw container cgroup
+`memory_stats.usage` counter, so the tables report its peak over the run. This
+is neither process-tree RSS nor Docker working set; depending on the cgroup it
+may include anonymous memory, file/page-cache memory, kernel memory, and socket
+memory. These pinned historical values are therefore labelled **peak raw
+container cgroup usage** throughout.
 "Convergence" is the harness `elapsed` column: monitor start to all expected
 prefixes received, which therefore includes the wait for the first prefix.
 "Total" additionally includes session establishment and harness setup.
@@ -67,7 +73,7 @@ prefixes received, which therefore includes the wait for the first prefix.
 
 ### 10 peers × 1,000 prefixes — 10,000 routes
 
-| Daemon | Convergence | Total (s) | Max CPU | Max RSS (MiB) |
+| Daemon | Convergence | Total (s) | Max CPU | Peak raw cgroup (MiB) |
 |---|---:|---:|---:|---:|
 | **rustbgpd** | **2 s** | **8.23** | 7% | 37.9 |
 | BIRD 2.18 | 2 s | 9.20 | 2% | **8.2** |
@@ -75,58 +81,63 @@ prefixes received, which therefore includes the wait for the first prefix.
 | FRR 10.7.0-dev | 3 s | 10.27 | 4% | 27.6 |
 
 Six runs each. rustbgpd total: 8.19 / 8.20 / 8.22 / 8.23 / 8.24 / 8.26.
-rustbgpd RSS: 36.9 / 36.9 / 37.9 / 37.9 / 38.9 / 42.0.
-BIRD RSS: 8.2 five times and 9.2 once. GoBGP RSS: 36.9 / 37.9 / 38.9 / 38.9 /
-39.9 / 39.9. FRR RSS: 26.6 / 27.6 / 27.6 / 27.6 / 27.6 / 28.7.
+rustbgpd raw cgroup usage: 36.9 / 36.9 / 37.9 / 37.9 / 38.9 / 42.0.
+BIRD raw cgroup usage: 8.2 five times and 9.2 once. GoBGP raw cgroup usage:
+36.9 / 37.9 / 38.9 / 38.9 / 39.9 / 39.9. FRR raw cgroup usage: 26.6 / 27.6 /
+27.6 / 27.6 / 27.6 / 28.7.
 
 ### 2 peers × 10,000 prefixes — 20,000 routes
 
-| Daemon | Convergence | Total (s) | Max CPU | Max RSS (MiB) |
+| Daemon | Convergence | Total (s) | Max CPU | Peak raw cgroup (MiB) |
 |---|---:|---:|---:|---:|
 | **rustbgpd** | **2 s** | **8.26** | 7% | 48.1 |
 | BIRD 2.18 | 2 s | 9.24 | 1% | **9.2** |
 | GoBGP 4.3.0 | 3 s | 10.34 | 88% | 44.0 |
 | FRR 10.7.0-dev | 3 s | 9.31 | 5% | 36.9 |
 
-rustbgpd RSS: 47.1 / 48.1 / 48.1. BIRD RSS: 8.2 / 9.2 / 10.2. GoBGP RSS:
-44.0 / 44.0 / 45.1. FRR RSS: 36.9 / 36.9 / 36.9.
+rustbgpd raw cgroup usage: 47.1 / 48.1 / 48.1. BIRD raw cgroup usage: 8.2 /
+9.2 / 10.2. GoBGP raw cgroup usage: 44.0 / 44.0 / 45.1. FRR raw cgroup
+usage: 36.9 / 36.9 / 36.9.
 
 ### 2 peers × 100,000 prefixes — 200,000 routes
 
-| Daemon | Convergence | Total (s) | Max CPU | Max RSS (MiB) |
+| Daemon | Convergence | Total (s) | Max CPU | Peak raw cgroup (MiB) |
 |---|---:|---:|---:|---:|
 | **rustbgpd** | **3 s** | **12.32** | 41% | 212.0 |
 | BIRD 2.18 | 3 s | 13.22 | 6% | **27.6** |
 | GoBGP 4.3.0 | 6 s | 16.49 | 565% | 202.8 |
 | FRR 10.7.0-dev | 4 s | 13.39 | 94% | 228.4 |
 
-rustbgpd RSS: 205.8 / 212.0 / 214.0. BIRD RSS: 26.6 / 27.6 / 28.7. GoBGP RSS:
-200.7 / 202.8 / 202.8. FRR RSS: 226.3 / 228.4 / 229.4. This is the one shape
-where rustbgpd is not last on memory — FRR is 7.7% larger.
+rustbgpd raw cgroup usage: 205.8 / 212.0 / 214.0. BIRD raw cgroup usage: 26.6 /
+27.6 / 28.7. GoBGP raw cgroup usage: 200.7 / 202.8 / 202.8. FRR raw cgroup
+usage: 226.3 / 228.4 / 229.4. This is the one shape where rustbgpd is not last
+on this memory surface — FRR is 7.7% larger.
 
 ### 30 peers × 1,000 prefixes — 30,000 routes (new)
 
-| Daemon | Convergence | Total (s) | Max CPU | Max RSS (MiB) |
+| Daemon | Convergence | Total (s) | Max CPU | Peak raw cgroup (MiB) |
 |---|---:|---:|---:|---:|
 | **rustbgpd** | **3 s** | **9.83** | 22% | 108.5 |
 | BIRD 2.18 | 3 s | 10.87 | 14% | **11.3** |
 | GoBGP 4.3.0 | 4 s | 11.84 | 897% | 68.6 |
 | FRR 10.7.0-dev | 4 s | 10.85 | 11% | 51.2 |
 
-**rustbgpd RSS: 86.0 / 108.5 / 131.1** — see the spread section. BIRD RSS:
-11.3 / 11.3 / 14.3. GoBGP RSS: 67.6 / 68.6 / 69.6. FRR RSS: 51.2 / 51.2 / 52.2.
+**rustbgpd raw cgroup usage: 86.0 / 108.5 / 131.1** — see the spread section.
+BIRD raw cgroup usage: 11.3 / 11.3 / 14.3. GoBGP raw cgroup usage: 67.6 / 68.6 /
+69.6. FRR raw cgroup usage: 51.2 / 51.2 / 52.2.
 
 ### 100 peers × 1,000 prefixes — 100,000 routes (new)
 
-| Daemon | Convergence | Total (s) | Max CPU | Max RSS (MiB) |
+| Daemon | Convergence | Total (s) | Max CPU | Peak raw cgroup (MiB) |
 |---|---:|---:|---:|---:|
 | **rustbgpd** | **3 s** | **11.79** | 122% | 212.0 |
 | BIRD 2.18 | 5 s | 15.22 | 101% | **32.8** |
 | GoBGP 4.3.0 | 20 s | 28.50 | 1281% | 193.5 |
 | FRR 10.7.0-dev | 7 s | 16.01 | 68% | 134.1 |
 
-**rustbgpd RSS: 180.2 / 212.0 / 230.4.** BIRD RSS: 32.8 / 32.8 / 33.8. GoBGP
-RSS: 183.3 / 193.5 / 198.7. FRR RSS: 134.1 / 134.1 / 135.2.
+**rustbgpd raw cgroup usage: 180.2 / 212.0 / 230.4.** BIRD raw cgroup usage:
+32.8 / 32.8 / 33.8. GoBGP raw cgroup usage: 183.3 / 193.5 / 198.7. FRR raw
+cgroup usage: 134.1 / 134.1 / 135.2.
 
 ## What rustbgpd wins
 
@@ -158,7 +169,7 @@ that matters most.
 
 ### Memory against BIRD, at every shape
 
-*Computed* rustbgpd-to-BIRD RSS ratio:
+*Computed* rustbgpd-to-BIRD raw-cgroup-usage ratio:
 
 | Shape | rustbgpd (MiB) | BIRD (MiB) | Ratio |
 |---|---:|---:|---:|
@@ -172,7 +183,7 @@ The range is **4.6×–9.6×** and the worst cell is 30 peers × 1,000 prefixes.
 BIRD's radix-tree RIB with global attribute deduplication is a structurally
 leaner design on this data, and nothing in this campaign narrows that.
 
-### rustbgpd's RSS is the noisiest figure in the campaign
+### rustbgpd's raw cgroup usage is the noisiest figure in the campaign
 
 **Do not read rustbgpd's memory numbers as single values.** They have the
 widest run-to-run spread of anything measured:
@@ -197,7 +208,8 @@ one it explains.
 ## Historical structural hypothesis: memory tracks peers, not routes
 
 > **2026-07-26 controlled follow-up:** this heading was too strong. The two
-> cells below changed both dimensions and had 24% RSS spread at 100 peers.
+> cells below changed both dimensions and had 24% raw-cgroup-usage spread at
+> 100 peers.
 > A counterbalanced 2 × 2 release-daemon matrix now holds BASE routes fixed
 > while varying peers, then holds peers fixed while varying BASE routes. The
 > last 8 stubs continuously flap distinct 16-prefix blocks after convergence.
@@ -207,12 +219,12 @@ one it explains.
 > bound, not an isolated per-peer cost or sizing coefficient.
 > The follow-up and immutable artifacts are in
 > [`per-peer-rss-attribution-2026-07.md`](per-peer-rss-attribution-2026-07.md).
-> The raw cross-stack tables below are retained unchanged.
+> The numeric cross-stack rows below are retained unchanged.
 
 Two shapes in this campaign carry very different route counts and produce
 identical memory:
 
-| Shape | Routes | rustbgpd RSS (MiB) |
+| Shape | Routes | rustbgpd raw cgroup usage (MiB) |
 |---|---:|---:|
 | 100p × 1k | 100,000 | 212.0 |
 | 2p × 100k | 200,000 | 212.0 |
@@ -223,7 +235,7 @@ dominates.
 
 Across the 10 → 100 peer span the *computed* marginal cost is:
 
-| Daemon | RSS 10p (MiB) | RSS 100p (MiB) | Marginal MiB/peer (*computed*) |
+| Daemon | Raw cgroup 10p (MiB) | Raw cgroup 100p (MiB) | Marginal MiB/peer (*computed*) |
 |---|---:|---:|---:|
 | rustbgpd | 37.9 | 212.0 | **1.93** |
 | GoBGP | 38.9 | 193.5 | 1.72 |
@@ -395,7 +407,7 @@ build with a distinct build identifier per cell.
 
 Medians of 3 runs per cell:
 
-| Shape | Daemon | Total (s) | Convergence (s) | Max CPU | Max RSS (MiB) |
+| Shape | Daemon | Total (s) | Convergence (s) | Max CPU | Peak raw cgroup (MiB) |
 |---|---|---:|---:|---:|---:|
 | 10p × 1k | **rustbgpd** | **8.28** | 2 | 6% | 37.9 |
 | | BIRD 2.18 | 9.23 | 2 | 3% | **9.2** |

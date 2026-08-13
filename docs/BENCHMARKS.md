@@ -1000,8 +1000,9 @@ regressed on both compact-storage candidates tried — see
 structural memory (2× Adj-RIB-In +
 Loc-RIB); each prefix stores Route instances with `Arc` sharing of attributes
 across copies, and global attribute interning shares one allocation across
-routes with identical attributes, whichever peers they came from. It is **distinct from the
-full-process RSS** below — it excludes the daemon's operational surfaces
+routes with identical attributes, whichever peers they came from. It is
+**distinct from the peak raw container cgroup usage** below — it excludes the
+daemon's operational surfaces
 (event-history, gRPC, telemetry, BFD, the tokio runtime, allocator arenas).
 
 ### RR / Route-Server Fanout Shape: 2 In + LocRib + 2 Out
@@ -1017,8 +1018,9 @@ Adj-RIB-In/Adj-RIB-Out capacities plus one rounded (`HashMap`) Loc-RIB
 capacity, for the same reason as the Full RIB table above. This is the
 structural memory shape closest to the dhat finding below: received
 routes, best paths, and advertised-route maps are all present. It still excludes
-full-daemon surfaces and allocator RSS behavior, so bgperf2 remains the
-operator-facing process-memory number. The A/B review rule for this harness is
+full-daemon surfaces and container cgroup-usage behavior, so bgperf2 remains
+the operator-facing container-memory surface. The A/B review rule for this
+harness is
 deliberately coarse: flag a row for review only when head grows by at least
 **+5% and +32 MiB** for the same shape/size; smaller movement is recorded but
 treated as allocator/map-capacity noise unless the PR is memory-targeted.
@@ -1043,9 +1045,10 @@ treated as allocator/map-capacity noise unless the PR is memory-targeted.
 > / metrics operational surfaces were **negligible (<1 MB)**. **This corrects the
 > framing below:** the `memory_profile` micro-bench above (60.6 MB) is
 > **Adj-RIB-In + Loc-RIB only, on synthetic routes — it excludes Adj-RIB-Out**,
-> which the profile shows is the *single largest* component. So the gap between
-> that 60.6 MB and full-daemon RSS is mostly **more RIB storage** (the
-> advertised-route maps plus real per-route data), not operational surfaces. The
+> which the profile shows is the *single largest* component. The independent
+> profile therefore shows that the full-daemon heap contains **more RIB
+> storage** (the advertised-route maps plus real per-route data) than the 60.6
+> MB micro-bench; it does not decompose bgperf2's raw cgroup counter. The
 > durable memory cost is the three-layer route-storage model (Adj-RIB-In +
 > Loc-RIB + Adj-RIB-Out) and its prefix-keyed `hashbrown` bucket arrays — the
 > target for any future memory work, not the runtime or operational surfaces.
@@ -1088,7 +1091,7 @@ The 900k×2 figures are the historical allocator-tracked journey; the 547 MB row
 is the last from the pre-RouteSlab harness. The structured
 `memory_profile_high_n` harness (2026-07-17 provenance note above) now measures
 100k/500k/900k directly and is the RIB-structure regression-tracking surface;
-full-daemon RSS at scale uses bgperf2.
+peak raw container cgroup usage at scale uses bgperf2.
 
 ### Optimization History (end-to-end, bgperf2 2p/100k)
 
@@ -1103,16 +1106,18 @@ full-daemon RSS at scale uses bgperf2.
 | **v0.32.0 — event-history off (daemon default now)** | **~284 MB** | ~11s |
 | **v0.32.0 — event-history on (opt-in)** | **~346 MB** | ~11s |
 
-**v0.32.0 cut 2p/100k full-daemon RSS ~21%** (event-history on: ~439 → ~346 MB,
-median of 337 / 346 / 369; off: ~344 → ~284 MB, of 280 / 289). The only code
+**v0.32.0 cut 2p/100k peak raw container cgroup usage ~21%** (event-history on:
+~439 → ~346 MB, median of 337 / 346 / 369; off: ~344 → ~284 MB, of 280 / 289).
+The only code
 delta versus the v0.31.0-era rows is the inbound-UPDATE attribute-`Arc` sharing
 (PR #326): eliminating the per-NLRI attribute-vector deep-clones during the
 route flood lowers the (jemalloc) allocator high-water mark, and since jemalloc
-retains freed arenas the lower peak shows up directly as lower steady-state RSS.
+retains freed arenas the lower peak shows up in the raw container cgroup counter.
 Clean before/after on the same harness and host.
 
 **The bgperf2 rows are not apples-to-apples with the v0.4.x/v0.30-era rows
-above** — they are *full-daemon* process RSS, not the RIB-only figure, and are
+above** — they are peak raw container cgroup usage, not process RSS or the
+RIB-only figure, and are
 **not a RIB memory regression** (RIB-only structural memory at 100k actually
 improved ~9% — see above). Since the ~257–260 MB era the daemon gained
 substantial always-available operational surfaces (BFD, gNMI, ASPA, BGP
@@ -1121,14 +1126,14 @@ roles/OTC, plus the explain cache — opt-in, default off since v0.61.0) and
 Type Sizes table above). The single
 biggest contributor is the durable **event-history outbox** (ADR-0072), which
 persists every route event to SQLite: enabling it
-(`[event_history].enabled = true`) adds **~62 MB** RSS (~284 → ~346 MB) **and
-roughly doubles peak CPU** (~115% → ~239%). Convergence is unchanged at ~11s
+(`[event_history].enabled = true`) adds **~62 MB** raw cgroup usage (~284 →
+~346 MB) **and roughly doubles peak CPU** (~115% → ~239%). Convergence is unchanged at ~11s
 (≈2s route-flood; the outbox is not on the convergence-critical path). Criterion
 and the RIB-only `memory_profile` above remain the regression-tracking surfaces
 for RIB data-structure changes.
 
 > **Operator note — the event-history outbox is opt-in as of v0.32.0.** That
-> always-on cost (~62 MB RSS + roughly double the peak CPU at 2p/100k) is
+> always-on cost (~62 MB raw cgroup usage + roughly double the peak CPU at 2p/100k) is
 > exactly why: the outbox now defaults to `[event_history].enabled = false`, so
 > the lean numbers above are the default. Deployments that want restart-safe
 > event replay set `enabled = true` and accept the cost. See ADR-0072 and the
@@ -1141,8 +1146,8 @@ even when no export policy modifications were configured. With the guard, ~85%
 of routes share the same `Arc` across LocRib and AdjRibOut — no deep copy.
 
 Capacity hints (pre-sizing AdjRibOut/LocRib HashMaps) were tested and shown to
-be neutral on steady-state RSS, confirming the remaining HashMap overhead is
-structural (power-of-2 rounding), not rehash churn.
+be neutral on the bgperf2 raw cgroup-usage surface, confirming the remaining
+HashMap overhead is structural (power-of-2 rounding), not rehash churn.
 
 Remaining memory is HashMap bucket arrays (~78%) and actual Route data (~19%).
 No obvious accidental overhead remains.
@@ -1204,7 +1209,9 @@ to all expected prefixes received — so it includes the wait for the first
 prefix as well as the flood. "Total time" additionally includes session
 establishment and harness setup. The harness prints memory labelled "MB" but
 computes it 1024-based; the tables below convert it and label the result
-**MiB**. RSS is the maximum resident set of the target container over the run.
+**MiB**. The memory value is the peak of Docker's raw container cgroup
+`memory_stats.usage` counter. It is not process-tree RSS or Docker working set
+and may include anonymous, file/cache, kernel, and socket memory.
 
 ### Results
 
@@ -1247,18 +1254,19 @@ separation in the campaign, at the shape rustbgpd is designed for.
 *v0.64.0 spot-check (2026-08-08, same host): a single run of the three
 original shapes against the release tag (image built from the public
 `v0.64.0` tag) reproduced the rustbgpd column within its bands — totals
-8.17 / 8.24 / 12.03 s and peak RSS 37.7 / 46.7 / 203.1 MiB for
+8.17 / 8.24 / 12.03 s and peak raw cgroup usage 37.7 / 46.7 / 203.1 MiB for
 10p × 1k / 2p × 10k / 2p × 100k. Single run, rustbgpd only; the
 four-daemon medians above remain the published comparison.*
 
 > **rustbgpd is last on memory of all four daemons at 100p × 1k — its own
 > target deployment.** 212.0 MiB against GoBGP's 193.5 MiB (1.10×), FRR's
 > 134.1 MiB (1.58×), and BIRD's 32.8 MiB (6.46×). Against BIRD the ratio runs
-> **4.6×–9.6× across every shape**, worst at 30p × 1k. This is the standing
-> memory position, and it did not improve in this campaign.
+> **4.6×–9.6× across every shape**, worst at 30p × 1k. This is the pinned
+> historical campaign's memory position, not a current-tip measurement.
 
-> **Do not quote rustbgpd's RSS at these shapes as a single value.** It was the
-> noisiest figure in the campaign: 86.0 / 108.5 / 131.1 MiB at 30p × 1k (a 42%
+> **Do not quote rustbgpd's raw cgroup usage at these shapes as a single
+> value.** It was the noisiest figure in the campaign: 86.0 / 108.5 / 131.1 MiB
+> at 30p × 1k (a 42%
 > spread) and 180.2 / 212.0 / 230.4 MiB at 100p × 1k (24%). GoBGP and FRR span
 > 0.8–7.9% at the same shapes. A reader who reproduces and measures 131 MiB at
 > 30 peers has not found a regression — that value is inside the measured
@@ -1299,8 +1307,8 @@ convergence column read 5 s in all three runs.
 **Deltas against the 2026-07-09 v0.50.0 three-way run** (same host and harness,
 event-history off in both): the three shared shapes are flat to slightly better
 on time (10p × 1k total 8.3 → 8.23 s, 2p × 10k 8.3 → 8.26 s, 2p × 100k
-12.1 → 12.32 s) and 2p/100k RSS moved 246 → 212.0 MiB. The earlier run's memory
-figures were reported in 1000-based MB against this run's MiB, so small
+12.1 → 12.32 s) and 2p/100k raw cgroup usage moved 246 → 212.0 MiB. The earlier
+run's memory figures were reported in 1000-based MB against this run's MiB, so small
 differences there are partly unit conversion; the shape of the result is
 unchanged. BIRD and GoBGP versions are identical across the two runs.
 
@@ -1358,16 +1366,18 @@ higher (565% and 1281%, goroutine-per-peer + GC). BIRD is the most efficient
 below 100 peers, reflecting decades of C optimization with a radix-tree RIB;
 at 100 peers BIRD and rustbgpd are close (101% vs 122%). FRR sits between.
 
-**Memory.** In the historical cross-stack campaign, *full-daemon RSS* at
+**Memory.** In the historical cross-stack campaign, *peak raw container cgroup
+usage* at
 2p/100k is 212.0 MiB — above GoBGP's
 202.8 MiB, below FRR's 228.4 MiB, and far above BIRD's 27.6 MiB. At 100p/1k
-rustbgpd is last of the four. A whole-daemon dhat heap profile (2026-06-02; see
-the *Memory Footprint* correction) attributes that RSS to **RIB route-storage
-map/index bucket arrays — ~76% of the live-at-peak heap** — across the
+rustbgpd is last of the four. An independent whole-daemon dhat heap profile
+(2026-06-02; see the *Memory Footprint* correction) attributes **~76% of its
+live-at-peak heap** to **RIB route-storage map/index bucket arrays** across the
 three-layer Adj-RIB-In + Loc-RIB + Adj-RIB-Out model, with Adj-RIB-Out the
 single largest piece. API / event / metrics operational surfaces were
-**negligible (<1 MB)**. The opt-in event-history outbox adds RSS when enabled,
-but that two-peer route-heavy profile does not price a 100-peer session fleet.
+**negligible (<1 MB)**. The opt-in event-history outbox adds raw cgroup usage
+when enabled, but that two-peer route-heavy profile does not price a 100-peer
+session fleet.
 A controlled 10/100-peer × 10k/100k-route follow-up measures both dimensions
 and attributes 6,150,300 control bytes at 100 ordinary-message peers to eager
 RFC 8654 receive-buffer reservation. The lazy-buffer candidate removes that
@@ -1397,8 +1407,8 @@ updates.
 | Convergence (2p × 100k) | 3 s | 6 s | 4 s | **3 s** |
 | CPU model | 1 core, very efficient | Multi-core, GC overhead | 1-2 cores | 1-2 cores, no GC |
 | Memory model | Radix tree, global attribute dedup | Go heap, GC managed | Per-daemon route storage | Arc sharing, attribute interning |
-| Full-daemon RSS (2p × 100k) | **27.6 MiB** | 202.8 MiB | 228.4 MiB | 212.0 MiB |
-| Full-daemon RSS (100p × 1k) | **32.8 MiB** | 193.5 MiB | 134.1 MiB | 212.0 MiB *(last of four)* |
+| Peak raw container cgroup usage (2p × 100k) | **27.6 MiB** | 202.8 MiB | 228.4 MiB | 212.0 MiB |
+| Peak raw container cgroup usage (100p × 1k) | **32.8 MiB** | 193.5 MiB | 134.1 MiB | 212.0 MiB *(last of four)* |
 | Mixed-shape marginal MiB/peer, 10 → 100p (*historical upper bound*) | **0.27** | 1.72 | 1.18 | 1.93 |
 | API during load | Responsive (no RIB contention) | Responsive (concurrent) | Responsive | Responsive (priority query channel) |
 
@@ -1407,16 +1417,17 @@ measured, and its convergence lead widens with peer count rather than with
 route count — 3 s against 5 / 7 / 20 s at 100 peers. That is the route-server
 shape, and it is where the update-group work shows.
 
-**Memory:** rustbgpd is not competitive with BIRD anywhere (4.6×–9.6×), sits
-just above GoBGP at 100 peers, and is last of the four at that shape. BIRD is
+**Memory in this pinned historical raw-cgroup campaign:** rustbgpd is not
+competitive with BIRD at any measured shape (4.6×–9.6×), sits just above GoBGP
+at 100 peers, and is last of the four at that shape. BIRD is
 30+ years of optimization in a purpose-built C codebase with a radix-tree RIB
 and global attribute deduplication; that gap is structural, not a tuning
 oversight. At route-heavy shapes the open lever for rustbgpd remains **compact
 prefix-keyed RIB storage** — reducing `hashbrown` bucket overhead across the
 route maps and prefix indexes. At peer-heavy shapes, the controlled follow-up
 separately identifies session allocations and removes the eager RFC 8654
-receive-buffer owner. The 42% run-to-run RSS spread at 30 peers remains
-unexplained. Note this does not contradict the rejected
+receive-buffer owner. The 42% run-to-run raw-cgroup-usage spread at 30 peers
+remains unexplained. Note this does not contradict the rejected
 shared-`RouteData` refactor (above): that shared the Route *payload*, which is
 the minority cost; the dominant cost is the maps' bucket arrays, so the open
 lever is the map/index *data structure*, not payload sharing.
@@ -1598,8 +1609,8 @@ View the profile at https://nnethercote.github.io/dh_view/dh_view.html
 - **PID 1 in Docker.** The `exec` in the startup script doesn't always replace
   bash as PID 1. rustbgpd may be a child process (e.g. PID 7). Use `/proc`
   scanning to find the right PID for SIGTERM.
-- **Variance.** RSS measurements vary ~10-15% between runs due to allocator
-  behavior and timing. Run 2-3 times and take the median.
+- **Variance.** Raw container cgroup-usage measurements vary ~10-15% between
+  runs due to allocator behavior and timing. Run 2-3 times and take the median.
 - **dhat overhead.** dhat wraps every allocation, adding ~2x CPU overhead and
   ~40% memory overhead. The tracked heap numbers are accurate but RSS will be
   higher than production builds.

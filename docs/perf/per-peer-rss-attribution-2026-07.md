@@ -11,9 +11,9 @@ The controlled result is:
 - Under the same continuous churn, at fixed peer count, steady RSS grows by a
   measured **825.515 B/BASE route** at 10 peers and **850.751 B/BASE route**
   at 100 peers.
-- The earlier cross-stack 1.93 MiB/peer figure changed peer count and route
-  count together. It remains a historical mixed-shape upper bound, not an
-  estimate of isolated per-peer cost.
+- The earlier cross-stack raw-cgroup-derived 1.93 MiB/peer figure changed peer
+  count and route count together. It remains a historical mixed-shape upper
+  bound, not an estimate of isolated per-peer cost.
 - Making the RFC 8654 receive buffer grow on demand removes an exact
   **6,150,300-byte** eager-reserve owner at 100 ordinary-message peers. The
   release C/N/N/C RSS delta is only **−185 KiB (−0.324%)**, below the
@@ -30,8 +30,10 @@ receipt](competitive-bgperf2-2026-07.md) compared 10 peers × 1,000 routes with
 100 peers × 1,000 routes. Both peer count and total route count grew tenfold,
 so its computed 1.93 MiB/peer marginal folded route storage into the numerator.
 Two other cells happened to share a 212.0 MiB median despite different shapes,
-but the run-to-run RSS spread was 24% at one of them. That evidence identified
-a memory problem; it did not isolate its dimension.
+but the run-to-run raw container cgroup-usage spread was 24% at one of them.
+That historical bgperf2 surface was neither process-tree RSS nor Docker working
+set; the independent RSS and DHAT measurements below remain labelled as such.
+That evidence identified a memory problem; it did not isolate its dimension.
 
 This campaign uses the real release daemon and real `reloadstall` BGP clients,
 with two counterbalanced repeats of a 2 × 2 matrix:
