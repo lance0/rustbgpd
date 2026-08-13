@@ -59,6 +59,8 @@ use crate::proto::policy_service_server::PolicyServiceServer;
 use crate::proto::rib_service_server::RibServiceServer;
 use crate::rib_service::RibService;
 use crate::runtime_config_settlement::RuntimeConfigSettlementWatchdog;
+
+use crate::runtime_config_settlement::RuntimeConfigFenceReason;
 use rustbgpd_rib::{RibReadinessQuery, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
 
@@ -157,7 +159,12 @@ pub enum ConfigTransactionApplyError {
     /// Internal actor/rollback failure.
     Internal(String),
     /// The daemon cannot prove whether the candidate took effect.
-    DetectedAmbiguousOutcome(String),
+    /// The owned mutation requires supervised recovery and must not return
+    /// while the settlement watchdog retains ownership.
+    RecoveryRequired {
+        reason: RuntimeConfigFenceReason,
+        message: String,
+    },
 }
 
 impl ConfigTransactionApplyError {
@@ -168,7 +175,7 @@ impl ConfigTransactionApplyError {
             Self::Unavailable(message) => Status::unavailable(message),
             Self::DeadlineExceeded(message) => Status::deadline_exceeded(message),
             Self::Internal(message) => Status::internal(message),
-            Self::DetectedAmbiguousOutcome(message) => Status::aborted(message),
+            Self::RecoveryRequired { message, .. } => Status::aborted(message),
         }
     }
 }
@@ -181,7 +188,7 @@ impl std::fmt::Display for ConfigTransactionApplyError {
             | Self::Unavailable(message)
             | Self::DeadlineExceeded(message)
             | Self::Internal(message)
-            | Self::DetectedAmbiguousOutcome(message) => f.write_str(message),
+            | Self::RecoveryRequired { message, .. } => f.write_str(message),
         }
     }
 }
@@ -585,7 +592,9 @@ pub async fn check_config_mutation_gate(
 /// discards the write with no trace.
 #[must_use = "a staged config write must be committed or explicitly dropped"]
 pub(crate) struct StagedConfigWrite {
-    commit_tx: tokio::sync::oneshot::Sender<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    commit_tx: tokio::sync::oneshot::Sender<
+        tokio::sync::oneshot::Sender<crate::peer_types::ConfigPersistCommitOutcome>,
+    >,
 }
 
 impl StagedConfigWrite {
@@ -597,8 +606,16 @@ impl StagedConfigWrite {
             .map_err(|_| RuntimeConfigCommitError::HandoffLost)?;
         ack_rx
             .await
-            .map_err(|_| RuntimeConfigCommitError::AcknowledgementLost)?
-            .map_err(RuntimeConfigCommitError::Failed)
+            .map_err(|_| RuntimeConfigCommitError::AcknowledgementLost)
+            .and_then(|outcome| match outcome {
+                crate::peer_types::ConfigPersistCommitOutcome::PublishedDurable => Ok(()),
+                crate::peer_types::ConfigPersistCommitOutcome::NotPublished(error) => {
+                    Err(RuntimeConfigCommitError::NotPublished(error))
+                }
+                crate::peer_types::ConfigPersistCommitOutcome::PublicationAmbiguous(error) => {
+                    Err(RuntimeConfigCommitError::PublicationAmbiguous(error))
+                }
+            })
     }
 }
 
@@ -627,18 +644,33 @@ impl RuntimeConfigStageError {
 pub(crate) enum RuntimeConfigCommitError {
     HandoffLost,
     AcknowledgementLost,
-    Failed(String),
+    NotPublished(String),
+    PublicationAmbiguous(String),
 }
 
 impl RuntimeConfigCommitError {
     pub(crate) fn into_status(self) -> Status {
         match self {
-            Self::HandoffLost | Self::AcknowledgementLost => Status::internal(COMMIT_LOST),
-            Self::Failed(error) => Status::internal(format!(
+            Self::HandoffLost => {
+                Status::internal("config bridge rejected the staged config commit before delivery")
+            }
+            Self::AcknowledgementLost => Status::internal(COMMIT_LOST),
+            Self::NotPublished(error) => Status::internal(format!(
                 "config persistence commit failed after the runtime change was applied \
                  (runtime and persisted config have drifted — SIGHUP or restart to \
                  reconcile): {error}"
             )),
+            Self::PublicationAmbiguous(error) => Status::internal(format!(
+                "config candidate is visible but its crash durability is unproved: {error}"
+            )),
+        }
+    }
+
+    pub(crate) fn fence_reason(&self) -> RuntimeConfigFenceReason {
+        match self {
+            Self::HandoffLost | Self::NotPublished(_) => RuntimeConfigFenceReason::KnownDivergence,
+            Self::PublicationAmbiguous(_) => RuntimeConfigFenceReason::PublicationAmbiguous,
+            Self::AcknowledgementLost => RuntimeConfigFenceReason::AcknowledgementLost,
         }
     }
 }
@@ -676,9 +708,9 @@ pub(crate) async fn stage_runtime_config_event_typed(
 ) -> Result<StagedConfigWrite, RuntimeConfigStageError> {
     let (staged_tx, staged_rx) = tokio::sync::oneshot::channel();
     let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
-    permit.send(build_event(crate::peer_types::ConfigPersistAck {
+    permit.send(build_event(crate::peer_types::ConfigPersistAck::Staged {
         staged: staged_tx,
-        commit: Some(commit_rx),
+        commit: commit_rx,
     }));
     staged_rx
         .await

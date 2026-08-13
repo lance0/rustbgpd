@@ -12,12 +12,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
 use rustbgpd_api::health_probe::DaemonGate;
+use rustbgpd_api::peer_types::ConfigPersistCommitOutcome;
 use rustbgpd_api::peer_types::{
     ConfigEvent, ConfigPersistAck, DynamicPeerBounceOutcome, DynamicRangeTarget, PeerKey,
     PeerLifecycleError, PeerManagerCommand, PeerManagerNeighborConfig, ResolvedPeerPolicy,
     RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus, StageConfigSnapshotError,
 };
 use rustbgpd_api::proto;
+use rustbgpd_api::runtime_config_settlement::RuntimeConfigFenceReason;
 use rustbgpd_api::runtime_config_settlement::{
     OwnedRuntimeConfigOperation, RuntimeConfigOperationKind, RuntimeConfigSettlementPhase,
     RuntimeConfigSettlementWatchdog,
@@ -36,7 +38,8 @@ use crate::config::{
     diff_neighbors,
 };
 use crate::fib_table_control::{
-    FibTableControlDeps, read_current_tables, replace_tables, runtime_unavailable_error,
+    FibTableControlDeps, FibTransactionReplaceOutcome, read_current_tables,
+    replace_tables_for_transaction, runtime_unavailable_error,
 };
 use crate::gnmi_set_bridge;
 use crate::peer_manager::InternalCommand;
@@ -133,7 +136,7 @@ struct ConfirmedApplyMode {
 trait OwnedOperationError: From<RuntimeConfigCoordinatorClosed> + Send + 'static {
     fn unavailable(message: &'static str) -> Self;
     fn task_lost(message: &'static str) -> Self;
-    fn is_ambiguous(&self) -> bool;
+    fn fence_reason(&self) -> Option<RuntimeConfigFenceReason>;
 }
 
 impl OwnedOperationError for ConfigTransactionApplyError {
@@ -145,14 +148,20 @@ impl OwnedOperationError for ConfigTransactionApplyError {
         Self::Internal(message.to_string())
     }
 
-    fn is_ambiguous(&self) -> bool {
-        matches!(self, Self::DetectedAmbiguousOutcome(_))
+    fn fence_reason(&self) -> Option<RuntimeConfigFenceReason> {
+        match self {
+            Self::RecoveryRequired { reason, .. } => Some(*reason),
+            _ => None,
+        }
     }
 }
 
 enum OwnedGnmiSetError {
     Clean(GnmiSetError),
-    Ambiguous(String),
+    Fenced {
+        message: String,
+        reason: RuntimeConfigFenceReason,
+    },
 }
 
 impl From<RuntimeConfigCoordinatorClosed> for OwnedGnmiSetError {
@@ -170,8 +179,11 @@ impl OwnedOperationError for OwnedGnmiSetError {
         Self::Clean(GnmiSetError::Internal(message.to_string()))
     }
 
-    fn is_ambiguous(&self) -> bool {
-        matches!(self, Self::Ambiguous(_))
+    fn fence_reason(&self) -> Option<RuntimeConfigFenceReason> {
+        match self {
+            Self::Fenced { reason, .. } => Some(*reason),
+            Self::Clean(_) => None,
+        }
     }
 }
 
@@ -223,11 +235,10 @@ impl ConfigTransactionController {
                 return Err(E::unavailable(shutdown_message));
             }
             let result = body(self, Some(operation.clone())).await;
-            if result
-                .as_ref()
-                .is_err_and(OwnedOperationError::is_ambiguous)
+            if let Err(error) = &result
+                && let Some(reason) = error.fence_reason()
             {
-                let _ = operation.fence_ambiguous_outcome();
+                let _ = operation.fence_recovery(reason);
                 std::future::pending::<()>().await;
             }
             if !operation.try_settle() {
@@ -459,13 +470,7 @@ impl ConfigTransactionController {
                 self.peer_mgr_internal_tx.as_ref(),
             )
             .await
-            .map_err(|failure| {
-                if failure.ambiguous {
-                    ConfigTransactionApplyError::DetectedAmbiguousOutcome(failure.error.to_string())
-                } else {
-                    failure.error
-                }
-            })
+            .map_err(ApplyFailure::into_apply_error)
         } else {
             self.apply_locked(request, None).await
         }
@@ -666,11 +671,8 @@ impl ConfigTransactionController {
             }
             operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
             let result = self.apply_locked(request, confirmed).await;
-            if matches!(
-                result,
-                Err(ConfigTransactionApplyError::DetectedAmbiguousOutcome(_))
-            ) {
-                let _ = operation.fence_ambiguous_outcome();
+            if let Err(ConfigTransactionApplyError::RecoveryRequired { reason, .. }) = &result {
+                let _ = operation.fence_recovery(*reason);
                 std::future::pending::<()>().await;
             }
             if !operation.try_settle() {
@@ -819,14 +821,14 @@ impl ConfigTransactionController {
                             self_.peer_mgr_internal_tx.as_ref(),
                         )
                         .await
-                        .map_err(|failure| {
-                            if failure.ambiguous {
-                                OwnedGnmiSetError::Ambiguous(failure.error.to_string())
-                            } else {
-                                OwnedGnmiSetError::Clean(apply_error_to_gnmi_set_error(
-                                    failure.error,
-                                ))
-                            }
+                        .map_err(|failure| match failure.fence_reason {
+                            Some(reason) => OwnedGnmiSetError::Fenced {
+                                message: failure.error.to_string(),
+                                reason,
+                            },
+                            None => OwnedGnmiSetError::Clean(apply_error_to_gnmi_set_error(
+                                failure.error,
+                            )),
                         })?
                     };
                     gnmi_set_outcome_from_apply_response(response).map_err(OwnedGnmiSetError::Clean)
@@ -836,7 +838,7 @@ impl ConfigTransactionController {
         match result {
             Ok(outcome) => Ok(outcome),
             Err(OwnedGnmiSetError::Clean(error)) => Err(error),
-            Err(OwnedGnmiSetError::Ambiguous(message)) => {
+            Err(OwnedGnmiSetError::Fenced { message, .. }) => {
                 let _ = message;
                 std::future::pending().await
             }
@@ -868,15 +870,7 @@ impl ConfigTransactionController {
                 .await?;
             apply_config_transaction_locked(&self.deps, request, self.peer_mgr_internal_tx.as_ref())
                 .await
-                .map_err(|failure| {
-                    if failure.ambiguous {
-                        ConfigTransactionApplyError::DetectedAmbiguousOutcome(
-                            failure.error.to_string(),
-                        )
-                    } else {
-                        failure.error
-                    }
-                })
+                .map_err(ApplyFailure::into_apply_error)
         }
     }
 
@@ -969,7 +963,10 @@ impl ConfigTransactionController {
                         }
                     );
                     return Err(if error.authority_retained() {
-                        ConfigTransactionApplyError::DetectedAmbiguousOutcome(message)
+                        ConfigTransactionApplyError::RecoveryRequired {
+                            reason: RuntimeConfigFenceReason::PublicationAmbiguous,
+                            message,
+                        }
                     } else {
                         ConfigTransactionApplyError::Internal(message)
                     });
@@ -994,7 +991,7 @@ impl ConfigTransactionController {
         {
             Ok(response) => response,
             Err(failure) => {
-                if failure.ambiguous {
+                if let Some(reason) = failure.fence_reason {
                     // LAN-277: the apply failed somewhere the daemon cannot
                     // prove the candidate left no trace (lost persistence
                     // acknowledgement, failed post-persist finalization, or
@@ -1011,12 +1008,13 @@ impl ConfigTransactionController {
                         error = %failure.error,
                         "confirmed config transaction failed with an ambiguous outcome; retaining the revert journal and blocking config mutations until restart"
                     );
-                    return Err(ConfigTransactionApplyError::DetectedAmbiguousOutcome(
-                        format!(
+                    return Err(ConfigTransactionApplyError::RecoveryRequired {
+                        reason,
+                        message: format!(
                             "{}; the transaction outcome is ambiguous; the commit-confirm revert journal is retained and config mutations are blocked; restart rustbgpd to boot-revert to the pre-transaction config",
                             failure.error
                         ),
-                    ));
+                    });
                 }
                 // Provably nothing committed — a stale journal would only
                 // trigger a harmless same-content boot revert, but clean it
@@ -1105,10 +1103,13 @@ impl ConfigTransactionController {
         let matched = self.matching_pending(&confirm_id).await?;
         let residue_cleanup = if let Some(files) = &matched.v3_files {
             files.remove_locator_authority().map_err(|error| {
-                ConfigTransactionApplyError::DetectedAmbiguousOutcome(format!(
-                    "confirm not recorded: durable v3 locator removal failed ({:?}); the transaction is still pending and will roll back on timeout",
-                    error.kind()
-                ))
+                ConfigTransactionApplyError::RecoveryRequired {
+                    reason: RuntimeConfigFenceReason::PublicationAmbiguous,
+                    message: format!(
+                        "confirm not recorded: durable v3 locator removal failed ({:?}); the transaction is still pending and will roll back on timeout",
+                        error.kind()
+                    ),
+                }
             })?;
             self.claim_v3(files, "confirmed transaction")
         } else {
@@ -1696,13 +1697,7 @@ impl ConfigTransactionController {
             self.peer_mgr_internal_tx.as_ref(),
         )
         .await;
-        let response = result.map_err(|failure| {
-            if failure.ambiguous {
-                ConfigTransactionApplyError::DetectedAmbiguousOutcome(failure.error.to_string())
-            } else {
-                failure.error
-            }
-        })?;
+        let response = result.map_err(ApplyFailure::into_apply_error)?;
         // A rollback whose re-apply plan did not commit leaves the
         // aborted/expired candidate running — that is a rollback failure,
         // not a success, and the caller must record AbortFailed /
@@ -1751,12 +1746,13 @@ impl ConfigTransactionController {
             Err(error) => {
                 let mut state = self.state.lock().await;
                 state.ambiguous_failure_confirm_id = Some(confirm_id.to_string());
-                Err(ConfigTransactionApplyError::DetectedAmbiguousOutcome(
-                    format!(
+                Err(ConfigTransactionApplyError::RecoveryRequired {
+                    reason: RuntimeConfigFenceReason::PublicationAmbiguous,
+                    message: format!(
                         "confirm outcome is ambiguous because durable v3 locator removal could not be proven ({:?}); config mutation admission is being fenced and the daemon will exit for supervised recovery",
                         error.kind()
                     ),
-                ))
+                })
             }
         }
     }
@@ -1777,10 +1773,13 @@ impl ConfigTransactionController {
         let matched = self.matching_pending(confirm_id).await?;
         let residue_cleanup = if let Some(files) = &matched.v3_files {
             files.remove_locator_authority().map_err(|error| {
-                ConfigTransactionApplyError::DetectedAmbiguousOutcome(format!(
-                    "rollback restored the prior config but remains nonterminal because durable v3 locator removal failed ({:?})",
-                    error.kind()
-                ))
+                ConfigTransactionApplyError::RecoveryRequired {
+                    reason: RuntimeConfigFenceReason::PublicationAmbiguous,
+                    message: format!(
+                        "rollback restored the prior config but remains nonterminal because durable v3 locator removal failed ({:?})",
+                        error.kind()
+                    ),
+                }
             })?;
             self.claim_v3(files, "confirmed rollback")
         } else {
@@ -1921,14 +1920,12 @@ impl Drop for V3Reservation {
     }
 }
 
-/// Internal apply-pipeline failure carrying whether the transaction's
-/// completion state is provably clean (LAN-277).
+/// Internal apply-pipeline failure carrying an exact recovery classification.
 ///
-/// `ambiguous == false` means the daemon can prove nothing of the candidate
+/// `fence_reason == None` means the daemon can prove nothing of the candidate
 /// survives: the config file was never replaced and every live mutation was
 /// rolled back, so the pre-transaction revert journal is redundant and may be
-/// removed. `ambiguous == true` marks the windows where that proof does not
-/// exist:
+/// removed. A reason marks a window that must retain ownership:
 ///
 /// - **(a) post-persist finalization failure** — the candidate is already
 ///   durable on disk when a later step (`commit_config_snapshot_stage`) fails;
@@ -1942,23 +1939,37 @@ impl Drop for V3Reservation {
 #[derive(Debug)]
 struct ApplyFailure {
     error: ConfigTransactionApplyError,
-    ambiguous: bool,
+    fence_reason: Option<RuntimeConfigFenceReason>,
 }
 
 impl ApplyFailure {
-    fn ambiguous(error: ConfigTransactionApplyError) -> Self {
+    fn fenced(error: ConfigTransactionApplyError, fence_reason: RuntimeConfigFenceReason) -> Self {
         Self {
             error,
-            ambiguous: true,
+            fence_reason: Some(fence_reason),
+        }
+    }
+
+    fn into_apply_error(self) -> ConfigTransactionApplyError {
+        match self.fence_reason {
+            Some(reason) => ConfigTransactionApplyError::RecoveryRequired {
+                reason,
+                message: self.error.to_string(),
+            },
+            None => self.error,
         }
     }
 }
 
 impl From<ConfigTransactionApplyError> for ApplyFailure {
     fn from(error: ConfigTransactionApplyError) -> Self {
+        let fence_reason = match &error {
+            ConfigTransactionApplyError::RecoveryRequired { reason, .. } => Some(*reason),
+            _ => None,
+        };
         Self {
             error,
-            ambiguous: false,
+            fence_reason,
         }
     }
 }
@@ -2311,10 +2322,11 @@ async fn finish_outbound_prefix_limit_transaction(
     });
     let outcome = crate::reload::finish_outbound_prefix_limits(rib_tx, txn, activate).await;
     match outcome {
-        Err(error) if activate => Err(ApplyFailure::ambiguous(
+        Err(error) if activate => Err(ApplyFailure::fenced(
             ConfigTransactionApplyError::Internal(format!(
                 "persisted configuration was committed but its outbound prefix maxima could not be activated: {error}"
             )),
+            RuntimeConfigFenceReason::KnownDivergence,
         )),
         // A discard cannot fail meaningfully: nothing was applied.
         Ok(()) | Err(_) => Ok(()),
@@ -2461,15 +2473,34 @@ async fn commit_fib_transaction(
     .unwrap_or_default();
     let staged_tables = candidate.fib_tables.clone();
     let previous = stage_preloaded_config_snapshot(peer_mgr_internal_tx, candidate).await?;
-    if let Err(error) = replace_tables(&fib_cmd_tx, staged_tables.clone()).await {
-        return Err(restore_preloaded_snapshot_after_error(
-            peer_mgr_internal_tx,
-            previous,
-            fib_error_to_apply_error(error).into(),
-        )
-        .await);
+    match replace_tables_for_transaction(&fib_cmd_tx, staged_tables.clone()).await {
+        FibTransactionReplaceOutcome::Applied => {}
+        FibTransactionReplaceOutcome::NotAccepted(error)
+        | FibTransactionReplaceOutcome::RejectedNoEffect(error) => {
+            return Err(restore_preloaded_snapshot_after_error(
+                peer_mgr_internal_tx,
+                previous,
+                fib_error_to_apply_error(error).into(),
+            )
+            .await);
+        }
+        FibTransactionReplaceOutcome::KnownDivergence(error) => {
+            return Err(ApplyFailure::fenced(
+                fib_error_to_apply_error(error),
+                RuntimeConfigFenceReason::KnownDivergence,
+            ));
+        }
+        FibTransactionReplaceOutcome::AcknowledgementLost(error) => {
+            return Err(ApplyFailure::fenced(
+                fib_error_to_apply_error(error),
+                RuntimeConfigFenceReason::AcknowledgementLost,
+            ));
+        }
     }
     if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+        if failure.fence_reason.is_some() {
+            return Err(failure);
+        }
         return Err(rollback_fib_transaction_after_error(
             &fib_cmd_tx,
             peer_mgr_internal_tx,
@@ -2479,9 +2510,7 @@ async fn commit_fib_transaction(
         )
         .await);
     }
-    commit_config_snapshot_stage(&deps.peer_mgr_tx)
-        .await
-        .map_err(ApplyFailure::ambiguous)?;
+    commit_config_snapshot_stage(&deps.peer_mgr_tx).await?;
     Ok(committable_response(
         post_commit_runtime_snapshot_token,
         vec![FIB_SECTION.to_string()],
@@ -2531,11 +2560,13 @@ async fn restore_preloaded_config_snapshot(
                 "peer manager is unavailable during config transaction rollback".to_string(),
             )
         })?;
-    reply_rx.await.map_err(|_| {
-        ConfigTransactionApplyError::Unavailable(
-            "peer manager dropped config transaction snapshot rollback reply".to_string(),
-        )
-    })
+    reply_rx
+        .await
+        .map_err(|_| ConfigTransactionApplyError::RecoveryRequired {
+            reason: RuntimeConfigFenceReason::AcknowledgementLost,
+            message: "peer manager accepted config snapshot rollback but dropped its reply"
+                .to_string(),
+        })
 }
 
 async fn restore_preloaded_snapshot_after_error(
@@ -2543,12 +2574,18 @@ async fn restore_preloaded_snapshot_after_error(
     previous: Box<Config>,
     original: ApplyFailure,
 ) -> ApplyFailure {
+    if original.fence_reason.is_some() {
+        return original;
+    }
     match restore_preloaded_config_snapshot(peer_mgr_internal_tx, previous).await {
         Ok(()) => original,
-        Err(rollback) => ApplyFailure::ambiguous(ConfigTransactionApplyError::Internal(format!(
-            "{}; config snapshot rollback failed: {rollback}",
-            original.error
-        ))),
+        Err(rollback) => ApplyFailure::fenced(
+            ConfigTransactionApplyError::Internal(format!(
+                "{}; config snapshot rollback failed: {rollback}",
+                original.error
+            )),
+            recovery_reason(&rollback),
+        ),
     }
 }
 
@@ -2559,22 +2596,32 @@ async fn rollback_fib_transaction_after_error(
     previous: Box<Config>,
     original: ApplyFailure,
 ) -> ApplyFailure {
-    let runtime_rollback = replace_tables(fib_cmd_tx, previous_tables).await;
-    let snapshot_rollback = restore_preloaded_config_snapshot(peer_mgr_internal_tx, previous).await;
-    match (runtime_rollback, snapshot_rollback) {
-        (Ok(()), Ok(())) => original,
-        (runtime, snapshot) => {
-            ApplyFailure::ambiguous(ConfigTransactionApplyError::Internal(format!(
-                "{}; FIB transaction rollback failed; runtime: {}; snapshot: {}",
-                original.error,
-                runtime
-                    .err()
-                    .map_or_else(|| "ok".to_string(), |error| error.to_string()),
-                snapshot
-                    .err()
-                    .map_or_else(|| "ok".to_string(), |error| error.to_string()),
-            )))
+    if original.fence_reason.is_some() {
+        return original;
+    }
+    match replace_tables_for_transaction(fib_cmd_tx, previous_tables).await {
+        FibTransactionReplaceOutcome::Applied => {
+            match restore_preloaded_config_snapshot(peer_mgr_internal_tx, previous).await {
+                Ok(()) => original,
+                Err(rollback) => ApplyFailure::fenced(
+                    ConfigTransactionApplyError::Internal(format!(
+                        "{}; config snapshot rollback failed: {rollback}",
+                        original.error
+                    )),
+                    recovery_reason(&rollback),
+                ),
+            }
         }
+        FibTransactionReplaceOutcome::AcknowledgementLost(error) => ApplyFailure::fenced(
+            fib_error_to_apply_error(error),
+            RuntimeConfigFenceReason::AcknowledgementLost,
+        ),
+        FibTransactionReplaceOutcome::NotAccepted(error)
+        | FibTransactionReplaceOutcome::RejectedNoEffect(error)
+        | FibTransactionReplaceOutcome::KnownDivergence(error) => ApplyFailure::fenced(
+            fib_error_to_apply_error(error),
+            RuntimeConfigFenceReason::KnownDivergence,
+        ),
     }
 }
 
@@ -2680,13 +2727,14 @@ async fn commit_candidate_snapshot_locked(
     let permit = reserve_persist_permit(config_tx).await?;
     let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
     if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+        if failure.fence_reason.is_some() {
+            return Err(failure);
+        }
         return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, failure).await);
     }
     // LAN-277 window (a): the candidate is durable on disk from here on — a
     // finalization failure must not be reported as a clean no-commit failure.
-    commit_config_snapshot_stage(peer_mgr_tx)
-        .await
-        .map_err(ApplyFailure::ambiguous)?;
+    commit_config_snapshot_stage(peer_mgr_tx).await?;
     Ok(())
 }
 
@@ -2729,13 +2777,14 @@ async fn commit_dynamic_neighbors_locked(
         return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await);
     }
     if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+        if failure.fence_reason.is_some() {
+            return Err(failure);
+        }
         return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, failure).await);
     }
     // LAN-277 window (a): the candidate is durable on disk from here on — a
     // finalization failure must not be reported as a clean no-commit failure.
-    commit_config_snapshot_stage(peer_mgr_tx)
-        .await
-        .map_err(ApplyFailure::ambiguous)?;
+    commit_config_snapshot_stage(peer_mgr_tx).await?;
     Ok(())
 }
 
@@ -2849,14 +2898,15 @@ async fn commit_static_neighbors_locked(
     }
 
     if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+        if failure.fence_reason.is_some() {
+            return Err(failure);
+        }
         return Err(
             rollback_static_and_snapshot(peer_mgr_tx, applied, previous_toml, failure).await,
         );
     }
     // LAN-277 window (a): candidate durable on disk from here on.
-    commit_config_snapshot_stage(peer_mgr_tx)
-        .await
-        .map_err(ApplyFailure::ambiguous)?;
+    commit_config_snapshot_stage(peer_mgr_tx).await?;
     Ok(())
 }
 
@@ -2906,14 +2956,15 @@ async fn commit_live_policy_impact_locked(
     };
 
     if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+        if failure.fence_reason.is_some() {
+            return Err(failure);
+        }
         return Err(
             rollback_live_policy_and_snapshot(peer_mgr_tx, priors, previous_toml, failure).await,
         );
     }
     // LAN-277 window (a): candidate durable on disk from here on.
-    commit_config_snapshot_stage(peer_mgr_tx)
-        .await
-        .map_err(ApplyFailure::ambiguous)?;
+    commit_config_snapshot_stage(peer_mgr_tx).await?;
     Ok(priors.len())
 }
 
@@ -3010,6 +3061,9 @@ async fn commit_peer_session_reshape_locked(
     };
 
     if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+        if failure.fence_reason.is_some() {
+            return Err(failure);
+        }
         return Err(rollback_peer_reshape_and_snapshot(
             peer_mgr_tx,
             priors,
@@ -3019,9 +3073,7 @@ async fn commit_peer_session_reshape_locked(
         .await);
     }
     // LAN-277 window (a): candidate durable on disk from here on.
-    commit_config_snapshot_stage(peer_mgr_tx)
-        .await
-        .map_err(ApplyFailure::ambiguous)?;
+    commit_config_snapshot_stage(peer_mgr_tx).await?;
 
     let dynamic_bounce =
         send_bounce_dynamic_range_peers(peer_mgr_tx, targets.dynamic_bounce_ranges).await;
@@ -3317,10 +3369,10 @@ async fn send_apply_resolved_policy_snapshot(
         })?;
     reply_rx
         .await
-        .map_err(|_| {
-            ConfigTransactionApplyError::Unavailable(
-                "peer manager dropped resolved-policy reply".to_string(),
-            )
+        .map_err(|_| ConfigTransactionApplyError::RecoveryRequired {
+            reason: RuntimeConfigFenceReason::AcknowledgementLost,
+            message: "peer manager accepted resolved-policy apply but dropped its reply"
+                .to_string(),
         })?
         .map_err(ConfigTransactionApplyError::Internal)
 }
@@ -3341,10 +3393,9 @@ async fn send_apply_peer_reshape_snapshot(
         })?;
     reply_rx
         .await
-        .map_err(|_| {
-            ConfigTransactionApplyError::Unavailable(
-                "peer manager dropped peer-reshape reply".to_string(),
-            )
+        .map_err(|_| ConfigTransactionApplyError::RecoveryRequired {
+            reason: RuntimeConfigFenceReason::AcknowledgementLost,
+            message: "peer manager accepted peer reshape but dropped its reply".to_string(),
         })?
         .map_err(peer_lifecycle_error_to_apply_error)
 }
@@ -3355,6 +3406,9 @@ async fn rollback_live_policy_and_snapshot(
     previous_toml: String,
     original: ApplyFailure,
 ) -> ApplyFailure {
+    if original.fence_reason.is_some() {
+        return original;
+    }
     let live_rollback = send_apply_resolved_policy_snapshot(peer_mgr_tx, priors)
         .await
         .map(|_| ());
@@ -3376,6 +3430,9 @@ async fn rollback_peer_reshape_and_snapshot(
     previous_toml: String,
     original: ApplyFailure,
 ) -> ApplyFailure {
+    if original.fence_reason.is_some() {
+        return original;
+    }
     let live_rollback = send_apply_peer_reshape_snapshot(peer_mgr_tx, priors)
         .await
         .map(|_| ());
@@ -3509,7 +3566,7 @@ async fn stage_config_snapshot(
         .await
         .map_err(|_| {
             ConfigTransactionApplyError::Unavailable(
-                "peer manager dropped config snapshot stage reply".to_string(),
+                "peer manager dropped config transaction snapshot stage reply".to_string(),
             )
         })?
         .map_err(stage_config_snapshot_error_to_apply_error)
@@ -3531,10 +3588,10 @@ async fn rollback_config_snapshot(
         })?;
     reply_rx
         .await
-        .map_err(|_| {
-            ConfigTransactionApplyError::Unavailable(
-                "peer manager dropped config snapshot rollback reply".to_string(),
-            )
+        .map_err(|_| ConfigTransactionApplyError::RecoveryRequired {
+            reason: RuntimeConfigFenceReason::AcknowledgementLost,
+            message: "peer manager accepted config snapshot rollback but dropped its reply"
+                .to_string(),
         })?
         .map_err(stage_config_snapshot_error_to_apply_error)
         .map_err(|error| {
@@ -3546,17 +3603,27 @@ async fn rollback_config_snapshot(
 
 async fn commit_config_snapshot_stage(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-) -> Result<(), ConfigTransactionApplyError> {
+) -> Result<(), ApplyFailure> {
     let (reply_tx, reply_rx) = oneshot::channel();
     peer_mgr_tx
         .send(PeerManagerCommand::CommitConfigSnapshotStage { reply: reply_tx })
         .await
         .map_err(|_| {
-            ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
+            ApplyFailure::fenced(
+                ConfigTransactionApplyError::Unavailable(
+                    "peer manager rejected config snapshot finalization before delivery"
+                        .to_string(),
+                ),
+                RuntimeConfigFenceReason::KnownDivergence,
+            )
         })?;
     reply_rx.await.map_err(|_| {
-        ConfigTransactionApplyError::Unavailable(
-            "peer manager dropped config snapshot commit reply".to_string(),
+        ApplyFailure::fenced(
+            ConfigTransactionApplyError::Unavailable(
+                "peer manager accepted config snapshot finalization but dropped its reply"
+                    .to_string(),
+            ),
+            RuntimeConfigFenceReason::AcknowledgementLost,
         )
     })
 }
@@ -3566,6 +3633,9 @@ async fn rollback_snapshot_after_error(
     previous_toml: String,
     original: ApplyFailure,
 ) -> ApplyFailure {
+    if original.fence_reason.is_some() {
+        return original;
+    }
     match rollback_config_snapshot(peer_mgr_tx, previous_toml).await {
         Ok(()) => original,
         Err(rollback_error) => {
@@ -3602,19 +3672,26 @@ async fn persist_candidate_config(
         ack: Some(ConfigPersistAck::immediate(ack_tx)),
     });
     match ack_rx.await {
-        Ok(Ok(())) => Ok(()),
+        Ok(ConfigPersistCommitOutcome::PublishedDurable) => Ok(()),
         // The persister reported failure: the atomic write did not replace the
         // config file, so disk provably still holds the previous config.
-        Ok(Err(error)) => {
-            Err(ConfigTransactionApplyError::FailedPrecondition(error.to_string()).into())
+        Ok(ConfigPersistCommitOutcome::NotPublished(error)) => {
+            Err(ConfigTransactionApplyError::FailedPrecondition(error).into())
         }
+        Ok(ConfigPersistCommitOutcome::PublicationAmbiguous(error)) => Err(ApplyFailure::fenced(
+            ConfigTransactionApplyError::Internal(format!(
+                "config candidate is visible but publication durability is unproved: {error}"
+            )),
+            RuntimeConfigFenceReason::PublicationAmbiguous,
+        )),
         // LAN-277 window (b): the acknowledgement was lost. The persister may
         // or may not have written the candidate — the on-disk outcome is
         // unknowable from here.
-        Err(_) => Err(ApplyFailure::ambiguous(
+        Err(_) => Err(ApplyFailure::fenced(
             ConfigTransactionApplyError::Internal(
                 "config bridge dropped transaction persistence acknowledgement".to_string(),
             ),
+            RuntimeConfigFenceReason::AcknowledgementLost,
         )),
     }
 }
@@ -3636,10 +3713,9 @@ async fn add_static_peer(
         })?;
     reply_rx
         .await
-        .map_err(|_| {
-            ConfigTransactionApplyError::Unavailable(
-                "peer manager dropped static-neighbor add reply".to_string(),
-            )
+        .map_err(|_| ConfigTransactionApplyError::RecoveryRequired {
+            reason: RuntimeConfigFenceReason::AcknowledgementLost,
+            message: "peer manager accepted static-neighbor add but dropped its reply".to_string(),
         })?
         .map_err(peer_lifecycle_error_to_apply_error)
 }
@@ -3661,10 +3737,10 @@ async fn delete_static_peer(
         })?;
     reply_rx
         .await
-        .map_err(|_| {
-            ConfigTransactionApplyError::Unavailable(
-                "peer manager dropped static-neighbor delete reply".to_string(),
-            )
+        .map_err(|_| ConfigTransactionApplyError::RecoveryRequired {
+            reason: RuntimeConfigFenceReason::AcknowledgementLost,
+            message: "peer manager accepted static-neighbor delete but dropped its reply"
+                .to_string(),
         })?
         .map_err(peer_lifecycle_error_to_apply_error)
 }
@@ -3685,10 +3761,10 @@ async fn reconfigure_static_peer(
         })?;
     reply_rx
         .await
-        .map_err(|_| {
-            ConfigTransactionApplyError::Unavailable(
-                "peer manager dropped static-neighbor reconfigure reply".to_string(),
-            )
+        .map_err(|_| ConfigTransactionApplyError::RecoveryRequired {
+            reason: RuntimeConfigFenceReason::AcknowledgementLost,
+            message: "peer manager accepted static-neighbor reconfigure but dropped its reply"
+                .to_string(),
         })?
         .map_err(peer_lifecycle_error_to_apply_error)
 }
@@ -3743,6 +3819,9 @@ async fn rollback_static_and_snapshot(
     previous_toml: String,
     original: ApplyFailure,
 ) -> ApplyFailure {
+    if original.fence_reason.is_some() {
+        return original;
+    }
     let static_rollback = rollback_static_ops(peer_mgr_tx, applied).await;
     let snapshot_rollback = rollback_config_snapshot(peer_mgr_tx, previous_toml).await;
     match (static_rollback, snapshot_rollback) {
@@ -3770,6 +3849,10 @@ fn combine_rollback_errors(
         ?snapshot_rollback,
         "config transaction rollback failed"
     );
+    let reason = first_rollback
+        .as_ref()
+        .or(snapshot_rollback.as_ref())
+        .map_or(RuntimeConfigFenceReason::KnownDivergence, recovery_reason);
     let mut message = format!("{original}; rollback failed");
     if let Some(error) = first_rollback {
         let _ = write!(message, "; {first_label}: {error}");
@@ -3777,7 +3860,14 @@ fn combine_rollback_errors(
     if let Some(error) = snapshot_rollback {
         let _ = write!(message, "; snapshot rollback: {error}");
     }
-    ApplyFailure::ambiguous(ConfigTransactionApplyError::Internal(message))
+    ApplyFailure::fenced(ConfigTransactionApplyError::Internal(message), reason)
+}
+
+fn recovery_reason(error: &ConfigTransactionApplyError) -> RuntimeConfigFenceReason {
+    match error {
+        ConfigTransactionApplyError::RecoveryRequired { reason, .. } => *reason,
+        _ => RuntimeConfigFenceReason::KnownDivergence,
+    }
 }
 
 fn committable_response(
@@ -3826,7 +3916,7 @@ fn apply_error_to_gnmi_set_error(error: ConfigTransactionApplyError) -> GnmiSetE
             GnmiSetError::Unavailable(message)
         }
         ConfigTransactionApplyError::Internal(message) => GnmiSetError::Internal(message),
-        ConfigTransactionApplyError::DetectedAmbiguousOutcome(message) => {
+        ConfigTransactionApplyError::RecoveryRequired { message, .. } => {
             GnmiSetError::Internal(message)
         }
     }
@@ -3834,8 +3924,8 @@ fn apply_error_to_gnmi_set_error(error: ConfigTransactionApplyError) -> GnmiSetE
 
 fn apply_error_to_owned_gnmi_set_error(error: ConfigTransactionApplyError) -> OwnedGnmiSetError {
     match error {
-        ConfigTransactionApplyError::DetectedAmbiguousOutcome(message) => {
-            OwnedGnmiSetError::Ambiguous(message)
+        ConfigTransactionApplyError::RecoveryRequired { reason, message } => {
+            OwnedGnmiSetError::Fenced { message, reason }
         }
         error => OwnedGnmiSetError::Clean(apply_error_to_gnmi_set_error(error)),
     }
@@ -3923,8 +4013,11 @@ fn confirm_abort_rollback_error(
             ConfigTransactionApplyError::DeadlineExceeded(message)
         }
         ConfigTransactionApplyError::Internal(_) => ConfigTransactionApplyError::Internal(message),
-        ConfigTransactionApplyError::DetectedAmbiguousOutcome(_) => {
-            ConfigTransactionApplyError::DetectedAmbiguousOutcome(message)
+        ConfigTransactionApplyError::RecoveryRequired { reason, .. } => {
+            ConfigTransactionApplyError::RecoveryRequired {
+                reason: *reason,
+                message,
+            }
         }
     }
 }
@@ -7182,7 +7275,10 @@ families = ["ipv4_unicast"]
             .unwrap_err();
         assert!(matches!(
             error,
-            ConfigTransactionApplyError::DetectedAmbiguousOutcome(ref message)
+            ConfigTransactionApplyError::RecoveryRequired {
+                reason: RuntimeConfigFenceReason::PublicationAmbiguous,
+                ref message,
+            }
                 if message.contains("confirm outcome is ambiguous")
                     && message.contains("daemon will exit for supervised recovery")
         ));
@@ -7485,8 +7581,10 @@ families = ["ipv4_unicast"]
 
         let err = assert_ambiguous_apply_failure_wedges(&controller, &dir, &previous_toml).await;
         assert!(
-            matches!(err, ConfigTransactionApplyError::DetectedAmbiguousOutcome(ref message)
-                if message.contains("snapshot commit") && message.contains("ambiguous")),
+            matches!(err, ConfigTransactionApplyError::RecoveryRequired {
+                reason: RuntimeConfigFenceReason::AcknowledgementLost,
+                ref message,
+            } if message.contains("finalization") && message.contains("dropped its reply")),
             "{err:?}"
         );
         ack_task.abort();
@@ -7526,7 +7624,7 @@ families = ["ipv4_unicast"]
 
         let err = assert_ambiguous_apply_failure_wedges(&controller, &dir, &previous_toml).await;
         assert!(
-            matches!(err, ConfigTransactionApplyError::DetectedAmbiguousOutcome(ref message)
+            matches!(err, ConfigTransactionApplyError::RecoveryRequired { ref message, .. }
                 if message.contains("persistence acknowledgement") && message.contains("ambiguous")),
             "{err:?}"
         );
@@ -7575,7 +7673,7 @@ families = ["ipv4_unicast"]
 
         let err = assert_ambiguous_apply_failure_wedges(&controller, &dir, &previous_toml).await;
         assert!(
-            matches!(err, ConfigTransactionApplyError::DetectedAmbiguousOutcome(ref message)
+            matches!(err, ConfigTransactionApplyError::RecoveryRequired { ref message, .. }
                 if message.contains("rollback failed") && message.contains("ambiguous")),
             "{err:?}"
         );
@@ -10430,9 +10528,9 @@ families = ["ipv4_unicast"]
         )
         .await
         .unwrap_err();
-        assert!(failure.ambiguous);
-        assert_eq!(*fib_state.lock().await, vec![edge]);
-        assert_eq!(*current.lock().await, prior);
+        assert!(failure.fence_reason.is_some());
+        assert_eq!(*fib_state.lock().await, vec![core]);
+        assert_ne!(*current.lock().await, prior);
     }
 
     #[test]

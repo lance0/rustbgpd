@@ -286,10 +286,10 @@ fn migrate(request: &Request) -> Result<Outcome, MigrationFailure> {
             )
         })
         .map_err(|error| {
-            if error
-                .to_string()
-                .contains("directory fsync after rename failed")
-            {
+            if matches!(
+                error,
+                crate::confirm_journal::AtomicPublishError::PublicationAmbiguous(_)
+            ) {
                 "migration publication durability is ambiguous; inspect CONFIG_PATH before retrying"
                     .to_string()
             } else {

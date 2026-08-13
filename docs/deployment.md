@@ -518,14 +518,16 @@ For your own deployment:
 - **Settlement fail-stop**: `--stop-timeout=1920` gives an explicit stop the
   same 32-minute grace as the shipped systemd unit. A failure to create the
   initial persistence stage rejects cleanly before runtime mutation. After
-  staging and runtime mutation begin, an unprovable rename or directory fsync
-  is ambiguous; a read-only bind-mounted config *file* can have a writable
-  parent yet still fail replacement in this window. The daemon then marks
-  readiness unavailable, closes persisted-mutation admission, and exits 70
-  within five seconds of detected ambiguity. A silent owner is fenced at 30
-  minutes and exits five seconds later. This standalone command has no restart
-  policy; use bounded supervisor retries and inspect durable config authority
-  before recovery.
+  runtime mutation begins, a failed rename is `NotPublished`: only complete
+  acknowledged compensation returns cleanly; otherwise known divergence fences
+  recovery. A post-rename directory-fsync failure is `PublicationAmbiguous`:
+  the complete visible candidate is adopted without rollback, and restart
+  selects durable authority. A read-only bind-mounted config *file* can have a
+  writable parent yet still fail replacement as `NotPublished`. A fenced daemon
+  marks readiness unavailable, closes persisted-mutation admission, and exits
+  70 within five seconds; a silent owner is fenced at 30 minutes and exits five
+  seconds later. This standalone command has no restart policy; use bounded
+  supervisor retries and inspect durable config authority before recovery.
 
 - **Health**: the image declares a `HEALTHCHECK` that runs `rbgp
   --json health` against the daemon's local gRPC socket and requires a

@@ -61,14 +61,16 @@ pub enum RuntimeConfigSettlementPhase {
 pub enum RuntimeConfigSettlementTerminal {
     Owned,
     Settled,
-    AmbiguousFenced,
+    RecoveryFenced,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeConfigFenceReason {
     BudgetExpired,
     ExecutorLost,
-    DetectedAmbiguousOutcome,
+    KnownDivergence,
+    PublicationAmbiguous,
+    AcknowledgementLost,
 }
 
 const TERMINAL_OWNED: u8 = 0;
@@ -80,8 +82,10 @@ const PHASE_SETTLING: u8 = 2;
 const AMBIGUITY_REASON_NONE: u8 = 0;
 const AMBIGUITY_REASON_BUDGET: u8 = 1;
 const AMBIGUITY_REASON_EXECUTOR: u8 = 2;
-const AMBIGUITY_REASON_DETECTED: u8 = 3;
-const AMBIGUITY_NOT_READY: &str = "runtime config settlement is ambiguous";
+const FENCE_REASON_DIVERGENCE: u8 = 3;
+const FENCE_REASON_PUBLICATION: u8 = 4;
+const FENCE_REASON_ACKNOWLEDGEMENT: u8 = 5;
+const RECOVERY_NOT_READY: &str = "runtime config settlement requires supervised recovery";
 
 #[derive(Debug)]
 struct OwnedResources {
@@ -327,16 +331,23 @@ impl RuntimeConfigSettlementWatchdog {
             );
             let outcome = body(operation.clone()).await;
             match outcome {
-                OwnedRuntimeConfigOutcome::Clean(result) => {
+                OwnedRuntimeConfigOutcome::CleanNoEffect(result) => {
                     if !operation.try_settle() {
                         std::future::pending::<()>().await;
                     }
                     drop(executor_guard);
                     result
                 }
-                OwnedRuntimeConfigOutcome::Ambiguous(error) => {
+                OwnedRuntimeConfigOutcome::PublishedDurable(value) => {
+                    if !operation.try_settle() {
+                        std::future::pending::<()>().await;
+                    }
+                    drop(executor_guard);
+                    Ok(value)
+                }
+                OwnedRuntimeConfigOutcome::Fenced { error, reason } => {
                     let _ = error;
-                    let _ = operation.fence_ambiguous_outcome();
+                    let _ = operation.fence_recovery(reason);
                     std::future::pending().await
                 }
             }
@@ -364,9 +375,15 @@ impl RuntimeConfigSettlementWatchdog {
 /// Typed result from an owned body; never inferred from transport status.
 pub enum OwnedRuntimeConfigOutcome<T, E> {
     /// Success or a proven no-effect or fully-compensated failure.
-    Clean(Result<T, E>),
+    CleanNoEffect(Result<T, E>),
+    /// The requested candidate is fully applied and durable.
+    PublishedDurable(T),
     /// An accepted effect whose final state cannot be proved.
-    Ambiguous(E),
+    /// Ownership must be retained until supervised recovery.
+    Fenced {
+        error: E,
+        reason: RuntimeConfigFenceReason,
+    },
 }
 
 /// Response attachment shared with a detached owned executor.
@@ -444,7 +461,7 @@ impl OwnedRuntimeConfigOperation {
         match self.inner.terminal.load(Ordering::Acquire) {
             TERMINAL_OWNED => RuntimeConfigSettlementTerminal::Owned,
             TERMINAL_SETTLED => RuntimeConfigSettlementTerminal::Settled,
-            _ => RuntimeConfigSettlementTerminal::AmbiguousFenced,
+            _ => RuntimeConfigSettlementTerminal::RecoveryFenced,
         }
     }
 
@@ -453,7 +470,9 @@ impl OwnedRuntimeConfigOperation {
         match self.inner.fence_reason.load(Ordering::Acquire) {
             AMBIGUITY_REASON_BUDGET => Some(RuntimeConfigFenceReason::BudgetExpired),
             AMBIGUITY_REASON_EXECUTOR => Some(RuntimeConfigFenceReason::ExecutorLost),
-            AMBIGUITY_REASON_DETECTED => Some(RuntimeConfigFenceReason::DetectedAmbiguousOutcome),
+            FENCE_REASON_DIVERGENCE => Some(RuntimeConfigFenceReason::KnownDivergence),
+            FENCE_REASON_PUBLICATION => Some(RuntimeConfigFenceReason::PublicationAmbiguous),
+            FENCE_REASON_ACKNOWLEDGEMENT => Some(RuntimeConfigFenceReason::AcknowledgementLost),
             _ => None,
         }
     }
@@ -465,13 +484,10 @@ impl OwnedRuntimeConfigOperation {
             .store(attached, Ordering::Release);
     }
 
-    /// Fence a known ambiguous result before any response can be published.
+    /// Fence a typed recovery result before any response can be published.
     #[must_use]
-    pub fn fence_ambiguous_outcome(&self) -> bool {
-        fence(
-            self.inner.as_ref(),
-            RuntimeConfigFenceReason::DetectedAmbiguousOutcome,
-        )
+    pub fn fence_recovery(&self, reason: RuntimeConfigFenceReason) -> bool {
+        fence(self.inner.as_ref(), reason)
     }
 
     #[must_use]
@@ -538,12 +554,14 @@ fn fence(operation: &OperationInner, reason: RuntimeConfigFenceReason) -> bool {
     let reason_value = match reason {
         RuntimeConfigFenceReason::BudgetExpired => AMBIGUITY_REASON_BUDGET,
         RuntimeConfigFenceReason::ExecutorLost => AMBIGUITY_REASON_EXECUTOR,
-        RuntimeConfigFenceReason::DetectedAmbiguousOutcome => AMBIGUITY_REASON_DETECTED,
+        RuntimeConfigFenceReason::KnownDivergence => FENCE_REASON_DIVERGENCE,
+        RuntimeConfigFenceReason::PublicationAmbiguous => FENCE_REASON_PUBLICATION,
+        RuntimeConfigFenceReason::AcknowledgementLost => FENCE_REASON_ACKNOWLEDGEMENT,
     };
     operation
         .fence_reason
         .store(reason_value, Ordering::Release);
-    operation.daemon_gate.mark_not_ready(AMBIGUITY_NOT_READY);
+    operation.daemon_gate.mark_not_ready(RECOVERY_NOT_READY);
     operation.daemon_gate.begin_shutdown();
     operation.coordinator.close();
     if let Some(admission) = operation
@@ -783,7 +801,7 @@ mod tests {
         drop(guard);
         assert_eq!(
             operation.terminal(),
-            RuntimeConfigSettlementTerminal::AmbiguousFenced
+            RuntimeConfigSettlementTerminal::RecoveryFenced
         );
         assert_eq!(
             operation.fence_reason(),
@@ -799,10 +817,10 @@ mod tests {
     async fn detected_ambiguity_closes_both_admission_resources() {
         let (watchdog, receiver) = test_watchdog(Duration::from_secs(5), Duration::from_millis(20));
         let (operation, guard, coordinator, admission) = operation(&watchdog, true).await;
-        assert!(operation.fence_ambiguous_outcome());
+        assert!(operation.fence_recovery(RuntimeConfigFenceReason::PublicationAmbiguous));
         assert_eq!(
             operation.fence_reason(),
-            Some(RuntimeConfigFenceReason::DetectedAmbiguousOutcome)
+            Some(RuntimeConfigFenceReason::PublicationAmbiguous)
         );
         assert!(coordinator.is_closed());
         assert!(admission.unwrap().is_closed());
@@ -847,7 +865,7 @@ mod tests {
                         move |operation| async move {
                             let _ = operation_tx.send(operation);
                             let _ = release_rx.await;
-                            OwnedRuntimeConfigOutcome::<(), tonic::Status>::Clean(Ok(()))
+                            OwnedRuntimeConfigOutcome::<(), tonic::Status>::PublishedDurable(())
                         },
                     )
                     .await
@@ -900,9 +918,10 @@ mod tests {
                         move |operation| async move {
                             let _ = operation_tx.send(operation);
                             let _ = ambiguous_rx.await;
-                            OwnedRuntimeConfigOutcome::<(), tonic::Status>::Ambiguous(
-                                tonic::Status::internal("typed ambiguous test outcome"),
-                            )
+                            OwnedRuntimeConfigOutcome::<(), tonic::Status>::Fenced {
+                                error: tonic::Status::internal("typed recovery test outcome"),
+                                reason: RuntimeConfigFenceReason::PublicationAmbiguous,
+                            }
                         },
                     )
                     .await
@@ -923,11 +942,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             operation.terminal(),
-            RuntimeConfigSettlementTerminal::AmbiguousFenced
+            RuntimeConfigSettlementTerminal::RecoveryFenced
         );
         assert_eq!(
             operation.fence_reason(),
-            Some(RuntimeConfigFenceReason::DetectedAmbiguousOutcome)
+            Some(RuntimeConfigFenceReason::PublicationAmbiguous)
         );
         assert!(gate.is_shutting_down());
         assert!(queued.await.unwrap().is_err());

@@ -2014,6 +2014,19 @@ impl std::fmt::Display for ConfigPersistError {
     }
 }
 
+/// Exact result of attempting to publish a config candidate.
+///
+/// The persister selects this at the atomic rename boundary. Receivers must
+/// not reconstruct it from errno, strings, or channel state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConfigPersistCommitOutcome {
+    /// The candidate is on disk; adopt it as the bridge snapshot.
+    PublishedDurable,
+    /// Nothing was written; keep the previous snapshot.
+    NotPublished(String),
+    PublicationAmbiguous(String),
+}
+
 /// Two-phase persistence acknowledgement carried by a [`ConfigEvent`].
 ///
 /// `FAILED_PRECONDITION` from a mutating RPC means the request did nothing.
@@ -2028,30 +2041,38 @@ impl std::fmt::Display for ConfigPersistError {
 /// `staged`. Nothing is observable on disk yet. The caller applies its runtime
 /// change and returns its commit channel through `commit`; dropping that
 /// channel discards the staged write instead.
-pub struct ConfigPersistAck {
+pub enum ConfigPersistAck {
+    /// Stage first, then wait for the runtime owner to request publication.
     /// Fires once the candidate is durably staged, or with the staging
     /// failure. A failure here means nothing was written and — because the
     /// caller has not applied yet — nothing was mutated.
-    pub staged: oneshot::Sender<Result<(), ConfigPersistError>>,
     /// Carries the caller's reply channel once its runtime change landed,
     /// which publishes the staged write. Dropping it discards the stage.
+    Staged {
+        /// Fires once the candidate is durably staged, or with the staging
+        /// failure. A failure here means nothing was written and — because the
+        /// caller has not applied yet — nothing was mutated.
+        staged: oneshot::Sender<Result<(), ConfigPersistError>>,
+        /// Carries the caller's reply channel once its runtime change landed,
+        /// which publishes the staged write. Dropping it discards the stage.
+        commit: oneshot::Receiver<oneshot::Sender<ConfigPersistCommitOutcome>>,
+    },
+    /// Publish immediately for an owner that supplies its own compensation
+    /// protocol (config transactions and FIB-table CRUD).
     ///
     /// `None` requests single-phase persistence: the bridge publishes as soon
     /// as the candidate is staged and reports the durable outcome on `staged`.
     /// Used by the paths that own an apply/rollback executor of their own
     /// (ADR-0076 config transactions, FIB-table CRUD).
-    pub commit: Option<oneshot::Receiver<oneshot::Sender<Result<(), String>>>>,
+    Immediate(oneshot::Sender<ConfigPersistCommitOutcome>),
 }
 
 impl ConfigPersistAck {
     /// Single-phase acknowledgement: stage and publish in one step, reporting
     /// the durable outcome on the supplied channel.
     #[must_use]
-    pub fn immediate(staged: oneshot::Sender<Result<(), ConfigPersistError>>) -> Self {
-        Self {
-            staged,
-            commit: None,
-        }
+    pub fn immediate(commit: oneshot::Sender<ConfigPersistCommitOutcome>) -> Self {
+        Self::Immediate(commit)
     }
 
     /// Drive the handshake to a successful persist, the way the config bridge
@@ -2060,25 +2081,36 @@ impl ConfigPersistAck {
     /// Returns whether the caller committed. `false` means it dropped the
     /// staged write, so nothing was persisted.
     pub async fn accept(self) -> bool {
-        let _ = self.staged.send(Ok(()));
-        let Some(commit) = self.commit else {
-            return true;
-        };
-        match commit.await {
-            Ok(reply) => {
-                let _ = reply.send(Ok(()));
+        match self {
+            Self::Immediate(reply) => {
+                let _ = reply.send(ConfigPersistCommitOutcome::PublishedDurable);
                 true
             }
-            Err(_) => false,
+            Self::Staged { staged, commit } => {
+                let _ = staged.send(Ok(()));
+                match commit.await {
+                    Ok(reply) => {
+                        let _ = reply.send(ConfigPersistCommitOutcome::PublishedDurable);
+                        true
+                    }
+                    Err(_) => false,
+                }
+            }
         }
     }
 
     /// Fail the handshake the way an unwritable config file does: the durable
     /// write never landed, and the caller has not mutated anything yet.
     pub fn fail_write(self, message: impl Into<String>) {
-        let _ = self
-            .staged
-            .send(Err(ConfigPersistError::Write(message.into())));
+        let message = message.into();
+        match self {
+            Self::Staged { staged, .. } => {
+                let _ = staged.send(Err(ConfigPersistError::Write(message)));
+            }
+            Self::Immediate(reply) => {
+                let _ = reply.send(ConfigPersistCommitOutcome::NotPublished(message));
+            }
+        }
     }
 }
 

@@ -16,6 +16,7 @@ use tracing::{error, info, warn};
 #[cfg(test)]
 use crate::config::Config;
 use crate::config::{AcceptedConfigSnapshot, Neighbor};
+use rustbgpd_api::peer_types::ConfigPersistCommitOutcome;
 
 /// File under `runtime_state_dir` recording the config file's mtime as of the
 /// daemon's last read or write of it.
@@ -37,7 +38,7 @@ pub enum ConfigMutation {
     /// the result to a caller that must not proceed until the write has settled.
     ReplaceConfigAck(
         Arc<AcceptedConfigSnapshot>,
-        oneshot::Sender<Result<(), String>>,
+        oneshot::Sender<ConfigPersistCommitOutcome>,
     ),
     /// Durably stage a replacement snapshot without publishing it, then
     /// acknowledge whether the write can land. Every persistence failure an
@@ -50,7 +51,7 @@ pub enum ConfigMutation {
         oneshot::Sender<Result<(), String>>,
     ),
     /// Publish the staged snapshot: rename it into place and adopt it.
-    CommitStagedConfig(oneshot::Sender<Result<(), String>>),
+    CommitStagedConfig(oneshot::Sender<ConfigPersistCommitOutcome>),
     /// Drop the staged snapshot. The caller's runtime change did not land, so
     /// neither may the write.
     DiscardStagedConfig,
@@ -127,14 +128,18 @@ impl ConfigPersister {
                     let previous = Arc::clone(&self.current);
                     info!("replacing persister config snapshot and persisting it");
                     self.current = new_config;
-                    let result = self.persist().map_err(|e| e.to_string());
-                    if let Err(e) = &result {
+                    let result = self.persist();
+                    if let ConfigPersistCommitOutcome::NotPublished(error) = &result {
                         self.current = previous;
                         error!(
                             path = %self.config_path.display(),
-                            error = %e,
-                            "failed to persist config — persister snapshot rolled back to previous state"
+                            error = %error,
+                            "config was not published — persister snapshot rolled back to previous state"
                         );
+                    } else if let ConfigPersistCommitOutcome::PublicationAmbiguous(error) = &result
+                    {
+                        error!(path = %self.config_path.display(), error = %error,
+                            "config is visible but crash durability is unproved");
                     }
                     let _ = ack.send(result);
                     continue;
@@ -158,12 +163,20 @@ impl ConfigPersister {
             // that is still outstanding here can no longer be published.
             self.discard_staged();
             let should_persist = self.apply(mutation);
-            if should_persist && let Err(e) = self.persist() {
-                error!(
-                    path = %self.config_path.display(),
-                    error = %e,
-                    "failed to persist config — in-memory state diverges from disk"
-                );
+            if should_persist {
+                match self.persist() {
+                    ConfigPersistCommitOutcome::PublishedDurable => {}
+                    ConfigPersistCommitOutcome::NotPublished(error) => error!(
+                        path = %self.config_path.display(),
+                        error = %error,
+                        "config was not published — in-memory state diverges from disk"
+                    ),
+                    ConfigPersistCommitOutcome::PublicationAmbiguous(error) => error!(
+                        path = %self.config_path.display(),
+                        error = %error,
+                        "config is visible but crash durability is unproved"
+                    ),
+                }
             }
         }
     }
@@ -189,21 +202,36 @@ impl ConfigPersister {
     }
 
     /// Publish the staged candidate and adopt it as the persister snapshot.
-    fn commit_staged(&mut self) -> Result<(), String> {
+    fn commit_staged(&mut self) -> ConfigPersistCommitOutcome {
         let Some((staged, config)) = self.staged.take() else {
-            return Err("no staged config write to commit".to_string());
-        };
-        if let Err(error) = staged.commit() {
-            error!(
-                path = %self.config_path.display(),
-                error = %error,
-                "failed to publish the staged config write"
+            return ConfigPersistCommitOutcome::NotPublished(
+                "no staged config write to commit".to_string(),
             );
-            return Err(error.to_string());
+        };
+        match staged.commit() {
+            Ok(()) => {
+                self.current = config;
+                self.record_current_history();
+                ConfigPersistCommitOutcome::PublishedDurable
+            }
+            Err(crate::confirm_journal::AtomicPublishError::NotPublished(error)) => {
+                error!(
+                    path = %self.config_path.display(),
+                    error = %error,
+                    "staged config was not published"
+                );
+                ConfigPersistCommitOutcome::NotPublished(error.to_string())
+            }
+            Err(crate::confirm_journal::AtomicPublishError::PublicationAmbiguous(error)) => {
+                self.current = config;
+                error!(
+                    path = %self.config_path.display(),
+                    error = %error,
+                    "staged config is visible but crash durability is unproved"
+                );
+                ConfigPersistCommitOutcome::PublicationAmbiguous(error.to_string())
+            }
         }
-        self.current = config;
-        self.record_current_history();
-        Ok(())
     }
 
     fn discard_staged(&mut self) {
@@ -282,19 +310,28 @@ impl ConfigPersister {
         }
     }
 
-    fn persist(&self) -> std::io::Result<()> {
+    fn persist(&self) -> ConfigPersistCommitOutcome {
         // Durable atomic write: temp file → fsync → rename → fsync parent dir.
         // Reuses the commit-confirm journal's proven primitive so a crash in the
         // settle window can never leave a torn/zero-length config (LAN-206).
-        crate::confirm_journal::write_atomic(
-            &self.config_path,
-            self.current.normalized_toml().as_bytes(),
-        )?;
         // Every durable config write funnels through this method, so recording
         // here gives the applied-config history exactly one choke point:
         // transaction commits, gRPC CRUD mutations, and boot all land in it.
-        self.record_current_history();
-        Ok(())
+        match crate::confirm_journal::write_atomic(
+            &self.config_path,
+            self.current.normalized_toml().as_bytes(),
+        ) {
+            Ok(()) => {
+                self.record_current_history();
+                ConfigPersistCommitOutcome::PublishedDurable
+            }
+            Err(crate::confirm_journal::AtomicPublishError::NotPublished(error)) => {
+                ConfigPersistCommitOutcome::NotPublished(error.to_string())
+            }
+            Err(crate::confirm_journal::AtomicPublishError::PublicationAmbiguous(error)) => {
+                ConfigPersistCommitOutcome::PublicationAmbiguous(error.to_string())
+            }
+        }
     }
 
     /// Best-effort recording of an applied config: the rollback history entry
@@ -1004,7 +1041,10 @@ log_format = "json"
         ))
         .await
         .unwrap();
-        assert_eq!(ack_rx.await.unwrap(), Ok(()));
+        assert_eq!(
+            ack_rx.await.unwrap(),
+            ConfigPersistCommitOutcome::PublishedDurable
+        );
 
         // A following mutation must build from the accepted replacement,
         // proving the warning-only history failure did not roll it back.

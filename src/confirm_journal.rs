@@ -9,6 +9,33 @@ use std::io::{self, Write as _};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
+/// Exact publication boundary for an atomic write.
+///
+/// The variants are selected by control flow around `rename(2)`, never by
+/// errno or error text. Before rename the target is provably unchanged; after
+/// rename the candidate is visible but its crash durability is not proved.
+#[derive(Debug)]
+pub(crate) enum AtomicPublishError {
+    NotPublished(io::Error),
+    PublicationAmbiguous(io::Error),
+}
+
+impl std::fmt::Display for AtomicPublishError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotPublished(error) | Self::PublicationAmbiguous(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for AtomicPublishError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NotPublished(error) | Self::PublicationAmbiguous(error) => Some(error),
+        }
+    }
+}
+
 /// Journal file name under `runtime_state_dir`.
 pub const JOURNAL_FILE_NAME: &str = "commit-confirm-journal.json";
 
@@ -56,8 +83,10 @@ pub fn refuse_retired_journal(path: &Path) -> Result<(), String> {
 /// Failures name the destination path: a bare io error ("No such file or
 /// directory (os error 2)") is useless to an operator who doesn't know
 /// which file the daemon was writing.
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    stage_atomic(path, bytes)?.commit()
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AtomicPublishError> {
+    stage_atomic(path, bytes)
+        .map_err(AtomicPublishError::NotPublished)?
+        .commit()
 }
 
 /// A durable write that has been fully written and fsynced next to its
@@ -105,32 +134,61 @@ impl StagedWrite {
     }
 
     /// Publish the staged bytes: rename into place and fsync the directory.
-    pub(crate) fn commit(mut self) -> io::Result<()> {
-        self.file.sync_all()?;
+    pub(crate) fn commit(mut self) -> Result<(), AtomicPublishError> {
+        self.file
+            .sync_all()
+            .map_err(AtomicPublishError::NotPublished)?;
         self.publish()
     }
 
     /// Re-run a caller-owned stale-source fence immediately before publish.
-    pub(crate) fn commit_if(mut self, fence: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
-        self.file.sync_all()?;
-        fence().map_err(|error| name_write_failure(&self.target, &error))?;
+    pub(crate) fn commit_if(
+        mut self,
+        fence: impl FnOnce() -> io::Result<()>,
+    ) -> Result<(), AtomicPublishError> {
+        self.file
+            .sync_all()
+            .map_err(AtomicPublishError::NotPublished)?;
+        fence()
+            .map_err(|error| name_write_failure(&self.target, &error))
+            .map_err(AtomicPublishError::NotPublished)?;
         self.publish()
     }
 
-    fn publish(&mut self) -> io::Result<()> {
+    fn publish(&mut self) -> Result<(), AtomicPublishError> {
         self.publish_with(fsync_dir)
     }
 
     fn publish_with(
         &mut self,
         sync_directory: impl FnOnce(&Path) -> io::Result<()>,
-    ) -> io::Result<()> {
-        self.verify_owned_temp()?;
+    ) -> Result<(), AtomicPublishError> {
+        self.verify_owned_temp()
+            .map_err(AtomicPublishError::NotPublished)?;
+        #[cfg(debug_assertions)]
+        if std::env::var("RUSTBGPD_TEST_CONFIG_PUBLISH_FAILURE").as_deref() == Ok("not_published") {
+            return Err(AtomicPublishError::NotPublished(io::Error::other(
+                "injected pre-rename config publication failure",
+            )));
+        }
         fs::rename(&self.tmp, &self.target)
-            .map_err(|error| name_write_failure(&self.target, &error))?;
+            .map_err(|error| name_write_failure(&self.target, &error))
+            .map_err(AtomicPublishError::NotPublished)?;
         self.tmp = PathBuf::new();
-        sync_directory(parent_dir(&self.target)?).map_err(|_| {
-            io::Error::other("directory fsync after rename failed; published state is ambiguous")
+        #[cfg(debug_assertions)]
+        if std::env::var("RUSTBGPD_TEST_CONFIG_PUBLISH_FAILURE").as_deref()
+            == Ok("publication_ambiguous")
+        {
+            return Err(AtomicPublishError::PublicationAmbiguous(io::Error::other(
+                "injected post-rename directory fsync failure",
+            )));
+        }
+        let parent = parent_dir(&self.target).map_err(AtomicPublishError::PublicationAmbiguous)?;
+        sync_directory(parent).map_err(|error| {
+            AtomicPublishError::PublicationAmbiguous(io::Error::new(
+                error.kind(),
+                format!("post-rename directory fsync failed; durability ambiguous: {error}"),
+            ))
         })
     }
 
@@ -138,8 +196,10 @@ impl StagedWrite {
     fn commit_with_dir_fsync(
         mut self,
         sync_directory: impl FnOnce(&Path) -> io::Result<()>,
-    ) -> io::Result<()> {
-        self.file.sync_all()?;
+    ) -> Result<(), AtomicPublishError> {
+        self.file
+            .sync_all()
+            .map_err(AtomicPublishError::NotPublished)?;
         self.publish_with(sync_directory)
     }
 
@@ -446,12 +506,34 @@ mod tests {
                 Err(io::Error::other("injected directory fsync failure"))
             })
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("directory fsync after rename failed")
-        );
+        assert!(matches!(
+            &error,
+            AtomicPublishError::PublicationAmbiguous(_)
+        ));
+        let message = error.to_string();
+        assert!(message.contains("post-rename directory fsync failed"));
+        assert!(message.contains("injected directory fsync failure"));
         assert_eq!(fs::read(&target).unwrap(), b"candidate");
         assert_eq!(fs::read(&successor).unwrap(), b"successor");
+    }
+
+    #[test]
+    fn failures_before_rename_are_typed_not_published_and_preserve_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("config.toml");
+        fs::write(&target, b"accepted").unwrap();
+        let tmp = target.with_extension("toml.tmp");
+        let stage = stage_atomic(&target, b"candidate").unwrap();
+        let owned = dir.path().join("owned-aside");
+        fs::rename(&tmp, &owned).unwrap();
+        fs::write(&tmp, b"substitute").unwrap();
+
+        assert!(matches!(
+            stage.commit(),
+            Err(AtomicPublishError::NotPublished(_))
+        ));
+        assert_eq!(fs::read(&target).unwrap(), b"accepted");
+        assert_eq!(fs::read(&tmp).unwrap(), b"substitute");
+        assert_eq!(fs::read(&owned).unwrap(), b"candidate");
     }
 }
