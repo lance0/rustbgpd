@@ -832,15 +832,22 @@ pub(crate) async fn dispatch_owned_catalog_mutation(
         Ok(Err(_)) => OwnedCatalogDispatch::NotAccepted(Status::unavailable(
             "peer manager unavailable before accepting command",
         )),
-        Ok(Ok(())) => match tokio::time::timeout(timeout, reply_rx).await {
-            Err(_) => OwnedCatalogDispatch::AcceptedReplyLost(Status::deadline_exceeded(
-                "peer manager accepted owned catalog mutation but reply timed out",
-            )),
-            Ok(Err(_)) => OwnedCatalogDispatch::AcceptedReplyLost(Status::internal(
-                "peer manager accepted owned catalog mutation but dropped its reply",
-            )),
-            Ok(Ok(outcome)) => OwnedCatalogDispatch::Replied(outcome),
-        },
+        Ok(Ok(())) => {
+            #[cfg(debug_assertions)]
+            crate::runtime_config_settlement::settlement_test_control::hold(
+                crate::runtime_config_settlement::settlement_test_control::Checkpoint::CatalogActorCommandAccepted,
+            )
+            .await;
+            match tokio::time::timeout(timeout, reply_rx).await {
+                Err(_) => OwnedCatalogDispatch::AcceptedReplyLost(Status::deadline_exceeded(
+                    "peer manager accepted owned catalog mutation but reply timed out",
+                )),
+                Ok(Err(_)) => OwnedCatalogDispatch::AcceptedReplyLost(Status::internal(
+                    "peer manager accepted owned catalog mutation but dropped its reply",
+                )),
+                Ok(Ok(outcome)) => OwnedCatalogDispatch::Replied(outcome),
+            }
+        }
     }
 }
 
