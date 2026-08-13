@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -167,31 +168,9 @@ thread_local! {
     static POLICY_ROUTES_MEMO: RefCell<Option<PolicyRoutesMemo>> = const { RefCell::new(None) };
 }
 
-/// Prometheus metrics for the BGP daemon.
-///
-/// All metrics are registered against an explicit [`Registry`], not the
-/// global default. This keeps tests isolated and gives the caller full
-/// control over metric lifetime and exposition.
-///
-/// Label values are plain strings — this crate has no dependency on
-/// `rustbgpd-fsm` or `rustbgpd-wire`.  Callers pass `state.as_str()`,
-/// `"keepalive"`, etc.
-///
-/// The `peer` label is the one exception: it has a single canonical
-/// form, produced by [`peer_label`] and enforced by
-/// [`non_canonical_peer_labels`]. Never stringify a `SocketAddr` into
-/// it.
-///
-/// **Adding a `peer`-labeled Vec metric?** Add it to the reap list in
-/// [`Self::reap_peer_series`] too, so the series are removed when the
-/// peer is deleted. Families without a `peer` label are process-global
-/// (or keyed by another identity such as VNI or VRF) and are
-/// intentionally not reaped — except `collector`-labeled BMP families,
-/// which [`Self::reap_bmp_collector_series`] and
-/// [`Self::reap_bmp_loc_rib_dump_live_buffer`] remove on BMP manager
-/// teardown.
-#[derive(Debug, Clone)]
-pub struct BgpMetrics {
+/// Registered metric handles shared by each public handle clone.
+#[derive(Debug)]
+struct BgpMetricsInner {
     registry: Registry,
     /// See [`NEXT_METRICS_INSTANCE_ID`].
     instance_id: u64,
@@ -419,6 +398,32 @@ pub struct BgpMetrics {
     /// for the collector reconnect SLA (ADR-0072 PR5).
     event_outbox_cursor_gap: IntCounter,
 }
+
+/// Prometheus metrics for the BGP daemon.
+///
+/// All metrics are registered against an explicit [`Registry`], not the
+/// global default. This keeps tests isolated and gives the caller full
+/// control over metric lifetime and exposition.
+///
+/// Label values are plain strings — this crate has no dependency on
+/// `rustbgpd-fsm` or `rustbgpd-wire`.  Callers pass `state.as_str()`,
+/// `"keepalive"`, etc.
+///
+/// The `peer` label is the one exception: it has a single canonical
+/// form, produced by [`peer_label`] and enforced by
+/// [`non_canonical_peer_labels`]. Never stringify a `SocketAddr` into
+/// it.
+///
+/// **Adding a `peer`-labeled Vec metric?** Add it to the reap list in
+/// [`Self::reap_peer_series`] too, so the series are removed when the
+/// peer is deleted. Families without a `peer` label are process-global
+/// (or keyed by another identity such as VNI or VRF) and are
+/// intentionally not reaped — except `collector`-labeled BMP families,
+/// which [`Self::reap_bmp_collector_series`] and
+/// [`Self::reap_bmp_loc_rib_dump_live_buffer`] remove on BMP manager
+/// teardown.
+#[derive(Debug, Clone)]
+pub struct BgpMetrics(Arc<BgpMetricsInner>);
 
 impl BgpMetrics {
     /// Create a new metrics instance with a fresh [`Registry`].
@@ -2433,7 +2438,7 @@ impl BgpMetrics {
             .register(Box::new(jemalloc_stats::JemallocCollector::new()))
             .expect("metric not already registered");
 
-        Self {
+        Self(Arc::new(BgpMetricsInner {
             registry,
             instance_id: NEXT_METRICS_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             state_transitions,
@@ -2600,28 +2605,28 @@ impl BgpMetrics {
             event_outbox_open_failures,
             event_outbox_degraded,
             event_outbox_cursor_gap,
-        }
+        }))
     }
 
     /// The underlying Prometheus registry, for gathering metrics.
     #[must_use]
     pub fn registry(&self) -> &Registry {
-        &self.registry
+        &self.0.registry
     }
 
     /// Publish the authoritative process-global dynamic-neighbor slot state.
     pub fn set_dynamic_neighbor_capacity(&self, used: usize, limit: u32) {
         let used = i64::try_from(used).unwrap_or(i64::MAX);
-        self.dynamic_neighbor_slots_used.set(used);
-        self.dynamic_neighbor_slots_limit.set(i64::from(limit));
-        self.dynamic_neighbor_slots_headroom.set(i64::from(
+        self.0.dynamic_neighbor_slots_used.set(used);
+        self.0.dynamic_neighbor_slots_limit.set(i64::from(limit));
+        self.0.dynamic_neighbor_slots_headroom.set(i64::from(
             limit.saturating_sub(u32::try_from(used).unwrap_or(u32::MAX)),
         ));
     }
 
     /// Record an inbound dynamic-neighbor drop caused by slot saturation.
     pub fn record_dynamic_neighbor_limit_rejection(&self) {
-        self.dynamic_neighbor_limit_rejections.inc();
+        self.0.dynamic_neighbor_limit_rejections.inc();
     }
 
     /// Record an accept-path inbound connection drop by bounded reason
@@ -2631,7 +2636,8 @@ impl BgpMetrics {
         &self,
         reason: crate::reason_labels::InboundConnectionDropReason,
     ) {
-        self.inbound_connections_dropped
+        self.0
+            .inbound_connections_dropped
             .with_label_values(&[reason.as_str()])
             .inc();
     }
@@ -2657,57 +2663,57 @@ impl BgpMetrics {
     /// REAP LIST — keep in sync with the `peer`-labeled Vec fields on
     /// [`BgpMetrics`] (see the struct doc comment).
     pub fn reap_peer_series(&self, peer: &str) {
-        Self::reap_peer_series_from_vec(&self.state_transitions, peer);
-        Self::reap_peer_series_from_vec(&self.session_flaps, peer);
-        Self::reap_peer_series_from_vec(&self.session_established, peer);
-        Self::reap_peer_series_from_vec(&self.peer_admin_enabled, peer);
-        Self::reap_peer_series_from_vec(&self.peer_session_established, peer);
-        Self::reap_peer_series_from_vec(&self.stale_timer_events, peer);
-        Self::reap_peer_series_from_vec(&self.bfd_session_up, peer);
-        Self::reap_peer_series_from_vec(&self.bfd_session_flaps_total, peer);
-        Self::reap_peer_series_from_vec(&self.notifications_sent, peer);
-        Self::reap_peer_series_from_vec(&self.notifications_received, peer);
-        Self::reap_peer_series_from_vec(&self.messages_sent, peer);
-        Self::reap_peer_series_from_vec(&self.messages_received, peer);
-        Self::reap_peer_series_from_vec(&self.peer_outbound_queue_depth, peer);
-        Self::reap_peer_series_from_vec(&self.peer_slow, peer);
-        Self::reap_peer_series_from_vec(&self.rejected_routes_retained, peer);
-        Self::reap_peer_series_from_vec(&self.rfc8212_missing_import_policy, peer);
-        Self::reap_peer_series_from_vec(&self.rfc8212_missing_export_policy, peer);
-        Self::reap_peer_series_from_vec(&self.peer_update_group, peer);
-        Self::reap_peer_series_from_vec(&self.rib_prefixes, peer);
-        Self::reap_peer_series_from_vec(&self.rib_adj_out_prefixes, peer);
-        Self::reap_peer_series_from_vec(&self.max_prefix_usage, peer);
-        Self::reap_peer_series_from_vec(&self.max_prefix_limit, peer);
-        Self::reap_peer_series_from_vec(&self.max_prefix_headroom, peer);
-        Self::reap_peer_series_from_vec(&self.max_prefix_exceeded, peer);
-        Self::reap_peer_series_from_vec(&self.outbound_prefix_usage, peer);
-        Self::reap_peer_series_from_vec(&self.outbound_prefix_limit, peer);
-        Self::reap_peer_series_from_vec(&self.outbound_prefix_headroom, peer);
-        Self::reap_peer_series_from_vec(&self.outbound_prefix_blocking, peer);
-        Self::reap_peer_series_from_vec(&self.outbound_prefix_blocked, peer);
-        Self::reap_peer_series_from_vec(&self.outbound_route_drops, peer);
-        Self::reap_peer_series_from_vec(&self.rib_outbound_registration_replaced, peer);
-        Self::reap_peer_series_from_vec(&self.rib_stale_peer_down_ignored, peer);
-        Self::reap_peer_series_from_vec(&self.rib_stale_session_message_ignored, peer);
-        Self::reap_peer_series_from_vec(&self.rib_outbound_registration_failover, peer);
-        Self::reap_peer_series_from_vec(&self.inbound_rib_backpressure, peer);
-        Self::reap_peer_series_from_vec(&self.hold_timer_rearmed_pending_input, peer);
-        Self::reap_peer_series_from_vec(&self.send_hold_expirations, peer);
-        Self::reap_peer_series_from_vec(&self.exact_export_rejections, peer);
-        Self::reap_peer_series_from_vec(&self.as_path_loop_detected, peer);
-        Self::reap_peer_series_from_vec(&self.rr_loop_detected, peer);
-        Self::reap_peer_series_from_vec(&self.bgpls_nlri_discarded, peer);
-        Self::reap_peer_series_from_vec(&self.update_malformed, peer);
-        Self::reap_peer_series_from_vec(&self.otc_routes_blocked, peer);
-        Self::reap_peer_series_from_vec(&self.role_mismatch, peer);
-        Self::reap_peer_series_from_vec(&self.policy_routes, peer);
-        Self::reap_peer_series_from_vec(&self.gr_active_peers, peer);
-        Self::reap_peer_series_from_vec(&self.gr_stale_routes, peer);
-        Self::reap_peer_series_from_vec(&self.gr_timer_expired, peer);
-        Self::reap_peer_series_from_vec(&self.route_refresh_in_progress, peer);
-        Self::reap_peer_series_from_vec(&self.route_refresh_stale_entries, peer);
-        Self::reap_peer_series_from_vec(&self.bmp_source_drops, peer);
+        Self::reap_peer_series_from_vec(&self.0.state_transitions, peer);
+        Self::reap_peer_series_from_vec(&self.0.session_flaps, peer);
+        Self::reap_peer_series_from_vec(&self.0.session_established, peer);
+        Self::reap_peer_series_from_vec(&self.0.peer_admin_enabled, peer);
+        Self::reap_peer_series_from_vec(&self.0.peer_session_established, peer);
+        Self::reap_peer_series_from_vec(&self.0.stale_timer_events, peer);
+        Self::reap_peer_series_from_vec(&self.0.bfd_session_up, peer);
+        Self::reap_peer_series_from_vec(&self.0.bfd_session_flaps_total, peer);
+        Self::reap_peer_series_from_vec(&self.0.notifications_sent, peer);
+        Self::reap_peer_series_from_vec(&self.0.notifications_received, peer);
+        Self::reap_peer_series_from_vec(&self.0.messages_sent, peer);
+        Self::reap_peer_series_from_vec(&self.0.messages_received, peer);
+        Self::reap_peer_series_from_vec(&self.0.peer_outbound_queue_depth, peer);
+        Self::reap_peer_series_from_vec(&self.0.peer_slow, peer);
+        Self::reap_peer_series_from_vec(&self.0.rejected_routes_retained, peer);
+        Self::reap_peer_series_from_vec(&self.0.rfc8212_missing_import_policy, peer);
+        Self::reap_peer_series_from_vec(&self.0.rfc8212_missing_export_policy, peer);
+        Self::reap_peer_series_from_vec(&self.0.peer_update_group, peer);
+        Self::reap_peer_series_from_vec(&self.0.rib_prefixes, peer);
+        Self::reap_peer_series_from_vec(&self.0.rib_adj_out_prefixes, peer);
+        Self::reap_peer_series_from_vec(&self.0.max_prefix_usage, peer);
+        Self::reap_peer_series_from_vec(&self.0.max_prefix_limit, peer);
+        Self::reap_peer_series_from_vec(&self.0.max_prefix_headroom, peer);
+        Self::reap_peer_series_from_vec(&self.0.max_prefix_exceeded, peer);
+        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_usage, peer);
+        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_limit, peer);
+        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_headroom, peer);
+        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_blocking, peer);
+        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_blocked, peer);
+        Self::reap_peer_series_from_vec(&self.0.outbound_route_drops, peer);
+        Self::reap_peer_series_from_vec(&self.0.rib_outbound_registration_replaced, peer);
+        Self::reap_peer_series_from_vec(&self.0.rib_stale_peer_down_ignored, peer);
+        Self::reap_peer_series_from_vec(&self.0.rib_stale_session_message_ignored, peer);
+        Self::reap_peer_series_from_vec(&self.0.rib_outbound_registration_failover, peer);
+        Self::reap_peer_series_from_vec(&self.0.inbound_rib_backpressure, peer);
+        Self::reap_peer_series_from_vec(&self.0.hold_timer_rearmed_pending_input, peer);
+        Self::reap_peer_series_from_vec(&self.0.send_hold_expirations, peer);
+        Self::reap_peer_series_from_vec(&self.0.exact_export_rejections, peer);
+        Self::reap_peer_series_from_vec(&self.0.as_path_loop_detected, peer);
+        Self::reap_peer_series_from_vec(&self.0.rr_loop_detected, peer);
+        Self::reap_peer_series_from_vec(&self.0.bgpls_nlri_discarded, peer);
+        Self::reap_peer_series_from_vec(&self.0.update_malformed, peer);
+        Self::reap_peer_series_from_vec(&self.0.otc_routes_blocked, peer);
+        Self::reap_peer_series_from_vec(&self.0.role_mismatch, peer);
+        Self::reap_peer_series_from_vec(&self.0.policy_routes, peer);
+        Self::reap_peer_series_from_vec(&self.0.gr_active_peers, peer);
+        Self::reap_peer_series_from_vec(&self.0.gr_stale_routes, peer);
+        Self::reap_peer_series_from_vec(&self.0.gr_timer_expired, peer);
+        Self::reap_peer_series_from_vec(&self.0.route_refresh_in_progress, peer);
+        Self::reap_peer_series_from_vec(&self.0.route_refresh_stale_entries, peer);
+        Self::reap_peer_series_from_vec(&self.0.bmp_source_drops, peer);
         // Invalidate memoized policy-routes handles AFTER the removal:
         // every memo taken before this point (including one resolved
         // mid-reap, whose series the loop above may just have removed)
@@ -2725,8 +2731,8 @@ impl BgpMetrics {
     /// with the same link-local address on another interface.
     pub fn reap_peer_identity_series(&self, peer: &str, interface: &str) {
         let labels = &[peer, interface];
-        let _ = self.peer_admin_enabled.remove_label_values(labels);
-        let _ = self.peer_session_established.remove_label_values(labels);
+        let _ = self.0.peer_admin_enabled.remove_label_values(labels);
+        let _ = self.0.peer_session_established.remove_label_values(labels);
     }
 
     fn reap_peer_series_from_vec<T: prometheus::core::MetricVecBuilder>(
@@ -2797,28 +2803,31 @@ impl BgpMetrics {
     /// Automatically increments the flap counter when leaving
     /// `"established"` and the established counter when entering it.
     pub fn record_state_transition(&self, peer: &str, from: &str, to: &str) {
-        self.state_transitions
+        self.0
+            .state_transitions
             .with_label_values(&[peer, from, to])
             .inc();
 
         if from == "established" {
-            self.session_flaps.with_label_values(&[peer]).inc();
+            self.0.session_flaps.with_label_values(&[peer]).inc();
         }
         if to == "established" {
-            self.session_established.with_label_values(&[peer]).inc();
+            self.0.session_established.with_label_values(&[peer]).inc();
         }
     }
 
     /// Publish the authoritative configured administrative intent.
     pub fn set_peer_admin_enabled(&self, peer: &str, interface: &str, enabled: bool) {
-        self.peer_admin_enabled
+        self.0
+            .peer_admin_enabled
             .with_label_values(&[peer, interface])
             .set(i64::from(enabled));
     }
 
     /// Publish whether the active-primary session is Established.
     pub fn set_peer_session_established(&self, peer: &str, interface: &str, established: bool) {
-        self.peer_session_established
+        self.0
+            .peer_session_established
             .with_label_values(&[peer, interface])
             .set(i64::from(established));
     }
@@ -2827,7 +2836,8 @@ impl BgpMetrics {
     /// Refreshed on BOTH transitions (connect and disconnect) so the series
     /// always reflects the live Publish-stream state.
     pub fn set_gnmi_dialout_connected(&self, target: &str, connected: bool) {
-        self.gnmi_dialout_connected
+        self.0
+            .gnmi_dialout_connected
             .with_label_values(&[target])
             .set(i64::from(connected));
     }
@@ -2835,17 +2845,19 @@ impl BgpMetrics {
     /// Reap the dial-out connection series for a target removed from the
     /// config (SIGHUP reload), so `/metrics` stops exporting stale targets.
     pub fn remove_gnmi_dialout_target(&self, target: &str) {
-        let _ = self.gnmi_dialout_connected.remove_label_values(&[target]);
+        let _ = self.0.gnmi_dialout_connected.remove_label_values(&[target]);
     }
 
     /// Record a BFD session state change: set the per-peer up gauge and count a
     /// flap on any transition out of Up.
     pub fn record_bfd_state(&self, peer: &str, is_up: bool, was_up: bool) {
-        self.bfd_session_up
+        self.0
+            .bfd_session_up
             .with_label_values(&[peer])
             .set(i64::from(is_up));
         if was_up && !is_up {
-            self.bfd_session_flaps_total
+            self.0
+                .bfd_session_flaps_total
                 .with_label_values(&[peer])
                 .inc();
         }
@@ -2856,35 +2868,40 @@ impl BgpMetrics {
     /// these rather than tearing the session down; the counter exists
     /// so they don't disappear silently.
     pub fn record_stale_timer_event(&self, peer: &str, state: &str, timer: &str) {
-        self.stale_timer_events
+        self.0
+            .stale_timer_events
             .with_label_values(&[peer, state, timer])
             .inc();
     }
 
     /// Record a NOTIFICATION sent to a peer.
     pub fn record_notification_sent(&self, peer: &str, code: &str, subcode: &str) {
-        self.notifications_sent
+        self.0
+            .notifications_sent
             .with_label_values(&[peer, code, subcode])
             .inc();
     }
 
     /// Record a NOTIFICATION received from a peer.
     pub fn record_notification_received(&self, peer: &str, code: &str, subcode: &str) {
-        self.notifications_received
+        self.0
+            .notifications_received
             .with_label_values(&[peer, code, subcode])
             .inc();
     }
 
     /// Record a BGP message sent to a peer.
     pub fn record_message_sent(&self, peer: &str, msg_type: &str) {
-        self.messages_sent
+        self.0
+            .messages_sent
             .with_label_values(&[peer, msg_type])
             .inc();
     }
 
     /// Record a BGP message received from a peer.
     pub fn record_message_received(&self, peer: &str, msg_type: &str) {
-        self.messages_received
+        self.0
+            .messages_received
             .with_label_values(&[peer, msg_type])
             .inc();
     }
@@ -2914,19 +2931,21 @@ impl BgpMetrics {
                 .map(|ty| vec.with_label_values(&[peer, ty]).get())
                 .sum()
         };
-        (sum(&self.messages_received), sum(&self.messages_sent))
+        (sum(&self.0.messages_received), sum(&self.0.messages_sent))
     }
 
     /// Set the number of prefixes in Adj-RIB-In for a peer/AFI-SAFI.
     pub fn set_rib_prefixes(&self, peer: &str, afi_safi: &str, count: i64) {
-        self.rib_prefixes
+        self.0
+            .rib_prefixes
             .with_label_values(&[peer, afi_safi])
             .set(count);
     }
 
     /// Set the number of prefixes in Adj-RIB-Out for a peer/AFI-SAFI.
     pub fn set_adj_rib_out_prefixes(&self, peer: &str, afi_safi: &str, count: i64) {
-        self.rib_adj_out_prefixes
+        self.0
+            .rib_adj_out_prefixes
             .with_label_values(&[peer, afi_safi])
             .set(count);
     }
@@ -2935,7 +2954,8 @@ impl BgpMetrics {
     /// writer. Sampled at batch granularity — once per enqueue batch and
     /// once per writer drain pass — never per BGP message.
     pub fn set_peer_outbound_queue_depth(&self, peer: &str, depth: i64) {
-        self.peer_outbound_queue_depth
+        self.0
+            .peer_outbound_queue_depth
             .with_label_values(&[peer])
             .set(depth);
     }
@@ -2943,7 +2963,8 @@ impl BgpMetrics {
     /// Read a peer's outbound-queue-depth gauge. Test/diagnostic helper.
     #[must_use]
     pub fn peer_outbound_queue_depth(&self, peer: &str) -> i64 {
-        self.peer_outbound_queue_depth
+        self.0
+            .peer_outbound_queue_depth
             .with_label_values(&[peer])
             .get()
     }
@@ -2953,7 +2974,8 @@ impl BgpMetrics {
     /// (into slow and out of slow) and on session teardown, so the flag
     /// can never stay latched for a peer that recovered.
     pub fn set_peer_slow(&self, peer: &str, slow: bool) {
-        self.peer_slow
+        self.0
+            .peer_slow
             .with_label_values(&[peer])
             .set(i64::from(slow));
     }
@@ -2961,7 +2983,7 @@ impl BgpMetrics {
     /// Read a peer's slow-peer flag gauge. Test/diagnostic helper.
     #[must_use]
     pub fn peer_slow(&self, peer: &str) -> i64 {
-        self.peer_slow.with_label_values(&[peer]).get()
+        self.0.peer_slow.with_label_values(&[peer]).get()
     }
 
     /// Set a peer's retained rejected-route count
@@ -2970,7 +2992,8 @@ impl BgpMetrics {
     /// and the session-reset clear — so the gauge tracks the store in
     /// both directions and can never stay latched.
     pub fn set_rejected_routes_retained(&self, peer: &str, count: usize) {
-        self.rejected_routes_retained
+        self.0
+            .rejected_routes_retained
             .with_label_values(&[peer])
             .set(i64::try_from(count).unwrap_or(i64::MAX));
     }
@@ -2979,7 +3002,8 @@ impl BgpMetrics {
     /// helper.
     #[must_use]
     pub fn rejected_routes_retained(&self, peer: &str) -> i64 {
-        self.rejected_routes_retained
+        self.0
+            .rejected_routes_retained
             .with_label_values(&[peer])
             .get()
     }
@@ -2991,10 +3015,12 @@ impl BgpMetrics {
     /// that refreshes one direction and leaves the other latched at a stale
     /// value.
     pub fn set_rfc8212_missing_policy(&self, peer: &str, import: bool, export: bool) {
-        self.rfc8212_missing_import_policy
+        self.0
+            .rfc8212_missing_import_policy
             .with_label_values(&[peer])
             .set(i64::from(import));
-        self.rfc8212_missing_export_policy
+        self.0
+            .rfc8212_missing_export_policy
             .with_label_values(&[peer])
             .set(i64::from(export));
     }
@@ -3002,7 +3028,8 @@ impl BgpMetrics {
     /// Read a peer's RFC 8212 missing-import gauge. Test/diagnostic helper.
     #[must_use]
     pub fn rfc8212_missing_import_policy(&self, peer: &str) -> i64 {
-        self.rfc8212_missing_import_policy
+        self.0
+            .rfc8212_missing_import_policy
             .with_label_values(&[peer])
             .get()
     }
@@ -3010,14 +3037,16 @@ impl BgpMetrics {
     /// Read a peer's RFC 8212 missing-export gauge. Test/diagnostic helper.
     #[must_use]
     pub fn rfc8212_missing_export_policy(&self, peer: &str) -> i64 {
-        self.rfc8212_missing_export_policy
+        self.0
+            .rfc8212_missing_export_policy
             .with_label_values(&[peer])
             .get()
     }
 
     /// Set the number of prefixes in the Loc-RIB for an AFI/SAFI.
     pub fn set_loc_rib_prefixes(&self, afi_safi: &str, count: i64) {
-        self.rib_loc_prefixes
+        self.0
+            .rib_loc_prefixes
             .with_label_values(&[afi_safi])
             .set(count);
     }
@@ -3027,47 +3056,48 @@ impl BgpMetrics {
     /// insert/remove batch seam so reclaim regressions surface as a
     /// monotonic slope, never a stale flat line.
     pub fn set_rib_attr_intern_global_size(&self, count: i64) {
-        self.rib_attr_intern_global_size.set(count);
+        self.0.rib_attr_intern_global_size.set(count);
     }
 
     /// Set the number of retained events in the bounded route-event
     /// history ring.
     pub fn set_route_event_history_depth(&self, count: i64) {
-        self.route_event_history_depth.set(count);
+        self.0.route_event_history_depth.set(count);
     }
 
     /// Set the configured capacity of the bounded route-event history
     /// ring.
     pub fn set_route_event_history_capacity(&self, count: i64) {
-        self.route_event_history_capacity.set(count);
+        self.0.route_event_history_capacity.set(count);
     }
 
     /// Record one RFC 9107 ORR SPF computation.
     pub fn record_orr_spf_run(&self) {
-        self.orr_spf_runs_total.inc();
+        self.0.orr_spf_runs_total.inc();
     }
 
     /// Set the cached ORR topology node count.
     pub fn set_orr_topology_nodes(&self, count: i64) {
-        self.orr_topology_nodes.set(count);
+        self.0.orr_topology_nodes.set(count);
     }
 
     /// Set the cached ORR topology usable-link count.
     pub fn set_orr_topology_links(&self, count: i64) {
-        self.orr_topology_links.set(count);
+        self.0.orr_topology_links.set(count);
     }
 
     /// Set the number of configured ORR vantages that do not resolve to
     /// a topology node.
     pub fn set_orr_unresolved_vantages(&self, count: i64) {
-        self.orr_unresolved_vantages.set(count);
+        self.0.orr_unresolved_vantages.set(count);
     }
 
     /// Set all five fixed ORR input-classification series. Calling this with
     /// the default diagnostics resets every series to zero when ORR is idle.
     pub fn set_orr_input_diagnostics(&self, values: [u64; 5]) {
         for (classification, value) in ORR_INPUT_CLASSIFICATIONS.iter().zip(values) {
-            self.orr_input_objects
+            self.0
+                .orr_input_objects
                 .with_label_values(&[classification])
                 .set(i64::try_from(value).unwrap_or(i64::MAX));
         }
@@ -3078,21 +3108,24 @@ impl BgpMetrics {
         if missed == 0 {
             return;
         }
-        self.event_stream_lagged
+        self.0
+            .event_stream_lagged
             .with_label_values(&[service, source])
             .inc_by(missed);
     }
 
     /// Increment the current live event-stream subscriber gauge.
     pub fn inc_event_stream_subscriber(&self, service: &str, source: &str) {
-        self.event_stream_subscribers
+        self.0
+            .event_stream_subscribers
             .with_label_values(&[service, source])
             .inc();
     }
 
     /// Decrement the current live event-stream subscriber gauge.
     pub fn dec_event_stream_subscriber(&self, service: &str, source: &str) {
-        self.event_stream_subscribers
+        self.0
+            .event_stream_subscribers
             .with_label_values(&[service, source])
             .dec();
     }
@@ -3125,7 +3158,8 @@ impl BgpMetrics {
         authn: &str,
         access_mode: &str,
     ) {
-        self.grpc_authz_decisions
+        self.0
+            .grpc_authz_decisions
             .with_label_values(&[tier, result, authn, access_mode])
             .inc();
     }
@@ -3134,7 +3168,8 @@ impl BgpMetrics {
     /// `success` and `failure`; listener paths and errors remain in logs.
     pub fn record_grpc_credential_reload(&self, outcome: &str) {
         debug_assert!(matches!(outcome, "success" | "failure"));
-        self.grpc_credential_reloads
+        self.0
+            .grpc_credential_reloads
             .with_label_values(&[outcome])
             .inc();
     }
@@ -3157,14 +3192,15 @@ impl BgpMetrics {
             matches!(outcome, "success" | "failure"),
             "unbounded config-transaction lifecycle outcome label: {outcome:?}"
         );
-        self.config_transaction_lifecycle
+        self.0
+            .config_transaction_lifecycle
             .with_label_values(&[operation, outcome])
             .inc();
     }
 
     /// Record a max-prefix-exceeded event for a peer.
     pub fn record_max_prefix_exceeded(&self, peer: &str) {
-        self.max_prefix_exceeded.with_label_values(&[peer]).inc();
+        self.0.max_prefix_exceeded.with_label_values(&[peer]).inc();
     }
 
     /// Publish one authoritative max-prefix accounting scope.
@@ -3186,19 +3222,24 @@ impl BgpMetrics {
         ));
         let labels = [peer, scope];
         let usage = i64::try_from(usage).unwrap_or(i64::MAX);
-        self.max_prefix_usage.with_label_values(&labels).set(usage);
+        self.0
+            .max_prefix_usage
+            .with_label_values(&labels)
+            .set(usage);
         if let Some(limit) = limit {
-            self.max_prefix_limit
+            self.0
+                .max_prefix_limit
                 .with_label_values(&labels)
                 .set(i64::from(limit));
-            self.max_prefix_headroom
+            self.0
+                .max_prefix_headroom
                 .with_label_values(&labels)
                 .set(i64::from(
                     limit.saturating_sub(u32::try_from(usage).unwrap_or(u32::MAX)),
                 ));
         } else {
-            let _ = self.max_prefix_limit.remove_label_values(&labels);
-            let _ = self.max_prefix_headroom.remove_label_values(&labels);
+            let _ = self.0.max_prefix_limit.remove_label_values(&labels);
+            let _ = self.0.max_prefix_headroom.remove_label_values(&labels);
         }
     }
 
@@ -3207,9 +3248,9 @@ impl BgpMetrics {
     /// This is narrower than [`Self::reap_peer_series`]: session teardown
     /// must not erase durable peer counters such as max-prefix exceed events.
     pub fn reap_max_prefix_capacity(&self, peer: &str) {
-        Self::reap_peer_series_from_vec(&self.max_prefix_usage, peer);
-        Self::reap_peer_series_from_vec(&self.max_prefix_limit, peer);
-        Self::reap_peer_series_from_vec(&self.max_prefix_headroom, peer);
+        Self::reap_peer_series_from_vec(&self.0.max_prefix_usage, peer);
+        Self::reap_peer_series_from_vec(&self.0.max_prefix_limit, peer);
+        Self::reap_peer_series_from_vec(&self.0.max_prefix_headroom, peer);
     }
 
     /// Publish one peer's outbound unicast capacity for one family
@@ -3227,24 +3268,28 @@ impl BgpMetrics {
         debug_assert!(matches!(family, "ipv4_unicast" | "ipv6_unicast"));
         let labels = [peer, family];
         let usage = i64::try_from(usage).unwrap_or(i64::MAX);
-        self.outbound_prefix_usage
+        self.0
+            .outbound_prefix_usage
             .with_label_values(&labels)
             .set(usage);
-        self.outbound_prefix_blocking
+        self.0
+            .outbound_prefix_blocking
             .with_label_values(&labels)
             .set(i64::from(blocking));
         if let Some(limit) = limit {
-            self.outbound_prefix_limit
+            self.0
+                .outbound_prefix_limit
                 .with_label_values(&labels)
                 .set(i64::from(limit));
-            self.outbound_prefix_headroom
+            self.0
+                .outbound_prefix_headroom
                 .with_label_values(&labels)
                 .set(i64::from(
                     limit.saturating_sub(u32::try_from(usage).unwrap_or(u32::MAX)),
                 ));
         } else {
-            let _ = self.outbound_prefix_limit.remove_label_values(&labels);
-            let _ = self.outbound_prefix_headroom.remove_label_values(&labels);
+            let _ = self.0.outbound_prefix_limit.remove_label_values(&labels);
+            let _ = self.0.outbound_prefix_headroom.remove_label_values(&labels);
         }
     }
 
@@ -3253,7 +3298,8 @@ impl BgpMetrics {
     /// unbounded quantity ADR-0113 refuses to inventory.
     pub fn record_outbound_prefix_blocked(&self, peer: &str, family: &str, blocked: u64) {
         debug_assert!(matches!(family, "ipv4_unicast" | "ipv6_unicast"));
-        self.outbound_prefix_blocked
+        self.0
+            .outbound_prefix_blocked
             .with_label_values(&[peer, family])
             .inc_by(blocked);
     }
@@ -3262,21 +3308,22 @@ impl BgpMetrics {
     /// The blocked-attempt counter is durable peer history and survives, as
     /// `max_prefix_exceeded` does across an inbound teardown.
     pub fn reap_outbound_prefix_capacity(&self, peer: &str) {
-        Self::reap_peer_series_from_vec(&self.outbound_prefix_usage, peer);
-        Self::reap_peer_series_from_vec(&self.outbound_prefix_limit, peer);
-        Self::reap_peer_series_from_vec(&self.outbound_prefix_headroom, peer);
-        Self::reap_peer_series_from_vec(&self.outbound_prefix_blocking, peer);
+        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_usage, peer);
+        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_limit, peer);
+        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_headroom, peer);
+        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_blocking, peer);
     }
 
     /// Record an outbound route update drop for a peer.
     pub fn record_outbound_route_drop(&self, peer: &str) {
-        self.outbound_route_drops.with_label_values(&[peer]).inc();
+        self.0.outbound_route_drops.with_label_values(&[peer]).inc();
     }
 
     /// Record an inbound route batch that blocked on a full RIB channel
     /// (ADR-0078: the session parks instead of dropping).
     pub fn record_inbound_rib_backpressure(&self, peer: &str) {
-        self.inbound_rib_backpressure
+        self.0
+            .inbound_rib_backpressure
             .with_label_values(&[peer])
             .inc();
     }
@@ -3284,7 +3331,8 @@ impl BgpMetrics {
     /// Record a hold-timer expiry converted to a re-arm because
     /// unprocessed peer input was pending (ADR-0078).
     pub fn record_hold_timer_rearmed_pending_input(&self, peer: &str) {
-        self.hold_timer_rearmed_pending_input
+        self.0
+            .hold_timer_rearmed_pending_input
             .with_label_values(&[peer])
             .inc();
     }
@@ -3292,23 +3340,27 @@ impl BgpMetrics {
     /// Record a session teardown caused by an RFC 9687 send-hold-timer
     /// expiry (peer stopped draining its TCP socket).
     pub fn record_send_hold_expiration(&self, peer: &str) {
-        self.send_hold_expirations.with_label_values(&[peer]).inc();
+        self.0
+            .send_hold_expirations
+            .with_label_values(&[peer])
+            .inc();
     }
 
     /// Set the number of peers currently registered with the RIB manager
     /// for outbound route distribution.
     pub fn set_rib_outbound_registered_peers(&self, count: i64) {
-        self.rib_outbound_registered_peers.set(count);
+        self.0.rib_outbound_registered_peers.set(count);
     }
 
     /// Set the number of update groups with at least one member.
     pub fn set_update_groups(&self, count: i64) {
-        self.update_groups.set(count);
+        self.0.update_groups.set(count);
     }
 
     /// Set the member count of one update group.
     pub fn set_update_group_members(&self, group: &str, count: i64) {
-        self.update_group_members
+        self.0
+            .update_group_members
             .with_label_values(&[group])
             .set(count);
     }
@@ -3316,7 +3368,7 @@ impl BgpMetrics {
     /// Remove an emptied update group's member-count series.
     pub fn remove_update_group_members(&self, group: &str) {
         // Removal fails only if the series never existed — fine either way.
-        let _ = self.update_group_members.remove_label_values(&[group]);
+        let _ = self.0.update_group_members.remove_label_values(&[group]);
     }
 
     /// Sentinel value of [`Self::set_peer_update_group`] for a peer on the
@@ -3329,7 +3381,8 @@ impl BgpMetrics {
     /// [`Self::set_update_group_members`]) or [`Self::UPDATE_GROUP_UNGROUPED`]
     /// for a fallback/ungrouped peer.
     pub fn set_peer_update_group(&self, peer: &str, group_id: i64) {
-        self.peer_update_group
+        self.0
+            .peer_update_group
             .with_label_values(&[peer])
             .set(group_id);
     }
@@ -3337,42 +3390,42 @@ impl BgpMetrics {
     /// Read a peer's update-group-id gauge. Test/diagnostic helper.
     #[must_use]
     pub fn peer_update_group(&self, peer: &str) -> i64 {
-        self.peer_update_group.with_label_values(&[peer]).get()
+        self.0.peer_update_group.with_label_values(&[peer]).get()
     }
 
     /// Record an update-group membership change for a registered peer.
     pub fn record_update_group_regroup(&self) {
-        self.update_group_regroups.inc();
+        self.0.update_group_regroups.inc();
     }
 
     /// Set the number of peers on the ungrouped (per-peer) fallback path.
     pub fn set_update_group_fallback_peers(&self, count: i64) {
-        self.update_group_fallback_peers.set(count);
+        self.0.update_group_fallback_peers.set(count);
     }
 
     /// Set the total withdrawal-residue entry count (group tombstones +
     /// per-member pending extra withdraws) held for dirty update-group
     /// members.
     pub fn set_update_group_residue_entries(&self, count: i64) {
-        self.update_group_residue_entries.set(count);
+        self.0.update_group_residue_entries.set(count);
     }
 
     /// Set the total exception-lane runner-up entry count across
     /// per-client-best update groups (ADR-0126).
     pub fn set_update_group_runner_up_entries(&self, count: i64) {
-        self.update_group_runner_up_entries.set(count);
+        self.0.update_group_runner_up_entries.set(count);
     }
 
     /// Set the number of export-chain contents interned by the
     /// update-group registry (append-only for the process lifetime).
     pub fn set_update_group_interned_chains(&self, count: i64) {
-        self.update_group_interned_chains.set(count);
+        self.0.update_group_interned_chains.set(count);
     }
 
     /// Set the number of update-group fingerprint keys created
     /// (append-only for the process lifetime).
     pub fn set_update_group_keys(&self, count: i64) {
-        self.update_group_keys.set(count);
+        self.0.update_group_keys.set(count);
     }
 
     /// Record a route rejected by the session's exact one-route export
@@ -3388,7 +3441,8 @@ impl BgpMetrics {
     ) {
         let family = Self::exact_export_family_label(family);
         let reason = reason.as_str();
-        self.exact_export_rejections
+        self.0
+            .exact_export_rejections
             .with_label_values(&[peer, family, reason])
             .inc();
     }
@@ -3425,7 +3479,8 @@ impl BgpMetrics {
         for family in families {
             let family = Self::exact_export_family_label(family);
             for reason in crate::reason_labels::ExactExportReason::ALL {
-                self.exact_export_rejections
+                self.0
+                    .exact_export_rejections
                     .with_label_values(&[peer, family, reason.as_str()])
                     .inc_by(0);
             }
@@ -3436,7 +3491,8 @@ impl BgpMetrics {
     /// for the same peer address (two sessions overlapped — collision
     /// window).
     pub fn record_rib_outbound_registration_replaced(&self, peer: &str) {
-        self.rib_outbound_registration_replaced
+        self.0
+            .rib_outbound_registration_replaced
             .with_label_values(&[peer])
             .inc();
     }
@@ -3445,7 +3501,8 @@ impl BgpMetrics {
     /// session id did not match the registered session for the peer (a
     /// stale teardown from a superseded session).
     pub fn record_rib_stale_peer_down_ignored(&self, peer: &str) {
-        self.rib_stale_peer_down_ignored
+        self.0
+            .rib_stale_peer_down_ignored
             .with_label_values(&[peer])
             .inc();
     }
@@ -3462,7 +3519,8 @@ impl BgpMetrics {
         peer: &str,
         kind: StaleSessionMessageKind,
     ) {
-        self.rib_stale_session_message_ignored
+        self.0
+            .rib_stale_session_message_ignored
             .with_label_values(&[peer, kind.as_str()])
             .inc();
     }
@@ -3473,7 +3531,8 @@ impl BgpMetrics {
     /// instead of being torn down (collision-window interleaving where the
     /// loser's `PeerUp` replaced the winner's registration).
     pub fn record_rib_outbound_registration_failover(&self, peer: &str) {
-        self.rib_outbound_registration_failover
+        self.0
+            .rib_outbound_registration_failover
             .with_label_values(&[peer])
             .inc();
     }
@@ -3486,41 +3545,42 @@ impl BgpMetrics {
             matches!(outcome, "cleared" | "still_dirty"),
             "unbounded dirty-resync outcome label: {outcome:?}"
         );
-        self.rib_dirty_resync.with_label_values(&[outcome]).inc();
+        self.0.rib_dirty_resync.with_label_values(&[outcome]).inc();
     }
 
     /// Set the sampled depth of the RIB manager ingest channel.
     pub fn set_rib_ingest_channel_depth(&self, depth: i64) {
-        self.rib_ingest_channel_depth.set(depth);
+        self.0.rib_ingest_channel_depth.set(depth);
     }
 
     /// Record a successful RFC 7999 kernel discard install.
     pub fn record_blackhole_discard_installed(&self) {
-        self.blackhole_discard_installed.inc();
+        self.0.blackhole_discard_installed.inc();
     }
 
     /// Record a successful RFC 7999 kernel discard removal.
     pub fn record_blackhole_discard_withdrawn(&self) {
-        self.blackhole_discard_withdrawn.inc();
+        self.0.blackhole_discard_withdrawn.inc();
     }
 
     /// Record a marker-matching kernel discard route adopted by the
     /// ADR-0079 startup sweep.
     pub fn record_blackhole_discard_adopted(&self) {
-        self.blackhole_discard_adopted.inc();
+        self.0.blackhole_discard_adopted.inc();
     }
 
     /// Record an adopted-but-unclaimed kernel discard route reaped after
     /// the post-startup deferral.
     pub fn record_blackhole_discard_reaped(&self) {
-        self.blackhole_discard_reaped.inc();
+        self.0.blackhole_discard_reaped.inc();
     }
 
     /// Record a rejected RFC 7999 kernel-discard candidate.
     ///
     /// `reason` is expected to be `broad_prefix` or `not_ebgp`.
     pub fn record_blackhole_discard_rejected(&self, reason: &str) {
-        self.blackhole_discard_rejected
+        self.0
+            .blackhole_discard_rejected
             .with_label_values(&[reason])
             .inc();
     }
@@ -3529,31 +3589,38 @@ impl BgpMetrics {
     ///
     /// `action` is expected to be `setup`, `install`, `remove`, or `dump`.
     pub fn record_blackhole_discard_kernel_failure(&self, action: &str) {
-        self.blackhole_discard_kernel_failures
+        self.0
+            .blackhole_discard_kernel_failures
             .with_label_values(&[action])
             .inc();
     }
 
     /// Record a successful general unicast FIB route install or replace.
     pub fn record_fib_route_installed(&self) {
-        self.fib_routes_installed.inc();
+        self.0.fib_routes_installed.inc();
     }
 
     /// Record a successful daemon-owned general unicast FIB route removal.
     pub fn record_fib_route_withdrawn(&self) {
-        self.fib_routes_withdrawn.inc();
+        self.0.fib_routes_withdrawn.inc();
     }
 
     /// Record a rejected general unicast FIB route candidate.
     pub fn record_fib_route_rejected(&self, reason: &str) {
-        self.fib_routes_rejected.with_label_values(&[reason]).inc();
+        self.0
+            .fib_routes_rejected
+            .with_label_values(&[reason])
+            .inc();
     }
 
     /// Record a kernel apply failure for general unicast FIB state.
     ///
     /// `action` is expected to be `setup`, `dump`, `install`, `replace`, or `remove`.
     pub fn record_fib_kernel_failure(&self, action: &str) {
-        self.fib_kernel_failures.with_label_values(&[action]).inc();
+        self.0
+            .fib_kernel_failures
+            .with_label_values(&[action])
+            .inc();
     }
 
     /// Record a dropped kernel route-event wake.
@@ -3569,7 +3636,8 @@ impl BgpMetrics {
             matches!(reason, "channel_full"),
             "unbounded kernel route-notify drop reason label: {reason:?}"
         );
-        self.kernel_route_notify_dropped
+        self.0
+            .kernel_route_notify_dropped
             .with_label_values(&[actor, reason])
             .inc();
     }
@@ -3587,14 +3655,16 @@ impl BgpMetrics {
             matches!(group, "ipv4_route" | "ipv6_route"),
             "unbounded kernel route-notify group label: {group:?}"
         );
-        self.kernel_route_notify_subscription_failures
+        self.0
+            .kernel_route_notify_subscription_failures
             .with_label_values(&[actor, group])
             .inc();
     }
 
     /// Record `AS_PATH` loop detection: increment by the number of rejected prefixes.
     pub fn record_as_path_loop_detected(&self, peer: &str, count: u64) {
-        self.as_path_loop_detected
+        self.0
+            .as_path_loop_detected
             .with_label_values(&[peer])
             .inc_by(count);
     }
@@ -3604,14 +3674,15 @@ impl BgpMetrics {
     /// two loop signals via
     /// [`crate::reason_labels::RrLoopReason`].
     pub fn record_rr_loop_detected(&self, peer: &str) {
-        self.rr_loop_detected.with_label_values(&[peer]).inc();
+        self.0.rr_loop_detected.with_label_values(&[peer]).inc();
     }
 
     /// Record recoverable BGP-LS NLRI discards (RFC 9552): increment by the
     /// number of known NLRIs dropped for out-of-order descriptor TLVs while
     /// the session was preserved.
     pub fn record_bgpls_nlri_discarded(&self, peer: &str, count: u64) {
-        self.bgpls_nlri_discarded
+        self.0
+            .bgpls_nlri_discarded
             .with_label_values(&[peer])
             .inc_by(count);
     }
@@ -3629,7 +3700,8 @@ impl BgpMetrics {
         peer: &str,
         disposition: crate::reason_labels::MalformedUpdateDisposition,
     ) {
-        self.update_malformed
+        self.0
+            .update_malformed
             .with_label_values(&[peer, disposition.as_str()])
             .inc();
     }
@@ -3638,7 +3710,8 @@ impl BgpMetrics {
     /// RFC 7606 disposition for one peer.
     pub fn initialize_update_malformed_series(&self, peer: &str) {
         for disposition in crate::reason_labels::MalformedUpdateDisposition::ALL {
-            self.update_malformed
+            self.0
+                .update_malformed
                 .with_label_values(&[peer, disposition.as_str()])
                 .inc_by(0);
         }
@@ -3654,7 +3727,8 @@ impl BgpMetrics {
         reason: crate::reason_labels::OtcBlockReason,
         count: u64,
     ) {
-        self.otc_routes_blocked
+        self.0
+            .otc_routes_blocked
             .with_label_values(&[peer, reason.as_str()])
             .inc_by(count);
     }
@@ -3666,7 +3740,8 @@ impl BgpMetrics {
     /// The label cardinality is fixed at 6×6 = 36 per peer; absent roles
     /// (peer didn't advertise, or we didn't configure) become `"none"`.
     pub fn record_role_mismatch(&self, peer: &str, local_role: &str, remote_role: &str) {
-        self.role_mismatch
+        self.0
+            .role_mismatch
             .with_label_values(&[peer, local_role, remote_role])
             .inc();
     }
@@ -3690,7 +3765,7 @@ impl BgpMetrics {
         let reap_epoch = POLICY_ROUTES_REAP_EPOCH.load(Ordering::Acquire);
         POLICY_ROUTES_MEMO.with_borrow_mut(|memo| {
             if let Some(m) = memo
-                && m.instance == self.instance_id
+                && m.instance == self.0.instance_id
                 && m.reap_epoch == reap_epoch
                 && m.peer == peer
                 && m.policy == policy
@@ -3701,11 +3776,12 @@ impl BgpMetrics {
                 return;
             }
             let counter = self
+                .0
                 .policy_routes
                 .with_label_values(&[peer, policy, direction, action]);
             counter.inc();
             *memo = Some(PolicyRoutesMemo {
-                instance: self.instance_id,
+                instance: self.0.instance_id,
                 reap_epoch,
                 peer: peer.to_owned(),
                 policy: policy.to_owned(),
@@ -3733,38 +3809,42 @@ impl BgpMetrics {
         if n == 0 {
             return;
         }
-        self.policy_routes
+        self.0
+            .policy_routes
             .with_label_values(&[peer, policy, direction, action])
             .inc_by(n);
     }
 
     /// Set the GR active flag for a peer (1 = in GR, 0 = not).
     pub fn set_gr_active(&self, peer: &str, active: bool) {
-        self.gr_active_peers
+        self.0
+            .gr_active_peers
             .with_label_values(&[peer])
             .set(i64::from(active));
     }
 
     /// Set the number of stale routes for a GR peer.
     pub fn set_gr_stale_routes(&self, peer: &str, count: i64) {
-        self.gr_stale_routes.with_label_values(&[peer]).set(count);
+        self.0.gr_stale_routes.with_label_values(&[peer]).set(count);
     }
 
     /// Record a GR timer expiration for a peer.
     pub fn record_gr_timer_expired(&self, peer: &str) {
-        self.gr_timer_expired.with_label_values(&[peer]).inc();
+        self.0.gr_timer_expired.with_label_values(&[peer]).inc();
     }
 
     /// Set whether restarting-speaker route selection is deferred for a family.
     pub fn set_selection_deferral_active(&self, afi_safi: &str, active: bool) {
-        self.selection_deferral_active
+        self.0
+            .selection_deferral_active
             .with_label_values(&[afi_safi])
             .set(i64::from(active));
     }
 
     /// Set the number of startup-frozen peers still blocking a family.
     pub fn set_selection_deferral_waiters(&self, afi_safi: &str, count: i64) {
-        self.selection_deferral_waiters
+        self.0
+            .selection_deferral_waiters
             .with_label_values(&[afi_safi])
             .set(count);
     }
@@ -3772,21 +3852,24 @@ impl BgpMetrics {
     /// Record release of one family gate (`all_eor`, `collision_refresh`,
     /// `all_excluded`, or `timer`).
     pub fn record_selection_deferral_release(&self, afi_safi: &str, reason: &str) {
-        self.selection_deferral_releases
+        self.0
+            .selection_deferral_releases
             .with_label_values(&[afi_safi, reason])
             .inc();
     }
 
     /// Record expiry of one family `Selection_Deferral_Timer`.
     pub fn record_selection_deferral_timeout(&self, afi_safi: &str) {
-        self.selection_deferral_timeouts
+        self.0
+            .selection_deferral_timeouts
             .with_label_values(&[afi_safi])
             .inc();
     }
 
     /// Record a family entering bounded-ledger release fallback.
     pub fn record_selection_deferral_ledger_overflow(&self, afi_safi: &str) {
-        self.selection_deferral_ledger_overflows
+        self.0
+            .selection_deferral_ledger_overflows
             .with_label_values(&[afi_safi])
             .inc();
     }
@@ -3794,22 +3877,24 @@ impl BgpMetrics {
     /// Materialize zero-valued timeout and ledger-overflow children for one
     /// active selection-deferral family.
     pub fn initialize_selection_deferral_failure_series(&self, afi_safi: &str) {
-        self.selection_deferral_timeouts
+        self.0
+            .selection_deferral_timeouts
             .with_label_values(&[afi_safi])
             .inc_by(0);
-        self.selection_deferral_ledger_overflows
+        self.0
+            .selection_deferral_ledger_overflows
             .with_label_values(&[afi_safi])
             .inc_by(0);
     }
 
     /// Set RPKI VRP count by address family.
     pub fn set_rpki_vrp_count(&self, af: &str, count: i64) {
-        self.rpki_vrp_count.with_label_values(&[af]).set(count);
+        self.0.rpki_vrp_count.with_label_values(&[af]).set(count);
     }
 
     /// Set ASPA record count.
     pub fn set_aspa_records(&self, count: i64) {
-        self.aspa_records.set(count);
+        self.0.aspa_records.set(count);
     }
 
     /// Record validation-cache-triggered inbound Route Refresh work.
@@ -3819,7 +3904,8 @@ impl BgpMetrics {
     /// - `outcome`: `"eligible"`, `"refreshed"`,
     ///   `"skipped_not_established"`, or `"failed"`.
     pub fn record_validation_import_refresh(&self, dependency: &str, outcome: &str, count: u64) {
-        self.validation_import_refreshes
+        self.0
+            .validation_import_refreshes
             .with_label_values(&[dependency, outcome])
             .inc_by(count);
     }
@@ -3827,7 +3913,8 @@ impl BgpMetrics {
     /// Count one failed policy-dataset refresh (LAN-305). The label is
     /// bounded by the config's declared dataset names.
     pub fn record_policy_dataset_refresh_error(&self, dataset: &str) {
-        self.policy_dataset_refresh_errors
+        self.0
+            .policy_dataset_refresh_errors
             .with_label_values(&[dataset])
             .inc();
     }
@@ -3838,7 +3925,8 @@ impl BgpMetrics {
     /// Never called on a rejected load — staleness alerting depends on
     /// the timestamp freezing while the prior generation stays live.
     pub fn record_policy_generation_loaded(&self) {
-        self.policy_generation_loaded_timestamp
+        self.0
+            .policy_generation_loaded_timestamp
             .set(unix_now_seconds());
     }
 
@@ -3849,7 +3937,8 @@ impl BgpMetrics {
     /// Never called on a failed refresh — the prior snapshot keeps
     /// serving and the timestamp keeps its last-accepted value.
     pub fn record_policy_dataset_loaded(&self, dataset: &str) {
-        self.policy_dataset_loaded_timestamp
+        self.0
+            .policy_dataset_loaded_timestamp
             .with_label_values(&[dataset])
             .set(unix_now_seconds());
     }
@@ -3860,9 +3949,11 @@ impl BgpMetrics {
     /// no longer exists.
     pub fn reap_policy_dataset_series(&self, dataset: &str) {
         let _ = self
+            .0
             .policy_dataset_loaded_timestamp
             .remove_label_values(&[dataset]);
         let _ = self
+            .0
             .policy_dataset_refresh_errors
             .remove_label_values(&[dataset]);
     }
@@ -3875,7 +3966,8 @@ impl BgpMetrics {
     ///
     /// Error path only — the evaluator's hot path never reaches this.
     pub fn record_policy_eval_error(&self, direction: &str, kind: &str) {
-        self.policy_eval_errors
+        self.0
+            .policy_eval_errors
             .with_label_values(&[direction, kind])
             .inc();
     }
@@ -3885,7 +3977,8 @@ impl BgpMetrics {
     /// `afi_safi` is expected to be a bounded family label such as
     /// `"ipv4_unicast"`, `"ipv6_flowspec"`, or `"l2vpn_evpn"`.
     pub fn set_route_refresh_in_progress(&self, peer: &str, afi_safi: &str, active: bool) {
-        self.route_refresh_in_progress
+        self.0
+            .route_refresh_in_progress
             .with_label_values(&[peer, afi_safi])
             .set(i64::from(active));
     }
@@ -3893,14 +3986,16 @@ impl BgpMetrics {
     /// Set whether the RIB actor currently owns an atomic export-policy
     /// transition.
     pub fn set_rib_policy_transition_in_progress(&self, active: bool) {
-        self.rib_policy_transition_in_progress
+        self.0
+            .rib_policy_transition_in_progress
             .set(i64::from(active));
     }
 
     /// Retain the monotonic elapsed duration of the most recently completed
     /// export-policy transition.
     pub fn set_rib_policy_transition_last_duration(&self, duration: std::time::Duration) {
-        self.rib_policy_transition_last_duration_milliseconds
+        self.0
+            .rib_policy_transition_last_duration_milliseconds
             .set(i64::try_from(duration.as_millis()).unwrap_or(i64::MAX));
     }
 
@@ -3913,21 +4008,24 @@ impl BgpMetrics {
         poll_kind: &str,
         duration: std::time::Duration,
     ) {
-        self.rib_policy_transition_actor_poll_duration_seconds
+        self.0
+            .rib_policy_transition_actor_poll_duration_seconds
             .with_label_values(&[poll_kind])
             .observe(duration.as_secs_f64());
     }
 
     /// Observe one real outbound prefix-limit apply batch on the RIB actor.
     pub fn observe_rib_outbound_prefix_limit_apply(&self, duration: std::time::Duration) {
-        self.rib_outbound_prefix_limit_actor_duration_seconds
+        self.0
+            .rib_outbound_prefix_limit_actor_duration_seconds
             .with_label_values(&["apply"])
             .observe(duration.as_secs_f64());
     }
 
     /// Observe one real outbound prefix-limit recovery batch on the RIB actor.
     pub fn observe_rib_outbound_prefix_limit_recovery(&self, duration: std::time::Duration) {
-        self.rib_outbound_prefix_limit_actor_duration_seconds
+        self.0
+            .rib_outbound_prefix_limit_actor_duration_seconds
             .with_label_values(&["recovery"])
             .observe(duration.as_secs_f64());
     }
@@ -3935,7 +4033,8 @@ impl BgpMetrics {
     /// Observe one accepted inbound Enhanced Route Refresh stale-inventory
     /// snapshot performed by the RIB actor.
     pub fn observe_rib_route_refresh_begin_actor_duration(&self, duration: std::time::Duration) {
-        self.rib_route_refresh_actor_duration_seconds
+        self.0
+            .rib_route_refresh_actor_duration_seconds
             .with_label_values(&["begin"])
             .observe(duration.as_secs_f64());
     }
@@ -3947,7 +4046,8 @@ impl BgpMetrics {
         timed_out: bool,
         duration: std::time::Duration,
     ) {
-        self.rib_route_refresh_actor_duration_seconds
+        self.0
+            .rib_route_refresh_actor_duration_seconds
             .with_label_values(&[if timed_out { "timeout" } else { "eorr" }])
             .observe(duration.as_secs_f64());
     }
@@ -3955,7 +4055,8 @@ impl BgpMetrics {
     /// Set how many entries are still awaiting replacement in an inbound
     /// Enhanced Route Refresh window.
     pub fn set_route_refresh_stale_entries(&self, peer: &str, afi_safi: &str, count: i64) {
-        self.route_refresh_stale_entries
+        self.0
+            .route_refresh_stale_entries
             .with_label_values(&[peer, afi_safi])
             .set(count);
     }
@@ -3964,7 +4065,8 @@ impl BgpMetrics {
     ///
     /// `action` is expected to be `inject` or `withdraw`.
     pub fn record_evpn_local_origination(&self, action: &str) {
-        self.evpn_local_originations
+        self.0
+            .evpn_local_originations
             .with_label_values(&[action])
             .inc();
     }
@@ -3973,7 +4075,8 @@ impl BgpMetrics {
     ///
     /// `action` is expected to be `inject` or `withdraw`.
     pub fn record_evpn_local_origination_error(&self, action: &str) {
-        self.evpn_local_origination_errors
+        self.0
+            .evpn_local_origination_errors
             .with_label_values(&[action])
             .inc();
     }
@@ -3983,7 +4086,8 @@ impl BgpMetrics {
     ///
     /// `reason` is expected to be `channel_full` or `channel_closed`.
     pub fn record_evpn_local_observation_drop(&self, reason: &str) {
-        self.evpn_local_observations_dropped
+        self.0
+            .evpn_local_observations_dropped
             .with_label_values(&[reason])
             .inc();
     }
@@ -3992,10 +4096,12 @@ impl BgpMetrics {
     /// event for one `(VNI, MAC)`.
     pub fn record_evpn_duplicate_mac_move(&self, vni: u32, mac: &str) {
         let vni = vni.to_string();
-        self.evpn_duplicate_mac_moves
+        self.0
+            .evpn_duplicate_mac_moves
             .with_label_values(&[vni.as_str(), mac])
             .inc();
         let first_seen = self
+            .0
             .evpn_duplicate_mac_first_move_timestamp
             .with_label_values(&[vni.as_str(), mac]);
         if first_seen.get() == 0 {
@@ -4011,7 +4117,8 @@ impl BgpMetrics {
     /// (`detect` or `suppress_local`).
     pub fn record_evpn_duplicate_mac_threshold_exceeded(&self, vni: u32, mac: &str, action: &str) {
         let vni = vni.to_string();
-        self.evpn_duplicate_mac_threshold_exceeded
+        self.0
+            .evpn_duplicate_mac_threshold_exceeded
             .with_label_values(&[vni.as_str(), mac, action])
             .inc();
     }
@@ -4019,7 +4126,8 @@ impl BgpMetrics {
     /// Set local-origin quarantine state for a duplicate-MAC key.
     pub fn set_evpn_duplicate_mac_quarantine_active(&self, vni: u32, mac: &str, active: bool) {
         let vni = vni.to_string();
-        self.evpn_duplicate_mac_quarantine_active
+        self.0
+            .evpn_duplicate_mac_quarantine_active
             .with_label_values(&[vni.as_str(), mac])
             .set(i64::from(active));
     }
@@ -4031,10 +4139,12 @@ impl BgpMetrics {
     /// (`XX:XX:XX:XX:XX:XX:XX:XX:XX:XX`) and `is_df`.
     pub fn set_evpn_df_role(&self, esi: &str, vni: u32, is_df: bool) {
         let vni = vni.to_string();
-        self.evpn_df_role
+        self.0
+            .evpn_df_role
             .with_label_values(&[esi, vni.as_str(), "df"])
             .set(i64::from(is_df));
-        self.evpn_df_role
+        self.0
+            .evpn_df_role
             .with_label_values(&[esi, vni.as_str(), "nondf"])
             .set(i64::from(!is_df));
     }
@@ -4049,7 +4159,8 @@ impl BgpMetrics {
             return;
         }
         for candidate in KNOWN {
-            self.evpn_es_ac_gate
+            self.0
+                .evpn_es_ac_gate
                 .with_label_values(&[esi, candidate])
                 .set(i64::from(candidate == state));
         }
@@ -4060,7 +4171,8 @@ impl BgpMetrics {
     /// label combinations read 0.
     pub fn clear_evpn_es_ac_gate(&self, esi: &str) {
         for candidate in ["blocked", "forwarding", "mixed-roles"] {
-            self.evpn_es_ac_gate
+            self.0
+                .evpn_es_ac_gate
                 .with_label_values(&[esi, candidate])
                 .set(0);
         }
@@ -4069,7 +4181,8 @@ impl BgpMetrics {
     /// Record an EVPN DF role transition for `(ESI, VNI)`.
     pub fn record_evpn_df_role_change(&self, esi: &str, vni: u32) {
         let vni = vni.to_string();
-        self.evpn_df_role_changes
+        self.0
+            .evpn_df_role_changes
             .with_label_values(&[esi, vni.as_str()])
             .inc();
     }
@@ -4081,7 +4194,8 @@ impl BgpMetrics {
     /// removal is reserved for the ESI leaving the config
     /// ([`Self::remove_evpn_es_drained`]).
     pub fn set_evpn_es_drained(&self, esi: &str, reason: &str, drained: bool) {
-        self.evpn_es_drained
+        self.0
+            .evpn_es_drained
             .with_label_values(&[esi, reason])
             .set(i64::from(drained));
     }
@@ -4091,7 +4205,7 @@ impl BgpMetrics {
     /// unknown label set is a no-op.
     pub fn remove_evpn_es_drained(&self, esi: &str, reasons: &[&str]) {
         for reason in reasons {
-            let _ = self.evpn_es_drained.remove_label_values(&[esi, reason]);
+            let _ = self.0.evpn_es_drained.remove_label_values(&[esi, reason]);
         }
     }
 
@@ -4100,7 +4214,8 @@ impl BgpMetrics {
     /// once per pass per VRF; the value is the latest count of routes
     /// surviving the classifier.
     pub fn set_evpn_ip_vrf_observed_routes(&self, vrf: &str, count: i64) {
-        self.evpn_ip_vrf_observed_routes
+        self.0
+            .evpn_ip_vrf_observed_routes
             .with_label_values(&[vrf])
             .set(count);
     }
@@ -4111,7 +4226,8 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_ip_vrf_observed_routes_filtered
+        self.0
+            .evpn_ip_vrf_observed_routes_filtered
             .with_label_values(&[vrf, reason])
             .inc_by(delta);
     }
@@ -4123,7 +4239,8 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_ip_vrf_origination_suppressed
+        self.0
+            .evpn_ip_vrf_origination_suppressed
             .with_label_values(&[vrf, reason])
             .inc_by(delta);
     }
@@ -4133,14 +4250,16 @@ impl BgpMetrics {
     /// the count of locally-originated Type 5 routes currently
     /// advertised by the L3 originator for that VRF.
     pub fn set_evpn_ip_vrf_originated_routes(&self, vrf: &str, count: i64) {
-        self.evpn_ip_vrf_originated_routes
+        self.0
+            .evpn_ip_vrf_originated_routes
             .with_label_values(&[vrf])
             .set(count);
     }
 
     /// Set the installed-routes gauge for one VRF (Gate 9 slice 6c).
     pub fn set_evpn_ip_vrf_installed_routes(&self, vrf: &str, count: i64) {
-        self.evpn_ip_vrf_installed_routes
+        self.0
+            .evpn_ip_vrf_installed_routes
             .with_label_values(&[vrf])
             .set(count);
     }
@@ -4148,7 +4267,8 @@ impl BgpMetrics {
     /// Set the current Type 5 projection-drop gauge for one bounded
     /// `(vrf, reason)` label pair.
     pub fn set_evpn_ip_vrf_remote_prefix_drops(&self, vrf: &str, reason: &str, count: i64) {
-        self.evpn_ip_vrf_remote_prefix_drops
+        self.0
+            .evpn_ip_vrf_remote_prefix_drops
             .with_label_values(&[vrf, reason])
             .set(count);
     }
@@ -4163,7 +4283,8 @@ impl BgpMetrics {
         value: i64,
     ) {
         let desired = if desired { "true" } else { "false" };
-        self.evpn_managed_netdev_state
+        self.0
+            .evpn_managed_netdev_state
             .with_label_values(&[class, name, desired, state])
             .set(value);
     }
@@ -4178,6 +4299,7 @@ impl BgpMetrics {
     ) {
         let desired = if desired { "true" } else { "false" };
         let _ = self
+            .0
             .evpn_managed_netdev_state
             .remove_label_values(&[class, name, desired, state]);
     }
@@ -4187,7 +4309,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_fdb_nhg_drift_members_repaired.inc_by(delta);
+        self.0.evpn_fdb_nhg_drift_members_repaired.inc_by(delta);
     }
 
     /// Increment re-created / replaced FDB-NHG group counter.
@@ -4195,7 +4317,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_fdb_nhg_drift_groups_replaced.inc_by(delta);
+        self.0.evpn_fdb_nhg_drift_groups_replaced.inc_by(delta);
     }
 
     /// Increment cleaned FDB-NHG orphan counter.
@@ -4203,7 +4325,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_fdb_nhg_orphans_cleaned.inc_by(delta);
+        self.0.evpn_fdb_nhg_orphans_cleaned.inc_by(delta);
     }
 
     /// Increment permanent drift-disable counter.
@@ -4211,7 +4333,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_fdb_nhg_drift_disabled.inc_by(delta);
+        self.0.evpn_fdb_nhg_drift_disabled.inc_by(delta);
     }
 
     /// Increment the ADR-0079 single-dst FDB adoption counter.
@@ -4219,7 +4341,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_fdb_single_dst_adopted.inc_by(delta);
+        self.0.evpn_fdb_single_dst_adopted.inc_by(delta);
     }
 
     /// Increment the ADR-0079 single-dst FDB reap counter.
@@ -4227,7 +4349,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_fdb_single_dst_reaped.inc_by(delta);
+        self.0.evpn_fdb_single_dst_reaped.inc_by(delta);
     }
 
     /// Increment the ADR-0079 adopted IP-VRF route counter.
@@ -4235,7 +4357,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_l3_route_adopted.inc_by(delta);
+        self.0.evpn_l3_route_adopted.inc_by(delta);
     }
 
     /// Increment the ADR-0079 reaped IP-VRF route counter.
@@ -4243,7 +4365,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_l3_route_reaped.inc_by(delta);
+        self.0.evpn_l3_route_reaped.inc_by(delta);
     }
 
     /// Increment the ADR-0079 adopted L3 neighbor counter.
@@ -4251,7 +4373,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_l3_neighbor_adopted.inc_by(delta);
+        self.0.evpn_l3_neighbor_adopted.inc_by(delta);
     }
 
     /// Increment the ADR-0079 reaped L3 neighbor counter.
@@ -4259,7 +4381,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_l3_neighbor_reaped.inc_by(delta);
+        self.0.evpn_l3_neighbor_reaped.inc_by(delta);
     }
 
     /// Increment the ADR-0079 adopted L3VXLAN FDB row counter.
@@ -4267,7 +4389,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_l3vxlan_fdb_adopted.inc_by(delta);
+        self.0.evpn_l3vxlan_fdb_adopted.inc_by(delta);
     }
 
     /// Increment the ADR-0079 reaped L3VXLAN FDB row counter.
@@ -4275,7 +4397,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_l3vxlan_fdb_reaped.inc_by(delta);
+        self.0.evpn_l3vxlan_fdb_reaped.inc_by(delta);
     }
 
     /// Increment the ADR-0083 single-active backup-swap counter.
@@ -4283,7 +4405,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_single_active_backup_swaps.inc_by(delta);
+        self.0.evpn_single_active_backup_swaps.inc_by(delta);
     }
 
     /// Increment the ADR-0083 single-active ordered-teardown counter.
@@ -4291,7 +4413,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_single_active_teardowns.inc_by(delta);
+        self.0.evpn_single_active_teardowns.inc_by(delta);
     }
 
     /// Increment the LAN-283 foreign-blocked replace counter.
@@ -4299,7 +4421,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_foreign_replaces_blocked.inc_by(delta);
+        self.0.evpn_foreign_replaces_blocked.inc_by(delta);
     }
 
     /// Increment the LAN-283 foreign-spared delete counter.
@@ -4307,7 +4429,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_foreign_deletes_skipped.inc_by(delta);
+        self.0.evpn_foreign_deletes_skipped.inc_by(delta);
     }
 
     /// Increment the LAN-283 foreign-takeover relinquish counter.
@@ -4315,7 +4437,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_foreign_owned_relinquished.inc_by(delta);
+        self.0.evpn_foreign_owned_relinquished.inc_by(delta);
     }
 
     /// Increment the LAN-290 reserved-NHID-range conflict counter.
@@ -4323,7 +4445,7 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_foreign_nhid_range_conflicts.inc_by(delta);
+        self.0.evpn_foreign_nhid_range_conflicts.inc_by(delta);
     }
 
     /// Increment the #268 decomposed-apply fail-stop counter: a
@@ -4333,19 +4455,20 @@ impl BgpMetrics {
         if delta == 0 {
             return;
         }
-        self.evpn_runtime_decomposed_fail_stops.inc_by(delta);
+        self.0.evpn_runtime_decomposed_fail_stops.inc_by(delta);
     }
 
     /// Set the ADR-0083 backup-window gauge: how many
     /// `(ESI, EthernetTag)` single-active groups are currently
     /// retargeted at their backup PE.
     pub fn set_evpn_single_active_backup_active(&self, value: i64) {
-        self.evpn_single_active_backup_active.set(value);
+        self.0.evpn_single_active_backup_active.set(value);
     }
 
     /// Record a BMP event dropped at the PeerSession→BmpManager channel.
     pub fn record_bmp_source_drop(&self, peer: &str, reason: &str) {
-        self.bmp_source_drops
+        self.0
+            .bmp_source_drops
             .with_label_values(&[peer, reason])
             .inc();
     }
@@ -4355,7 +4478,8 @@ impl BgpMetrics {
     /// or `stats`; `reason` is `channel_full` or `channel_closed`. Both
     /// label sets are bounded, so this family needs no reaping.
     pub fn record_bmp_loc_rib_source_drop(&self, event: &str, reason: &str) {
-        self.bmp_loc_rib_source_drops
+        self.0
+            .bmp_loc_rib_source_drops
             .with_label_values(&[event, reason])
             .inc();
     }
@@ -4371,14 +4495,16 @@ impl BgpMetrics {
         reason: &str,
         count: u64,
     ) {
-        self.bmp_collector_drops
+        self.0
+            .bmp_collector_drops
             .with_label_values(&[collector, phase, reason])
             .inc_by(count);
     }
 
     /// Record a PeerUp-cache replay attempt for a reconnected BMP collector.
     pub fn record_bmp_replay_attempt(&self, collector: &str) {
-        self.bmp_replay_attempts
+        self.0
+            .bmp_replay_attempts
             .with_label_values(&[collector])
             .inc();
     }
@@ -4388,17 +4514,20 @@ impl BgpMetrics {
     /// `channel_closed`, or `channel_timeout`. When this counter is non-zero
     /// the manager has not processed the corresponding connection phase.
     pub fn record_bmp_control_event_drop(&self, collector: &str, kind: &str, reason: &str) {
-        self.bmp_control_event_drops
+        self.0
+            .bmp_control_event_drops
             .with_label_values(&[collector, kind, reason])
             .inc();
     }
 
     /// Reset live-buffer gauges for a newly validated collector generation.
     pub fn reset_bmp_loc_rib_dump_live_buffer(&self, collector: &str) {
-        self.bmp_loc_rib_dump_live_buffer_depth
+        self.0
+            .bmp_loc_rib_dump_live_buffer_depth
             .with_label_values(&[collector])
             .set(0);
-        self.bmp_loc_rib_dump_live_buffer_high_watermark
+        self.0
+            .bmp_loc_rib_dump_live_buffer_high_watermark
             .with_label_values(&[collector])
             .set(0);
     }
@@ -4406,10 +4535,12 @@ impl BgpMetrics {
     /// Observe a live-buffer depth, updating both current and generation HWM.
     pub fn observe_bmp_loc_rib_dump_live_buffer(&self, collector: &str, depth: usize) {
         let value = i64::try_from(depth).unwrap_or(i64::MAX);
-        self.bmp_loc_rib_dump_live_buffer_depth
+        self.0
+            .bmp_loc_rib_dump_live_buffer_depth
             .with_label_values(&[collector])
             .set(value);
         let high = self
+            .0
             .bmp_loc_rib_dump_live_buffer_high_watermark
             .with_label_values(&[collector]);
         if value > high.get() {
@@ -4419,7 +4550,8 @@ impl BgpMetrics {
 
     /// Clear only the current live-buffer depth after storage is discarded.
     pub fn clear_bmp_loc_rib_dump_live_buffer(&self, collector: &str) {
-        self.bmp_loc_rib_dump_live_buffer_depth
+        self.0
+            .bmp_loc_rib_dump_live_buffer_depth
             .with_label_values(&[collector])
             .set(0);
     }
@@ -4428,9 +4560,11 @@ impl BgpMetrics {
     pub fn reap_bmp_loc_rib_dump_live_buffer(&self, collector: &str) {
         let labels = &[collector];
         let _ = self
+            .0
             .bmp_loc_rib_dump_live_buffer_depth
             .remove_label_values(labels);
         let _ = self
+            .0
             .bmp_loc_rib_dump_live_buffer_high_watermark
             .remove_label_values(labels);
     }
@@ -4442,9 +4576,9 @@ impl BgpMetrics {
     /// (`BmpManager`'s `Drop`) so a collector that leaves the config does
     /// not keep its series alive in a long-lived registry.
     pub fn reap_bmp_collector_series(&self, collector: &str) {
-        Self::reap_label_series_from_vec(&self.bmp_collector_drops, "collector", collector);
-        Self::reap_label_series_from_vec(&self.bmp_replay_attempts, "collector", collector);
-        Self::reap_label_series_from_vec(&self.bmp_control_event_drops, "collector", collector);
+        Self::reap_label_series_from_vec(&self.0.bmp_collector_drops, "collector", collector);
+        Self::reap_label_series_from_vec(&self.0.bmp_replay_attempts, "collector", collector);
+        Self::reap_label_series_from_vec(&self.0.bmp_control_event_drops, "collector", collector);
     }
 
     // ── Event history outbox (ADR-0072) ─────────────────────────
@@ -4452,7 +4586,8 @@ impl BgpMetrics {
     /// Record a successful durable commit. Called by EHM after each
     /// committed batch, once per event in the batch.
     pub fn record_event_outbox_committed(&self, category: &str) {
-        self.event_outbox_committed
+        self.0
+            .event_outbox_committed
             .with_label_values(&[category])
             .inc();
     }
@@ -4464,7 +4599,8 @@ impl BgpMetrics {
     /// represents an operator-visible outbox degradation; shutdown-time
     /// `closed` drops intentionally do not mark degraded.
     pub fn record_event_outbox_drop(&self, category: &str, reason: &str) {
-        self.event_outbox_dropped
+        self.0
+            .event_outbox_dropped
             .with_label_values(&[category, reason])
             .inc();
     }
@@ -4476,7 +4612,8 @@ impl BgpMetrics {
     /// the bridge body and therefore never enqueued into EHM. Same
     /// bounded `reason` vocabulary as `record_event_outbox_drop`.
     pub fn record_event_outbox_drops_by(&self, category: &str, reason: &str, count: u64) {
-        self.event_outbox_dropped
+        self.0
+            .event_outbox_dropped
             .with_label_values(&[category, reason])
             .inc_by(count);
     }
@@ -4484,32 +4621,34 @@ impl BgpMetrics {
     /// Update the per-category queue depth gauge. EHM calls this
     /// from the actor loop after each batch drain.
     pub fn set_event_outbox_queue_depth(&self, category: &str, depth: i64) {
-        self.event_outbox_queue_depth
+        self.0
+            .event_outbox_queue_depth
             .with_label_values(&[category])
             .set(depth);
     }
 
     pub fn set_event_outbox_db_size_bytes(&self, bytes: i64) {
-        self.event_outbox_db_size_bytes.set(bytes);
+        self.0.event_outbox_db_size_bytes.set(bytes);
     }
 
     pub fn record_event_outbox_retention_evicted(&self, reason: &str, count: u64) {
-        self.event_outbox_retention_evicted
+        self.0
+            .event_outbox_retention_evicted
             .with_label_values(&[reason])
             .inc_by(count);
     }
 
     pub fn set_event_outbox_latest_event_id(&self, event_id: i64) {
-        self.event_outbox_latest_event_id.set(event_id);
+        self.0.event_outbox_latest_event_id.set(event_id);
     }
 
     pub fn record_event_outbox_open_failure(&self) {
-        self.event_outbox_open_failures.inc();
-        self.event_outbox_degraded.set(1);
+        self.0.event_outbox_open_failures.inc();
+        self.0.event_outbox_degraded.set(1);
     }
 
     pub fn mark_event_outbox_degraded(&self) {
-        self.event_outbox_degraded.set(1);
+        self.0.event_outbox_degraded.set(1);
     }
 
     /// Increment the `SubscribeFromEvent` cursor-gap counter. The
@@ -4517,14 +4656,14 @@ impl BgpMetrics {
     /// `StreamLagEvent` because the requested cursor was below the
     /// retention floor (ADR-0072 PR5).
     pub fn record_event_outbox_cursor_gap(&self) {
-        self.event_outbox_cursor_gap.inc();
+        self.0.event_outbox_cursor_gap.inc();
     }
 
     /// Whether the outbox is currently flagged degraded. 1 = at least
     /// one drop or open failure since process start.
     #[must_use]
     pub fn event_outbox_degraded(&self) -> bool {
-        self.event_outbox_degraded.get() != 0
+        self.0.event_outbox_degraded.get() != 0
     }
 }
 
@@ -4665,6 +4804,73 @@ mod tests {
         String::from_utf8(buf).unwrap()
     }
 
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn metrics_handle_is_one_pointer() {
+        assert_eq!(std::mem::size_of::<BgpMetrics>(), 8);
+    }
+
+    #[test]
+    fn clones_share_one_inventory_and_survive_either_drop_order() {
+        let original = BgpMetrics::new();
+        let clone = original.clone();
+        assert!(Arc::ptr_eq(&original.0, &clone.0));
+        clone.record_message_sent("192.0.2.1", "update");
+        drop(clone);
+        assert!(
+            gather_text(&original)
+                .contains(r#"bgp_messages_sent_total{peer="192.0.2.1",type="update"} 1"#)
+        );
+        let survivor = original.clone();
+        drop(original);
+        survivor.record_message_sent("192.0.2.1", "update");
+        let families = survivor.registry().gather();
+        let family = families
+            .iter()
+            .filter(|family| family.name() == "bgp_messages_sent_total")
+            .collect::<Vec<_>>();
+        assert_eq!(family.len(), 1);
+        assert_eq!(family[0].get_metric().len(), 1);
+        assert!((family[0].get_metric()[0].get_counter().value() - 2.0).abs() < f64::EPSILON);
+    }
+    #[test]
+    fn independent_instances_isolate_policy_memo_and_registry_lifetime() {
+        let first = BgpMetrics::new();
+        let second = BgpMetrics::new();
+        first.record_policy_routes("192.0.2.1", "term-a", "import", "permit");
+        second.record_policy_routes("192.0.2.1", "term-a", "import", "permit");
+        second.record_policy_routes("192.0.2.1", "term-a", "import", "permit");
+        assert_ne!(first.0.instance_id, second.0.instance_id);
+        assert!(gather_text(&first).contains("bgp_policy_routes_total{action=\"permit\",direction=\"import\",peer=\"192.0.2.1\",policy=\"term-a\"} 1"));
+        assert!(gather_text(&second).contains("bgp_policy_routes_total{action=\"permit\",direction=\"import\",peer=\"192.0.2.1\",policy=\"term-a\"} 2"));
+    }
+
+    #[test]
+    fn concurrent_clones_publish_exact_total() {
+        let metrics = BgpMetrics::new();
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let metrics = metrics.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..250 {
+                        metrics.record_message_received("192.0.2.1", "update");
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(
+            metrics
+                .0
+                .messages_received
+                .with_label_values(&["192.0.2.1", "update"])
+                .get(),
+            1_000
+        );
+    }
+
     #[test]
     fn new_creates_metrics_at_zero() {
         let m = BgpMetrics::new();
@@ -4724,14 +4930,14 @@ mod tests {
         metrics.record_dynamic_neighbor_limit_rejection();
         metrics.record_dynamic_neighbor_limit_rejection();
 
-        assert_eq!(metrics.dynamic_neighbor_slots_used.get(), 3);
-        assert_eq!(metrics.dynamic_neighbor_slots_limit.get(), 5);
-        assert_eq!(metrics.dynamic_neighbor_slots_headroom.get(), 2);
-        assert_eq!(metrics.dynamic_neighbor_limit_rejections.get(), 2);
+        assert_eq!(metrics.0.dynamic_neighbor_slots_used.get(), 3);
+        assert_eq!(metrics.0.dynamic_neighbor_slots_limit.get(), 5);
+        assert_eq!(metrics.0.dynamic_neighbor_slots_headroom.get(), 2);
+        assert_eq!(metrics.0.dynamic_neighbor_limit_rejections.get(), 2);
 
         metrics.set_dynamic_neighbor_capacity(6, 5);
         assert_eq!(
-            metrics.dynamic_neighbor_slots_headroom.get(),
+            metrics.0.dynamic_neighbor_slots_headroom.get(),
             0,
             "headroom saturates instead of reporting a negative capacity"
         );
@@ -4795,10 +5001,10 @@ mod tests {
         m.record_state_transition("10.0.0.1", "idle", "connect");
         m.record_state_transition("10.0.0.1", "idle", "connect");
 
-        let val = m
-            .state_transitions
-            .with_label_values(&["10.0.0.1", "idle", "connect"])
-            .get();
+        let val =
+            m.0.state_transitions
+                .with_label_values(&["10.0.0.1", "idle", "connect"])
+                .get();
         assert_eq!(val, 2);
     }
 
@@ -4807,7 +5013,7 @@ mod tests {
         let m = BgpMetrics::new();
         m.record_state_transition("10.0.0.1", "established", "idle");
 
-        let flaps = m.session_flaps.with_label_values(&["10.0.0.1"]).get();
+        let flaps = m.0.session_flaps.with_label_values(&["10.0.0.1"]).get();
         assert_eq!(flaps, 1);
     }
 
@@ -4853,13 +5059,13 @@ mod tests {
         m.record_exact_export_rejection("10.0.0.2", "l2vpn_evpn", ExactExportReason::Encoding);
 
         assert_eq!(
-            m.exact_export_rejections
+            m.0.exact_export_rejections
                 .with_label_values(&["10.0.0.1", "ipv4_unicast", "message_too_long"])
                 .get(),
             2
         );
         assert_eq!(
-            m.exact_export_rejections
+            m.0.exact_export_rejections
                 .with_label_values(&["10.0.0.1", "unknown", "encoding"])
                 .get(),
             1,
@@ -4881,13 +5087,13 @@ mod tests {
         m.record_blackhole_discard_kernel_failure("dump");
 
         assert_eq!(
-            m.blackhole_discard_kernel_failures
+            m.0.blackhole_discard_kernel_failures
                 .with_label_values(&["setup"])
                 .get(),
             1
         );
         assert_eq!(
-            m.blackhole_discard_kernel_failures
+            m.0.blackhole_discard_kernel_failures
                 .with_label_values(&["dump"])
                 .get(),
             1
@@ -4903,16 +5109,22 @@ mod tests {
         m.record_fib_kernel_failure("setup");
         m.record_fib_kernel_failure("dump");
 
-        assert_eq!(m.fib_routes_installed.get(), 1);
-        assert_eq!(m.fib_routes_withdrawn.get(), 1);
+        assert_eq!(m.0.fib_routes_installed.get(), 1);
+        assert_eq!(m.0.fib_routes_withdrawn.get(), 1);
         assert_eq!(
-            m.fib_routes_rejected
+            m.0.fib_routes_rejected
                 .with_label_values(&["foreign_route_exists"])
                 .get(),
             1
         );
-        assert_eq!(m.fib_kernel_failures.with_label_values(&["setup"]).get(), 1);
-        assert_eq!(m.fib_kernel_failures.with_label_values(&["dump"]).get(), 1);
+        assert_eq!(
+            m.0.fib_kernel_failures.with_label_values(&["setup"]).get(),
+            1
+        );
+        assert_eq!(
+            m.0.fib_kernel_failures.with_label_values(&["dump"]).get(),
+            1
+        );
     }
 
     #[test]
@@ -4925,19 +5137,19 @@ mod tests {
         m.record_kernel_route_notify_subscription_failure("blackhole_discard", "ipv6_route");
 
         assert_eq!(
-            m.kernel_route_notify_dropped
+            m.0.kernel_route_notify_dropped
                 .with_label_values(&["general_fib", "channel_full"])
                 .get(),
             2
         );
         assert_eq!(
-            m.kernel_route_notify_subscription_failures
+            m.0.kernel_route_notify_subscription_failures
                 .with_label_values(&["blackhole_discard", "ipv4_route"])
                 .get(),
             1
         );
         assert_eq!(
-            m.kernel_route_notify_subscription_failures
+            m.0.kernel_route_notify_subscription_failures
                 .with_label_values(&["blackhole_discard", "ipv6_route"])
                 .get(),
             1
@@ -4953,13 +5165,13 @@ mod tests {
         m.record_event_stream_lagged("watch_events", "session", 0);
 
         assert_eq!(
-            m.event_stream_lagged
+            m.0.event_stream_lagged
                 .with_label_values(&["watch_events", "route"])
                 .get(),
             5
         );
         assert_eq!(
-            m.event_stream_lagged
+            m.0.event_stream_lagged
                 .with_label_values(&["watch_events", "session"])
                 .get(),
             0
@@ -4973,7 +5185,7 @@ mod tests {
         {
             let _guard = m.event_stream_subscriber_guard("watch_routes", "route");
             assert_eq!(
-                m.event_stream_subscribers
+                m.0.event_stream_subscribers
                     .with_label_values(&["watch_routes", "route"])
                     .get(),
                 1
@@ -4981,7 +5193,7 @@ mod tests {
         }
 
         assert_eq!(
-            m.event_stream_subscribers
+            m.0.event_stream_subscribers
                 .with_label_values(&["watch_routes", "route"])
                 .get(),
             0
@@ -4995,7 +5207,7 @@ mod tests {
         m.record_grpc_authz_decision("operator_only", "audit_forward", "mtls", "read_write");
 
         assert_eq!(
-            m.grpc_authz_decisions
+            m.0.grpc_authz_decisions
                 .with_label_values(&["operator_only", "audit_forward", "mtls", "read_write"])
                 .get(),
             2
@@ -5024,19 +5236,19 @@ mod tests {
         m.record_config_transaction_lifecycle("auto_revert", "success");
 
         assert_eq!(
-            m.config_transaction_lifecycle
+            m.0.config_transaction_lifecycle
                 .with_label_values(&["confirm", "success"])
                 .get(),
             1
         );
         assert_eq!(
-            m.config_transaction_lifecycle
+            m.0.config_transaction_lifecycle
                 .with_label_values(&["abort", "failure"])
                 .get(),
             1
         );
         assert_eq!(
-            m.config_transaction_lifecycle
+            m.0.config_transaction_lifecycle
                 .with_label_values(&["auto_revert", "success"])
                 .get(),
             1
@@ -5058,7 +5270,7 @@ mod tests {
         m.record_otc_routes_blocked("10.0.0.2", OtcBlockReason::IngressPeerMismatch, 3);
 
         assert_eq!(
-            m.otc_routes_blocked
+            m.0.otc_routes_blocked
                 .with_label_values(&["10.0.0.2", "ingress_peer_mismatch"])
                 .get(),
             5
@@ -5076,7 +5288,7 @@ mod tests {
         for reason in OtcBlockReason::ALL {
             m.record_otc_routes_blocked("10.0.0.2", reason, 1);
             assert_eq!(
-                m.otc_routes_blocked
+                m.0.otc_routes_blocked
                     .with_label_values(&["10.0.0.2", reason.as_str()])
                     .get(),
                 1,
@@ -5100,19 +5312,19 @@ mod tests {
         m.record_policy_routes("10.0.0.3", "inline", "import", "deny");
 
         assert_eq!(
-            m.policy_routes
+            m.0.policy_routes
                 .with_label_values(&["10.0.0.2", "ingress-filter", "import", "permit"])
                 .get(),
             3
         );
         assert_eq!(
-            m.policy_routes
+            m.0.policy_routes
                 .with_label_values(&["10.0.0.2", "ingress-filter", "import", "deny"])
                 .get(),
             1
         );
         assert_eq!(
-            m.policy_routes
+            m.0.policy_routes
                 .with_label_values(&["10.0.0.3", "inline", "import", "deny"])
                 .get(),
             1
@@ -5135,13 +5347,13 @@ mod tests {
         m.record_policy_eval_error("export", "fuel-exhausted");
 
         assert_eq!(
-            m.policy_eval_errors
+            m.0.policy_eval_errors
                 .with_label_values(&["import", "overflow"])
                 .get(),
             2
         );
         assert_eq!(
-            m.policy_eval_errors
+            m.0.policy_eval_errors
                 .with_label_values(&["export", "fuel-exhausted"])
                 .get(),
             1
@@ -5159,12 +5371,12 @@ mod tests {
     fn policy_freshness_timestamps_stamp_and_reap() {
         let m = BgpMetrics::new();
         m.record_policy_generation_loaded();
-        assert!(m.policy_generation_loaded_timestamp.get() > 0);
+        assert!(m.0.policy_generation_loaded_timestamp.get() > 0);
 
         m.record_policy_dataset_loaded("customers");
         m.record_policy_dataset_refresh_error("customers");
         assert!(
-            m.policy_dataset_loaded_timestamp
+            m.0.policy_dataset_loaded_timestamp
                 .with_label_values(&["customers"])
                 .get()
                 > 0
@@ -5180,7 +5392,7 @@ mod tests {
         let text = gather_text(&m);
         assert!(!text.contains(r#"dataset="customers""#));
         // The unlabeled generation timestamp is untouched by dataset reaps.
-        assert!(m.policy_generation_loaded_timestamp.get() > 0);
+        assert!(m.0.policy_generation_loaded_timestamp.get() > 0);
     }
 
     /// Reaping a peer must invalidate the thread-local memoized counter
@@ -5202,7 +5414,7 @@ mod tests {
         // memoized pre-reap child.
         m.record_policy_routes("10.0.0.2", "ingress-filter", "import", "permit");
         assert_eq!(
-            m.policy_routes
+            m.0.policy_routes
                 .with_label_values(&["10.0.0.2", "ingress-filter", "import", "permit"])
                 .get(),
             1,
@@ -5224,14 +5436,14 @@ mod tests {
         a2.record_policy_routes("10.0.0.2", "p", "import", "permit");
 
         assert_eq!(
-            a.policy_routes
+            a.0.policy_routes
                 .with_label_values(&["10.0.0.2", "p", "import", "permit"])
                 .get(),
             2,
             "instance A counts its own and its clone's increment"
         );
         assert_eq!(
-            b.policy_routes
+            b.0.policy_routes
                 .with_label_values(&["10.0.0.2", "p", "import", "permit"])
                 .get(),
             1,
@@ -5248,25 +5460,25 @@ mod tests {
         m.record_validation_import_refresh("aspa", "failed", 1);
 
         assert_eq!(
-            m.validation_import_refreshes
+            m.0.validation_import_refreshes
                 .with_label_values(&["rpki", "eligible"])
                 .get(),
             3
         );
         assert_eq!(
-            m.validation_import_refreshes
+            m.0.validation_import_refreshes
                 .with_label_values(&["rpki", "refreshed"])
                 .get(),
             2
         );
         assert_eq!(
-            m.validation_import_refreshes
+            m.0.validation_import_refreshes
                 .with_label_values(&["rpki", "skipped_not_established"])
                 .get(),
             1
         );
         assert_eq!(
-            m.validation_import_refreshes
+            m.0.validation_import_refreshes
                 .with_label_values(&["aspa", "failed"])
                 .get(),
             1
@@ -5298,13 +5510,13 @@ mod tests {
         m.set_route_refresh_stale_entries("10.0.0.1", "ipv4_unicast", 0);
 
         assert_eq!(
-            m.route_refresh_in_progress
+            m.0.route_refresh_in_progress
                 .with_label_values(&["10.0.0.1", "ipv4_unicast"])
                 .get(),
             0
         );
         assert_eq!(
-            m.route_refresh_stale_entries
+            m.0.route_refresh_stale_entries
                 .with_label_values(&["10.0.0.1", "ipv4_unicast"])
                 .get(),
             0
@@ -5320,13 +5532,13 @@ mod tests {
     fn policy_transition_gauges_are_process_global_and_retain_terminal_duration() {
         let m = BgpMetrics::new();
         m.set_rib_policy_transition_in_progress(true);
-        assert_eq!(m.rib_policy_transition_in_progress.get(), 1);
+        assert_eq!(m.0.rib_policy_transition_in_progress.get(), 1);
 
         m.set_rib_policy_transition_last_duration(std::time::Duration::from_millis(1_234));
         m.set_rib_policy_transition_in_progress(false);
-        assert_eq!(m.rib_policy_transition_in_progress.get(), 0);
+        assert_eq!(m.0.rib_policy_transition_in_progress.get(), 0);
         assert_eq!(
-            m.rib_policy_transition_last_duration_milliseconds.get(),
+            m.0.rib_policy_transition_last_duration_milliseconds.get(),
             1_234
         );
 
@@ -5489,13 +5701,13 @@ mod tests {
         m.record_role_mismatch("10.0.0.8", "customer", "none");
 
         assert_eq!(
-            m.role_mismatch
+            m.0.role_mismatch
                 .with_label_values(&["10.0.0.7", "provider", "provider"])
                 .get(),
             2
         );
         assert_eq!(
-            m.role_mismatch
+            m.0.role_mismatch
                 .with_label_values(&["10.0.0.8", "customer", "none"])
                 .get(),
             1
@@ -5515,8 +5727,8 @@ mod tests {
         m.set_route_event_history_capacity(4096);
         m.set_route_event_history_depth(17);
 
-        assert_eq!(m.route_event_history_capacity.get(), 4096);
-        assert_eq!(m.route_event_history_depth.get(), 17);
+        assert_eq!(m.0.route_event_history_capacity.get(), 4096);
+        assert_eq!(m.0.route_event_history_depth.get(), 17);
     }
 
     #[test]
@@ -5525,7 +5737,7 @@ mod tests {
         m.record_state_transition("10.0.0.1", "idle", "connect");
         m.record_state_transition("10.0.0.1", "connect", "open_sent");
 
-        let flaps = m.session_flaps.with_label_values(&["10.0.0.1"]).get();
+        let flaps = m.0.session_flaps.with_label_values(&["10.0.0.1"]).get();
         assert_eq!(flaps, 0);
     }
 
@@ -5534,7 +5746,10 @@ mod tests {
         let m = BgpMetrics::new();
         m.record_state_transition("10.0.0.1", "open_confirm", "established");
 
-        let est = m.session_established.with_label_values(&["10.0.0.1"]).get();
+        let est =
+            m.0.session_established
+                .with_label_values(&["10.0.0.1"])
+                .get();
         assert_eq!(est, 1);
     }
 
@@ -5545,16 +5760,16 @@ mod tests {
         m.record_notification_sent("10.0.0.1", "2", "2");
         m.record_notification_sent("10.0.0.1", "6", "0");
 
-        let open_err = m
-            .notifications_sent
-            .with_label_values(&["10.0.0.1", "2", "2"])
-            .get();
+        let open_err =
+            m.0.notifications_sent
+                .with_label_values(&["10.0.0.1", "2", "2"])
+                .get();
         assert_eq!(open_err, 2);
 
-        let cease = m
-            .notifications_sent
-            .with_label_values(&["10.0.0.1", "6", "0"])
-            .get();
+        let cease =
+            m.0.notifications_sent
+                .with_label_values(&["10.0.0.1", "6", "0"])
+                .get();
         assert_eq!(cease, 1);
     }
 
@@ -5563,10 +5778,10 @@ mod tests {
         let m = BgpMetrics::new();
         m.record_notification_received("10.0.0.2", "4", "0");
 
-        let val = m
-            .notifications_received
-            .with_label_values(&["10.0.0.2", "4", "0"])
-            .get();
+        let val =
+            m.0.notifications_received
+                .with_label_values(&["10.0.0.2", "4", "0"])
+                .get();
         assert_eq!(val, 1);
     }
 
@@ -5577,16 +5792,16 @@ mod tests {
         m.record_message_sent("10.0.0.1", "keepalive");
         m.record_message_sent("10.0.0.1", "keepalive");
 
-        let open = m
-            .messages_sent
-            .with_label_values(&["10.0.0.1", "open"])
-            .get();
+        let open =
+            m.0.messages_sent
+                .with_label_values(&["10.0.0.1", "open"])
+                .get();
         assert_eq!(open, 1);
 
-        let ka = m
-            .messages_sent
-            .with_label_values(&["10.0.0.1", "keepalive"])
-            .get();
+        let ka =
+            m.0.messages_sent
+                .with_label_values(&["10.0.0.1", "keepalive"])
+                .get();
         assert_eq!(ka, 2);
     }
 
@@ -5595,10 +5810,10 @@ mod tests {
         let m = BgpMetrics::new();
         m.record_message_received("10.0.0.2", "update");
 
-        let val = m
-            .messages_received
-            .with_label_values(&["10.0.0.2", "update"])
-            .get();
+        let val =
+            m.0.messages_received
+                .with_label_values(&["10.0.0.2", "update"])
+                .get();
         assert_eq!(val, 1);
     }
 
@@ -5607,17 +5822,17 @@ mod tests {
         let m = BgpMetrics::new();
         m.set_rib_prefixes("10.0.0.1", "ipv4_unicast", 42);
 
-        let val = m
-            .rib_prefixes
-            .with_label_values(&["10.0.0.1", "ipv4_unicast"])
-            .get();
+        let val =
+            m.0.rib_prefixes
+                .with_label_values(&["10.0.0.1", "ipv4_unicast"])
+                .get();
         assert_eq!(val, 42);
 
         m.set_rib_prefixes("10.0.0.1", "ipv4_unicast", 0);
-        let val = m
-            .rib_prefixes
-            .with_label_values(&["10.0.0.1", "ipv4_unicast"])
-            .get();
+        let val =
+            m.0.rib_prefixes
+                .with_label_values(&["10.0.0.1", "ipv4_unicast"])
+                .get();
         assert_eq!(val, 0);
     }
 
@@ -5625,9 +5840,9 @@ mod tests {
     fn rib_attr_intern_global_size_gauge_is_daemon_wide() {
         let m = BgpMetrics::new();
         m.set_rib_attr_intern_global_size(7);
-        assert_eq!(m.rib_attr_intern_global_size.get(), 7);
+        assert_eq!(m.0.rib_attr_intern_global_size.get(), 7);
         m.set_rib_attr_intern_global_size(3);
-        assert_eq!(m.rib_attr_intern_global_size.get(), 3);
+        assert_eq!(m.0.rib_attr_intern_global_size.get(), 3);
     }
 
     #[test]
@@ -5636,14 +5851,14 @@ mod tests {
         m.record_state_transition("10.0.0.1", "idle", "connect");
         m.record_state_transition("10.0.0.2", "idle", "connect");
 
-        let p1 = m
-            .state_transitions
-            .with_label_values(&["10.0.0.1", "idle", "connect"])
-            .get();
-        let p2 = m
-            .state_transitions
-            .with_label_values(&["10.0.0.2", "idle", "connect"])
-            .get();
+        let p1 =
+            m.0.state_transitions
+                .with_label_values(&["10.0.0.1", "idle", "connect"])
+                .get();
+        let p2 =
+            m.0.state_transitions
+                .with_label_values(&["10.0.0.2", "idle", "connect"])
+                .get();
         assert_eq!(p1, 1);
         assert_eq!(p2, 1);
     }
@@ -5662,7 +5877,7 @@ mod tests {
 
     fn assert_duplicate_mac_metrics(m: &BgpMetrics, first_move_timestamp: i64, text: &str) {
         assert_eq!(
-            m.evpn_duplicate_mac_moves
+            m.0.evpn_duplicate_mac_moves
                 .with_label_values(&["100", "02:aa:bb:cc:dd:01"])
                 .get(),
             2
@@ -5672,20 +5887,20 @@ mod tests {
             "first move timestamp should be set"
         );
         assert_eq!(
-            m.evpn_duplicate_mac_first_move_timestamp
+            m.0.evpn_duplicate_mac_first_move_timestamp
                 .with_label_values(&["100", "02:aa:bb:cc:dd:01"])
                 .get(),
             first_move_timestamp,
             "first move timestamp should not change on later moves"
         );
         assert_eq!(
-            m.evpn_duplicate_mac_threshold_exceeded
+            m.0.evpn_duplicate_mac_threshold_exceeded
                 .with_label_values(&["100", "02:aa:bb:cc:dd:01", "detect"])
                 .get(),
             1
         );
         assert_eq!(
-            m.evpn_duplicate_mac_quarantine_active
+            m.0.evpn_duplicate_mac_quarantine_active
                 .with_label_values(&["100", "02:aa:bb:cc:dd:01"])
                 .get(),
             1
@@ -5730,46 +5945,46 @@ mod tests {
         m.record_evpn_local_observation_drop("channel_full");
         m.record_evpn_local_observation_drop("channel_closed");
         m.record_evpn_duplicate_mac_move(100, "02:aa:bb:cc:dd:01");
-        let first_move_timestamp = m
-            .evpn_duplicate_mac_first_move_timestamp
-            .with_label_values(&["100", "02:aa:bb:cc:dd:01"])
-            .get();
+        let first_move_timestamp =
+            m.0.evpn_duplicate_mac_first_move_timestamp
+                .with_label_values(&["100", "02:aa:bb:cc:dd:01"])
+                .get();
         m.record_evpn_duplicate_mac_move(100, "02:aa:bb:cc:dd:01");
         m.record_evpn_duplicate_mac_threshold_exceeded(100, "02:aa:bb:cc:dd:01", "detect");
         m.set_evpn_duplicate_mac_quarantine_active(100, "02:aa:bb:cc:dd:01", true);
 
         assert_eq!(
-            m.evpn_local_originations
+            m.0.evpn_local_originations
                 .with_label_values(&["inject"])
                 .get(),
             1
         );
         assert_eq!(
-            m.evpn_local_originations
+            m.0.evpn_local_originations
                 .with_label_values(&["withdraw"])
                 .get(),
             1
         );
         assert_eq!(
-            m.evpn_local_origination_errors
+            m.0.evpn_local_origination_errors
                 .with_label_values(&["inject"])
                 .get(),
             1
         );
         assert_eq!(
-            m.evpn_local_origination_errors
+            m.0.evpn_local_origination_errors
                 .with_label_values(&["withdraw"])
                 .get(),
             1
         );
         assert_eq!(
-            m.evpn_local_observations_dropped
+            m.0.evpn_local_observations_dropped
                 .with_label_values(&["channel_full"])
                 .get(),
             1
         );
         assert_eq!(
-            m.evpn_local_observations_dropped
+            m.0.evpn_local_observations_dropped
                 .with_label_values(&["channel_closed"])
                 .get(),
             1
@@ -5796,12 +6011,12 @@ mod tests {
         m.add_evpn_fdb_single_dst_adopted(5);
         m.add_evpn_fdb_single_dst_reaped(6);
 
-        assert_eq!(m.evpn_fdb_nhg_drift_members_repaired.get(), 2);
-        assert_eq!(m.evpn_fdb_nhg_drift_groups_replaced.get(), 3);
-        assert_eq!(m.evpn_fdb_nhg_orphans_cleaned.get(), 4);
-        assert_eq!(m.evpn_fdb_nhg_drift_disabled.get(), 1);
-        assert_eq!(m.evpn_fdb_single_dst_adopted.get(), 5);
-        assert_eq!(m.evpn_fdb_single_dst_reaped.get(), 6);
+        assert_eq!(m.0.evpn_fdb_nhg_drift_members_repaired.get(), 2);
+        assert_eq!(m.0.evpn_fdb_nhg_drift_groups_replaced.get(), 3);
+        assert_eq!(m.0.evpn_fdb_nhg_orphans_cleaned.get(), 4);
+        assert_eq!(m.0.evpn_fdb_nhg_drift_disabled.get(), 1);
+        assert_eq!(m.0.evpn_fdb_single_dst_adopted.get(), 5);
+        assert_eq!(m.0.evpn_fdb_single_dst_reaped.get(), 6);
 
         let text = gather_text(&m);
         assert!(text.contains("evpn_fdb_nhg_drift_members_repaired_total 2"));
@@ -5822,12 +6037,12 @@ mod tests {
         m.add_evpn_l3vxlan_fdb_adopted(5);
         m.add_evpn_l3vxlan_fdb_reaped(6);
 
-        assert_eq!(m.evpn_l3_route_adopted.get(), 1);
-        assert_eq!(m.evpn_l3_route_reaped.get(), 2);
-        assert_eq!(m.evpn_l3_neighbor_adopted.get(), 3);
-        assert_eq!(m.evpn_l3_neighbor_reaped.get(), 4);
-        assert_eq!(m.evpn_l3vxlan_fdb_adopted.get(), 5);
-        assert_eq!(m.evpn_l3vxlan_fdb_reaped.get(), 6);
+        assert_eq!(m.0.evpn_l3_route_adopted.get(), 1);
+        assert_eq!(m.0.evpn_l3_route_reaped.get(), 2);
+        assert_eq!(m.0.evpn_l3_neighbor_adopted.get(), 3);
+        assert_eq!(m.0.evpn_l3_neighbor_reaped.get(), 4);
+        assert_eq!(m.0.evpn_l3vxlan_fdb_adopted.get(), 5);
+        assert_eq!(m.0.evpn_l3vxlan_fdb_reaped.get(), 6);
 
         let text = gather_text(&m);
         assert!(text.contains("evpn_l3_route_adopted_total 1"));
@@ -5845,9 +6060,9 @@ mod tests {
         m.add_evpn_foreign_deletes_skipped(2);
         m.add_evpn_foreign_owned_relinquished(3);
 
-        assert_eq!(m.evpn_foreign_replaces_blocked.get(), 1);
-        assert_eq!(m.evpn_foreign_deletes_skipped.get(), 2);
-        assert_eq!(m.evpn_foreign_owned_relinquished.get(), 3);
+        assert_eq!(m.0.evpn_foreign_replaces_blocked.get(), 1);
+        assert_eq!(m.0.evpn_foreign_deletes_skipped.get(), 2);
+        assert_eq!(m.0.evpn_foreign_owned_relinquished.get(), 3);
 
         let text = gather_text(&m);
         assert!(text.contains("evpn_foreign_replaces_blocked_total 1"));
@@ -5880,9 +6095,9 @@ mod tests {
         m.add_evpn_single_active_teardowns(1);
         m.set_evpn_single_active_backup_active(3);
 
-        assert_eq!(m.evpn_single_active_backup_swaps.get(), 2);
-        assert_eq!(m.evpn_single_active_teardowns.get(), 1);
-        assert_eq!(m.evpn_single_active_backup_active.get(), 3);
+        assert_eq!(m.0.evpn_single_active_backup_swaps.get(), 2);
+        assert_eq!(m.0.evpn_single_active_teardowns.get(), 1);
+        assert_eq!(m.0.evpn_single_active_backup_active.get(), 3);
 
         let text = gather_text(&m);
         assert!(text.contains("evpn_single_active_backup_swaps_total 2"));
@@ -5899,7 +6114,7 @@ mod tests {
     fn evpn_runtime_decomposed_fail_stops_is_exported() {
         let m = BgpMetrics::new();
         m.add_evpn_runtime_decomposed_fail_stops(1);
-        assert_eq!(m.evpn_runtime_decomposed_fail_stops.get(), 1);
+        assert_eq!(m.0.evpn_runtime_decomposed_fail_stops.get(), 1);
         let text = gather_text(&m);
         assert!(text.contains("evpn_runtime_decomposed_fail_stops_total 1"));
     }
@@ -5911,13 +6126,13 @@ mod tests {
         m.set_evpn_ip_vrf_remote_prefix_drops("_unscoped", "no_matching_ip_vrf", 1);
 
         assert_eq!(
-            m.evpn_ip_vrf_remote_prefix_drops
+            m.0.evpn_ip_vrf_remote_prefix_drops
                 .with_label_values(&["blue", "unresolved_overlay_index_gateway"])
                 .get(),
             2
         );
         assert_eq!(
-            m.evpn_ip_vrf_remote_prefix_drops
+            m.0.evpn_ip_vrf_remote_prefix_drops
                 .with_label_values(&["_unscoped", "no_matching_ip_vrf"])
                 .get(),
             1
@@ -5938,10 +6153,10 @@ mod tests {
         let m = BgpMetrics::new();
         m.set_adj_rib_out_prefixes("10.0.0.1", "ipv4_unicast", 5);
 
-        let val = m
-            .rib_adj_out_prefixes
-            .with_label_values(&["10.0.0.1", "ipv4_unicast"])
-            .get();
+        let val =
+            m.0.rib_adj_out_prefixes
+                .with_label_values(&["10.0.0.1", "ipv4_unicast"])
+                .get();
         assert_eq!(val, 5);
     }
 
@@ -5950,10 +6165,10 @@ mod tests {
         let m = BgpMetrics::new();
         m.set_loc_rib_prefixes("ipv4_unicast", 42);
 
-        let val = m
-            .rib_loc_prefixes
-            .with_label_values(&["ipv4_unicast"])
-            .get();
+        let val =
+            m.0.rib_loc_prefixes
+                .with_label_values(&["ipv4_unicast"])
+                .get();
         assert_eq!(val, 42);
     }
 
@@ -5963,7 +6178,10 @@ mod tests {
         m.record_max_prefix_exceeded("10.0.0.1");
         m.record_max_prefix_exceeded("10.0.0.1");
 
-        let val = m.max_prefix_exceeded.with_label_values(&["10.0.0.1"]).get();
+        let val =
+            m.0.max_prefix_exceeded
+                .with_label_values(&["10.0.0.1"])
+                .get();
         assert_eq!(val, 2);
     }
 
@@ -5973,10 +6191,10 @@ mod tests {
         m.record_as_path_loop_detected("10.0.0.1", 3);
         m.record_as_path_loop_detected("10.0.0.1", 2);
 
-        let val = m
-            .as_path_loop_detected
-            .with_label_values(&["10.0.0.1"])
-            .get();
+        let val =
+            m.0.as_path_loop_detected
+                .with_label_values(&["10.0.0.1"])
+                .get();
         assert_eq!(val, 5);
     }
 
@@ -5986,10 +6204,10 @@ mod tests {
         m.record_bgpls_nlri_discarded("10.0.0.1", 2);
         m.record_bgpls_nlri_discarded("10.0.0.1", 1);
 
-        let val = m
-            .bgpls_nlri_discarded
-            .with_label_values(&["10.0.0.1"])
-            .get();
+        let val =
+            m.0.bgpls_nlri_discarded
+                .with_label_values(&["10.0.0.1"])
+                .get();
         assert_eq!(val, 3);
     }
 
@@ -6010,7 +6228,7 @@ mod tests {
             ("session_reset", 1),
         ] {
             assert_eq!(
-                m.update_malformed
+                m.0.update_malformed
                     .with_label_values(&["10.0.0.1", disposition])
                     .get(),
                 expected,
@@ -6025,7 +6243,7 @@ mod tests {
         m.record_rr_loop_detected("10.0.0.1");
         m.record_rr_loop_detected("10.0.0.1");
 
-        let val = m.rr_loop_detected.with_label_values(&["10.0.0.1"]).get();
+        let val = m.0.rr_loop_detected.with_label_values(&["10.0.0.1"]).get();
         assert_eq!(val, 2);
     }
 
@@ -6046,16 +6264,16 @@ mod tests {
         m.record_bmp_source_drop("10.0.0.1", "channel_full");
         m.record_bmp_source_drop("10.0.0.2", "channel_closed");
 
-        let full = m
-            .bmp_source_drops
-            .with_label_values(&["10.0.0.1", "channel_full"])
-            .get();
+        let full =
+            m.0.bmp_source_drops
+                .with_label_values(&["10.0.0.1", "channel_full"])
+                .get();
         assert_eq!(full, 2);
 
-        let closed = m
-            .bmp_source_drops
-            .with_label_values(&["10.0.0.2", "channel_closed"])
-            .get();
+        let closed =
+            m.0.bmp_source_drops
+                .with_label_values(&["10.0.0.2", "channel_closed"])
+                .get();
         assert_eq!(closed, 1);
     }
 
@@ -6072,13 +6290,13 @@ mod tests {
         m.observe_bmp_loc_rib_dump_live_buffer(first, 2);
         m.observe_bmp_loc_rib_dump_live_buffer(sibling, 7);
         assert_eq!(
-            m.bmp_loc_rib_dump_live_buffer_depth
+            m.0.bmp_loc_rib_dump_live_buffer_depth
                 .with_label_values(&[first])
                 .get(),
             2
         );
         assert_eq!(
-            m.bmp_loc_rib_dump_live_buffer_high_watermark
+            m.0.bmp_loc_rib_dump_live_buffer_high_watermark
                 .with_label_values(&[first])
                 .get(),
             3
@@ -6086,20 +6304,20 @@ mod tests {
 
         m.clear_bmp_loc_rib_dump_live_buffer(first);
         assert_eq!(
-            m.bmp_loc_rib_dump_live_buffer_depth
+            m.0.bmp_loc_rib_dump_live_buffer_depth
                 .with_label_values(&[first])
                 .get(),
             0
         );
         assert_eq!(
-            m.bmp_loc_rib_dump_live_buffer_high_watermark
+            m.0.bmp_loc_rib_dump_live_buffer_high_watermark
                 .with_label_values(&[first])
                 .get(),
             3
         );
         m.reset_bmp_loc_rib_dump_live_buffer(first);
         assert_eq!(
-            m.bmp_loc_rib_dump_live_buffer_high_watermark
+            m.0.bmp_loc_rib_dump_live_buffer_high_watermark
                 .with_label_values(&[first])
                 .get(),
             0
@@ -6119,13 +6337,13 @@ mod tests {
         m.record_bmp_loc_rib_source_drop("stats", "channel_closed");
 
         assert_eq!(
-            m.bmp_loc_rib_source_drops
+            m.0.bmp_loc_rib_source_drops
                 .with_label_values(&["route_monitoring", "channel_full"])
                 .get(),
             2
         );
         assert_eq!(
-            m.bmp_loc_rib_source_drops
+            m.0.bmp_loc_rib_source_drops
                 .with_label_values(&["stats", "channel_closed"])
                 .get(),
             1
@@ -6141,16 +6359,16 @@ mod tests {
         // skipped, not just one.
         m.record_bmp_collector_drop("127.0.0.1:5000", "replay", "channel_full", 7);
 
-        let fan_out = m
-            .bmp_collector_drops
-            .with_label_values(&["127.0.0.1:5000", "fan_out", "channel_full"])
-            .get();
+        let fan_out =
+            m.0.bmp_collector_drops
+                .with_label_values(&["127.0.0.1:5000", "fan_out", "channel_full"])
+                .get();
         assert_eq!(fan_out, 2);
 
-        let replay = m
-            .bmp_collector_drops
-            .with_label_values(&["127.0.0.1:5000", "replay", "channel_full"])
-            .get();
+        let replay =
+            m.0.bmp_collector_drops
+                .with_label_values(&["127.0.0.1:5000", "replay", "channel_full"])
+                .get();
         assert_eq!(replay, 7);
     }
 
@@ -6161,16 +6379,16 @@ mod tests {
         m.record_bmp_control_event_drop("127.0.0.1:5000", "collector_connected", "channel_closed");
         m.record_bmp_control_event_drop("127.0.0.1:5000", "collector_connected", "channel_timeout");
 
-        let timeouts = m
-            .bmp_control_event_drops
-            .with_label_values(&["127.0.0.1:5000", "collector_connected", "channel_timeout"])
-            .get();
+        let timeouts =
+            m.0.bmp_control_event_drops
+                .with_label_values(&["127.0.0.1:5000", "collector_connected", "channel_timeout"])
+                .get();
         assert_eq!(timeouts, 2);
 
-        let closed = m
-            .bmp_control_event_drops
-            .with_label_values(&["127.0.0.1:5000", "collector_connected", "channel_closed"])
-            .get();
+        let closed =
+            m.0.bmp_control_event_drops
+                .with_label_values(&["127.0.0.1:5000", "collector_connected", "channel_closed"])
+                .get();
         assert_eq!(closed, 1);
     }
 
@@ -6191,39 +6409,39 @@ mod tests {
         m.record_rib_dirty_resync("cleared");
         m.set_rib_ingest_channel_depth(17);
 
-        assert_eq!(m.rib_outbound_registered_peers.get(), 3);
+        assert_eq!(m.0.rib_outbound_registered_peers.get(), 3);
         assert_eq!(
-            m.rib_outbound_registration_replaced
+            m.0.rib_outbound_registration_replaced
                 .with_label_values(&["10.0.0.1"])
                 .get(),
             2
         );
         assert_eq!(
-            m.rib_stale_peer_down_ignored
+            m.0.rib_stale_peer_down_ignored
                 .with_label_values(&["10.0.0.1"])
                 .get(),
             1
         );
         assert_eq!(
-            m.rib_stale_session_message_ignored
+            m.0.rib_stale_session_message_ignored
                 .with_label_values(&["10.0.0.1", "routes"])
                 .get(),
             2
         );
         assert_eq!(
-            m.rib_stale_session_message_ignored
+            m.0.rib_stale_session_message_ignored
                 .with_label_values(&["10.0.0.1", "eor"])
                 .get(),
             1
         );
         assert_eq!(
-            m.rib_stale_session_message_ignored
+            m.0.rib_stale_session_message_ignored
                 .with_label_values(&["10.0.0.1", "policy_context"])
                 .get(),
             1
         );
         assert_eq!(
-            m.rib_stale_session_message_ignored
+            m.0.rib_stale_session_message_ignored
                 .with_label_values(&["10.0.0.1", "slow_peer"])
                 .get(),
             1
@@ -6245,17 +6463,22 @@ mod tests {
                 .join(", ")
         )));
         assert_eq!(
-            m.rib_outbound_registration_failover
+            m.0.rib_outbound_registration_failover
                 .with_label_values(&["10.0.0.1"])
                 .get(),
             1
         );
         assert_eq!(
-            m.rib_dirty_resync.with_label_values(&["still_dirty"]).get(),
+            m.0.rib_dirty_resync
+                .with_label_values(&["still_dirty"])
+                .get(),
             1
         );
-        assert_eq!(m.rib_dirty_resync.with_label_values(&["cleared"]).get(), 1);
-        assert_eq!(m.rib_ingest_channel_depth.get(), 17);
+        assert_eq!(
+            m.0.rib_dirty_resync.with_label_values(&["cleared"]).get(),
+            1
+        );
+        assert_eq!(m.0.rib_ingest_channel_depth.get(), 17);
     }
 
     fn repo_doc(path: &str) -> String {
@@ -6560,7 +6783,7 @@ mod tests {
         m.record_state_transition("10.0.0.1", "idle", "connect");
         m.reap_peer_series("192.0.2.99");
         assert_eq!(
-            m.state_transitions
+            m.0.state_transitions
                 .with_label_values(&["10.0.0.1", "idle", "connect"])
                 .get(),
             1
@@ -6579,16 +6802,16 @@ mod tests {
         m.record_bmp_replay_attempt("127.0.0.1:5000");
         m.record_bmp_replay_attempt("127.0.0.1:5001");
 
-        let a = m
-            .bmp_replay_attempts
-            .with_label_values(&["127.0.0.1:5000"])
-            .get();
+        let a =
+            m.0.bmp_replay_attempts
+                .with_label_values(&["127.0.0.1:5000"])
+                .get();
         assert_eq!(a, 2);
 
-        let b = m
-            .bmp_replay_attempts
-            .with_label_values(&["127.0.0.1:5001"])
-            .get();
+        let b =
+            m.0.bmp_replay_attempts
+                .with_label_values(&["127.0.0.1:5001"])
+                .get();
         assert_eq!(b, 1);
     }
 
