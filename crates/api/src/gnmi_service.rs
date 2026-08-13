@@ -21,6 +21,7 @@ use crate::gnmi;
 use crate::gnmi_ext;
 use crate::peer_types::{PeerInfo, PeerManagerCommand};
 use crate::proto;
+use crate::runtime_config_settlement::OwnedRuntimeConfigRequestContext;
 use crate::server::{
     AccessMode, GnmiSetCommitAction, GnmiSetFn, GnmiSetOperation, GnmiSetTransaction,
     read_only_rejection,
@@ -2466,7 +2467,8 @@ impl gnmi::g_nmi_server::GNmi for GnmiService {
         // therefore only ever sent when every operation was applied — partial
         // apply is unrepresentable by construction, not misreported.
         let mut response = set_response_from_operations(&transaction.operations);
-        let outcome = set_handler(transaction)
+        let (context, _attachment) = OwnedRuntimeConfigRequestContext::unary();
+        let outcome = set_handler(transaction, context)
             .await
             .map_err(crate::server::GnmiSetError::into_status)?;
         response.timestamp = now_nanos();
@@ -2553,6 +2555,7 @@ mod tests {
     use super::*;
     use crate::test_support::peer_info;
     use gnmi::g_nmi_server::GNmi as _;
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
 
     fn test_service(peers: Vec<PeerInfo>) -> GnmiService {
@@ -2762,7 +2765,12 @@ mod tests {
     async fn set_with_hook_normalizes_operations_and_builds_response() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let hook_captured = Arc::clone(&captured);
-        let hook: crate::server::GnmiSetFn = Arc::new(move |transaction| {
+        let hook: crate::server::GnmiSetFn = Arc::new(move |transaction, context| {
+            assert!(
+                context
+                    .response_attached()
+                    .load(std::sync::atomic::Ordering::Acquire)
+            );
             hook_captured.lock().unwrap().push(transaction);
             Box::pin(async { Ok(crate::server::GnmiSetOutcome::default()) })
         });
@@ -2837,8 +2845,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_cancellation_detaches_but_does_not_cancel_daemon_hook() {
+        let (started, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let daemon_release = Arc::clone(&release);
+        let (continued, mut continued_rx) = tokio::sync::mpsc::unbounded_channel();
+        let hook: crate::server::GnmiSetFn = Arc::new(move |_, context| {
+            let attached = context.response_attached();
+            let started = started.clone();
+            let daemon_release = Arc::clone(&daemon_release);
+            let continued = continued.clone();
+            Box::pin(async move {
+                tokio::spawn(async move {
+                    assert!(attached.load(Ordering::Acquire));
+                    started.send(Arc::clone(&attached)).unwrap();
+                    daemon_release.acquire().await.unwrap().forget();
+                    assert!(!attached.load(Ordering::Acquire));
+                    continued.send(()).unwrap();
+                    Ok(crate::server::GnmiSetOutcome::default())
+                })
+                .await
+                .unwrap()
+            })
+        });
+        let service = test_service(Vec::new()).with_set_handler(Some(hook));
+        let rpc = tokio::spawn(async move {
+            service
+                .set(Request::new(gnmi::SetRequest {
+                    prefix: Some(mounted_path(&[])),
+                    delete: vec![relative_path(&["neighbors"])],
+                    replace: Vec::new(),
+                    update: Vec::new(),
+                    extension: Vec::new(),
+                    union_replace: Vec::new(),
+                }))
+                .await
+        });
+        let attached = started_rx.recv().await.unwrap();
+        assert!(attached.load(Ordering::Acquire));
+        rpc.abort();
+        assert!(rpc.await.unwrap_err().is_cancelled());
+        assert!(!attached.load(Ordering::Acquire));
+        release.add_permits(1);
+        continued_rx.recv().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn set_rejects_union_replace_before_hook() {
-        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_, _| {
             panic!("union_replace must reject before invoking the hook");
         });
         let err = test_service(Vec::new())
@@ -2859,7 +2913,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_rejects_empty_request_before_hook() {
-        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_, _| {
             panic!("empty Set request must reject before invoking the hook");
         });
         let err = test_service(Vec::new())
@@ -2882,7 +2936,7 @@ mod tests {
     async fn set_with_commit_request_forwards_confirmed_apply_action() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let hook_captured = Arc::clone(&captured);
-        let hook: crate::server::GnmiSetFn = Arc::new(move |transaction| {
+        let hook: crate::server::GnmiSetFn = Arc::new(move |transaction, _context| {
             hook_captured.lock().unwrap().push(transaction);
             Box::pin(async { Ok(crate::server::GnmiSetOutcome::default()) })
         });
@@ -2924,7 +2978,7 @@ mod tests {
     async fn set_with_commit_confirm_forwards_empty_transaction_action() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let hook_captured = Arc::clone(&captured);
-        let hook: crate::server::GnmiSetFn = Arc::new(move |transaction| {
+        let hook: crate::server::GnmiSetFn = Arc::new(move |transaction, _context| {
             hook_captured.lock().unwrap().push(transaction);
             Box::pin(async { Ok(crate::server::GnmiSetOutcome::default()) })
         });
@@ -2960,7 +3014,7 @@ mod tests {
     async fn set_with_commit_cancel_forwards_empty_transaction_action() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let hook_captured = Arc::clone(&captured);
-        let hook: crate::server::GnmiSetFn = Arc::new(move |transaction| {
+        let hook: crate::server::GnmiSetFn = Arc::new(move |transaction, _context| {
             hook_captured.lock().unwrap().push(transaction);
             Box::pin(async { Ok(crate::server::GnmiSetOutcome::default()) })
         });
@@ -2992,7 +3046,7 @@ mod tests {
     async fn set_with_commit_rollback_reset_forwards_empty_transaction_action() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let hook_captured = Arc::clone(&captured);
-        let hook: crate::server::GnmiSetFn = Arc::new(move |transaction| {
+        let hook: crate::server::GnmiSetFn = Arc::new(move |transaction, _context| {
             hook_captured.lock().unwrap().push(transaction);
             Box::pin(async { Ok(crate::server::GnmiSetOutcome::default()) })
         });
@@ -3030,7 +3084,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_rejects_unknown_extensions_before_hook() {
-        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_, _| {
             panic!("extensions must reject before invoking the hook");
         });
         let err = test_service(Vec::new())
@@ -3051,7 +3105,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_rejects_commit_action_shape_errors_before_hook() {
-        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_, _| {
             panic!("commit action shape errors must reject before invoking the hook");
         });
         let err = test_service(Vec::new())
@@ -3090,7 +3144,7 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("must not include Set operations"));
 
-        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_, _| {
             panic!("rollback-duration shape errors must reject before invoking the hook");
         });
         let err = test_service(Vec::new())
@@ -3120,7 +3174,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_rejects_commit_rollback_reset_missing_duration_before_hook() {
-        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_, _| {
             panic!("rollback-duration validation errors must reject before invoking the hook");
         });
         let err = test_service(Vec::new())
@@ -3147,7 +3201,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_rejects_empty_typed_value_before_hook() {
-        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_, _| {
             panic!("empty typed value must reject before invoking the hook");
         });
         let err = test_service(Vec::new())
@@ -3168,7 +3222,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_rejects_non_openconfig_origin_before_hook() {
-        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_, _| {
             panic!("bad origin must reject before invoking the hook");
         });
         let mut path = relative_path(&["bgp"]);
@@ -3194,7 +3248,7 @@ mod tests {
     /// `gnmi.gNMI/Set`.
     #[tokio::test]
     async fn set_on_read_only_listener_is_rejected_before_hook() {
-        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_, _| {
             panic!("read-only listeners must reject Set before invoking the hook");
         });
         let mut service = test_service(Vec::new()).with_set_handler(Some(hook));
@@ -3215,7 +3269,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_hook_error_maps_to_grpc_status() {
-        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_, _| {
             Box::pin(async {
                 Err(crate::server::GnmiSetError::FailedPrecondition(
                     "confirmed transaction pending".to_string(),

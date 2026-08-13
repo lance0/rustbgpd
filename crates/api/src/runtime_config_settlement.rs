@@ -74,12 +74,14 @@ pub enum RuntimeConfigFenceReason {
     AcknowledgementLost,
 }
 
-const TERMINAL_OWNED: u8 = 0;
-const TERMINAL_SETTLED: u8 = 1;
-const TERMINAL_AMBIGUOUS: u8 = 2;
 const PHASE_PREFLIGHT: u8 = 0;
 const PHASE_MUTATING: u8 = 1;
 const PHASE_SETTLING: u8 = 2;
+const PHASE_MASK: u8 = 0b11;
+const TERMINAL_OWNED: u8 = 0;
+const TERMINAL_SETTLED: u8 = 1 << 2;
+const TERMINAL_AMBIGUOUS: u8 = 2 << 2;
+const TERMINAL_MASK: u8 = 0b11 << 2;
 const AMBIGUITY_REASON_NONE: u8 = 0;
 const AMBIGUITY_REASON_BUDGET: u8 = 1;
 const AMBIGUITY_REASON_EXECUTOR: u8 = 2;
@@ -99,8 +101,7 @@ struct OperationInner {
     id: u64,
     kind: RuntimeConfigOperationKind,
     deadline: Instant,
-    phase: AtomicU8,
-    terminal: AtomicU8,
+    state: AtomicU8,
     fence_reason: AtomicU8,
     response_attached: Arc<AtomicBool>,
     coordinator: RuntimeConfigCoordinator,
@@ -264,8 +265,7 @@ impl RuntimeConfigSettlementWatchdog {
             id,
             kind,
             deadline,
-            phase: AtomicU8::new(PHASE_PREFLIGHT),
-            terminal: AtomicU8::new(TERMINAL_OWNED),
+            state: AtomicU8::new(TERMINAL_OWNED | PHASE_PREFLIGHT),
             fence_reason: AtomicU8::new(AMBIGUITY_REASON_NONE),
             response_attached,
             coordinator,
@@ -409,6 +409,14 @@ impl OwnedRuntimeConfigRequestContext {
         )
     }
 
+    /// Create a daemon-owned request with no response transport attached.
+    #[must_use]
+    pub fn detached() -> Self {
+        Self {
+            response_attached: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     /// Transfer the shared attachment sentinel to the detached executor.
     #[must_use]
     pub fn response_attached(&self) -> Arc<AtomicBool> {
@@ -444,26 +452,42 @@ impl OwnedRuntimeConfigOperation {
 
     #[must_use]
     pub fn phase(&self) -> RuntimeConfigSettlementPhase {
-        match self.inner.phase.load(Ordering::Acquire) {
+        match self.inner.state.load(Ordering::Acquire) & PHASE_MASK {
             PHASE_PREFLIGHT => RuntimeConfigSettlementPhase::OwnedPreflight,
             PHASE_MUTATING => RuntimeConfigSettlementPhase::Mutating,
             _ => RuntimeConfigSettlementPhase::SettlingRollback,
         }
     }
 
-    /// Advance the phase monotonically. Regressions are ignored.
+    /// Advance the phase monotonically while ownership is live.
+    /// Settlement and recovery fencing atomically freeze the last phase.
     pub fn advance_phase(&self, phase: RuntimeConfigSettlementPhase) {
         let desired = match phase {
             RuntimeConfigSettlementPhase::OwnedPreflight => PHASE_PREFLIGHT,
             RuntimeConfigSettlementPhase::Mutating => PHASE_MUTATING,
             RuntimeConfigSettlementPhase::SettlingRollback => PHASE_SETTLING,
         };
-        self.inner.phase.fetch_max(desired, Ordering::AcqRel);
+        let mut observed = self.inner.state.load(Ordering::Acquire);
+        loop {
+            if observed & TERMINAL_MASK != TERMINAL_OWNED || observed & PHASE_MASK >= desired {
+                return;
+            }
+            let next = (observed & !PHASE_MASK) | desired;
+            match self.inner.state.compare_exchange_weak(
+                observed,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) => observed = actual,
+            }
+        }
     }
 
     #[must_use]
     pub fn terminal(&self) -> RuntimeConfigSettlementTerminal {
-        match self.inner.terminal.load(Ordering::Acquire) {
+        match self.inner.state.load(Ordering::Acquire) & TERMINAL_MASK {
             TERMINAL_OWNED => RuntimeConfigSettlementTerminal::Owned,
             TERMINAL_SETTLED => RuntimeConfigSettlementTerminal::Settled,
             _ => RuntimeConfigSettlementTerminal::RecoveryFenced,
@@ -482,13 +506,6 @@ impl OwnedRuntimeConfigOperation {
         }
     }
 
-    /// Mark whether a transport is still waiting; this never changes ownership.
-    pub fn set_response_attached(&self, attached: bool) {
-        self.inner
-            .response_attached
-            .store(attached, Ordering::Release);
-    }
-
     /// Fence a typed recovery result before any response can be published.
     #[must_use]
     pub fn fence_recovery(&self, reason: RuntimeConfigFenceReason) -> bool {
@@ -502,18 +519,21 @@ impl OwnedRuntimeConfigOperation {
 
     /// Prove settlement and release physical ownership. Returns false after fencing.
     pub fn try_settle(&self) -> bool {
-        if self
-            .inner
-            .terminal
-            .compare_exchange(
-                TERMINAL_OWNED,
-                TERMINAL_SETTLED,
+        let mut observed = self.inner.state.load(Ordering::Acquire);
+        loop {
+            if observed & TERMINAL_MASK != TERMINAL_OWNED {
+                return false;
+            }
+            let settled = (observed & PHASE_MASK) | TERMINAL_SETTLED;
+            match self.inner.state.compare_exchange_weak(
+                observed,
+                settled,
                 Ordering::AcqRel,
                 Ordering::Acquire,
-            )
-            .is_err()
-        {
-            return false;
+            ) {
+                Ok(_) => break,
+                Err(actual) => observed = actual,
+            }
         }
         self.inner.registry.unregister(self.inner.id);
         let resources = self
@@ -544,17 +564,21 @@ impl Drop for RuntimeConfigExecutorGuard {
 }
 
 fn fence(operation: &OperationInner, reason: RuntimeConfigFenceReason) -> bool {
-    if operation
-        .terminal
-        .compare_exchange(
-            TERMINAL_OWNED,
-            TERMINAL_AMBIGUOUS,
+    let mut observed = operation.state.load(Ordering::Acquire);
+    loop {
+        if observed & TERMINAL_MASK != TERMINAL_OWNED {
+            return false;
+        }
+        let fenced = (observed & PHASE_MASK) | TERMINAL_AMBIGUOUS;
+        match operation.state.compare_exchange_weak(
+            observed,
+            fenced,
             Ordering::AcqRel,
             Ordering::Acquire,
-        )
-        .is_err()
-    {
-        return false;
+        ) {
+            Ok(_) => break,
+            Err(actual) => observed = actual,
+        }
     }
     let reason_value = match reason {
         RuntimeConfigFenceReason::BudgetExpired => AMBIGUITY_REASON_BUDGET,
@@ -600,7 +624,7 @@ fn watchdog_loop(registry: &Arc<Registry>) {
                 .registrations
                 .values()
                 .filter(|entry| {
-                    entry.operation.terminal.load(Ordering::Acquire) == TERMINAL_OWNED
+                    entry.operation.state.load(Ordering::Acquire) & TERMINAL_MASK == TERMINAL_OWNED
                         && entry.operation.deadline <= now
                 })
                 .map(|entry| Arc::clone(&entry.operation))
@@ -609,7 +633,8 @@ fn watchdog_loop(registry: &Arc<Registry>) {
                 .registrations
                 .values()
                 .find(|entry| {
-                    entry.operation.terminal.load(Ordering::Acquire) == TERMINAL_AMBIGUOUS
+                    entry.operation.state.load(Ordering::Acquire) & TERMINAL_MASK
+                        == TERMINAL_AMBIGUOUS
                         && entry.terminal_at <= now
                 })
                 .map(|entry| Arc::clone(&entry.operation));
@@ -617,7 +642,9 @@ fn watchdog_loop(registry: &Arc<Registry>) {
                 .registrations
                 .values()
                 .map(|entry| {
-                    if entry.operation.terminal.load(Ordering::Acquire) == TERMINAL_OWNED {
+                    if entry.operation.state.load(Ordering::Acquire) & TERMINAL_MASK
+                        == TERMINAL_OWNED
+                    {
                         entry.operation.deadline
                     } else {
                         entry.terminal_at
@@ -781,6 +808,53 @@ mod tests {
         );
         assert_eq!(operation.deadline(), deadline);
         assert!(operation.try_settle());
+        operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
+        assert_eq!(
+            operation.phase(),
+            RuntimeConfigSettlementPhase::SettlingRollback
+        );
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn terminal_transition_freezes_phase_against_concurrent_advance() {
+        let (watchdog, _receiver) = test_watchdog(Duration::from_secs(1), Duration::from_secs(1));
+        let (operation, guard, _, _) = operation(&watchdog, false).await;
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let advance = {
+            let operation = operation.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+            })
+        };
+        let settle = {
+            let operation = operation.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                operation.try_settle()
+            })
+        };
+        barrier.wait();
+        advance.join().unwrap();
+        assert!(settle.join().unwrap());
+        let frozen = operation.phase();
+        operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
+        assert_eq!(operation.phase(), frozen);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn recovery_fence_freezes_last_owned_phase() {
+        let (watchdog, receiver) = test_watchdog(Duration::from_secs(5), Duration::from_millis(20));
+        let (operation, guard, _, _) = operation(&watchdog, false).await;
+        operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+        assert!(operation.fence_recovery(RuntimeConfigFenceReason::KnownDivergence));
+        operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
+        assert_eq!(operation.phase(), RuntimeConfigSettlementPhase::Mutating);
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(), 70);
         drop(guard);
     }
 
@@ -797,6 +871,19 @@ mod tests {
         drop(guard);
         assert!(coordinator_waiter.await.unwrap().is_ok());
         assert!(admission_waiter.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn clean_settlement_freezes_preflight_phase() {
+        let (watchdog, _receiver) = test_watchdog(Duration::from_secs(1), Duration::from_secs(1));
+        let (operation, guard, _, _) = operation(&watchdog, false).await;
+        assert!(operation.try_settle());
+        operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
+        assert_eq!(
+            operation.phase(),
+            RuntimeConfigSettlementPhase::OwnedPreflight
+        );
+        drop(guard);
     }
 
     #[tokio::test]
@@ -968,8 +1055,18 @@ mod tests {
     async fn std_thread_deadline_ignores_paused_tokio_clock_and_detach() {
         let (watchdog, receiver) =
             test_watchdog(Duration::from_millis(40), Duration::from_millis(20));
-        let (operation, guard, coordinator, _) = operation(&watchdog, false).await;
-        operation.set_response_attached(false);
+        let coordinator = RuntimeConfigCoordinator::new();
+        let permit = coordinator.acquire().await.unwrap();
+        let context = OwnedRuntimeConfigRequestContext::detached();
+        let (operation, guard) = watchdog.register_owned(
+            RuntimeConfigOperationKind::Sighup,
+            coordinator.clone(),
+            permit,
+            DaemonGate::new(),
+            None,
+            None,
+            context.response_attached(),
+        );
         assert!(!operation.response_attached());
         assert_eq!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(), 70);
         assert!(coordinator.is_closed());

@@ -21,8 +21,8 @@ use rustbgpd_api::peer_types::{
 use rustbgpd_api::proto;
 use rustbgpd_api::runtime_config_settlement::RuntimeConfigFenceReason;
 use rustbgpd_api::runtime_config_settlement::{
-    OwnedRuntimeConfigOperation, RuntimeConfigOperationKind, RuntimeConfigSettlementPhase,
-    RuntimeConfigSettlementWatchdog,
+    OwnedRuntimeConfigOperation, OwnedRuntimeConfigRequestContext, RuntimeConfigOperationKind,
+    RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
 };
 use rustbgpd_api::server::{
     ConfigHistoryListFn, ConfigMutationGateFn, ConfigRollbackFn, ConfigTransactionAbortFn,
@@ -193,11 +193,32 @@ impl From<GnmiSetError> for OwnedGnmiSetError {
     }
 }
 
+#[derive(Clone, Default)]
+struct RuntimeConfigMutationProgress(Option<OwnedRuntimeConfigOperation>);
+
+impl RuntimeConfigMutationProgress {
+    fn owned(operation: &OwnedRuntimeConfigOperation) -> Self {
+        Self(Some(operation.clone()))
+    }
+
+    fn begin_mutation(&self) {
+        if let Some(operation) = &self.0 {
+            operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+        }
+    }
+
+    fn begin_settling(&self) {
+        if let Some(operation) = &self.0 {
+            operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
+        }
+    }
+}
+
 impl ConfigTransactionController {
     async fn execute_owned_operation<T, E, F, Fut>(
         self,
         kind: RuntimeConfigOperationKind,
-        response_attached: bool,
+        context: OwnedRuntimeConfigRequestContext,
         shutdown_message: &'static str,
         task_lost_message: &'static str,
         body: F,
@@ -221,7 +242,7 @@ impl ConfigTransactionController {
                 daemon_gate,
                 None,
                 None,
-                Arc::new(AtomicBool::new(response_attached)),
+                context.response_attached(),
             );
             if self
                 .settlement
@@ -443,12 +464,13 @@ impl ConfigTransactionController {
             rustbgpd_api::peer_types::RuntimeConfigTransactionPlan,
             Arc<AcceptedConfigSnapshot>,
         )>,
+        progress: &RuntimeConfigMutationProgress,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
         let confirmed = parse_confirmed_apply_mode(&request)?;
         if let Some(confirmed) = confirmed {
             self.begin_confirmed_apply(&confirmed.confirm_id).await?;
             let result = self
-                .apply_confirmed_locked(request, confirmed.clone(), preloaded)
+                .apply_confirmed_locked(request, confirmed.clone(), preloaded, progress)
                 .await;
             if !matches!(
                 result,
@@ -468,11 +490,12 @@ impl ConfigTransactionController {
                 request,
                 Some(preloaded),
                 self.peer_mgr_internal_tx.as_ref(),
+                progress,
             )
             .await
             .map_err(ApplyFailure::into_apply_error)
         } else {
-            self.apply_locked(request, None).await
+            self.apply_locked(request, None, progress).await
         }
     }
 
@@ -518,27 +541,31 @@ impl ConfigTransactionController {
     #[must_use]
     pub fn gnmi_set_fn(&self) -> GnmiSetFn {
         let controller = self.clone();
-        Arc::new(move |transaction| {
+        Arc::new(move |transaction, context| {
             let controller = controller.clone();
-            Box::pin(async move { controller.apply_gnmi_set(transaction).await })
+            Box::pin(async move {
+                controller
+                    .apply_gnmi_set_with_context(transaction, context)
+                    .await
+            })
         })
     }
 
     #[must_use]
     pub fn confirm_fn(&self) -> ConfigTransactionConfirmFn {
         let controller = self.clone();
-        Arc::new(move |request| {
+        Arc::new(move |request, context| {
             let controller = controller.clone();
-            Box::pin(async move { controller.confirm(request).await })
+            Box::pin(async move { controller.confirm_with_context(request, context).await })
         })
     }
 
     #[must_use]
     pub fn abort_fn(&self) -> ConfigTransactionAbortFn {
         let controller = self.clone();
-        Arc::new(move |request| {
+        Arc::new(move |request, context| {
             let controller = controller.clone();
-            Box::pin(async move { controller.abort(request).await })
+            Box::pin(async move { controller.abort_with_context(request, context).await })
         })
     }
 
@@ -563,9 +590,9 @@ impl ConfigTransactionController {
     #[must_use]
     pub fn rollback_fn(&self) -> ConfigRollbackFn {
         let controller = self.clone();
-        Arc::new(move |request| {
+        Arc::new(move |request, context| {
             let controller = controller.clone();
-            Box::pin(async move { controller.rollback(request).await })
+            Box::pin(async move { controller.rollback_with_context(request, context).await })
         })
     }
 
@@ -636,11 +663,17 @@ impl ConfigTransactionController {
                 )
             })??;
             let Some((watchdog, daemon_gate)) = self.settlement.clone() else {
-                let result = self.apply_locked(request, confirmed).await;
+                let result = self
+                    .apply_locked(
+                        request,
+                        confirmed,
+                        &RuntimeConfigMutationProgress::default(),
+                    )
+                    .await;
                 drop(context);
                 return result;
             };
-            let response_attached = context.response_attached();
+            let response_attached = context.request_context().response_attached();
             let stream = context.take_stream_ownership();
             let (stream_permit, stream_admission) = stream
                 .map_or((None, None), |(permit, admission)| {
@@ -669,8 +702,8 @@ impl ConfigTransactionController {
                     "config transaction rejected: daemon is shutting down".to_string(),
                 ));
             }
-            operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
-            let result = self.apply_locked(request, confirmed).await;
+            let progress = RuntimeConfigMutationProgress::owned(&operation);
+            let result = self.apply_locked(request, confirmed, &progress).await;
             if let Err(ConfigTransactionApplyError::RecoveryRequired { reason, .. }) = &result {
                 let _ = operation.fence_recovery(*reason);
                 std::future::pending::<()>().await;
@@ -691,31 +724,39 @@ impl ConfigTransactionController {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "gNMI Set keeps its closed commit-action dispatch inside one owned settlement executor"
-    )]
+    #[cfg(test)]
     async fn apply_gnmi_set(
         self,
         transaction: rustbgpd_api::server::GnmiSetTransaction,
     ) -> Result<GnmiSetOutcome, GnmiSetError> {
+        let (context, _attachment) = OwnedRuntimeConfigRequestContext::unary();
+        self.apply_gnmi_set_with_context(transaction, context).await
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "gNMI Set keeps its closed commit-action dispatch inside one owned settlement executor"
+    )]
+    async fn apply_gnmi_set_with_context(
+        self,
+        transaction: rustbgpd_api::server::GnmiSetTransaction,
+        context: OwnedRuntimeConfigRequestContext,
+    ) -> Result<GnmiSetOutcome, GnmiSetError> {
         let result = self
             .execute_owned_operation(
                 RuntimeConfigOperationKind::GnmiSet,
-                true,
+                context,
                 "gNMI Set rejected: daemon is shutting down",
                 "gNMI Set transaction task did not complete",
                 move |controller, operation| async move {
                     let self_ = controller;
+                    let progress = RuntimeConfigMutationProgress(operation);
                     match transaction.commit_action.clone() {
                         Some(GnmiSetCommitAction::Confirm { confirm_id }) => {
                             let confirm_id = validate_confirm_id(&confirm_id)
                                 .map_err(apply_error_to_owned_gnmi_set_error)?;
-                            if let Some(operation) = &operation {
-                                operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
-                            }
                             self_
-                                .confirm_locked(confirm_id)
+                                .confirm_locked(confirm_id, &progress)
                                 .await
                                 .map_err(apply_error_to_owned_gnmi_set_error)?;
                             return Ok(GnmiSetOutcome::default());
@@ -723,12 +764,8 @@ impl ConfigTransactionController {
                         Some(GnmiSetCommitAction::Cancel { confirm_id }) => {
                             let confirm_id = validate_confirm_id(&confirm_id)
                                 .map_err(apply_error_to_owned_gnmi_set_error)?;
-                            if let Some(operation) = &operation {
-                                operation
-                                    .advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
-                            }
                             self_
-                                .abort_locked(confirm_id)
+                                .abort_locked(confirm_id, &progress)
                                 .await
                                 .map_err(apply_error_to_owned_gnmi_set_error)?;
                             return Ok(GnmiSetOutcome::default());
@@ -742,11 +779,12 @@ impl ConfigTransactionController {
                             let confirm_timeout_seconds =
                                 validate_confirm_timeout_seconds(confirm_timeout_seconds)
                                     .map_err(apply_error_to_owned_gnmi_set_error)?;
-                            if let Some(operation) = &operation {
-                                operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
-                            }
                             self_
-                                .reset_rollback_duration_locked(confirm_id, confirm_timeout_seconds)
+                                .reset_rollback_duration_locked(
+                                    confirm_id,
+                                    confirm_timeout_seconds,
+                                    &progress,
+                                )
                                 .await
                                 .map_err(apply_error_to_owned_gnmi_set_error)?;
                             return Ok(GnmiSetOutcome::default());
@@ -802,12 +840,9 @@ impl ConfigTransactionController {
                     };
                     let confirmed = parse_confirmed_apply_mode(&request)
                         .map_err(apply_error_to_owned_gnmi_set_error)?;
-                    if let Some(operation) = &operation {
-                        operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
-                    }
                     let response = if confirmed.is_some() {
                         self_
-                            .apply_locked(request, confirmed)
+                            .apply_locked(request, confirmed, &progress)
                             .await
                             .map_err(apply_error_to_owned_gnmi_set_error)?
                     } else {
@@ -819,6 +854,7 @@ impl ConfigTransactionController {
                             &self_.deps,
                             request,
                             self_.peer_mgr_internal_tx.as_ref(),
+                            &progress,
                         )
                         .await
                         .map_err(|failure| match failure.fence_reason {
@@ -849,11 +885,12 @@ impl ConfigTransactionController {
         &self,
         request: proto::ApplyConfigTransactionRequest,
         confirmed: Option<ConfirmedApplyMode>,
+        progress: &RuntimeConfigMutationProgress,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
         if let Some(confirmed) = confirmed {
             self.begin_confirmed_apply(&confirmed.confirm_id).await?;
             let result = self
-                .apply_confirmed_locked(request, confirmed.clone(), None)
+                .apply_confirmed_locked(request, confirmed.clone(), None, progress)
                 .await;
             if !matches!(
                 result,
@@ -868,9 +905,14 @@ impl ConfigTransactionController {
         } else {
             self.reject_if_pending("ConfigService.ApplyConfigTransaction")
                 .await?;
-            apply_config_transaction_locked(&self.deps, request, self.peer_mgr_internal_tx.as_ref())
-                .await
-                .map_err(ApplyFailure::into_apply_error)
+            apply_config_transaction_locked(
+                &self.deps,
+                request,
+                self.peer_mgr_internal_tx.as_ref(),
+                progress,
+            )
+            .await
+            .map_err(ApplyFailure::into_apply_error)
         }
     }
 
@@ -886,6 +928,7 @@ impl ConfigTransactionController {
             rustbgpd_api::peer_types::RuntimeConfigTransactionPlan,
             Arc<AcceptedConfigSnapshot>,
         )>,
+        progress: &RuntimeConfigMutationProgress,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
         let prior_snapshot = self
             .accepted_prior_snapshot()
@@ -941,6 +984,7 @@ impl ConfigTransactionController {
                         "refusing confirmed apply: v3 pending storage is unavailable".to_string(),
                     )
                 })?;
+            progress.begin_settling();
             match launch.publish(
                 pending_dir,
                 &confirmed.confirm_id,
@@ -986,6 +1030,7 @@ impl ConfigTransactionController {
             request,
             preloaded,
             self.peer_mgr_internal_tx.as_ref(),
+            progress,
         )
         .await
         {
@@ -1019,6 +1064,7 @@ impl ConfigTransactionController {
                 // Provably nothing committed — a stale journal would only
                 // trigger a harmless same-content boot revert, but clean it
                 // up anyway.
+                progress.begin_settling();
                 self.cleanup_uncommitted_authority(
                     &confirmed.confirm_id,
                     v3_files.as_deref(),
@@ -1029,6 +1075,7 @@ impl ConfigTransactionController {
             }
         };
         if response.status != proto::ConfigTransactionPlanStatus::Committable as i32 {
+            progress.begin_settling();
             self.cleanup_uncommitted_authority(
                 &confirmed.confirm_id,
                 v3_files.as_deref(),
@@ -1062,6 +1109,7 @@ impl ConfigTransactionController {
             &pending,
             "Confirmed config transaction is pending confirmation.",
         );
+        progress.begin_settling();
         self.install_pending_confirmed_transaction(pending).await;
         self.spawn_confirm_timeout(confirmed.confirm_id).await;
         response.confirmation = Some(confirmation);
@@ -1071,21 +1119,29 @@ impl ConfigTransactionController {
         Ok(response)
     }
 
+    #[cfg(test)]
     async fn confirm(
         self,
         request: proto::ConfirmConfigTransactionRequest,
     ) -> Result<proto::ConfirmConfigTransactionResponse, ConfigTransactionApplyError> {
+        let (context, _attachment) = OwnedRuntimeConfigRequestContext::unary();
+        self.confirm_with_context(request, context).await
+    }
+
+    async fn confirm_with_context(
+        self,
+        request: proto::ConfirmConfigTransactionRequest,
+        context: OwnedRuntimeConfigRequestContext,
+    ) -> Result<proto::ConfirmConfigTransactionResponse, ConfigTransactionApplyError> {
         let confirm_id = validate_confirm_id(&request.confirm_id)?;
         self.execute_owned_operation(
             RuntimeConfigOperationKind::Confirm,
-            true,
+            context,
             "config transaction confirm rejected: daemon is shutting down",
             "config transaction confirm task did not complete",
             move |controller, operation| async move {
-                if let Some(operation) = operation {
-                    operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
-                }
-                controller.confirm_locked(confirm_id).await
+                let progress = RuntimeConfigMutationProgress(operation);
+                controller.confirm_locked(confirm_id, &progress).await
             },
         )
         .await
@@ -1094,6 +1150,7 @@ impl ConfigTransactionController {
     async fn confirm_locked(
         &self,
         confirm_id: String,
+        progress: &RuntimeConfigMutationProgress,
     ) -> Result<proto::ConfirmConfigTransactionResponse, ConfigTransactionApplyError> {
         // Validate the handle against the pending transaction before touching
         // the journal, then delete the journal BEFORE clearing the pending
@@ -1101,6 +1158,7 @@ impl ConfigTransactionController {
         // timer stay armed — a leftover journal would boot-revert a config
         // the operator explicitly confirmed.
         let matched = self.matching_pending(&confirm_id).await?;
+        progress.begin_settling();
         let residue_cleanup = if let Some(files) = &matched.v3_files {
             files.remove_locator_authority().map_err(|error| {
                 ConfigTransactionApplyError::RecoveryRequired {
@@ -1136,21 +1194,29 @@ impl ConfigTransactionController {
         })
     }
 
+    #[cfg(test)]
     async fn abort(
         self,
         request: proto::AbortConfigTransactionRequest,
     ) -> Result<proto::AbortConfigTransactionResponse, ConfigTransactionApplyError> {
+        let (context, _attachment) = OwnedRuntimeConfigRequestContext::unary();
+        self.abort_with_context(request, context).await
+    }
+
+    async fn abort_with_context(
+        self,
+        request: proto::AbortConfigTransactionRequest,
+        context: OwnedRuntimeConfigRequestContext,
+    ) -> Result<proto::AbortConfigTransactionResponse, ConfigTransactionApplyError> {
         let confirm_id = validate_confirm_id(&request.confirm_id)?;
         self.execute_owned_operation(
             RuntimeConfigOperationKind::Abort,
-            true,
+            context,
             "config transaction abort rejected: daemon is shutting down",
             "config transaction abort task did not complete",
             move |controller, operation| async move {
-                if let Some(operation) = operation {
-                    operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
-                }
-                controller.abort_locked(confirm_id).await
+                let progress = RuntimeConfigMutationProgress(operation);
+                controller.abort_locked(confirm_id, &progress).await
             },
         )
         .await
@@ -1159,9 +1225,11 @@ impl ConfigTransactionController {
     async fn abort_locked(
         &self,
         confirm_id: String,
+        progress: &RuntimeConfigMutationProgress,
     ) -> Result<proto::AbortConfigTransactionResponse, ConfigTransactionApplyError> {
         let pending = self.matching_pending(&confirm_id).await?;
-        match self.rollback_pending_locked(&pending).await {
+        progress.begin_settling();
+        match self.rollback_pending_locked(&pending, progress).await {
             Ok(response) => {
                 self.remove_pending_after_rollback(
                         &confirm_id,
@@ -1205,6 +1273,7 @@ impl ConfigTransactionController {
         &self,
         confirm_id: String,
         timeout_seconds: u32,
+        progress: &RuntimeConfigMutationProgress,
     ) -> Result<(), ConfigTransactionApplyError> {
         // The revert journal is NOT rewritten here: its deadline field is
         // informational only — boot revert fires on any unconfirmed journal
@@ -1228,6 +1297,7 @@ impl ConfigTransactionController {
                     pending.confirm_id
                 )));
             }
+            progress.begin_settling();
             pending.timeout_seconds = timeout_seconds;
             pending.deadline = deadline;
             pending.deadline_unix_seconds = deadline_unix_seconds;
@@ -1368,9 +1438,19 @@ impl ConfigTransactionController {
     /// the plan/impact classification, commit, receipts, and (when a confirm
     /// handle is given) the whole confirmed-commit lifecycle. There is
     /// deliberately no second apply route here.
+    #[cfg(test)]
     async fn rollback(
         self,
         request: proto::RollbackConfigTransactionRequest,
+    ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+        let (context, _attachment) = OwnedRuntimeConfigRequestContext::unary();
+        self.rollback_with_context(request, context).await
+    }
+
+    async fn rollback_with_context(
+        self,
+        request: proto::RollbackConfigTransactionRequest,
+        context: OwnedRuntimeConfigRequestContext,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
         self.history_dir()?;
         if request.index == 0 {
@@ -1385,11 +1465,12 @@ impl ConfigTransactionController {
         }
         self.execute_owned_operation(
             RuntimeConfigOperationKind::Rollback,
-            true,
+            context,
             "config rollback rejected: daemon is shutting down",
             "config rollback task did not complete",
             move |controller, operation| async move {
             let self_ = controller;
+            let progress = RuntimeConfigMutationProgress(operation);
             // Resolve the entry under the coordinator lock so a concurrent
             // commit cannot shift indexes between resolution and apply.
             let dir = self_.history_dir()?;
@@ -1436,11 +1517,8 @@ impl ConfigTransactionController {
                 confirm_id: request.confirm_id,
                 confirm_timeout_seconds: request.confirm_timeout_seconds,
             };
-            if let Some(operation) = operation {
-                operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
-            }
             let mut response = self_
-                .apply_prepared_rollback(apply_request, preloaded)
+                .apply_prepared_rollback(apply_request, preloaded, &progress)
                 .await?;
             // Name the restored entry only when something actually committed;
             // a noop ("already running that config") or rejected plan keeps
@@ -1564,20 +1642,22 @@ impl ConfigTransactionController {
     async fn auto_revert(self, confirm_id: String) -> Result<(), ConfigTransactionApplyError> {
         self.execute_owned_operation(
             RuntimeConfigOperationKind::AutoRevert,
-            false,
+            OwnedRuntimeConfigRequestContext::detached(),
             "config transaction auto-revert rejected: daemon is shutting down",
             "config transaction auto-revert task did not complete",
             move |controller, operation| async move {
-                if let Some(operation) = operation {
-                    operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
-                }
+                let progress = RuntimeConfigMutationProgress(operation);
                 let Some(pending) = controller.pending_for_timeout(&confirm_id).await else {
                     return Ok(());
                 };
                 if tokio::time::Instant::now() < pending.deadline {
                     return Ok(());
                 }
-                match controller.rollback_pending_locked(&pending).await {
+                progress.begin_settling();
+                match controller
+                    .rollback_pending_locked(&pending, &progress)
+                    .await
+                {
                     Ok(response) => {
                         controller.remove_pending_after_rollback(
                         &confirm_id,
@@ -1672,6 +1752,7 @@ impl ConfigTransactionController {
     async fn rollback_pending_locked(
         &self,
         pending: &PendingConfirmedTransaction,
+        progress: &RuntimeConfigMutationProgress,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
         let request = proto::ApplyConfigTransactionRequest {
             candidate_toml: pending.prior_snapshot.normalized_toml().to_string(),
@@ -1695,6 +1776,7 @@ impl ConfigTransactionController {
             request,
             Some((plan, Arc::clone(prior))),
             self.peer_mgr_internal_tx.as_ref(),
+            progress,
         )
         .await;
         let response = result.map_err(ApplyFailure::into_apply_error)?;
@@ -2082,9 +2164,14 @@ async fn apply_config_transaction(
 
     let join = tokio::spawn(async move {
         let _guard = deps.lock.acquire().await?;
-        apply_config_transaction_locked(&deps, request, None)
-            .await
-            .map_err(|failure| failure.error)
+        apply_config_transaction_locked(
+            &deps,
+            request,
+            None,
+            &RuntimeConfigMutationProgress::default(),
+        )
+        .await
+        .map_err(|failure| failure.error)
     });
 
     join.await.map_err(|_| {
@@ -2103,9 +2190,14 @@ async fn apply_config_transaction_with_internal(
     validate_apply_request(&request)?;
     let join = tokio::spawn(async move {
         let _guard = deps.lock.acquire().await?;
-        apply_config_transaction_locked(&deps, request, Some(&peer_mgr_internal_tx))
-            .await
-            .map_err(|failure| failure.error)
+        apply_config_transaction_locked(
+            &deps,
+            request,
+            Some(&peer_mgr_internal_tx),
+            &RuntimeConfigMutationProgress::default(),
+        )
+        .await
+        .map_err(|failure| failure.error)
     });
     join.await.map_err(|_| {
         ConfigTransactionApplyError::Internal(
@@ -2118,8 +2210,16 @@ async fn apply_config_transaction_locked(
     deps: &FibTableControlDeps,
     request: proto::ApplyConfigTransactionRequest,
     peer_mgr_internal_tx: Option<&mpsc::UnboundedSender<InternalCommand>>,
+    progress: &RuntimeConfigMutationProgress,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
-    apply_config_transaction_locked_with_preloaded(deps, request, None, peer_mgr_internal_tx).await
+    apply_config_transaction_locked_with_preloaded(
+        deps,
+        request,
+        None,
+        peer_mgr_internal_tx,
+        progress,
+    )
+    .await
 }
 
 async fn apply_config_transaction_locked_with_preloaded(
@@ -2130,6 +2230,7 @@ async fn apply_config_transaction_locked_with_preloaded(
         Arc<AcceptedConfigSnapshot>,
     )>,
     peer_mgr_internal_tx: Option<&mpsc::UnboundedSender<InternalCommand>>,
+    progress: &RuntimeConfigMutationProgress,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     let plan = match &preloaded {
         Some((plan, _)) => plan.clone(),
@@ -2216,6 +2317,7 @@ async fn apply_config_transaction_locked_with_preloaded(
         plan.supported_sections,
         post_commit_runtime_snapshot_token,
         update_group_impact,
+        progress,
     )
     .await?;
     if family == ApplyFamily::LivePolicyImpact {
@@ -2244,6 +2346,7 @@ async fn commit_apply_family(
     supported_sections: Vec<String>,
     post_commit_runtime_snapshot_token: String,
     update_group_impact: proto::UpdateGroupImpactPlan,
+    progress: &RuntimeConfigMutationProgress,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     // ADR-0113 deliberately INVERTS ADR-0076's apply-live-before-persist
     // order for outbound prefix maxima. Applying a raise or removal first
@@ -2267,6 +2370,7 @@ async fn commit_apply_family(
         supported_sections,
         post_commit_runtime_snapshot_token,
         update_group_impact,
+        progress,
     ))
     .await;
     finish_outbound_prefix_limit_transaction(deps, prepared, &committed).await?;
@@ -2335,6 +2439,7 @@ async fn finish_outbound_prefix_limit_transaction(
 
 #[expect(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "family dispatch mirrors commit_apply_family's parameters verbatim"
 )]
 async fn commit_apply_family_inner(
@@ -2347,6 +2452,7 @@ async fn commit_apply_family_inner(
     supported_sections: Vec<String>,
     post_commit_runtime_snapshot_token: String,
     update_group_impact: proto::UpdateGroupImpactPlan,
+    progress: &RuntimeConfigMutationProgress,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     match family {
         ApplyFamily::FibTables => {
@@ -2358,6 +2464,7 @@ async fn commit_apply_family_inner(
                 candidate,
                 post_commit_runtime_snapshot_token,
                 update_group_impact,
+                progress,
             )
             .await
         }
@@ -2367,6 +2474,7 @@ async fn commit_apply_family_inner(
                 config_tx,
                 candidate_toml,
                 &candidate,
+                progress,
             )
             .await?;
             Ok(committable_response(
@@ -2380,7 +2488,13 @@ async fn commit_apply_family_inner(
             ))
         }
         ApplyFamily::CatalogSnapshot => {
-            commit_candidate_snapshot_locked(&deps.peer_mgr_tx, config_tx, candidate_toml).await?;
+            commit_candidate_snapshot_locked(
+                &deps.peer_mgr_tx,
+                config_tx,
+                candidate_toml,
+                progress,
+            )
+            .await?;
             Ok(committable_response(
                 post_commit_runtime_snapshot_token,
                 supported_sections,
@@ -2399,6 +2513,7 @@ async fn commit_apply_family_inner(
                 config_tx,
                 candidate_toml,
                 &candidate,
+                progress,
             )
             .await?;
             Ok(committable_response(
@@ -2416,6 +2531,7 @@ async fn commit_apply_family_inner(
                 config_tx,
                 candidate_toml,
                 &candidate,
+                progress,
             )
             .await?;
             Ok(committable_response(
@@ -2432,6 +2548,7 @@ async fn commit_apply_family_inner(
                 candidate_toml,
                 &candidate,
                 &supported_sections,
+                progress,
             )
             .await?;
             Ok(committable_response(
@@ -2444,6 +2561,10 @@ async fn commit_apply_family_inner(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "FIB commit carries the typed settlement progress with its existing closed transaction inputs"
+)]
 async fn commit_fib_transaction(
     deps: &FibTableControlDeps,
     peer_mgr_internal_tx: Option<&mpsc::UnboundedSender<InternalCommand>>,
@@ -2452,6 +2573,7 @@ async fn commit_fib_transaction(
     candidate: Config,
     post_commit_runtime_snapshot_token: String,
     update_group_impact: proto::UpdateGroupImpactPlan,
+    progress: &RuntimeConfigMutationProgress,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     let fib_cmd_tx = deps.fib_cmd_tx.clone().ok_or_else(|| {
         fib_error_to_apply_error(runtime_unavailable_error(!deps.startup_tables.is_empty()))
@@ -2472,11 +2594,13 @@ async fn commit_fib_transaction(
     .map_err(fib_error_to_apply_error)?
     .unwrap_or_default();
     let staged_tables = candidate.fib_tables.clone();
+    progress.begin_mutation();
     let previous = stage_preloaded_config_snapshot(peer_mgr_internal_tx, candidate).await?;
     match replace_tables_for_transaction(&fib_cmd_tx, staged_tables.clone()).await {
         FibTransactionReplaceOutcome::Applied => {}
         FibTransactionReplaceOutcome::NotAccepted(error)
         | FibTransactionReplaceOutcome::RejectedNoEffect(error) => {
+            progress.begin_settling();
             return Err(restore_preloaded_snapshot_after_error(
                 peer_mgr_internal_tx,
                 previous,
@@ -2497,6 +2621,7 @@ async fn commit_fib_transaction(
             ));
         }
     }
+    progress.begin_settling();
     if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
         if failure.fence_reason.is_some() {
             return Err(failure);
@@ -2723,9 +2848,12 @@ async fn commit_candidate_snapshot_locked(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate_toml: String,
+    progress: &RuntimeConfigMutationProgress,
 ) -> Result<(), ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
+    progress.begin_mutation();
     let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
+    progress.begin_settling();
     if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
         if failure.fence_reason.is_some() {
             return Err(failure);
@@ -2750,8 +2878,10 @@ async fn commit_dynamic_neighbors_locked(
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate_toml: String,
     candidate: &Config,
+    progress: &RuntimeConfigMutationProgress,
 ) -> Result<(), ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
+    progress.begin_mutation();
     let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
     let previous = match Config::load_toml_with_diagnostics(
         &previous_toml,
@@ -2760,6 +2890,7 @@ async fn commit_dynamic_neighbors_locked(
         Ok(previous) => previous,
         Err(error) => {
             let error = ConfigTransactionApplyError::Internal(error);
+            progress.begin_settling();
             return Err(
                 rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
             );
@@ -2774,8 +2905,10 @@ async fn commit_dynamic_neighbors_locked(
              reload — apply this change through the config file and SIGHUP"
                 .to_string(),
         ));
+        progress.begin_settling();
         return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await);
     }
+    progress.begin_settling();
     if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
         if failure.fence_reason.is_some() {
             return Err(failure);
@@ -2798,8 +2931,10 @@ async fn commit_static_neighbors_locked(
     candidate_toml: String,
     candidate: &Config,
     committed_sections: &[String],
+    progress: &RuntimeConfigMutationProgress,
 ) -> Result<(), ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
+    progress.begin_mutation();
     let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
     let previous = match Config::load_toml_with_diagnostics(
         &previous_toml,
@@ -2808,6 +2943,7 @@ async fn commit_static_neighbors_locked(
         Ok(previous) => previous,
         Err(error) => {
             let error = ConfigTransactionApplyError::Internal(error);
+            progress.begin_settling();
             return Err(
                 rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
             );
@@ -2820,6 +2956,7 @@ async fn commit_static_neighbors_locked(
         let error = ConfigTransactionApplyError::Internal(
             "static-neighbor transaction executor received a non-static-neighbor diff".to_string(),
         );
+        progress.begin_settling();
         return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await);
     }
 
@@ -2827,6 +2964,7 @@ async fn commit_static_neighbors_locked(
     let added = match resolve_static_neighbors(candidate, &neighbor_diff.added) {
         Ok(added) => added,
         Err(error) => {
+            progress.begin_settling();
             return Err(
                 rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
             );
@@ -2835,6 +2973,7 @@ async fn commit_static_neighbors_locked(
     let changed = match resolve_static_neighbors(candidate, &neighbor_diff.changed) {
         Ok(changed) => changed,
         Err(error) => {
+            progress.begin_settling();
             return Err(rollback_static_and_snapshot(
                 peer_mgr_tx,
                 applied,
@@ -2846,6 +2985,7 @@ async fn commit_static_neighbors_locked(
     };
     for config in added {
         if let Some(error) = runtime_added_neighbor_inbound_auth_error(&config) {
+            progress.begin_settling();
             return Err(rollback_static_and_snapshot(
                 peer_mgr_tx,
                 applied,
@@ -2855,6 +2995,7 @@ async fn commit_static_neighbors_locked(
             .await);
         }
         if let Err(error) = add_static_peer(peer_mgr_tx, config.clone()).await {
+            progress.begin_settling();
             return Err(rollback_static_and_snapshot(
                 peer_mgr_tx,
                 applied,
@@ -2872,6 +3013,7 @@ async fn commit_static_neighbors_locked(
         match reconfigure_static_peer(peer_mgr_tx, config).await {
             Ok(previous) => applied.push(AppliedStaticOp::Modified(Box::new(previous))),
             Err(error) => {
+                progress.begin_settling();
                 return Err(rollback_static_and_snapshot(
                     peer_mgr_tx,
                     applied,
@@ -2886,6 +3028,7 @@ async fn commit_static_neighbors_locked(
         match delete_static_peer(peer_mgr_tx, peer.clone()).await {
             Ok(removed) => applied.push(AppliedStaticOp::Deleted(Box::new(removed))),
             Err(error) => {
+                progress.begin_settling();
                 return Err(rollback_static_and_snapshot(
                     peer_mgr_tx,
                     applied,
@@ -2897,6 +3040,7 @@ async fn commit_static_neighbors_locked(
         }
     }
 
+    progress.begin_settling();
     if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
         if failure.fence_reason.is_some() {
             return Err(failure);
@@ -2919,8 +3063,10 @@ async fn commit_live_policy_impact_locked(
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate_toml: String,
     candidate: &Config,
+    progress: &RuntimeConfigMutationProgress,
 ) -> Result<usize, ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
+    progress.begin_mutation();
     let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
     let previous = match Config::load_toml_with_diagnostics(
         &previous_toml,
@@ -2929,6 +3075,7 @@ async fn commit_live_policy_impact_locked(
         Ok(previous) => previous,
         Err(error) => {
             let error = ConfigTransactionApplyError::Internal(error);
+            progress.begin_settling();
             return Err(
                 rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
             );
@@ -2938,6 +3085,7 @@ async fn commit_live_policy_impact_locked(
     let targets = match resolve_live_policy_targets(&previous, candidate) {
         Ok(targets) => targets,
         Err(error) => {
+            progress.begin_settling();
             return Err(
                 rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
             );
@@ -2949,12 +3097,14 @@ async fn commit_live_policy_impact_locked(
         Err(error) => {
             // The peer-manager command self-heals its live mutations on a
             // mid-fanout failure, so only the staged snapshot needs rollback.
+            progress.begin_settling();
             return Err(
                 rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
             );
         }
     };
 
+    progress.begin_settling();
     if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
         if failure.fence_reason.is_some() {
             return Err(failure);
@@ -3018,8 +3168,10 @@ async fn commit_peer_session_reshape_locked(
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate_toml: String,
     candidate: &Config,
+    progress: &RuntimeConfigMutationProgress,
 ) -> Result<PeerSessionReshapeCommit, ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
+    progress.begin_mutation();
     let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
     let previous = match Config::load_toml_with_diagnostics(
         &previous_toml,
@@ -3028,6 +3180,7 @@ async fn commit_peer_session_reshape_locked(
         Ok(previous) => previous,
         Err(error) => {
             let error = ConfigTransactionApplyError::Internal(error);
+            progress.begin_settling();
             return Err(
                 rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
             );
@@ -3037,6 +3190,7 @@ async fn commit_peer_session_reshape_locked(
     let targets = match resolve_peer_session_reshape_targets(&previous, candidate) {
         Ok(targets) => targets,
         Err(error) => {
+            progress.begin_settling();
             return Err(
                 rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
             );
@@ -3045,6 +3199,7 @@ async fn commit_peer_session_reshape_locked(
     if let Some(error) =
         dynamic_bounce_listener_auth_error(&previous, candidate, &targets.dynamic_bounce_ranges)
     {
+        progress.begin_settling();
         return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await);
     }
     let reconfigured = targets.static_targets.len();
@@ -3054,12 +3209,14 @@ async fn commit_peer_session_reshape_locked(
         Err(error) => {
             // The peer-manager command self-heals its live mutations on a
             // mid-fanout failure, so only the staged snapshot needs rollback.
+            progress.begin_settling();
             return Err(
                 rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
             );
         }
     };
 
+    progress.begin_settling();
     if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
         if failure.fence_reason.is_some() {
             return Err(failure);
@@ -4138,12 +4295,302 @@ remote_asn = 65002
             .split_once("};")
             .unwrap()
             .0;
-        let apply = fallback
-            .find("let result = self.apply_locked(request, confirmed).await;")
-            .unwrap();
+        let apply = fallback.find(".apply_locked(").unwrap();
         let detach = fallback.find("drop(context);").unwrap();
         let response = fallback.find("return result;").unwrap();
         assert!(apply < detach && detach < response);
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the source proof inventories every transaction family mutation and recovery boundary"
+    )]
+    fn owned_transaction_phase_boundaries_are_closed() {
+        fn body<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            source
+                .split_once(start)
+                .unwrap()
+                .1
+                .split_once(end)
+                .unwrap()
+                .0
+        }
+
+        let source = include_str!("config_transaction_control.rs");
+        let apply = body(
+            source,
+            "async fn apply_config_transaction_locked_with_preloaded",
+            "async fn commit_apply_family(",
+        );
+        assert!(
+            apply.find("let plan = match").unwrap() < apply.find("commit_apply_family(").unwrap()
+        );
+        assert!(!apply.contains("progress.begin_mutation()"));
+
+        let dispatch = body(
+            source,
+            "async fn commit_apply_family(",
+            "fn confirmed_apply_loosens_outbound_limits",
+        );
+        assert!(
+            dispatch
+                .find("prepare_outbound_prefix_limit_transaction")
+                .unwrap()
+                < dispatch.find("commit_apply_family_inner(").unwrap()
+        );
+        assert!(!dispatch.contains("progress.begin_mutation()"));
+
+        let reload = include_str!("reload.rs");
+        for (start, end) in [
+            (
+                "async fn dispatch_rib_mutation_step",
+                "/// Preflight `config`'s outbound prefix maxima",
+            ),
+            ("async fn dispatch_actor_mutation_step", "fn step_result"),
+        ] {
+            let mutation_dispatch = body(reload, start, end);
+            let reserve = mutation_dispatch.find(".reserve().await").unwrap();
+            let mutation = mutation_dispatch.find("progress.begin_mutation()").unwrap();
+            let send = mutation_dispatch
+                .find("permit.send(build(reply_tx))")
+                .unwrap();
+            assert!(reserve < mutation && mutation < send, "{start}");
+        }
+        for (send, phase) in [
+            (
+                "permit.send(PeerManagerCommand::ReconcilePeers",
+                "progress.begin_mutation()",
+            ),
+            (
+                "permit.send(FibRuntimeCommand::OwnedReplaceTables",
+                "progress.begin_mutation()",
+            ),
+        ] {
+            let send = reload.find(send).unwrap();
+            let mutation = reload[..send].rfind(phase).unwrap();
+            let reserve = reload[..mutation].rfind(".reserve().await").unwrap();
+            assert!(reserve < mutation && mutation < send);
+        }
+
+        let rotation = include_str!("peer_manager/rotation.rs");
+        for (start, end) in [
+            (
+                "async fn preflight_tcp_ao_add_only(",
+                "async fn apply_tcp_ao_add_only(",
+            ),
+            (
+                "async fn preflight_tcp_ao_delete(",
+                "async fn apply_tcp_ao_delete(",
+            ),
+            (
+                "async fn preflight_tcp_ao_selection(",
+                "async fn apply_tcp_ao_selection(",
+            ),
+        ] {
+            let preflight = body(rotation, start, end);
+            assert!(preflight.contains("&self,"), "{start}");
+            for mutation in [
+                "retain_desired_inventory",
+                "mark_tcp_ao_rotation_failed",
+                "self.tcp_ao_rotation =",
+                ".get_mut(",
+            ] {
+                assert!(!preflight.contains(mutation), "{start}: {mutation}");
+            }
+        }
+        for (start, end, first_session_mutation, phase) in [
+            (
+                "async fn apply_tcp_ao_add_only(",
+                "async fn preflight_tcp_ao_delete(",
+                "apply_to_session(",
+                "TcpAoRotationPhase::AddOnly",
+            ),
+            (
+                "async fn apply_tcp_ao_delete(",
+                "async fn preflight_tcp_ao_selection(",
+                "apply_delete_session(",
+                "TcpAoRotationPhase::Deleting",
+            ),
+            (
+                "async fn apply_tcp_ao_selection(",
+                "#[cfg(test)]\nmod tests",
+                "apply_selection_session(",
+                "TcpAoRotationPhase::Selecting",
+            ),
+        ] {
+            let apply = body(rotation, start, end);
+            assert!(
+                apply.find(phase).unwrap() < apply.find(first_session_mutation).unwrap(),
+                "{start}"
+            );
+        }
+
+        let listener = include_str!("../crates/transport/src/listener.rs");
+        let listener_dispatch = body(
+            listener,
+            "async fn dispatch<T, F>(",
+            "/// Validate the complete desired listener inventory",
+        );
+        let reserve = listener_dispatch.find("self.tx.reserve()").unwrap();
+        let phase = listener_dispatch.find("before_dispatch();").unwrap();
+        let send = listener_dispatch.find("permit.send(command)").unwrap();
+        assert!(reserve < phase && phase < send);
+
+        let evpn = include_str!("evpn_runtime_converger.rs");
+        let changed_apply = body(
+            evpn,
+            "pub(crate) async fn apply_config_if_changed",
+            "fn reload_state(",
+        );
+        assert!(
+            changed_apply
+                .find("if !changed(&config, &baseline)")
+                .unwrap()
+                < changed_apply
+                    .find("apply_candidate_config_locked(&config, false, begin_mutation)")
+                    .unwrap()
+        );
+        let candidate_apply = body(
+            evpn,
+            "async fn apply_evpn_runtime_candidate_locked",
+            "/// Apply the #268-decomposed primitive steps",
+        );
+        let commit_path = candidate_apply.split_once("if plan.is_noop() {").unwrap().1;
+        assert!(
+            commit_path.find("validate_supported_plan_shape").unwrap()
+                < commit_path.find("begin_mutation();").unwrap()
+        );
+        assert!(
+            commit_path.rfind("begin_mutation();").unwrap()
+                < commit_path.find("converger.converge(").unwrap()
+        );
+
+        for (start, end, first_mutation) in [
+            (
+                "async fn commit_fib_transaction(",
+                "fn apply_family(",
+                "stage_preloaded_config_snapshot(",
+            ),
+            (
+                "async fn commit_candidate_snapshot_locked(",
+                "async fn commit_dynamic_neighbors_locked(",
+                "stage_config_snapshot(",
+            ),
+            (
+                "async fn commit_dynamic_neighbors_locked(",
+                "async fn commit_static_neighbors_locked(",
+                "stage_config_snapshot(",
+            ),
+            (
+                "async fn commit_static_neighbors_locked(",
+                "async fn commit_live_policy_impact_locked(",
+                "stage_config_snapshot(",
+            ),
+            (
+                "async fn commit_live_policy_impact_locked(",
+                "struct PeerSessionReshapeCommit",
+                "stage_config_snapshot(",
+            ),
+            (
+                "async fn commit_peer_session_reshape_locked(",
+                "async fn send_bounce_dynamic_range_peers(",
+                "stage_config_snapshot(",
+            ),
+        ] {
+            let owned = body(source, start, end);
+            let reserve = owned.find("reserve_persist_permit(").unwrap();
+            let mutation = owned.find("progress.begin_mutation()").unwrap();
+            let first_mutation = owned.find(first_mutation).unwrap();
+            let settling = owned.find("progress.begin_settling()").unwrap();
+            let publication = owned.find("persist_candidate_config(").unwrap();
+            assert!(reserve < mutation && mutation < first_mutation, "{start}");
+            assert!(mutation < settling && settling < publication, "{start}");
+        }
+
+        for (start, end, rollback, expected) in [
+            (
+                "async fn commit_fib_transaction(",
+                "fn apply_family(",
+                "restore_preloaded_snapshot_after_error(",
+                1,
+            ),
+            (
+                "async fn commit_dynamic_neighbors_locked(",
+                "async fn commit_static_neighbors_locked(",
+                "rollback_snapshot_after_error(",
+                2,
+            ),
+            (
+                "async fn commit_static_neighbors_locked(",
+                "async fn commit_live_policy_impact_locked(",
+                "rollback_snapshot_after_error(",
+                3,
+            ),
+            (
+                "async fn commit_static_neighbors_locked(",
+                "async fn commit_live_policy_impact_locked(",
+                "rollback_static_and_snapshot(",
+                5,
+            ),
+            (
+                "async fn commit_live_policy_impact_locked(",
+                "struct PeerSessionReshapeCommit",
+                "rollback_snapshot_after_error(",
+                3,
+            ),
+            (
+                "async fn commit_peer_session_reshape_locked(",
+                "async fn send_bounce_dynamic_range_peers(",
+                "rollback_snapshot_after_error(",
+                4,
+            ),
+        ] {
+            let owned = body(source, start, end);
+            let pre_persist = owned.split_once("persist_candidate_config(").unwrap().0;
+            assert_eq!(pre_persist.matches(rollback).count(), expected, "{start}");
+            for prefix in pre_persist.split(rollback).take(expected) {
+                let after_phase = prefix.rsplit_once("progress.begin_settling();").unwrap().1;
+                let structural = after_phase
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .collect::<String>();
+                assert_eq!(structural, "returnErr(", "{start}: {rollback}");
+            }
+        }
+
+        let confirmed = body(
+            source,
+            "async fn apply_confirmed_locked(",
+            "async fn confirm(",
+        );
+        assert!(
+            confirmed.find("progress.begin_settling()").unwrap()
+                < confirmed.find("match launch.publish(").unwrap()
+        );
+        let confirm = body(source, "async fn confirm_locked(", "async fn abort(");
+        assert!(
+            confirm.find("matching_pending(").unwrap()
+                < confirm.find("progress.begin_settling()").unwrap()
+        );
+        let abort = body(
+            source,
+            "async fn abort_locked(",
+            "async fn reset_rollback_duration_locked(",
+        );
+        assert!(
+            abort.find("matching_pending(").unwrap()
+                < abort.find("progress.begin_settling()").unwrap()
+        );
+        let auto = body(
+            source,
+            "async fn auto_revert(",
+            "async fn matching_pending(",
+        );
+        assert!(
+            auto.find("pending_for_timeout(").unwrap()
+                < auto.find("progress.begin_settling()").unwrap()
+        );
     }
 
     #[test]
@@ -4171,6 +4618,8 @@ remote_asn = 65002
             .unwrap()
             .0;
         let main = production(include_str!("main.rs"));
+        let config_service = production(include_str!("../crates/api/src/config_service.rs"));
+        let gnmi_service = production(include_str!("../crates/api/src/gnmi_service.rs"));
         let owners = [server, neighbor, peer_group, policy, fib, transaction, main];
 
         #[rustfmt::skip]
@@ -4211,6 +4660,48 @@ remote_asn = 65002
                 "settlement registration inventory for {kind}"
             );
         }
+        assert!(!settlement.contains("set_response_attached"));
+        assert!(!server.contains("ConfigTransactionResponseAttachment"));
+        assert!(!transaction.contains("response_attached: bool"));
+        assert_eq!(
+            main.matches("OwnedRuntimeConfigRequestContext::detached()")
+                .count(),
+            1,
+            "SIGHUP must register as detached"
+        );
+        assert_eq!(
+            transaction
+                .matches("OwnedRuntimeConfigRequestContext::detached()")
+                .count(),
+            1,
+            "AutoRevert must register as detached"
+        );
+        assert_eq!(
+            config_service
+                .matches("OwnedRuntimeConfigRequestContext::unary()")
+                .count(),
+            3,
+            "Confirm, Abort, and Rollback must carry unary attachment contexts"
+        );
+        assert_eq!(
+            gnmi_service
+                .matches("OwnedRuntimeConfigRequestContext::unary()")
+                .count(),
+            1,
+            "gNMI Set must carry one unary attachment context"
+        );
+        let credential_reload = main.find("match credentials.reload()").unwrap();
+        let credential_success = main[credential_reload..].find("Ok(generation) =>").unwrap();
+        let credential_mutating = main[credential_reload..]
+            .find("operation.advance_phase(RuntimeConfigSettlementPhase::Mutating)")
+            .unwrap();
+        let credential_effect = main[credential_reload..]
+            .find("accepted_effect = true")
+            .unwrap();
+        assert!(
+            credential_success < credential_mutating && credential_mutating < credential_effect,
+            "SIGHUP credential reload enters Mutating only after atomic publication"
+        );
         for kind in [
             "NeighborAdd",
             "NeighborDelete",
@@ -10465,6 +10956,7 @@ families = ["ipv4_unicast"]
             fib_config(&core),
             "next".to_string(),
             proto::UpdateGroupImpactPlan::default(),
+            &RuntimeConfigMutationProgress::default(),
         )
         .await
         .unwrap_err();
@@ -10517,6 +11009,7 @@ families = ["ipv4_unicast"]
             fib_config(&core),
             "next".to_string(),
             proto::UpdateGroupImpactPlan::default(),
+            &RuntimeConfigMutationProgress::default(),
         )
         .await
         .unwrap_err();

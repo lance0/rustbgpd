@@ -19,6 +19,7 @@ use crate::peer_types::{
     RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus,
 };
 use crate::proto;
+use crate::runtime_config_settlement::OwnedRuntimeConfigRequestContext;
 use crate::server::{
     ConfigHistoryListFn, ConfigRollbackFn, ConfigTransactionAbortFn, ConfigTransactionApplyContext,
     ConfigTransactionApplyError, ConfigTransactionApplyFn, ConfigTransactionConfirmFn,
@@ -331,7 +332,8 @@ impl proto::config_service_server::ConfigService for ConfigService {
                 "ConfigService.ConfirmConfigTransaction executor is unavailable",
             ));
         };
-        transaction_confirm(request)
+        let (context, _attachment) = OwnedRuntimeConfigRequestContext::unary();
+        transaction_confirm(request, context)
             .await
             .map(Response::new)
             .map_err(ConfigTransactionApplyError::into_status)
@@ -351,7 +353,8 @@ impl proto::config_service_server::ConfigService for ConfigService {
                 "ConfigService.AbortConfigTransaction executor is unavailable",
             ));
         };
-        transaction_abort(request)
+        let (context, _attachment) = OwnedRuntimeConfigRequestContext::unary();
+        transaction_abort(request, context)
             .await
             .map(Response::new)
             .map_err(ConfigTransactionApplyError::into_status)
@@ -412,7 +415,8 @@ impl proto::config_service_server::ConfigService for ConfigService {
                 "ConfigService.RollbackConfigTransaction executor is unavailable",
             ));
         };
-        rollback(request)
+        let (context, _attachment) = OwnedRuntimeConfigRequestContext::unary();
+        rollback(request, context)
             .await
             .map(Response::new)
             .map_err(ConfigTransactionApplyError::into_status)
@@ -441,10 +445,43 @@ mod tests {
     use super::*;
     use prost::Message as _;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::time::Duration;
 
     use crate::audit::GrpcAuditHandle;
     use proto::config_service_server::ConfigService as _;
+
+    #[derive(Clone)]
+    struct DetachedHookProbe {
+        started: mpsc::UnboundedSender<Arc<AtomicBool>>,
+        release: Arc<tokio::sync::Semaphore>,
+        continued: mpsc::UnboundedSender<()>,
+    }
+
+    impl DetachedHookProbe {
+        fn hook<T: Default + Send + 'static>(
+            &self,
+            context: &OwnedRuntimeConfigRequestContext,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T, ConfigTransactionApplyError>> + Send>,
+        > {
+            let attached = context.response_attached();
+            let started = self.started.clone();
+            let release = Arc::clone(&self.release);
+            let continued = self.continued.clone();
+            Box::pin(async move {
+                tokio::spawn(async move {
+                    assert!(attached.load(Ordering::Acquire));
+                    started.send(Arc::clone(&attached)).unwrap();
+                    release.acquire().await.unwrap().forget();
+                    continued.send(()).unwrap();
+                    Ok(T::default())
+                })
+                .await
+                .unwrap()
+            })
+        }
+    }
 
     #[derive(Clone, PartialEq, prost::Message)]
     struct LegacyConfigHistoryEntry {
@@ -962,8 +999,13 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let svc = ConfigService::new(tx).with_transaction_hooks(
             None,
-            Some(Arc::new(|request| {
+            Some(Arc::new(|request, context| {
                 Box::pin(async move {
+                    assert!(
+                        context
+                            .response_attached()
+                            .load(std::sync::atomic::Ordering::Acquire)
+                    );
                     assert_eq!(request.confirm_id, "deploy-42");
                     Ok(proto::ConfirmConfigTransactionResponse {
                         confirmation: Some(proto::ConfigTransactionConfirmation {
@@ -979,8 +1021,13 @@ mod tests {
                     })
                 })
             })),
-            Some(Arc::new(|request| {
+            Some(Arc::new(|request, context| {
                 Box::pin(async move {
+                    assert!(
+                        context
+                            .response_attached()
+                            .load(std::sync::atomic::Ordering::Acquire)
+                    );
                     assert_eq!(request.confirm_id, "deploy-42");
                     Ok(proto::AbortConfigTransactionResponse {
                         confirmation: Some(proto::ConfigTransactionConfirmation {
@@ -1052,6 +1099,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unary_control_cancellation_detaches_but_does_not_cancel_daemon_hooks() {
+        let (started, mut started_rx) = mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let (continued, mut continued_rx) = mpsc::unbounded_channel();
+        let probe = DetachedHookProbe {
+            started,
+            release: Arc::clone(&release),
+            continued,
+        };
+        let (tx, _rx) = mpsc::channel(1);
+        let svc = Arc::new(ConfigService::new(tx).with_transaction_hooks(
+            None,
+            Some(Arc::new({
+                let probe = probe.clone();
+                move |_, context| probe.hook::<proto::ConfirmConfigTransactionResponse>(&context)
+            })),
+            Some(Arc::new({
+                let probe = probe.clone();
+                move |_, context| probe.hook::<proto::AbortConfigTransactionResponse>(&context)
+            })),
+            None,
+            None,
+            Some(Arc::new(move |_, context| {
+                probe.hook::<proto::ConfigTransactionApplyResponse>(&context)
+            })),
+        ));
+
+        macro_rules! assert_detached {
+            ($method:ident, $request:expr) => {{
+                let svc = Arc::clone(&svc);
+                let rpc =
+                    tokio::spawn(
+                        async move { svc.$method(Request::new($request)).await.map(|_| ()) },
+                    );
+                let attached = started_rx.recv().await.unwrap();
+                assert!(attached.load(Ordering::Acquire));
+                rpc.abort();
+                assert!(rpc.await.unwrap_err().is_cancelled());
+                assert!(!attached.load(Ordering::Acquire));
+                release.add_permits(1);
+                continued_rx.recv().await.unwrap();
+            }};
+        }
+        let confirm = proto::ConfirmConfigTransactionRequest::default();
+        let abort = proto::AbortConfigTransactionRequest::default();
+        let rollback = proto::RollbackConfigTransactionRequest::default();
+        assert_detached!(confirm_config_transaction, confirm);
+        assert_detached!(abort_config_transaction, abort);
+        assert_detached!(rollback_config_transaction, rollback);
+    }
+
+    #[tokio::test]
     async fn confirmed_transaction_control_hooks_fail_closed_without_executor() {
         let (tx, _rx) = mpsc::channel(1);
         let svc = ConfigService::new(tx);
@@ -1106,8 +1205,13 @@ mod tests {
                 })
             })),
             Some(Arc::new(
-                |request: proto::RollbackConfigTransactionRequest| {
+                |request: proto::RollbackConfigTransactionRequest, context| {
                     Box::pin(async move {
+                        assert!(
+                            context
+                                .response_attached()
+                                .load(std::sync::atomic::Ordering::Acquire)
+                        );
                         assert_eq!(request.index, 2);
                         assert_eq!(request.confirm_id, "rollback-1");
                         Ok(proto::ConfigTransactionApplyResponse {

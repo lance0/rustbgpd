@@ -473,11 +473,6 @@ async fn owned_policy_mutation_body(
         None
     };
     let dispatch = dispatch_owned_catalog_mutation(peer_mgr_tx, actor_timeout, mutation).await;
-    if matches!(dispatch, OwnedCatalogDispatch::Replied(_))
-        && let Some(operation) = &owned
-    {
-        operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
-    }
     match dispatch {
         OwnedCatalogDispatch::NotAccepted(error) => {
             drop(staged);
@@ -504,6 +499,9 @@ async fn owned_policy_mutation_body(
             let Some(staged) = staged else {
                 return OwnedRuntimeConfigOutcome::PublishedDurable(());
             };
+            if let Some(operation) = &owned {
+                operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
+            }
             match staged.commit_typed().await {
                 Ok(()) => OwnedRuntimeConfigOutcome::PublishedDurable(()),
                 Err(error) => {

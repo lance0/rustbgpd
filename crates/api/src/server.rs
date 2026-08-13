@@ -58,9 +58,10 @@ use crate::proto::peer_group_service_server::PeerGroupServiceServer;
 use crate::proto::policy_service_server::PolicyServiceServer;
 use crate::proto::rib_service_server::RibServiceServer;
 use crate::rib_service::RibService;
-use crate::runtime_config_settlement::RuntimeConfigSettlementWatchdog;
-
-use crate::runtime_config_settlement::RuntimeConfigFenceReason;
+use crate::runtime_config_settlement::{
+    OwnedRuntimeConfigRequestContext, OwnedRuntimeConfigResponseAttachment,
+    RuntimeConfigFenceReason, RuntimeConfigSettlementWatchdog,
+};
 use rustbgpd_rib::{RibReadinessQuery, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
 
@@ -402,7 +403,12 @@ pub type GnmiSetFuture =
 ///
 /// The binary crate owns this because `OpenConfig` Set must translate into
 /// complete candidate TOML and then use the ADR-0076 transaction controller.
-pub type GnmiSetFn = Arc<dyn Fn(GnmiSetTransaction) -> GnmiSetFuture + Send + Sync + 'static>;
+pub type GnmiSetFn = Arc<
+    dyn Fn(GnmiSetTransaction, OwnedRuntimeConfigRequestContext) -> GnmiSetFuture
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Future returned by the daemon-owned config transaction apply hook.
 pub type ConfigTransactionApplyFuture = Pin<
@@ -432,20 +438,20 @@ pub type ConfigTransactionApplyFn = Arc<
 
 /// Transport state transferred to the daemon-owned Apply executor.
 pub struct ConfigTransactionApplyContext {
-    response_attached: Arc<std::sync::atomic::AtomicBool>,
+    request: OwnedRuntimeConfigRequestContext,
     stream: Option<StreamApplyOwnership>,
 }
 
 impl ConfigTransactionApplyContext {
     #[must_use]
-    pub fn unary() -> (Self, ConfigTransactionResponseAttachment) {
-        let attached = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    pub fn unary() -> (Self, OwnedRuntimeConfigResponseAttachment) {
+        let (request, attachment) = OwnedRuntimeConfigRequestContext::unary();
         (
             Self {
-                response_attached: Arc::clone(&attached),
+                request,
                 stream: None,
             },
-            ConfigTransactionResponseAttachment(attached),
+            attachment,
         )
     }
 
@@ -453,15 +459,15 @@ impl ConfigTransactionApplyContext {
     pub(crate) fn streamed(
         permit: OwnedSemaphorePermit,
         admission: Arc<Semaphore>,
-    ) -> (Self, ConfigTransactionResponseAttachment) {
+    ) -> (Self, OwnedRuntimeConfigResponseAttachment) {
         let (mut context, attachment) = Self::unary();
         context.stream = Some(StreamApplyOwnership { permit, admission });
         (context, attachment)
     }
 
     #[must_use]
-    pub fn response_attached(&self) -> Arc<std::sync::atomic::AtomicBool> {
-        Arc::clone(&self.response_attached)
+    pub fn request_context(&self) -> &OwnedRuntimeConfigRequestContext {
+        &self.request
     }
 
     #[must_use]
@@ -475,15 +481,6 @@ impl ConfigTransactionApplyContext {
 struct StreamApplyOwnership {
     permit: OwnedSemaphorePermit,
     admission: Arc<Semaphore>,
-}
-
-/// Response-lifetime sentinel; dropping it records transport cancellation.
-pub struct ConfigTransactionResponseAttachment(Arc<std::sync::atomic::AtomicBool>);
-
-impl Drop for ConfigTransactionResponseAttachment {
-    fn drop(&mut self) {
-        self.0.store(false, std::sync::atomic::Ordering::Release);
-    }
 }
 
 /// Future returned by the daemon-owned config transaction confirm hook.
@@ -500,7 +497,10 @@ pub type ConfigTransactionConfirmFuture = Pin<
 
 /// Daemon-owned hook for `ConfigService.ConfirmConfigTransaction`.
 pub type ConfigTransactionConfirmFn = Arc<
-    dyn Fn(crate::proto::ConfirmConfigTransactionRequest) -> ConfigTransactionConfirmFuture
+    dyn Fn(
+            crate::proto::ConfirmConfigTransactionRequest,
+            OwnedRuntimeConfigRequestContext,
+        ) -> ConfigTransactionConfirmFuture
         + Send
         + Sync
         + 'static,
@@ -520,7 +520,10 @@ pub type ConfigTransactionAbortFuture = Pin<
 
 /// Daemon-owned hook for `ConfigService.AbortConfigTransaction`.
 pub type ConfigTransactionAbortFn = Arc<
-    dyn Fn(crate::proto::AbortConfigTransactionRequest) -> ConfigTransactionAbortFuture
+    dyn Fn(
+            crate::proto::AbortConfigTransactionRequest,
+            OwnedRuntimeConfigRequestContext,
+        ) -> ConfigTransactionAbortFuture
         + Send
         + Sync
         + 'static,
@@ -587,7 +590,10 @@ pub type ConfigRollbackFuture = Pin<
 /// entry and routes it through the same transaction executor as
 /// `ApplyConfigTransaction`.
 pub type ConfigRollbackFn = Arc<
-    dyn Fn(crate::proto::RollbackConfigTransactionRequest) -> ConfigRollbackFuture
+    dyn Fn(
+            crate::proto::RollbackConfigTransactionRequest,
+            OwnedRuntimeConfigRequestContext,
+        ) -> ConfigRollbackFuture
         + Send
         + Sync
         + 'static,
