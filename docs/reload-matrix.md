@@ -251,7 +251,7 @@ that are stood up once at startup. Two flags are hot-pluggable.
 | `allow_blackhole_broad_prefixes` | restart-required | Same — feeds the discard-spawn gate. |
 | `multipath_relax` | restart-required | RIB best-path tie-break behavior; reconciling mid-flight would require an Adj-RIB-Out rebuild. |
 | `link_bandwidth_weighted` | restart-required | Weighted-multipath behavior (ADR-0068). |
-| `dynamic_neighbor_limit` | restart-required | Pre-allocated cap on dynamic-neighbor slots. SIGHUP pins the runtime snapshot to the startup value while retaining the edited desired value for restart. |
+| `dynamic_neighbor_limit` | restart-required | Admission cap compared live against the dynamic-peer counter (inbound admission and LRU eviction bound); nothing is pre-allocated. SIGHUP pins the runtime snapshot to the startup value while retaining the edited desired value for restart. |
 | `worker_threads` | restart-required | Tokio runtime worker-thread count; the runtime is built once at startup. Unset caps to `min(CPU parallelism, 8)`; `RUSTBGPD_WORKER_THREADS` overrides. |
 | `warm_cache_checkpoint_on_shutdown` | restart-required | The shutdown checkpoint writer and its pinned runtime-state directory are selected at startup. |
 | `runtime_state_dir` | restart-required | File-system paths (`gr-restart.toml`, `fib-owned.json`, `grpc.sock`) are bound at startup. |

@@ -1313,12 +1313,16 @@ impl Config {
 
         validate_tcp_ao_listener_capacity(self, &parsed_dynamic_prefixes)?;
 
-        // Validate dynamic_neighbor_limit range
+        // A zero limit would silently reject every dynamic neighbor; an
+        // operator who wants that removes the [[dynamic_neighbors]] ranges
+        // instead. There is no upper bound: both consumers are live counter
+        // compares (inbound admission and the LRU eviction bound), nothing
+        // is pre-allocated.
         if let Some(limit) = self.global.dynamic_neighbor_limit
-            && (limit == 0 || limit > 5000)
+            && limit == 0
         {
             return Err(ConfigError::InvalidDynamicNeighbor {
-                reason: format!("dynamic_neighbor_limit must be 1..=5000, got {limit}"),
+                reason: "dynamic_neighbor_limit must be greater than 0".to_string(),
             });
         }
 

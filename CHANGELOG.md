@@ -215,6 +215,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `[global] dynamic_neighbor_limit` no longer enforces a 5000 ceiling; any
+  value greater than 0 is accepted. Both consumers are live counter compares
+  (inbound admission and the LRU eviction bound) with no pre-allocation, so
+  the ceiling protected nothing. Existing configs are unaffected — widening
+  an accepted range is backward-compatible. (LAN-967)
 - `rustbgpd --init-config PROFILE` no longer requires `--stdout`; the flag
   carried no information since stdout is the only output target. It remains
   accepted alongside `--init-config` and is ignored, so existing invocations
