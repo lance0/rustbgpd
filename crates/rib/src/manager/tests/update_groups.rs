@@ -934,7 +934,10 @@ fn grouped_peer_slow_round_trip_releases_private_unicast_without_wire_delta() {
             assert_eq!(private.len(), 0);
             assert_eq!(private.bench_route_capacity(), 0);
         }
-        assert!(outbound.try_recv().is_err());
+        assert!(matches!(
+            outbound.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 }
 
