@@ -2,10 +2,19 @@
 
 Scale/perf harnesses that back the published perf receipts in `docs/perf/`.
 
-Each is a standalone crate with its own empty `[workspace]` table, deliberately
-kept **out of** the root workspace so normal `cargo build --workspace` does not
-build it. CI compiles and tests each crate explicitly so API drift cannot leave
-a receipt harness broken on `main`.
+The harness crates are members of a dedicated workspace rooted at
+[`Cargo.toml`](Cargo.toml) with one shared [`Cargo.lock`](Cargo.lock),
+deliberately kept **out of** the root workspace so normal
+`cargo build --workspace` does not build them. CI compiles and tests each
+crate explicitly so API drift cannot leave a receipt harness broken on
+`main`. Binaries land in `bench/scale/target/`.
+
+Release-time lockfile refresh (syncs the path-dep versions after a
+workspace version bump) is one command:
+
+```text
+cargo update --workspace --manifest-path bench/scale/Cargo.toml
+```
 
 | Harness | Measures | Backs |
 |---|---|---|
@@ -17,13 +26,13 @@ a receipt harness broken on `main`.
 | [`outbound-prefix-limits/`](outbound-prefix-limits/) | ADR-0113 outbound unicast prefix maxima end to end: four real stub sessions against a real daemon, wire-side prefix counts under a cap, and the operator surfaces | [receipt](../../docs/perf/outbound-prefix-limits-2026-07.md) |
 | [`config-persistence/`](config-persistence/) | Config persistence, applied-config history, `config rollback`, and the three commit-confirm outcomes end to end: three real stub sessions against a real daemon it restarts itself, plus an injected persistence rejection that must leave sessions, counters, and wire state unchanged | [receipt](../../docs/perf/config-persistence-2026-07.md) |
 
-Build (from repo root):
+Build (from repo root; binaries land in `bench/scale/target/release/`):
 
 ```text
-cd bench/scale/rrharness              && cargo build --release
-cd bench/scale/reloadstall            && cargo build --release
-cd bench/scale/outbound-prefix-limits && cargo build --release
-cd bench/scale/config-persistence     && cargo build --release
+cargo build --release --manifest-path bench/scale/rrharness/Cargo.toml
+cargo build --release --manifest-path bench/scale/reloadstall/Cargo.toml
+cargo build --release --manifest-path bench/scale/outbound-prefix-limits/Cargo.toml
+cargo build --release --manifest-path bench/scale/config-persistence/Cargo.toml
 ```
 
 See each harness's `README.md` for its arg contract and run shapes.

@@ -15,5 +15,3 @@ rustbgpd-transport = { path = "../../../crates/transport", features = ["bench-in
 rustbgpd-wire = { path = "../../../crates/wire" }
 tikv-jemallocator = { version = "0.7", features = ["profiling", "stats"] }
 tokio = { version = "1", features = ["full"] }
-
-[workspace]

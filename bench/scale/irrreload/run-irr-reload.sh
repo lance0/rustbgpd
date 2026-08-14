@@ -38,7 +38,7 @@ set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 RSTALL="$REPO/bench/scale/reloadstall"
-HARNESS="$RSTALL/target/release/reloadstall"
+HARNESS="$REPO/bench/scale/target/release/reloadstall"
 GEN="$RSTALL/gen-irr-scenario.py"
 SAMPLER="$REPO/bench/scale/matrix/rss-sampler.sh"
 TXN_APPLY="$REPO/bench/scale/irrreload/txn-apply.sh"

@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "config-persistence",
+    "enhanced-route-refresh",
+    "outbound-prefix-limit-scale",
+    "outbound-prefix-limits",
+    "reloadstall",
+    "rrharness",
+    "rrtransport",
+]
+resolver = "2"
+
+# Carried over from the former per-crate manifests: the profiling harnesses
+# need line tables in release builds for folded-stack output.
+[profile.release]
+debug = 1

@@ -4,14 +4,15 @@ set -euo pipefail
 root=$(git rev-parse --show-toplevel)
 verifier="$root/bench/scale/rrtransport/verify_receipt.py"
 manifest="$root/bench/scale/rrtransport/Cargo.toml"
-binary="$root/bench/scale/rrtransport/target/release/rrtransport"
+binary="$root/bench/scale/target/release/rrtransport"
 rss_limit_kib=$((2 * 1024 * 1024))
 sources=(
   bench/scale/rrtransport/src/main.rs
   bench/scale/rrtransport/src/rr1000.rs
   bench/scale/rrtransport/src/rr1000_support.rs
   bench/scale/rrtransport/Cargo.toml
-  bench/scale/rrtransport/Cargo.lock
+  bench/scale/Cargo.toml
+  bench/scale/Cargo.lock
   bench/scale/rrtransport/run-receipt.sh
   bench/scale/rrtransport/verify_receipt.py
 )
@@ -413,7 +414,7 @@ startup_gate_fixture() {
   receipt=$fixture_dir/receipt
   tiny_ready=$fixture_dir/gate/ready
   tiny_go=$fixture_dir/gate/go
-  tiny_expected="$root/bench/scale/rrtransport/target/debug/rrtransport"
+  tiny_expected="$root/bench/scale/target/debug/rrtransport"
   printf 'observer\trss_kib\n' >"$receipt/rss.tsv"
   max_rss=0
   case $mode in
@@ -797,7 +798,7 @@ case ${1:-} in
     receipt=$2
     rm -rf "$receipt"
     mkdir -p "$receipt"
-    tiny_binary="$root/bench/scale/rrtransport/target/debug/rrtransport"
+    tiny_binary="$root/bench/scale/target/debug/rrtransport"
     run_grouped_commit_fixture "$receipt" 4 100
     printf 'observer\trss_kib\n' >"$receipt/rss.tsv"
     tiny_ready=$receipt/.startup-ready

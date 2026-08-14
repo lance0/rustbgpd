@@ -22,7 +22,7 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 RSTALL="$REPO/bench/scale/reloadstall"
-HARNESS="$RSTALL/target/release/reloadstall"
+HARNESS="$REPO/bench/scale/target/release/reloadstall"
 SAMPLER="$REPO/bench/scale/matrix/rss-sampler.sh"
 
 N_PEERS="${N_PEERS:-700}"

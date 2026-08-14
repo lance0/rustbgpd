@@ -11,8 +11,3 @@ rustbgpd-telemetry = { path = "../../../crates/telemetry" }
 tokio = { version = "1", features = ["full"] }
 pprof = { version = "0.14", features = ["flamegraph"] }
 libc = "0.2"
-
-[profile.release]
-debug = 1
-
-[workspace]

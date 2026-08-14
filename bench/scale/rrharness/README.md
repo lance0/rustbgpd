@@ -42,12 +42,12 @@ compiling against `crates/rib`, `crates/wire`, and `crates/telemetry` on `main`.
 
 ## Build and run
 
-Standalone crate (not a workspace member — build it explicitly):
+Member of the `bench/scale` workspace (not the root workspace — build it
+explicitly):
 
 ```text
-cd bench/scale/rrharness
-cargo build --release
-./target/release/rrharness <mode> <args...>
+cargo build --release --manifest-path bench/scale/rrharness/Cargo.toml
+./bench/scale/target/release/rrharness <mode> <args...>
 ```
 
 ## Arg contract
