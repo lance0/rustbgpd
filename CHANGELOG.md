@@ -219,6 +219,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   carried no information since stdout is the only output target. It remains
   accepted alongside `--init-config` and is ignored, so existing invocations
   are unchanged. (LAN-967)
+- The planned v1 CLI inventory no longer pins bare `rbgp diff`, which was
+  never invocable — a subcommand has always been required. The invocable
+  `diff advertised` and `diff snapshot` paths stay pinned. (LAN-967)
 - The planned v1 RS/RR compatibility inventory no longer freezes
   `[global].worker_threads`, `[event_history]`'s `batch_interval_ms`,
   `batch_size`, `overflow`, `queue_capacity`, and `synchronous` keys, or the
