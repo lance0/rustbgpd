@@ -296,7 +296,9 @@ async fn routes_validated_on_insert_with_vrp_table() {
         max_len: 24,
         origin_asn: 65001,
     }]));
-    tx.send(RibUpdate::RpkiCacheUpdate { table }).await.unwrap();
+    tx.send(RibUpdate::RpkiCacheUpdate { table, delta: None })
+        .await
+        .unwrap();
 
     // Now send a route with matching origin
     let peer = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1));
@@ -380,7 +382,9 @@ async fn rpki_cache_update_revalidates_existing_routes() {
         max_len: 24,
         origin_asn: 65001,
     }]));
-    tx.send(RibUpdate::RpkiCacheUpdate { table }).await.unwrap();
+    tx.send(RibUpdate::RpkiCacheUpdate { table, delta: None })
+        .await
+        .unwrap();
 
     // Query again — should be Valid now
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -453,7 +457,9 @@ async fn rpki_cache_update_changes_best_path() {
         max_len: 24,
         origin_asn: 65002,
     }]));
-    tx.send(RibUpdate::RpkiCacheUpdate { table }).await.unwrap();
+    tx.send(RibUpdate::RpkiCacheUpdate { table, delta: None })
+        .await
+        .unwrap();
 
     // After RPKI: peer2 should be best (Valid > NotFound)
     // But peer1's route has origin 65001, not covered → still NotFound.
@@ -519,7 +525,9 @@ async fn rpki_cache_update_invalid_demotes_best_path() {
         max_len: 24,
         origin_asn: 65002,
     }]));
-    tx.send(RibUpdate::RpkiCacheUpdate { table }).await.unwrap();
+    tx.send(RibUpdate::RpkiCacheUpdate { table, delta: None })
+        .await
+        .unwrap();
 
     // peer1 is now Invalid (VRP covers prefix but wrong origin), peer2 is Valid
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -774,7 +782,9 @@ async fn rpki_cache_update_no_change_no_redistribution() {
         max_len: 24,
         origin_asn: 65099,
     }]));
-    tx.send(RibUpdate::RpkiCacheUpdate { table }).await.unwrap();
+    tx.send(RibUpdate::RpkiCacheUpdate { table, delta: None })
+        .await
+        .unwrap();
 
     // Verify route stays NotFound — no VRP covers 10.0.0.0/24
     let (reply_tx, reply_rx) = oneshot::channel();

@@ -305,7 +305,11 @@ impl RibManager {
         true
     }
 
-    pub(super) fn handle_rpki_cache_update(&mut self, table: Arc<VrpTable>) {
+    pub(super) fn handle_rpki_cache_update(
+        &mut self,
+        table: Arc<VrpTable>,
+        _delta: Option<Vec<rustbgpd_rpki::VrpEntry>>,
+    ) {
         info!(
             vrps = table.len(),
             "RPKI cache update — re-validating routes"

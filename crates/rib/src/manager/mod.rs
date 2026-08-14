@@ -2365,7 +2365,9 @@ impl RibManager {
                     self.ensure_all_route_pages_advanced(page_versions);
                 }
             }
-            RibUpdate::RpkiCacheUpdate { table } => self.handle_rpki_cache_update(table),
+            RibUpdate::RpkiCacheUpdate { table, delta } => {
+                self.handle_rpki_cache_update(table, delta);
+            }
             RibUpdate::AspaTableUpdate { table } => self.handle_aspa_cache_update(table),
             RibUpdate::InjectFlowSpec { route, reply } => self.handle_inject_flowspec(route, reply),
             RibUpdate::WithdrawFlowSpec { key, reply } => {
