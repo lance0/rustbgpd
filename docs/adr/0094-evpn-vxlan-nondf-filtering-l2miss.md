@@ -34,7 +34,7 @@ was dead, and deferred A2 as ASIC/SAI-only.
 
 ### What ADR-0065 did not test (and explicitly flagged as the open avenue)
 
-ADR-0065's own *Decision outcome* (lines 156–164) named the remaining softswitch
+ADR-0065's own "Decision outcome" section named the remaining softswitch
 avenue — classify/mark on the **underlay before decap**, or operate on the
 decapsulated inner frame — but blocked it on two unknowns: **(1) mark survival
 through decap** and **(2) per-MAC state to separate unknown-unicast from

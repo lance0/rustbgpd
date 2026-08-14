@@ -190,7 +190,7 @@ value that doesn't match what's actually being used to decapsulate.
 ### 5. Type 5 wire shape — single label, Interface-less
 
 The Type 5 codec already round-trips (`EvpnIpPrefixRoute` in
-`crates/wire/src/evpn.rs:453`) and carries one MPLS label slot.
+`crates/wire/src/evpn.rs`) and carries one MPLS label slot.
 RFC 9136 §4.4.2 mandates the Interface-less model uses that single
 label as the L3VNI and `gateway = 0.0.0.0 / ::`.
 

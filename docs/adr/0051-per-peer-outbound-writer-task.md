@@ -259,7 +259,8 @@ still holds for any future broken peer (real or synthetic).
 
 ## What this does NOT fix
 
-- The dirty-resync HashSet rebuild cost in `distribution.rs:1362-1373`.
+- The dirty-resync HashSet rebuild cost in `distribute_changes` in
+  `crates/rib/src/manager/distribution/mod.rs`.
   Disconnecting a saturated peer drops its `dirty_peers` membership, so
   the symptom abates, but a healthy peer at the edge of capacity could
   still drive distribution-side allocation pressure. Address separately

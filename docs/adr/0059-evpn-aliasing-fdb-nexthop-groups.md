@@ -168,7 +168,7 @@ message; only the attribute payload differs).
 
 ### 4. Portable intent shape: add `alias_group_key` to `RemoteMacEntry`
 
-The current `RemoteMacEntry` (`crates/evpn/src/mac.rs:67`) carries:
+The current `RemoteMacEntry` (`crates/evpn/src/mac.rs`) carries:
 
 ```rust
 pub remote_vtep_ip: IpAddr,
