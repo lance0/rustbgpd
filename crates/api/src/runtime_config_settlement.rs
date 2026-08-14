@@ -810,8 +810,20 @@ impl OperationInner {
         fence_reason_from_state(self.state.load(Ordering::Acquire))
     }
 
+    /// Elapsed ownership time, derived on every call from the stored
+    /// `registered_at` instant. Nothing stores an elapsed value at phase
+    /// transitions, so a wedged owner still reads a growing elapsed on a
+    /// frozen phase at scrape time.
     fn elapsed(&self) -> Duration {
-        Instant::now().saturating_duration_since(self.registered_at)
+        let now = Instant::now();
+        #[cfg(test)]
+        let now = now
+            + Duration::from_nanos(
+                self.registry
+                    .scrape_clock_advance_nanos
+                    .load(Ordering::Acquire),
+            );
+        now.saturating_duration_since(self.registered_at)
     }
 }
 
@@ -830,6 +842,11 @@ struct Registry {
     terminal: std::sync::mpsc::Sender<i32>,
     #[cfg(test)]
     terminal_fired: AtomicBool,
+    /// Test-only clock advance applied to elapsed derivation, proving the
+    /// scrape reads elapsed from `registered_at` instead of a value written
+    /// at the last phase transition.
+    #[cfg(test)]
+    scrape_clock_advance_nanos: AtomicU64,
 }
 
 impl Registry {
@@ -864,6 +881,7 @@ impl Registry {
             observer_thread: OnceLock::new(),
             terminal,
             terminal_fired: AtomicBool::new(false),
+            scrape_clock_advance_nanos: AtomicU64::new(0),
         }
     }
 
@@ -1149,6 +1167,14 @@ impl RuntimeConfigSettlementWatchdog {
             previous.is_none(),
             "runtime-config settlement permits only one current operation"
         );
+        tracing::info!(
+            operation_id = operation.id,
+            kind = operation.kind.as_str(),
+            phase = operation.phase().as_str(),
+            elapsed_seconds = operation.elapsed().as_secs(),
+            budget_seconds = self.registry.budget.as_secs(),
+            "runtime config settlement ownership registered"
+        );
         self.registry.wake.notify_one();
         if let Some(observer) = self.registry.observer_thread.get() {
             observer.unpark();
@@ -1350,7 +1376,17 @@ impl OwnedRuntimeConfigOperation {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return,
+                Ok(_) => {
+                    tracing::info!(
+                        operation_id = self.inner.id,
+                        kind = self.inner.kind.as_str(),
+                        phase = phase.as_str(),
+                        elapsed_seconds = self.inner.elapsed().as_secs(),
+                        budget_seconds = self.inner.registry.budget.as_secs(),
+                        "runtime config settlement phase advanced"
+                    );
+                    return;
+                }
                 Err(actual) => observed = actual,
             }
         }
@@ -1395,6 +1431,14 @@ impl OwnedRuntimeConfigOperation {
                 Err(actual) => observed = actual,
             }
         }
+        tracing::info!(
+            operation_id = self.inner.id,
+            kind = self.inner.kind.as_str(),
+            phase = self.inner.phase().as_str(),
+            elapsed_seconds = self.inner.elapsed().as_secs(),
+            budget_seconds = self.inner.registry.budget.as_secs(),
+            "runtime config settlement settled"
+        );
         self.inner.registry.current.store(None);
         self.inner.registry.wake_threads();
         let resources = self
@@ -1970,6 +2014,56 @@ mod tests {
             1
         );
         assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(), 70);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn scrape_derives_elapsed_from_start_instant_while_wedged_phase_is_frozen() {
+        let (watchdog, _receiver) = test_watchdog(Duration::from_mins(30), Duration::from_secs(5));
+        let registry = prometheus::Registry::new();
+        watchdog.register_metrics(&registry);
+        let (operation, guard, _, _) = operation(&watchdog, false).await;
+        operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+        // The operation is now wedged: nothing below writes any phase or
+        // metric. Only the scrape clock advances, and each scrape must derive
+        // elapsed from the stored start instant at that moment.
+        let scrape_elapsed_at = |advance: Duration| {
+            watchdog.registry.scrape_clock_advance_nanos.store(
+                u64::try_from(advance.as_nanos()).unwrap(),
+                Ordering::Release,
+            );
+            let text = encode_metric_families(&registry.gather());
+            assert!(
+                text.contains(
+                    "bgp_runtime_config_settlement_active{fence_reason=\"none\",\
+                     kind=\"apply\",phase=\"mutating\",response_attached=\"attached\"} 1"
+                ),
+                "wedged owner must stay active in its frozen phase: {text}"
+            );
+            assert!(!text.contains("phase=\"owned_preflight\""));
+            assert!(text.contains("bgp_runtime_config_settlement_fail_stops_total{"));
+            assert!(!text.contains("fail_stops_total{fence_reason=\"budget_expired\""));
+            text.lines()
+                .find(|line| line.starts_with("bgp_runtime_config_settlement_elapsed_seconds{"))
+                .unwrap()
+                .rsplit_once(' ')
+                .unwrap()
+                .1
+                .parse::<f64>()
+                .unwrap()
+        };
+        let fifteen = scrape_elapsed_at(Duration::from_mins(15));
+        assert!(
+            (900.0..905.0).contains(&fifteen),
+            "scrape 15 minutes into the wedge must read 15 minutes, got {fifteen}"
+        );
+        let sixteen = scrape_elapsed_at(Duration::from_mins(16));
+        assert!(
+            sixteen - fifteen >= 59.0,
+            "elapsed must keep growing on a frozen phase: {fifteen} -> {sixteen}"
+        );
+        assert_eq!(operation.phase(), RuntimeConfigSettlementPhase::Mutating);
+        assert!(operation.try_settle());
         drop(guard);
     }
 

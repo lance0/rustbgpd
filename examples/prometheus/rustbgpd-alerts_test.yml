@@ -41,6 +41,54 @@ tests:
                 edge1:9179 for 2 minutes. The daemon is down,
                 unreachable, or `prometheus_addr` is no longer configured.
 
+  # ── BgpRuntimeConfigSettlementSlow ────────────────────────────
+  # Label names and values mirror the daemon's closed metric surface in
+  # crates/api/src/runtime_config_settlement.rs: labels kind/phase/
+  # response_attached/fence_reason with closed-enum values only.
+  - interval: 1s
+    input_series:
+      # edge1: one live apply owner wedged in `mutating`. Elapsed is derived
+      # at scrape time, so it keeps growing while the phase stays frozen.
+      - series: 'bgp_runtime_config_settlement_active{instance="edge1:9179",kind="apply",phase="mutating",response_attached="attached",fence_reason="none"}'
+        values: "1x602"
+      - series: 'bgp_runtime_config_settlement_elapsed_seconds{instance="edge1:9179",kind="apply",phase="mutating",response_attached="attached",fence_reason="none"}'
+        values: "0+1x602"
+      - series: 'bgp_runtime_config_settlement_budget_seconds{instance="edge1:9179",kind="apply",phase="mutating",response_attached="attached",fence_reason="none"}'
+        values: "1800x602"
+      # An inactive owner with a stale high elapsed must not fire.
+      - series: 'bgp_runtime_config_settlement_active{instance="edge2:9179",kind="confirm",phase="owned_preflight",response_attached="detached",fence_reason="none"}'
+        values: "0x602"
+      - series: 'bgp_runtime_config_settlement_elapsed_seconds{instance="edge2:9179",kind="confirm",phase="owned_preflight",response_attached="detached",fence_reason="none"}'
+        values: "700x602"
+      # A recovery-fenced owner past ten minutes is excluded: it is already
+      # committed to exit 70.
+      - series: 'bgp_runtime_config_settlement_active{instance="edge3:9179",kind="sighup",phase="settling_rollback",response_attached="detached",fence_reason="acknowledgement_lost"}'
+        values: "1x602"
+      - series: 'bgp_runtime_config_settlement_elapsed_seconds{instance="edge3:9179",kind="sighup",phase="settling_rollback",response_attached="detached",fence_reason="acknowledgement_lost"}'
+        values: "700x602"
+    alert_rule_test:
+      - eval_time: 9m59s
+        alertname: BgpRuntimeConfigSettlementSlow
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BgpRuntimeConfigSettlementSlow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: edge1:9179
+              kind: apply
+              phase: mutating
+              response_attached: attached
+              fence_reason: none
+            exp_annotations:
+              summary: "Runtime-config settlement still running after ten minutes"
+              description: >-
+                The apply runtime-config operation on edge1:9179 has held
+                ownership in mutating with its response attached for at least
+                ten minutes. Inspect the owning actor now; the daemon exits
+                independently when the fixed 30-minute budget plus five-second
+                grace expires.
+
   # ── BgpRuntimeConfigSettlementHalfBudget ──────────────────────
   - interval: 1s
     input_series:

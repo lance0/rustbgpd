@@ -36,6 +36,31 @@ groups:
             {{ $labels.instance }} for 2 minutes. The daemon is down,
             unreachable, or `prometheus_addr` is no longer configured.
 
+      - alert: BgpRuntimeConfigSettlementSlow
+        # Early advisory: ten minutes of owned settlement is far past any
+        # measured normal apply but leaves twenty minutes of the fixed
+        # 30-minute fail-stop budget for an operator to inspect the owner.
+        # Elapsed is derived at scrape time from the stored start instant,
+        # so a wedged owner keeps this firing on a frozen phase.
+        # Recovery-fenced owners are already committed to exit 70 and are
+        # deliberately excluded.
+        expr: >-
+          bgp_runtime_config_settlement_active{fence_reason="none"} == 1
+          and
+          bgp_runtime_config_settlement_elapsed_seconds{fence_reason="none"} >= 600
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Runtime-config settlement still running after ten minutes"
+          description: >-
+            The {{ $labels.kind }} runtime-config operation on
+            {{ $labels.instance }} has held ownership in {{ $labels.phase }}
+            with its response {{ $labels.response_attached }} for at least
+            ten minutes. Inspect the owning actor now; the daemon exits
+            independently when the fixed 30-minute budget plus five-second
+            grace expires.
+
       - alert: BgpRuntimeConfigSettlementHalfBudget
         # The owner has consumed half of the fixed 30-minute settlement
         # budget. Recovery-fenced owners are already committed to exit 70 and
