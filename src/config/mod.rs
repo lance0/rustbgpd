@@ -3492,6 +3492,7 @@ const fn format_policy_source(source: Rfc8212PolicySource) -> &'static str {
         Rfc8212PolicySource::LegacyOmission => "legacy_omission",
         Rfc8212PolicySource::ExplicitFalse => "explicit_false",
         Rfc8212PolicySource::ExplicitTrue => "explicit_true",
+        Rfc8212PolicySource::Epoch2Default => "epoch_2_default",
     }
 }
 
