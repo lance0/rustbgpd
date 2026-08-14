@@ -7253,7 +7253,10 @@ remote_asn = 65010
         else {
             panic!("confirmed gNMI full-snapshot mutation remains fenced");
         };
-        assert!(matches!(error, GnmiSetError::FailedPrecondition(_)));
+        assert!(
+            matches!(error, GnmiSetError::FailedPrecondition(_)),
+            "expected FailedPrecondition, got: {error:?}"
+        );
         assert!(!harness.locator.exists());
         assert!(!harness.journal.exists());
     }
