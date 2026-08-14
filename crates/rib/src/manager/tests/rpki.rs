@@ -802,3 +802,467 @@ async fn rpki_cache_update_no_change_no_redistribution() {
 }
 
 // ---- Add-Path multi-path send tests ----
+
+// ---- Delta-scoped revalidation (LAN-1029) ----
+//
+// Correctness fence: the delta arm must produce validation outcomes
+// identical to a full rescan — only which routes get revisited changes.
+// Several tests poison an uncovered route's stored state as a sentinel:
+// the delta arm must NOT touch it (a full rescan would repair it), which
+// proves both the scoping and which arm actually ran.
+
+fn delta_vrp(addr: Ipv4Addr, prefix_len: u8, max_len: u8, asn: u32) -> rustbgpd_rpki::VrpEntry {
+    rustbgpd_rpki::VrpEntry {
+        prefix: IpAddr::V4(addr),
+        prefix_len,
+        max_len,
+        origin_asn: asn,
+    }
+}
+
+fn delta_table(entries: &[rustbgpd_rpki::VrpEntry]) -> Arc<rustbgpd_rpki::VrpTable> {
+    Arc::new(rustbgpd_rpki::VrpTable::new(entries.to_vec()))
+}
+
+fn delta_manager() -> RibManager {
+    let (_tx, rx) = mpsc::channel(1);
+    RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+}
+
+fn insert_routes(manager: &mut RibManager, peer: Ipv4Addr, routes: Vec<Route>) {
+    let peer = IpAddr::V4(peer);
+    let mut rib = crate::adj_rib_in::AdjRibIn::new(peer);
+    for route in routes {
+        rib.insert(route);
+    }
+    manager.ribs.insert(peer, rib);
+}
+
+fn set_state(manager: &mut RibManager, peer: IpAddr, prefix: Prefix, state: RpkiValidation) {
+    manager
+        .ribs
+        .get_mut(&peer)
+        .unwrap()
+        .iter_mut()
+        .find(|r| r.prefix == prefix)
+        .unwrap()
+        .validation_state = state;
+}
+
+fn state_of(manager: &RibManager, peer: IpAddr, prefix: Prefix) -> RpkiValidation {
+    manager
+        .ribs
+        .get(&peer)
+        .unwrap()
+        .iter()
+        .find(|r| r.prefix == prefix)
+        .unwrap()
+        .validation_state
+}
+
+fn rpki_states(manager: &RibManager) -> Vec<(IpAddr, Prefix, u32, RpkiValidation)> {
+    let mut out: Vec<(IpAddr, Prefix, u32, RpkiValidation)> = manager
+        .ribs
+        .iter()
+        .flat_map(|(peer, rib)| {
+            rib.iter()
+                .map(move |r| (*peer, r.prefix, r.path_id, r.validation_state))
+        })
+        .collect();
+    out.sort_unstable_by_key(|&(peer, prefix, path_id, _)| (peer, prefix, path_id));
+    out
+}
+
+#[test]
+fn rpki_delta_revalidates_only_covered_routes() {
+    let mut manager = delta_manager();
+    let peer = Ipv4Addr::new(1, 0, 0, 1);
+    let covered = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+    let more_specific = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 25));
+    let outside = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 168, 0, 0), 24));
+    insert_routes(
+        &mut manager,
+        peer,
+        vec![
+            make_route_with_as_path(
+                Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
+                peer,
+                vec![65001],
+            ),
+            make_route_with_as_path(
+                Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 25),
+                peer,
+                vec![65002],
+            ),
+            make_route_with_as_path(
+                Ipv4Prefix::new(Ipv4Addr::new(192, 168, 0, 0), 24),
+                peer,
+                vec![65003],
+            ),
+        ],
+    );
+    let peer = IpAddr::V4(peer);
+
+    // Baseline snapshot (first table always full-rescans): everything NotFound.
+    manager.handle_rpki_cache_update(delta_table(&[]), None);
+    assert_eq!(state_of(&manager, peer, covered), RpkiValidation::NotFound);
+
+    // Sentinel: poison the uncovered route's stored state.
+    set_state(&mut manager, peer, outside, RpkiValidation::Valid);
+
+    // Announce 10.0.0.0/16 max_len 25 AS65001 as an incremental delta.
+    let announced = delta_vrp(Ipv4Addr::new(10, 0, 0, 0), 16, 25, 65001);
+    manager.handle_rpki_cache_update(
+        delta_table(std::slice::from_ref(&announced)),
+        Some(vec![announced]),
+    );
+
+    // The covered set includes more-specifics of the announced VRP.
+    assert_eq!(state_of(&manager, peer, covered), RpkiValidation::Valid);
+    // Covered, within max_len, wrong origin → Invalid.
+    assert_eq!(
+        state_of(&manager, peer, more_specific),
+        RpkiValidation::Invalid
+    );
+    // Uncovered sentinel untouched — the delta path did not scan it.
+    assert_eq!(state_of(&manager, peer, outside), RpkiValidation::Valid);
+}
+
+#[test]
+fn rpki_delta_withdrawal_flips_states_and_respects_overlap() {
+    let mut manager = delta_manager();
+    let peer1 = Ipv4Addr::new(1, 0, 0, 1);
+    let peer2 = Ipv4Addr::new(1, 0, 0, 2);
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+    insert_routes(
+        &mut manager,
+        peer1,
+        vec![make_route_with_as_path(
+            Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
+            peer1,
+            vec![65001],
+        )],
+    );
+    insert_routes(
+        &mut manager,
+        peer2,
+        vec![make_route_with_as_path(
+            Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
+            peer2,
+            vec![65002],
+        )],
+    );
+    let (peer1, peer2) = (IpAddr::V4(peer1), IpAddr::V4(peer2));
+
+    let general = delta_vrp(Ipv4Addr::new(10, 0, 0, 0), 16, 24, 65001);
+    let specific = delta_vrp(Ipv4Addr::new(10, 0, 0, 0), 24, 24, 65002);
+    manager.handle_rpki_cache_update(delta_table(&[general.clone(), specific.clone()]), None);
+    assert_eq!(state_of(&manager, peer1, prefix), RpkiValidation::Valid);
+    assert_eq!(state_of(&manager, peer2, prefix), RpkiValidation::Valid);
+
+    // Withdraw the general VRP: the specific one still covers, so peer1's
+    // route flips Valid→Invalid (covered, wrong origin) — NOT NotFound —
+    // and peer2's route is revisited but stays Valid.
+    manager.handle_rpki_cache_update(
+        delta_table(std::slice::from_ref(&specific)),
+        Some(vec![general]),
+    );
+    assert_eq!(state_of(&manager, peer1, prefix), RpkiValidation::Invalid);
+    assert_eq!(state_of(&manager, peer2, prefix), RpkiValidation::Valid);
+
+    // Withdraw the last covering VRP: both flip to NotFound.
+    manager.handle_rpki_cache_update(delta_table(&[]), Some(vec![specific]));
+    assert_eq!(state_of(&manager, peer1, prefix), RpkiValidation::NotFound);
+    assert_eq!(state_of(&manager, peer2, prefix), RpkiValidation::NotFound);
+}
+
+#[test]
+fn rpki_delta_max_len_gates_valid_but_not_coverage() {
+    let mut manager = delta_manager();
+    let peer = Ipv4Addr::new(1, 0, 0, 1);
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+    insert_routes(
+        &mut manager,
+        peer,
+        vec![make_route_with_as_path(
+            Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
+            peer,
+            vec![65001],
+        )],
+    );
+    let peer = IpAddr::V4(peer);
+    manager.handle_rpki_cache_update(delta_table(&[]), None);
+
+    // The announced VRP authorizes only up to /16, but coverage is by
+    // prefix-length containment: the /24 must be revisited and flip
+    // NotFound→Invalid even though it can never be Valid under this VRP.
+    let tight = delta_vrp(Ipv4Addr::new(10, 0, 0, 0), 16, 16, 65001);
+    manager.handle_rpki_cache_update(
+        delta_table(std::slice::from_ref(&tight)),
+        Some(vec![tight.clone()]),
+    );
+    assert_eq!(state_of(&manager, peer, prefix), RpkiValidation::Invalid);
+
+    // A second VRP for the same network with max_len 24 makes it Valid...
+    let loose = delta_vrp(Ipv4Addr::new(10, 0, 0, 0), 16, 24, 65001);
+    manager.handle_rpki_cache_update(
+        delta_table(&[tight.clone(), loose.clone()]),
+        Some(vec![loose.clone()]),
+    );
+    assert_eq!(state_of(&manager, peer, prefix), RpkiValidation::Valid);
+
+    // ...and withdrawing it flips back to Invalid under the surviving
+    // tighter VRP.
+    manager.handle_rpki_cache_update(delta_table(std::slice::from_ref(&tight)), Some(vec![loose]));
+    assert_eq!(state_of(&manager, peer, prefix), RpkiValidation::Invalid);
+}
+
+#[test]
+fn rpki_first_table_with_delta_forces_full_rescan() {
+    let mut manager = delta_manager();
+    let peer = Ipv4Addr::new(1, 0, 0, 1);
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+    insert_routes(
+        &mut manager,
+        peer,
+        vec![make_route_with_as_path(
+            Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
+            peer,
+            vec![65001],
+        )],
+    );
+    let peer = IpAddr::V4(peer);
+    // Poison before any table exists.
+    set_state(&mut manager, peer, prefix, RpkiValidation::Valid);
+
+    // The first-ever update arrives claiming a delta that does not cover
+    // the route. With no baseline to delta from, the manager must ignore
+    // the delta, full-rescan, and repair the poisoned state.
+    let unrelated = delta_vrp(Ipv4Addr::new(192, 168, 0, 0), 24, 24, 65099);
+    manager.handle_rpki_cache_update(
+        delta_table(std::slice::from_ref(&unrelated)),
+        Some(vec![unrelated]),
+    );
+    assert_eq!(state_of(&manager, peer, prefix), RpkiValidation::NotFound);
+}
+
+#[test]
+fn rpki_delta_covers_ipv6_routes() {
+    fn v6_route(addr: &str, len: u8, peer: Ipv4Addr, asns: Vec<u32>) -> Route {
+        let mut route =
+            make_route_with_as_path(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0), peer, asns);
+        route.prefix = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(addr.parse().unwrap(), len));
+        route
+    }
+
+    let mut manager = delta_manager();
+    let peer = Ipv4Addr::new(1, 0, 0, 1);
+    let covered = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+        "2001:db8:1::".parse().unwrap(),
+        48,
+    ));
+    let outside = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+        "2001:db9::".parse().unwrap(),
+        32,
+    ));
+    insert_routes(
+        &mut manager,
+        peer,
+        vec![
+            v6_route("2001:db8:1::", 48, peer, vec![65001]),
+            v6_route("2001:db9::", 32, peer, vec![65001]),
+        ],
+    );
+    let peer = IpAddr::V4(peer);
+    manager.handle_rpki_cache_update(delta_table(&[]), None);
+    set_state(&mut manager, peer, outside, RpkiValidation::Invalid);
+
+    let announced = rustbgpd_rpki::VrpEntry {
+        prefix: IpAddr::V6("2001:db8::".parse().unwrap()),
+        prefix_len: 32,
+        max_len: 48,
+        origin_asn: 65001,
+    };
+    manager.handle_rpki_cache_update(
+        delta_table(std::slice::from_ref(&announced)),
+        Some(vec![announced]),
+    );
+    assert_eq!(state_of(&manager, peer, covered), RpkiValidation::Valid);
+    // Same family, different network: the sentinel proves it was skipped.
+    assert_eq!(state_of(&manager, peer, outside), RpkiValidation::Invalid);
+}
+
+/// Differential fence: a random announce/withdraw sequence applied through
+/// the delta arm and through full rescans must land every route of every
+/// peer in identical validation states at every step.
+#[test]
+fn rpki_delta_matches_full_rescan_on_random_sequences() {
+    fn rng_next(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    // VRP candidate universe with deliberate overlap: a /8 umbrella, /16s
+    // and /24s at competing origins and max lengths.
+    let mut candidates = vec![delta_vrp(Ipv4Addr::new(10, 0, 0, 0), 8, 24, 65001)];
+    for x in 0..4u8 {
+        for &(asn, max_len) in &[(65001u32, 16u8), (65001, 24), (65002, 20)] {
+            candidates.push(delta_vrp(Ipv4Addr::new(10, x, 0, 0), 16, max_len, asn));
+        }
+        for y in 0..2u8 {
+            for &(asn, max_len) in &[(65001u32, 24u8), (65002, 32), (65003, 25)] {
+                candidates.push(delta_vrp(Ipv4Addr::new(10, x, y, 0), 24, max_len, asn));
+            }
+        }
+    }
+
+    // Identical route sets in both managers: 4 peers × mixed lengths and
+    // origins across the candidate networks, plus one never-covered route
+    // per peer.
+    let build = || {
+        let mut manager = delta_manager();
+        for p in 1..=4u8 {
+            let peer = Ipv4Addr::new(1, 0, 0, p);
+            let mut routes = Vec::new();
+            for x in 0..4u8 {
+                for &(y, len) in &[(0u8, 16u8), (0, 20), (0, 24), (0, 25), (1, 24), (1, 32)] {
+                    let origin = 65001 + u32::from((x + y + p) % 4);
+                    routes.push(make_route_with_as_path(
+                        Ipv4Prefix::new(Ipv4Addr::new(10, x, y, 0), len),
+                        peer,
+                        vec![64900, origin],
+                    ));
+                }
+            }
+            routes.push(make_route_with_as_path(
+                Ipv4Prefix::new(Ipv4Addr::new(172, 16, p, 0), 24),
+                peer,
+                vec![65001],
+            ));
+            insert_routes(&mut manager, peer, routes);
+        }
+        manager
+    };
+    let mut with_delta = build();
+    let mut with_full = build();
+
+    let mut rng = 0x1029_5EED_u64;
+    let mut current: Vec<rustbgpd_rpki::VrpEntry> = Vec::new();
+    let mut prev_table = delta_table(&[]);
+    for step in 0..40 {
+        // 1-3 withdrawals then 1-3 announcements of random candidates,
+        // mirroring the VRP manager's withdraw-before-announce order and
+        // its delta = withdrawn + announced construction.
+        let mut delta = Vec::new();
+        for _ in 0..=(rng_next(&mut rng) % 3) {
+            let pick = usize::try_from(rng_next(&mut rng)).unwrap_or(usize::MAX);
+            let entry = candidates[pick % candidates.len()].clone();
+            current.retain(|c| c != &entry);
+            delta.push(entry);
+        }
+        for _ in 0..=(rng_next(&mut rng) % 3) {
+            let pick = usize::try_from(rng_next(&mut rng)).unwrap_or(usize::MAX);
+            let entry = candidates[pick % candidates.len()].clone();
+            if !current.contains(&entry) {
+                current.push(entry.clone());
+            }
+            delta.push(entry);
+        }
+        let table = delta_table(&current);
+        // Mirror the VRP manager's deep-equality suppression: an update
+        // that leaves the merged table unchanged is never distributed, so
+        // its delta is dropped for both arms.
+        if *table == *prev_table {
+            continue;
+        }
+        prev_table = Arc::clone(&table);
+        with_delta.handle_rpki_cache_update(Arc::clone(&table), Some(delta));
+        with_full.handle_rpki_cache_update(table, None);
+        assert_eq!(
+            rpki_states(&with_delta),
+            rpki_states(&with_full),
+            "delta and full rescan diverged at step {step}"
+        );
+    }
+}
+
+/// Timing receipt at the LAN-1029 synthetic shape: 100 peers × 10k routes,
+/// 1-entry delta. Two managers with identical state take the same T1→T2
+/// transition, one through each arm, so the timed sections do identical
+/// recompute work and differ only in revalidation scan scope. Outcomes are
+/// asserted identical; timings print to stderr (run with --nocapture).
+#[test]
+fn rpki_delta_timing_receipt() {
+    let build = || {
+        let mut manager = delta_manager();
+        for p in 0..100u8 {
+            let peer = Ipv4Addr::new(1, 0, p, 1);
+            let mut routes = Vec::with_capacity(10_000);
+            for a in 0..40u8 {
+                for b in 0..250u8 {
+                    // 10.0.0.0/24 carries origin 65002 so the delta below
+                    // flips exactly that route on every peer.
+                    let origin = if a == 0 && b == 0 { 65002 } else { 65001 };
+                    routes.push(make_route_with_as_path(
+                        Ipv4Prefix::new(Ipv4Addr::new(10, a, b, 0), 24),
+                        peer,
+                        vec![64900, origin],
+                    ));
+                }
+            }
+            insert_routes(&mut manager, peer, routes);
+        }
+        manager
+    };
+
+    // T1: one VRP per route prefix authorizing AS65001.
+    let mut t1_entries = Vec::with_capacity(10_000);
+    for a in 0..40u8 {
+        for b in 0..250u8 {
+            t1_entries.push(delta_vrp(Ipv4Addr::new(10, a, b, 0), 24, 24, 65001));
+        }
+    }
+    let t1 = delta_table(&t1_entries);
+    // T2 = T1 + one VRP authorizing AS65002 on 10.0.0.0/24.
+    let extra = delta_vrp(Ipv4Addr::new(10, 0, 0, 0), 24, 24, 65002);
+    let mut t2_entries = t1_entries.clone();
+    t2_entries.push(extra.clone());
+    let t2 = delta_table(&t2_entries);
+
+    let mut with_full = build();
+    let mut with_delta = build();
+    with_full.handle_rpki_cache_update(Arc::clone(&t1), None);
+    with_delta.handle_rpki_cache_update(Arc::clone(&t1), None);
+
+    let target = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+    let probe_peer = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1));
+    assert_eq!(
+        state_of(&with_full, probe_peer, target),
+        RpkiValidation::Invalid
+    );
+    assert_eq!(
+        state_of(&with_delta, probe_peer, target),
+        RpkiValidation::Invalid
+    );
+
+    let started = std::time::Instant::now();
+    with_full.handle_rpki_cache_update(Arc::clone(&t2), None);
+    let full_elapsed = started.elapsed();
+    let started = std::time::Instant::now();
+    with_delta.handle_rpki_cache_update(t2, Some(vec![extra]));
+    let delta_elapsed = started.elapsed();
+
+    // Identical outcomes on every peer: the 10.0.0.0/24 route flipped
+    // Invalid→Valid through both arms.
+    assert_eq!(rpki_states(&with_full), rpki_states(&with_delta));
+    for p in 0..100u8 {
+        let peer = IpAddr::V4(Ipv4Addr::new(1, 0, p, 1));
+        assert_eq!(state_of(&with_delta, peer, target), RpkiValidation::Valid);
+    }
+    eprintln!(
+        "rpki revalidation receipt (100 peers x 10k routes, 1-entry delta): \
+         full={full_elapsed:?} delta={delta_elapsed:?}"
+    );
+}
