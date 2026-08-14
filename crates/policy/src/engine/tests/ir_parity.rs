@@ -1,10 +1,20 @@
-//! Golden decision-compatibility corpus (ADR-0096 PR-1).
+//! Golden decision-compatibility corpus (ADR-0096 PR-1; frozen as
+//! data in LAN-965).
 //!
-//! Pins the IR path — `PolicyChain::evaluate_with_attribution`, which
+//! `golden_corpus.txt` freezes every corpus case — stable case IDs,
+//! both inputs as Debug reprs, and the expected `(PolicyResult,
+//! PolicyEvaluation)` — produced once by the pre-IR statement walker
+//! (`evaluate_with_attribution_legacy`). The corpus test asserts the
+//! frozen outcomes against both evaluators — the legacy walker and
+//! the IR path (`PolicyChain::evaluate_with_attribution`, which
 //! compiles through `crate::compile` and evaluates through the
-//! `CompiledChain` evaluator — decision-identical to the legacy
-//! statement walker (`evaluate_with_attribution_legacy`) across a broad
-//! (chain-shape × route-context) matrix:
+//! `CompiledChain` evaluator) — and asserts the regenerated inputs
+//! against their frozen reprs, so neither an evaluator nor a
+//! generator edit can drift silently. The corpus is never regenerated
+//! by tooling — an auto-blessed golden agrees with whatever the code
+//! does. A corpus change is a hand-edited, reviewed commit.
+//!
+//! The (chain-shape × route-context) matrix covers:
 //!
 //! - every match field kind, including the indexed community-set path
 //!   (multi-criterion OR-lists) and the inline single-criterion path;
@@ -17,11 +27,7 @@
 //!   deny-termination across policies, modification merge conflicts,
 //!   deny statements carrying (dropped) modifications;
 //! - attribution names for named / unnamed / empty / `None` chains;
-//! - `requires_*` introspection parity (legacy field scan vs IR walk).
-//!
-//! Both `PolicyResult` and `PolicyEvaluation` must be equal on every
-//! case. The legacy walker stays in-tree solely as this oracle until a
-//! later ADR-0096 slice deletes it.
+//! - `requires_*` introspection parity (direct field scan vs IR walk).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -768,17 +774,165 @@ fn composed_chains() -> Vec<(String, PolicyChain)> {
     chains
 }
 
+/// Parsed `golden_corpus.txt`: inputs and outcomes stay as raw repr
+/// strings — the tests compare reprs, never re-parse values.
+struct Golden {
+    /// `(case-ID, frozen chain repr)` in corpus order.
+    chains: Vec<(&'static str, &'static str)>,
+    /// `(case-ID, frozen route-context repr)` in corpus order.
+    ctxs: Vec<(&'static str, &'static str)>,
+    /// Distinct frozen `(PolicyResult, PolicyEvaluation)` reprs.
+    outs: Vec<&'static str>,
+    /// `(chain-ID, ctx-ID, index into outs)` in corpus order.
+    cases: Vec<(&'static str, &'static str, usize)>,
+}
+
+fn take<'a>(fields: &mut std::str::Split<'a, char>, line: usize, kind: &str) -> &'a str {
+    fields
+        .next()
+        .unwrap_or_else(|| panic!("golden_corpus.txt:{line}: truncated {kind} record"))
+}
+
+fn parse_golden() -> Golden {
+    const GOLDEN: &str = include_str!("golden_corpus.txt");
+    let mut g = Golden {
+        chains: Vec::new(),
+        ctxs: Vec::new(),
+        outs: Vec::new(),
+        cases: Vec::new(),
+    };
+    for (i, line) in GOLDEN.lines().enumerate() {
+        let n = i + 1;
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split('\t');
+        let kind = fields.next().expect("split yields at least one field");
+        match kind {
+            "chain" => {
+                let id = take(&mut fields, n, kind);
+                g.chains.push((id, take(&mut fields, n, kind)));
+            }
+            "ctx" => {
+                let id = take(&mut fields, n, kind);
+                g.ctxs.push((id, take(&mut fields, n, kind)));
+            }
+            "out" => {
+                let idx: usize = take(&mut fields, n, kind)
+                    .parse()
+                    .unwrap_or_else(|e| panic!("golden_corpus.txt:{n}: bad out index: {e}"));
+                assert_eq!(
+                    idx,
+                    g.outs.len(),
+                    "golden_corpus.txt:{n}: out records must be dense and in order"
+                );
+                g.outs.push(take(&mut fields, n, kind));
+            }
+            "case" => {
+                let chain = take(&mut fields, n, kind);
+                let ctx = take(&mut fields, n, kind);
+                let out: usize = take(&mut fields, n, kind)
+                    .parse()
+                    .unwrap_or_else(|e| panic!("golden_corpus.txt:{n}: bad case out index: {e}"));
+                assert!(
+                    out < g.outs.len(),
+                    "golden_corpus.txt:{n}: case references out {out} of {}",
+                    g.outs.len()
+                );
+                g.cases.push((chain, ctx, out));
+            }
+            other => panic!("golden_corpus.txt:{n}: unknown record kind {other:?}"),
+        }
+    }
+    g
+}
+
+/// Every corpus case against both evaluators: the frozen outcome must
+/// equal the legacy walker's and the IR path's `(PolicyResult,
+/// PolicyEvaluation)`. The regenerated inputs are asserted against
+/// their frozen reprs first, so an outcome comparison never runs
+/// against a silently different chain or route.
 #[test]
-fn golden_corpus_ir_matches_legacy() {
+fn golden_corpus_pins_evaluators() {
+    let golden = parse_golden();
     let backing = Backing::new();
     let contexts = contexts(&backing);
-
     let mut chains = generated_chains();
     chains.extend(composed_chains());
 
-    let mut cases = 0usize;
+    // Inputs: same IDs in the same order, same frozen reprs.
+    assert_eq!(
+        golden.chains.len(),
+        chains.len(),
+        "corpus chain count != generated chain count"
+    );
+    for ((golden_id, golden_repr), (id, chain)) in golden.chains.iter().zip(&chains) {
+        assert_eq!(golden_id, id, "chain ID drift");
+        assert_eq!(
+            *golden_repr,
+            format!("{:?}", chain.policies),
+            "chain input drift on {id}"
+        );
+    }
+    assert_eq!(
+        golden.ctxs.len(),
+        contexts.len(),
+        "corpus context count != generated context count"
+    );
+    for ((golden_id, golden_repr), (id, route)) in golden.ctxs.iter().zip(&contexts) {
+        assert_eq!(golden_id, id, "context ID drift");
+        assert_eq!(
+            *golden_repr,
+            format!("{route:?}"),
+            "context input drift on {id}"
+        );
+    }
+
+    // Cases: the full (chain × context) cross product, in order.
+    // 42 variants × 2 actions × 2 defaults × 2 mods + composed, × 13
+    // contexts. Guard against the corpus silently shrinking.
+    assert_eq!(
+        golden.cases.len(),
+        chains.len() * contexts.len(),
+        "corpus cases != chain × context cross product"
+    );
+    assert!(
+        golden.cases.len() >= 4000,
+        "corpus shrank to {} cases",
+        golden.cases.len()
+    );
+    let mut cases = golden.cases.iter();
     for (chain_name, chain) in &chains {
-        // requires_* parity: legacy field scan vs IR analysis.
+        for (ctx_name, route) in &contexts {
+            let (case_chain, case_ctx, out) = cases.next().expect("cross product checked above");
+            assert_eq!(
+                (*case_chain, *case_ctx),
+                (chain_name.as_str(), *ctx_name),
+                "case ID drift"
+            );
+            let expected = golden.outs[*out];
+            let legacy = format!("{:?}", chain.evaluate_with_attribution_legacy(route));
+            assert_eq!(
+                legacy, expected,
+                "legacy walker diverges from golden: chain={chain_name} ctx={ctx_name}"
+            );
+            let ir = format!("{:?}", chain.evaluate_with_attribution(route));
+            assert_eq!(
+                ir, expected,
+                "IR diverges from golden: chain={chain_name} ctx={ctx_name}"
+            );
+        }
+    }
+}
+
+/// `requires_*` introspection parity: the IR analyses must agree with
+/// a direct field scan of the statement lists.
+#[test]
+fn requires_introspection_matches_field_scan() {
+    let mut chains = generated_chains();
+    chains.extend(composed_chains());
+
+    for (chain_name, chain) in &chains {
         let legacy_regex = chain
             .policies
             .iter()
@@ -820,21 +974,7 @@ fn golden_corpus_ir_matches_legacy() {
             legacy_peer_ctx,
             "requires_peer_context diverges on {chain_name}"
         );
-
-        for (ctx_name, route) in &contexts {
-            let legacy = chain.evaluate_with_attribution_legacy(route);
-            let ir = chain.evaluate_with_attribution(route);
-            assert_eq!(
-                legacy, ir,
-                "IR/legacy divergence: chain={chain_name} ctx={ctx_name}"
-            );
-            cases += 1;
-        }
     }
-
-    // 42 variants × 2 actions × 2 defaults × 2 mods + composed, × 13
-    // contexts. Guard against the corpus silently shrinking.
-    assert!(cases >= 4000, "corpus shrank to {cases} cases");
 }
 
 /// `None`-chain contract: implicit permit with no attribution, on both
