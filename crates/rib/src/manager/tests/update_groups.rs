@@ -885,7 +885,7 @@ fn grouped_peer_non_unicast_first_delta_keeps_private_unicast_unallocated() {
 }
 
 #[test]
-fn grouped_peer_ungroup_seeds_private_advertised_routes() {
+fn grouped_peer_slow_round_trip_releases_private_unicast_without_wire_delta() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 1, 4));
@@ -908,11 +908,34 @@ fn grouped_peer_ungroup_seeds_private_advertised_routes() {
         .get(&peer)
         .expect("private fallback state");
     assert_eq!(private.len(), 1);
+    assert!(private.bench_route_capacity() > 0);
     assert!(private.get(&Prefix::V4(prefix), 0).is_some());
     assert!(matches!(
         outbound.try_recv(),
         Err(mpsc::error::TryRecvError::Empty)
     ));
+
+    for slow in [false, true, false] {
+        manager.handle_update(RibUpdate::PeerSlowState {
+            peer,
+            session_id: 0,
+            slow,
+        });
+        while manager.process_next_route_chunk() {}
+
+        let private = manager.adj_ribs_out.get(&peer).expect("private state");
+        if slow {
+            assert!(manager.grouped_member_of(peer).is_none());
+            assert_eq!(private.len(), 1);
+            assert!(private.bench_route_capacity() > 0);
+            assert!(private.get(&Prefix::V4(prefix), 0).is_some());
+        } else {
+            assert!(manager.grouped_member_of(peer).is_some());
+            assert_eq!(private.len(), 0);
+            assert_eq!(private.bench_route_capacity(), 0);
+        }
+        assert!(outbound.try_recv().is_err());
+    }
 }
 
 fn drive_exact_precommit_step(

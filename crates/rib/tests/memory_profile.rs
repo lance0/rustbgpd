@@ -665,6 +665,59 @@ fn memory_profile_schema_quick() {
     assert_eq!(rr.stats.adj_out_routes, 512 * 2);
 }
 
+#[cfg(feature = "bench-internals")]
+#[test]
+fn adj_rib_out_release_unicast_reclaims_100k_structural_capacity() {
+    const PREFIX_COUNT: usize = 100_000;
+    const MIN_RECLAIMED_BYTES: usize = 1024 * 1024;
+
+    let prefixes = generate_prefixes(PREFIX_COUNT);
+    let attrs = typical_attributes(1);
+    let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::new(10, 0, 11, 1)));
+    for prefix in &prefixes {
+        rib.insert(make_route(*prefix, 1, &attrs));
+    }
+
+    let route_capacity_before = rib.bench_route_capacity();
+    let prefix_len_before = rib.bench_prefix_index_len();
+    let route_bytes_before = route_capacity_before * std::mem::size_of::<Option<Route>>();
+    let prefix_bytes_before = rib.bench_prefix_index_mem_size();
+    let structural_bytes_before = route_bytes_before + prefix_bytes_before;
+    assert_eq!(rib.len(), PREFIX_COUNT);
+    assert_eq!(prefix_len_before, PREFIX_COUNT);
+    let fresh = AdjRibOut::new(IpAddr::V4(Ipv4Addr::new(10, 0, 12, 1)));
+    let fresh_route_capacity = fresh.bench_route_capacity();
+    let fresh_route_bytes = fresh_route_capacity * std::mem::size_of::<Option<Route>>();
+    let fresh_prefix_len = fresh.bench_prefix_index_len();
+    let fresh_prefix_bytes = fresh.bench_prefix_index_mem_size();
+
+    rib.release_unicast();
+
+    let route_capacity_after = rib.bench_route_capacity();
+    let prefix_len_after = rib.bench_prefix_index_len();
+    let route_bytes_after = route_capacity_after * std::mem::size_of::<Option<Route>>();
+    let prefix_bytes_after = rib.bench_prefix_index_mem_size();
+    let structural_bytes_after = route_bytes_after + prefix_bytes_after;
+    let route_reclaimed = route_bytes_before.saturating_sub(route_bytes_after);
+    let prefix_reclaimed = prefix_bytes_before.saturating_sub(prefix_bytes_after);
+    let reclaimed = route_reclaimed + prefix_reclaimed;
+    println!(
+        "route_capacity_before={} route_bytes_before={route_bytes_before} prefix_len_before={} prefix_bytes_before={prefix_bytes_before} route_capacity_after={} route_bytes_after={route_bytes_after} prefix_len_after={} prefix_bytes_after={prefix_bytes_after} fresh_route_bytes={fresh_route_bytes} fresh_prefix_bytes={fresh_prefix_bytes} route_reclaimed={route_reclaimed} prefix_reclaimed={prefix_reclaimed} total_before={structural_bytes_before} total_after={structural_bytes_after} total_reclaimed={reclaimed}",
+        route_capacity_before, prefix_len_before, route_capacity_after, prefix_len_after,
+    );
+    assert!(rib.is_empty());
+    assert_eq!(route_capacity_after, fresh_route_capacity);
+    assert_eq!(route_bytes_after, fresh_route_bytes);
+    assert_eq!(prefix_bytes_after, fresh_prefix_bytes);
+    assert_eq!(prefix_len_after, fresh_prefix_len);
+    assert!(route_bytes_before > route_bytes_after);
+    assert!(prefix_bytes_before > prefix_bytes_after);
+    assert!(
+        reclaimed >= MIN_RECLAIMED_BYTES,
+        "released {reclaimed} structural bytes, expected at least {MIN_RECLAIMED_BYTES}"
+    );
+}
+
 #[test]
 #[ignore = "manual high-N memory regression harness; use bench/compare-rib-memory.sh"]
 fn memory_profile_high_n() {
