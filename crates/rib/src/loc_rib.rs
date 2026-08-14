@@ -1442,6 +1442,30 @@ mod tests {
     use super::*;
     use crate::route::{BgpLsFamily, RouteOrigin};
 
+    /// The BENCHMARKS.md type-size table quotes `size_of` for `AdjRibIn`
+    /// and `LocRib`, and — unlike the other rows — nothing regenerates
+    /// them: both structs grow through nested per-family types with no
+    /// edit in their own files, and the documented figures went stale
+    /// silently (LAN-957). Fence the two rows the harness JSON cannot
+    /// see, the same include-the-doc pattern as the gRPC method
+    /// inventory fence in `crates/api/src/authz.rs`.
+    #[test]
+    fn benchmarks_doc_type_size_rows_match_compiler() {
+        let doc = include_str!("../../../docs/BENCHMARKS.md");
+        for (name, size) in [
+            ("AdjRibIn", size_of::<crate::adj_rib_in::AdjRibIn>()),
+            ("LocRib", size_of::<LocRib>()),
+        ] {
+            let row = format!("| `{name}` | {size} bytes |");
+            assert!(
+                doc.contains(&row),
+                "docs/BENCHMARKS.md type-size table is missing the row {row:?}: \
+                 the struct changed size or the doc was edited; update the \
+                 table (and its growth prose) to match the compiler"
+            );
+        }
+    }
+
     fn make_route(peer_oct: u8, prefix: Ipv4Prefix, local_pref: u32) -> Route {
         crate::test_support::make_route_with_lp(
             prefix,

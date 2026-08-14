@@ -37,6 +37,15 @@ ROOT = Path(__file__).resolve().parents[1]
 # changelog's released sections are historical records that must not be
 # rewritten, and the roadmap tracks unshipped work whose only public name is
 # often the tracker item itself.
+#
+# The rest of the tree — `bench/`, `examples/`, `scripts/`, crate sources —
+# is deliberately out of scope too (settled with LAN-957, the same
+# narrow-the-rule-to-what-matters call as the host-path-identifier
+# decision): those files are read by people working inside the repository,
+# where a tracker ID is the conventional cross-reference, and a stale one
+# in a harness README costs that reader very little. Known mentions outside
+# the fence (e.g. bench/scale/rrharness/README.md) are accepted, not
+# missed. Do not widen the scan without a new recorded decision.
 SCANNED_PREFIXES = ("docs/",)
 SCANNED_FILES = frozenset(
     {
