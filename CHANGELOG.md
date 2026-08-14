@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Runtime-config settlement logs now carry the operation ID, kind, phase,
+  elapsed seconds, and budget at ownership registration, every phase
+  transition, and settlement, matching the existing fencing diagnostic. The
+  shipped Prometheus alert pack adds `BgpRuntimeConfigSettlementSlow`, a
+  ten-minute early advisory ahead of the half-budget warning, and
+  docs/OPERATIONS.md gains a settlement metrics reference table. (LAN-1023)
+
 - The TUI peer detail now opens an on-demand unicast export-explain view with
   `r`: page through the global Best-RIB and explain advertise/deny gates,
   ordered policy reasons, and modifications for the selected peer. (LAN-995)

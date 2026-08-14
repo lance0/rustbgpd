@@ -69,24 +69,34 @@ none of those paths can postpone the 30-minute-plus-five-second deadline. Do not
 classify 70 as success or suppress its restart: the new process re-establishes
 authority from durable state.
 
-While one owner exists, `/metrics` exposes exactly one series for each of
-`bgp_runtime_config_settlement_active`, `_elapsed_seconds`, and
-`_budget_seconds`. `bgp_runtime_config_settlement_fail_stops_total` becomes 1
-when recovery fencing wins. All four use the bounded labels `kind`, `phase`
+While one owner exists, `/metrics` exposes exactly one series for each family
+below; they emit no idle tuple.
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `bgp_runtime_config_settlement_active` | gauge | 1 while one owner is live or recovery-fenced. |
+| `bgp_runtime_config_settlement_elapsed_seconds` | gauge | Seconds since ownership, derived at scrape time from the stored start instant — it keeps growing while a wedged owner's phase stays frozen. |
+| `bgp_runtime_config_settlement_budget_seconds` | gauge | The fixed 1800-second fail-stop budget. |
+| `bgp_runtime_config_settlement_fail_stops_total` | counter | Becomes 1 when recovery fencing wins; exit 70 follows after the grace. |
+
+All four use the bounded labels `kind`, `phase`
 (`owned_preflight`, `mutating`, or `settling_rollback`), `response_attached`
 (`attached` or `detached`), and `fence_reason` (`none`, `budget_expired`,
 `executor_lost`, `known_divergence`, `publication_ambiguous`, or
-`acknowledgement_lost`). They emit no idle tuple. Detached means the daemon owns
-the work without a live RPC response; it does not weaken the deadline.
+`acknowledgement_lost`). Detached means the daemon owns
+the work without a live RPC response; it does not weaken the deadline. The
+daemon-generated operation ID appears in logs at ownership registration, each
+phase transition, settlement, and fencing — never as a metric label.
 
 The daemon warns once at 15, 25, and 29 minutes without extending or resetting
-the deadline. `BgpRuntimeConfigSettlementHalfBudget` fires at 50%; at that point
-identify the labeled owner and inspect the owning actor rather than retrying the
-mutation. Fencing produces one redacted diagnostic containing only operation
-identity/classification, phase, elapsed/budget seconds, attachment, terminal,
-optional fence reason, and exit status. It never includes config contents,
-tokens, confirm IDs, comments, credentials, paths, digests, candidates, or raw
-error text.
+the deadline. `BgpRuntimeConfigSettlementSlow` fires after ten minutes of owned
+settlement and `BgpRuntimeConfigSettlementHalfBudget` at 50% of the budget; at
+either point identify the labeled owner and inspect the owning actor rather
+than retrying the mutation. Fencing produces one redacted diagnostic containing
+only operation identity/classification, phase, elapsed/budget seconds,
+attachment, terminal, optional fence reason, and exit status. It never includes
+config contents, tokens, confirm IDs, comments, credentials, paths, digests,
+candidates, or raw error text.
 
 The shipped systemd unit uses `Restart=on-failure`, but caps recovery at five
 starts per ten minutes so a deterministic persistence fault cannot flap every
