@@ -12622,7 +12622,8 @@ stable track (Tokio's policy) — gated in PR-CI so it doesn't drift.
 ### Fixed
 
 - **FlowSpec MP_REACH next-hop validation no longer tears the
-  session.** Per RFC 8955 §6.1 the `NEXT_HOP` value for FlowSpec
+  session.** Per RFC 8955 §4 (the original release note
+  incorrectly cited §6.1) the `NEXT_HOP` value for FlowSpec
   (SAFI 133) advertisements is "irrelevant" and recommended to be
   0. Wire decoder fills `MpReachNlri.next_hop` with `0.0.0.0`
   when the on-wire NH-Len is 0 (the FlowSpec convention). The
