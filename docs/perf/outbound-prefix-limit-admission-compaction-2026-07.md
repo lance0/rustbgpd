@@ -1,5 +1,15 @@
 # Grouped outbound prefix-limit admission compaction receipt — 2026-07
 
+> **Archived tooling.** The campaign driver this receipt references —
+> `bench/scale/outbound-prefix-limit-scale/run-receipt.sh` and its harness
+> crate — was retired from the working tree after this receipt was sealed. It
+> is preserved at commit `b12e5bf310cb4f9faf7aac5360a111301210b4c3` (the
+> last main commit containing it) and in release tag `v0.64.0`. Recover any
+> file with
+> `git show b12e5bf310cb4f9faf7aac5360a111301210b4c3:bench/scale/outbound-prefix-limit-scale/<file>`.
+> Command blocks below are quoted from the sealed campaign and refer to the
+> archived paths.
+
 This immediate-parent A/B measures the live memory required
 to materialize ADR-0113's exact per-member admitted-prefix sets for grouped
 peers. The candidate keeps the exact semantics but stores IPv4 and IPv6

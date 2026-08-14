@@ -1,5 +1,17 @@
 # Grouped outbound prefix-limit scale receipt — 2026-07
 
+> **Archived tooling.** The harness this receipt references —
+> `bench/scale/outbound-prefix-limit-scale/` (`run-receipt.sh`, the harness
+> crate, and its red proofs) — was retired from the working tree after this
+> receipt was sealed. The driver was deliberately one-shot: it refuses to run
+> unless `HEAD^` is the measured candidate's literal first parent with an
+> identical harness tree. The complete harness is preserved at commit
+> `b12e5bf310cb4f9faf7aac5360a111301210b4c3` (the last main commit containing
+> it) and in release tag `v0.64.0`. Recover any file with
+> `git show b12e5bf310cb4f9faf7aac5360a111301210b4c3:bench/scale/outbound-prefix-limit-scale/<file>`.
+> Command blocks below are quoted from the sealed campaign and refer to the
+> archived paths.
+
 ADR-0113 keeps one exact admitted-prefix set per limited peer and family, even
 when the peers share an update group. This receipt measures the cost of
 installing and removing those sets before changing their representation.

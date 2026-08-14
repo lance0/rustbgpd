@@ -1,5 +1,15 @@
 # Outbound prefix-limit recovery slicing receipt — 2026-07
 
+> **Archived tooling.** The campaign driver this receipt references —
+> `bench/scale/outbound-prefix-limit-scale/run-receipt.sh` and its harness
+> crate — was retired from the working tree after this receipt was sealed. It
+> is preserved at commit `b12e5bf310cb4f9faf7aac5360a111301210b4c3` (the
+> last main commit containing it) and in release tag `v0.64.0`. Recover any
+> file with
+> `git show b12e5bf310cb4f9faf7aac5360a111301210b4c3:bench/scale/outbound-prefix-limit-scale/<file>`.
+> Command blocks below are quoted from the sealed campaign and refer to the
+> archived paths.
+
 This receipt measures the bounded-work recovery path for grouped outbound
 prefix limits. It is an availability change: it returns the single-owner RIB
 actor between peer/family replays. It does **not** reduce the total full-table
