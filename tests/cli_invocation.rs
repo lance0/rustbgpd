@@ -79,7 +79,7 @@ fn unknown_options_use_the_documented_invocation_exit() {
     );
     let usage = concat!(
         "usage: rustbgpd [--check [--strict]] [--diff PATH] [--json] ",
-        "[--init-config PROFILE --stdout] [--dump-config-schema] [CONFIG_PATH]\n",
+        "[--init-config PROFILE] [--dump-config-schema] [CONFIG_PATH]\n",
         "       rustbgpd (--help | -h)\n",
         "       rustbgpd (--version | -V)\n",
         "       rustbgpd --man\n",
@@ -141,6 +141,7 @@ fn valid_one_shot_interleavings_and_literal_dash_paths_still_work() {
         vec![config_path, "--check"],
         vec!["--diff", config_path, config_path],
         vec![config_path, "--diff", config_path],
+        vec!["--init-config", "edge"],
         vec!["--init-config", "edge", "--stdout"],
         vec!["--dump-config-schema"],
     ] {

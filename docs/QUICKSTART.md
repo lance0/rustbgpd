@@ -25,7 +25,7 @@ sudo useradd --system --home-dir /var/lib/rustbgpd \
 sudo install -m 0644 share/systemd/rustbgpd.service \
   /etc/systemd/system/rustbgpd.service
 sudo install -d -m 0755 /etc/rustbgpd
-rustbgpd --init-config edge --stdout | \
+rustbgpd --init-config edge | \
   sudo tee /etc/rustbgpd/config.toml >/dev/null
 sudo chmod 0640 /etc/rustbgpd/config.toml
 sudo chgrp rustbgpd /etc/rustbgpd/config.toml
@@ -81,7 +81,7 @@ generate a disposable `lab` profile in the current directory:
 ```bash
 # `lab` = minimal single-box setup:
 # gRPC over a local UDS, state under /tmp, Prometheus probes enabled.
-rustbgpd --init-config lab --stdout > config.toml
+rustbgpd --init-config lab > config.toml
 $EDITOR config.toml
 ```
 

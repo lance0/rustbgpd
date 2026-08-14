@@ -2340,12 +2340,11 @@ change.
 Output the diff as JSON (only with \fB\-\-diff\fR).
 .TP
 \fB\-\-init\-config\fR \fIPROFILE\fR
-Print a starter config to stdout and exit (requires
-\fB\-\-stdout\fR). Profiles: lab, edge.
+Print a starter config to stdout and exit. Profiles: lab, edge.
 .TP
 \fB\-\-stdout\fR
-Write \fB\-\-init\-config\fR output to stdout (the only target for
-now).
+Accepted with \fB\-\-init\-config\fR and ignored; output always goes
+to stdout.
 .TP
 \fB\-\-dump\-config\-schema\fR
 Print the config JSON Schema to stdout and exit.
@@ -2441,9 +2440,10 @@ fn main() -> ExitCode {
                                      and deployment gates). Rejected without --check\n  \
                --diff PATH           Compare config against PATH and show what SIGHUP would change\n  \
                --json                Output diff as JSON (only with --diff)\n  \
-               --init-config PROFILE Print a starter config to stdout and exit (needs --stdout).\n                        \
+               --init-config PROFILE Print a starter config to stdout and exit.\n                        \
                                      Profiles: lab, edge\n  \
-               --stdout              Write --init-config output to stdout (the only target for now)\n  \
+               --stdout              Accepted with --init-config and ignored (output always\n                        \
+                                     goes to stdout)\n  \
                --dump-config-schema  Print the config JSON Schema to stdout and exit\n  \
                --man                 Print the man page (roff) to stdout and exit\n  \
                --version             Print version and exit\n  \
@@ -2527,7 +2527,7 @@ fn main() -> ExitCode {
         } else {
             eprintln!("error: unknown option: {arg}");
             eprintln!(
-                "usage: rustbgpd [--check [--strict]] [--diff PATH] [--json] [--init-config PROFILE --stdout] [--dump-config-schema] [CONFIG_PATH]\n       rustbgpd (--help | -h)\n       rustbgpd (--version | -V)\n       rustbgpd --man"
+                "usage: rustbgpd [--check [--strict]] [--diff PATH] [--json] [--init-config PROFILE] [--dump-config-schema] [CONFIG_PATH]\n       rustbgpd (--help | -h)\n       rustbgpd (--version | -V)\n       rustbgpd --man"
             );
             process::exit(2);
         }
@@ -2589,16 +2589,12 @@ fn main() -> ExitCode {
         }));
     }
 
-    // `--init-config PROFILE --stdout` prints a curated starter config and
-    // exits — handled before loading any runtime config, since config
-    // generation must work before a config file (or daemon) exists.
+    // `--init-config PROFILE` prints a curated starter config and exits —
+    // handled before loading any runtime config, since config generation
+    // must work before a config file (or daemon) exists. `--stdout` is
+    // accepted alongside it for compatibility and ignored: stdout is the
+    // only output target.
     if let Some(profile) = init_profile {
-        if !to_stdout {
-            eprintln!(
-                "error: --init-config currently requires --stdout (file output is not yet supported)"
-            );
-            process::exit(2);
-        }
         let Some(toml) = crate::config::profiles::profile_toml(&profile) else {
             eprintln!(
                 "error: unknown profile {profile:?}; available: {}",

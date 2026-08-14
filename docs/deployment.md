@@ -92,7 +92,7 @@ sudo useradd --system --home-dir /var/lib/rustbgpd \
 sudo install -m 0644 share/systemd/rustbgpd.service \
   /etc/systemd/system/rustbgpd.service
 sudo install -d -m 0755 /etc/rustbgpd
-rustbgpd --init-config edge --stdout | \
+rustbgpd --init-config edge | \
   sudo tee /etc/rustbgpd/config.toml >/dev/null
 sudo chmod 0640 /etc/rustbgpd/config.toml
 sudo chgrp rustbgpd /etc/rustbgpd/config.toml
@@ -480,7 +480,7 @@ For your own deployment:
   # One-time host prep.
   sudo install -d -o 999 -g 999 /etc/rustbgpd /var/lib/rustbgpd
   docker run --rm ghcr.io/lance0/rustbgpd:latest \
-    rustbgpd --init-config edge --stdout > config.toml
+    rustbgpd --init-config edge > config.toml
   # Edit config.toml for your ASN, router ID, peers, and policy.
   sudo install -o 999 -g 999 -m 0600 config.toml /etc/rustbgpd/config.toml
 
@@ -692,7 +692,7 @@ These cover the config lifecycle, from bootstrap to reload:
 
 | Command | What it does |
 |---|---|
-| `rustbgpd --init-config <lab\|edge> --stdout` | Print a curated, commented starter TOML to stdout and exit (file output is not yet supported). `lab` is a minimal single-box profile; `edge` is an eBGP edge skeleton with a default-route-dropping import chain and a default-deny export chain to fill in. Both use a mode-`0600` local UDS whose filesystem permissions authenticate access and whose stable `operator` principal is tier-authorized, set `[global] ebgp_requires_policy = true`, and pass `--check --strict` as emitted. Cannot be combined with `--check` / `--diff`. |
+| `rustbgpd --init-config <lab\|edge>` | Print a curated, commented starter TOML to stdout and exit (file output is not yet supported). `lab` is a minimal single-box profile; `edge` is an eBGP edge skeleton with a default-route-dropping import chain and a default-deny export chain to fill in. Both use a mode-`0600` local UDS whose filesystem permissions authenticate access and whose stable `operator` principal is tier-authorized, set `[global] ebgp_requires_policy = true`, and pass `--check --strict` as emitted. Cannot be combined with `--check` / `--diff`. |
 | `rustbgpd --check <file>` | Parse + validate; print `config OK`, `config VALID, <n> WARNINGS — NOT a clean check` (warnings framed on stderr; still exit 0), or a rustc-style diagnostic (exit 1). Does not start the daemon. |
 | `rustbgpd --check --strict <file>` | The same check, but any warning exits 1 instead of 0 — for CI and deployment gates that must not accept a valid-but-risky config. A clean check still exits 0. `--strict` without `--check` is an error (exit 2). |
 | `rustbgpd --migrate-config <pin-legacy\|prepare-secure\|downgrade-v0.64> --offline [--dry-run] <file>` | Rewrite the RFC 8212 posture representation in place, offline (Linux only). `pin-legacy` writes epoch 1 + explicit `false`; `prepare-secure` writes epoch 2 + explicit `true`; `downgrade-v0.64` preserves the effective boolean, removes the epoch, and requires `--validator` naming an exact v0.64.0 binary. `--dry-run` performs the same validation proof and discards the stage. `--offline` is an operator assertion, not a daemon probe — stop or quiesce the daemon first. |
