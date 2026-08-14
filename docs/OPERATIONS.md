@@ -197,12 +197,15 @@ rbgp config plan /tmp/new-config.toml
 rbgp --json config plan /tmp/new-config.toml
 
 # Apply can plan the same candidate automatically, or consume the exact token
-# printed by `config plan` when a separate review/approval step is required:
+# printed by `config plan` when a separate review/approval step is required.
+# The runtime snapshot token is opaque — capture it and pass it back verbatim:
+RUNTIME_SNAPSHOT_TOKEN="$(rbgp --json config plan /tmp/new-config.toml \
+  | jq -r .runtime_snapshot_token)"
 rbgp config apply /tmp/new-config.toml \
-  --expected-runtime-snapshot-token kv1:...
+  --expected-runtime-snapshot-token "$RUNTIME_SNAPSHOT_TOKEN"
 rbgp config apply /tmp/new-config.toml \
   --plan-token 550e8400-e29b-41d4-a716-446655440000 \
-  --expected-runtime-snapshot-token kv1:...
+  --expected-runtime-snapshot-token "$RUNTIME_SNAPSHOT_TOKEN"
 ```
 
 `rbgp config effective` downloads this byte-exact full document with a finite
@@ -231,7 +234,7 @@ same handle is confirmed:
 ```bash
 rbgp config apply /tmp/new-config.toml \
   --plan-token 550e8400-e29b-41d4-a716-446655440000 \
-  --expected-runtime-snapshot-token kv1:... \
+  --expected-runtime-snapshot-token "$RUNTIME_SNAPSHOT_TOKEN" \
   --confirm-id deploy-20260605-1 \
   --confirm-timeout 120
 

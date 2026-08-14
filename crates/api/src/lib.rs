@@ -1,9 +1,11 @@
 //! rustbgpd-api — gRPC API server
 //!
-//! Tonic bindings for the rustbgpd services:
-//! `GlobalService`, `NeighborService`, `PolicyService`, `PeerGroupService`,
-//! `RibService`, `EventService`, `InjectionService`, `ControlService`,
-//! `EvpnService`.
+//! Tonic bindings for the rustbgpd services: `GlobalService`,
+//! `ConfigService`, `NeighborService`, `PolicyService`, `PeerGroupService`,
+//! `RibService`, `BfdService`, `EventService`, `InjectionService`,
+//! `ControlService`, `EvpnService`, and the `OpenConfig` `gnmi.gNMI` service.
+//! The authoritative roster is the set of `add_service` registrations in
+//! [`server`].
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]

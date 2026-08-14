@@ -27,13 +27,16 @@ does not continuously poll the RIB.
 
 ```bash
 rbgp config diff config.toml
-rbgp config plan config.toml
+# The runtime snapshot token printed by plan is opaque — capture it and pass
+# it back verbatim:
+RUNTIME_SNAPSHOT_TOKEN="$(rbgp --json config plan config.toml \
+  | jq -r .runtime_snapshot_token)"
 rbgp config apply config.toml \
-  --expected-runtime-snapshot-token kv1:...
+  --expected-runtime-snapshot-token "$RUNTIME_SNAPSHOT_TOKEN"
 
 # Confirmed apply: rolls back unless confirmed before the timeout.
 rbgp config apply config.toml \
-  --expected-runtime-snapshot-token kv1:... \
+  --expected-runtime-snapshot-token "$RUNTIME_SNAPSHOT_TOKEN" \
   --confirm-id deploy-123 \
   --confirm-timeout 120
 rbgp config status
