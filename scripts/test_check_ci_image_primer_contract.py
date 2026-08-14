@@ -128,6 +128,65 @@ class PrimerContractTests(unittest.TestCase):
             path.write_text(text[:index] + new + text[index + len(old) :])
             self.assertTrue(check(root), f"mutation stayed green: {relative}: {old}")
 
+    def stage_indexed_fixture(self, root):
+        for fixture in (
+            ".github/workflows",
+            ".github/actions/install-gnmic-artifact",
+            ".github/actions/install-grpcurl-artifact",
+            ".github/actions/setup-dataplane-host",
+            ".github/actions/stage-bird3-artifact",
+            ".github/actions/stage-gobgp-artifact",
+        ):
+            shutil.copytree(ROOT / fixture, root / fixture)
+        shutil.copy2(ROOT / "Dockerfile", root / "Dockerfile")
+        interop = root / "tests" / "interop"
+        interop.mkdir(parents=True)
+        shutil.copy2(
+            ROOT / "tests" / "interop" / "Dockerfile.gobgp", interop / "Dockerfile.gobgp"
+        )
+        shutil.copy2(
+            ROOT / "tests" / "interop" / "Dockerfile.bird3", interop / "Dockerfile.bird3"
+        )
+        scripts = root / ".github" / "scripts"
+        scripts.mkdir(parents=True)
+        for name in (
+            "install-grpcurl.sh",
+            "install-gnmic.sh",
+            "install-gobgp.sh",
+            "install-bird3.sh",
+        ):
+            shutil.copy2(ROOT / ".github" / "scripts" / name, scripts / name)
+        subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+
+    def test_group_writable_checkout_passes_with_executable_index(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.stage_indexed_fixture(root)
+            for name in (
+                "install-grpcurl.sh",
+                "install-gnmic.sh",
+                "install-gobgp.sh",
+                "install-bird3.sh",
+            ):
+                (root / ".github" / "scripts" / name).chmod(0o775)
+            self.assertEqual([], check(root))
+
+    def test_non_executable_index_mode_fails_despite_executable_disk(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.stage_indexed_fixture(root)
+            installer = ".github/scripts/install-grpcurl.sh"
+            subprocess.run(
+                ["git", "-C", str(root), "update-index", "--chmod=-x", installer],
+                check=True,
+            )
+            self.assertTrue(os.access(root / installer, os.X_OK))
+            self.assertIn(
+                "install-grpcurl.sh must be executable (git index mode 100755)",
+                check(root),
+            )
+
     def test_live_contract(self):
         self.assertEqual([], check(ROOT))
 
@@ -194,7 +253,7 @@ class PrimerContractTests(unittest.TestCase):
             shutil.copy2(ROOT / bird3_installer.relative_to(root), bird3_installer)
             installer.chmod(0o644)
             self.assertIn(
-                "install-grpcurl.sh must have exact executable mode 100755",
+                "install-grpcurl.sh must be executable (git index mode 100755)",
                 check(root),
             )
 
@@ -669,7 +728,7 @@ class PrimerContractTests(unittest.TestCase):
                 shutil.copy2(ROOT / ".github" / "scripts" / name, scripts / name)
             (scripts / "install-gnmic.sh").chmod(0o644)
             self.assertIn(
-                "install-gnmic.sh must have exact executable mode 100755",
+                "install-gnmic.sh must be executable (git index mode 100755)",
                 check(root),
             )
 
@@ -702,7 +761,7 @@ class PrimerContractTests(unittest.TestCase):
                 shutil.copy2(ROOT / ".github" / "scripts" / name, scripts / name)
             (scripts / "install-gobgp.sh").chmod(0o644)
             self.assertIn(
-                "install-gobgp.sh must have exact executable mode 100755",
+                "install-gobgp.sh must be executable (git index mode 100755)",
                 check(root),
             )
 
@@ -735,7 +794,7 @@ class PrimerContractTests(unittest.TestCase):
                 shutil.copy2(ROOT / ".github" / "scripts" / name, scripts / name)
             (scripts / "install-bird3.sh").chmod(0o644)
             self.assertIn(
-                "install-bird3.sh must have exact executable mode 100755",
+                "install-bird3.sh must be executable (git index mode 100755)",
                 check(root),
             )
 
