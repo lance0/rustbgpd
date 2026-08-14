@@ -1210,7 +1210,14 @@ fn remove_named_safe(directory: &File, name: &OsStr) -> io::Result<()> {
     {
         return Err(invalid("unsafe exact pending residue"));
     }
-    unlinkat(directory, Path::new(name), UnlinkatFlags::NoRemoveDir).map_err(errno)
+    // LAN-1020: the detached terminal-residue cleanup thread removes the same
+    // tombstone names and can win the unlink between the fstatat above and
+    // this unlinkat. The postcondition — name absent — holds either way, so a
+    // lost race must not fail the next publication.
+    match unlinkat(directory, Path::new(name), UnlinkatFlags::NoRemoveDir) {
+        Ok(()) | Err(nix::errno::Errno::ENOENT) => Ok(()),
+        Err(error) => Err(errno(error)),
+    }
 }
 
 fn validate_file_metadata(metadata: &std::fs::Metadata, cap: usize) -> io::Result<()> {

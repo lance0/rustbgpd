@@ -142,6 +142,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A confirmed apply whose v3 pending-authority publication fails before the
+  locator rename — no authority retained, candidate and runtime untouched —
+  now returns `FAILED_PRECONDITION` instead of `INTERNAL`, matching the
+  ADR-0127 clean no-effect classification for pre-mutation publication
+  failures. Publication no longer spuriously fails with `NotFound` when it
+  immediately follows a terminal confirmed transaction: losing the tombstone
+  unlink race against that transaction's detached residue cleanup is now
+  tolerated, since the residue is gone either way. (LAN-1020)
+
 - General FIB owned-state files whose payload shape contradicts their declared
   envelope version — e.g. a current-generation payload whose version field
   reads 1, or a claimed-v5 file carrying only the v1 scalar next-hop — are now
