@@ -386,7 +386,7 @@ ce_mac_egress_ips() {
     done
 }
 
-# Scrape Prometheus via a container's management IP (M38/M49/M66/M67 pattern).
+# Scrape Prometheus via a container's management IP (M38/M66/M67 pattern).
 prom_scrape() {
     local container=${1:?}
     local ip

@@ -1,7 +1,7 @@
 name: Privileged Interop (netns)
 
 # Manual, on-demand harness for the direct-`cargo test` privileged netns suites
-# on GitHub-hosted ubuntu-latest. The containerlab EVPN smokes (M36–M49) now run
+# on GitHub-hosted ubuntu-latest. The containerlab EVPN smokes now run
 # automatically in the kernel-dataplane workflow, so this keeps only the
 # non-docker netns binaries (`netns_dataplane` / `netns_fdb_nhg` /
 # `netns_l3_install` / `netns_nexthop_raw`) available on demand. The

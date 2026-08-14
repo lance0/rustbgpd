@@ -34,7 +34,7 @@ Compact M36-M90 index (details and assertions stay in
 | Receipts | Coverage |
 |----------|----------|
 | M36, M37, M37+IP | EVPN L2 VTEP FDB programming plus local Type 2 / Type 3 / MAC+IP origination. |
-| M38, M40, M46, M49, M65, M66, M67, M69 | EVPN multi-homing: DF election, aliasing/FDB-NHG, single-active backup swap, runtime drain, link drain, and FRR preference-DF interop. |
+| M38, M40, M65, M66, M67, M69 | EVPN multi-homing: DF election, aliasing/FDB-NHG, single-active backup swap, runtime drain, link drain, and FRR preference-DF interop. |
 | M39, M39b, M47, M48, M60, M61, M68, M70, M71, M72 | EVPN L3VNI / Type 5 / runtime convergence / adoption / VLAN-aware / overlay-index dataplane receipts. |
 | M42, M50, M51, M52, M53, M58, M62 | Non-EVPN kernel dataplane receipts in the same hosted span: FIB runtime/CRUD, BFD, BGP unnumbered, and BLACKHOLE adoption. |
 | M43 | Conditional TCP-AO queued-child receipt, uninterrupted no-flap add/select/deprecate/delete against BIRD with a 100 ms route-continuity oracle, and a separate three-phase SIGKILL/restart recovery gate requiring exact fresh-start inventory/auth/session state; probed and skipped only when the selected runner kernel lacks support. |

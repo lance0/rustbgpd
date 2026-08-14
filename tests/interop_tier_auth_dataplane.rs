@@ -100,7 +100,7 @@ fn active_dataplane_interop_is_tier_authenticated_end_to_end() {
         );
         configs.insert(name.to_owned());
     }
-    assert_eq!(configs.len(), 39, "classify the changed config inventory");
+    assert_eq!(configs.len(), 35, "classify the changed config inventory");
 
     let mut topologies = BTreeSet::new();
     let mut mounted = BTreeSet::new();
@@ -143,13 +143,9 @@ fn active_dataplane_interop_is_tier_authenticated_end_to_end() {
         unmounted,
         BTreeSet::from(["rustbgpd-m47-teardown.toml".into()])
     );
-    assert_eq!(topologies.len(), 31, "topology inventory changed");
+    assert_eq!(topologies.len(), 29, "topology inventory changed");
 
-    let standalone = [
-        "m38-evpn-df-election",
-        "m46-evpn-df-hrw",
-        "m49-evpn-preference-df",
-    ];
+    let standalone = ["m38-evpn-df-election"];
     for topology in &topologies {
         let driver = match topology.as_str() {
             "m59-aspa-roles-rtr2" => "test-m59-aspa-roles.sh".to_owned(),

@@ -639,8 +639,8 @@ mod tests {
 
     #[test]
     fn hrw_m46_interop_premise_pins_winner() {
-        // Pin the M46 interop smoke's premise to the real HRW algorithm so it
-        // cannot silently drift again. M46's ESI is 00:..:01 (last octet only),
+        // Pin the retired M46 interop smoke's premise to the real HRW algorithm
+        // so it cannot silently drift again. M46's ESI is 00:..:01 (last octet only),
         // candidates 10.0.0.1 (PE1) and 10.0.0.2 (PE2). The smoke is a positive
         // proof of "HRW, not modulo" only when HRW elects the HIGHER-IP PE2
         // while default modulo carving (even VNI -> slot 0 -> lowest IP) would

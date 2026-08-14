@@ -230,10 +230,6 @@ fn early_interop_auth_inventory_is_tier_wired() {
         ("m16-llgr-frr.clab.yml", "test-m16-llgr-frr.sh"),
         ("m17-addpath-frr.clab.yml", "test-m17-addpath-frr.sh"),
         ("m18-extnexthop-frr.clab.yml", "test-m18-extnexthop-frr.sh"),
-        (
-            "m19-routeserver-frr.clab.yml",
-            "test-m19-routeserver-frr.sh",
-        ),
         ("m20-privateas-frr.clab.yml", "test-m20-privateas-frr.sh"),
         ("m21-rpki-frr.clab.yml", "test-m21-rpki-frr.sh"),
         ("m22-flowspec-frr.clab.yml", "test-m22-flowspec-frr.sh"),
@@ -375,8 +371,8 @@ fn early_interop_auth_inventory_is_tier_wired() {
         );
     }
     assert_eq!(
-        config_count, 32,
-        "the frozen M3-M32 and M34-M35c slice must cover 32 active configs"
+        config_count, 31,
+        "the frozen M3-M32 and M34-M35c slice must cover 31 active configs"
     );
 
     for (label, config_name, topology_name) in [
@@ -685,30 +681,6 @@ fn route_server_example_exception_chain_preserves_later_guards() {
             "unexpected local-pref modification for {prefix}"
         );
     }
-}
-
-#[test]
-fn m49_interop_configs_describe_preference_df_with_dont_preempt() {
-    // Pin the M49 interop fixtures: PE1 (pref 100, revertive) and PE2 (pref
-    // 200, non-revertive) both run highest-preference. Guards the smoke against
-    // drift in the configs or the DF config surface.
-    let pe1 = parse_with_shared_test_grpc_token(include_str!(
-        "../../../tests/interop/configs/rustbgpd-m49-pe1.toml"
-    ))
-    .unwrap();
-    let s1 = pe1.resolve_ethernet_segments().unwrap();
-    assert_eq!(s1[0].df_algorithm, DfAlgorithm::HighestPreference);
-    assert_eq!(s1[0].df_preference, 100);
-    assert!(!s1[0].df_dont_preempt);
-
-    let pe2 = parse_with_shared_test_grpc_token(include_str!(
-        "../../../tests/interop/configs/rustbgpd-m49-pe2.toml"
-    ))
-    .unwrap();
-    let s2 = pe2.resolve_ethernet_segments().unwrap();
-    assert_eq!(s2[0].df_algorithm, DfAlgorithm::HighestPreference);
-    assert_eq!(s2[0].df_preference, 200);
-    assert!(s2[0].df_dont_preempt);
 }
 
 #[test]

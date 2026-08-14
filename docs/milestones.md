@@ -1030,7 +1030,7 @@ to the plain capability they delivered.
   operation, restart-required by design) and unsupported dependency-cycle
   edits (fail closed with a "split the request" error, pending a generalized
   converge-to-candidate follow-up).
-- **EVPN multi-homing — ESI, Type-1/Type-4** (v0.17.0, ADR-0057, M38/M46/M49) —
+- **EVPN multi-homing — ESI, Type-1/Type-4** (v0.17.0, ADR-0057, M38) —
   observable DF election + Type 1/4 origination. Pure DF election state machine
   (RFC 7432 §8.5 service carving + RFC 8584 §3.2 Highest Random Weight + RFC 9785
   Highest-/Lowest-Preference, with fallback to default when candidates disagree),
@@ -1039,7 +1039,9 @@ to the plain capability they delivered.
   best-path broadcast, Prometheus `evpn_df_role{esi,vni,role}` gauge +
   `evpn_df_role_changes_total` counter, and an ADR-0063 runtime owner/control
   surface keeping complete desired-ES snapshots under the segment actor. M38
-  covers default modulo, M46 covers HRW, M49 covers RFC 9785 Highest-Preference.
+  covers default modulo; HRW and RFC 9785 Highest-Preference election are
+  pinned by byte-exact known-answer unit tests, with M69 proving preference-DF
+  cross-vendor (the former single-stack M46/M49 smokes are retired).
   Auto-derived ES-Import RT extcomm on Type 4 ES routes and ESI Label extcomm on
   Type 1 EAD-per-ES routes; `[[ethernet_segments]].redundancy_mode` sets the ESI
   Label `single_active` flag (`all-active` default), and the receiver suppresses
