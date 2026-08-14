@@ -79,6 +79,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- Retired three standalone `bench/scale` receipt harnesses whose campaigns
+  sealed in 2026-07 (LAN-970). The stable behavioral assertions of
+  `outbound-prefix-limits` and `config-persistence` now run on every
+  `cargo test --workspace` as `tests/outbound_prefix_limits.rs` and
+  `tests/config_persistence_lifecycle.rs`; the deliberately one-shot
+  `outbound-prefix-limit-scale` A/B driver is archived. The sealed receipts
+  in `docs/perf/` are unchanged apart from archive pointers naming the last
+  containing commit and release tag.
 - The pre-IR legacy policy evaluator (`evaluate_with_attribution_legacy`) and
   its `set_heavy/legacy_1000_stmts` bench arm. Its ~4,500-case decision corpus
   is frozen as data — stable case IDs, inputs, and expected results in

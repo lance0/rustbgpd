@@ -1,47 +1,48 @@
-//! ADR-0113 outbound prefix-limit integration receipt harness.
+//! ADR-0113 outbound prefix-limit behavior test.
 //!
-//! Four real BGP stub sessions dial a running rustbgpd over loopback TCP and
+//! Four real BGP stub sessions dial a spawned rustbgpd over loopback TCP and
 //! exchange real OPEN/KEEPALIVE/UPDATE messages encoded and decoded by
 //! `crates/wire`. One stub is the route source; the other three are observers
-//! whose received NLRI is the wire-side truth this receipt reports. The
-//! observers are deliberately shaped so one limited peer rides the shared
-//! update-group fanout and another takes the private per-peer path:
+//! whose received NLRI is the wire-side truth this test asserts. The observers
+//! are deliberately shaped so one limited peer rides the shared update-group
+//! fanout and another takes the private per-peer path:
 //!
 //! | stub | role | limits | distribution path |
 //! |---|---|---|---|
 //! | 0 | route source | none | grouped |
 //! | 1 | peer-group member, inherits both maxima | group | grouped |
 //! | 2 | unlimited sibling in the same update group | none | grouped |
-//! | 3 | per-client-best peer, neighbor-level maxima | neighbor | private |
+//! | 3 | per-client-best peer, neighbor-level maxima | neighbor | own per-client-best group (ADR-0126) |
 //!
 //! Phases: converge -> assert the caps hold on the wire -> SIGHUP a lowering
 //! below current usage and assert it is rejected with wire state intact ->
 //! SIGHUP a raise and assert the recovery resync fills the new capacity.
+//! After the phases, the daemon log is gated on ADR-0113's bounded episode
+//! contract: exactly one open and one recovery warning per limited peer and
+//! family, one whole-reload rejection naming the violation, and no peer
+//! rebuild from either limit edit.
 //!
-//! Every assertion prints one `CHECK <name> <PASS|FAIL> <detail>` line, and a
-//! machine-readable summary is written to `<out_dir>/summary.json`. A failed
-//! check exits 1; an operational failure (session, timeout, tooling) exits 2.
-//!
-//! Usage:
-//!   outboundlimits <daemon_port> <daemon_pid> <rbgp_bin> <grpc_addr> \
-//!       <metrics_addr> <config_live> <config_lower> <config_raise> <out_dir>
-//!
-//! Shape pinned in docs/perf/outbound-prefix-limits-2026-07.md.
+//! Behavior port of the retired `bench/scale/outbound-prefix-limits` receipt
+//! harness (the sealed receipt is `docs/perf/outbound-prefix-limits-2026-07.md`).
+//! Every assertion prints one `CHECK <name> <PASS|FAIL> <detail>` line and the
+//! test fails at the end if any check failed, so one failure does not hide the
+//! rest of the picture.
 
-use std::collections::{BTreeMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
 use rustbgpd_wire::attribute::MpReachNlri;
 use rustbgpd_wire::capability::{Afi, Capability, Safi};
 use rustbgpd_wire::constants::{HEADER_LEN, MAX_MESSAGE_LEN};
 use rustbgpd_wire::header::peek_message_length;
-use rustbgpd_wire::message::{decode_message, encode_message, Message};
+use rustbgpd_wire::message::{Message, decode_message, encode_message};
 use rustbgpd_wire::nlri::{NlriEntry, Prefix};
 use rustbgpd_wire::open::OpenMessage;
 use rustbgpd_wire::update::{Ipv4UnicastMode, UpdateMessage};
@@ -53,9 +54,8 @@ use tokio::net::TcpSocket;
 use tokio::sync::mpsc;
 
 // ---------------------------------------------------------------------------
-// Pinned fleet shape. The receipt discloses these exact numbers; they are
-// constants rather than arguments so a published row cannot describe a
-// different run than the one the driver performed.
+// Pinned fleet shape. The shape is constant rather than configurable so the
+// assertions below always describe the same run.
 // ---------------------------------------------------------------------------
 
 /// Stub sessions: source + limited grouped member + unlimited sibling +
@@ -70,7 +70,7 @@ const PRIVATE_CAPPED: usize = 3;
 const V4_ROUTES: usize = 12;
 const V6_ROUTES: usize = 6;
 
-/// Configured maxima in the starting config (`config_live`).
+/// Configured maxima in the starting config.
 const V4_LIMIT: usize = 8;
 const V6_LIMIT: usize = 4;
 
@@ -88,15 +88,6 @@ fn peer_addr(i: usize) -> Ipv4Addr {
 
 fn peer_asn(i: usize) -> u32 {
     64601 + u32::try_from(i).expect("peer index fits")
-}
-
-fn peer_role(i: usize) -> &'static str {
-    match i {
-        SOURCE => "route-source",
-        GROUPED_CAPPED => "grouped-capped-member",
-        GROUPED_SIBLING => "grouped-unlimited-sibling",
-        _ => "private-capped-peer",
-    }
 }
 
 fn v4_prefix(i: usize) -> Ipv4Prefix {
@@ -288,20 +279,20 @@ async fn establish(ctx: Arc<Ctx>, i: usize) -> Result<mpsc::Sender<Message>, Str
 
     let mut buf = BytesMut::with_capacity(4096);
     loop {
-        if let Ok(Some(total)) = peek_message_length(&buf, MAX_MESSAGE_LEN) {
-            if buf.len() >= usize::from(total) {
-                let mut body = buf.split_to(usize::from(total)).freeze();
-                match decode_message(&mut body, MAX_MESSAGE_LEN) {
-                    Ok(Message::Open(_)) => break,
-                    Ok(Message::Notification(n)) => {
-                        return Err(format!(
-                            "NOTIFICATION during open: {:?}/{}",
-                            n.code, n.subcode
-                        ))
-                    }
-                    Ok(_) => continue,
-                    Err(e) => return Err(format!("decode during open: {e}")),
+        if let Ok(Some(total)) = peek_message_length(&buf, MAX_MESSAGE_LEN)
+            && buf.len() >= usize::from(total)
+        {
+            let mut body = buf.split_to(usize::from(total)).freeze();
+            match decode_message(&mut body, MAX_MESSAGE_LEN) {
+                Ok(Message::Open(_)) => break,
+                Ok(Message::Notification(n)) => {
+                    return Err(format!(
+                        "NOTIFICATION during open: {:?}/{}",
+                        n.code, n.subcode
+                    ));
                 }
+                Ok(_) => continue,
+                Err(e) => return Err(format!("decode during open: {e}")),
             }
         }
         let mut tmp = [0u8; 4096];
@@ -401,7 +392,7 @@ async fn establish(ctx: Arc<Ctx>, i: usize) -> Result<mpsc::Sender<Message>, Str
                     let parsed = match update.parse(true, false, &[]) {
                         Ok(parsed) => parsed,
                         Err(error) => {
-                            // A daemon UPDATE this harness cannot decode is a
+                            // A daemon UPDATE this test cannot decode is a
                             // daemon defect, and silently skipping it looks
                             // exactly like the under-delivery being measured.
                             eprintln!("stub {i} decode error on daemon UPDATE: {error}");
@@ -500,14 +491,36 @@ fn sample(scrape: &str, name: &str, labels: &[(&str, &str)]) -> Option<f64> {
     })
 }
 
+/// `rbgp` against the spawned daemon. `CARGO_BIN_EXE_rbgp` is not set for a
+/// dev-dependency's binary, so fall back to `cargo run -p rustbgpctl`.
 struct Rbgp {
-    bin: PathBuf,
+    argv: Vec<String>,
     addr: String,
 }
 
 impl Rbgp {
+    fn new(addr: String) -> Self {
+        let argv = if let Ok(path) = std::env::var("CARGO_BIN_EXE_rbgp") {
+            vec![path]
+        } else {
+            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+            vec![
+                cargo,
+                "run".into(),
+                "--quiet".into(),
+                "-p".into(),
+                "rustbgpctl".into(),
+                "--bin".into(),
+                "rbgp".into(),
+                "--".into(),
+            ]
+        };
+        Self { argv, addr }
+    }
+
     async fn run(&self, args: &[&str]) -> Result<String, String> {
-        let out = tokio::process::Command::new(&self.bin)
+        let out = tokio::process::Command::new(&self.argv[0])
+            .args(&self.argv[1..])
             .arg("--addr")
             .arg(&self.addr)
             .args(args)
@@ -547,52 +560,201 @@ impl Checks {
         self.assert(name, pass, format!("got={got:?} want={want:?}"));
     }
 
-    fn failed(&self) -> usize {
-        self.rows.iter().filter(|(_, pass, _)| !pass).count()
+    fn failing(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .filter(|(_, pass, _)| !pass)
+            .map(|(name, _, detail)| format!("{name}: {detail}"))
+            .collect()
     }
 }
 
 // ---------------------------------------------------------------------------
-// Driver.
+// Lab: daemon lifecycle and config generations. Replaces the retired shell
+// driver; the behavioral gates it carried (`--check` on every generated
+// generation, readiness before the run, the bounded log episodes after it)
+// live here.
 // ---------------------------------------------------------------------------
 
-struct Args {
-    port: u16,
-    pid: i32,
-    rbgp: Rbgp,
-    metrics: SocketAddr,
-    config_live: PathBuf,
-    config_lower: PathBuf,
-    config_raise: PathBuf,
-    out: PathBuf,
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("reserve loopback port")
+        .local_addr()
+        .expect("read loopback port")
+        .port()
 }
 
-fn usage() -> ! {
-    eprintln!(
-        "usage: outboundlimits <daemon_port> <daemon_pid> <rbgp_bin> <grpc_addr> \
-         <metrics_addr> <config_live> <config_lower> <config_raise> <out_dir>"
+/// Short-path runtime dir: the gRPC UDS must fit `sockaddr_un.sun_path`,
+/// which a tempdir under a deep build path may not.
+struct RunDir {
+    path: PathBuf,
+}
+
+impl RunDir {
+    fn new(tag: &str) -> Self {
+        let path = PathBuf::from(format!("/tmp/rustbgpd-{tag}-{}", std::process::id()));
+        std::fs::create_dir(&path).expect("create run dir");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("stat run dir")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
+        std::fs::set_permissions(&path, permissions).expect("restrict run dir");
+        Self { path }
+    }
+}
+
+impl Drop for RunDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn emit_config(path: &Path, bgp_port: u16, metrics: SocketAddr, rundir: &Path, v4: u32, v6: u32) {
+    let rundir = rundir.display();
+    let body = format!(
+        r#"# Generated by tests/outbound_prefix_limits.rs — do not edit.
+[global]
+asn = 65500
+router_id = "10.255.0.1"
+listen_port = {bgp_port}
+runtime_state_dir = "{rundir}"
+
+[global.telemetry]
+prometheus_addr = "{metrics}"
+log_format = "json"
+
+[global.telemetry.grpc_uds]
+path = "{rundir}/grpc.sock"
+principal = "operator"
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+operator = "operator"
+
+# The capped member inherits both maxima from its peer group and sets none of
+# its own: ADR-0113's inheritance path, not a neighbor-level shortcut.
+[peer_groups.capped-clients]
+hold_time = 180
+families = ["ipv4_unicast", "ipv6_unicast"]
+# These sessions run over IPv4 transport, so an eBGP IPv6 export has no
+# derivable next hop without this. Unrelated to ADR-0113, but without it the
+# IPv6 half of the evidence would silently measure nothing.
+local_ipv6_nexthop = "2001:db8:ffff::ffff"
+max_prefixes_out_ipv4 = {v4}
+max_prefixes_out_ipv6 = {v6}
+
+# Same staging profile, no maxima: this group's member must land in the same
+# update group as the capped one.
+[peer_groups.open-clients]
+hold_time = 180
+families = ["ipv4_unicast", "ipv6_unicast"]
+local_ipv6_nexthop = "2001:db8:ffff::ffff"
+
+[[neighbors]]
+address = "127.9.0.1"
+remote_asn = 64601
+description = "route-source"
+hold_time = 180
+families = ["ipv4_unicast", "ipv6_unicast"]
+
+[[neighbors]]
+address = "127.9.0.2"
+remote_asn = 64602
+description = "grouped-capped-member"
+peer_group = "capped-clients"
+
+[[neighbors]]
+address = "127.9.0.3"
+remote_asn = 64603
+description = "grouped-unlimited-sibling"
+peer_group = "open-clients"
+
+# RFC 7947 per-client best-path puts this peer in its own per-client-best
+# update group (ADR-0126 keys the group on a dedicated bit), so the same
+# maxima are exercised off the capped member's shared group.
+[[neighbors]]
+address = "127.9.0.4"
+remote_asn = 64604
+description = "private-capped-peer"
+hold_time = 180
+families = ["ipv4_unicast", "ipv6_unicast"]
+route_server_client = true
+per_client_best = true
+max_prefixes_out_ipv4 = {v4}
+max_prefixes_out_ipv6 = {v6}
+"#
     );
-    std::process::exit(2);
+    std::fs::write(path, body).expect("write config generation");
 }
 
-fn parse_args() -> Args {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    if argv.len() != 9 {
-        usage();
+fn check_config(path: &Path) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
+        .arg("--check")
+        .arg(path)
+        .output()
+        .expect("run rustbgpd --check");
+    assert!(
+        output.status.success(),
+        "generated {} failed rustbgpd --check:\n{}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+struct Daemon {
+    child: std::process::Child,
+    log_path: PathBuf,
+}
+
+impl Daemon {
+    fn spawn(config: &Path, log_path: PathBuf) -> Self {
+        let stdout = std::fs::File::create(&log_path).expect("create daemon log");
+        let stderr = stdout.try_clone().expect("clone daemon log handle");
+        let child = std::process::Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
+            .arg(config)
+            .env("RUST_LOG", "info")
+            .stdout(stdout)
+            .stderr(stderr)
+            .spawn()
+            .expect("spawn rustbgpd");
+        Self { child, log_path }
     }
-    Args {
-        port: argv[0].parse().unwrap_or_else(|_| usage()),
-        pid: argv[1].parse().unwrap_or_else(|_| usage()),
-        rbgp: Rbgp {
-            bin: PathBuf::from(&argv[2]),
-            addr: argv[3].clone(),
-        },
-        metrics: argv[4].parse().unwrap_or_else(|_| usage()),
-        config_live: PathBuf::from(&argv[5]),
-        config_lower: PathBuf::from(&argv[6]),
-        config_raise: PathBuf::from(&argv[7]),
-        out: PathBuf::from(&argv[8]),
+
+    fn pid(&self) -> Pid {
+        Pid::from_raw(i32::try_from(self.child.id()).expect("daemon PID fits i32"))
     }
+
+    fn log(&self) -> String {
+        std::fs::read_to_string(&self.log_path).unwrap_or_default()
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+async fn wait_until_serving(rbgp: &Rbgp, sock: &Path, daemon: &mut Daemon) {
+    let deadline = Instant::now() + CONVERGE_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Some(status) = daemon.child.try_wait().expect("query daemon status") {
+            panic!(
+                "rustbgpd exited during startup with {status}\nlog:\n{}",
+                daemon.log()
+            );
+        }
+        if sock.exists() && rbgp.run(&["global"]).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("daemon never became ready\nlog:\n{}", daemon.log());
 }
 
 /// Poll `predicate` up to [`CONVERGE_TIMEOUT`]. `None` means it never held.
@@ -612,8 +774,7 @@ where
     None
 }
 
-/// Everything the daemon reports at one phase boundary, written to the
-/// artifact directory and returned for assertions.
+/// Everything the daemon reports at one phase boundary.
 struct Evidence {
     metrics: String,
     neighbor_json: Vec<String>,
@@ -624,71 +785,42 @@ struct Evidence {
     advertised_v6: usize,
 }
 
-async fn collect(args: &Args, label: &str) -> Result<Evidence, String> {
-    let metrics = scrape(args.metrics).await?;
-    std::fs::write(args.out.join(format!("metrics-{label}.prom")), &metrics)
-        .map_err(|e| format!("write metrics: {e}"))?;
+async fn collect(rbgp: &Rbgp, metrics_addr: SocketAddr) -> Result<Evidence, String> {
+    let metrics = scrape(metrics_addr).await?;
 
     let mut neighbor_json = Vec::new();
     for i in 0..PEERS {
         let addr = peer_addr(i).to_string();
-        let json = args.rbgp.run(&["-j", "neighbor", &addr]).await?;
-        std::fs::write(
-            args.out.join(format!("neighbor-{addr}-{label}.json")),
-            &json,
-        )
-        .map_err(|e| format!("write neighbor json: {e}"))?;
-        neighbor_json.push(json);
+        neighbor_json.push(rbgp.run(&["-j", "neighbor", &addr]).await?);
     }
-    // The human surface is retained too: ADR-0113 requires the operator-facing
-    // rows, not only the machine ones.
-    let human = args
-        .rbgp
-        .run(&["neighbor", &peer_addr(GROUPED_CAPPED).to_string()])
+    // The human surface is exercised too: ADR-0113 requires the
+    // operator-facing rows, not only the machine ones.
+    rbgp.run(&["neighbor", &peer_addr(GROUPED_CAPPED).to_string()])
         .await?;
-    std::fs::write(
-        args.out.join(format!("neighbor-capped-{label}.txt")),
-        &human,
-    )
-    .map_err(|e| format!("write neighbor text: {e}"))?;
 
     // Two operator-visible membership comparisons: the capped member against
     // its unlimited sibling (must be one shared group) and against the
-    // private peer (must be separate, for the documented reason).
+    // per-client-best peer (must be separate: its own ADR-0126 group).
     let mut compares = Vec::new();
-    for (name, other) in [("sibling", GROUPED_SIBLING), ("private", PRIVATE_CAPPED)] {
-        let json = args
-            .rbgp
-            .run(&[
+    for other in [GROUPED_SIBLING, PRIVATE_CAPPED] {
+        compares.push(
+            rbgp.run(&[
                 "-j",
                 "neighbor",
                 &peer_addr(GROUPED_CAPPED).to_string(),
                 "--compare",
                 &peer_addr(other).to_string(),
             ])
-            .await?;
-        std::fs::write(
-            args.out
-                .join(format!("update-group-compare-{name}-{label}.json")),
-            &json,
-        )
-        .map_err(|e| format!("write group compare: {e}"))?;
-        compares.push(json);
+            .await?,
+        );
     }
 
     let capped = peer_addr(GROUPED_CAPPED).to_string();
     let mut advertised = Vec::new();
     for family in ["ipv4-unicast", "ipv6-unicast"] {
-        let json = args
-            .rbgp
+        let json = rbgp
             .run(&["-j", "rib", "advertised", &capped, "-a", family])
             .await?;
-        std::fs::write(
-            args.out
-                .join(format!("advertised-capped-{family}-{label}.json")),
-            &json,
-        )
-        .map_err(|e| format!("write advertised: {e}"))?;
         // `JsonRoute` has exactly one top-level `"prefix"` key per route and
         // no nested one, so occurrences are the route count.
         advertised.push(json.matches("\"prefix\"").count());
@@ -706,14 +838,6 @@ async fn collect(args: &Args, label: &str) -> Result<Evidence, String> {
 /// Collapse a pretty-printed JSON document onto one line for a check detail.
 fn one_line(json: &str) -> String {
     json.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn sighup(pid: i32) {
-    // SAFETY: `kill` with a valid signal number is safe; the driver owns the
-    // pid and reaps the daemon itself.
-    unsafe {
-        libc::kill(pid, libc::SIGHUP);
-    }
 }
 
 /// Assert one peer/family capacity row across all four gauges. `expect` is
@@ -766,66 +890,127 @@ fn capacity_row(
     );
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    let args = parse_args();
-    match run(&args).await {
-        Ok(code) => code,
-        Err(error) => {
-            eprintln!("outboundlimits: {error}");
-            ExitCode::from(2)
-        }
+/// Bounded log-episode gate: ADR-0113's episode contract is a log surface.
+/// Exactly one open and one recovery per limited peer and family, one
+/// whole-reload rejection naming the violation, and no peer rebuild.
+fn log_gates(checks: &mut Checks, log: &str) {
+    for (name, want, pattern) in [
+        // Two limited peers x two families, one warning each, and no
+        // per-prefix spam.
+        ("log.episode_opened", 4, "outbound prefix limit reached"),
+        (
+            "log.episode_recovered",
+            4,
+            "outbound prefix limit recovered",
+        ),
+        // The per-step SIGHUP reload stops exactly once, at the prefix-limit
+        // prepare step, and its one rejection line names every violating
+        // peer/family pair (two limited peers x two families).
+        (
+            "log.lowering_rejected",
+            1,
+            "\"bucket\":\"prefix_limit.prepare\"",
+        ),
+        (
+            "log.rejection_names_the_violation",
+            4,
+            "above the requested maximum",
+        ),
+        // ADR-0113: "Limit edits are live, local RIB-manager changes. They do
+        // not reset the session." Neither SIGHUP in this run changes anything
+        // but the two maxima, so no peer may be torn down and re-created.
+        (
+            "log.no_peer_rebuild_on_limit_edit",
+            0,
+            "\"message\":\"peer deleted\"",
+        ),
+    ] {
+        checks.eq(name, log.matches(pattern).count(), want);
     }
 }
 
-#[allow(clippy::too_many_lines, reason = "one linear receipt script")]
-async fn run(args: &Args) -> Result<ExitCode, String> {
+// ---------------------------------------------------------------------------
+// The test.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines, reason = "one linear behavior arc")]
+async fn outbound_prefix_limits_bound_the_wire_and_survive_reload_edits() {
+    let rundir = RunDir::new("oplim");
+    let bgp_port = free_port();
+    let metrics: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
+
+    let config_live = rundir.path.join("config.toml");
+    let config_lower = rundir.path.join("config.lower.toml");
+    let config_raise = rundir.path.join("config.raise.toml");
+    // One config body, three limit generations. The starting generation caps
+    // below what the source announces; `lower` asks for less than current
+    // usage and must be rejected whole; `raise` opens exactly enough capacity
+    // for the full table.
+    emit_config(&config_live, bgp_port, metrics, &rundir.path, 8, 4);
+    emit_config(&config_lower, bgp_port, metrics, &rundir.path, 2, 1);
+    emit_config(&config_raise, bgp_port, metrics, &rundir.path, 12, 6);
+    for generation in [&config_live, &config_lower, &config_raise] {
+        check_config(generation);
+    }
+
+    let sock = rundir.path.join("grpc.sock");
+    let rbgp = Rbgp::new(format!("unix://{}", sock.display()));
+    let mut daemon = Daemon::spawn(&config_live, rundir.path.join("daemon.log"));
+    wait_until_serving(&rbgp, &sock, &mut daemon).await;
+
     let ctx = Arc::new(Ctx {
-        daemon: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), args.port),
+        daemon: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), bgp_port),
         obs: (0..PEERS).map(|_| Obs::new()).collect(),
     });
     let mut checks = Checks { rows: Vec::new() };
 
     let mut senders = Vec::new();
     for i in 0..PEERS {
-        senders.push(establish(Arc::clone(&ctx), i).await?);
+        senders.push(
+            establish(Arc::clone(&ctx), i)
+                .await
+                .expect("stub session establishes"),
+        );
     }
-    if wait_for(|| {
-        ctx.obs
+    assert!(
+        wait_for(|| ctx
+            .obs
             .iter()
-            .all(|o| o.established.load(Ordering::Acquire))
-    })
-    .await
-    .is_none()
-    {
-        return Err("not every stub session reached Established".into());
-    }
+            .all(|o| o.established.load(Ordering::Acquire)))
+        .await
+        .is_some(),
+        "not every stub session reached Established\nlog:\n{}",
+        daemon.log()
+    );
 
     // Phase 1 — the source announces its full table.
     for msg in source_table() {
         senders[SOURCE]
             .send(msg)
             .await
-            .map_err(|_| "source session closed before announce".to_string())?;
+            .expect("source session open for announce");
     }
 
     // The unlimited sibling is the non-vacuity sentinel: until it holds the
     // whole table, "the capped peer only got 8" would be indistinguishable
     // from "only 8 were ever distributed".
-    let Some(converge) = wait_for(|| {
-        let (v4, v6, ..) = ctx.obs[GROUPED_SIBLING].snapshot();
-        v4 == V4_ROUTES && v6 == V6_ROUTES
-    })
-    .await
-    else {
+    assert!(
+        wait_for(|| {
+            let (v4, v6, ..) = ctx.obs[GROUPED_SIBLING].snapshot();
+            v4 == V4_ROUTES && v6 == V6_ROUTES
+        })
+        .await
+        .is_some(),
         // Nothing downstream means anything if the table was never
         // distributed, so this one wait stays fatal.
-        return Err("the unlimited sibling never received the full table".into());
-    };
+        "the unlimited sibling never received the full table\nlog:\n{}",
+        daemon.log()
+    );
     tokio::time::sleep(SETTLE).await;
 
     // -- Phase: blocked -----------------------------------------------------
-    let blocked = collect(args, "blocked").await?;
+    let blocked = collect(&rbgp, metrics).await.expect("collect blocked");
     let capped = peer_addr(GROUPED_CAPPED).to_string();
     let sibling = peer_addr(GROUPED_SIBLING).to_string();
     let private = peer_addr(PRIVATE_CAPPED).to_string();
@@ -850,10 +1035,13 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
     );
 
     // The grouped assertion. `bgp_peer_update_group` is >= 0 for a shared
-    // update group and the sentinel -1 for the private path, so this is the
-    // difference ADR-0113 asks the receipt to prove: the limited member is
-    // riding the same shared fanout as an unlimited sibling, not a per-peer
-    // private path that happens to also enforce a cap.
+    // update group and the sentinel -1 for the private fallback path, so this
+    // is the difference ADR-0113 asks the evidence to prove: the limited
+    // member is riding the same shared fanout as an unlimited sibling, not a
+    // per-peer private path that happens to also enforce a cap. Since
+    // ADR-0126 the per-client-best peer is grouped too, on its own dedicated
+    // key bit — a separate group from the unmitigated one, never the
+    // fallback.
     let capped_group = sample(
         &blocked.metrics,
         "bgp_peer_update_group",
@@ -880,15 +1068,18 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
         format!("capped={capped_group:?} sibling={sibling_group:?}"),
     );
     checks.assert(
-        "blocked.grouped.private_peer_is_private",
-        private_group == Some(-1.0),
-        format!("bgp_peer_update_group{{peer={private}}}={private_group:?}"),
+        "blocked.grouped.per_client_best_peer_has_its_own_group",
+        private_group.is_some_and(|group| group >= 0.0) && private_group != capped_group,
+        format!(
+            "bgp_peer_update_group{{peer={private}}}={private_group:?} capped={capped_group:?}"
+        ),
     );
     // The same fact through the operator-visible surface, which does not
     // expose internal group ids: `shared` between the two grouped peers, and
-    // `separate` with the documented `per_client_best` reason for the private
+    // `separate` — both grouped, different groups — for the per-client-best
     // one. This is the check that would still fail if the limit were quietly
-    // implemented by pushing the capped member onto a private path.
+    // implemented by pushing the capped member onto a private path, or if the
+    // mitigated and unmitigated groups ever merged.
     checks.assert(
         "blocked.grouped.cli_verdict_shared_with_sibling",
         blocked.compares[0].contains("\"verdict\": \"shared\"")
@@ -901,19 +1092,21 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
     );
     checks.assert(
         "blocked.grouped.cli_verdict_separate_from_private",
-        blocked.compares[1].contains("\"verdict\": \"private\"")
-            && blocked.compares[1].contains("\"comparison_membership\": \"per_client_best\""),
+        blocked.compares[1].contains("\"verdict\": \"separate\"")
+            && blocked.compares[1].contains("\"primary_membership\": \"grouped\"")
+            && blocked.compares[1].contains("\"comparison_membership\": \"grouped\""),
         format!(
             "rbgp neighbor --compare(private): {}",
             one_line(&blocked.compares[1])
         ),
     );
-    // One member blocking must not filter the shared payload or split the
-    // group: exactly one peer (the per-client-best one) is on the private path.
+    // One member blocking must not filter the shared payload, split a group,
+    // or push anyone onto the private fallback: with ADR-0126 grouping every
+    // peer here is shareable, so the fallback must stay empty.
     checks.eq(
         "blocked.grouped.fallback_peers",
         sample(&blocked.metrics, "bgp_update_group_fallback_peers", &[]),
-        Some(1.0),
+        Some(0.0),
     );
 
     capacity_row(
@@ -1008,11 +1201,10 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
     );
 
     // -- Phase: a lowering below current usage is rejected atomically -------
-    std::fs::copy(&args.config_lower, &args.config_live)
-        .map_err(|e| format!("stage lowering config: {e}"))?;
-    sighup(args.pid);
+    std::fs::copy(&config_lower, &config_live).expect("stage lowering config");
+    kill(daemon.pid(), Signal::SIGHUP).expect("send SIGHUP");
     tokio::time::sleep(SETTLE).await;
-    let lowered = collect(args, "lower-rejected").await?;
+    let lowered = collect(&rbgp, metrics).await.expect("collect lower");
 
     let (cap_v4_l, cap_v6_l, _, cap_wd_l, _) = ctx.obs[GROUPED_CAPPED].snapshot();
     let (sib_v4_l, sib_v6_l, sib_ann_l, sib_wd_l, _) = ctx.obs[GROUPED_SIBLING].snapshot();
@@ -1071,9 +1263,8 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
     );
 
     // -- Phase: a raise recovers the withheld intent ------------------------
-    std::fs::copy(&args.config_raise, &args.config_live)
-        .map_err(|e| format!("stage raise config: {e}"))?;
-    sighup(args.pid);
+    std::fs::copy(&config_raise, &config_live).expect("stage raise config");
+    kill(daemon.pid(), Signal::SIGHUP).expect("send SIGHUP");
     let recovery = wait_for(|| {
         let (v4, v6, ..) = ctx.obs[GROUPED_CAPPED].snapshot();
         v4 == V4_ROUTES && v6 == V6_ROUTES
@@ -1088,7 +1279,7 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
         ),
     );
     tokio::time::sleep(SETTLE).await;
-    let raised = collect(args, "recovered").await?;
+    let raised = collect(&rbgp, metrics).await.expect("collect recovered");
 
     let (cap_v4_r, cap_v6_r, _, cap_wd_r, _) = ctx.obs[GROUPED_CAPPED].snapshot();
     let (sib_v4_r, sib_v6_r, sib_ann_r, sib_wd_r, _) = ctx.obs[GROUPED_SIBLING].snapshot();
@@ -1149,7 +1340,7 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
     checks.eq(
         "recovered.grouped.fallback_peers",
         sample(&raised.metrics, "bgp_update_group_fallback_peers", &[]),
-        Some(1.0),
+        Some(0.0),
     );
     checks.eq(
         "recovered.advertised.capped.ipv4",
@@ -1174,140 +1365,102 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
         .sum();
     checks.eq("run.decode_errors", decode_errors, 0);
 
-    // -- Summary ------------------------------------------------------------
-    let mut wire_rows = BTreeMap::new();
-    for i in 0..PEERS {
-        let (v4, v6, ann, wd, updates) = ctx.obs[i].snapshot();
-        wire_rows.insert(
-            peer_addr(i).to_string(),
-            format!(
-                "{{\"role\":\"{}\",\"asn\":{},\"final_ipv4\":{v4},\"final_ipv6\":{v6},\
-                 \"announced_nlri\":{ann},\"withdrawn_nlri\":{wd},\"updates\":{updates}}}",
-                peer_role(i),
-                peer_asn(i)
-            ),
-        );
-    }
-    let failed = checks.failed();
-    let summary = format!(
-        "{{\n  \"shape\": {{\n    \"peers\": {PEERS},\n    \"families\": \
-         [\"ipv4_unicast\", \"ipv6_unicast\"],\n    \"add_path\": \"not negotiated on any \
-         session\",\n    \"ipv4_routes\": {V4_ROUTES},\n    \"ipv6_routes\": {V6_ROUTES},\n    \
-         \"initial_max_prefixes_out_ipv4\": {V4_LIMIT},\n    \
-         \"initial_max_prefixes_out_ipv6\": {V6_LIMIT},\n    \
-         \"raised_max_prefixes_out_ipv4\": {V4_ROUTES},\n    \
-         \"raised_max_prefixes_out_ipv6\": {V6_ROUTES}\n  }},\n  \
-         \"cold_convergence_seconds\": {:.3},\n  \"recovery_seconds\": {},\n  \
-         \"wire\": {{\n{}\n  }},\n  \"checks_total\": {},\n  \"checks_failed\": {failed}\n}}\n",
-        converge.as_secs_f64(),
-        recovery.map_or_else(
-            || "null".to_string(),
-            |elapsed| format!("{:.3}", elapsed.as_secs_f64())
-        ),
-        wire_rows
-            .iter()
-            .map(|(peer, row)| format!("    \"{peer}\": {row}"))
-            .collect::<Vec<_>>()
-            .join(",\n"),
-        checks.rows.len(),
-    );
-    std::fs::write(args.out.join("summary.json"), &summary)
-        .map_err(|e| format!("write summary: {e}"))?;
-    print!("{summary}");
+    // -- Bounded log-episode gates -----------------------------------------
+    log_gates(&mut checks, &daemon.log());
 
-    if failed == 0 {
-        println!("RESULT PASS {} checks", checks.rows.len());
-        Ok(ExitCode::SUCCESS)
-    } else {
-        println!("RESULT FAIL {failed}/{} checks", checks.rows.len());
-        Ok(ExitCode::FAILURE)
-    }
+    drop(senders);
+    let failing = checks.failing();
+    assert!(
+        failing.is_empty(),
+        "{} of {} checks failed:\n{}",
+        failing.len(),
+        checks.rows.len(),
+        failing.join("\n")
+    );
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// ---------------------------------------------------------------------------
+// Pure unit checks carried over from the harness.
+// ---------------------------------------------------------------------------
 
-    #[test]
-    fn sample_reads_labelled_series_and_reports_absence() {
-        let scrape =
-            "# HELP x\nbgp_outbound_prefix_usage{peer=\"127.9.0.2\",family=\"ipv4_unicast\"} 8\n\
-                      bgp_outbound_prefix_usage{peer=\"127.9.0.3\",family=\"ipv4_unicast\"} 12\n\
-                      bgp_update_group_fallback_peers 1\n";
-        assert_eq!(
-            sample(
-                scrape,
-                "bgp_outbound_prefix_usage",
-                &[("peer", "127.9.0.2"), ("family", "ipv4_unicast")]
-            ),
-            Some(8.0)
-        );
-        assert_eq!(
-            sample(scrape, "bgp_update_group_fallback_peers", &[]),
-            Some(1.0)
-        );
-        // An unlimited family drops its limit series entirely; the receipt
-        // asserts that absence, so a silent Some(0.0) would be a false pass.
-        assert_eq!(
-            sample(
-                scrape,
-                "bgp_outbound_prefix_limit",
-                &[("peer", "127.9.0.2"), ("family", "ipv4_unicast")]
-            ),
-            None
-        );
-    }
+#[test]
+fn sample_reads_labelled_series_and_reports_absence() {
+    let scrape = "# HELP x\nbgp_outbound_prefix_usage{peer=\"127.9.0.2\",family=\"ipv4_unicast\"} 8\n\
+                  bgp_outbound_prefix_usage{peer=\"127.9.0.3\",family=\"ipv4_unicast\"} 12\n\
+                  bgp_update_group_fallback_peers 1\n";
+    assert_eq!(
+        sample(
+            scrape,
+            "bgp_outbound_prefix_usage",
+            &[("peer", "127.9.0.2"), ("family", "ipv4_unicast")]
+        ),
+        Some(8.0)
+    );
+    assert_eq!(
+        sample(scrape, "bgp_update_group_fallback_peers", &[]),
+        Some(1.0)
+    );
+    // An unlimited family drops its limit series entirely; the test asserts
+    // that absence, so a silent Some(0.0) would be a false pass.
+    assert_eq!(
+        sample(
+            scrape,
+            "bgp_outbound_prefix_limit",
+            &[("peer", "127.9.0.2"), ("family", "ipv4_unicast")]
+        ),
+        None
+    );
+}
 
-    #[test]
-    fn sample_does_not_match_a_longer_metric_name() {
-        let scrape = "bgp_outbound_prefix_blocked_total{peer=\"127.9.0.2\"} 4\n";
-        assert_eq!(
-            sample(
-                scrape,
-                "bgp_outbound_prefix_blocked",
-                &[("peer", "127.9.0.2")]
-            ),
-            None
-        );
-    }
+#[test]
+fn sample_does_not_match_a_longer_metric_name() {
+    let scrape = "bgp_outbound_prefix_blocked_total{peer=\"127.9.0.2\"} 4\n";
+    assert_eq!(
+        sample(
+            scrape,
+            "bgp_outbound_prefix_blocked",
+            &[("peer", "127.9.0.2")]
+        ),
+        None
+    );
+}
 
-    #[test]
-    fn fleet_addresses_and_asns_are_distinct() {
-        let addrs: HashSet<_> = (0..PEERS).map(peer_addr).collect();
-        let asns: HashSet<_> = (0..PEERS).map(peer_asn).collect();
-        assert_eq!(addrs.len(), PEERS);
-        assert_eq!(asns.len(), PEERS);
-        const {
-            assert!(
-                V4_LIMIT < V4_ROUTES && V6_LIMIT < V6_ROUTES,
-                "caps must actually block"
-            )
+#[test]
+fn fleet_addresses_and_asns_are_distinct() {
+    let addrs: HashSet<_> = (0..PEERS).map(peer_addr).collect();
+    let asns: HashSet<_> = (0..PEERS).map(peer_asn).collect();
+    assert_eq!(addrs.len(), PEERS);
+    assert_eq!(asns.len(), PEERS);
+    const {
+        assert!(
+            V4_LIMIT < V4_ROUTES && V6_LIMIT < V6_ROUTES,
+            "caps must actually block"
+        )
+    };
+}
+
+#[test]
+fn source_table_encodes_both_families_on_the_wire() {
+    let msgs = source_table();
+    assert_eq!(msgs.len(), 2);
+    let mut v4 = 0;
+    let mut v6 = 0;
+    for msg in &msgs {
+        let Message::Update(update) = msg else {
+            panic!("expected UPDATE")
         };
-    }
-
-    #[test]
-    fn source_table_encodes_both_families_on_the_wire() {
-        let msgs = source_table();
-        assert_eq!(msgs.len(), 2);
-        let mut v4 = 0;
-        let mut v6 = 0;
-        for msg in &msgs {
-            let Message::Update(update) = msg else {
-                panic!("expected UPDATE")
-            };
-            let bytes = encode_message(msg).expect("source UPDATE encodes");
-            assert!(bytes.len() <= usize::from(MAX_MESSAGE_LEN));
-            let parsed = update
-                .parse(true, false, &[])
-                .expect("source UPDATE parses");
-            v4 += parsed.announced.len();
-            for attribute in &parsed.attributes {
-                if let PathAttribute::MpReachNlri(mp) = attribute {
-                    v6 += mp.announced.len();
-                }
+        let bytes = encode_message(msg).expect("source UPDATE encodes");
+        assert!(bytes.len() <= usize::from(MAX_MESSAGE_LEN));
+        let parsed = update
+            .parse(true, false, &[])
+            .expect("source UPDATE parses");
+        v4 += parsed.announced.len();
+        for attribute in &parsed.attributes {
+            if let PathAttribute::MpReachNlri(mp) = attribute {
+                v6 += mp.announced.len();
             }
         }
-        assert_eq!(v4, V4_ROUTES);
-        assert_eq!(v6, V6_ROUTES);
     }
+    assert_eq!(v4, V4_ROUTES);
+    assert_eq!(v6, V6_ROUTES);
 }

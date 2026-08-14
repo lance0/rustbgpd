@@ -1,5 +1,7 @@
 # reloadstall
 
+Deliberate manual performance harness: CI compiles, lints, and unit-tests it, but the measured run is operator-initiated.
+
 Route-server-scale policy-reload UPDATE-stall driver.
 
 ## What it measures

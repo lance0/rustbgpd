@@ -349,30 +349,18 @@ jobs:
           cargo fmt --manifest-path bench/scale/rrharness/Cargo.toml -- --check
           cargo fmt --manifest-path bench/scale/rrtransport/Cargo.toml -- --check
           cargo fmt --manifest-path bench/scale/reloadstall/Cargo.toml -- --check
-          cargo fmt --manifest-path bench/scale/outbound-prefix-limits/Cargo.toml -- --check
-          cargo fmt --manifest-path bench/scale/config-persistence/Cargo.toml -- --check
           cargo fmt --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml -- --check
-          cargo fmt --manifest-path bench/scale/outbound-prefix-limit-scale/Cargo.toml -- --check
           cargo test --manifest-path bench/scale/rrharness/Cargo.toml --locked
           cargo test --manifest-path bench/scale/rrtransport/Cargo.toml --locked
           cargo test --manifest-path bench/scale/reloadstall/Cargo.toml --locked
-          cargo test --manifest-path bench/scale/outbound-prefix-limits/Cargo.toml --locked
-          cargo test --manifest-path bench/scale/config-persistence/Cargo.toml --locked
           cargo test --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml --locked
-          cargo test --manifest-path bench/scale/outbound-prefix-limit-scale/Cargo.toml --locked
-          cargo clippy --manifest-path bench/scale/outbound-prefix-limits/Cargo.toml \
-            --locked --all-targets -- -D warnings
           cargo clippy --manifest-path bench/scale/rrtransport/Cargo.toml \
             --locked --all-targets -- -D warnings
           cargo run --manifest-path bench/scale/rrtransport/Cargo.toml --locked -- smoke
           rrtransport_receipt=$(mktemp -d)
           bench/scale/rrtransport/run-receipt.sh --real-smoke "$rrtransport_receipt"
           bash bench/tests/test-rrtransport-receipt.sh
-          cargo clippy --manifest-path bench/scale/config-persistence/Cargo.toml \
-            --locked --all-targets -- -D warnings
           cargo clippy --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml \
-            --locked --all-targets -- -D warnings
-          cargo clippy --manifest-path bench/scale/outbound-prefix-limit-scale/Cargo.toml \
             --locked --all-targets -- -D warnings
           # The IRR manifest contract exercises the production rustbgpd
           # renderer, so make that prerequisite explicit on a clean runner.
@@ -382,10 +370,7 @@ jobs:
           shellcheck bench/compare-criterion.sh bench/tests/test-compare-criterion-harness.sh
           shellcheck bench/smoke-benches.sh
           bash -n bench/scale/route-server-1000/run-receipt.sh
-          bash -n bench/scale/outbound-prefix-limits/run-receipt.sh
-          bash -n bench/scale/config-persistence/run-receipt.sh
           bash -n bench/scale/enhanced-route-refresh/run-receipt.sh
-          bash -n bench/scale/outbound-prefix-limit-scale/run-receipt.sh
           bash -n bench/scale/rrtransport/run-receipt.sh
           bash -n bench/tests/test-rrtransport-receipt.sh
           bash -n bench/tests/test-route-server-1000-receipt.sh
@@ -393,10 +378,7 @@ jobs:
           bash -n bench/tests/test-vpn-query-campaign.sh
           bash -n bench/run-vpn-query-campaign.sh
           shellcheck bench/scale/route-server-1000/run-receipt.sh \
-            bench/scale/outbound-prefix-limits/run-receipt.sh \
-            bench/scale/config-persistence/run-receipt.sh \
             bench/scale/enhanced-route-refresh/run-receipt.sh \
-            bench/scale/outbound-prefix-limit-scale/run-receipt.sh \
             bench/scale/rrtransport/run-receipt.sh \
             bench/tests/test-rrtransport-receipt.sh \
             bench/tests/test-route-server-1000-receipt.sh

@@ -1,5 +1,7 @@
 # rrtransport
 
+Deliberate CI-run correctness tripwire: the `smoke` shape executes on every PR; the gated scale instrument below is operator-initiated.
+
 `rrtransport smoke` is a fixed-shape correctness harness for the real
 route-reflector transport path. It starts a production `RibManager`, two
 production transport sessions over TCP loopback, and the existing
