@@ -278,10 +278,12 @@ EOF
             "$fixture_dir/offline-install"
     ) || fail_self_test "offline artifact install failed"
 
+    # Pinned to the current consumer roster; bump when a job that uses the
+    # offline artifact path is added or removed (41st consumer: m84).
     interop_calls=$(grep -cF 'uses: ./.github/actions/install-grpcurl-artifact' \
         "$repo_root/.github/workflows/interop.yml")
-    [[ "$interop_calls" -eq 40 ]] \
-        || fail_self_test "Interop must have 40 offline grpcurl consumers"
+    [[ "$interop_calls" -eq 41 ]] \
+        || fail_self_test "Interop must have 41 offline grpcurl consumers"
     setup_calls=$(grep -cF 'uses: ./.github/actions/install-grpcurl-artifact' \
         "$repo_root/.github/actions/setup-dataplane-host/action.yml")
     [[ "$setup_calls" -eq 1 ]] \
