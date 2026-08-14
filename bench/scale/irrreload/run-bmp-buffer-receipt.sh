@@ -6,7 +6,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 GEN="$REPO/bench/scale/reloadstall/gen-irr-scenario.py"
-HARNESS="$REPO/bench/scale/reloadstall/target/release/reloadstall"
+HARNESS="$REPO/bench/scale/target/release/reloadstall"
 SINK="$REPO/bench/scale/irrreload/bmp-loc-rib-sink.py"
 VERIFY="$REPO/bench/scale/irrreload/verify-bmp-buffer-receipt.py"
 DAEMON="$REPO/target/release/rustbgpd"

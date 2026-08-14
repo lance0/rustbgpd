@@ -76,7 +76,7 @@ cargo build --release --locked -p rustbgpd -p rustbgpctl >"${OUT}/build-daemon.l
 
 readonly DAEMON="${REPO}/target/release/rustbgpd"
 readonly RBGP="${REPO}/target/release/rbgp"
-readonly HARNESS="${here}/target/release/configpersist"
+readonly HARNESS="${REPO}/bench/scale/target/release/configpersist"
 sha256sum "${DAEMON}" "${RBGP}" "${HARNESS}" | sed "s#${REPO}/##; s#${here}/##" \
     >"${OUT}/binaries.sha256"
 

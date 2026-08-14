@@ -164,7 +164,7 @@ wait_for_idle prebuild
 (cd "$REPO" && env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
     --manifest-path bench/scale/reloadstall/Cargo.toml) >"$OUT/build/reloadstall.log" 2>&1
 readonly DAEMON="$REPO/target/release/rustbgpd" RBGP="$REPO/target/release/rbgp"
-readonly HARNESS="$REPO/bench/scale/reloadstall/target/release/reloadstall"
+readonly HARNESS="$REPO/bench/scale/target/release/reloadstall"
 sha256sum "$DAEMON" "$RBGP" "$HARNESS" >"$OUT/build/binaries.sha256"
 wait_for_idle postbuild
 

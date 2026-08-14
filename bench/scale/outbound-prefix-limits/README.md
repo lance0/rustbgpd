@@ -44,11 +44,11 @@ withheld prefixes must arrive without touching the sibling).
 
 ## Build and run
 
-The harness is a standalone crate (its own empty `[workspace]` table), not a
-root-workspace member. CI compiles, formats, lints, and tests it explicitly.
+The harness is a member of the `bench/scale` workspace, not the root
+workspace. CI compiles, formats, lints, and tests it explicitly.
 
 ```text
-cd bench/scale/outbound-prefix-limits && cargo build --release
+cargo build --release --manifest-path bench/scale/outbound-prefix-limits/Cargo.toml
 ```
 
 The driver takes no arguments, refuses a dirty checkout, and owns the whole

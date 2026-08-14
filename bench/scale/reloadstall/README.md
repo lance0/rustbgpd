@@ -48,12 +48,12 @@ Depends only on `crates/wire` (wire encode/decode for the stub sessions).
 
 ## Build and run
 
-Standalone crate (not a workspace member — build it explicitly):
+Member of the `bench/scale` workspace (not the root workspace — build it
+explicitly):
 
 ```text
-cd bench/scale/reloadstall
-cargo build --release
-./target/release/reloadstall <n_peers> <total_prefixes> <daemon_port> \
+cargo build --release --manifest-path bench/scale/reloadstall/Cargo.toml
+./bench/scale/target/release/reloadstall <n_peers> <total_prefixes> <daemon_port> \
     <daemon_pid> <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
     [changed_peers]
 ```

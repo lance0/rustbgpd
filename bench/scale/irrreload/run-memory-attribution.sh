@@ -489,7 +489,7 @@ PROFILE=release; BUILD_FEATURES=(); [[ $MODE != dhat ]] || { PROFILE=release-pro
 (cd "$REPO" && cargo build --locked --profile "$PROFILE" -p rustbgpd -p rs-config-render "${BUILD_FEATURES[@]}") >"$ART/build.log" 2>&1
 (cd "$REPO" && cargo build --locked --release --manifest-path bench/scale/reloadstall/Cargo.toml) >>"$ART/build.log" 2>&1
 DAEMON=$REPO/target/$PROFILE/rustbgpd; RENDER=$REPO/target/$PROFILE/rs-config-render
-HARNESS=$REPO/bench/scale/reloadstall/target/release/reloadstall
+HARNESS=$REPO/bench/scale/target/release/reloadstall
 for binary in "$DAEMON" "$RENDER" "$HARNESS"; do [[ -x $binary ]] || die "missing binary: $binary"; done
 printf 'script %s\ngenerator %s\nclassifier %s\ndaemon %s\nrenderer %s\nharness %s\n' \
     "$(hash_file "${BASH_SOURCE[0]}")" "$(hash_file "$GEN")" "$(hash_file "$CLASSIFIER")" \

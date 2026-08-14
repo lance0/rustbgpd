@@ -58,12 +58,12 @@ an untouched session and a freshly rebuilt one are indistinguishable.
 
 ## Build and run
 
-The harness is a standalone crate (its own empty `[workspace]` table), not a
-root-workspace member. CI compiles, formats, lints, and tests it explicitly;
+The harness is a member of the `bench/scale` workspace, not the root
+workspace. CI compiles, formats, lints, and tests it explicitly;
 the full run is not on the PR critical path.
 
 ```text
-cd bench/scale/config-persistence && cargo build --release
+cargo build --release --manifest-path bench/scale/config-persistence/Cargo.toml
 ```
 
 The driver takes no arguments, refuses a dirty checkout, refuses to run as
