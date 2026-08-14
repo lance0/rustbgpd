@@ -1773,6 +1773,71 @@ mod tests {
         assert!(result.is_err(), "BFD event leaked into the default stream");
     }
 
+    /// LAN-1014: on a daemon whose FIB/BFD subsystem never spawns (fixed at
+    /// startup — reload and CRUD both answer restart-required), the daemon
+    /// wires 1-slot placeholder rings into `ServeConfig` instead of the full
+    /// 4096/1024-slot rings. A subscriber arriving before (or without) the
+    /// subsystem must still get an open, functional stream: pending while
+    /// silent, delivering if a publisher ever sends.
+    #[tokio::test]
+    async fn bfd_watch_on_one_slot_placeholder_ring_stays_open_and_delivers() {
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let (bfd_tx, _) = broadcast::channel(1);
+        let (fib_route_tx, _) = broadcast::channel(1);
+        let service = EventService::with_dataplane_snapshots_broadcaster_and_metrics(
+            rib_tx,
+            peer_tx,
+            Arc::new(Vec::new),
+            Arc::new(Vec::new),
+            dataplane_event_broadcaster(),
+            Some(fib_route_tx),
+            Some(bfd_tx.clone()),
+            BgpMetrics::new(),
+        );
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Bfd as i32],
+                event_types: vec![],
+                neighbor_address: String::new(),
+                afi_safi: proto::AddressFamily::Unspecified as i32,
+                prefix: String::new(),
+                prefix_length: 0,
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        // No publisher: the stream stays open (pending), it does not end.
+        let idle = tokio::time::timeout(std::time::Duration::from_millis(300), stream.next()).await;
+        assert!(
+            idle.is_err(),
+            "BFD stream on a placeholder ring must stay pending, got {idle:?}"
+        );
+
+        // A publisher on the 1-slot ring still reaches the subscriber.
+        bfd_tx
+            .send(bfd_bgp_event(proto::BgpEventType::BfdSessionUp, "10.0.0.1"))
+            .unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .expect("event on placeholder ring must be delivered")
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.category, proto::EventCategory::Bfd as i32);
+    }
+
+    /// LAN-1014 structural pin: tokio broadcast allocates its slot array at
+    /// construction, and each slot embeds an `Option<BgpEvent>` payload
+    /// (prost oneof sized by its largest variant). Shrinking the never-used
+    /// FIB (4096-slot) and BFD (1024-slot) proto rings to 1-slot placeholders
+    /// removes 4095 + 1023 = 5118 slots of eager payload capacity per daemon:
+    /// 5118 × 944 B = 4,831,392 B of slot payload, before per-slot metadata.
+    #[test]
+    fn watch_events_ring_slot_payload_size_pin() {
+        assert_eq!(std::mem::size_of::<Option<proto::BgpEvent>>(), 944);
+    }
+
     #[test]
     fn dataplane_summaries_count_blackhole_and_fib_states() {
         let summaries = dataplane_summaries(

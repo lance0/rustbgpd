@@ -4264,10 +4264,22 @@ async fn run<T>(
     // route-server / route-reflector deployments control-plane-only.
     let (fib_status_tx, fib_status_rx) =
         tokio::sync::watch::channel(Vec::<fib_runtime::FibRuntimeStatus>::new());
+    // LAN-1014: tokio broadcast allocates its full slot array at
+    // construction. The reconciler's existence is fixed at startup — with no
+    // `[[fib_tables]]` it never spawns, and both SIGHUP reload and FIB-table
+    // CRUD answer restart-required — so on a control-plane-only daemon these
+    // rings can never carry an event. Shrink them to 1-slot placeholders in
+    // that case; the senders stay alive either way so WatchEvents dataplane
+    // subscribers keep an open (silent) stream.
+    let fib_ring_capacity = if config.fib_tables.is_empty() {
+        1
+    } else {
+        4096
+    };
     let (fib_event_tx, fib_event_rx) =
-        tokio::sync::broadcast::channel::<fib_runtime::FibRuntimeEvent>(4096);
+        tokio::sync::broadcast::channel::<fib_runtime::FibRuntimeEvent>(fib_ring_capacity);
     let (fib_bgp_event_tx, _) =
-        tokio::sync::broadcast::channel::<rustbgpd_api::proto::BgpEvent>(4096);
+        tokio::sync::broadcast::channel::<rustbgpd_api::proto::BgpEvent>(fib_ring_capacity);
     let _fib_event_bridge_handle = spawn_fib_dataplane_event_bridge(
         fib_event_rx,
         fib_bgp_event_tx.clone(),
@@ -4309,10 +4321,17 @@ async fn run<T>(
     // stream stays open even when no sessions are configured. The actor event
     // channel (`bfd_event_tx`) is dropped if the actor doesn't start (no
     // sessions), which simply ends the bridge task.
+    //
+    // LAN-1014: like the FIB rings above, the BFD actor's existence is fixed
+    // at startup (BFD config is restart-required; reload pins BFD edits to
+    // the startup snapshot and there is no BFD CRUD), so without configured
+    // sessions these rings can never carry an event — shrink them to 1-slot
+    // placeholders while keeping the long-lived sink open.
+    let bfd_ring_capacity = if bfd_initial.enabled() { 1024 } else { 1 };
     let (bfd_event_tx, bfd_event_rx) =
-        tokio::sync::broadcast::channel::<bfd_runtime::BfdRuntimeEvent>(1024);
+        tokio::sync::broadcast::channel::<bfd_runtime::BfdRuntimeEvent>(bfd_ring_capacity);
     let (bfd_bgp_event_tx, _) =
-        tokio::sync::broadcast::channel::<rustbgpd_api::proto::BgpEvent>(1024);
+        tokio::sync::broadcast::channel::<rustbgpd_api::proto::BgpEvent>(bfd_ring_capacity);
     let _bfd_event_bridge = spawn_bfd_event_bridge(
         bfd_event_rx,
         bfd_bgp_event_tx.clone(),
