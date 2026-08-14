@@ -1,5 +1,7 @@
 # Enhanced Route Refresh scale receipt
 
+Deliberate manual performance harness: CI compiles, lints, and unit-tests it, but the measured run is operator-initiated.
+
 This directory measures the current RFC 7313 inventory owners before any
 representation or ownership change. It drives a real TCP BGP session through
 the shipped wire decoder and transport session, announces exactly 100,000 IPv4

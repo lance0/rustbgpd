@@ -1,5 +1,7 @@
 # rrharness
 
+Deliberate manual performance harness: CI compiles, lints, and unit-tests it, but the measured run is operator-initiated.
+
 RibManager flood/churn CPU + memory profiling and late-client-join measurement
 harness.
 
