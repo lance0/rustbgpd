@@ -17,14 +17,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
+# CI stages the same-run, checksum- and version-verified source archive here
+# (.github/actions/stage-bird3-artifact) so hosted builds never contact the
+# upstream download site; the committed directory is empty, which keeps cold
+# local builds on the bounded in-build fetch below.
+COPY bird3-archive/ /tmp/bird3-archive/
+
 WORKDIR /tmp/bird
 
-RUN curl -fsSL "https://bird.nic.cz/download/bird-${BIRD_VERSION}.tar.gz" -o bird.tar.gz \
-    && tar -xzf bird.tar.gz --strip-components=1 \
-    && ./configure --prefix=/usr --sysconfdir=/etc/bird --localstatedir=/run/bird \
-    && make -j"$(nproc)" \
-    && make install \
-    && mkdir -p /etc/bird /run/bird \
-    && bird --version
+RUN set -eux; \
+    checksum="d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190"; \
+    archive="bird-${BIRD_VERSION}.tar.gz"; \
+    if [ ! -f "/tmp/bird3-archive/${archive}" ]; then \
+        attempt=1; \
+        while ! curl --fail --location --silent --show-error \
+            --connect-timeout 10 --max-time 120 \
+            "https://bird.nic.cz/download/bird-${BIRD_VERSION}.tar.gz" \
+            --output "/tmp/bird3-archive/${archive}"; do \
+            rm -f "/tmp/bird3-archive/${archive}"; \
+            if [ "${attempt}" -ge 3 ]; then \
+                echo "BIRD ${BIRD_VERSION} download failed after ${attempt} attempts" >&2; \
+                exit 1; \
+            fi; \
+            sleep $((attempt * 5)); \
+            attempt=$((attempt + 1)); \
+        done; \
+    fi; \
+    echo "${checksum}  /tmp/bird3-archive/${archive}" | sha256sum --check --strict; \
+    tar -xzf "/tmp/bird3-archive/${archive}" --strip-components=1; \
+    ./configure --prefix=/usr --sysconfdir=/etc/bird --localstatedir=/run/bird; \
+    make -j"$(nproc)"; \
+    make install; \
+    mkdir -p /etc/bird /run/bird; \
+    bird --version
 
 CMD ["sleep", "infinity"]

@@ -67,6 +67,17 @@ GOBGP_ACTION = "uses: ./.github/actions/stage-gobgp-artifact"
 GOBGP_BUILD = (
     "docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop"
 )
+BIRD3_VERSION = "3.3.1"
+BIRD3_SHA256 = "d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190"
+BIRD3_ARCHIVE = f"bird-{BIRD3_VERSION}.tar.gz"
+BIRD3_ARTIFACT = f"bird3-v{BIRD3_VERSION}-source"
+BIRD3_CACHE_KEY = f"{BIRD3_ARTIFACT}-{BIRD3_SHA256}"
+BIRD3_ACTION = "uses: ./.github/actions/stage-bird3-artifact"
+BIRD3_BUILD = "file: tests/interop/Dockerfile.bird3"
+BIRD3_CACHE_SEAMS = (
+    "cache-from: type=gha,scope=bird3-tcpao",
+    "cache-to: type=gha,mode=max,scope=bird3-tcpao,ignore-error=true",
+)
 
 TRIGGER_HASHES = {
     "ci.yml": "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8",
@@ -86,15 +97,15 @@ CALL_HASHES = {
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 85,
+        "actions/checkout@v7": 86,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95": 2,
         "docker/setup-buildx-action@v4": 44,
         "docker/build-push-action@v7": 45,
-        "actions/cache@v6": 6,
-        "actions/upload-artifact@v7": 7,
-        "actions/download-artifact@v8": 5,
+        "actions/cache@v6": 7,
+        "actions/upload-artifact@v7": 8,
+        "actions/download-artifact@v8": 6,
         "rustsec/audit-check@v2.0.0": 1,
         "EmbarkStudios/cargo-deny-action@v2": 1,
     }
@@ -205,6 +216,34 @@ def check(root: Path) -> list[str]:
         errors.append("install-gobgp.sh release URL inventory drifted")
     if re.search(r"curl[^\n]*\|\s*(?:sudo\s+)?tar", gobgp_installer_text):
         errors.append("install-gobgp.sh streams network bytes into tar")
+    bird3_installer = root / ".github" / "scripts" / "install-bird3.sh"
+    if not bird3_installer.is_file():
+        errors.append("install-bird3.sh is missing")
+    elif stat.S_IMODE(bird3_installer.stat().st_mode) != 0o755:
+        errors.append("install-bird3.sh must have exact executable mode 100755")
+    bird3_installer_text = (
+        bird3_installer.read_text() if bird3_installer.is_file() else ""
+    )
+    for seam in (
+        f'readonly BIRD3_VERSION="{BIRD3_VERSION}"',
+        f'readonly BIRD3_SHA256="{BIRD3_SHA256}"',
+        'readonly BIRD3_ASSET="bird-${BIRD3_VERSION}.tar.gz"',
+        "https://bird.nic.cz/download/${BIRD3_ASSET}",
+        "readonly BIRD3_ATTEMPTS=3",
+        "curl -fsSL",
+        "--connect-timeout 10",
+        "--max-time 120",
+        "--prepare-archive",
+        "--stage-archive",
+        "--self-test",
+        "unexpected bird3 source version",
+    ):
+        if seam not in bird3_installer_text:
+            errors.append(f"install-bird3.sh missing {seam}")
+    if bird3_installer_text.count("bird.nic.cz/download/") != 1:
+        errors.append("install-bird3.sh download URL inventory drifted")
+    if re.search(r"curl[^\n]*\|\s*(?:sudo\s+)?tar", bird3_installer_text):
+        errors.append("install-bird3.sh streams network bytes into tar")
     workflow_dir = root / ".github" / "workflows"
     texts = {name: (workflow_dir / name).read_text() for name in WORKFLOWS}
     for name, text in texts.items():
@@ -297,6 +336,7 @@ def check(root: Path) -> list[str]:
             ["grpcurl_archive"]
             + ([] if setup else ["gnmic_archive"])
             + ["gobgp_archive"]
+            + (["bird3_archive"] if setup else [])
         )
         gobgp_consumers = (
             {"m65", "m71", "m72"} if setup else {"m74", "m75", "m81", "m82", "m83"}
@@ -451,6 +491,49 @@ def check(root: Path) -> list[str]:
         )
         if gobgp_producer.count(exact_gobgp_path) != 2:
             errors.append(f"{name}:gobgp_archive cache/artifact paths drifted")
+        if setup:
+            bird3_producer = jobs.get("bird3_archive", "")
+            for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
+                if not _has_line(bird3_producer, f"    {seam}"):
+                    errors.append(f"{name}:bird3_archive missing job-level {seam}")
+            for seam in (
+                "name: Prepare exact bird3 archive",
+                "runs-on: ubuntu-latest",
+                "timeout-minutes: 10",
+                CHECKOUT,
+                "ref: ${{ github.sha }}",
+                "uses: actions/cache@v6",
+                f"path: ${{{{ runner.temp }}}}/bird3-cache/{BIRD3_ARCHIVE}",
+                f"key: {BIRD3_CACHE_KEY}",
+                "--prepare-archive",
+                f'"$RUNNER_TEMP/bird3-cache/{BIRD3_ARCHIVE}"',
+                "uses: actions/upload-artifact@v7",
+                f"name: {BIRD3_ARTIFACT}",
+                "if-no-files-found: error",
+                "retention-days: 1",
+                "compression-level: 0",
+            ):
+                if seam not in bird3_producer:
+                    errors.append(f"{name}:bird3_archive missing {seam}")
+            for forbidden in (
+                "restore-keys:",
+                "continue-on-error:",
+                "actions/download-artifact@",
+                "--stage-archive",
+            ):
+                if forbidden in bird3_producer:
+                    errors.append(f"{name}:bird3_archive permits {forbidden}")
+            if bird3_producer.count("uses: actions/cache@v6") != 1:
+                errors.append(f"{name}:bird3_archive must restore one exact cache")
+            if bird3_producer.count("--prepare-archive") != 1:
+                errors.append(f"{name}:bird3_archive must prepare one archive")
+            if bird3_producer.count("uses: actions/upload-artifact@v7") != 1:
+                errors.append(f"{name}:bird3_archive must upload one artifact")
+            exact_bird3_path = (
+                f"path: ${{{{ runner.temp }}}}/bird3-cache/{BIRD3_ARCHIVE}"
+            )
+            if bird3_producer.count(exact_bird3_path) != 2:
+                errors.append(f"{name}:bird3_archive cache/artifact paths drifted")
         primer = jobs.get("prime_dev_image", "")
         for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
             if not _has_line(primer, f"    {seam}"):
@@ -480,6 +563,10 @@ def check(root: Path) -> list[str]:
                 expected_needs = (
                     "    needs: [grpcurl_archive, gnmic_archive, prime_dev_image]"
                 )
+            elif setup and job_name == "m43":
+                expected_needs = (
+                    "    needs: [grpcurl_archive, bird3_archive, prime_dev_image]"
+                )
             elif job_name in gobgp_consumers:
                 expected_needs = (
                     "    needs: [grpcurl_archive, gobgp_archive, prime_dev_image]"
@@ -503,6 +590,25 @@ def check(root: Path) -> list[str]:
                 errors.append(
                     f"{name}:{job_name}: gobgp build precedes the staged artifact"
                 )
+            expected_bird3 = 1 if setup and job_name == "m43" else 0
+            if job.count(BIRD3_ACTION) != expected_bird3:
+                errors.append(f"{name}:{job_name}: bird3 stage consumer drifted")
+            if job.count(BIRD3_BUILD) != expected_bird3:
+                errors.append(
+                    f"{name}:{job_name}: bird3 image build inventory drifted"
+                )
+            if expected_bird3 and not (
+                0 <= job.find(BIRD3_ACTION) < job.find(BIRD3_BUILD)
+            ):
+                errors.append(
+                    f"{name}:{job_name}: bird3 build precedes the staged artifact"
+                )
+            if expected_bird3:
+                for seam in BIRD3_CACHE_SEAMS:
+                    if seam not in job:
+                        errors.append(
+                            f"{name}:{job_name}: bird3 buildx layer cache missing {seam}"
+                        )
             if CHECKOUT not in job:
                 errors.append(f"{name}:{job_name}: pinned checkout drifted")
             if setup:
@@ -607,6 +713,9 @@ def check(root: Path) -> list[str]:
     gobgp_action = (
         root / ".github" / "actions" / "stage-gobgp-artifact" / "action.yml"
     ).read_text()
+    bird3_action = (
+        root / ".github" / "actions" / "stage-bird3-artifact" / "action.yml"
+    ).read_text()
     for seam in (
         "uses: actions/download-artifact@v8",
         f"name: {GRPCURL_ARTIFACT}",
@@ -683,6 +792,31 @@ def check(root: Path) -> list[str]:
     ):
         if forbidden in gobgp_action:
             errors.append(f"stage-gobgp-artifact permits {forbidden}")
+    for seam in (
+        "uses: actions/download-artifact@v8",
+        f"name: {BIRD3_ARTIFACT}",
+        "path: ${{ runner.temp }}/bird3-artifact",
+        "--stage-archive",
+        f'"$RUNNER_TEMP/bird3-artifact/{BIRD3_ARCHIVE}"',
+        "tests/interop/bird3-archive",
+    ):
+        if seam not in bird3_action:
+            errors.append(f"stage-bird3-artifact missing {seam}")
+    if bird3_action.count("uses: actions/download-artifact@v8") != 1:
+        errors.append("stage-bird3-artifact must download one same-run artifact")
+    if bird3_action.count("--stage-archive") != 1:
+        errors.append("stage-bird3-artifact must perform one offline stage")
+    for forbidden in (
+        "--prepare-archive",
+        "actions/cache@",
+        "actions/upload-artifact@",
+        "restore-keys:",
+        "continue-on-error:",
+        "bird.nic.cz",
+        "curl ",
+    ):
+        if forbidden in bird3_action:
+            errors.append(f"stage-bird3-artifact permits {forbidden}")
     # split(...)[-1] returns the whole file when the step name drifts, which
     # turns every seam check below into a file-wide search that passes
     # vacuously. Scope the region only once the anchor is known to be present.
@@ -740,9 +874,25 @@ def check(root: Path) -> list[str]:
     )
     if "osrg/gobgp/releases" in gobgp_surfaces:
         errors.append("gobgp release URL escaped the installer/Dockerfile")
+    if texts["interop.yml"].count(BIRD3_ACTION) != 0:
+        errors.append("interop.yml: bird3 stage must remain kernel-only")
+    if texts["kernel-dataplane.yml"].count(BIRD3_ACTION) != 1:
+        errors.append("kernel-dataplane.yml: bird3 stage consumer inventory drifted")
+    bird3_surfaces = "\n".join(
+        (texts["interop.yml"], texts["kernel-dataplane.yml"], bird3_action)
+    )
+    if "bird.nic.cz" in bird3_surfaces:
+        errors.append("bird.nic.cz URL escaped the installer/Dockerfile")
 
     pins = collections.Counter()
-    for text in [*texts.values(), action, grpcurl_action, gnmic_action, gobgp_action]:
+    for text in [
+        *texts.values(),
+        action,
+        grpcurl_action,
+        gnmic_action,
+        gobgp_action,
+        bird3_action,
+    ]:
         for value in re.findall(r"^\s*(?:- )?uses:\s*(.+)$", text, re.MULTILINE):
             if not value.strip().startswith("./"):
                 pins[value.strip()] += 1
@@ -792,6 +942,32 @@ def check(root: Path) -> list[str]:
         errors.append("Dockerfile.gobgp: floating GoBGP release is forbidden")
     if "go install github.com/osrg/gobgp" in gobgp or "FROM golang:" in gobgp:
         errors.append("Dockerfile.gobgp: source build replaced pinned release archives")
+
+    bird3 = (root / "tests" / "interop" / "Dockerfile.bird3").read_text()
+    for seam in (
+        f"ARG BIRD_VERSION={BIRD3_VERSION}",
+        "COPY bird3-archive/ /tmp/bird3-archive/",
+        f'checksum="{BIRD3_SHA256}"',
+        'archive="bird-${BIRD_VERSION}.tar.gz"',
+        'if [ ! -f "/tmp/bird3-archive/${archive}" ]; then',
+        "https://bird.nic.cz/download/bird-${BIRD_VERSION}.tar.gz",
+        'if [ "${attempt}" -ge 3 ]; then',
+        'echo "${checksum}  /tmp/bird3-archive/${archive}" | sha256sum --check --strict',
+        'tar -xzf "/tmp/bird3-archive/${archive}" --strip-components=1',
+        "bird --version",
+    ):
+        if seam not in bird3:
+            errors.append(f"Dockerfile.bird3: pinned source seam missing: {seam}")
+    if bird3.count("bird.nic.cz") != 1:
+        errors.append("Dockerfile.bird3: download URL inventory drifted")
+    if not (
+        0
+        <= bird3.find("sha256sum --check --strict")
+        < bird3.find('tar -xzf "/tmp/bird3-archive/${archive}"')
+    ):
+        errors.append("Dockerfile.bird3: extraction precedes checksum verification")
+    if re.search(r"BIRD_VERSION=latest|/download/latest", bird3):
+        errors.append("Dockerfile.bird3: floating BIRD release is forbidden")
     return errors
 
 

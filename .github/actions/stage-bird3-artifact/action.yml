@@ -1,0 +1,22 @@
+name: "Stage verified BIRD 3 source archive"
+description: >-
+  Download the same-run BIRD 3 source archive, verify its immutable checksum
+  and source version offline, and stage it into the interop image build
+  context.
+runs:
+  using: "composite"
+  steps:
+    - name: Download verified BIRD 3 archive
+      uses: actions/download-artifact@v8
+      with:
+        name: bird3-v3.3.1-source
+        path: ${{ runner.temp }}/bird3-artifact
+
+    - name: Stage exact BIRD 3 archive offline
+      shell: bash
+      run: |
+        set -euo pipefail
+        .github/scripts/install-bird3.sh \
+          --stage-archive \
+          "$RUNNER_TEMP/bird3-artifact/bird-3.3.1.tar.gz" \
+          tests/interop/bird3-archive

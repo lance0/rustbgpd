@@ -94,6 +94,7 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
+                ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
             ):
                 source = ROOT / fixture
@@ -107,10 +108,14 @@ class PrimerContractTests(unittest.TestCase):
             shutil.copy2(ROOT / gnmic_installer.relative_to(root), gnmic_installer)
             gobgp_installer = root / ".github" / "scripts" / "install-gobgp.sh"
             shutil.copy2(ROOT / gobgp_installer.relative_to(root), gobgp_installer)
+            bird3_installer = root / ".github" / "scripts" / "install-bird3.sh"
+            shutil.copy2(ROOT / bird3_installer.relative_to(root), bird3_installer)
             shutil.copy2(ROOT / "Dockerfile", root / "Dockerfile")
             gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
             gobgp.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
+            bird3 = root / "tests" / "interop" / "Dockerfile.bird3"
+            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.bird3", bird3)
             path = root / relative
             text = path.read_text()
             start = 0
@@ -141,6 +146,7 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
+                ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
             ):
                 shutil.copytree(ROOT / fixture, root / fixture)
@@ -148,11 +154,15 @@ class PrimerContractTests(unittest.TestCase):
             gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
             gobgp.parent.mkdir(parents=True)
             shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
+            bird3 = root / "tests" / "interop" / "Dockerfile.bird3"
+            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.bird3", bird3)
             gnmic_installer = root / ".github" / "scripts" / "install-gnmic.sh"
             gnmic_installer.parent.mkdir(parents=True)
             shutil.copy2(ROOT / gnmic_installer.relative_to(root), gnmic_installer)
             gobgp_installer = root / ".github" / "scripts" / "install-gobgp.sh"
             shutil.copy2(ROOT / gobgp_installer.relative_to(root), gobgp_installer)
+            bird3_installer = root / ".github" / "scripts" / "install-bird3.sh"
+            shutil.copy2(ROOT / bird3_installer.relative_to(root), bird3_installer)
             self.assertIn("install-grpcurl.sh is missing", check(root))
 
     def test_grpcurl_installer_executable_mode_is_load_bearing(self):
@@ -163,6 +173,7 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
+                ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
             ):
                 shutil.copytree(ROOT / fixture, root / fixture)
@@ -170,6 +181,8 @@ class PrimerContractTests(unittest.TestCase):
             gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
             gobgp.parent.mkdir(parents=True)
             shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
+            bird3 = root / "tests" / "interop" / "Dockerfile.bird3"
+            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.bird3", bird3)
             installer = root / ".github" / "scripts" / "install-grpcurl.sh"
             installer.parent.mkdir(parents=True)
             shutil.copy2(ROOT / installer.relative_to(root), installer)
@@ -177,6 +190,8 @@ class PrimerContractTests(unittest.TestCase):
             shutil.copy2(ROOT / gnmic_installer.relative_to(root), gnmic_installer)
             gobgp_installer = root / ".github" / "scripts" / "install-gobgp.sh"
             shutil.copy2(ROOT / gobgp_installer.relative_to(root), gobgp_installer)
+            bird3_installer = root / ".github" / "scripts" / "install-bird3.sh"
+            shutil.copy2(ROOT / bird3_installer.relative_to(root), bird3_installer)
             installer.chmod(0o644)
             self.assertIn(
                 "install-grpcurl.sh must have exact executable mode 100755",
@@ -195,6 +210,8 @@ class PrimerContractTests(unittest.TestCase):
         if workflow == "interop.yml":
             artifacts.append("gnmic_archive")
         artifacts.append("gobgp_archive")
+        if workflow == "kernel-dataplane.yml":
+            artifacts.append("bird3_archive")
         expected = ["classify_changes", *artifacts, "prime_dev_image", *roster]
         if workflow == "kernel-dataplane.yml":
             expected.append("netns")
@@ -227,6 +244,8 @@ class PrimerContractTests(unittest.TestCase):
             if workflow == "interop.yml":
                 artifacts.append("gnmic_archive")
             artifacts.append("gobgp_archive")
+            if workflow == "kernel-dataplane.yml":
+                artifacts.append("bird3_archive")
             skipped = {
                 job: "skipped" for job in [*artifacts, "prime_dev_image", *roster]
             }
@@ -277,6 +296,16 @@ class PrimerContractTests(unittest.TestCase):
                     0,
                     self.run_aggregate(workflow, "true", gobgp_red).returncode,
                 )
+            if workflow == "kernel-dataplane.yml":
+                with self.subTest(workflow=workflow, state="bird3 producer red"):
+                    self.assertNotEqual(
+                        0,
+                        self.run_aggregate(
+                            workflow,
+                            "true",
+                            {"bird3_archive": "failure", "m43": "skipped"},
+                        ).returncode,
+                    )
             for run_labs, results in (
                 ("", {}),
                 ("unknown", {}),
@@ -522,6 +551,95 @@ class PrimerContractTests(unittest.TestCase):
             with self.subTest(seam=old):
                 self.mutate(installer, old, new)
 
+    def test_bird3_producer_and_stage_consumer_are_load_bearing(self):
+        checksum = "d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190"
+        relative = ".github/workflows/kernel-dataplane.yml"
+        for old, new in (
+            ("  bird3_archive:\n", "  removed_bird3_archive:\n"),
+            (f"key: bird3-v3.3.1-source-{checksum}", "key: bird3-latest"),
+            ("name: bird3-v3.3.1-source", "name: bird3-latest"),
+            (
+                "needs: [grpcurl_archive, bird3_archive, prime_dev_image]",
+                "needs: [grpcurl_archive, prime_dev_image]",
+            ),
+            (
+                "uses: ./.github/actions/stage-bird3-artifact",
+                "run: curl https://example.invalid/bird3 -o /tmp/bird.tar.gz",
+            ),
+            ("cache-from: type=gha,scope=bird3-tcpao", "cache-from: type=gha"),
+            (
+                "cache-to: type=gha,mode=max,scope=bird3-tcpao,ignore-error=true",
+                "cache-to: type=gha",
+            ),
+        ):
+            with self.subTest(seam=old):
+                self.mutate(relative, old, new)
+        for seam, replacement in (
+            ("actions/cache@v6", "actions/cache@main"),
+            ("--prepare-archive", "--stage-archive"),
+            ("actions/upload-artifact@v7", "actions/upload-artifact@main"),
+        ):
+            with self.subTest(seam=f"bird3 producer {seam}"):
+                self.mutate(relative, seam, replacement, occurrence=2)
+        exact_path = (
+            "path: ${{ runner.temp }}/bird3-cache/bird-3.3.1.tar.gz"
+        )
+        for occurrence in (0, 1):
+            with self.subTest(seam="bird3 exact path", occurrence=occurrence):
+                self.mutate(
+                    relative,
+                    exact_path,
+                    "path: ${{ runner.temp }}/bird3-cache/wrong.tar.gz",
+                    occurrence=occurrence,
+                )
+
+        stage_step = (
+            "      - name: Stage verified BIRD 3 archive\n"
+            "        if: steps.tcp_ao.outputs.supported == 'true'\n"
+            "        uses: ./.github/actions/stage-bird3-artifact\n"
+        )
+        build_step = (
+            "      - name: Build BIRD 3.3.1 TCP-AO image\n"
+            "        if: steps.tcp_ao.outputs.supported == 'true'\n"
+            "        uses: docker/build-push-action@v7\n"
+            "        with:\n"
+            "          context: tests/interop\n"
+            "          file: tests/interop/Dockerfile.bird3\n"
+            "          load: true\n"
+            "          tags: bird:3.3.1-tcpao\n"
+            "          cache-from: type=gha,scope=bird3-tcpao\n"
+            "          cache-to: type=gha,mode=max,scope=bird3-tcpao,ignore-error=true\n"
+        )
+        with self.subTest(seam="stage precedes build"):
+            self.mutate(
+                relative,
+                f"{stage_step}\n{build_step}",
+                f"{build_step}\n{stage_step}",
+            )
+
+        action = ".github/actions/stage-bird3-artifact/action.yml"
+        for old, new in (
+            ("actions/download-artifact@v8", "actions/download-artifact@main"),
+            ("name: bird3-v3.3.1-source", "name: bird3-latest"),
+            ("--stage-archive", "--prepare-archive"),
+            (
+                "set -euo pipefail",
+                "set -euo pipefail\n        curl https://example.invalid/bird3",
+            ),
+        ):
+            with self.subTest(seam=old):
+                self.mutate(action, old, new)
+
+        installer = ".github/scripts/install-bird3.sh"
+        for old, new in (
+            ('readonly BIRD3_VERSION="3.3.1"', 'readonly BIRD3_VERSION="latest"'),
+            (checksum, "0" * 64),
+            ("curl -fsSL", "curl -sL"),
+            ("--connect-timeout 10", "--connect-timeout 0"),
+        ):
+            with self.subTest(seam=old):
+                self.mutate(installer, old, new)
+
     def test_gnmic_installer_executable_mode_is_load_bearing(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -530,6 +648,7 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
+                ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
             ):
                 shutil.copytree(ROOT / fixture, root / fixture)
@@ -537,9 +656,16 @@ class PrimerContractTests(unittest.TestCase):
             gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
             gobgp.parent.mkdir(parents=True)
             shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
+            bird3 = root / "tests" / "interop" / "Dockerfile.bird3"
+            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.bird3", bird3)
             scripts = root / ".github" / "scripts"
             scripts.mkdir(parents=True)
-            for name in ("install-grpcurl.sh", "install-gnmic.sh", "install-gobgp.sh"):
+            for name in (
+                "install-grpcurl.sh",
+                "install-gnmic.sh",
+                "install-gobgp.sh",
+                "install-bird3.sh",
+            ):
                 shutil.copy2(ROOT / ".github" / "scripts" / name, scripts / name)
             (scripts / "install-gnmic.sh").chmod(0o644)
             self.assertIn(
@@ -555,6 +681,7 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
+                ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
             ):
                 shutil.copytree(ROOT / fixture, root / fixture)
@@ -562,13 +689,53 @@ class PrimerContractTests(unittest.TestCase):
             gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
             gobgp.parent.mkdir(parents=True)
             shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
+            bird3 = root / "tests" / "interop" / "Dockerfile.bird3"
+            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.bird3", bird3)
             scripts = root / ".github" / "scripts"
             scripts.mkdir(parents=True)
-            for name in ("install-grpcurl.sh", "install-gnmic.sh", "install-gobgp.sh"):
+            for name in (
+                "install-grpcurl.sh",
+                "install-gnmic.sh",
+                "install-gobgp.sh",
+                "install-bird3.sh",
+            ):
                 shutil.copy2(ROOT / ".github" / "scripts" / name, scripts / name)
             (scripts / "install-gobgp.sh").chmod(0o644)
             self.assertIn(
                 "install-gobgp.sh must have exact executable mode 100755",
+                check(root),
+            )
+
+    def test_bird3_installer_executable_mode_is_load_bearing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for fixture in (
+                ".github/workflows",
+                ".github/actions/install-gnmic-artifact",
+                ".github/actions/install-grpcurl-artifact",
+                ".github/actions/setup-dataplane-host",
+                ".github/actions/stage-bird3-artifact",
+                ".github/actions/stage-gobgp-artifact",
+            ):
+                shutil.copytree(ROOT / fixture, root / fixture)
+            shutil.copy2(ROOT / "Dockerfile", root / "Dockerfile")
+            gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
+            gobgp.parent.mkdir(parents=True)
+            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
+            bird3 = root / "tests" / "interop" / "Dockerfile.bird3"
+            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.bird3", bird3)
+            scripts = root / ".github" / "scripts"
+            scripts.mkdir(parents=True)
+            for name in (
+                "install-grpcurl.sh",
+                "install-gnmic.sh",
+                "install-gobgp.sh",
+                "install-bird3.sh",
+            ):
+                shutil.copy2(ROOT / ".github" / "scripts" / name, scripts / name)
+            (scripts / "install-bird3.sh").chmod(0o644)
+            self.assertIn(
+                "install-bird3.sh must have exact executable mode 100755",
                 check(root),
             )
 
@@ -581,7 +748,9 @@ class PrimerContractTests(unittest.TestCase):
             needs_prefix = (
                 "needs: [classify_changes, grpcurl_archive, "
                 + ("gnmic_archive, " if workflow == "interop.yml" else "")
-                + "gobgp_archive, prime_dev_image, "
+                + "gobgp_archive, "
+                + ("bird3_archive, " if workflow == "kernel-dataplane.yml" else "")
+                + "prime_dev_image, "
             )
             for old, new in (
                 ("if: ${{ always() }}", "if: success()"),
@@ -936,6 +1105,51 @@ class PrimerContractTests(unittest.TestCase):
                 "\nFROM debian:bookworm-slim\n",
                 "\nFROM debian:trixie-slim\n",
             ),
+        )
+        for old, new in cases:
+            with self.subTest(seam=old):
+                self.mutate(relative, old, new)
+
+    def test_bird3_source_archive_contract_is_load_bearing(self):
+        relative = "tests/interop/Dockerfile.bird3"
+        checksum = "d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190"
+        cases = (
+            ("ARG BIRD_VERSION=3.3.1", "ARG BIRD_VERSION=latest"),
+            (
+                f'checksum="{checksum}"',
+                f'checksum="{checksum[::-1]}"',
+            ),
+            (
+                "COPY bird3-archive/ /tmp/bird3-archive/",
+                "RUN mkdir -p /tmp/bird3-archive",
+            ),
+            (
+                'if [ ! -f "/tmp/bird3-archive/${archive}" ]; then',
+                "if true; then",
+            ),
+            (
+                "https://bird.nic.cz/download/bird-${BIRD_VERSION}.tar.gz",
+                "https://example.invalid/bird-${BIRD_VERSION}.tar.gz",
+            ),
+            (
+                'if [ "${attempt}" -ge 3 ]; then',
+                'if [ "${attempt}" -ge 9999 ]; then',
+            ),
+            (
+                'echo "${checksum}  /tmp/bird3-archive/${archive}" | sha256sum --check --strict',
+                "true # skipped checksum verification",
+            ),
+            (
+                'tar -xzf "/tmp/bird3-archive/${archive}" --strip-components=1',
+                'tar -xzf "/tmp/bird3-archive/${archive}"',
+            ),
+            (
+                '    echo "${checksum}  /tmp/bird3-archive/${archive}" | sha256sum --check --strict; \\\n'
+                '    tar -xzf "/tmp/bird3-archive/${archive}" --strip-components=1; \\\n',
+                '    tar -xzf "/tmp/bird3-archive/${archive}" --strip-components=1; \\\n'
+                '    echo "${checksum}  /tmp/bird3-archive/${archive}" | sha256sum --check --strict; \\\n',
+            ),
+            ("bird --version", "true # removed bird assertion"),
         )
         for old, new in cases:
             with self.subTest(seam=old):
