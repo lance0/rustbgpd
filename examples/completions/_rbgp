@@ -629,19 +629,7 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-bfd-command-$line[1]:"
         case $line[1] in
-            (list)
-_arguments "${_arguments_options[@]}" : \
-'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
-'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
-'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
-'--no-color[Disable colored output]' \
-'-h[Print help (see more with '\''--help'\'')]' \
-'--help[Print help (see more with '\''--help'\'')]' \
-&& ret=0
-;;
-(show)
+            (show)
 _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -666,11 +654,7 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-bfd-help-command-$line[1]:"
         case $line[1] in
-            (list)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(show)
+            (show)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1388,23 +1372,7 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-evpn-command-$line[1]:"
         case $line[1] in
-            (list)
-_arguments "${_arguments_options[@]}" : \
-'--route-type=[]:ROUTE_TYPE:_default' \
-'--neighbor=[Neighbor IP address filter]:NEIGHBOR:_default' \
-'--peer=[Neighbor IP address filter]:NEIGHBOR:_default' \
-'--rd=[]:RD:_default' \
-'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
-'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
-'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
-'--no-color[Disable colored output]' \
-'-h[Print help (see more with '\''--help'\'')]' \
-'--help[Print help (see more with '\''--help'\'')]' \
-&& ret=0
-;;
-(add-mac-ip)
+            (add-mac-ip)
 _arguments "${_arguments_options[@]}" : \
 '--rd=[Route Distinguisher, "asn\:value" / "ip\:value"]:RD:_default' \
 '--ethernet-tag=[Ethernet-tag identifying the EVI (default 0)]:ETHERNET_TAG:_default' \
@@ -1704,11 +1672,7 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-evpn-help-command-$line[1]:"
         case $line[1] in
-            (list)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(add-mac-ip)
+            (add-mac-ip)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -3055,11 +3019,7 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-help-bfd-command-$line[1]:"
         case $line[1] in
-            (list)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(show)
+            (show)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -3231,11 +3191,7 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-help-evpn-command-$line[1]:"
         case $line[1] in
-            (list)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(add-mac-ip)
+            (add-mac-ip)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -3657,7 +3613,6 @@ _rbgp_commands() {
 (( $+functions[_rbgp__subcmd__bfd_commands] )) ||
 _rbgp__subcmd__bfd_commands() {
     local commands; commands=(
-'list:List all BFD sessions (default)' \
 'show:Show a single BFD session by peer address' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -3666,7 +3621,6 @@ _rbgp__subcmd__bfd_commands() {
 (( $+functions[_rbgp__subcmd__bfd__subcmd__help_commands] )) ||
 _rbgp__subcmd__bfd__subcmd__help_commands() {
     local commands; commands=(
-'list:List all BFD sessions (default)' \
 'show:Show a single BFD session by peer address' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -3677,20 +3631,10 @@ _rbgp__subcmd__bfd__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp bfd help help commands' commands "$@"
 }
-(( $+functions[_rbgp__subcmd__bfd__subcmd__help__subcmd__list_commands] )) ||
-_rbgp__subcmd__bfd__subcmd__help__subcmd__list_commands() {
-    local commands; commands=()
-    _describe -t commands 'rbgp bfd help list commands' commands "$@"
-}
 (( $+functions[_rbgp__subcmd__bfd__subcmd__help__subcmd__show_commands] )) ||
 _rbgp__subcmd__bfd__subcmd__help__subcmd__show_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp bfd help show commands' commands "$@"
-}
-(( $+functions[_rbgp__subcmd__bfd__subcmd__list_commands] )) ||
-_rbgp__subcmd__bfd__subcmd__list_commands() {
-    local commands; commands=()
-    _describe -t commands 'rbgp bfd list commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__bfd__subcmd__show_commands] )) ||
 _rbgp__subcmd__bfd__subcmd__show_commands() {
@@ -4065,7 +4009,6 @@ _rbgp__subcmd__events__subcmd__watch_commands() {
 (( $+functions[_rbgp__subcmd__evpn_commands] )) ||
 _rbgp__subcmd__evpn_commands() {
     local commands; commands=(
-'list:List EVPN routes (default action — same as omitting the subcommand)' \
 'add-mac-ip:Inject a Type 2 MAC/IP route' \
 'add-imet:Inject a Type 3 IMET route' \
 'add-ip-prefix:Inject a Type 5 IP Prefix route' \
@@ -4182,7 +4125,6 @@ _rbgp__subcmd__evpn__subcmd__es__subcmd__undrain_commands() {
 (( $+functions[_rbgp__subcmd__evpn__subcmd__help_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__help_commands() {
     local commands; commands=(
-'list:List EVPN routes (default action — same as omitting the subcommand)' \
 'add-mac-ip:Inject a Type 2 MAC/IP route' \
 'add-imet:Inject a Type 3 IMET route' \
 'add-ip-prefix:Inject a Type 5 IP Prefix route' \
@@ -4275,11 +4217,6 @@ _rbgp__subcmd__evpn__subcmd__help__subcmd__instances_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn help instances commands' commands "$@"
 }
-(( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__list_commands] )) ||
-_rbgp__subcmd__evpn__subcmd__help__subcmd__list_commands() {
-    local commands; commands=()
-    _describe -t commands 'rbgp evpn help list commands' commands "$@"
-}
 (( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__managed-netdevs_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__help__subcmd__managed-netdevs_commands() {
     local commands; commands=()
@@ -4304,11 +4241,6 @@ _rbgp__subcmd__evpn__subcmd__help__subcmd__vrfs_commands() {
 _rbgp__subcmd__evpn__subcmd__instances_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn instances commands' commands "$@"
-}
-(( $+functions[_rbgp__subcmd__evpn__subcmd__list_commands] )) ||
-_rbgp__subcmd__evpn__subcmd__list_commands() {
-    local commands; commands=()
-    _describe -t commands 'rbgp evpn list commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__evpn__subcmd__managed-netdevs_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__managed-netdevs_commands() {
@@ -4479,15 +4411,9 @@ _rbgp__subcmd__help_commands() {
 (( $+functions[_rbgp__subcmd__help__subcmd__bfd_commands] )) ||
 _rbgp__subcmd__help__subcmd__bfd_commands() {
     local commands; commands=(
-'list:List all BFD sessions (default)' \
 'show:Show a single BFD session by peer address' \
     )
     _describe -t commands 'rbgp help bfd commands' commands "$@"
-}
-(( $+functions[_rbgp__subcmd__help__subcmd__bfd__subcmd__list_commands] )) ||
-_rbgp__subcmd__help__subcmd__bfd__subcmd__list_commands() {
-    local commands; commands=()
-    _describe -t commands 'rbgp help bfd list commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__bfd__subcmd__show_commands] )) ||
 _rbgp__subcmd__help__subcmd__bfd__subcmd__show_commands() {
@@ -4658,7 +4584,6 @@ _rbgp__subcmd__help__subcmd__events__subcmd__watch_commands() {
 (( $+functions[_rbgp__subcmd__help__subcmd__evpn_commands] )) ||
 _rbgp__subcmd__help__subcmd__evpn_commands() {
     local commands; commands=(
-'list:List EVPN routes (default action — same as omitting the subcommand)' \
 'add-mac-ip:Inject a Type 2 MAC/IP route' \
 'add-imet:Inject a Type 3 IMET route' \
 'add-ip-prefix:Inject a Type 5 IP Prefix route' \
@@ -4744,11 +4669,6 @@ _rbgp__subcmd__help__subcmd__evpn__subcmd__es__subcmd__undrain_commands() {
 _rbgp__subcmd__help__subcmd__evpn__subcmd__instances_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help evpn instances commands' commands "$@"
-}
-(( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__list_commands] )) ||
-_rbgp__subcmd__help__subcmd__evpn__subcmd__list_commands() {
-    local commands; commands=()
-    _describe -t commands 'rbgp help evpn list commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__managed-netdevs_commands] )) ||
 _rbgp__subcmd__help__subcmd__evpn__subcmd__managed-netdevs_commands() {
