@@ -69,6 +69,32 @@ fn validator(dir: &Path, body: &str) -> PathBuf {
     path
 }
 
+/// Polls `condition` every 50ms until it holds or `deadline_secs` elapses.
+/// Scheduler-dependent state (process reap, concurrent stage creation) must
+/// never be asserted instantaneously: under load the state lags the event.
+fn poll_until(deadline_secs: u64, condition: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(deadline_secs);
+    loop {
+        if condition() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Validator whose check phase holds its stage open until `release` appears,
+/// letting tests order events deterministically instead of racing a fixed
+/// sleep. Capped at ~30s so an aborted test cannot leak a spinning script.
+fn holding_validator_script(release: &Path) -> String {
+    format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'rustbgpd 0.64.0\\n'; else i=0; while [ ! -e '{}' ] && [ \"$i\" -lt 600 ]; do sleep 0.05; i=$((i+1)); done; fi\n",
+        release.display()
+    )
+}
+
 #[test]
 fn pin_and_prepare_are_surgical_atomic_and_current_valid() {
     for (action, epoch, posture) in [
@@ -504,26 +530,23 @@ fn source_or_symlink_change_during_validation_refuses_and_cleans_stage() {
         fs::write(&target, CONFIG).unwrap();
         fs::write(&alternate, CONFIG.replace("65001", "65003")).unwrap();
         symlink(&target, &link).unwrap();
-        let validator = validator(
-            dir.path(),
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'rustbgpd 0.64.0\\n'; else sleep 1; fi\n",
-        );
+        let release = dir.path().join("release");
+        let validator = validator(dir.path(), &holding_validator_script(&release));
         let child_link = link.clone();
         let child_target = target.clone();
         let child_alternate = alternate.clone();
         let changer = thread::spawn(move || {
             let stage = PathBuf::from(format!("{}.tmp", child_target.display()));
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while !stage.exists() && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(5));
-            }
-            assert!(stage.exists(), "stage never appeared");
+            assert!(poll_until(10, || stage.exists()), "stage never appeared");
             if swap_link {
                 fs::remove_file(&child_link).unwrap();
                 symlink(&child_alternate, &child_link).unwrap();
             } else {
                 fs::write(&child_target, CONFIG.replace("65001", "65004")).unwrap();
             }
+            // The validator holds until this appears, so the mutation above is
+            // strictly ordered before validation completes — no sleep race.
+            fs::write(&release, b"go").unwrap();
         });
         let output = run(
             &[&validator, &link],
@@ -579,7 +602,10 @@ fn nonregular_source_refuses_without_blocking() {
         let started = Instant::now();
         let output = run(&[&path], &["pin-legacy", "--offline"]);
         assert_eq!(output.status.code(), Some(1), "{kind}: {:?}", text(&output));
-        assert!(started.elapsed() < Duration::from_secs(1));
+        // "Without blocking" is proven by the refusal above: a migrator that
+        // opened the writerless fifo would never return. The elapsed bound is
+        // purely a hang stop, not a timing proof — keep it generous.
+        assert!(started.elapsed() < Duration::from_secs(30), "{kind}");
     }
 }
 
@@ -590,10 +616,8 @@ fn different_target_migrations_in_one_directory_do_not_contend() {
     let second = dir.path().join("second.toml");
     fs::write(&first, CONFIG).unwrap();
     fs::write(&second, CONFIG.replace("65001", "65003")).unwrap();
-    let validator = validator(
-        dir.path(),
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'rustbgpd 0.64.0\\n'; else sleep 2; fi\n",
-    );
+    let release = dir.path().join("release");
+    let validator = validator(dir.path(), &holding_validator_script(&release));
     let mut first_child = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
         .args([
             "--migrate-config",
@@ -606,15 +630,35 @@ fn different_target_migrations_in_one_directory_do_not_contend() {
         .spawn()
         .unwrap();
     let first_stage = PathBuf::from(format!("{}.tmp", first.display()));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !first_stage.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    let started = Instant::now();
+    assert!(
+        poll_until(10, || first_stage.exists()),
+        "first migration stage never appeared"
+    );
     let concurrent = run(&[&second], &["pin-legacy", "--offline"]);
     assert!(concurrent.status.success(), "{:?}", text(&concurrent));
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(
+        fs::read_to_string(&second)
+            .unwrap()
+            .starts_with("config_epoch = 1"),
+        "second migration did not publish"
+    );
+    // Direct non-contention proof, no wall clock: the second migration ran to
+    // a published completion while the first still held its stage — the first
+    // cannot finish before `release` exists. A second migration that waited on
+    // the first would only return after the first exited (its holding
+    // validator caps at ~30s), which this catches as Some(_) here.
+    assert!(
+        first_child.try_wait().unwrap().is_none(),
+        "first migration finished before the concurrent one: the migrations contended"
+    );
+    fs::write(&release, b"go").unwrap();
     assert!(first_child.wait().unwrap().success());
+    assert!(
+        fs::read_to_string(&first)
+            .unwrap()
+            .contains("ebgp_requires_policy = false"),
+        "first migration did not publish"
+    );
 }
 
 #[test]
@@ -848,14 +892,19 @@ fn both_validator_deadlines_kill_reap_sanitize_and_clean_stage() {
         let path = dir.path().join("config.toml");
         fs::write(&path, CONFIG).unwrap();
         let descendant_pid = dir.path().join("descendant.pid");
+        // The descendant sleeps 60s: far past every bound below, so "reaped
+        // within the poll deadline" can only mean the migrator killed it, and
+        // "returned within the hang stop" can only mean the migrator did not
+        // wait it out. The pid record is the script's first action because the
+        // whole script races the shrunk 100ms deadline kill.
         let script = if phase == "version" {
             format!(
-                "#!/bin/sh\nprintf DO_NOT_PRINT >&2\nsleep 5 & echo $! > '{}'\n",
+                "#!/bin/sh\nsleep 60 & echo $! > '{}'\nprintf DO_NOT_PRINT >&2\n",
                 descendant_pid.display()
             )
         } else {
             format!(
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'rustbgpd 0.64.0\\n'; else printf DO_NOT_PRINT >&2; (sleep 1; printf malicious > \"$2\") & echo $! > '{}'; fi\n",
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'rustbgpd 0.64.0\\n'; else (sleep 60; printf malicious > \"$2\") & echo $! > '{}'; printf DO_NOT_PRINT >&2; fi\n",
                 descendant_pid.display()
             )
         };
@@ -872,10 +921,20 @@ fn both_validator_deadlines_kill_reap_sanitize_and_clean_stage() {
             "{phase}: {:?}",
             text(&output)
         );
-        assert!(started.elapsed() < Duration::from_secs(2));
+        // Hang stop: waiting out the descendant instead of killing at the
+        // deadline would take 60s. Generous so scheduler load cannot trip it.
+        assert!(started.elapsed() < Duration::from_secs(30), "{phase}");
         assert!(!text(&output).1.contains("DO_NOT_PRINT"));
         let pid = fs::read_to_string(&descendant_pid).unwrap();
-        assert!(!Path::new(&format!("/proc/{}", pid.trim())).exists());
+        let proc_entry = format!("/proc/{}", pid.trim());
+        // The kill precedes the migrator's exit, but the reap can lag it under
+        // load — poll instead of asserting instant /proc non-existence. The
+        // 60s descendant sleep keeps this a kill proof, not an exit race.
+        assert!(
+            poll_until(10, || !Path::new(&proc_entry).exists()),
+            "{phase}: descendant {} survived the deadline kill",
+            pid.trim()
+        );
         assert!(!PathBuf::from(format!("{}.tmp", path.display())).exists());
         let retry = run(&[&path], &["pin-legacy", "--offline"]);
         assert!(
