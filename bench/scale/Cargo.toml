@@ -1,9 +1,7 @@
 [workspace]
 members = [
-    "config-persistence",
     "enhanced-route-refresh",
     "outbound-prefix-limit-scale",
-    "outbound-prefix-limits",
     "reloadstall",
     "rrharness",
     "rrtransport",

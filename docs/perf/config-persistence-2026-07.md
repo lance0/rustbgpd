@@ -1,5 +1,17 @@
 # Config persistence, history, rollback, and commit-confirm receipt — 2026-07
 
+> **Archived harness.** The standalone harness this receipt references —
+> `bench/scale/config-persistence/` (the `configpersist` driver binary and
+> `run-receipt.sh`) — was retired from the working tree after this receipt was
+> sealed; its stable behavioral assertions now run continuously as the
+> workspace integration test `tests/config_persistence_lifecycle.rs`. The
+> complete harness is preserved at commit
+> `b12e5bf310cb4f9faf7aac5360a111301210b4c3` (the last main commit containing
+> it) and in release tag `v0.64.0`. Recover any file with
+> `git show b12e5bf310cb4f9faf7aac5360a111301210b4c3:bench/scale/config-persistence/<file>`.
+> Command blocks below are quoted from the sealed campaign and refer to the
+> archived paths.
+
 This receipt answers one bounded question: do the mutating config paths — the
 persisted write, the applied-config history, `config rollback`, and the three
 commit-confirm outcomes — actually behave as specified against a real daemon

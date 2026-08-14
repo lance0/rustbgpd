@@ -95,8 +95,6 @@ fn irr_reload_shell_scripts_parse_as_bash() {
         "bench/scale/irrreload/txn-lifecycle.sh",
         "bench/scale/matrix/rss-sampler.sh",
         "bench/scale/irrreload/run-bmp-buffer-receipt.sh",
-        "bench/scale/config-persistence/run-receipt.sh",
-        "bench/scale/outbound-prefix-limits/run-receipt.sh",
     ] {
         let output = std::process::Command::new("bash")
             .args(["-n", &format!("{root}/{relative}")])
@@ -945,62 +943,11 @@ fn irr_reload_counterbalanced_receipt_protocol_is_load_bearing() {
 /// a caller umask of 002.
 fn remaining_receipt_runtime_directories_are_owner_only() {
     let root = env!("CARGO_MANIFEST_DIR");
-    let persistence = std::fs::read_to_string(format!(
-        "{root}/bench/scale/config-persistence/run-receipt.sh"
-    ))
-    .expect("read config-persistence receipt");
-    let private_parent = "mkdir -m 0700 -- \"${RUNDIR}\"";
-    assert_eq!(
-        persistence.matches(private_parent).count(),
-        1,
-        "config-persistence must create its predictable /tmp parent owner-only"
-    );
-    let private_parent_pos = persistence
-        .find(private_parent)
-        .expect("config-persistence private parent creation");
-    let config_child_pos = persistence
-        .find("mkdir -p \"${CONFDIR}\"")
-        .expect("config-persistence config child creation");
-    assert!(
-        private_parent_pos < config_child_pos,
-        "private parent must exist before creating children beneath it"
-    );
-    let fixture = tempfile::tempdir().expect("config-persistence parent fixture");
-    let runtime = fixture.path().join("runtime-parent");
-    let output = std::process::Command::new("bash")
-        .args([
-            "-c",
-            &format!(
-                "set -euo pipefail\numask 002\n{private_parent}\nstat -c '%a' \"${{RUNDIR}}\""
-            ),
-        ])
-        .env("RUNDIR", &runtime)
-        .output()
-        .expect("execute config-persistence private parent creation");
-    assert!(output.status.success(), "private parent creation failed");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        "700",
-        "config-persistence parent mode"
-    );
-
-    let cases = [
-        (
-            "bench/scale/irrreload/run-bmp-buffer-receipt.sh",
-            "run",
-            "mkdir -m 0700 -- \"$run\" || return 1",
-        ),
-        (
-            "bench/scale/config-persistence/run-receipt.sh",
-            "STATEDIR",
-            "mkdir -m 0700 -- \"${STATEDIR}\"",
-        ),
-        (
-            "bench/scale/outbound-prefix-limits/run-receipt.sh",
-            "RUNDIR",
-            "mkdir -m 0700 -- \"${RUNDIR}\"",
-        ),
-    ];
+    let cases = [(
+        "bench/scale/irrreload/run-bmp-buffer-receipt.sh",
+        "run",
+        "mkdir -m 0700 -- \"$run\" || return 1",
+    )];
 
     for (relative, variable, create) in cases {
         let script = std::fs::read_to_string(format!("{root}/{relative}"))

@@ -1,5 +1,17 @@
 # ADR-0113 outbound prefix-limit real-session receipt — 2026-07
 
+> **Archived harness.** The standalone harness this receipt references —
+> `bench/scale/outbound-prefix-limits/` (the `outboundlimits` driver binary
+> and `run-receipt.sh`) — was retired from the working tree after this receipt
+> was sealed; its stable behavioral assertions now run continuously as the
+> workspace integration test `tests/outbound_prefix_limits.rs`. The complete
+> harness is preserved at commit
+> `b12e5bf310cb4f9faf7aac5360a111301210b4c3` (the last main commit containing
+> it) and in release tag `v0.64.0`. Recover any file with
+> `git show b12e5bf310cb4f9faf7aac5360a111301210b4c3:bench/scale/outbound-prefix-limits/<file>`.
+> Command blocks below are quoted from the sealed campaign and refer to the
+> archived paths.
+
 This receipt answers one bounded question: do the configured outbound unicast
 prefix maxima actually bound what leaves the real encoder, on the shared
 update-group fanout as well as the private per-peer path? Four real BGP
