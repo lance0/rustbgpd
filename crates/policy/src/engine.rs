@@ -1648,54 +1648,6 @@ impl PolicyChain {
         }
         rows
     }
-
-    /// The pre-IR chain walker, kept intact as the oracle for the
-    /// golden decision-compatibility corpus
-    /// (`engine/tests/ir_parity.rs`) and the `set_heavy` benchmark
-    /// contrast. Not public API; deleted in a later ADR-0096 slice
-    /// once the corpus has soaked.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn evaluate_with_attribution_legacy(
-        &self,
-        ctx: &RouteContext<'_>,
-    ) -> (PolicyResult, PolicyEvaluation) {
-        let mut accumulated = RouteModifications::default();
-        for named in &self.policies {
-            let result = named.policy.evaluate(ctx);
-            match result.action {
-                PolicyAction::Deny => {
-                    return (
-                        PolicyResult::deny(),
-                        PolicyEvaluation {
-                            action: PolicyAction::Deny,
-                            matched_policy: named.name.clone().map(Arc::from),
-                            eval_error: None,
-                        },
-                    );
-                }
-                PolicyAction::Permit => accumulated.merge_from(result.modifications),
-            }
-        }
-        // All policies permitted (including an empty chain). Attribute
-        // to the last policy in the chain since chain evaluation
-        // completes only after every policy permits.
-        let matched_policy = self
-            .policies
-            .last()
-            .and_then(|n| n.name.clone().map(Arc::from));
-        (
-            PolicyResult {
-                action: PolicyAction::Permit,
-                modifications: accumulated,
-            },
-            PolicyEvaluation {
-                action: PolicyAction::Permit,
-                matched_policy,
-                eval_error: None,
-            },
-        )
-    }
 }
 
 /// One row of the policy-stats surface: a term's live guard-hit count
