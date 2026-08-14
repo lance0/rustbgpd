@@ -139,6 +139,32 @@ impl<V> FamilyPrefixMap<V> {
     }
 }
 
+impl<V> FamilyPrefixMap<V> {
+    /// Iterate `covering` and every stored more-specific prefix contained
+    /// within it (network containment), with their values. The other address
+    /// family contributes nothing.
+    pub(crate) fn children(&self, covering: &Prefix) -> impl Iterator<Item = (Prefix, &V)> {
+        let (v4, v6) = match covering {
+            Prefix::V4(p) => (Some(self.v4.children(&v4_net(*p))), None),
+            Prefix::V6(p) => (None, Some(self.v6.children(&v6_net(*p)))),
+        };
+        v4.into_iter()
+            .flatten()
+            .map(|(prefix, value)| {
+                (
+                    Prefix::V4(Ipv4Prefix::new(prefix.addr(), prefix.prefix_len())),
+                    value,
+                )
+            })
+            .chain(v6.into_iter().flatten().map(|(prefix, value)| {
+                (
+                    Prefix::V6(Ipv6Prefix::new(prefix.addr(), prefix.prefix_len())),
+                    value,
+                )
+            }))
+    }
+}
+
 impl<V: Default> FamilyPrefixMap<V> {
     /// Return a mutable reference to the value for `prefix`, inserting `V::default()`
     /// if absent — mirrors `HashMap::entry(_).or_default()`.

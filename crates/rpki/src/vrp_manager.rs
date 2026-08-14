@@ -21,6 +21,17 @@ use crate::vrp::{VrpEntry, VrpTable};
 pub struct RpkiTableUpdate {
     /// The new merged VRP table snapshot.
     pub table: Arc<VrpTable>,
+    /// The VRP entries announced or withdrawn since the previously
+    /// distributed snapshot, when this update came from an RTR incremental
+    /// (serial) sync. The merged table is a union of per-server sets, so any
+    /// entry that differs between consecutive distributed snapshots is
+    /// guaranteed to appear in this list — a route's validation outcome can
+    /// only change if its prefix is covered by one of these entries, which
+    /// lets the RIB manager revalidate just the covered routes.
+    ///
+    /// `None` means no delta is known (full cache snapshot, cache reset,
+    /// resync, server loss) and consumers must revalidate everything.
+    pub delta: Option<Vec<VrpEntry>>,
 }
 
 /// Message sent from VRP manager to RIB manager when the ASPA table changes.
@@ -88,7 +99,7 @@ impl VrpManager {
     }
 
     async fn handle_update(&mut self, update: VrpUpdate) {
-        match update {
+        let vrp_delta = match update {
             VrpUpdate::FullTable {
                 server,
                 entries,
@@ -111,6 +122,9 @@ impl VrpManager {
                         .map(|r| (r.customer_asn, r.provider_asns))
                         .collect(),
                 );
+                // A full snapshot replaces the server's whole set — there is
+                // no bounded changed-entry list, so downstream must rescan.
+                None
             }
             VrpUpdate::IncrementalUpdate {
                 server,
@@ -138,6 +152,11 @@ impl VrpManager {
                 for w in &withdrawn {
                     table.remove(w);
                 }
+                // Every merged-table entry that can differ from the previous
+                // snapshot is in one of these two lists (only this server's
+                // set is mutated, and only by exactly these entries).
+                let mut delta = withdrawn.clone();
+                delta.extend(announced.iter().cloned());
                 table.extend(announced);
 
                 // ASPA incremental (8210bis semantics): a withdraw (which
@@ -151,15 +170,20 @@ impl VrpManager {
                 for a in aspa_announced {
                     aspa_table.insert(a.customer_asn, a.provider_asns);
                 }
+                Some(delta)
             }
             VrpUpdate::ServerDown { server } => {
                 info!(%server, "cache server down — removing entries");
                 self.server_tables.remove(&server);
                 self.server_aspa_tables.remove(&server);
+                // ponytail: the removed set IS the exact delta, but server
+                // loss is rare and multi-cache overlap makes it usually a
+                // no-op distribution; wire it through if it ever shows up.
+                None
             }
-        }
+        };
 
-        self.rebuild_and_distribute_vrp().await;
+        self.rebuild_and_distribute_vrp(vrp_delta).await;
         self.rebuild_and_distribute_aspa().await;
     }
 
@@ -169,7 +193,7 @@ impl VrpManager {
     // O(total log total) on a single manager task off the hot path.
     // ponytail: revisit with per-family incremental table maintenance only if
     // caches ever stream high-rate deltas.
-    async fn rebuild_and_distribute_vrp(&mut self) {
+    async fn rebuild_and_distribute_vrp(&mut self, delta: Option<Vec<VrpEntry>>) {
         let merged: Vec<VrpEntry> = self
             .server_tables
             .values()
@@ -178,6 +202,9 @@ impl VrpManager {
 
         let new_table = Arc::new(VrpTable::new(merged));
 
+        // Dropping a suppressed update's delta is sound: suppression proves
+        // the merged table did not change, so the last *distributed* snapshot
+        // still equals the table any later delta is computed against.
         if *new_table == *self.current_table {
             debug!("VRP table unchanged — skipping distribution");
             return;
@@ -190,7 +217,13 @@ impl VrpManager {
             "VRP table updated"
         );
         self.current_table = Arc::clone(&new_table);
-        let _ = self.rib_tx.send(RpkiTableUpdate { table: new_table }).await;
+        let _ = self
+            .rib_tx
+            .send(RpkiTableUpdate {
+                table: new_table,
+                delta,
+            })
+            .await;
     }
 
     async fn rebuild_and_distribute_aspa(&mut self) {
@@ -271,6 +304,10 @@ mod tests {
 
         let update = rib_rx.try_recv().unwrap();
         assert_eq!(update.table.len(), 2);
+        assert!(
+            update.delta.is_none(),
+            "full snapshot must not carry a delta"
+        );
     }
 
     #[tokio::test]
@@ -324,7 +361,7 @@ mod tests {
         mgr.handle_update(VrpUpdate::IncrementalUpdate {
             server: server1(),
             announced: vec![e3.clone()],
-            withdrawn: vec![e1],
+            withdrawn: vec![e1.clone()],
             aspa_announced: vec![],
             aspa_withdrawn: vec![],
         })
@@ -332,6 +369,10 @@ mod tests {
 
         let update = rib_rx.try_recv().unwrap();
         assert_eq!(update.table.len(), 2); // e2 + e3
+        // Incremental sync carries exactly the withdrawn + announced entries.
+        let delta = update.delta.expect("incremental sync must carry a delta");
+        assert_eq!(delta.len(), 2);
+        assert!(delta.contains(&e1) && delta.contains(&e3));
     }
 
     #[tokio::test]
@@ -361,6 +402,7 @@ mod tests {
 
         let update = rib_rx.try_recv().unwrap();
         assert_eq!(update.table.len(), 1);
+        assert!(update.delta.is_none(), "server loss must not carry a delta");
     }
 
     #[tokio::test]

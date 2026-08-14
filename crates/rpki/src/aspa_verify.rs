@@ -4,8 +4,14 @@
 //! direction selected from the locally configured BGP Role when available.
 
 use rustbgpd_wire::{AsPath, AsPathSegment, AspaValidation, AspaValidationContext, BgpRole};
+use smallvec::SmallVec;
 
 use crate::aspa::{AspaTable, ProviderAuth};
+
+/// Compressed `AS_PATH` hop list. Inline capacity 8 keeps the global-table
+/// common case (compressed paths of ~3-6 ASNs) allocation-free; this runs
+/// once per route per ASPA revalidation pass.
+type CompressedPath = SmallVec<[u32; 8]>;
 
 /// Proven customer/provider pair that made an ASPA path invalid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -45,8 +51,8 @@ impl AspaVerificationResult {
 ///
 /// Returns `None` if any `AS_SET` segment is encountered (`AS_SET` makes the
 /// path unverifiable).
-fn compress_as_path(path: &AsPath) -> Option<Vec<u32>> {
-    let mut result = Vec::new();
+fn compress_as_path(path: &AsPath) -> Option<CompressedPath> {
+    let mut result = CompressedPath::new();
     for segment in &path.segments {
         match segment {
             AsPathSegment::AsSet(_) => return None,
@@ -240,7 +246,7 @@ fn verify_downstream_detailed(
         return AspaVerificationResult::state(AspaValidation::Valid);
     }
 
-    let origin_to_neighbor: Vec<u32> = compressed.iter().rev().copied().collect();
+    let origin_to_neighbor: CompressedPath = compressed.iter().rev().copied().collect();
     let n = origin_to_neighbor.len();
     let (max_up, invalid_hop) = ramp_up_bound(&origin_to_neighbor, table, BoundMode::Max);
     let (min_up, _) = ramp_up_bound(&origin_to_neighbor, table, BoundMode::Min);

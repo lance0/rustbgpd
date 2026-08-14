@@ -2210,6 +2210,11 @@ pub enum RibUpdate {
     RpkiCacheUpdate {
         /// The new VRP table snapshot.
         table: Arc<VrpTable>,
+        /// VRP entries announced or withdrawn since the previously
+        /// distributed snapshot (see [`rustbgpd_rpki::RpkiTableUpdate`]).
+        /// `Some` scopes revalidation to routes covered by these entries;
+        /// `None` forces a full revalidation of every Adj-RIB-In.
+        delta: Option<Vec<rustbgpd_rpki::VrpEntry>>,
     },
     /// ASPA cache update — new ASPA table for path verification.
     AspaTableUpdate {

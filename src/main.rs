@@ -3597,6 +3597,7 @@ async fn run<T>(
                 let _ = rpki_rib_tx
                     .send(RibUpdate::RpkiCacheUpdate {
                         table: update.table,
+                        delta: update.delta,
                     })
                     .await;
                 trigger_import_validation_refresh(

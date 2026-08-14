@@ -306,6 +306,21 @@ impl AdjRibIn {
         self.routes.iter_mut()
     }
 
+    /// Visit mutably every unicast route whose prefix is covered by
+    /// `covering` — the prefix itself and all stored more-specifics
+    /// (network containment, same family). Uses the prefix trie for
+    /// O(covered) enumeration instead of an O(N) full scan.
+    pub fn for_each_covered_mut(&mut self, covering: &Prefix, mut f: impl FnMut(&mut Route)) {
+        let routes = &mut self.routes;
+        for (_, ids) in self.prefix_index.children(covering) {
+            for &(_, handle) in ids {
+                if let Some(route) = routes.get_mut(handle) {
+                    f(route);
+                }
+            }
+        }
+    }
+
     /// Look up a route by prefix and path ID.
     #[must_use]
     pub fn get(&self, prefix: &Prefix, path_id: u32) -> Option<&Route> {

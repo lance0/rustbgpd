@@ -232,6 +232,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- RPKI origin revalidation after an RTR incremental (serial) update is now
+  scoped to the routes whose prefix is covered by an announced or withdrawn
+  VRP, instead of rescanning every peer's full Adj-RIB-In on each changed
+  table. Validation outcomes are unchanged — only the revisited set shrinks;
+  full snapshots, cache resets, resyncs, and server loss still trigger a
+  full revalidation. The completion log now reports the mode (`delta`/
+  `full`), routes revalidated, changed routes, affected prefixes, and
+  elapsed time. In-test receipt at 100 peers × 10k routes with a 1-entry
+  delta (release build): 129.3 ms full rescan → 141.7 µs delta-scoped.
+  (LAN-1029)
+
 - **The RFC 8212 secure default is activated for epoch 2 (ADR-0119; owner
   decision recorded in ADR-0125 DR4).** `config_epoch = 2` with
   `[global].ebgp_requires_policy` omitted now resolves to effective `true`
