@@ -27,8 +27,8 @@
 //!   evaluation (mask + ge/le bounds) — its absolute cost gates whether a
 //!   build-time prefix-mask precompute is worth pursuing.
 //! - `set_heavy` — the ADR-0096 set-index claim measured in-repo: a
-//!   1,000-prefix list as a statement chain (legacy walker and IR term
-//!   walk) vs one indexed `PrefixInSet` IR term. See `bench_set_heavy`.
+//!   1,000-prefix list as a statement chain (IR term walk) vs one
+//!   indexed `PrefixInSet` IR term. See `bench_set_heavy`.
 //!
 //! Run: `cargo bench -p rustbgpd-policy --bench policy_eval`
 //! Compare across refs: `bench/compare-criterion.sh --package
@@ -379,13 +379,11 @@ fn bench_policy_predicate_eval(c: &mut Criterion) {
 
 /// The ADR-0096 headline measurement: a 1,000-prefix customer list
 /// expressed the only way TOML chains allow (1,000 statements) versus
-/// a single indexed set-match IR term. Three arms over the same
+/// a single indexed set-match IR term. Two arms over the same
 /// non-member route — the worst case, where every statement (or the
 /// one set probe) runs to completion:
 ///
-/// - `legacy_1000_stmts` — the pre-IR statement walker (the corpus
-///   oracle), i.e. what this cost *was*.
-/// - `ir_1000_terms` — the same 1,000-statement chain through the IR
+/// - `ir_1000_terms` — the 1,000-statement chain through the IR
 ///   term walk: what existing TOML configs get automatically.
 /// - `ir_prefix_set` — one `PrefixInSet` term over the interned set:
 ///   what the `.rpol` frontend (and any set-aware frontend) emits.
@@ -445,12 +443,6 @@ fn bench_set_heavy(c: &mut Criterion) {
     let ctx = predicate_ctx(miss, &communities, &as_path_str, peer_ip);
 
     let mut group = c.benchmark_group("set_heavy");
-    group.bench_function("legacy_1000_stmts", |b| {
-        b.iter(|| {
-            let r = std::hint::black_box(&stmt_chain).evaluate_with_attribution_legacy(&ctx);
-            std::hint::black_box(r);
-        });
-    });
     group.bench_function("ir_1000_terms", |b| {
         b.iter(|| {
             let r = evaluate_chain_with_attribution(Some(std::hint::black_box(&stmt_chain)), &ctx);
