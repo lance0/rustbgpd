@@ -80,6 +80,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and transport abstractions do not expand daemon support.
 - Retired stale subsystem stress scripts and a checked-in benchmark scratch
   artifact; maintained soak and interop coverage remain authoritative. (LAN-968)
+- Retired three interop scenarios whose coverage survives elsewhere: M46 and
+  M49 (both nodes were rustbgpd, not interop — their DF-promotion property is
+  asserted by M38 on the same two-PE shape, their non-modulo election premises
+  by the HRW/preference-DF unit tests, and preference-DF stays proven
+  cross-vendor by M69), and the never-CI-wired M19 transparent-route-server
+  smoke (strictly subsumed by M83's three-stack transparency assertions).
+  (LAN-969)
 - `NeighborService.AddNeighbor` now requires field-2 `intent` with its inner
   config and mask. Field 1/name `config` are reserved; custom clients must
   move the former top-level config under `intent` and mask each selected

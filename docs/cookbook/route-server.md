@@ -18,9 +18,7 @@ ASN in any AS_PATH segment, NEXT_HOP = originator, MED and communities
 verbatim), RFC 9234 OTC toward members, per-member export views, ROV
 reject-at-import with `rbgp policy explain`, and the §2.3 path-hiding
 contrast live (single-best hides / per-client-best advertises the
-runner-up / Add-Path carries both). Also
-[M19](../RECEIPTS.md#interop-labs--manual--local-gates) (transparent
-route server vs FRR: no ASN prepend, NEXT_HOP preservation). The config
+runner-up / Add-Path carries both). The config
 shape is derived from
 [`examples/route-server/`](../../examples/route-server/). M83 uses the same
 route-server architecture but a pinned, reduced IPv4 lab policy: its

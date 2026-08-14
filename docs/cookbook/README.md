@@ -12,10 +12,10 @@ receipts that prove its scenario ([`RECEIPTS.md`](../RECEIPTS.md)).
 |--------|------------------|-----------|
 | [iBGP route reflector at scale](route-reflector.md) | Replacing an iBGP full mesh; tens to 1,000 clients | M14, M76, M77, [1000-peer scale receipt](../perf/scale-receipt-2026-07.md) |
 | [L3VPN route reflector](l3vpn-route-reflector.md) | VPNv4/VPNv6 reflection for a PE fleet, RT-Constrain filtered | M74, M75, M77, [VPN scale receipt](../perf/scale-receipt-2026-07.md) |
-| [IXP route server](route-server.md) | Transparent redistribution among exchange members: RPKI, RFC 9234 roles, Add-Path + per-client best-path | M19, M83 |
-| [Route-server migration](route-server-migration.md) | Map FRR, BIRD, and ARouteServer concepts into rustbgpd and run a shadow-trial cutover | M19, M83 |
-| [Route-server shadow pilot](route-server-shadow-pilot.md) | Run rustbgpd for weeks as a receive-only, non-authoritative second route server beside production BIRD/OpenBGPD — standing comparison loop, data-return contract, clean teardown | M19, M83, [IXP receipt matrix](../perf/ixp-matrix-2026-07.md) |
-| [IXP filter pipeline](ixp-filter-pipeline.md) | Keep your arouteserver `general.yml`/`clients.yml`: render member filters with `rs-config-render`, reload fail-stale, serve Alice-LG | M19, M83 |
+| [IXP route server](route-server.md) | Transparent redistribution among exchange members: RPKI, RFC 9234 roles, Add-Path + per-client best-path | M83 |
+| [Route-server migration](route-server-migration.md) | Map FRR, BIRD, and ARouteServer concepts into rustbgpd and run a shadow-trial cutover | M83 |
+| [Route-server shadow pilot](route-server-shadow-pilot.md) | Run rustbgpd for weeks as a receive-only, non-authoritative second route server beside production BIRD/OpenBGPD — standing comparison loop, data-return contract, clean teardown | M83, [IXP receipt matrix](../perf/ixp-matrix-2026-07.md) |
+| [IXP filter pipeline](ixp-filter-pipeline.md) | Keep your arouteserver `general.yml`/`clients.yml`: render member filters with `rs-config-render`, reload fail-stale, serve Alice-LG | M83 |
 | [MANRS IXP Action 1](manrs-ixp-action1.md) | Document your MANRS IXP Programme participation: Action 1 mapped requirement-by-requirement to validated config and member-verifiable surfaces | M83, fragments pass `rustbgpd --check --strict` |
 | [Controller / monitoring feed](monitoring-feed.md) | Streaming BMP, durable events, and MRT into a controller or collector stack | M24, M81 |
 | [EVPN fabric route reflector](evpn-fabric-rr.md) | Control-plane-only RR for a VXLAN-EVPN leaf/spine fabric | M29, M30, M82, M33 |

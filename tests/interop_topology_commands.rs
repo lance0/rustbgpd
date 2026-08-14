@@ -39,28 +39,17 @@ fn route_server_topologies_have_exact_control_plane_setup() {
     // Destructive red proof: adding either former `sysctl -w
     // net.ipv4.ip_forward=1` command makes the corresponding exact exec list
     // differ and this test fail.
-    let cases = [
-        (
-            "m19-routeserver-frr.clab.yml",
-            vec![
-                "ip addr add 10.0.0.1/24 dev eth1",
-                "ip link set eth1 up",
-                "ip addr add 10.0.1.1/24 dev eth2",
-                "ip link set eth2 up",
-            ],
-        ),
-        (
-            "m83-routeserver-multistack.clab.yml",
-            vec![
-                "ip addr add 10.83.1.1/24 dev eth1",
-                "ip link set eth1 up",
-                "ip addr add 10.83.2.1/24 dev eth2",
-                "ip link set eth2 up",
-                "ip addr add 10.83.3.1/24 dev eth3",
-                "ip link set eth3 up",
-            ],
-        ),
-    ];
+    let cases = [(
+        "m83-routeserver-multistack.clab.yml",
+        vec![
+            "ip addr add 10.83.1.1/24 dev eth1",
+            "ip link set eth1 up",
+            "ip addr add 10.83.2.1/24 dev eth2",
+            "ip link set eth2 up",
+            "ip addr add 10.83.3.1/24 dev eth3",
+            "ip link set eth3 up",
+        ],
+    )];
 
     for (relative, expected_exec) in cases {
         let topology = topology(relative);

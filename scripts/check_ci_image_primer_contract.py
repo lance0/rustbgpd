@@ -17,7 +17,7 @@ INTEROP = (
 ).split()
 KERNEL = (
     "m36 m37 m37-ip m38 m39 m39b m48 m60 m61 m62 m40 m42 m50 m52 "
-    "m58 m53 m51 m43 m46 m47 m49 m69 m70 m65 m71 m72 m66 m67 m68"
+    "m58 m53 m51 m43 m47 m69 m70 m65 m71 m72 m66 m67 m68"
 ).split()
 WORKFLOWS = ("ci.yml", "audit.yml", "interop.yml", "kernel-dataplane.yml")
 GROUP = "group: ${{ github.workflow }}-${{ github.ref }}"
@@ -82,11 +82,11 @@ PERMISSION_HASHES = {
 }
 CALL_HASHES = {
     "interop.yml": "baf8da4607ed5e36ea6d2a656f05df3c87449456159dd4c847d51588ff0a96b5",
-    "kernel-dataplane.yml": "decf4a7ba46c4a89f420de248790ef1badbfaba81371ae7c291ad9c9943add03",
+    "kernel-dataplane.yml": "310ed2344bd6ff3f766580f704cc77fec4be0a2103a943e2ad837f497af346c3",
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 87,
+        "actions/checkout@v7": 85,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95": 2,
