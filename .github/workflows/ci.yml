@@ -250,23 +250,13 @@ jobs:
           receipt=docs/perf/artifacts/policy-attribution-criterion-2026-07
           python3 "$receipt/verify.py"
           (cd "$receipt" && sha256sum -c SHA256SUMS)
-      - name: Check event-history producer fail-closed measurement tooling
+      - name: Check event-history host-fence and naming guards
         run: |
           set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/event-history-venv"
-          "$RUNNER_TEMP/event-history-venv/bin/pip" install --disable-pip-version-check 'PyYAML==6.0.2'
           bash docs/perf/test-event-history-host-fence.sh
           bash docs/perf/test-event-history-naming.sh
-          "$RUNNER_TEMP/event-history-venv/bin/python" -m unittest -v \
-            docs/perf/test_validate_event_history_receipt.py \
-            docs/perf/test_validate_event_history_criterion.py \
-            docs/perf/test_validate_event_history_perf.py \
-            docs/perf/test_validate_event_history_full_comparison.py
           shellcheck -x \
             docs/perf/event-history-host-fence.sh \
-            docs/perf/run-event-history-criterion.sh \
-            docs/perf/run-event-history-full-daemon.sh \
-            docs/perf/bgperf-rustbgpd-ehm-wrapper.sh \
             docs/perf/test-event-history-host-fence.sh \
             docs/perf/test-event-history-naming.sh
       - name: Wire crate README freshness gate

@@ -6,6 +6,19 @@ Status: **offload implemented and gated**. The baseline proceed gate passed
 durable history enabled), and the producer offload landed with a same-host
 Criterion A/B — see "Results" below.
 
+> **Archived tooling.** The harness this receipt references —
+> `run-event-history-criterion.sh`, `run-event-history-full-daemon.sh`,
+> `bgperf-rustbgpd-ehm-wrapper.sh`, the four `validate-event-history-*.py`
+> gates, and their `test_validate_event_history_*.py` unittest modules — was
+> retired from the working tree after this receipt was sealed. The complete
+> harness is preserved at commit
+> `5a4484912d6bd97a5eac238e95c4fe913818d355` (the last main commit containing
+> it) and in release tag `v0.64.0`. Recover any file with
+> `git show 5a4484912d6bd97a5eac238e95c4fe913818d355:docs/perf/<file>`.
+> The shared host fence (`event-history-host-fence.sh`) and the naming guard
+> remain in the tree. Command blocks below are quoted from the sealed campaign
+> and refer to the archived paths.
+
 The Criterion harness separates two costs:
 
 - `event_history_manager_self_time` measures the synchronous `RibManager::publish_*`
