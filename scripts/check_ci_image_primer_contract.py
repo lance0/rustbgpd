@@ -7,6 +7,7 @@ import collections
 import hashlib
 import re
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -116,6 +117,34 @@ def _hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def _installer_executable(root: Path, installer: Path) -> bool:
+    """True when the installer is executable where the repo records it.
+
+    The repo property is the git index mode (100755); on-disk group-write
+    from umask 002 checkouts is a checkout artifact, not contract drift.
+    Outside a git checkout (unittest fixtures) fall back to the on-disk
+    executable bits so a genuinely non-executable installer still fails.
+    """
+    proc = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "ls-files",
+            "-s",
+            "--",
+            installer.relative_to(root).as_posix(),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    fields = proc.stdout.split()
+    if proc.returncode == 0 and fields:
+        return fields[0] == "100755"
+    mode = stat.S_IMODE(installer.stat().st_mode)
+    return mode & 0o111 == 0o111
+
+
 def _top_block(text: str, key: str) -> str:
     match = re.search(rf"(?ms)^{re.escape(key)}:\n.*?(?=^[A-Za-z][\w-]*:|\Z)", text)
     return match.group(0).rstrip() if match else ""
@@ -159,13 +188,13 @@ def check(root: Path) -> list[str]:
     grpcurl_installer = root / ".github" / "scripts" / "install-grpcurl.sh"
     if not grpcurl_installer.is_file():
         errors.append("install-grpcurl.sh is missing")
-    elif stat.S_IMODE(grpcurl_installer.stat().st_mode) != 0o755:
-        errors.append("install-grpcurl.sh must have exact executable mode 100755")
+    elif not _installer_executable(root, grpcurl_installer):
+        errors.append("install-grpcurl.sh must be executable (git index mode 100755)")
     gnmic_installer = root / ".github" / "scripts" / "install-gnmic.sh"
     if not gnmic_installer.is_file():
         errors.append("install-gnmic.sh is missing")
-    elif stat.S_IMODE(gnmic_installer.stat().st_mode) != 0o755:
-        errors.append("install-gnmic.sh must have exact executable mode 100755")
+    elif not _installer_executable(root, gnmic_installer):
+        errors.append("install-gnmic.sh must be executable (git index mode 100755)")
     gnmic_installer_text = (
         gnmic_installer.read_text() if gnmic_installer.is_file() else ""
     )
@@ -191,8 +220,8 @@ def check(root: Path) -> list[str]:
     gobgp_installer = root / ".github" / "scripts" / "install-gobgp.sh"
     if not gobgp_installer.is_file():
         errors.append("install-gobgp.sh is missing")
-    elif stat.S_IMODE(gobgp_installer.stat().st_mode) != 0o755:
-        errors.append("install-gobgp.sh must have exact executable mode 100755")
+    elif not _installer_executable(root, gobgp_installer):
+        errors.append("install-gobgp.sh must be executable (git index mode 100755)")
     gobgp_installer_text = (
         gobgp_installer.read_text() if gobgp_installer.is_file() else ""
     )
@@ -219,8 +248,8 @@ def check(root: Path) -> list[str]:
     bird3_installer = root / ".github" / "scripts" / "install-bird3.sh"
     if not bird3_installer.is_file():
         errors.append("install-bird3.sh is missing")
-    elif stat.S_IMODE(bird3_installer.stat().st_mode) != 0o755:
-        errors.append("install-bird3.sh must have exact executable mode 100755")
+    elif not _installer_executable(root, bird3_installer):
+        errors.append("install-bird3.sh must be executable (git index mode 100755)")
     bird3_installer_text = (
         bird3_installer.read_text() if bird3_installer.is_file() else ""
     )
