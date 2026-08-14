@@ -21,7 +21,7 @@ fn import_ack_loss_policy_handle(
                         reply.send(policy_test_peer_state(peer_addr, SessionState::Established));
                 }
                 PeerCommand::UpdateImportPolicy { policy, reply } => {
-                    *live_import.lock().unwrap() = policy;
+                    *live_import.lock().unwrap() = policy.map(|policy| *policy);
                     import_installs.fetch_add(1, Ordering::SeqCst);
                     if first_import.swap(false, Ordering::SeqCst) {
                         drop(reply);

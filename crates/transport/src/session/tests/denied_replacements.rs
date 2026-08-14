@@ -45,7 +45,7 @@ async fn denied_classic_replacement_withdraws_exact_route_and_remains_explainabl
     let (reply_tx, reply_rx) = oneshot::channel();
     let flow = session
         .handle_command(PeerCommand::UpdateImportPolicy {
-            policy: Some(deny_chain),
+            policy: Some(Box::new(deny_chain)),
             reply: reply_tx,
         })
         .await;
@@ -586,7 +586,7 @@ async fn denied_replacement_is_removed_before_eorr_and_cannot_survive_gr() {
     assert_eq!(
         session
             .handle_command(PeerCommand::UpdateImportPolicy {
-                policy: Some(deny_policy),
+                policy: Some(Box::new(deny_policy)),
                 reply: reply_tx,
             })
             .await,

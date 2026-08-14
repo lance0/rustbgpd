@@ -290,7 +290,10 @@ async fn apply_to_session(
     let (reply, response) = oneshot::channel();
     tokio::time::timeout(
         PEER_LIFECYCLE_COMMAND_TIMEOUT,
-        commands.send(PeerCommand::ApplyTcpAoAddOnly { desired, reply }),
+        commands.send(PeerCommand::ApplyTcpAoAddOnly {
+            desired: Box::new(desired),
+            reply,
+        }),
     )
     .await
     .map_err(|_| SessionApplyFailure::before_mutation("TCP-AO session command delivery timed out"))?
@@ -398,7 +401,10 @@ async fn preflight_session(
     let (reply, response) = oneshot::channel();
     tokio::time::timeout(
         PEER_LIFECYCLE_COMMAND_TIMEOUT,
-        commands.send(PeerCommand::PreflightTcpAoAddOnly { desired, reply }),
+        commands.send(PeerCommand::PreflightTcpAoAddOnly {
+            desired: Box::new(desired),
+            reply,
+        }),
     )
     .await
     .map_err(|_| "TCP-AO session preflight delivery timed out".to_string())?
@@ -417,7 +423,10 @@ async fn preflight_selection_session(
     let (reply, response) = oneshot::channel();
     tokio::time::timeout(
         PEER_LIFECYCLE_COMMAND_TIMEOUT,
-        commands.send(PeerCommand::PreflightTcpAoSelection { desired, reply }),
+        commands.send(PeerCommand::PreflightTcpAoSelection {
+            desired: Box::new(desired),
+            reply,
+        }),
     )
     .await
     .map_err(|_| "TCP-AO selection preflight delivery timed out".to_string())?
@@ -436,7 +445,10 @@ async fn apply_selection_session(
     let (reply, response) = oneshot::channel();
     tokio::time::timeout(
         PEER_LIFECYCLE_COMMAND_TIMEOUT,
-        commands.send(PeerCommand::ApplyTcpAoSelection { desired, reply }),
+        commands.send(PeerCommand::ApplyTcpAoSelection {
+            desired: Box::new(desired),
+            reply,
+        }),
     )
     .await
     .map_err(|_| SessionApplyFailure::before_mutation("TCP-AO selection delivery timed out"))?
@@ -472,7 +484,10 @@ async fn observe_selection_session(
     let (reply, response) = oneshot::channel();
     tokio::time::timeout(
         PEER_LIFECYCLE_COMMAND_TIMEOUT,
-        commands.send(PeerCommand::ObserveTcpAoSelection { desired, reply }),
+        commands.send(PeerCommand::ObserveTcpAoSelection {
+            desired: Box::new(desired),
+            reply,
+        }),
     )
     .await
     .map_err(|_| "TCP-AO selection observation delivery timed out".to_string())?
@@ -497,7 +512,10 @@ async fn commit_selection_session(
     let (reply, response) = oneshot::channel();
     tokio::time::timeout(
         PEER_LIFECYCLE_COMMAND_TIMEOUT,
-        commands.send(PeerCommand::CommitTcpAoSelection { desired, reply }),
+        commands.send(PeerCommand::CommitTcpAoSelection {
+            desired: Box::new(desired),
+            reply,
+        }),
     )
     .await
     .map_err(|_| "TCP-AO selection metadata commit delivery timed out".to_string())?
@@ -516,7 +534,10 @@ async fn preflight_delete_session(
     let (reply, response) = oneshot::channel();
     tokio::time::timeout(
         PEER_LIFECYCLE_COMMAND_TIMEOUT,
-        commands.send(PeerCommand::PreflightTcpAoDelete { desired, reply }),
+        commands.send(PeerCommand::PreflightTcpAoDelete {
+            desired: Box::new(desired),
+            reply,
+        }),
     )
     .await
     .map_err(|_| "TCP-AO deletion preflight delivery timed out".to_string())?
@@ -535,7 +556,10 @@ async fn apply_delete_session(
     let (reply, response) = oneshot::channel();
     tokio::time::timeout(
         PEER_LIFECYCLE_COMMAND_TIMEOUT,
-        commands.send(PeerCommand::ApplyTcpAoDelete { desired, reply }),
+        commands.send(PeerCommand::ApplyTcpAoDelete {
+            desired: Box::new(desired),
+            reply,
+        }),
     )
     .await
     .map_err(|_| SessionApplyFailure::before_mutation("TCP-AO deletion delivery timed out"))?

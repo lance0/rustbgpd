@@ -397,7 +397,10 @@ async fn fresh_dynamic_tcp_ao_inbound_seeds_selected_owner_keyring_for_manager_a
     };
     let (reply, response) = oneshot::channel();
     commands
-        .send(rustbgpd_transport::PeerCommand::PreflightTcpAoSelection { desired, reply })
+        .send(rustbgpd_transport::PeerCommand::PreflightTcpAoSelection {
+            desired: Box::new(desired),
+            reply,
+        })
         .await
         .unwrap();
     let error = tokio::time::timeout(Duration::from_secs(1), response)

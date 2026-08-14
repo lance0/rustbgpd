@@ -230,13 +230,15 @@ async fn max_prefix_capacity_metrics_follow_updates_and_runtime_limits() {
     assert_eq!(
         session
             .handle_command(PeerCommand::UpdateRuntimeConfig {
-                max_prefixes: None,
-                max_prefixes_ipv4: None,
-                max_prefixes_ipv6: None,
-                gr_stale_routes_time: session.config.gr_stale_routes_time,
-                gr_peer_restart_time_max: session.config.gr_peer_restart_time_max,
-                local_ipv6_nexthop: session.config.local_ipv6_nexthop,
-                remove_private_as: session.config.remove_private_as,
+                config: Box::new(crate::handle::PeerRuntimeConfigUpdate {
+                    max_prefixes: None,
+                    max_prefixes_ipv4: None,
+                    max_prefixes_ipv6: None,
+                    gr_stale_routes_time: session.config.gr_stale_routes_time,
+                    gr_peer_restart_time_max: session.config.gr_peer_restart_time_max,
+                    local_ipv6_nexthop: session.config.local_ipv6_nexthop,
+                    remove_private_as: session.config.remove_private_as,
+                }),
                 reply,
             })
             .await,
@@ -824,13 +826,15 @@ async fn runtime_lowering_per_family_limit_enforces_immediately() {
     assert_eq!(
         session
             .handle_command(PeerCommand::UpdateRuntimeConfig {
-                max_prefixes: None,
-                max_prefixes_ipv4: Some(1),
-                max_prefixes_ipv6: None,
-                gr_stale_routes_time: 360,
-                gr_peer_restart_time_max: 4095,
-                local_ipv6_nexthop: None,
-                remove_private_as: RemovePrivateAs::Disabled,
+                config: Box::new(crate::handle::PeerRuntimeConfigUpdate {
+                    max_prefixes: None,
+                    max_prefixes_ipv4: Some(1),
+                    max_prefixes_ipv6: None,
+                    gr_stale_routes_time: 360,
+                    gr_peer_restart_time_max: 4095,
+                    local_ipv6_nexthop: None,
+                    remove_private_as: RemovePrivateAs::Disabled,
+                }),
                 reply,
             })
             .await,
@@ -872,13 +876,15 @@ async fn runtime_lowering_aggregate_limit_keeps_next_update_semantics() {
     assert_eq!(
         session
             .handle_command(PeerCommand::UpdateRuntimeConfig {
-                max_prefixes: Some(1),
-                max_prefixes_ipv4: None,
-                max_prefixes_ipv6: None,
-                gr_stale_routes_time: 360,
-                gr_peer_restart_time_max: 4095,
-                local_ipv6_nexthop: None,
-                remove_private_as: RemovePrivateAs::Disabled,
+                config: Box::new(crate::handle::PeerRuntimeConfigUpdate {
+                    max_prefixes: Some(1),
+                    max_prefixes_ipv4: None,
+                    max_prefixes_ipv6: None,
+                    gr_stale_routes_time: 360,
+                    gr_peer_restart_time_max: 4095,
+                    local_ipv6_nexthop: None,
+                    remove_private_as: RemovePrivateAs::Disabled,
+                }),
                 reply,
             })
             .await,
