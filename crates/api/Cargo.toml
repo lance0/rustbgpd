@@ -69,10 +69,8 @@ required-features = ["bench-internals"]
 name = "vpn_query_timing"
 harness = false
 required-features = ["bench-internals"]
-path = "benches/vpn_query.rs"
 
 [[bench]]
 name = "vpn_query_allocation"
 harness = false
 required-features = ["bench-internals", "vpn-query-allocation"]
-path = "benches/vpn_query.rs"
