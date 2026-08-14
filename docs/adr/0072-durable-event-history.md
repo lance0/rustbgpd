@@ -46,7 +46,8 @@ history" work:
 - **ADR-0071 (Roles + OTC)** deferred the `OtcRouteBlocked` event
   payload because a backfillable event needs stable cursors that the
   current 4096-entry process-local ring cannot provide
-  (`docs/adr/0071-bgp-roles-otc.md:241-245`).
+  (the deferred `OtcRouteBlocked` event note under "Observability" in
+  `docs/adr/0071-bgp-roles-otc.md`).
 - **ADR-0070 (gNMI / OpenConfig telemetry)** deferred
   `Subscribe ON_CHANGE` for the same reason: gNMI ON_CHANGE
   subscribers need restart-survivable change history with
@@ -646,7 +647,7 @@ Prometheus counters and gauges added by this work:
 
 The existing
 `bgp_event_stream_lagged_total{service, source}` counter
-(`crates/telemetry/src/metrics.rs:46`) keeps its current semantics
+(`crates/telemetry/src/metrics.rs`) keeps its current semantics
 — broadcast subscribers falling behind. EHM owning the broadcast
 doesn't change that contract.
 
