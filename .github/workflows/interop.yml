@@ -225,6 +225,35 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  gobgp_archive:
+    needs: classify_changes
+    if: needs.classify_changes.outputs.run_labs == 'true'
+    name: Prepare exact gobgp archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Restore exact gobgp archive cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/gobgp-cache/gobgp_3.37.0_linux_amd64.tar.gz
+          key: gobgp-v3.37.0-linux-amd64-e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522
+      - name: Prepare exact gobgp archive
+        run: |
+          .github/scripts/install-gobgp.sh \
+            --prepare-archive \
+            "$RUNNER_TEMP/gobgp-cache/gobgp_3.37.0_linux_amd64.tar.gz"
+      - name: Upload verified gobgp archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: gobgp-v3.37.0-linux-amd64
+          path: ${{ runner.temp }}/gobgp-cache/gobgp_3.37.0_linux_amd64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   # Warm one fixed-scope cache per source SHA; jobs still build and load their
   # own image, falling back to an uncached build if the cache is unavailable.
   prime_dev_image:
@@ -551,7 +580,7 @@ jobs:
           script: tests/interop/scripts/test-m87-exact-export-rejection.sh
 
   m74:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [grpcurl_archive, gobgp_archive, prime_dev_image]
     name: M74 — VPNv4 route reflection (GoBGP 3.x)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -580,6 +609,9 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
+      - name: Stage verified GoBGP archive
+        uses: ./.github/actions/stage-gobgp-artifact
+
       - name: Build gobgp:interop
         run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
 
@@ -591,7 +623,7 @@ jobs:
           script: tests/interop/scripts/test-m74-vpnv4-reflection-gobgp.sh
 
   m75:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [grpcurl_archive, gobgp_archive, prime_dev_image]
     name: M75 — RT-Constrain VPNv4 filtering (GoBGP 3.x)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -619,6 +651,9 @@ jobs:
           tags: rustbgpd:dev
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
+
+      - name: Stage verified GoBGP archive
+        uses: ./.github/actions/stage-gobgp-artifact
 
       - name: Build gobgp:interop
         run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
@@ -864,7 +899,7 @@ jobs:
           script: tests/interop/scripts/test-m24-bmp-frr.sh
 
   m81:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [grpcurl_archive, gobgp_archive, prime_dev_image]
     name: M81 — BMP trio + BMPv4 receipt (pmacct + gobmp + tshark)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -894,6 +929,9 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
+      - name: Stage verified GoBGP archive
+        uses: ./.github/actions/stage-gobgp-artifact
+
       - name: Build gobgp:interop
         run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
 
@@ -911,7 +949,7 @@ jobs:
           script: tests/interop/scripts/test-m81-bmp-trio-gobgp.sh
 
   m82:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [grpcurl_archive, gobgp_archive, prime_dev_image]
     # Synthetic leg only. The SR Linux vendor leg
     # (m82-evpn-bundle-srlinux.clab.yml) stays local: the NOS image is
     # ~750 MB compressed / 3.2 GB on disk and boots a full chassis sim —
@@ -945,6 +983,9 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
+      - name: Stage verified GoBGP archive
+        uses: ./.github/actions/stage-gobgp-artifact
+
       - name: Build gobgp:interop
         run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
 
@@ -956,7 +997,7 @@ jobs:
           script: tests/interop/scripts/test-m82-evpn-bundle-synthetic-gobgp.sh
 
   m83:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [grpcurl_archive, gobgp_archive, prime_dev_image]
     # Full 3-stack leg in CI: BIRD 2 is a plain apt install on
     # bookworm-slim (deterministic build) and BIRD already runs in
     # hosted CI (M43, kernel-dataplane.yml) without flake history —
@@ -994,6 +1035,9 @@ jobs:
         # bird2 + tshark: the member stack that carries the byte-level
         # RFC 7947 transparency / OTC / EoR wire assertions.
         run: docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+
+      - name: Stage verified GoBGP archive
+        uses: ./.github/actions/stage-gobgp-artifact
 
       - name: Build gobgp:interop
         run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
@@ -1913,15 +1957,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() }}
-    needs: [classify_changes, grpcurl_archive, gnmic_archive, prime_dev_image, m1, m13, m80,
-      m15, m10, m14, m17, m73, m74, m75, m76, m77, m78, m79, m22, m24,
+    needs: [classify_changes, grpcurl_archive, gnmic_archive, gobgp_archive, prime_dev_image, m1,
+      m13, m80, m15, m10, m14, m17, m73, m74, m75, m76, m77, m78, m79, m22, m24,
       m81, m82, m83, m85, m94, m86, m25, m29, m30, m34, m35, m35b, m35c,
       m41, m44, m54, m55, m56, m45, m57, m63, m64,
       m26_m27_m28_m59_m91, m92]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
-        classify_changes grpcurl_archive gnmic_archive prime_dev_image m1 m13 m80 m15 m10
+        classify_changes grpcurl_archive gnmic_archive gobgp_archive prime_dev_image
+        m1 m13 m80 m15 m10
         m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 m24 m81 m82 m83 m85 m94
         m86 m25 m29 m30 m34 m35 m35b m35c m41 m44 m54 m55 m56 m45 m57
         m63 m64 m26_m27_m28_m59_m91 m92

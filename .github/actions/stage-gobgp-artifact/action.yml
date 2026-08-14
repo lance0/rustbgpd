@@ -1,0 +1,22 @@
+name: "Stage verified GoBGP archive"
+description: >-
+  Download the same-run GoBGP release archive, verify its immutable checksum
+  and exact gobgp/gobgpd versions offline, and stage it into the interop
+  image build context.
+runs:
+  using: "composite"
+  steps:
+    - name: Download verified GoBGP archive
+      uses: actions/download-artifact@v8
+      with:
+        name: gobgp-v3.37.0-linux-amd64
+        path: ${{ runner.temp }}/gobgp-artifact
+
+    - name: Stage exact GoBGP archive offline
+      shell: bash
+      run: |
+        set -euo pipefail
+        .github/scripts/install-gobgp.sh \
+          --stage-archive \
+          "$RUNNER_TEMP/gobgp-artifact/gobgp_3.37.0_linux_amd64.tar.gz" \
+          tests/interop/gobgp-archive
