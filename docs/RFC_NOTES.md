@@ -132,21 +132,26 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   reserved names that operator policy cannot shadow) in that direction. The
   two directions are independent, and the session stays Established, so the
   gap is repairable without transport churn.
-- **Deviation:** the RFC mandates this as default behavior; rustbgpd ships it
-  opt-in (default `false`). The historical default is permit-all when a
-  session resolves no policy chain, and flipping the default would make an
-  upgrade silently drop routes in a way indistinguishable from a policy
-  change — the warn-first posture RFC 8212 Appendix A.1 describes for
-  implementations with an installed base. `rustbgpd --check` warns on every
-  eBGP neighbor missing explicit policy whether the knob is on or off, every
-  shipped starter config with eBGP neighbors sets the knob, and all starters
-  pass `rustbgpd --check --strict` (fenced by
+- **Default:** epoch-scoped (ADR-0119). Under `config_epoch = 2` an omitted
+  `ebgp_requires_policy` resolves to the RFC-mandated secure default —
+  effective `true`, source `epoch_2_default` — so epoch-2 configs comply with
+  the RFC's default-deny requirement without writing the knob. Epoch-less and
+  epoch-1 omission remain permit-all permanently: the historical default is
+  permit-all when a session resolves no policy chain, and flipping it under
+  existing configs would make an upgrade silently drop routes in a way
+  indistinguishable from a policy change — the warn-first posture RFC 8212
+  Appendix A.1 describes for implementations with an installed base. Explicit
+  `true`/`false` keeps its stated value in every epoch. `rustbgpd --check`
+  warns on every eBGP neighbor missing explicit policy whether enforcement is
+  on or off, every shipped starter config with eBGP neighbors sets the knob,
+  and all starters pass `rustbgpd --check --strict` (fenced by
   `tests/starter_configs_check_strict.rs`).
 - **Migration surface (ADR-0119).** The knob's posture is carried by a root
   `config_epoch = 1 | 2` key alongside a lossless record of whether
   `ebgp_requires_policy` was written at all. Epoch 1 pins the legacy
-  permit-all default; epoch 2 selects the RFC-aligned default. A config that
-  states neither resolves to `LegacyOmission` and raises the
+  permit-all default; epoch 2 activates the RFC-aligned default for the
+  omitted boolean. A config that states neither resolves to `LegacyOmission`
+  and raises the
   `rfc8212_secure_default_ready` advisory: `rustbgpd --check` warns and exits
   0, `--check --strict` exits 1. `rustbgpd --migrate-config
   pin-legacy|prepare-secure --offline` performs the in-place move to an

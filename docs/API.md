@@ -452,8 +452,9 @@ retain tonic's 4 MiB decode default.
 | `RollbackConfigTransaction` | Restore a provenance-verified v2 row through the same transaction executor as apply — same plan/impact classification and receipts (`rbgp config rollback N`). Unreadable rows and provenance mismatches fail closed before planning or mutation. |
 
 For a supported transaction with an independent mutation, the plan carries one canonical committed candidate
-through token, runtime stage, persistence, and accepted history. It may materialize omitted RFC 8212 epoch-1/false
-presence without changing effective policy. Representation-only or posture-changing candidates are rejected before
+through token, runtime stage, persistence, and accepted history. It may materialize omitted RFC 8212 presence
+(epoch-1 omission as epoch 1 plus explicit `false`; epoch-2 omission as epoch 2 plus explicit `true`)
+without changing effective policy. Representation-only or posture-changing candidates are rejected before
 mutation. FIB transactions stage the full tables-plus-posture snapshot;
 determinate failures attempt to restore both. Lost persistence acknowledgement remains ambiguous after attempted restore; rollback or post-durable finalization failure is also ambiguous.
 
