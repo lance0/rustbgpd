@@ -1268,6 +1268,114 @@ impl PersistedFibRoute {
     }
 }
 
+/// Generation-shape invariants for a persisted route, derived from the exact
+/// writer each envelope version shipped with (see the [`OWNED_STATE_VERSION`]
+/// doc comment):
+///
+/// - v1 wrote a required scalar `next_hop` and none of the newer fields.
+/// - v2 wrote a nonempty `next_hops` set; the scalar best is optional (the
+///   first v2 writer omitted it) but, when present, is always a member of the
+///   set. `weights`/ifindex fields did not exist yet.
+/// - v3 added `weights`, always emitted 1:1 with `next_hops` and always
+///   kernel-representable (`1..=256`).
+/// - v4 added `next_hop_ifindexes`, always emitted 1:1 with `next_hops`
+///   (`0` = unscoped). Values are NOT constrained to link-local hops: a
+///   released writer emitted stale scopes on non-link-local hops and the fix
+///   ignores them on read, so nonzero-on-non-link-local is tolerated here.
+/// - v5 added the optional scalar `next_hop_ifindex`, only ever emitted
+///   alongside the scalar `next_hop`.
+///
+/// A payload violating these for its declared version is ambiguous ownership
+/// evidence — e.g. a claimed-v5 file with no `next_hops` must not be
+/// reinterpreted through the v1 scalar upgrade path, and a claimed-v1 file
+/// must not smuggle newer positional fields. Returns the violated invariant
+/// as a bounded static category (no route data), or `None` when consistent.
+fn owned_state_shape_mismatch(version: u32, route: &PersistedFibRoute) -> Option<&'static str> {
+    if version == 1 {
+        if route.next_hop.is_none() {
+            return Some("v1_missing_scalar_next_hop");
+        }
+        if !route.next_hops.is_empty()
+            || !route.weights.is_empty()
+            || !route.next_hop_ifindexes.is_empty()
+            || route.next_hop_ifindex.is_some()
+        {
+            return Some("newer_fields_under_v1");
+        }
+        return None;
+    }
+    if route.next_hops.is_empty() {
+        return Some("missing_next_hops");
+    }
+    if let Some(next_hop) = route.next_hop
+        && !route.next_hops.contains(&next_hop)
+    {
+        return Some("scalar_best_not_in_set");
+    }
+    if version < 3 {
+        if !route.weights.is_empty()
+            || !route.next_hop_ifindexes.is_empty()
+            || route.next_hop_ifindex.is_some()
+        {
+            return Some("newer_fields_under_v2");
+        }
+        return None;
+    }
+    if route.weights.len() != route.next_hops.len() {
+        return Some("weights_misaligned");
+    }
+    if route
+        .weights
+        .iter()
+        .any(|weight| !(1..=256).contains(weight))
+    {
+        return Some("weight_out_of_range");
+    }
+    if version < 4 {
+        if !route.next_hop_ifindexes.is_empty() || route.next_hop_ifindex.is_some() {
+            return Some("newer_fields_under_v3");
+        }
+        return None;
+    }
+    if route.next_hop_ifindexes.len() != route.next_hops.len() {
+        return Some("ifindexes_misaligned");
+    }
+    if version < 5 && route.next_hop_ifindex.is_some() {
+        return Some("newer_fields_under_v4");
+    }
+    if route.next_hop_ifindex.is_some() && route.next_hop.is_none() {
+        return Some("scalar_ifindex_without_scalar_next_hop");
+    }
+    None
+}
+
+/// Cross-check every persisted route's payload shape against the declared
+/// generation. A mismatch means the file is ambiguous ownership evidence
+/// (corrupt or hand-edited), and reinterpreting it through legacy serde
+/// defaults would silently mis-claim ownership — so fail closed exactly like
+/// an unsupported version: warn, quarantine the evidence aside, own nothing.
+/// Returns `true` after quarantining.
+fn quarantine_on_shape_mismatch(
+    config: &FibRuntimeConfig,
+    path: &Path,
+    persisted: &PersistedFibOwnedState,
+) -> bool {
+    for route in &persisted.routes {
+        if let Some(detail) = owned_state_shape_mismatch(persisted.version, route) {
+            warn!(
+                path = %path.display(),
+                version = persisted.version,
+                detail,
+                "ignoring general FIB owned-state whose payload shape \
+                 contradicts its declared version"
+            );
+            quarantine_owned_state_file(config, "generation_shape_mismatch");
+            return true;
+        }
+    }
+    false
+}
+
 fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
     let Some(path) = &config.owned_state_path else {
         return FibOwnedState::default();
@@ -1300,6 +1408,9 @@ fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
             "ignoring unsupported general FIB owned-state version"
         );
         quarantine_owned_state_file(config, "unsupported_version");
+        return FibOwnedState::default();
+    }
+    if quarantine_on_shape_mismatch(config, path, &persisted) {
         return FibOwnedState::default();
     }
     // ADR-0079: per-table, set-wise signature comparison. A persisted
@@ -3147,6 +3258,351 @@ mod tests {
         // Accepted in place, not quarantined.
         assert!(path.exists());
         assert!(!stale_owned_state_path(&path).exists());
+    }
+
+    /// Owned-state envelope JSON around a single route, with the "edge" table
+    /// signature matching [`config`]. Optional signature keys are omitted:
+    /// they deserialize identically whether absent (v1 files) or `null`
+    /// (v2+ writers), and generation-shape validation ignores signatures.
+    fn owned_state_fixture(version: u32, route_json: &str) -> String {
+        format!(
+            r#"{{
+              "version": {version},
+              "tables": [
+                {{
+                  "name": "edge",
+                  "table_id": 1000,
+                  "metric": 200,
+                  "families": ["ipv4_unicast", "ipv6_unicast"],
+                  "allowed_peer_groups": [],
+                  "allowed_neighbors": [],
+                  "max_routes": null
+                }}
+              ],
+              "routes": [{route_json}]
+            }}"#
+        )
+    }
+
+    fn load_fixture(fixture: &str) -> (tempfile::TempDir, PathBuf, FibOwnedState) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+        std::fs::write(&path, fixture).unwrap();
+        let owned = load_owned_state(&config);
+        (dir, path, owned)
+    }
+
+    #[test]
+    fn owned_state_v2_set_fixture_loads_and_upgrades() {
+        // The last shipped v2 writer (v0.28.0) emitted the scalar best plus
+        // the equal-cost set; the first v2 writer omitted the scalar. Both
+        // shapes must keep loading without quarantine, with weights defaulting
+        // to 1 and no interface scope.
+        let with_scalar = owned_state_fixture(
+            2,
+            r#"{
+              "table_name": "edge",
+              "table_id": 1000,
+              "metric": 200,
+              "prefix_addr": "203.0.113.0",
+              "prefix_len": 24,
+              "next_hop": "192.0.2.2",
+              "next_hops": ["192.0.2.1", "192.0.2.2"],
+              "peer": "198.51.100.1",
+              "origin_type": "ebgp",
+              "path_id": 0
+            }"#,
+        );
+        let (_dir, path, owned) = load_fixture(&with_scalar);
+        let mut expected = fib_route(v4(24), ip("192.0.2.1"));
+        expected.target = FibRouteTarget::from_set_with_best(
+            ip("192.0.2.2"),
+            [ip("192.0.2.1"), ip("192.0.2.2")].map(FibNextHop::equal),
+        );
+        assert_eq!(owned.routes.get(&expected.key), Some(&expected));
+        assert!(path.exists());
+        assert!(!stale_owned_state_path(&path).exists());
+
+        let without_scalar = owned_state_fixture(
+            2,
+            r#"{
+              "table_name": "edge",
+              "table_id": 1000,
+              "metric": 200,
+              "prefix_addr": "203.0.113.0",
+              "prefix_len": 24,
+              "next_hops": ["192.0.2.1", "192.0.2.2"],
+              "peer": "198.51.100.1",
+              "origin_type": "ebgp",
+              "path_id": 0
+            }"#,
+        );
+        let (_dir, path, owned) = load_fixture(&without_scalar);
+        assert_eq!(owned.routes.len(), 1, "scalar-less v2 files must load");
+        assert!(!stale_owned_state_path(&path).exists());
+    }
+
+    #[test]
+    fn owned_state_v3_weighted_fixture_loads() {
+        // ADR-0068 v3 files carry weights positionally aligned with
+        // `next_hops` and no ifindex fields.
+        let fixture = owned_state_fixture(
+            3,
+            r#"{
+              "table_name": "edge",
+              "table_id": 1000,
+              "metric": 200,
+              "prefix_addr": "203.0.113.0",
+              "prefix_len": 24,
+              "next_hop": "192.0.2.1",
+              "next_hops": ["192.0.2.1", "192.0.2.2"],
+              "weights": [200, 100],
+              "peer": "198.51.100.1",
+              "origin_type": "ebgp",
+              "path_id": 0
+            }"#,
+        );
+        let (_dir, path, owned) = load_fixture(&fixture);
+        let mut expected = fib_route(v4(24), ip("192.0.2.1"));
+        expected.target = FibRouteTarget::from_set_with_best_hop(
+            FibNextHop {
+                addr: ip("192.0.2.1"),
+                scope: None,
+                weight: 200,
+            },
+            [
+                FibNextHop {
+                    addr: ip("192.0.2.1"),
+                    scope: None,
+                    weight: 200,
+                },
+                FibNextHop {
+                    addr: ip("192.0.2.2"),
+                    scope: None,
+                    weight: 100,
+                },
+            ],
+        );
+        assert_eq!(owned.routes.get(&expected.key), Some(&expected));
+        assert!(!stale_owned_state_path(&path).exists());
+    }
+
+    #[test]
+    fn owned_state_v4_scoped_fixture_loads() {
+        // No on-disk v4 shipped on its own (v4 and v5 landed together in the
+        // ADR-0069 slice), but a claimed-v4 receipt matching the v4 writer
+        // shape — positional ifindexes, no scalar ifindex — stays loadable.
+        let fixture = owned_state_fixture(
+            4,
+            r#"{
+              "table_name": "edge",
+              "table_id": 1000,
+              "metric": 200,
+              "prefix_addr": "203.0.113.0",
+              "prefix_len": 24,
+              "next_hop": "fe80::2",
+              "next_hops": ["fe80::2"],
+              "weights": [1],
+              "next_hop_ifindexes": [7],
+              "peer": "198.51.100.1",
+              "origin_type": "ebgp",
+              "path_id": 0
+            }"#,
+        );
+        let (_dir, path, owned) = load_fixture(&fixture);
+        let mut expected = fib_route(v4(24), ip("fe80::2"));
+        expected.target = FibRouteTarget::from_next_hops([FibNextHop::scoped(ip("fe80::2"), 7)]);
+        assert_eq!(owned.routes.get(&expected.key), Some(&expected));
+        assert!(!stale_owned_state_path(&path).exists());
+    }
+
+    /// A syntactically valid current-generation route for shape-mismatch
+    /// mutation tests; must itself pass validation.
+    fn persisted_v5_route() -> PersistedFibRoute {
+        PersistedFibRoute {
+            table_name: "edge".to_string(),
+            table_id: 1000,
+            metric: 200,
+            prefix_addr: ip("203.0.113.0"),
+            prefix_len: 24,
+            next_hop: Some(ip("192.0.2.1")),
+            next_hop_ifindex: None,
+            next_hops: vec![ip("192.0.2.1"), ip("192.0.2.2")],
+            weights: vec![1, 1],
+            next_hop_ifindexes: vec![0, 0],
+            peer: ip("198.51.100.1"),
+            origin_type: PersistedRouteOrigin::Ebgp,
+            path_id: 0,
+        }
+    }
+
+    /// Assert `route` under declared `version` trips the given invariant
+    /// category and that loading such a file owns nothing and quarantines the
+    /// artifact byte-for-byte — renamed aside like an unsupported version,
+    /// never mutated or deleted.
+    fn assert_shape_quarantined(version: u32, route: PersistedFibRoute, detail: &str) {
+        assert_eq!(
+            owned_state_shape_mismatch(version, &route),
+            Some(detail),
+            "expected invariant category for v{version}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+        let persisted = PersistedFibOwnedState {
+            version,
+            tables: config
+                .tables
+                .iter()
+                .map(PersistedFibTableSignature::from)
+                .collect(),
+            routes: vec![route],
+        };
+        let bytes = serde_json::to_vec_pretty(&persisted).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+
+        let loaded = load_owned_state(&config);
+
+        assert!(
+            loaded.routes.is_empty(),
+            "{detail}: mismatched owned-state must own nothing"
+        );
+        assert!(!path.exists(), "{detail}: artifact must be quarantined");
+        assert_eq!(
+            std::fs::read(stale_owned_state_path(&path)).unwrap(),
+            bytes,
+            "{detail}: quarantined evidence must be byte-identical"
+        );
+    }
+
+    #[test]
+    fn owned_state_v5_payload_declaring_v1_is_quarantined() {
+        // The headline mismatch: a current-generation payload whose version
+        // field reads 1 must not run the legacy upgrade path (which would
+        // default weights to 1 and drop link-local scopes) — it is ambiguous
+        // evidence and fails closed.
+        assert_shape_quarantined(1, persisted_v5_route(), "newer_fields_under_v1");
+    }
+
+    #[test]
+    fn owned_state_v1_payload_declaring_v5_is_quarantined() {
+        // The inverse: claimed-current with only the v1 scalar shape must not
+        // fall back to the scalar upgrade path.
+        let route = PersistedFibRoute {
+            next_hop_ifindex: None,
+            next_hops: Vec::new(),
+            weights: Vec::new(),
+            next_hop_ifindexes: Vec::new(),
+            ..persisted_v5_route()
+        };
+        assert_shape_quarantined(5, route, "missing_next_hops");
+    }
+
+    #[test]
+    fn owned_state_misaligned_generation_shapes_are_quarantined() {
+        let base = persisted_v5_route;
+        assert_eq!(
+            owned_state_shape_mismatch(OWNED_STATE_VERSION, &base()),
+            None,
+            "mutation base must itself be valid"
+        );
+        assert_shape_quarantined(
+            1,
+            PersistedFibRoute {
+                next_hop: None,
+                next_hops: Vec::new(),
+                weights: Vec::new(),
+                next_hop_ifindexes: Vec::new(),
+                ..base()
+            },
+            "v1_missing_scalar_next_hop",
+        );
+        assert_shape_quarantined(
+            5,
+            PersistedFibRoute {
+                next_hop: Some(ip("192.0.2.99")),
+                ..base()
+            },
+            "scalar_best_not_in_set",
+        );
+        assert_shape_quarantined(
+            5,
+            PersistedFibRoute {
+                weights: vec![1],
+                ..base()
+            },
+            "weights_misaligned",
+        );
+        assert_shape_quarantined(
+            5,
+            PersistedFibRoute {
+                weights: vec![1, 1, 1],
+                ..base()
+            },
+            "weights_misaligned",
+        );
+        assert_shape_quarantined(
+            5,
+            PersistedFibRoute {
+                weights: vec![0, 1],
+                ..base()
+            },
+            "weight_out_of_range",
+        );
+        assert_shape_quarantined(
+            5,
+            PersistedFibRoute {
+                weights: vec![300, 1],
+                ..base()
+            },
+            "weight_out_of_range",
+        );
+        assert_shape_quarantined(
+            5,
+            PersistedFibRoute {
+                next_hop_ifindexes: vec![0],
+                ..base()
+            },
+            "ifindexes_misaligned",
+        );
+        // Newer fields smuggled under intermediate declared generations.
+        assert_shape_quarantined(
+            2,
+            PersistedFibRoute {
+                weights: vec![1, 1],
+                next_hop_ifindexes: Vec::new(),
+                ..base()
+            },
+            "newer_fields_under_v2",
+        );
+        assert_shape_quarantined(
+            3,
+            PersistedFibRoute {
+                next_hop_ifindexes: vec![0, 0],
+                ..base()
+            },
+            "newer_fields_under_v3",
+        );
+        assert_shape_quarantined(
+            4,
+            PersistedFibRoute {
+                next_hop_ifindex: Some(9),
+                ..base()
+            },
+            "newer_fields_under_v4",
+        );
+        assert_shape_quarantined(
+            5,
+            PersistedFibRoute {
+                next_hop: None,
+                next_hop_ifindex: Some(9),
+                ..base()
+            },
+            "scalar_ifindex_without_scalar_next_hop",
+        );
     }
 
     #[test]

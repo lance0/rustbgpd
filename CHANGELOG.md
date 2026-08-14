@@ -111,6 +111,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- General FIB owned-state files whose payload shape contradicts their declared
+  envelope version — e.g. a current-generation payload whose version field
+  reads 1, or a claimed-v5 file carrying only the v1 scalar next-hop — are now
+  quarantined like an unsupported version (warned, renamed aside as evidence,
+  ownership fails closed) instead of being silently reinterpreted through
+  legacy serde defaults, which could mis-claim weights, drop link-local
+  scopes, or downgrade a multipath set to its scalar best. Valid v1–v5 files
+  continue to load and upgrade unchanged. (LAN-1001)
 - Config publication failures now carry an exact rename-boundary result:
   pre-rename failures preserve the prior config and may return clean only after
   complete acknowledged compensation, while post-rename directory-sync
