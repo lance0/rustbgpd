@@ -759,12 +759,12 @@ impl RibManager {
                 .bmp_tx
                 .as_ref()
                 .and_then(|_| self.loc_rib.get_vpn(key).map(|route| route.nlri.clone()));
-            let candidates: Vec<VpnRibRoute> = self
+            let candidates: Vec<&VpnRibRoute> = self
                 .ribs
                 .values()
-                .flat_map(|rib| rib.iter_vpn_for_nlri(key).cloned())
+                .flat_map(|rib| rib.iter_vpn_for_nlri(key))
                 .collect();
-            if self.loc_rib.recompute_vpn(*key, candidates.iter()) {
+            if self.loc_rib.recompute_vpn(*key, candidates.into_iter()) {
                 changed_keys.insert(*key);
                 if self.bmp_tx.is_some() {
                     let (pdu, path_status) = match self.loc_rib.get_vpn(key) {

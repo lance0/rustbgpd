@@ -606,6 +606,12 @@ impl AdjRibIn {
         self.evpn_routes.remove(key).is_some()
     }
 
+    /// Look up an EVPN route by key.
+    #[must_use]
+    pub fn get_evpn(&self, key: &EvpnRouteKey) -> Option<&EvpnRibRoute> {
+        self.evpn_routes.get(key)
+    }
+
     /// Iterate over all EVPN routes in this Adj-RIB-In.
     pub fn iter_evpn(&self) -> impl Iterator<Item = &EvpnRibRoute> {
         self.evpn_routes.values()
@@ -3333,6 +3339,70 @@ mod tests {
             is_llgr_stale: false,
         });
         key
+    }
+
+    #[test]
+    fn get_evpn_hit_miss_and_after_withdraw() {
+        use rustbgpd_wire::{EthernetTagId, RouteDistinguisher};
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer_ip);
+        let key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
+        let sibling = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 200, vec![]);
+
+        let hit = rib.get_evpn(&key).expect("inserted key resolves");
+        assert_eq!(hit.key(), key);
+
+        let missing = EvpnRouteKey::Imet {
+            rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+            ethernet_tag: EthernetTagId(999),
+            originator_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        };
+        assert!(rib.get_evpn(&missing).is_none());
+
+        assert!(rib.withdraw_evpn(&key));
+        assert!(rib.get_evpn(&key).is_none());
+        assert!(rib.get_evpn(&sibling).is_some(), "sibling key survives");
+    }
+
+    #[test]
+    fn get_evpn_candidates_match_key_filter_scan_across_peers() {
+        // Differential guard for the keyed candidate gathering in
+        // `recompute_and_distribute_evpn`: per-rib `get_evpn` must return
+        // exactly the routes the old `iter_evpn().filter(|r| r.key() == *key)`
+        // full scan returned, for every key on a populated multi-peer set.
+        let mut ribs = Vec::new();
+        for i in 1..=3u8 {
+            ribs.push(AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, i))));
+        }
+        // Same IMET identity (originator + tag) advertised by two peers,
+        // plus a unique key per rib.
+        insert_evpn_imet(&mut ribs[0], Ipv4Addr::new(10, 0, 0, 99), 100, vec![]);
+        let shared = insert_evpn_imet(&mut ribs[1], Ipv4Addr::new(10, 0, 0, 99), 100, vec![]);
+        insert_evpn_imet(&mut ribs[0], Ipv4Addr::new(10, 0, 0, 1), 200, vec![]);
+        insert_evpn_imet(&mut ribs[2], Ipv4Addr::new(10, 0, 0, 3), 300, vec![]);
+
+        let keys: std::collections::HashSet<EvpnRouteKey> = ribs
+            .iter()
+            .flat_map(|rib| rib.iter_evpn().map(EvpnRibRoute::key))
+            .collect();
+        assert_eq!(keys.len(), 3);
+
+        for key in keys {
+            let mut scanned: Vec<*const EvpnRibRoute> = ribs
+                .iter()
+                .flat_map(|rib| rib.iter_evpn().filter(|r| r.key() == key))
+                .map(std::ptr::from_ref)
+                .collect();
+            let mut keyed: Vec<*const EvpnRibRoute> = ribs
+                .iter()
+                .filter_map(|rib| rib.get_evpn(&key))
+                .map(std::ptr::from_ref)
+                .collect();
+            scanned.sort_unstable();
+            keyed.sort_unstable();
+            assert_eq!(scanned, keyed);
+            assert_eq!(keyed.len(), if key == shared { 2 } else { 1 });
+        }
     }
 
     #[test]

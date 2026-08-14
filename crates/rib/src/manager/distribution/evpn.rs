@@ -417,7 +417,7 @@ impl RibManager {
             let candidates: Vec<&EvpnRibRoute> = self
                 .ribs
                 .values()
-                .flat_map(|rib| rib.iter_evpn().filter(|r| r.key() == *key))
+                .filter_map(|rib| rib.get_evpn(key))
                 .collect();
             // Capture old state BEFORE recompute_evpn so the event-type
             // derivation below distinguishes Added / Withdrawn /

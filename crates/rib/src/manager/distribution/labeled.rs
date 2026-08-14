@@ -693,12 +693,12 @@ impl RibManager {
 
         let mut changed_keys: HashSet<Prefix> = HashSet::new();
         for key in &affected_nlri {
-            let candidates: Vec<LabeledRibRoute> = self
+            let candidates: Vec<&LabeledRibRoute> = self
                 .ribs
                 .values()
-                .flat_map(|rib| rib.iter_labeled_for_prefix(key).cloned())
+                .flat_map(|rib| rib.iter_labeled_for_prefix(key))
                 .collect();
-            if self.loc_rib.recompute_labeled(*key, candidates.iter()) {
+            if self.loc_rib.recompute_labeled(*key, candidates.into_iter()) {
                 changed_keys.insert(*key);
             }
         }

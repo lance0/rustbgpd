@@ -231,8 +231,6 @@ impl RibManager {
         &mut self,
         affected: &HashSet<crate::route::RtcRibRouteKey>,
     ) {
-        use crate::route::RtcRibRoute;
-
         self.record_deferred_rtc(affected);
         if self.selection_deferred(crate::route::RtcRibRouteKey::afi_safi()) {
             return;
@@ -240,12 +238,8 @@ impl RibManager {
 
         let mut changed_keys: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
         for key in affected {
-            let candidates: Vec<RtcRibRoute> = self
-                .ribs
-                .values()
-                .filter_map(|rib| rib.get_rtc(key).cloned())
-                .collect();
-            if self.loc_rib.recompute_rtc(key.clone(), candidates.iter()) {
+            let candidates = self.ribs.values().filter_map(|rib| rib.get_rtc(key));
+            if self.loc_rib.recompute_rtc(key.clone(), candidates) {
                 changed_keys.insert(key.clone());
             }
         }
