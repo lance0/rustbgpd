@@ -121,7 +121,7 @@ impl RibManager {
                 // ownership into the bounded member set first.
                 self.carry_outbound_admitted_across_regroup(peer, true);
                 if let Some(rib_out) = self.adj_ribs_out.get_mut(&peer) {
-                    rib_out.clear_unicast();
+                    rib_out.release_unicast();
                     if vpn_groupable {
                         rib_out.clear_vpn();
                     }

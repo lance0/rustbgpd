@@ -67,8 +67,9 @@ impl AdjRibOut {
     /// Use `LocRib::len()` for an authoritative per-peer unicast table. A
     /// freshly installed grouped peer's private table owns only the other
     /// address families, so it starts with zero unicast capacity; the shared
-    /// group table carries the Loc-RIB-sized reservation. Moving an existing
-    /// ungrouped table into a group may retain its prior allocation.
+    /// group table carries the Loc-RIB-sized reservation. Group transfer
+    /// releases an existing private reservation; a later return to the
+    /// per-peer path grows the private table again from empty.
     #[must_use]
     pub fn with_capacity(peer: IpAddr, capacity: usize) -> Self {
         Self {
@@ -186,13 +187,26 @@ impl AdjRibOut {
     }
 
     /// Remove only the unicast routes and their secondary prefix index,
-    /// leaving every other family untouched. Used when a peer moves onto
-    /// the update-group path: its unicast advertised state becomes
-    /// group-owned while non-unicast families keep riding this per-peer
-    /// table.
+    /// leaving every other family untouched. This keeps the backing
+    /// allocations for callers that expect the unicast table to refill.
+    /// Use [`Self::release_unicast`] when ownership moves to an update group.
     pub fn clear_unicast(&mut self) {
         self.routes.clear();
         self.prefix_path_ids.clear();
+    }
+
+    /// Remove only the unicast routes and their secondary prefix index,
+    /// releasing their backing allocations while leaving every other family
+    /// untouched.
+    ///
+    /// Unlike [`Self::clear_unicast`], this is used when a peer moves onto the
+    /// update-group path and its unicast state becomes group-owned. Returning
+    /// to the private path grows the empty table again, so repeated membership
+    /// flaps deliberately trade reallocation for lower grouped steady-state
+    /// memory.
+    pub fn release_unicast(&mut self) {
+        self.routes = RouteSlab::default();
+        self.prefix_path_ids = FamilyPrefixMap::default();
     }
 
     /// Remove only the VPN routes and their secondary key index, leaving
@@ -823,6 +837,38 @@ mod tests {
         assert!(rib.path_ids_for_prefix(&prefix_b()).is_empty());
         assert!(rib.is_empty());
         assert_eq!(rib.bgpls_len(), 0);
+    }
+
+    #[test]
+    fn clear_unicast_keeps_capacity_and_other_families() {
+        let mut rib = AdjRibOut::with_capacity(IpAddr::V4(Ipv4Addr::LOCALHOST), 64);
+        rib.insert(make_route(prefix_a(), 0));
+        rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 1, 0], 24, 100), 1));
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(15), 1));
+        let capacity = rib.bench_route_capacity();
+
+        rib.clear_unicast();
+
+        assert!(rib.is_empty());
+        assert_eq!(rib.bench_route_capacity(), capacity);
+        assert_eq!(rib.vpn_len(), 1);
+        assert_eq!(rib.bgpls_len(), 1);
+    }
+
+    #[test]
+    fn release_unicast_drops_capacity_and_keeps_other_families() {
+        let mut rib = AdjRibOut::with_capacity(IpAddr::V4(Ipv4Addr::LOCALHOST), 64);
+        rib.insert(make_route(prefix_a(), 0));
+        rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 1, 0], 24, 100), 1));
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(16), 1));
+        assert!(rib.bench_route_capacity() >= 64);
+
+        rib.release_unicast();
+
+        assert!(rib.is_empty());
+        assert_eq!(rib.bench_route_capacity(), 0);
+        assert_eq!(rib.vpn_len(), 1);
+        assert_eq!(rib.bgpls_len(), 1);
     }
 
     #[test]
