@@ -207,16 +207,10 @@ impl RibManager {
     ///
     /// BGP-LS remains opaque: the selected route is reflected as received with
     /// ordinary BGP attribute handling, and no LSDB/TLV semantics are parsed.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "typed BGP-LS recompute stages every outbound distribution mode"
-    )]
     pub(in crate::manager) fn recompute_and_distribute_bgpls(
         &mut self,
         affected: &HashSet<crate::route::BgpLsRouteKey>,
     ) {
-        use crate::route::BgpLsRibRoute;
-
         self.record_deferred_bgpls(affected);
         let affected: HashSet<_> = affected
             .iter()
@@ -229,12 +223,8 @@ impl RibManager {
 
         let mut changed_keys: HashSet<crate::route::BgpLsRouteKey> = HashSet::new();
         for key in &affected {
-            let candidates: Vec<BgpLsRibRoute> = self
-                .ribs
-                .values()
-                .filter_map(|rib| rib.get_bgpls(key).cloned())
-                .collect();
-            if self.loc_rib.recompute_bgpls(key.clone(), candidates.iter()) {
+            let candidates = self.ribs.values().filter_map(|rib| rib.get_bgpls(key));
+            if self.loc_rib.recompute_bgpls(key.clone(), candidates) {
                 changed_keys.insert(key.clone());
             }
         }

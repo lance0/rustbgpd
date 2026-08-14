@@ -2532,10 +2532,7 @@ impl RibManager {
                 rib.iter_flowspec()
                     .any(|route| route.selection_key() == *key)
             }),
-            ExactExportKey::Evpn(key) => self
-                .ribs
-                .values()
-                .any(|rib| rib.iter_evpn().any(|route| route.key() == *key)),
+            ExactExportKey::Evpn(key) => self.ribs.values().any(|rib| rib.get_evpn(key).is_some()),
             ExactExportKey::BgpLs(key) => self.ribs.values().any(|rib| {
                 rib.iter_bgpls().any(|route| {
                     ExactExportKey::BgpLs(route.key()).nlri_identity()
