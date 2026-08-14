@@ -1,10 +1,14 @@
+# ADR-0119 activated cell: epoch 2 with [global].ebgp_requires_policy omitted
+# resolves to the RFC 8212 secure default (effective true, source
+# epoch_2_default). The tuple is restart-required, so every variant in this
+# lab carries the same cell — the reload never flips it — and the whole lab
+# proves the activated default drives real ADR-0112 enforcement.
+config_epoch = 2
+
 [global]
 asn = 65001
 router_id = "10.95.0.1"
 listen_port = 179
-# ADR-0112: opt into RFC 8212 enforcement. Restart-required, so every
-# variant in this lab carries the same value — the reload never flips it.
-ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
