@@ -215,6 +215,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The RFC 8212 secure default is activated for epoch 2 (ADR-0119; owner
+  decision recorded in ADR-0125 DR4).** `config_epoch = 2` with
+  `[global].ebgp_requires_policy` omitted now resolves to effective `true`
+  with the new source verdict `epoch_2_default` instead of being rejected as
+  a pending activation: unpoliced eBGP directions on an epoch-2 config run
+  the reserved deny-all chain, as RFC 8212 requires. Upgrade behavior: no
+  existing configuration changes behavior. Epoch-less and epoch-1 omission
+  remain effective `false` permanently, and an explicit `true`/`false` keeps
+  its stated value in every epoch — `config_epoch = 2` plus
+  `ebgp_requires_policy = false` remains a supported, deliberate opt-out.
+  Operator action: adopt the secure default with
+  `rustbgpd --migrate-config prepare-secure --offline CONFIG_PATH` (writes
+  epoch 2 plus explicit `true`), or simply write `config_epoch = 2` and rely
+  on the activated default; pin the legacy posture instead with
+  `pin-legacy`. Canonical persistence, applied history, and effective-config
+  output materialize epoch-2 omission as explicit epoch 2 plus `true`;
+  SIGHUP still pins the complete startup tuple and reports drift as
+  restart-required; `downgrade-v0.64` materializes the effective `true`
+  before removing the epoch. Invalid epochs stay rejected, and the
+  `rfc8212_secure_default_ready` advisory still fires only on legacy
+  omission. (LAN-779)
 - `[global] dynamic_neighbor_limit` no longer enforces a 5000 ceiling; any
   value greater than 0 is accepted. Both consumers are live counter compares
   (inbound admission and the LRU eviction bound) with no pre-allocation, so

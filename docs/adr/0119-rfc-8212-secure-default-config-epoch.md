@@ -1,6 +1,6 @@
 # ADR-0119: RFC 8212 secure-default config epoch
 
-**Status:** Accepted (representation shipped; activation proof-gated)
+**Status:** Accepted (implemented; activation shipped)
 **Date:** 2026-07-29
 **Decision recorded:** 2026-08-08
 
@@ -26,7 +26,10 @@ The representation, transaction-materialization, legacy advisory, and offline
 migration/downgrade tranches are implemented. Migration is an explicit
 Linux-only, in-place operation with source/symlink stale fences, current-loader
 validation, atomic publication, dry-run, and an exact external v0.64.0 loader
-gate for downgrade. The M95 extension and activation remain gated below.
+gate for downgrade. Activation itself has since shipped under the gate below:
+the epoch-2/omitted cell now resolves to `epoch_2_default`, effective `true`,
+with per-seam revert-red proofs recorded on the activating change and the M95
+lab moved onto the activated cell.
 
 ## Decision
 

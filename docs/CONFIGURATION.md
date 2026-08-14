@@ -127,15 +127,18 @@ positive + negative test fixture under `src/test/rustbgpd/`.)
 
 `config_epoch` is an optional integer at the document root, before any TOML
 table. Omission permanently means epoch 1; the only accepted explicit values
-are `1` and `2`. It records config semantics for a later RFC 8212
-secure-default activation and does not infer intent from file age or release.
+are `1` and `2`. It records config semantics explicitly and never infers
+intent from file age or release.
 
-The current pre-activation behavior does not flip the default: epoch-less and
-epoch-1 omission of `[global].ebgp_requires_policy` remain effective `false`.
-Epoch 2 currently requires the boolean to be written explicitly as `true` or
-`false`; omission fails `--check`, startup, reload, and transaction validation
-with the exact edit required. Explicit booleans retain their value in either
-epoch.
+The ADR-0119 RFC 8212 secure default is active for exactly one cell:
+`config_epoch = 2` with `[global].ebgp_requires_policy` omitted resolves to
+effective `true` (source `epoch_2_default`), so unpoliced eBGP directions on
+an epoch-2 config fail closed by default. Epoch-less and epoch-1 omission
+remain effective `false` permanently — an untouched pre-epoch config never
+changes behavior on upgrade. An explicit `true` or `false` retains its stated
+value in every epoch, so `config_epoch = 2` plus
+`ebgp_requires_policy = false` is still a supported, deliberate opt-out.
+Invalid epochs (anything other than integer `1` or `2`) are rejected.
 
 Leaving the posture at legacy omission has one operator-visible consequence:
 every `rustbgpd --check` raises the `rfc8212_secure_default_ready` advisory,
@@ -145,12 +148,13 @@ plus boolean pair clears it.
 
 Daemon-written canonical config, applied history, runtime snapshot tokens, and
 effective config output materialize the effective epoch plus the effective
-boolean: omission becomes `config_epoch = 1`, while an explicit epoch 2 remains
-`config_epoch = 2`. Merely booting an epoch-less operator file does not rewrite
-its bytes.
+boolean: epoch-less omission becomes `config_epoch = 1` plus
+`ebgp_requires_policy = false`, and epoch-2 omission becomes
+`config_epoch = 2` plus `ebgp_requires_policy = true`. Merely booting an
+operator file does not rewrite its bytes.
 
 A supported config transaction with a real non-posture mutation atomically materializes the exact unchanged
-effective posture (for example, omission becomes epoch 1 plus explicit false). Posture-only, effective-value, or partial materialization changes are rejected.
+effective posture (legacy omission becomes epoch 1 plus explicit false; epoch-2 omission becomes epoch 2 plus explicit true). Posture-only, effective-value, or partial materialization changes are rejected.
 Boot, SIGHUP, and general diff candidates remain source-preserving; targeted CRUD is unchanged.
 
 Linux operators can make the representation change explicitly, offline and in
@@ -195,7 +199,7 @@ Required. Defines the local BGP speaker identity.
 | `honor_blackhole`   | bool   | no       | `false`              | Enable RFC 7999 receiver scoping on EBGP imports — see below |
 | `install_blackhole_discard` | bool | no | `false`              | Install kernel blackhole routes for accepted RFC 7999 host routes — see below |
 | `allow_blackhole_broad_prefixes` | bool | no | `false`           | Permit non-host BLACKHOLE discard installs when the FIB slice is enabled |
-| `ebgp_requires_policy` | bool | no       | `false`              | RFC 8212: require explicit operator import/export policy on eBGP sessions; raw omission is retained for `config_epoch`, while epoch-less/epoch-1 omission remains effective false. **Restart-required** — see below |
+| `ebgp_requires_policy` | bool | no       | epoch-dependent (`false` at epoch 1, `true` at epoch 2) | RFC 8212: require explicit operator import/export policy on eBGP sessions. Raw omission is retained alongside `config_epoch`: epoch-less/epoch-1 omission remains effective false, while omission under `config_epoch = 2` resolves to the activated secure default, effective true (source `epoch_2_default`). An explicit value always keeps its stated meaning. **Restart-required** — see below |
 | `multipath_relax`   | bool   | no       | `false`              | ADR-0066 multipath-relax: group unicast ECMP candidates by `AS_PATH` *length* instead of an exact `AS_PATH` match (FRR's `bgp bestpath as-path multipath-relax`). Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
 | `link_bandwidth_weighted` | bool | no   | `false`              | ADR-0068 weighted multipath: weight unicast ECMP next-hops by the lowest finite nonnegative RFC 10005 Link Bandwidth value when the whole equal-cost group carries a positive one; zero, missing, or unusable values fall back to equal cost. Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
 

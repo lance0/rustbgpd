@@ -1,10 +1,11 @@
 use super::*;
 
-/// ADR-0119 pre-activation matrix. Removing either raw `Option`, collapsing
-/// omission into false before posture derivation, or changing any accepted
-/// epoch/value cell makes at least one exact tuple red.
+/// ADR-0119 activation matrix. Removing either raw `Option`, collapsing
+/// omission into false before posture derivation, or changing any
+/// epoch/value cell — including the activated epoch-2/omitted cell —
+/// makes at least one exact tuple red.
 #[test]
-fn rfc8212_epoch_and_policy_presence_matrix_is_lossless_without_flipping_default() {
+fn rfc8212_epoch_and_policy_activation_matrix_is_lossless_and_exact() {
     for (epoch, epoch_raw, epoch_effective, epoch_source) in [
         (None, None, ConfigEpoch::V1, ConfigEpochSource::Omitted),
         (
@@ -32,10 +33,10 @@ fn rfc8212_epoch_and_policy_presence_matrix_is_lossless_without_flipping_default
             assert_eq!(posture.policy_raw, raw);
             assert_eq!(posture.policy_effective, effective);
             assert_eq!(posture.policy_source, source);
-            assert!(!posture.requires_explicit_policy);
         }
     }
 
+    // Epoch-less and epoch-1 omission remain permissive forever.
     for epoch in [None, Some("1")] {
         let posture = parse(&rfc8212_representation_toml(epoch, None))
             .unwrap()
@@ -44,20 +45,52 @@ fn rfc8212_epoch_and_policy_presence_matrix_is_lossless_without_flipping_default
         assert!(!posture.policy_effective);
         assert_eq!(posture.policy_source, Rfc8212PolicySource::LegacyOmission);
     }
+
+    // The single cell activation changed: epoch-2 omission is the secure
+    // default — effective true, distinct source, raw omission retained.
+    let posture = parse(&rfc8212_representation_toml(Some("2"), None))
+        .unwrap()
+        .rfc8212_posture();
+    assert_eq!(posture.config_epoch_raw, Some(ConfigEpoch::V2));
+    assert_eq!(posture.config_epoch_source, ConfigEpochSource::Explicit);
+    assert_eq!(posture.policy_raw, None);
+    assert!(posture.policy_effective);
+    assert_eq!(posture.policy_source, Rfc8212PolicySource::Epoch2Default);
 }
 
+/// ADR-0119 activation: the epoch-2/omitted cell loads with the secure
+/// default, canonical sinks materialize it explicitly, and no legacy
+/// advisory fires. Invalid epochs stay rejected in the same breath.
 #[test]
-fn rfc8212_epoch_two_omission_and_invalid_epochs_fail_closed() {
-    const EXACT: &str = "config_epoch = 2 requires [global].ebgp_requires_policy = true or [global].ebgp_requires_policy = false: the RFC 8212 secure default is not activated yet (ADR-0119 gates activation on its production-mutation proofs), so epoch 2 does not infer the omitted value. This is a pending activation, not a misconfiguration; add one explicit assignment";
+fn rfc8212_epoch_two_omission_activates_secure_default_and_invalid_epochs_stay_rejected() {
     let source = rfc8212_representation_toml(Some("2"), None);
-    assert_eq!(parse(&source).unwrap_err().to_string(), EXACT);
-    let schema_only = parse_schema_only(&source).unwrap();
-    assert!(schema_only.rfc8212_posture().requires_explicit_policy);
+    let config = parse(&source).unwrap();
+    assert!(config.rfc8212_posture().policy_effective);
+
+    // Durable persistence materializes the effective posture explicitly and
+    // round-trips byte-identically through the shared canonical renderer.
+    let persisted = persisted_config_document(&config).unwrap();
+    assert!(persisted.contains("config_epoch = 2"), "{persisted}");
+    assert!(
+        persisted.contains("ebgp_requires_policy = true"),
+        "{persisted}"
+    );
+    let reloaded = Config::load_toml_with_diagnostics(&persisted, "canonical persisted").unwrap();
+    let reloaded_posture = reloaded.rfc8212_posture();
+    assert!(reloaded_posture.policy_effective);
     assert_eq!(
-        persisted_config_document(&schema_only)
-            .unwrap_err()
-            .to_string(),
-        EXACT
+        reloaded_posture.policy_source,
+        Rfc8212PolicySource::ExplicitTrue
+    );
+    assert_eq!(persisted_config_document(&reloaded).unwrap(), persisted);
+
+    // The secure default is not a legacy omission; no advisory fires.
+    assert!(
+        config
+            .advisories()
+            .iter()
+            .all(|advisory| !advisory.headline.contains("rfc8212_secure_default_ready")),
+        "epoch-2 omission is the activated default, not a legacy posture"
     );
 
     for invalid in ["0", "-1", "3", "1.5", "\"2\""] {
@@ -65,6 +98,10 @@ fn rfc8212_epoch_two_omission_and_invalid_epochs_fail_closed() {
             .unwrap_err()
             .to_string();
         assert!(error.contains("config_epoch"), "{invalid}: {error}");
+        let omitted = parse(&rfc8212_representation_toml(Some(invalid), None))
+            .unwrap_err()
+            .to_string();
+        assert!(omitted.contains("config_epoch"), "{invalid}: {omitted}");
     }
 }
 
@@ -563,6 +600,45 @@ fn rfc8212_resolved_neighbors_carry_the_deny_before_peers_start() {
         peer.export_policy.as_ref(),
         super::RFC8212_MISSING_EXPORT_POLICY,
     );
+}
+
+/// ADR-0119 activation reaches ADR-0112 enforcement: under `config_epoch = 2`
+/// with the boolean omitted, an unpoliced governed neighbor carries the
+/// reserved deny in both directions exactly as explicit `true` does, while
+/// epoch-1 omission keeps the permit-all default. Reverting the epoch-aware
+/// arm of `rfc8212_posture()` makes the deny assertions red.
+#[test]
+fn rfc8212_epoch_two_omission_installs_reserved_deny_like_explicit_true() {
+    let cfg = parse(&format!(
+        "config_epoch = 2\n{}",
+        rfc8212_toml("", "", 65002, "")
+    ))
+    .unwrap();
+    assert_eq!(
+        cfg.rfc8212_posture().policy_source,
+        Rfc8212PolicySource::Epoch2Default
+    );
+    let resolved = cfg.resolved_neighbors().expect("startup roster resolves");
+    let peer = resolved.first().expect("one neighbor");
+    assert!(peer.rfc8212_external);
+    assert_reserved_deny(
+        peer.import_policy.as_ref(),
+        super::RFC8212_MISSING_IMPORT_POLICY,
+    );
+    assert_reserved_deny(
+        peer.export_policy.as_ref(),
+        super::RFC8212_MISSING_EXPORT_POLICY,
+    );
+
+    // Epoch-1 omission control: the permissive cell stays permissive.
+    let legacy = parse(&format!(
+        "config_epoch = 1\n{}",
+        rfc8212_toml("", "", 65002, "")
+    ))
+    .unwrap();
+    let resolved = legacy.resolved_neighbors().expect("legacy roster resolves");
+    let peer = resolved.first().expect("one neighbor");
+    assert!(peer.import_policy.is_none() && peer.export_policy.is_none());
 }
 
 /// What `rustbgpd --check` warns on. The query is independent of

@@ -239,7 +239,7 @@ that are stood up once at startup. Two flags are hot-pluggable.
 
 | Field | Class | Notes |
 |---|---|---|
-| root `config_epoch` | restart-required | ADR-0119 semantic epoch. Omission means epoch 1. A SIGHUP reports and pins raw/effective/source drift with the RFC 8212 boolean tuple. Before secure-default activation, epoch 2 with an omitted boolean is rejected at parse/validation time. |
+| root `config_epoch` | restart-required | ADR-0119 semantic epoch. Omission means epoch 1. A SIGHUP reports and pins raw/effective/source drift with the RFC 8212 boolean tuple. Epoch 2 with an omitted boolean resolves to the activated secure default: effective `true`, source `epoch_2_default`. |
 | `asn` | restart-required | Identity. |
 | `router_id` | restart-required | Identity. Advertised in every OPEN. |
 | `listen_port` | restart-required | The listen socket is created at startup. |

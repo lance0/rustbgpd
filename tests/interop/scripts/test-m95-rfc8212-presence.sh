@@ -2,6 +2,11 @@
 # M95 interop test — ADR-0112 step 4, live RFC 8212 import policy-presence
 # transitions against real sessions.
 #
+# Every config variant runs the ADR-0119 activated cell — `config_epoch = 2`
+# with `[global].ebgp_requires_policy` omitted — so the entire lab doubles as
+# the real-peer proof that the activated secure default (not an explicit
+# boolean) drives ADR-0112 enforcement end to end.
+#
 # What makes this test load-bearing is the pair of peers:
 #
 #   frr  (AS 65002) advertises RFC 2918 Route Refresh. A presence transition
@@ -61,6 +66,26 @@ docker exec "$BIRD" sh -c \
 # The daemon's own log is the only place a rejected reload explains itself, so
 # capture it to a file the assertions can read rather than to the exec's stdout.
 start_rustbgpd "exec /usr/local/bin/rustbgpd /etc/rustbgpd/config.toml >$DAEMON_LOG 2>&1"
+
+# ---------------------------------------------------------------------------
+# ADR-0119 premise: the running config is the activated epoch-2/omitted cell,
+# and the loader treats it as the secure default, not as a legacy omission.
+# ---------------------------------------------------------------------------
+
+if docker exec "$RUSTBGPD" grep -q '^config_epoch = 2$' /etc/rustbgpd/config.toml \
+    && ! docker exec "$RUSTBGPD" grep -qE '^[[:space:]]*ebgp_requires_policy[[:space:]]*=' \
+        /etc/rustbgpd/config.toml; then
+    ok "running config is the epoch-2/omitted ADR-0119 cell (premise of the whole lab)"
+else
+    fail "running config is not the epoch-2/omitted cell — the activation premise is vacuous"
+fi
+check_output=$(docker exec "$RUSTBGPD" /usr/local/bin/rustbgpd --check /etc/rustbgpd/config.toml 2>&1) \
+    || { fail "rustbgpd --check rejected the epoch-2/omitted config"; printf '%s\n' "$check_output" >&2; }
+if grep -q "rfc8212_secure_default_ready" <<<"$check_output"; then
+    fail "--check raised the legacy-omission advisory on the activated cell"
+else
+    ok "--check accepts the cell without the legacy-omission advisory"
+fi
 
 # ---------------------------------------------------------------------------
 # Helpers

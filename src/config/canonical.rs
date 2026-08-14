@@ -4,9 +4,9 @@ use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 
 use super::{
-    BfdProfileConfig, BmpConfig, Config, ConfigEpoch, ConfigError, DynamicNeighborConfig,
-    EthernetSegmentConfig, EventHistoryConfig, EvpnInstanceConfig, EvpnIpVrfConfig, FibTableConfig,
-    Global, GnmiDialoutConfig, InboundAdmissionConfig, ManagedNetdevsConfig, MrtConfig, Neighbor,
+    BfdProfileConfig, BmpConfig, Config, ConfigEpoch, DynamicNeighborConfig, EthernetSegmentConfig,
+    EventHistoryConfig, EvpnInstanceConfig, EvpnIpVrfConfig, FibTableConfig, Global,
+    GnmiDialoutConfig, InboundAdmissionConfig, ManagedNetdevsConfig, MrtConfig, Neighbor,
     PeerGroupConfig, PolicyConfig, PolicyStatementConfig, RpkiConfig, SecurityConfig,
 };
 
@@ -434,12 +434,6 @@ impl<'a> From<&'a Config> for CanonicalConfig<'a> {
 }
 
 pub(super) fn render(config: &Config) -> Result<String, toml::ser::Error> {
-    let posture = config.rfc8212_posture();
-    if posture.requires_explicit_policy {
-        return Err(serde::ser::Error::custom(
-            ConfigError::Rfc8212Epoch2PolicyOmission,
-        ));
-    }
     toml::to_string_pretty(&CanonicalConfig::from(config))
 }
 
@@ -460,13 +454,6 @@ fn render_document_bounded_with_hook(
     config: &mut Config,
     mut hook: impl FnMut(&'static str) -> Result<(), toml::ser::Error>,
 ) -> Result<(String, BoundedRenderStats), toml::ser::Error> {
-    let posture = config.rfc8212_posture();
-    if posture.requires_explicit_policy {
-        return Err(serde::ser::Error::custom(
-            ConfigError::Rfc8212Epoch2PolicyOmission,
-        ));
-    }
-
     let extraction = StatementExtraction::new(config);
     hook("after-extraction")?;
     let skeleton = toml::to_string_pretty(&CanonicalConfig::from(&*extraction.config))?;
@@ -540,12 +527,6 @@ pub(super) fn render_with_phase_observer(
     config: &Config,
     mut observe: impl FnMut(&'static str),
 ) -> Result<String, toml::ser::Error> {
-    let posture = config.rfc8212_posture();
-    if posture.requires_explicit_policy {
-        return Err(serde::ser::Error::custom(
-            ConfigError::Rfc8212Epoch2PolicyOmission,
-        ));
-    }
     let canonical = CanonicalConfig::from(config);
     let mut graph = toml::ser::Buffer::new();
     canonical.serialize(toml::ser::Serializer::pretty(&mut graph))?;

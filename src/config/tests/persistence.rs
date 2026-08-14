@@ -211,9 +211,51 @@ fn rfc8212_canonical_sinks_materialize_without_rewriting_boot_input() {
     );
 }
 
+/// ADR-0119 activated cell through every canonical sink: an epoch-2/omitted
+/// boot file stays byte-identical on load while durable persistence, the
+/// runtime snapshot token, and the redacted effective config are all
+/// indistinguishable from explicit `config_epoch = 2` plus
+/// `ebgp_requires_policy = true`. Losing the effective `true` at any sink
+/// makes an equality assertion red.
+#[test]
+fn rfc8212_epoch_two_omission_canonical_sinks_equal_explicit_true() {
+    let raw_source = format!(
+        "config_epoch = 2\n{}",
+        tier_authorized_uds_test_config(valid_toml())
+    );
+    let file = NamedTempFile::new().unwrap();
+    fs::write(file.path(), &raw_source).unwrap();
+    let raw = Config::load_with_diagnostics(file.path().to_str().unwrap()).unwrap();
+    assert_eq!(fs::read_to_string(file.path()).unwrap(), raw_source);
+    assert_eq!(raw.config_epoch, Some(ConfigEpoch::V2));
+    assert_eq!(raw.global.ebgp_requires_policy, None);
+    assert_eq!(
+        raw.rfc8212_posture().policy_source,
+        Rfc8212PolicySource::Epoch2Default
+    );
+
+    let explicit = parse(&rfc8212_representation_toml(Some("2"), Some(true))).unwrap();
+    let persisted = persisted_config_document(&raw).unwrap();
+    assert!(persisted.contains("config_epoch = 2"), "{persisted}");
+    assert!(
+        persisted.contains("ebgp_requires_policy = true"),
+        "{persisted}"
+    );
+
+    let key = RuntimeSnapshotKey::random();
+    assert_eq!(key.token(&raw).unwrap(), key.token(&explicit).unwrap());
+    assert_eq!(
+        raw.effective_redacted_toml().unwrap(),
+        explicit.effective_redacted_toml().unwrap()
+    );
+}
+
 /// Load-bearing transaction matrix. Removing the supported-mutation fence,
 /// accepting a partial/source-regressing tuple, or changing the exact
-/// canonical target makes a named row red.
+/// canonical target makes a named row red. The epoch-2/omitted rows pin the
+/// ADR-0119 activated cell: it materializes to explicit epoch 2 plus `true`
+/// with its effective value preserved, and every effective/source drift
+/// around it stays rejected.
 #[test]
 fn rfc8212_transaction_materialization_requires_real_mutation_and_exact_posture() {
     for (label, live_epoch, live_policy, candidate_epoch, candidate_policy) in [
@@ -221,6 +263,14 @@ fn rfc8212_transaction_materialization_requires_real_mutation_and_exact_posture(
         ("caller canonical", None, None, Some("1"), Some(false)),
         ("true posture", None, Some(true), None, Some(true)),
         ("epoch-only omission", Some("1"), None, Some("1"), None),
+        ("epoch-2 omission", Some("2"), None, Some("2"), None),
+        (
+            "epoch-2 caller canonical",
+            Some("2"),
+            None,
+            Some("2"),
+            Some(true),
+        ),
     ] {
         let live = rfc8212_transaction_fixture(live_epoch, live_policy, false);
         let mut candidate = rfc8212_transaction_fixture(candidate_epoch, candidate_policy, true);
@@ -231,12 +281,17 @@ fn rfc8212_transaction_materialization_requires_real_mutation_and_exact_posture(
             vec!["[[neighbors]] add"],
             "{label}"
         );
+        let live_posture = live.rfc8212_posture();
         let posture = candidate.rfc8212_posture();
-        assert_eq!(posture.config_epoch_raw, Some(ConfigEpoch::V1), "{label}");
+        assert_eq!(
+            posture.config_epoch_raw,
+            Some(live_posture.config_epoch_effective),
+            "{label}"
+        );
         assert_eq!(
             posture.policy_raw,
-            Some(posture.policy_effective),
-            "{label}"
+            Some(live_posture.policy_effective),
+            "{label}: materialization must preserve the live effective value"
         );
     }
 
@@ -254,6 +309,30 @@ fn rfc8212_transaction_materialization_requires_real_mutation_and_exact_posture(
             true,
         ),
         ("epoch move", None, None, Some("2"), Some(false), true),
+        (
+            "epoch-2 explicit-false drift",
+            Some("2"),
+            None,
+            Some("2"),
+            Some(false),
+            true,
+        ),
+        (
+            "epoch-2 source regression",
+            Some("2"),
+            Some(true),
+            Some("2"),
+            None,
+            true,
+        ),
+        (
+            "epoch-2 epoch move",
+            Some("2"),
+            None,
+            None,
+            Some(true),
+            true,
+        ),
     ] {
         let live = rfc8212_transaction_fixture(live_epoch, live_policy, false);
         let mut candidate = rfc8212_transaction_fixture(candidate_epoch, candidate_policy, mutate);

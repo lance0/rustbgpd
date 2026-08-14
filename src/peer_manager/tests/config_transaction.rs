@@ -882,3 +882,181 @@ md5_password = "new-secret"
     assert!(!diff.diff_json.contains("old-secret"));
     assert!(!diff.diff_json.contains("new-secret"));
 }
+
+/// ADR-0119 activated cell through the runtime transaction seams. With a live
+/// epoch-2/omitted config (effective `true`, source `epoch_2_default`):
+///
+/// - a unary Apply plan for a real non-tuple mutation materializes the
+///   committed candidate to explicit `config_epoch = 2` plus
+///   `ebgp_requires_policy = true` and receipts the exact tuple transition
+///   with route behavior unchanged;
+/// - a candidate that drifts the effective value to explicit `false` is
+///   rejected restart-required, never committed;
+/// - the trusted preloaded/rollback path commits the same canonical tuple.
+///
+/// Reverting the epoch-aware posture arm, the materialization guard, or the
+/// canonical target makes a named assertion red.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps the unary materialization, drift rejection, and preloaded rollback verdicts of the activated cell in one load-bearing scenario"
+)]
+async fn epoch_two_omission_transactions_materialize_and_reject_effective_drift() {
+    let mut current = load_test_config(
+        r#"
+config_epoch = 2
+
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+"#,
+    );
+    current.fib_tables.push(crate::config::FibTableConfig {
+        name: "edge".to_string(),
+        table_id: 1000,
+        metric: 200,
+        families: vec!["ipv4_unicast".to_string()],
+        allowed_peer_groups: Vec::new(),
+        allowed_neighbors: Vec::new(),
+        max_routes: None,
+        maximum_paths: None,
+        maximum_paths_ebgp: None,
+        maximum_paths_ibgp: None,
+    });
+    let live_posture = current.rfc8212_posture();
+    assert!(live_posture.policy_effective);
+    assert_eq!(
+        live_posture.policy_source,
+        crate::config::Rfc8212PolicySource::Epoch2Default
+    );
+
+    let mut fib_candidate = current.clone();
+    fib_candidate.fib_tables[0].metric = 201;
+    let fib_candidate_toml = toml::to_string_pretty(&fib_candidate).unwrap();
+    assert!(
+        fib_candidate_toml.contains("config_epoch = 2")
+            && !fib_candidate_toml.contains("ebgp_requires_policy"),
+        "raw candidate serialization must retain the omitted boolean"
+    );
+    let mut drift_candidate = fib_candidate.clone();
+    drift_candidate.global.ebgp_requires_policy = Some(false);
+    let drift_candidate_toml = toml::to_string_pretty(&drift_candidate).unwrap();
+
+    let (_tx, rx) = mpsc::channel(4);
+    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let mgr = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        current,
+    );
+    let responder = tokio::spawn(async move {
+        for _ in 0..3 {
+            let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
+                panic!("plan snapshot query missing");
+            };
+            reply
+                .send(rustbgpd_rib::UpdateGroupSnapshot { peers: Vec::new() })
+                .unwrap();
+        }
+    });
+
+    // Unary Apply seam: the epoch-cell tuple materializes canonically.
+    let plan = mgr
+        .plan_config_transaction(&fib_candidate_toml, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        plan.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Committable
+    );
+    assert_eq!(plan.supported_sections, vec!["[[fib_tables]]"]);
+    assert!(!plan.diff.has_restart_required_changes);
+    assert!(
+        plan.diff
+            .human_text
+            .contains("Informational transaction materialization"),
+        "{}",
+        plan.diff.human_text
+    );
+    assert!(
+        plan.diff.human_text.contains(
+            "[global].ebgp_requires_policy: raw=<omitted> effective=true \
+             source=epoch_2_default -> raw=true effective=true source=explicit_true"
+        ),
+        "{}",
+        plan.diff.human_text
+    );
+    let diff_json: serde_json::Value = serde_json::from_str(&plan.diff.diff_json).unwrap();
+    assert_eq!(
+        diff_json["informational"]["rfc8212_materialization"]["route_behavior_changed"],
+        false
+    );
+    let committed = plan
+        .committed_candidate
+        .as_ref()
+        .expect("committable plan must retain one candidate")
+        .as_str();
+    assert!(committed.contains("config_epoch = 2"), "{committed}");
+    assert!(
+        committed.contains("ebgp_requires_policy = true"),
+        "{committed}"
+    );
+
+    // Effective drift out of the activated cell stays restart-required.
+    let rejected = mgr
+        .plan_config_transaction(&drift_candidate_toml, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        rejected.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Rejected
+    );
+    assert!(rejected.diff.has_restart_required_changes);
+    assert!(
+        rejected
+            .diff
+            .human_text
+            .contains("[global].ebgp_requires_policy"),
+        "{}",
+        rejected.diff.human_text
+    );
+    assert!(rejected.committed_candidate.is_none());
+
+    // Trusted preloaded/rollback seam: the same canonical tuple commits.
+    let mut preloaded = fib_candidate.clone();
+    let rollback = mgr
+        .plan_preloaded_config_transaction(&mut preloaded, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        rollback.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Committable
+    );
+    assert_eq!(rollback.supported_sections, vec!["[[fib_tables]]"]);
+    assert_eq!(preloaded.config_epoch, Some(crate::config::ConfigEpoch::V2));
+    assert_eq!(preloaded.global.ebgp_requires_policy, Some(true));
+    let committed = rollback
+        .committed_candidate
+        .as_ref()
+        .expect("committable rollback plan must retain one candidate")
+        .as_str();
+    assert!(
+        committed.contains("ebgp_requires_policy = true"),
+        "{committed}"
+    );
+    responder.await.unwrap();
+}

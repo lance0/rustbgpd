@@ -58,7 +58,9 @@ where
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Configuration semantics epoch. Omission permanently means epoch 1;
-    /// only explicit integer values 1 and 2 are accepted.
+    /// only explicit integer values 1 and 2 are accepted. Epoch 2 activates
+    /// the RFC 8212 secure default: an omitted
+    /// `[global].ebgp_requires_policy` resolves to effective true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "ConfigEpoch", extend("default" = 1))]
     #[expect(
@@ -241,6 +243,10 @@ pub enum Rfc8212PolicySource {
     LegacyOmission,
     ExplicitFalse,
     ExplicitTrue,
+    /// ADR-0119 activated secure default: `config_epoch = 2` with the
+    /// boolean omitted resolves to effective `true`.
+    #[serde(rename = "epoch_2_default")]
+    Epoch2Default,
 }
 
 /// Lossless RFC 8212 representation derived from one raw config snapshot.
@@ -252,12 +258,16 @@ pub struct Rfc8212Posture {
     pub policy_raw: Option<bool>,
     pub policy_effective: bool,
     pub policy_source: Rfc8212PolicySource,
-    pub requires_explicit_policy: bool,
 }
 
 impl Config {
-    /// Derive the complete pre-activation RFC 8212 posture without erasing raw
-    /// presence. Epoch-2 omission is rejected by validation before use.
+    /// Derive the complete RFC 8212 posture without erasing raw presence.
+    ///
+    /// ADR-0119 activation matrix: an explicit boolean always retains its
+    /// stated value; epoch-less and epoch-1 omission remain effective `false`
+    /// forever; `config_epoch = 2` with the boolean omitted resolves to the
+    /// activated secure default, effective `true` with source
+    /// `epoch_2_default`.
     #[must_use]
     pub const fn rfc8212_posture(&self) -> Rfc8212Posture {
         let config_epoch_effective = match self.config_epoch {
@@ -268,11 +278,13 @@ impl Config {
             Some(_) => ConfigEpochSource::Explicit,
             None => ConfigEpochSource::Omitted,
         };
-        let (policy_effective, policy_source) = match self.global.ebgp_requires_policy {
-            Some(true) => (true, Rfc8212PolicySource::ExplicitTrue),
-            Some(false) => (false, Rfc8212PolicySource::ExplicitFalse),
-            None => (false, Rfc8212PolicySource::LegacyOmission),
-        };
+        let (policy_effective, policy_source) =
+            match (self.global.ebgp_requires_policy, config_epoch_effective) {
+                (Some(true), _) => (true, Rfc8212PolicySource::ExplicitTrue),
+                (Some(false), _) => (false, Rfc8212PolicySource::ExplicitFalse),
+                (None, ConfigEpoch::V2) => (true, Rfc8212PolicySource::Epoch2Default),
+                (None, ConfigEpoch::V1) => (false, Rfc8212PolicySource::LegacyOmission),
+            };
         Rfc8212Posture {
             config_epoch_raw: self.config_epoch,
             config_epoch_effective,
@@ -280,8 +292,6 @@ impl Config {
             policy_raw: self.global.ebgp_requires_policy,
             policy_effective,
             policy_source,
-            requires_explicit_policy: matches!(config_epoch_effective, ConfigEpoch::V2)
-                && self.global.ebgp_requires_policy.is_none(),
         }
     }
 }
@@ -814,11 +824,14 @@ pub struct Global {
     #[serde(default)]
     pub allow_blackhole_broad_prefixes: bool,
     /// Require explicit operator import/export policy on EBGP sessions
-    /// (RFC 8212). Raw omission is retained for `config_epoch`; epoch-less and
-    /// epoch-1 omission remain effective false, preserving the historical
-    /// treatment of an EBGP session with no resolved policy chain as
-    /// permit-all. Before secure-default activation, epoch 2 requires an
-    /// explicit true or false value.
+    /// (RFC 8212). Raw omission is retained alongside `config_epoch`; an
+    /// explicit value always keeps its stated meaning. Epoch-less and
+    /// epoch-1 omission remain effective false forever, preserving the
+    /// historical treatment of an EBGP session with no resolved policy
+    /// chain as permit-all. Under `config_epoch = 2`, omission resolves to
+    /// the ADR-0119 activated secure default: effective true
+    /// (source `epoch_2_default`), so unpoliced EBGP directions fail
+    /// closed as RFC 8212 requires.
     ///
     /// **Restart-required.** The enforcement mode is read once at startup and
     /// pinned across SIGHUP: a reload reports a changed value as
@@ -2609,10 +2622,6 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("failed to parse TOML: {0}")]
     Parse(#[from] toml::de::Error),
-    #[error(
-        "config_epoch = 2 requires [global].ebgp_requires_policy = true or [global].ebgp_requires_policy = false: the RFC 8212 secure default is not activated yet (ADR-0119 gates activation on its production-mutation proofs), so epoch 2 does not infer the omitted value. This is a pending activation, not a misconfiguration; add one explicit assignment"
-    )]
-    Rfc8212Epoch2PolicyOmission,
     #[error("invalid local ASN {value}: AS 0 is reserved (RFC 7607 section 2)")]
     InvalidLocalAsn { value: u32 },
     #[error("invalid router_id {value:?}: {reason}")]

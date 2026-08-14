@@ -15,8 +15,11 @@
 #        genuinely cannot be asked to re-advertise. Nothing is mocked: the
 #        capability is absent from its OPEN.
 #
-# rustbgpd (AS 65001) runs `[global] ebgp_requires_policy = true` in every
-# config variant — the knob is restart-required, so no reload flips it.
+# rustbgpd (AS 65001) runs the ADR-0119 activated cell — `config_epoch = 2`
+# with `[global].ebgp_requires_policy` omitted (effective true, source
+# epoch_2_default) — in every config variant. The tuple is restart-required,
+# so no reload flips it, and the lab proves the activated secure default
+# drives real enforcement.
 #
 # Phases (see tests/interop/scripts/test-m95-rfc8212-presence.sh):
 #   1. Remove the global import chain while BOTH peers inherit it. BIRD cannot
