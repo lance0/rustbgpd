@@ -74,6 +74,7 @@ Start here if you have never run the daemon.
 | [adr/](adr/README.md) | Architecture Decision Records for every significant protocol and design choice |
 | [USE_CASES.md](USE_CASES.md) | Deployment scenarios and their architecture (for step-by-step configs, see the cookbook) |
 | [RFC_NOTES.md](RFC_NOTES.md) | Per-RFC conformance notes: interpretations, deviations, supported standards at a glance |
+| [aspa-conformance.md](aspa-conformance.md) | Per-procedure ASPA conformance against the verification draft, the §5.6 mitigation boundary, and route-server rollout positioning |
 | [OPERATIONAL_PROOF.md](OPERATIONAL_PROOF.md) | Roll-up of operational evidence: interop, dataplane, scale, memory, soaks |
 | [RECEIPTS.md](RECEIPTS.md) | Index of labs and measurements backing every wire-behavior and performance claim |
 | [BENCHMARKS.md](BENCHMARKS.md) | Criterion micro-benchmarks and cross-stack perf snapshots |
