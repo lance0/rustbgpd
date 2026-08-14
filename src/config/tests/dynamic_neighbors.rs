@@ -645,18 +645,21 @@ log_format = "json"
 
 #[test]
 fn dynamic_neighbor_limit_valid_accepted() {
+    // 50000 exceeds the removed 5000 ceiling: any positive value is
+    // accepted, since both consumers are live counter compares with no
+    // pre-allocation.
     let toml = r#"
 [global]
 asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
-dynamic_neighbor_limit = 500
+dynamic_neighbor_limit = 50000
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 "#;
     let config = parse(toml).unwrap();
-    assert_eq!(config.global.dynamic_neighbor_limit, Some(500));
+    assert_eq!(config.global.dynamic_neighbor_limit, Some(50000));
 }
 
 #[test]

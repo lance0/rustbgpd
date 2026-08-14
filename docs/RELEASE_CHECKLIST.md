@@ -208,7 +208,7 @@ omission.
 ```bash
 # Each built-in profile emits a starter config that passes the strict gate.
 for p in lab edge; do
-  ./target/release/rustbgpd --init-config "$p" --stdout > "/tmp/init-$p.toml"
+  ./target/release/rustbgpd --init-config "$p" > "/tmp/init-$p.toml"
   ./target/release/rustbgpd --check --strict "/tmp/init-$p.toml"  # expect: config OK
 done
 
@@ -225,7 +225,7 @@ sed "s#/run/rustbgpd/grpc-test-only-operator.token#$PWD/tests/fixtures/grpc-test
 
 # Guards must exit non-zero:
 ./target/release/rustbgpd --stdout                              # --stdout without --init-config
-./target/release/rustbgpd --init-config lab --stdout --check x  # --init-config combined with --check/--diff
+./target/release/rustbgpd --init-config lab --check x           # --init-config combined with --check/--diff
 ./target/release/rustbgpd --strict /tmp/init-lab.toml           # --strict without --check
 ```
 

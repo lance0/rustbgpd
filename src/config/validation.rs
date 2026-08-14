@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
@@ -1313,12 +1313,16 @@ impl Config {
 
         validate_tcp_ao_listener_capacity(self, &parsed_dynamic_prefixes)?;
 
-        // Validate dynamic_neighbor_limit range
+        // A zero limit would silently reject every dynamic neighbor; an
+        // operator who wants that removes the [[dynamic_neighbors]] ranges
+        // instead. There is no upper bound: both consumers are live counter
+        // compares (inbound admission and the LRU eviction bound), nothing
+        // is pre-allocated.
         if let Some(limit) = self.global.dynamic_neighbor_limit
-            && (limit == 0 || limit > 5000)
+            && limit == 0
         {
             return Err(ConfigError::InvalidDynamicNeighbor {
-                reason: format!("dynamic_neighbor_limit must be 1..=5000, got {limit}"),
+                reason: "dynamic_neighbor_limit must be greater than 0".to_string(),
             });
         }
 
@@ -1518,13 +1522,7 @@ fn validate_managed_netdevs(config: &Config) -> Result<(), ConfigError> {
     if !owner_token.is_empty() {
         validate_managed_token(owner_token, "managed_netdevs.owner_token")?;
     }
-    if managed_netdevs_has_rows(managed) && owner_token.is_empty() {
-        return Err(ConfigError::InvalidManagedNetdev {
-            reason:
-                "managed_netdevs.owner_token is required when managed netdev rows are configured"
-                    .to_string(),
-        });
-    }
+    require_managed_netdev_owner_token(managed)?;
 
     let mut names = HashSet::new();
     validate_managed_bridges(&managed.bridges, owner_token, &mut names)?;
@@ -1706,6 +1704,62 @@ fn managed_netdevs_has_rows(managed: &ManagedNetdevsConfig) -> bool {
         || !managed.vlan_uppers.is_empty()
 }
 
+/// Owner-token requirement shared by config-load validation and
+/// [`Config::resolve_managed_netdevs`]: managed netdev rows without an
+/// owner token fail closed at both call sites with the same diagnostic.
+pub(super) fn require_managed_netdev_owner_token(
+    managed: &ManagedNetdevsConfig,
+) -> Result<(), ConfigError> {
+    if managed_netdevs_has_rows(managed) && managed.owner_token.is_empty() {
+        return Err(ConfigError::InvalidManagedNetdev {
+            reason:
+                "managed_netdevs.owner_token is required when managed netdev rows are configured"
+                    .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Resolve one managed SVD VXLAN's VLAN→VNI bindings from the
+/// `[[evpn_instances]]` rows on its bridge. Shared by config-load
+/// validation and [`Config::resolve_managed_netdevs`] so both call
+/// sites reject an out-of-range `bridge_vlan` and conflicting VNI
+/// mappings with the same diagnostics.
+pub(super) fn svd_vxlan_vlan_bindings(
+    config: &Config,
+    svd: &ManagedSvdVxlanNetdevConfig,
+) -> Result<BTreeMap<u16, u32>, ConfigError> {
+    let mut bindings = BTreeMap::new();
+    for inst in config
+        .evpn_instances
+        .iter()
+        .filter(|inst| inst.bridge.as_deref() == Some(svd.bridge.as_str()))
+    {
+        let Some(vlan) = inst.bridge_vlan else {
+            continue;
+        };
+        let vlan = u16::try_from(vlan).map_err(|_| ConfigError::InvalidManagedNetdev {
+            reason: format!(
+                "managed SVD VXLAN {:?}: bridge {:?} instance VNI {} has invalid bridge_vlan {}",
+                svd.name, svd.bridge, inst.vni, vlan
+            ),
+        })?;
+        if let Some(&existing) = bindings.get(&vlan) {
+            if existing != inst.vni {
+                return Err(ConfigError::InvalidManagedNetdev {
+                    reason: format!(
+                        "managed SVD VXLAN {:?}: bridge {:?} bridge_vlan {} maps to conflicting VNIs {} and {}; each VLAN must map to exactly one VNI",
+                        svd.name, svd.bridge, vlan, existing, inst.vni
+                    ),
+                });
+            }
+        } else {
+            bindings.insert(vlan, inst.vni);
+        }
+    }
+    Ok(bindings)
+}
+
 fn validate_managed_bridges(
     bridges: &[ManagedBridgeNetdevConfig],
     owner_token: &str,
@@ -1821,34 +1875,7 @@ fn validate_managed_svd_vxlans(
                 ),
             });
         }
-        let mut bindings: HashMap<u16, u32> = HashMap::new();
-        for inst in config
-            .evpn_instances
-            .iter()
-            .filter(|inst| inst.bridge.as_deref() == Some(svd.bridge.as_str()))
-        {
-            let Some(vlan) = inst.bridge_vlan else {
-                continue;
-            };
-            let vlan = u16::try_from(vlan).map_err(|_| ConfigError::InvalidManagedNetdev {
-                reason: format!(
-                    "managed SVD VXLAN {:?}: bridge {:?} instance VNI {} has invalid bridge_vlan {}",
-                    svd.name, svd.bridge, inst.vni, vlan
-                ),
-            })?;
-            if let Some(&existing) = bindings.get(&vlan) {
-                if existing != inst.vni {
-                    return Err(ConfigError::InvalidManagedNetdev {
-                        reason: format!(
-                            "managed SVD VXLAN {:?}: bridge {:?} bridge_vlan {} maps to conflicting VNIs {} and {}; each VLAN must map to exactly one VNI",
-                            svd.name, svd.bridge, vlan, existing, inst.vni
-                        ),
-                    });
-                }
-            } else {
-                bindings.insert(vlan, inst.vni);
-            }
-        }
+        let bindings = svd_vxlan_vlan_bindings(config, svd)?;
         if bindings.is_empty() {
             return Err(ConfigError::InvalidManagedNetdev {
                 reason: format!(

@@ -1,4 +1,4 @@
-//! Starter config profiles for `rustbgpd --init-config <profile> --stdout`.
+//! Starter config profiles for `rustbgpd --init-config <profile>`.
 //!
 //! Each profile is a **hand-curated, commented** TOML string — not a
 //! serialized `Config` value. Serializing the real struct would emit a

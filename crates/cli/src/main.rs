@@ -1140,8 +1140,6 @@ enum SnapshotAction {
 
 #[derive(Subcommand)]
 enum BfdAction {
-    /// List all BFD sessions (default)
-    List,
     /// Show a single BFD session by peer address
     Show {
         /// Peer address
@@ -1460,16 +1458,6 @@ enum EventsAction {
 
 #[derive(Subcommand)]
 enum EvpnAction {
-    /// List EVPN routes (default action — same as omitting the subcommand).
-    List {
-        #[arg(long)]
-        route_type: Option<u32>,
-        /// Neighbor IP address filter
-        #[arg(long = "neighbor", visible_alias = "peer", value_name = "NEIGHBOR")]
-        peer: Option<String>,
-        #[arg(long)]
-        rd: Option<String>,
-    },
     /// Inject a Type 2 MAC/IP route.
     AddMacIp {
         /// Route Distinguisher, "asn:value" / "ip:value".
@@ -2330,7 +2318,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             Some(BfdAction::Show { address }) => {
                 commands::bfd::show(connection, &address, json).await
             }
-            Some(BfdAction::List) | None => commands::bfd::list(connection, json).await,
+            None => commands::bfd::list(connection, json).await,
         },
 
         Command::Config { action } => match action {
@@ -2991,11 +2979,6 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             rd,
         } => match action {
             None => commands::evpn::list(connection, route_type, peer, rd, json).await,
-            Some(EvpnAction::List {
-                route_type,
-                peer,
-                rd,
-            }) => commands::evpn::list(connection, route_type, peer, rd, json).await,
             Some(EvpnAction::AddMacIp {
                 rd,
                 ethernet_tag,

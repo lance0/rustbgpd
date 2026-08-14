@@ -157,12 +157,12 @@
   },
   "cli": {
     "stability_scope": "command_path_and_name_only",
-    "stable_command_paths": ["config abort", "config apply", "config confirm", "config diff", "config effective", "config plan", "config status", "diff", "diff advertised", "diff snapshot", "diff snapshot from-bmp", "diff snapshot from-mrt", "doctor", "dynamic-neighbor", "events", "global", "gshut", "health", "metrics", "mrt-dump", "neighbor", "neighbor-set", "peer-group", "policy check", "policy explain", "policy list", "policy stats", "policy test", "rib", "rib advertised", "rib received", "shutdown"],
+    "stable_command_paths": ["config abort", "config apply", "config confirm", "config diff", "config effective", "config plan", "config status", "diff advertised", "diff snapshot", "diff snapshot from-bmp", "diff snapshot from-mrt", "doctor", "dynamic-neighbor", "events", "global", "gshut", "health", "metrics", "mrt-dump", "neighbor", "neighbor-set", "peer-group", "policy check", "policy explain", "policy list", "policy stats", "policy test", "rib", "rib advertised", "rib received", "shutdown"],
     "scoped_rr_only_command_paths": ["orr", "rib bgpls", "rib labeled", "rib rtc", "rib vpn", "topology links", "topology nodes"],
     "versioned_json_contracts": [
       {
         "id": "rbgp-ribdiff/1",
-        "command_paths": ["diff", "diff advertised"],
+        "command_paths": ["diff advertised"],
         "source": "crates/cli/src/ribdiff.rs",
         "test": "json_schema_golden",
         "test_linkage": "assert_ribdiff_inventory_contract",
@@ -180,7 +180,7 @@
       },
       {
         "id": "rbgp-ribsnap/1",
-        "command_paths": ["diff", "diff advertised", "diff snapshot", "diff snapshot from-bmp", "diff snapshot from-mrt"],
+        "command_paths": ["diff advertised", "diff snapshot", "diff snapshot from-bmp", "diff snapshot from-mrt"],
         "source": "crates/cli/src/commands/diff.rs",
         "test": "ribsnap_json_contract_floor_matches_producer_goldens",
         "test_linkage": "ribsnap_inventory_contract",

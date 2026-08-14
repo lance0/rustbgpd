@@ -1103,19 +1103,18 @@ impl Config {
     ///
     /// # Errors
     /// Returns [`ConfigError::InvalidManagedNetdev`] if a caller bypassed
-    /// validation and left bridge rows without an owner token.
+    /// validation: the owner-token requirement and the SVD VLAN→VNI
+    /// resolution run through the same shared functions the config-load
+    /// validation pass uses, so both call sites fail closed with
+    /// identical diagnostics.
     pub fn resolve_managed_netdevs(
         &self,
     ) -> Result<rustbgpd_evpn::ManagedNetdevTable, ConfigError> {
         let owner_token = self.managed_netdevs.owner_token.as_str();
-        if self.managed_netdevs_empty_without_owner(owner_token) {
-            return Ok(rustbgpd_evpn::ManagedNetdevTable::new());
-        }
+        validation::require_managed_netdev_owner_token(&self.managed_netdevs)?;
         if owner_token.is_empty() {
-            return Err(ConfigError::InvalidManagedNetdev {
-                reason: "managed_netdevs.owner_token is required when managed netdev rows are configured"
-                    .to_string(),
-            });
+            // The shared guard above proved there are no rows either.
+            return Ok(rustbgpd_evpn::ManagedNetdevTable::new());
         }
         let bridges = self
             .managed_netdevs
@@ -1203,16 +1202,6 @@ impl Config {
         ))
     }
 
-    fn managed_netdevs_empty_without_owner(&self, owner_token: &str) -> bool {
-        self.managed_netdevs.bridges.is_empty()
-            && self.managed_netdevs.vxlans.is_empty()
-            && self.managed_netdevs.svd_vxlans.is_empty()
-            && self.managed_netdevs.vrfs.is_empty()
-            && self.managed_netdevs.l3vxlans.is_empty()
-            && self.managed_netdevs.vlan_uppers.is_empty()
-            && owner_token.is_empty()
-    }
-
     fn resolve_managed_svd_vxlans(
         &self,
     ) -> Result<BTreeMap<String, rustbgpd_evpn::ManagedSvdVxlanNetdevSpec>, ConfigError> {
@@ -1220,31 +1209,7 @@ impl Config {
             .svd_vxlans
             .iter()
             .map(|svd| {
-                let mut bindings = BTreeMap::new();
-                for inst in self.evpn_instances.iter().filter(|inst| {
-                    inst.bridge.as_deref() == Some(svd.bridge.as_str())
-                        && inst.bridge_vlan.is_some()
-                }) {
-                    let vlan = inst.bridge_vlan.expect("filtered Some");
-                    let bridge_vlan =
-                        u16::try_from(vlan).map_err(|_| ConfigError::InvalidManagedNetdev {
-                            reason: format!(
-                                "managed SVD VXLAN {:?}: bridge {:?} instance VNI {} has invalid bridge_vlan {}",
-                                svd.name, svd.bridge, inst.vni, vlan
-                            ),
-                        })?;
-                    if let Some(&existing) = bindings.get(&bridge_vlan)
-                        && existing != inst.vni
-                    {
-                        return Err(ConfigError::InvalidManagedNetdev {
-                            reason: format!(
-                                "managed SVD VXLAN {:?}: bridge {:?} bridge_vlan {} maps to conflicting VNIs {} and {}; each VLAN must map to exactly one VNI",
-                                svd.name, svd.bridge, bridge_vlan, existing, inst.vni
-                            ),
-                        });
-                    }
-                    bindings.insert(bridge_vlan, inst.vni);
-                }
+                let bindings = validation::svd_vxlan_vlan_bindings(self, svd)?;
                 Ok((
                     svd.name.clone(),
                     rustbgpd_evpn::ManagedSvdVxlanNetdevSpec {
