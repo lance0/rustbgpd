@@ -9589,10 +9589,17 @@ remote_asn = 65002
     }
 
     async fn reload_then_persist_policy_after_desired_refresh(new_toml: &str) -> (Config, Config) {
+        reload_then_persist_policy_after_desired_refresh_from(baseline_toml(), new_toml).await
+    }
+
+    async fn reload_then_persist_policy_after_desired_refresh_from(
+        initial_toml: &str,
+        new_toml: &str,
+    ) -> (Config, Config) {
         use rustbgpd_api::peer_types::{ConfigEvent, NamedPolicyDefinition};
 
         let path = unique_temp_path("reload-desired-refresh");
-        std::fs::write(&path, baseline_toml()).unwrap();
+        std::fs::write(&path, initial_toml).unwrap();
         let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
@@ -9779,6 +9786,68 @@ remote_asn = 65002
         assert!(
             disk.rfc8212_posture().policy_effective,
             "desired/disk snapshot must reflect the operator's opt-in"
+        );
+    }
+
+    /// ADR-0119 activated cell through the SIGHUP seam: a daemon running on
+    /// `config_epoch = 2` with the boolean omitted (effective `true`, source
+    /// `epoch_2_default`) must stay pinned on that startup posture when the
+    /// on-disk file drifts to explicit `false`. Hot-applying the drift would
+    /// silently disable enforcement on every EBGP session inside a reload.
+    /// Reverting the reload-time posture pin makes the runtime assertion red.
+    #[tokio::test]
+    async fn reload_pin_epoch_two_omission_keeps_runtime_secure_default() {
+        let initial_toml = format!("config_epoch = 2\n{}", baseline_toml());
+        let new_toml = format!(
+            "config_epoch = 2\n{}",
+            baseline_toml().replace(
+                "listen_port = 179",
+                "listen_port = 179\nebgp_requires_policy = false",
+            )
+        );
+        let (runtime, disk) =
+            reload_then_persist_policy_after_desired_refresh_from(&initial_toml, &new_toml).await;
+
+        let runtime_posture = runtime.rfc8212_posture();
+        assert!(
+            runtime_posture.policy_effective,
+            "runtime must stay pinned to the activated secure default"
+        );
+        assert_eq!(
+            runtime_posture.policy_source,
+            crate::config::Rfc8212PolicySource::Epoch2Default,
+            "the pin must retain the complete startup tuple, not just the value"
+        );
+        assert!(
+            !disk.rfc8212_posture().policy_effective,
+            "desired/disk snapshot must carry the operator's explicit opt-out \
+             forward for a restart to adopt"
+        );
+    }
+
+    /// ADR-0119 activated cell through the runtime CRUD persistence seam: a
+    /// gRPC-style mutation on an epoch-2/omitted daemon rewrites the main
+    /// file canonically — explicit `config_epoch = 2` plus explicit
+    /// `ebgp_requires_policy = true` — never dropping the activated cell back
+    /// to omission or to a legacy epoch. Bypassing the canonical writer for
+    /// the durable sink makes the raw-presence assertions red.
+    #[tokio::test]
+    async fn crud_persist_on_epoch_two_omission_materializes_secure_default() {
+        let cell_toml = format!("config_epoch = 2\n{}", baseline_toml());
+        let (runtime, disk) =
+            reload_then_persist_policy_after_desired_refresh_from(&cell_toml, &cell_toml).await;
+
+        let runtime_posture = runtime.rfc8212_posture();
+        assert!(runtime_posture.policy_effective);
+        assert_eq!(
+            runtime_posture.policy_source,
+            crate::config::Rfc8212PolicySource::Epoch2Default
+        );
+        assert_eq!(disk.config_epoch, Some(crate::config::ConfigEpoch::V2));
+        assert_eq!(disk.global.ebgp_requires_policy, Some(true));
+        assert_eq!(
+            disk.rfc8212_posture().policy_source,
+            crate::config::Rfc8212PolicySource::ExplicitTrue
         );
     }
 

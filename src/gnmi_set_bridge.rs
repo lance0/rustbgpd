@@ -1176,6 +1176,53 @@ description = "old"
         }
     }
 
+    /// ADR-0119 activated cell through the gNMI Set seam: a targeted leaf
+    /// edit on an epoch-2/omitted running config keeps the complete raw
+    /// tuple — epoch 2 explicit, boolean omitted, posture `epoch_2_default`
+    /// effective `true` — so the shared transaction planner downstream sees
+    /// the exact live posture, not a collapsed or legacy one.
+    #[test]
+    fn set_preserves_epoch_two_omission_posture() {
+        let config: Config = toml::from_str(&format!(
+            "config_epoch = 2\n{}",
+            tier_authorized_uds_test_config(
+                r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 1179
+
+[global.telemetry]
+log_format = "plain"
+
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+description = "old"
+"#,
+            )
+        ))
+        .unwrap();
+        let candidate = apply_transaction_to_config(
+            config,
+            &transaction(vec![update(
+                "192.0.2.1",
+                "description",
+                TypedValue::JsonIetfVal(br#""new""#.to_vec()),
+            )]),
+        )
+        .unwrap();
+
+        assert_eq!(candidate.config_epoch, Some(crate::config::ConfigEpoch::V2));
+        assert_eq!(candidate.global.ebgp_requires_policy, None);
+        let posture = candidate.rfc8212_posture();
+        assert!(posture.policy_effective);
+        assert_eq!(
+            posture.policy_source,
+            crate::config::Rfc8212PolicySource::Epoch2Default
+        );
+    }
+
     #[test]
     fn set_peer_as_creates_static_neighbor() {
         let candidate = apply_transaction_to_config(

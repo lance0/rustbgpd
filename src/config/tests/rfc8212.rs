@@ -602,6 +602,45 @@ fn rfc8212_resolved_neighbors_carry_the_deny_before_peers_start() {
     );
 }
 
+/// ADR-0119 activation reaches ADR-0112 enforcement: under `config_epoch = 2`
+/// with the boolean omitted, an unpoliced governed neighbor carries the
+/// reserved deny in both directions exactly as explicit `true` does, while
+/// epoch-1 omission keeps the permit-all default. Reverting the epoch-aware
+/// arm of `rfc8212_posture()` makes the deny assertions red.
+#[test]
+fn rfc8212_epoch_two_omission_installs_reserved_deny_like_explicit_true() {
+    let cfg = parse(&format!(
+        "config_epoch = 2\n{}",
+        rfc8212_toml("", "", 65002, "")
+    ))
+    .unwrap();
+    assert_eq!(
+        cfg.rfc8212_posture().policy_source,
+        Rfc8212PolicySource::Epoch2Default
+    );
+    let resolved = cfg.resolved_neighbors().expect("startup roster resolves");
+    let peer = resolved.first().expect("one neighbor");
+    assert!(peer.rfc8212_external);
+    assert_reserved_deny(
+        peer.import_policy.as_ref(),
+        super::RFC8212_MISSING_IMPORT_POLICY,
+    );
+    assert_reserved_deny(
+        peer.export_policy.as_ref(),
+        super::RFC8212_MISSING_EXPORT_POLICY,
+    );
+
+    // Epoch-1 omission control: the permissive cell stays permissive.
+    let legacy = parse(&format!(
+        "config_epoch = 1\n{}",
+        rfc8212_toml("", "", 65002, "")
+    ))
+    .unwrap();
+    let resolved = legacy.resolved_neighbors().expect("legacy roster resolves");
+    let peer = resolved.first().expect("one neighbor");
+    assert!(peer.import_policy.is_none() && peer.export_policy.is_none());
+}
+
 /// What `rustbgpd --check` warns on. The query is independent of
 /// `ebgp_requires_policy`: the knob decides whether an unpoliced direction is
 /// permit-all or reserved-deny, not whether it is worth reporting.

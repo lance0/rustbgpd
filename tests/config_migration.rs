@@ -410,6 +410,10 @@ fn downgrade_materializes_effective_bool_removes_epoch_and_runs_exact_validator(
             ),
             true,
         ),
+        // ADR-0119 activated cell: epoch-2 omission is effective `true`, so
+        // downgrade output must materialize the explicit boolean the epoch-less
+        // v0.64 loader needs to preserve enforcement.
+        (format!("config_epoch = 2\n{CONFIG}"), true),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
