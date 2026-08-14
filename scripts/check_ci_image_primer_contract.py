@@ -13,7 +13,7 @@ from pathlib import Path
 INTEROP = (
     "m1 m13 m80 m15 m10 m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 "
     "m24 m81 m82 m83 m85 m94 m86 m25 m29 m30 m34 m35 m35b m35c m41 "
-    "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91 m92"
+    "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91 m92 m84"
 ).split()
 KERNEL = (
     "m36 m37 m37-ip m38 m39 m39b m48 m60 m61 m62 m40 m42 m50 m52 "
@@ -92,17 +92,17 @@ PERMISSION_HASHES = {
     "kernel-dataplane.yml": "6f1d70d72bad231d43c575acef6946580e439c879794ed2ea1f4a40340245172",
 }
 CALL_HASHES = {
-    "interop.yml": "baf8da4607ed5e36ea6d2a656f05df3c87449456159dd4c847d51588ff0a96b5",
+    "interop.yml": "59a909cca623733c8407b8bc706443ee54d6a2451169af0f73a81faed8badd6e",
     "kernel-dataplane.yml": "310ed2344bd6ff3f766580f704cc77fec4be0a2103a943e2ad837f497af346c3",
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 86,
+        "actions/checkout@v7": 87,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95": 2,
-        "docker/setup-buildx-action@v4": 44,
-        "docker/build-push-action@v7": 45,
+        "docker/setup-buildx-action@v4": 45,
+        "docker/build-push-action@v7": 46,
         "actions/cache@v6": 7,
         "actions/upload-artifact@v7": 8,
         "actions/download-artifact@v8": 6,

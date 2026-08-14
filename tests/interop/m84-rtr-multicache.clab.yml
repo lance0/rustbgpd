@@ -33,7 +33,6 @@
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
-#   docker pull nlnetlabs/routinator:latest
 #   containerlab deploy -t tests/interop/m84-rtr-multicache.clab.yml
 #   bash tests/interop/scripts/test-m84-rtr-multicache.sh
 #   containerlab destroy -t tests/interop/m84-rtr-multicache.clab.yml --cleanup
@@ -72,7 +71,8 @@ topology:
 
     routinator:
       kind: linux
-      image: nlnetlabs/routinator:latest
+      # Routinator 0.15.2 (digest resolved from :latest on 2026-08-14)
+      image: nlnetlabs/routinator@sha256:bc57d6e973c3f34fec03ef6fec09e17e405f56f084bf2252a8d54bd2ff3ca597
       binds:
         - ./configs/routinator-m84-slurm.json:/data/slurm.json:ro
       # Offline + deterministic: no TALs, data comes from the SLURM
@@ -84,7 +84,8 @@ topology:
 
     stayrtr:
       kind: linux
-      image: rpki/stayrtr:latest
+      # StayRTR 0.6.4 (digest resolved from :latest on 2026-08-14)
+      image: rpki/stayrtr@sha256:cdb93c0b661d97179a5525e00caf7d9e693a04da3b9002f7e24bebb194d9a77b
       binds:
         - ./configs/rpki-vrps-m84.json:/data/vrps.json:ro
       cmd: >-
