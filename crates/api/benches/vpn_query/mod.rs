@@ -558,7 +558,7 @@ fn receipt_json(value: &QueryReceipt) -> serde_json::Value {
     })
 }
 
-fn main() {
+pub(crate) fn main() {
     let args: Vec<_> = std::env::args().filter(|arg| arg != "--bench").collect();
     let (routes, case, output, timeout, declared_cpu) = match args.as_slice() {
         [_, mode, case, output, cpu] if mode == "smoke" && (case == "U" || case == "F") => (

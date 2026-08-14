@@ -7,7 +7,7 @@ trap 'rm -rf "$tmp_dir"' EXIT
 
 timing_receipt="$tmp_dir/timing.json"
 allocation_receipt="$tmp_dir/allocation.json"
-bench_source="$repo_root/crates/api/benches/vpn_query.rs"
+bench_source="$repo_root/crates/api/benches/vpn_query/mod.rs"
 declared_cpu=$(awk '/^Cpus_allowed_list:/{split($2, a, /[-,]/); print a[1]}' /proc/self/status)
 
 check_allocator_seam() {
