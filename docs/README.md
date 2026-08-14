@@ -33,6 +33,7 @@ Start here if you have never run the daemon.
 | [cookbook/paired-route-servers.md](cookbook/paired-route-servers.md) | Runbook: two independent route servers — staggered updates, inter-RS consistency diff, maintenance-window drain |
 | [explain.md](explain.md) | Answer "why is this route (not) here?": the catalog of every explain surface, with the support-ticket workflow |
 | [deployment.md](deployment.md) | End-to-end install + lifecycle: systemd, Docker, containerlab, validate, reload, upgrade |
+| [settlement-watchdog.md](settlement-watchdog.md) | The runtime-config settlement watchdog: what a fail-stop (exit 70) means, the recovery runbook, and the supervisor contract |
 | [ribdiff.md](ribdiff.md) | Drive `rbgp diff advertised` for the shadow trial (also the `rbgp-ribsnap/1` snapshot-format reference) |
 | [evpn-vtep-setup.md](evpn-vtep-setup.md) | Prepare kernel netdev topology (bridge/VXLAN/VRF) for the EVPN VTEP dataplane |
 | [evpn-vtep-troubleshooting.md](evpn-vtep-troubleshooting.md) | Runbook: debugging the bidirectional EVPN VTEP path, symptom by symptom |
