@@ -1012,7 +1012,13 @@ impl ConfigTransactionController {
                             message,
                         }
                     } else {
-                        ConfigTransactionApplyError::Internal(message)
+                        // ADR-0127: a publication failure before the locator
+                        // rename retains no authority and precedes every
+                        // runtime mutation — a determinate clean no-effect
+                        // refusal, same as the NotPublished persistence
+                        // mapping in persist_candidate_config, not an
+                        // internal invariant breach.
+                        ConfigTransactionApplyError::FailedPrecondition(message)
                     });
                 }
             }
@@ -6947,7 +6953,13 @@ remote_asn = 65010
             ))
             .await
             .unwrap_err();
-        assert!(matches!(error, ConfigTransactionApplyError::Internal(_)));
+        // ADR-0127: no authority retained and nothing mutated — a clean
+        // no-effect refusal, so the client sees FailedPrecondition.
+        assert!(matches!(
+            error,
+            ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains("publication failed")
+        ));
         assert!(!peer_apply_seen.load(std::sync::atomic::Ordering::SeqCst));
         assert!(config_rx.try_recv().is_err());
         assert_eq!(std::fs::read_to_string(config_path).unwrap(), previous);
@@ -6955,8 +6967,9 @@ remote_asn = 65010
 
     #[tokio::test]
     async fn oversized_v3_prior_is_a_precondition_failure_before_publication_or_mutation() {
-        // Destructive proof: deleting the controller preflight changes this
-        // stable failure to INTERNAL in the publisher; moving it after
+        // Destructive proof: deleting the controller preflight replaces this
+        // stable message with the publisher's limit refusal (which lacks the
+        // "without confirmation" guidance asserted below); moving it after
         // publication or apply makes the empty-authority or mutation
         // assertions red.
         use std::os::unix::fs::PermissionsExt as _;
@@ -7220,6 +7233,12 @@ remote_asn = 65010
         // Destructive proof: bypassing the ordinary planner makes either
         // full-snapshot request committable; publishing after the verdict or
         // skipping cleanup leaves v3 authority after the rejection.
+        //
+        // LAN-1020: the second publication used to race the first apply's
+        // detached residue-cleanup thread over the tombstone names and could
+        // fail with NotFound before the fence was consulted; remove_named_safe
+        // now tolerates losing that unlink race, so publication succeeds and
+        // only the plan verdict can reject here.
         let harness = v3_external_fence_harness(RuntimeConfigTransactionStatus::Rejected);
         let mut candidate: Config = toml::from_str(&harness.current_toml).unwrap();
         candidate.neighbors[0].description = Some("must remain fenced".to_string());
@@ -7259,6 +7278,69 @@ remote_asn = 65010
         );
         assert!(!harness.locator.exists());
         assert!(!harness.journal.exists());
+    }
+
+    #[tokio::test]
+    async fn v3_publication_failure_without_authority_is_failed_precondition() {
+        // LAN-1020 / ADR-0127: a pre-rename publication failure retains no v3
+        // authority and precedes every runtime mutation — a determinate clean
+        // no-effect refusal that must surface as FailedPrecondition (matching
+        // the NotPublished persistence mapping), never Internal, and must not
+        // fence later applies.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let harness = v3_external_fence_harness(RuntimeConfigTransactionStatus::Rejected);
+        let pending_dir = harness.journal.parent().unwrap().to_path_buf();
+        let read_only = std::fs::Permissions::from_mode(0o500);
+        std::fs::set_permissions(&pending_dir, read_only).unwrap();
+
+        let Err(error) = harness
+            .controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                harness.current_toml.clone(),
+                "native-unpublishable",
+                60,
+            ))
+            .await
+        else {
+            panic!("unpublishable v3 pending storage must refuse the confirmed apply");
+        };
+        assert!(
+            matches!(
+                &error,
+                ConfigTransactionApplyError::FailedPrecondition(message)
+                    if message.contains("publication failed")
+            ),
+            "expected FailedPrecondition, got: {error:?}"
+        );
+        assert!(!harness.locator.exists());
+        assert!(!harness.journal.exists());
+
+        // No fence: the next confirmed apply is admitted and refused the
+        // same clean way on the gNMI surface.
+        let Err(error) = harness
+            .controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_add_neighbor_confirmed(
+                "10.0.0.3",
+                65003,
+                "gnmi-unpublishable",
+                60,
+            ))
+            .await
+        else {
+            panic!("unpublishable v3 pending storage must refuse the confirmed gNMI set");
+        };
+        assert!(
+            matches!(
+                &error,
+                GnmiSetError::FailedPrecondition(message)
+                    if message.contains("publication failed")
+            ),
+            "expected FailedPrecondition, got: {error:?}"
+        );
+        std::fs::set_permissions(&pending_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[tokio::test]
