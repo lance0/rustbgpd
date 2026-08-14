@@ -44,6 +44,10 @@ tests/soak/runs/
 tests/interop/gobgp-archive/*
 !tests/interop/gobgp-archive/.gitkeep
 
+# CI-staged BIRD 3 source archive (never vendor upstream tarballs into git)
+tests/interop/bird3-archive/*
+!tests/interop/bird3-archive/.gitkeep
+
 
 # M44 mTLS PKI fixture — regenerated per CI run by gen-m44-certs.sh so
 # certificate validity windows never expire in the repo.

@@ -113,6 +113,35 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  bird3_archive:
+    needs: classify_changes
+    if: needs.classify_changes.outputs.run_labs == 'true'
+    name: Prepare exact bird3 archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Restore exact bird3 archive cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/bird3-cache/bird-3.3.1.tar.gz
+          key: bird3-v3.3.1-source-d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190
+      - name: Prepare exact bird3 archive
+        run: |
+          .github/scripts/install-bird3.sh \
+            --prepare-archive \
+            "$RUNNER_TEMP/bird3-cache/bird-3.3.1.tar.gz"
+      - name: Upload verified bird3 archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: bird3-v3.3.1-source
+          path: ${{ runner.temp }}/bird3-cache/bird-3.3.1.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   # Warm one fixed-scope cache per source SHA; jobs still build and load their
   # own image, falling back to an uncached build if the cache is unavailable.
   prime_dev_image:
@@ -417,7 +446,7 @@ jobs:
           script: tests/interop/scripts/test-m51-bfd-frr.sh
 
   m43:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [grpcurl_archive, bird3_archive, prime_dev_image]
     name: M43 — TCP-AO live rotation and crash recovery (BIRD 3.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -513,13 +542,19 @@ jobs:
           cargo test -p rustbgpd-transport --lib "$receipt" -- \
             --ignored --exact --nocapture
 
-      # Buildx GHA layer cache (LAN-252): the bird.nic.cz tarball fetch and
-      # the full BIRD source build live in layers keyed on the Dockerfile
-      # content (which pins BIRD_VERSION and the configure flags), so warm
-      # runs skip both the flaky download and the compile; a version bump
-      # edits the Dockerfile and naturally invalidates. Buildx itself is set
+      # The staged verified archive (LAN-1024) composes with the buildx GHA
+      # layer cache (LAN-252): on a cache hit the full BIRD source build is
+      # replayed from layers keyed on the Dockerfile content and the staged
+      # archive bytes, so neither the fetch nor the stage matters; on a cache
+      # miss the staged archive keeps the build offline, confining the
+      # upstream fetch to a bounded fallback for cold local builds. A version
+      # bump edits the Dockerfile and naturally invalidates. Buildx is set
       # up by setup-dataplane-host above. The dedicated scope keeps this
       # image's cache separate from rustbgpd:dev's.
+      - name: Stage verified BIRD 3 archive
+        if: steps.tcp_ao.outputs.supported == 'true'
+        uses: ./.github/actions/stage-bird3-artifact
+
       - name: Build BIRD 3.3.1 TCP-AO image
         if: steps.tcp_ao.outputs.supported == 'true'
         uses: docker/build-push-action@v7
@@ -835,14 +870,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() }}
-    needs: [classify_changes, grpcurl_archive, gobgp_archive, prime_dev_image, m36, m37,
-      m37-ip, m38, m39, m39b, m48, m60, m61, m62, m40, m42, m50, m52,
+    needs: [classify_changes, grpcurl_archive, gobgp_archive, bird3_archive, prime_dev_image, m36,
+      m37, m37-ip, m38, m39, m39b, m48, m60, m61, m62, m40, m42, m50, m52,
       m58, m53, m51, m43, m47, m69, m70, m65, m71, m72, m66,
       m67, m68, netns]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
-        classify_changes grpcurl_archive gobgp_archive prime_dev_image m36 m37 m37-ip m38 m39
+        classify_changes grpcurl_archive gobgp_archive bird3_archive prime_dev_image
+        m36 m37 m37-ip m38 m39
         m39b m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m51 m43 m47
         m69 m70 m65 m71 m72 m66 m67 m68 netns
     steps:
