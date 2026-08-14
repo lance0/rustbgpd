@@ -17,6 +17,17 @@ name: Criterion Bench Nightly
 # Straddle-zero (min..max or CI), high-stddev, or delta-only rows remain
 # advisory/inconclusive. bgperf2 stays release-time `/bench` only — it is too
 # stateful (Docker, one-at-a-time, shared container names) for unattended runs.
+#
+# TWO-CONSECUTIVE-NIGHTS RULE — on scheduled runs a confident-regression row
+# fails the workflow only when the same row was also confident on the previous
+# nightly. With 53 rows per run on a virtualized VPS, one all-positive row
+# clears the per-row bar by chance roughly nightly (2026-08-12..14 each fired
+# a single different row and the next night contradicted it: rib_pipeline/1000
+# +5.81% then -7.43%; loc_rib_recompute/8 -7.97% then +4.65%), while every
+# real regression this tripwire has caught repeated identically the following
+# night (2026-08-02/03: adj_rib_in_insert/500000 +49.3%/+49.8%,
+# best_path_cmp/equal +3.55%/+4.55%). First-night rows stay advisory in the
+# run summary. workflow_dispatch runs keep single-run verdicts.
 
 on:
   schedule:
@@ -143,14 +154,49 @@ jobs:
             echo "::notice::host lock held by an active soak — skipping nightly bench (advisory, non-gating)"
             exit 0
           fi
-          exit "$rc"
           # require_performance is intentionally NOT set — the VPS CPU is
           # virtualized and exposes no cpufreq governor (see bench.yml).
+          if [ "$GITHUB_EVENT_NAME" != "schedule" ]; then
+            exit "$rc"
+          fi
+          # Two-consecutive-nights rule (see the header comment): rc=1 with a
+          # confident-regression verdict fails the run only when a fired row
+          # also fired on the previous nightly. Streak state lives next to the
+          # host lock on this single pinned runner; a run without confident
+          # rows resets it. Harness errors (no summary, or rc other than 0/1)
+          # propagate untouched.
+          summary="$(find target/bench-compare -name summary.md -print 2>/dev/null | sort | tail -n 1 || true)"
+          if { [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; } || [ -z "$summary" ]; then
+            exit "$rc"
+          fi
+          current="$(grep -m1 '^Confident regression rows:' "$summary" | grep -o '`[^`]*`' | tr -d '`' | sort -u || true)"
+          if [ "$rc" -eq 1 ] && [ -z "$current" ]; then
+            exit "$rc"
+          fi
+          state_file="${HOME}/.local/state/rustbgpd-bench-nightly-confident-rows-${PACKAGE}-${BENCH}.txt"
+          previous=""
+          if [ -f "$state_file" ]; then
+            previous="$(cat "$state_file")"
+          fi
+          mkdir -p "$(dirname "$state_file")"
+          printf '%s' "$current" > "$state_file"
+          if [ "$rc" -eq 0 ]; then
+            exit 0
+          fi
+          confirmed="$(comm -12 <(printf '%s' "$current") <(printf '%s' "$previous") || true)"
+          if [ -n "$confirmed" ]; then
+            echo "::error::confident regression on two consecutive nightly runs: $(echo "$confirmed" | paste -sd' ' -)"
+            exit 1
+          fi
+          echo "unconfirmed=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::confident-regression row(s) not confident on the previous nightly — advisory; the run fails if the same row repeats tomorrow: $(echo "$current" | paste -sd' ' -)"
+          exit 0
 
       - name: Publish summary
         if: always()
         env:
           SOAK_SKIP: ${{ steps.compare.outputs.soak_skip }}
+          UNCONFIRMED: ${{ steps.compare.outputs.unconfirmed }}
         run: |
           set -euo pipefail
           if [ "${SOAK_SKIP:-}" = "true" ]; then
@@ -171,10 +217,20 @@ jobs:
             echo "for confident regressions: enough attempts, \`min..max\` and the"
             echo "last-run 95% CI both entirely above zero, bounded stddev, and"
             echo "\`mean delta\` above the configured threshold. Straddle-zero (range"
-            echo "or CI) and high-stddev rows remain advisory."
+            echo "or CI) and high-stddev rows remain advisory. A scheduled run"
+            echo "fails only when the same row is confident on two consecutive"
+            echo "nightlies."
             echo "See docs/BENCHMARKS.md."
             echo
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${UNCONFIRMED:-}" = "true" ]; then
+            {
+              echo "**Advisory:** confident-regression row(s) fired on this run but"
+              echo "were not confident on the previous nightly. The run stays green;"
+              echo "it fails if the same row repeats on the next nightly."
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
           summary="$(find target/bench-compare -name summary.md -print 2>/dev/null | sort | tail -n 1 || true)"
           if [ -n "$summary" ]; then
             cat "$summary" >> "$GITHUB_STEP_SUMMARY"
