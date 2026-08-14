@@ -91,9 +91,12 @@ use a config transaction with a confirm timer instead of SIGHUP:
 
 ```bash
 rbgp config plan /etc/rustbgpd/candidate.toml
-# plan prints the runtime snapshot token; apply requires it:
+# plan prints the runtime snapshot token; it is opaque — capture it and pass
+# it back verbatim on apply:
+RUNTIME_SNAPSHOT_TOKEN="$(rbgp --json config plan /etc/rustbgpd/candidate.toml \
+  | jq -r .runtime_snapshot_token)"
 rbgp config apply /etc/rustbgpd/candidate.toml \
-  --expected-runtime-snapshot-token kv1:... \
+  --expected-runtime-snapshot-token "$RUNTIME_SNAPSHOT_TOKEN" \
   --confirm-id rr1-edit-$(date -u +%Y%m%d-%H%M) \
   --confirm-timeout 120
 

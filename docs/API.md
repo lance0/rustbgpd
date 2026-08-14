@@ -649,7 +649,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d @ localhost:50051 rustbgpd.v1.ConfigService/ApplyConfigTransaction <<'JSON'
 {
   "candidate_toml": "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n[[fib_tables]]\nname = \"edge\"\ntable_id = 1000\nmetric = 200\n",
-  "expected_runtime_snapshot_token": "kv1:...",
+  "expected_runtime_snapshot_token": "<runtime-snapshot-token-from-plan>",
   "client_request_id": "deploy-2026-06-03-001",
   "comment": "roll edge FIB table definition"
 }
@@ -663,7 +663,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d @ localhost:50051 rustbgpd.v1.ConfigService/ApplyConfigTransaction <<'JSON'
 {
   "candidate_toml": "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n[[neighbors]]\naddress = \"192.0.2.10\"\nremote_asn = 65010\nhold_time = 45\n",
-  "expected_runtime_snapshot_token": "kv1:...",
+  "expected_runtime_snapshot_token": "<runtime-snapshot-token-from-plan>",
   "client_request_id": "deploy-2026-06-03-002",
   "comment": "adjust neighbor hold timer"
 }
@@ -677,7 +677,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d @ localhost:50051 rustbgpd.v1.ConfigService/ApplyConfigTransaction <<'JSON'
 {
   "candidate_toml": "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n[[neighbors]]\naddress = \"192.0.2.10\"\nremote_asn = 65010\nhold_time = 45\n",
-  "expected_runtime_snapshot_token": "kv1:...",
+  "expected_runtime_snapshot_token": "<runtime-snapshot-token-from-plan>",
   "client_request_id": "deploy-2026-06-03-003",
   "comment": "safe neighbor timer deploy",
   "confirm_id": "deploy-2026-06-03-003",
@@ -759,11 +759,14 @@ CLI equivalent:
 ```bash
 rbgp config diff /tmp/new-config.toml
 rbgp --json config diff /tmp/new-config.toml
-rbgp config plan /tmp/new-config.toml
+# The runtime snapshot token printed by plan is opaque — capture it and pass
+# it back verbatim:
+RUNTIME_SNAPSHOT_TOKEN="$(rbgp --json config plan /tmp/new-config.toml \
+  | jq -r .runtime_snapshot_token)"
 rbgp config apply /tmp/new-config.toml \
-  --expected-runtime-snapshot-token kv1:...
+  --expected-runtime-snapshot-token "$RUNTIME_SNAPSHOT_TOKEN"
 rbgp config apply /tmp/new-config.toml \
-  --expected-runtime-snapshot-token kv1:... \
+  --expected-runtime-snapshot-token "$RUNTIME_SNAPSHOT_TOKEN" \
   --client-request-id deploy-2026-06-03-003 \
   --confirm-id deploy-2026-06-03-003 \
   --confirm-timeout 120

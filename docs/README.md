@@ -52,6 +52,7 @@ Start here if you have never run the daemon.
 | [API.md](API.md) | gRPC API reference with examples for every RPC |
 | [grpc-method-inventory.md](grpc-method-inventory.md) | Authorization tier of every gRPC method (machine-readable twin: [grpc-method-inventory.json](grpc-method-inventory.json)) |
 | [rpol-language.md](rpol-language.md) | The `.rpol` typed policy language, ADR-0096 |
+| [format-version-namespaces.md](format-version-namespaces.md) | Map of the independent format/version namespaces (commit-confirm journal, config history, snapshot tokens, stream frames, support bundle, FIB owned state, GR marker) |
 | [OPERATIONS.md](OPERATIONS.md) | Production reference: reload semantics, metrics catalog, failure modes, authorization audit (contains runbook-style debugging sections) |
 | [GNMI.md](GNMI.md) | The supported gNMI / OpenConfig operational-state subset |
 | [EMBEDDING.md](EMBEDDING.md) | The crate map for using rustbgpd's layers as Rust libraries |
