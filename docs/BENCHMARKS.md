@@ -373,7 +373,12 @@ whose `min..max` straddles zero remain advisory/noise, high-stddev rows remain
 inconclusive, all-positive rows whose last-run 95% CI straddles zero stay
 advisory (`ci-straddles-zero`), and a confirmed row at or above the threshold
 whose last-run 95% CI is entirely above zero makes the workflow fail for human
-review.
+review. On scheduled nightly runs one further filter applies: a confident row
+fails the workflow only when the same row was also confident on the previous
+nightly. With ~53 rows per run on the VPS a single all-positive row clears the
+per-row bar by chance roughly nightly and is contradicted the next night,
+while real regressions repeat identically; first-night rows are surfaced as
+advisory in the run summary instead of failing the run.
 
 **Worked example** — the first multi-attempt comparison on the VPS
 runner (`rib_ops`, `v0.30.0` → `main`, 3 attempts; the span includes
