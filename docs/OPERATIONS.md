@@ -45,6 +45,11 @@ runtime wiring, not that every actor has answered a readiness probe yet.
 
 ### Runtime-config settlement fail-stop
 
+The dedicated operator page — ownership phases, the two bounds, the
+five fence reasons, the exit-70 recovery runbook, and the supervisor
+contract — is [settlement-watchdog.md](settlement-watchdog.md). This
+section is the condensed production reference.
+
 Persisted runtime mutations use a cancellation-shielded owner. If creation of
 the initial persistence stage fails because the config directory is not
 writable, the request is rejected cleanly before runtime state changes and the
