@@ -432,12 +432,8 @@ fn recording_runtime_config_handle() -> (PeerHandle, mpsc::UnboundedReceiver<u16
     let task = tokio::spawn(async move {
         while let Some(command) = command_rx.recv().await {
             match command {
-                PeerCommand::UpdateRuntimeConfig {
-                    gr_peer_restart_time_max,
-                    reply,
-                    ..
-                } => {
-                    let _ = seen_tx.send(gr_peer_restart_time_max);
+                PeerCommand::UpdateRuntimeConfig { config, reply } => {
+                    let _ = seen_tx.send(config.gr_peer_restart_time_max);
                     let _ = reply.send(Ok(()));
                 }
                 PeerCommand::Shutdown => break,

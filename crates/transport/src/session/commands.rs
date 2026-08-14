@@ -1324,6 +1324,7 @@ impl PeerSession {
                 ControlFlow::Continue(())
             }
             PeerCommand::UpdateImportPolicy { policy, reply } => {
+                let policy = policy.map(|policy| *policy);
                 self.install_import_policy(policy);
                 // ADR-0073: advancing the session-local generation makes
                 // every decision recorded under the prior chain read as
@@ -1411,20 +1412,21 @@ impl PeerSession {
                 ControlFlow::Continue(())
             }
             PeerCommand::UpdateExportPolicy { policy, reply } => {
+                let policy = policy.map(|policy| *policy);
                 self.export_policy = policy;
                 let _ = reply.send(Ok(()));
                 ControlFlow::Continue(())
             }
-            PeerCommand::UpdateRuntimeConfig {
-                max_prefixes,
-                max_prefixes_ipv4,
-                max_prefixes_ipv6,
-                gr_stale_routes_time,
-                gr_peer_restart_time_max,
-                local_ipv6_nexthop,
-                remove_private_as,
-                reply,
-            } => {
+            PeerCommand::UpdateRuntimeConfig { config, reply } => {
+                let crate::handle::PeerRuntimeConfigUpdate {
+                    max_prefixes,
+                    max_prefixes_ipv4,
+                    max_prefixes_ipv6,
+                    gr_stale_routes_time,
+                    gr_peer_restart_time_max,
+                    local_ipv6_nexthop,
+                    remove_private_as,
+                } = *config;
                 // LAN-341 hot-apply: these knobs are read from
                 // `self.config` on every evaluation (see the command's
                 // doc) — no FSM event, no TCP impact. A lowered
@@ -1457,7 +1459,7 @@ impl PeerSession {
             }
             PeerCommand::ApplyTcpAoAddOnly { desired, reply } => {
                 let generation = desired.generation.as_u64();
-                let result = self.apply_tcp_ao_add_only(desired);
+                let result = self.apply_tcp_ao_add_only(*desired);
                 if result.is_ok() {
                     info!(peer = %self.peer_label, generation, "applied TCP-AO add-only generation");
                 }
@@ -1465,18 +1467,18 @@ impl PeerSession {
                 ControlFlow::Continue(())
             }
             PeerCommand::PreflightTcpAoAddOnly { desired, reply } => {
-                let result = self.preflight_tcp_ao_add_only(&desired);
+                let result = self.preflight_tcp_ao_add_only(desired.as_ref());
                 let _ = reply.send(result);
                 ControlFlow::Continue(())
             }
             PeerCommand::PreflightTcpAoSelection { desired, reply } => {
-                let result = self.preflight_tcp_ao_selection(&desired);
+                let result = self.preflight_tcp_ao_selection(desired.as_ref());
                 let _ = reply.send(result);
                 ControlFlow::Continue(())
             }
             PeerCommand::ApplyTcpAoSelection { desired, reply } => {
                 let generation = desired.generation.as_u64();
-                let result = self.apply_tcp_ao_selection(desired);
+                let result = self.apply_tcp_ao_selection(*desired);
                 if result.is_ok() {
                     info!(peer = %self.peer_label, generation, "selected TCP-AO successor RNext");
                 }
@@ -1484,13 +1486,13 @@ impl PeerSession {
                 ControlFlow::Continue(())
             }
             PeerCommand::ObserveTcpAoSelection { desired, reply } => {
-                let result = self.observe_tcp_ao_selection(&desired);
+                let result = self.observe_tcp_ao_selection(desired.as_ref());
                 let _ = reply.send(result);
                 ControlFlow::Continue(())
             }
             PeerCommand::CommitTcpAoSelection { desired, reply } => {
                 let generation = desired.generation.as_u64();
-                let result = self.commit_tcp_ao_selection(&desired);
+                let result = self.commit_tcp_ao_selection(desired.as_ref());
                 if result.is_ok() {
                     info!(peer = %self.peer_label, generation, "committed TCP-AO selection metadata");
                 }
@@ -1498,13 +1500,13 @@ impl PeerSession {
                 ControlFlow::Continue(())
             }
             PeerCommand::PreflightTcpAoDelete { desired, reply } => {
-                let result = self.preflight_tcp_ao_delete(&desired);
+                let result = self.preflight_tcp_ao_delete(desired.as_ref());
                 let _ = reply.send(result);
                 ControlFlow::Continue(())
             }
             PeerCommand::ApplyTcpAoDelete { desired, reply } => {
                 let generation = desired.generation.as_u64();
-                let result = self.apply_tcp_ao_delete(&desired);
+                let result = self.apply_tcp_ao_delete(desired.as_ref());
                 if result.is_ok() {
                     info!(peer = %self.peer_label, generation, "applied TCP-AO deletion generation");
                 }

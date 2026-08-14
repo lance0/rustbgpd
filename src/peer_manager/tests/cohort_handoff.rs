@@ -49,7 +49,7 @@ fn import_tolerant_cohort_test_session_with_states(
             match command {
                 PeerCommand::UpdateImportPolicy { policy, reply } => {
                     counters.import_installs.fetch_add(1, Ordering::SeqCst);
-                    *counters.live_import.lock().unwrap() = policy;
+                    *counters.live_import.lock().unwrap() = policy.map(|policy| *policy);
                     let _ = reply.send(Ok(()));
                 }
                 PeerCommand::UpdateExportPolicy { reply, .. } => {

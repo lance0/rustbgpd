@@ -42,6 +42,7 @@ pub use error::TransportError;
 pub use event_sink::{
     NoopTransportEventSink, OtcDirection, OtcRouteBlockedEvent, TransportEventSink,
 };
+pub use handle::PeerRuntimeConfigUpdate;
 pub use handle::{
     ImportPolicyTermHits, NegotiatedGracefulRestartState, NegotiatedSessionState, PeerCommand,
     PeerCommandError, PeerHandle, PeerSessionState, PeerShutdownError, SessionIdentity,

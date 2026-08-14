@@ -315,6 +315,28 @@ pub enum SessionLifecycleNotification {
     },
 }
 
+/// Runtime knobs applied to an established peer without restarting its session.
+#[derive(Debug)]
+pub struct PeerRuntimeConfigUpdate {
+    /// Maximum prefixes accepted before Cease/1 (None = unlimited). Lowering
+    /// this aggregate limit retains its historical next-UPDATE enforcement.
+    pub max_prefixes: Option<u32>,
+    /// Independent IPv4-unicast prefix limit (ADR-0108). Lowering below the
+    /// current count enforces immediately on apply.
+    pub max_prefixes_ipv4: Option<u32>,
+    /// Independent IPv6-unicast prefix limit (ADR-0108). Lowering below the
+    /// current count enforces immediately on apply.
+    pub max_prefixes_ipv6: Option<u32>,
+    /// Stale-route retention after peer restart (seconds).
+    pub gr_stale_routes_time: u64,
+    /// Upper bound on the peer-advertised GR Restart Time.
+    pub gr_peer_restart_time_max: u16,
+    /// Explicit IPv6 next-hop for eBGP (None = derive from socket).
+    pub local_ipv6_nexthop: Option<std::net::Ipv6Addr>,
+    /// Private AS removal mode for outbound `AS_PATH`.
+    pub remove_private_as: crate::config::RemovePrivateAs,
+}
+
 /// Commands sent to a running peer session.
 #[derive(Debug)]
 pub enum PeerCommand {
@@ -352,14 +374,14 @@ pub enum PeerCommand {
     /// Replace the import policy chain for future inbound UPDATE processing.
     UpdateImportPolicy {
         /// New effective import policy chain (`None` = permit-all).
-        policy: Option<PolicyChain>,
+        policy: Option<Box<PolicyChain>>,
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
     /// Replace the export policy chain used on future `PeerUp` registration.
     UpdateExportPolicy {
         /// New effective export policy chain (`None` = permit-all).
-        policy: Option<PolicyChain>,
+        policy: Option<Box<PolicyChain>>,
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
@@ -371,22 +393,8 @@ pub enum PeerCommand {
     /// `gr_peer_restart_time_max`), so
     /// the swap takes effect on the next evaluation.
     UpdateRuntimeConfig {
-        /// Maximum prefixes accepted before Cease/1 (None = unlimited).
-        max_prefixes: Option<u32>,
-        /// Independent IPv4-unicast prefix limit (ADR-0108). Lowering
-        /// below the current count enforces immediately on apply.
-        max_prefixes_ipv4: Option<u32>,
-        /// Independent IPv6-unicast prefix limit (ADR-0108). Lowering
-        /// below the current count enforces immediately on apply.
-        max_prefixes_ipv6: Option<u32>,
-        /// Stale-route retention after peer restart (seconds).
-        gr_stale_routes_time: u64,
-        /// Upper bound on the peer-advertised GR Restart Time.
-        gr_peer_restart_time_max: u16,
-        /// Explicit IPv6 next-hop for eBGP (None = derive from socket).
-        local_ipv6_nexthop: Option<std::net::Ipv6Addr>,
-        /// Private AS removal mode for outbound `AS_PATH`.
-        remove_private_as: crate::config::RemovePrivateAs,
+        /// Runtime configuration carried out of the inline command envelope.
+        config: Box<PeerRuntimeConfigUpdate>,
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
@@ -394,47 +402,47 @@ pub enum PeerCommand {
     /// currently owned connected socket, then advance future active-open
     /// configuration. Current/RNext and existing MKTs are untouched.
     ApplyTcpAoAddOnly {
-        desired: crate::TcpAoSessionGeneration,
+        desired: Box<crate::TcpAoSessionGeneration>,
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
     /// Validate a desired add-only generation against this session's current
     /// immutable owner inventory without mutating its socket or configuration.
     PreflightTcpAoAddOnly {
-        desired: crate::TcpAoSessionGeneration,
+        desired: Box<crate::TcpAoSessionGeneration>,
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
     /// Validate exact unchanged inventory and explicit owner selection before
     /// any local `RNext` mutation.
     PreflightTcpAoSelection {
-        desired: crate::config::TcpAoSessionSelection,
+        desired: Box<crate::config::TcpAoSessionSelection>,
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
     /// Select the already-installed successor as local `RNext` once.
     ApplyTcpAoSelection {
-        desired: crate::config::TcpAoSessionSelection,
+        desired: Box<crate::config::TcpAoSessionSelection>,
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
     /// Observe peer-driven successor use once without polling.
     ObserveTcpAoSelection {
-        desired: crate::config::TcpAoSessionSelection,
+        desired: Box<crate::config::TcpAoSessionSelection>,
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
     /// Commit declaration-only preferred/deprecated metadata after the whole
     /// cohort has passed observation.
     CommitTcpAoSelection {
-        desired: crate::config::TcpAoSessionSelection,
+        desired: Box<crate::config::TcpAoSessionSelection>,
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
     /// Validate an exact current-to-survivor deletion without mutating the
     /// currently owned connected socket.
     PreflightTcpAoDelete {
-        desired: crate::TcpAoSessionDeletion,
+        desired: Box<crate::TcpAoSessionDeletion>,
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
     /// Delete deprecated, unselected MKTs from the currently owned connected
     /// socket and advance future active-open configuration.
     ApplyTcpAoDelete {
-        desired: crate::TcpAoSessionDeletion,
+        desired: Box<crate::TcpAoSessionDeletion>,
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
     /// Discard this session's connected stream after any sibling may have
@@ -1616,7 +1624,7 @@ impl PeerHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.commands
             .send(PeerCommand::UpdateImportPolicy {
-                policy,
+                policy: policy.map(Box::new),
                 reply: reply_tx,
             })
             .await
@@ -1680,7 +1688,7 @@ impl PeerHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
         commands
             .send(PeerCommand::UpdateImportPolicy {
-                policy,
+                policy: policy.map(Box::new),
                 reply: reply_tx,
             })
             .await
@@ -1773,7 +1781,7 @@ impl PeerHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.commands
             .send(PeerCommand::UpdateExportPolicy {
-                policy,
+                policy: policy.map(Box::new),
                 reply: reply_tx,
             })
             .await
@@ -1841,7 +1849,7 @@ impl PeerHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
         commands
             .send(PeerCommand::UpdateExportPolicy {
-                policy,
+                policy: policy.map(Box::new),
                 reply: reply_tx,
             })
             .await
@@ -1879,13 +1887,15 @@ impl PeerHandle {
             let (reply_tx, reply_rx) = oneshot::channel();
             commands
                 .send(PeerCommand::UpdateRuntimeConfig {
-                    max_prefixes,
-                    max_prefixes_ipv4,
-                    max_prefixes_ipv6,
-                    gr_stale_routes_time,
-                    gr_peer_restart_time_max,
-                    local_ipv6_nexthop,
-                    remove_private_as,
+                    config: Box::new(PeerRuntimeConfigUpdate {
+                        max_prefixes,
+                        max_prefixes_ipv4,
+                        max_prefixes_ipv6,
+                        gr_stale_routes_time,
+                        gr_peer_restart_time_max,
+                        local_ipv6_nexthop,
+                        remove_private_as,
+                    }),
                     reply: reply_tx,
                 })
                 .await
@@ -1919,7 +1929,7 @@ impl PeerHandle {
             let (reply_tx, reply_rx) = oneshot::channel();
             commands
                 .send(PeerCommand::ApplyTcpAoAddOnly {
-                    desired,
+                    desired: Box::new(desired),
                     reply: reply_tx,
                 })
                 .await

@@ -611,7 +611,7 @@ async fn query_import_policy_term_hits_snapshots_without_counting() {
         let (reply_tx, reply_rx) = oneshot::channel();
         let _ = session
             .handle_command(PeerCommand::UpdateImportPolicy {
-                policy: Some(chain),
+                policy: Some(Box::new(chain)),
                 reply: reply_tx,
             })
             .await;
@@ -894,7 +894,7 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
     let (reply_tx, reply_rx) = oneshot::channel();
     let _ = session
         .handle_command(PeerCommand::UpdateImportPolicy {
-            policy: Some(chain),
+            policy: Some(Box::new(chain)),
             reply: reply_tx,
         })
         .await;
