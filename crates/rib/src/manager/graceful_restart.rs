@@ -308,40 +308,81 @@ impl RibManager {
     pub(super) fn handle_rpki_cache_update(
         &mut self,
         table: Arc<VrpTable>,
-        _delta: Option<Vec<rustbgpd_rpki::VrpEntry>>,
+        delta: Option<Vec<rustbgpd_rpki::VrpEntry>>,
     ) {
-        info!(
-            vrps = table.len(),
-            "RPKI cache update — re-validating routes"
-        );
+        let started = std::time::Instant::now();
+        // The delta arm assumes every stored `validation_state` reflects the
+        // previously distributed snapshot. Before the first table there is
+        // no such baseline, so the first update always rescans fully.
+        let delta = if self.vrp_table.is_some() {
+            delta
+        } else {
+            None
+        };
+        let mode = if delta.is_some() { "delta" } else { "full" };
         self.vrp_table = Some(table);
         let Some(table) = self.vrp_table.as_ref() else {
             return;
         };
+        let vrps = table.len();
         self.metrics
             .set_rpki_vrp_count("ipv4", gauge_val(table.v4_count()));
         self.metrics
             .set_rpki_vrp_count("ipv6", gauge_val(table.v6_count()));
 
         let mut affected = HashSet::new();
-        for rib in self.ribs.values_mut() {
-            for route in rib.iter_mut() {
-                let new_state = validate_route_rpki(route, table);
-                if route.validation_state != new_state {
-                    route.validation_state = new_state;
-                    affected.insert(route.prefix);
+        let mut routes_revalidated = 0_u64;
+        let mut changed_routes = 0_u64;
+        let mut revalidate = |route: &mut crate::route::Route| {
+            routes_revalidated += 1;
+            let new_state = validate_route_rpki(route, table);
+            if route.validation_state != new_state {
+                route.validation_state = new_state;
+                changed_routes += 1;
+                affected.insert(route.prefix);
+            }
+        };
+        if let Some(delta) = delta {
+            // A route's RFC 6811 outcome depends only on the VRPs covering
+            // its prefix, and coverage is by VRP prefix length (max_len only
+            // gates the Valid decision). Every entry that differs between
+            // the previous and this snapshot is in `delta`, so the union of
+            // the delta entries' covered sets is a superset of every route
+            // whose outcome can change — including Valid→NotFound/Invalid
+            // flips from withdrawals and overlap where a surviving VRP still
+            // covers. Revalidating covered routes against the FULL new table
+            // keeps outcomes identical to a full rescan; only the set of
+            // routes revisited shrinks. Overlapping delta entries may visit
+            // a route twice; revalidation is idempotent.
+            for rib in self.ribs.values_mut() {
+                for entry in &delta {
+                    let Some(covering) = super::helpers::vrp_covering_prefix(entry) else {
+                        continue;
+                    };
+                    rib.for_each_covered_mut(&covering, &mut revalidate);
+                }
+            }
+        } else {
+            for rib in self.ribs.values_mut() {
+                for route in rib.iter_mut() {
+                    revalidate(route);
                 }
             }
         }
 
         if !affected.is_empty() {
-            info!(
-                changed = affected.len(),
-                "RPKI re-validation changed routes"
-            );
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
         }
+        info!(
+            vrps,
+            mode,
+            routes_revalidated,
+            changed_routes,
+            affected_prefixes = affected.len(),
+            elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "RPKI cache update re-validation complete"
+        );
     }
 
     pub(super) fn handle_aspa_cache_update(&mut self, table: Arc<rustbgpd_rpki::AspaTable>) {

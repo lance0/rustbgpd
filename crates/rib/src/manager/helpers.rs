@@ -257,6 +257,23 @@ pub(super) fn should_suppress_ibgp_inner(
     }
 }
 
+/// The covering prefix of a VRP entry: the routes whose RFC 6811 outcome
+/// the entry can influence are exactly those contained within it. Coverage
+/// is defined by `prefix_len` alone — `max_len` only gates the Valid
+/// decision, never coverage. Malformed lengths (beyond the family width)
+/// can cover nothing (`VrpTable::new` skips them), so they yield `None`.
+pub(super) fn vrp_covering_prefix(entry: &rustbgpd_rpki::VrpEntry) -> Option<Prefix> {
+    match entry.prefix {
+        IpAddr::V4(addr) if entry.prefix_len <= 32 => Some(Prefix::V4(
+            rustbgpd_wire::Ipv4Prefix::new(addr, entry.prefix_len),
+        )),
+        IpAddr::V6(addr) if entry.prefix_len <= 128 => Some(Prefix::V6(
+            rustbgpd_wire::Ipv6Prefix::new(addr, entry.prefix_len),
+        )),
+        _ => None,
+    }
+}
+
 /// Validate a route's origin against the VRP table (RFC 6811).
 ///
 /// Extracts the origin ASN from the route's `AS_PATH` (last AS in rightmost
