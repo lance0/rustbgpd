@@ -39,6 +39,10 @@ clab-*/
 # Soak harness output (one directory per run; machine-specific timeseries)
 tests/soak/runs/
 
+# CI-staged GoBGP fixture archive (never vendor release binaries into git)
+tests/interop/gobgp-archive/*
+!tests/interop/gobgp-archive/.gitkeep
+
 
 # M44 mTLS PKI fixture — regenerated per CI run by gen-m44-certs.sh so
 # certificate validity windows never expire in the repo.

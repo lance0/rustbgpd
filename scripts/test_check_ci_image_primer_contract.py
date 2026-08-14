@@ -94,6 +94,7 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
+                ".github/actions/stage-gobgp-artifact",
             ):
                 source = ROOT / fixture
                 target = root / fixture
@@ -104,6 +105,8 @@ class PrimerContractTests(unittest.TestCase):
             shutil.copy2(ROOT / installer.relative_to(root), installer)
             gnmic_installer = root / ".github" / "scripts" / "install-gnmic.sh"
             shutil.copy2(ROOT / gnmic_installer.relative_to(root), gnmic_installer)
+            gobgp_installer = root / ".github" / "scripts" / "install-gobgp.sh"
+            shutil.copy2(ROOT / gobgp_installer.relative_to(root), gobgp_installer)
             shutil.copy2(ROOT / "Dockerfile", root / "Dockerfile")
             gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
             gobgp.parent.mkdir(parents=True, exist_ok=True)
@@ -138,6 +141,7 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
+                ".github/actions/stage-gobgp-artifact",
             ):
                 shutil.copytree(ROOT / fixture, root / fixture)
             shutil.copy2(ROOT / "Dockerfile", root / "Dockerfile")
@@ -147,6 +151,8 @@ class PrimerContractTests(unittest.TestCase):
             gnmic_installer = root / ".github" / "scripts" / "install-gnmic.sh"
             gnmic_installer.parent.mkdir(parents=True)
             shutil.copy2(ROOT / gnmic_installer.relative_to(root), gnmic_installer)
+            gobgp_installer = root / ".github" / "scripts" / "install-gobgp.sh"
+            shutil.copy2(ROOT / gobgp_installer.relative_to(root), gobgp_installer)
             self.assertIn("install-grpcurl.sh is missing", check(root))
 
     def test_grpcurl_installer_executable_mode_is_load_bearing(self):
@@ -157,6 +163,7 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
+                ".github/actions/stage-gobgp-artifact",
             ):
                 shutil.copytree(ROOT / fixture, root / fixture)
             shutil.copy2(ROOT / "Dockerfile", root / "Dockerfile")
@@ -168,6 +175,8 @@ class PrimerContractTests(unittest.TestCase):
             shutil.copy2(ROOT / installer.relative_to(root), installer)
             gnmic_installer = root / ".github" / "scripts" / "install-gnmic.sh"
             shutil.copy2(ROOT / gnmic_installer.relative_to(root), gnmic_installer)
+            gobgp_installer = root / ".github" / "scripts" / "install-gobgp.sh"
+            shutil.copy2(ROOT / gobgp_installer.relative_to(root), gobgp_installer)
             installer.chmod(0o644)
             self.assertIn(
                 "install-grpcurl.sh must have exact executable mode 100755",
@@ -185,6 +194,7 @@ class PrimerContractTests(unittest.TestCase):
         artifacts = ["grpcurl_archive"]
         if workflow == "interop.yml":
             artifacts.append("gnmic_archive")
+        artifacts.append("gobgp_archive")
         expected = ["classify_changes", *artifacts, "prime_dev_image", *roster]
         if workflow == "kernel-dataplane.yml":
             expected.append("netns")
@@ -216,6 +226,7 @@ class PrimerContractTests(unittest.TestCase):
             artifacts = ["grpcurl_archive"]
             if workflow == "interop.yml":
                 artifacts.append("gnmic_archive")
+            artifacts.append("gobgp_archive")
             skipped = {
                 job: "skipped" for job in [*artifacts, "prime_dev_image", *roster]
             }
@@ -254,6 +265,18 @@ class PrimerContractTests(unittest.TestCase):
                             },
                         ).returncode,
                     )
+            gobgp_consumers = (
+                ("m74", "m75", "m81", "m82", "m83")
+                if workflow == "interop.yml"
+                else ("m65", "m71", "m72")
+            )
+            with self.subTest(workflow=workflow, state="gobgp producer red"):
+                gobgp_red = {job: "skipped" for job in gobgp_consumers}
+                gobgp_red["gobgp_archive"] = "failure"
+                self.assertNotEqual(
+                    0,
+                    self.run_aggregate(workflow, "true", gobgp_red).returncode,
+                )
             for run_labs, results in (
                 ("", {}),
                 ("unknown", {}),
@@ -411,6 +434,94 @@ class PrimerContractTests(unittest.TestCase):
             with self.subTest(seam=old):
                 self.mutate(installer, old, new)
 
+    def test_gobgp_producer_and_stage_consumers_are_load_bearing(self):
+        checksum = "e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522"
+        for workflow in ("interop.yml", "kernel-dataplane.yml"):
+            relative = f".github/workflows/{workflow}"
+            producer_occurrence = 2 if workflow == "interop.yml" else 1
+            for old, new in (
+                ("  gobgp_archive:\n", "  removed_gobgp_archive:\n"),
+                (f"key: gobgp-v3.37.0-linux-amd64-{checksum}", "key: gobgp-latest"),
+                ("name: gobgp-v3.37.0-linux-amd64", "name: gobgp-latest"),
+                (
+                    "needs: [grpcurl_archive, gobgp_archive, prime_dev_image]",
+                    "needs: [grpcurl_archive, prime_dev_image]",
+                ),
+                (
+                    "uses: ./.github/actions/stage-gobgp-artifact",
+                    "run: curl https://example.invalid/gobgp -o /tmp/gobgp.tar.gz",
+                ),
+            ):
+                with self.subTest(workflow=workflow, seam=old):
+                    self.mutate(relative, old, new)
+            for seam, replacement in (
+                ("actions/cache@v6", "actions/cache@main"),
+                ("--prepare-archive", "--stage-archive"),
+                ("actions/upload-artifact@v7", "actions/upload-artifact@main"),
+            ):
+                with self.subTest(workflow=workflow, seam=f"gobgp producer {seam}"):
+                    self.mutate(
+                        relative, seam, replacement, occurrence=producer_occurrence
+                    )
+            exact_path = (
+                "path: ${{ runner.temp }}/gobgp-cache/"
+                "gobgp_3.37.0_linux_amd64.tar.gz"
+            )
+            for occurrence in (0, 1):
+                with self.subTest(
+                    workflow=workflow, seam="gobgp exact path", occurrence=occurrence
+                ):
+                    self.mutate(
+                        relative,
+                        exact_path,
+                        "path: ${{ runner.temp }}/gobgp-cache/wrong.tar.gz",
+                        occurrence=occurrence,
+                    )
+
+        stage_then_build = (
+            "      - name: Stage verified GoBGP archive\n"
+            "        uses: ./.github/actions/stage-gobgp-artifact\n"
+            "\n"
+            "      - name: Build gobgp:interop\n"
+            "        run: docker build -t gobgp:interop"
+            " -f tests/interop/Dockerfile.gobgp tests/interop\n"
+        )
+        build_then_stage = (
+            "      - name: Build gobgp:interop\n"
+            "        run: docker build -t gobgp:interop"
+            " -f tests/interop/Dockerfile.gobgp tests/interop\n"
+            "\n"
+            "      - name: Stage verified GoBGP archive\n"
+            "        uses: ./.github/actions/stage-gobgp-artifact\n"
+        )
+        with self.subTest(seam="stage precedes build"):
+            self.mutate(
+                ".github/workflows/interop.yml", stage_then_build, build_then_stage
+            )
+
+        action = ".github/actions/stage-gobgp-artifact/action.yml"
+        for old, new in (
+            ("actions/download-artifact@v8", "actions/download-artifact@main"),
+            ("name: gobgp-v3.37.0-linux-amd64", "name: gobgp-latest"),
+            ("--stage-archive", "--prepare-archive"),
+            (
+                "set -euo pipefail",
+                "set -euo pipefail\n        curl https://example.invalid/gobgp",
+            ),
+        ):
+            with self.subTest(seam=old):
+                self.mutate(action, old, new)
+
+        installer = ".github/scripts/install-gobgp.sh"
+        for old, new in (
+            ('readonly GOBGP_VERSION="3.37.0"', 'readonly GOBGP_VERSION="latest"'),
+            (checksum, "0" * 64),
+            ("curl -fsSL", "curl -sL"),
+            ("--connect-timeout 10", "--connect-timeout 0"),
+        ):
+            with self.subTest(seam=old):
+                self.mutate(installer, old, new)
+
     def test_gnmic_installer_executable_mode_is_load_bearing(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -419,6 +530,7 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
+                ".github/actions/stage-gobgp-artifact",
             ):
                 shutil.copytree(ROOT / fixture, root / fixture)
             shutil.copy2(ROOT / "Dockerfile", root / "Dockerfile")
@@ -427,11 +539,36 @@ class PrimerContractTests(unittest.TestCase):
             shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
             scripts = root / ".github" / "scripts"
             scripts.mkdir(parents=True)
-            for name in ("install-grpcurl.sh", "install-gnmic.sh"):
+            for name in ("install-grpcurl.sh", "install-gnmic.sh", "install-gobgp.sh"):
                 shutil.copy2(ROOT / ".github" / "scripts" / name, scripts / name)
             (scripts / "install-gnmic.sh").chmod(0o644)
             self.assertIn(
                 "install-gnmic.sh must have exact executable mode 100755",
+                check(root),
+            )
+
+    def test_gobgp_installer_executable_mode_is_load_bearing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for fixture in (
+                ".github/workflows",
+                ".github/actions/install-gnmic-artifact",
+                ".github/actions/install-grpcurl-artifact",
+                ".github/actions/setup-dataplane-host",
+                ".github/actions/stage-gobgp-artifact",
+            ):
+                shutil.copytree(ROOT / fixture, root / fixture)
+            shutil.copy2(ROOT / "Dockerfile", root / "Dockerfile")
+            gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
+            gobgp.parent.mkdir(parents=True)
+            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
+            scripts = root / ".github" / "scripts"
+            scripts.mkdir(parents=True)
+            for name in ("install-grpcurl.sh", "install-gnmic.sh", "install-gobgp.sh"):
+                shutil.copy2(ROOT / ".github" / "scripts" / name, scripts / name)
+            (scripts / "install-gobgp.sh").chmod(0o644)
+            self.assertIn(
+                "install-gobgp.sh must have exact executable mode 100755",
                 check(root),
             )
 
@@ -444,7 +581,7 @@ class PrimerContractTests(unittest.TestCase):
             needs_prefix = (
                 "needs: [classify_changes, grpcurl_archive, "
                 + ("gnmic_archive, " if workflow == "interop.yml" else "")
-                + "prime_dev_image, "
+                + "gobgp_archive, prime_dev_image, "
             )
             for old, new in (
                 ("if: ${{ always() }}", "if: success()"),
@@ -760,16 +897,28 @@ class PrimerContractTests(unittest.TestCase):
                 "*) exit 1 ;;",
             ),
             (
+                "COPY gobgp-archive/ /tmp/gobgp-archive/",
+                "RUN mkdir -p /tmp/gobgp-archive",
+            ),
+            (
+                'if [ ! -f "/tmp/gobgp-archive/${archive}" ]; then',
+                "if true; then",
+            ),
+            (
                 'https://github.com/osrg/gobgp/releases/download/v${GOBGP_VERSION}/${archive}',
                 "https://example.invalid/${archive}",
             ),
             (
-                'echo "${checksum}  /tmp/${archive}" | sha256sum --check --strict',
+                'if [ "${attempt}" -ge 3 ]; then',
+                'if [ "${attempt}" -ge 9999 ]; then',
+            ),
+            (
+                'echo "${checksum}  /tmp/gobgp-archive/${archive}" | sha256sum --check --strict',
                 "true # skipped checksum verification",
             ),
             (
-                'tar --extract --gzip --file "/tmp/${archive}" --directory /usr/local/bin gobgp gobgpd',
-                'tar --extract --gzip --file "/tmp/${archive}" --directory /usr/local/bin',
+                'tar --extract --gzip --file "/tmp/gobgp-archive/${archive}" --directory /usr/local/bin gobgp gobgpd',
+                'tar --extract --gzip --file "/tmp/gobgp-archive/${archive}" --directory /usr/local/bin',
             ),
             (
                 'test "$(gobgp --version)" = "gobgp version ${GOBGP_VERSION}"',

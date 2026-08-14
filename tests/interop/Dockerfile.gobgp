@@ -8,6 +8,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# CI stages the same-run, checksum- and version-verified release archive here
+# (.github/actions/stage-gobgp-artifact) so hosted builds never contact the
+# upstream release; the committed directory is empty, which keeps cold
+# local/multi-arch builds on the bounded in-build fetch below.
+COPY gobgp-archive/ /tmp/gobgp-archive/
+
 RUN set -eux; \
     case "${TARGETARCH}" in \
         amd64) checksum="e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522" ;; \
@@ -15,11 +21,23 @@ RUN set -eux; \
         *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     archive="gobgp_${GOBGP_VERSION}_linux_${TARGETARCH}.tar.gz"; \
-    curl --fail --location --silent --show-error \
-        "https://github.com/osrg/gobgp/releases/download/v${GOBGP_VERSION}/${archive}" \
-        --output "/tmp/${archive}"; \
-    echo "${checksum}  /tmp/${archive}" | sha256sum --check --strict; \
-    tar --extract --gzip --file "/tmp/${archive}" --directory /usr/local/bin gobgp gobgpd; \
+    if [ ! -f "/tmp/gobgp-archive/${archive}" ]; then \
+        attempt=1; \
+        while ! curl --fail --location --silent --show-error \
+            --connect-timeout 10 --max-time 120 \
+            "https://github.com/osrg/gobgp/releases/download/v${GOBGP_VERSION}/${archive}" \
+            --output "/tmp/gobgp-archive/${archive}"; do \
+            rm -f "/tmp/gobgp-archive/${archive}"; \
+            if [ "${attempt}" -ge 3 ]; then \
+                echo "GoBGP ${GOBGP_VERSION} download failed after ${attempt} attempts" >&2; \
+                exit 1; \
+            fi; \
+            sleep $((attempt * 5)); \
+            attempt=$((attempt + 1)); \
+        done; \
+    fi; \
+    echo "${checksum}  /tmp/gobgp-archive/${archive}" | sha256sum --check --strict; \
+    tar --extract --gzip --file "/tmp/gobgp-archive/${archive}" --directory /usr/local/bin gobgp gobgpd; \
     test "$(gobgp --version)" = "gobgp version ${GOBGP_VERSION}"; \
     test "$(gobgpd --version)" = "gobgpd version ${GOBGP_VERSION}"
 

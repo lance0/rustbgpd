@@ -60,6 +60,13 @@ GNMIC_ARCHIVE = "gnmic_0.46.0_Linux_x86_64.tar.gz"
 GNMIC_ARTIFACT = "gnmic-v0.46.0-linux-x86_64"
 GNMIC_CACHE_KEY = f"gnmic-v0.46.0-linux-x86_64-{GNMIC_SHA256}"
 GNMIC_ACTION = "uses: ./.github/actions/install-gnmic-artifact"
+GOBGP_ARCHIVE = f"gobgp_{GOBGP_VERSION}_linux_amd64.tar.gz"
+GOBGP_ARTIFACT = f"gobgp-v{GOBGP_VERSION}-linux-amd64"
+GOBGP_CACHE_KEY = f"{GOBGP_ARTIFACT}-{GOBGP_CHECKSUMS['amd64']}"
+GOBGP_ACTION = "uses: ./.github/actions/stage-gobgp-artifact"
+GOBGP_BUILD = (
+    "docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop"
+)
 
 TRIGGER_HASHES = {
     "ci.yml": "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8",
@@ -79,15 +86,15 @@ CALL_HASHES = {
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 85,
+        "actions/checkout@v7": 87,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95": 2,
         "docker/setup-buildx-action@v4": 44,
         "docker/build-push-action@v7": 45,
-        "actions/cache@v6": 4,
-        "actions/upload-artifact@v7": 5,
-        "actions/download-artifact@v8": 4,
+        "actions/cache@v6": 6,
+        "actions/upload-artifact@v7": 7,
+        "actions/download-artifact@v8": 5,
         "rustsec/audit-check@v2.0.0": 1,
         "EmbarkStudios/cargo-deny-action@v2": 1,
     }
@@ -170,6 +177,34 @@ def check(root: Path) -> list[str]:
         errors.append("install-gnmic.sh release URL inventory drifted")
     if re.search(r"curl[^\n]*\|\s*(?:sudo\s+)?tar", gnmic_installer_text):
         errors.append("install-gnmic.sh streams network bytes into tar")
+    gobgp_installer = root / ".github" / "scripts" / "install-gobgp.sh"
+    if not gobgp_installer.is_file():
+        errors.append("install-gobgp.sh is missing")
+    elif stat.S_IMODE(gobgp_installer.stat().st_mode) != 0o755:
+        errors.append("install-gobgp.sh must have exact executable mode 100755")
+    gobgp_installer_text = (
+        gobgp_installer.read_text() if gobgp_installer.is_file() else ""
+    )
+    for seam in (
+        f'readonly GOBGP_VERSION="{GOBGP_VERSION}"',
+        f'readonly GOBGP_SHA256="{GOBGP_CHECKSUMS["amd64"]}"',
+        'readonly GOBGP_ASSET="gobgp_${GOBGP_VERSION}_linux_amd64.tar.gz"',
+        "https://github.com/osrg/gobgp/releases/download/v${GOBGP_VERSION}/${GOBGP_ASSET}",
+        "readonly GOBGP_ATTEMPTS=3",
+        "curl -fsSL",
+        "--connect-timeout 10",
+        "--max-time 120",
+        "--prepare-archive",
+        "--stage-archive",
+        "--self-test",
+        "unexpected ${binary} version",
+    ):
+        if seam not in gobgp_installer_text:
+            errors.append(f"install-gobgp.sh missing {seam}")
+    if gobgp_installer_text.count("osrg/gobgp/releases/download/") != 1:
+        errors.append("install-gobgp.sh release URL inventory drifted")
+    if re.search(r"curl[^\n]*\|\s*(?:sudo\s+)?tar", gobgp_installer_text):
+        errors.append("install-gobgp.sh streams network bytes into tar")
     workflow_dir = root / ".github" / "workflows"
     texts = {name: (workflow_dir / name).read_text() for name in WORKFLOWS}
     for name, text in texts.items():
@@ -258,7 +293,14 @@ def check(root: Path) -> list[str]:
     ):
         jobs = _jobs(texts[name])
         heavy = [*roster] + (["netns"] if setup else [])
-        artifact_jobs = ["grpcurl_archive"] + ([] if setup else ["gnmic_archive"])
+        artifact_jobs = (
+            ["grpcurl_archive"]
+            + ([] if setup else ["gnmic_archive"])
+            + ["gobgp_archive"]
+        )
+        gobgp_consumers = (
+            {"m65", "m71", "m72"} if setup else {"m74", "m75", "m81", "m82", "m83"}
+        )
         expected = [
             "classify_changes",
             *artifact_jobs,
@@ -367,6 +409,48 @@ def check(root: Path) -> list[str]:
             )
             if gnmic_producer.count(exact_gnmic_path) != 2:
                 errors.append(f"{name}:gnmic_archive cache/artifact paths drifted")
+        gobgp_producer = jobs.get("gobgp_archive", "")
+        for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
+            if not _has_line(gobgp_producer, f"    {seam}"):
+                errors.append(f"{name}:gobgp_archive missing job-level {seam}")
+        for seam in (
+            "name: Prepare exact gobgp archive",
+            "runs-on: ubuntu-latest",
+            "timeout-minutes: 10",
+            CHECKOUT,
+            "ref: ${{ github.sha }}",
+            "uses: actions/cache@v6",
+            f"path: ${{{{ runner.temp }}}}/gobgp-cache/{GOBGP_ARCHIVE}",
+            f"key: {GOBGP_CACHE_KEY}",
+            "--prepare-archive",
+            f'"$RUNNER_TEMP/gobgp-cache/{GOBGP_ARCHIVE}"',
+            "uses: actions/upload-artifact@v7",
+            f"name: {GOBGP_ARTIFACT}",
+            "if-no-files-found: error",
+            "retention-days: 1",
+            "compression-level: 0",
+        ):
+            if seam not in gobgp_producer:
+                errors.append(f"{name}:gobgp_archive missing {seam}")
+        for forbidden in (
+            "restore-keys:",
+            "continue-on-error:",
+            "actions/download-artifact@",
+            "--stage-archive",
+        ):
+            if forbidden in gobgp_producer:
+                errors.append(f"{name}:gobgp_archive permits {forbidden}")
+        if gobgp_producer.count("uses: actions/cache@v6") != 1:
+            errors.append(f"{name}:gobgp_archive must restore one exact cache")
+        if gobgp_producer.count("--prepare-archive") != 1:
+            errors.append(f"{name}:gobgp_archive must prepare one archive")
+        if gobgp_producer.count("uses: actions/upload-artifact@v7") != 1:
+            errors.append(f"{name}:gobgp_archive must upload one artifact")
+        exact_gobgp_path = (
+            f"path: ${{{{ runner.temp }}}}/gobgp-cache/{GOBGP_ARCHIVE}"
+        )
+        if gobgp_producer.count(exact_gobgp_path) != 2:
+            errors.append(f"{name}:gobgp_archive cache/artifact paths drifted")
         primer = jobs.get("prime_dev_image", "")
         for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
             if not _has_line(primer, f"    {seam}"):
@@ -392,14 +476,32 @@ def check(root: Path) -> list[str]:
             errors.append(f"{name}: primer must export cache, not load an image")
         for job_name in roster:
             job = jobs.get(job_name, "")
-            expected_needs = (
-                "    needs: [grpcurl_archive, gnmic_archive, prime_dev_image]"
-                if not setup and job_name in ("m54", "m56")
-                else "    needs: [grpcurl_archive, prime_dev_image]"
-            )
+            if not setup and job_name in ("m54", "m56"):
+                expected_needs = (
+                    "    needs: [grpcurl_archive, gnmic_archive, prime_dev_image]"
+                )
+            elif job_name in gobgp_consumers:
+                expected_needs = (
+                    "    needs: [grpcurl_archive, gobgp_archive, prime_dev_image]"
+                )
+            else:
+                expected_needs = "    needs: [grpcurl_archive, prime_dev_image]"
             if not _has_line(job, expected_needs):
                 errors.append(
                     f"{name}:{job_name}: missing exact artifact/primer dependencies"
+                )
+            expected_gobgp = 1 if job_name in gobgp_consumers else 0
+            if job.count(GOBGP_ACTION) != expected_gobgp:
+                errors.append(f"{name}:{job_name}: gobgp stage consumer drifted")
+            if job.count(GOBGP_BUILD) != expected_gobgp:
+                errors.append(
+                    f"{name}:{job_name}: gobgp:interop build inventory drifted"
+                )
+            if expected_gobgp and not (
+                0 <= job.find(GOBGP_ACTION) < job.find(GOBGP_BUILD)
+            ):
+                errors.append(
+                    f"{name}:{job_name}: gobgp build precedes the staged artifact"
                 )
             if CHECKOUT not in job:
                 errors.append(f"{name}:{job_name}: pinned checkout drifted")
@@ -502,6 +604,9 @@ def check(root: Path) -> list[str]:
     gnmic_action = (
         root / ".github" / "actions" / "install-gnmic-artifact" / "action.yml"
     ).read_text()
+    gobgp_action = (
+        root / ".github" / "actions" / "stage-gobgp-artifact" / "action.yml"
+    ).read_text()
     for seam in (
         "uses: actions/download-artifact@v8",
         f"name: {GRPCURL_ARTIFACT}",
@@ -553,6 +658,31 @@ def check(root: Path) -> list[str]:
     ):
         if forbidden in gnmic_action:
             errors.append(f"install-gnmic-artifact permits {forbidden}")
+    for seam in (
+        "uses: actions/download-artifact@v8",
+        f"name: {GOBGP_ARTIFACT}",
+        "path: ${{ runner.temp }}/gobgp-artifact",
+        "--stage-archive",
+        f'"$RUNNER_TEMP/gobgp-artifact/{GOBGP_ARCHIVE}"',
+        "tests/interop/gobgp-archive",
+    ):
+        if seam not in gobgp_action:
+            errors.append(f"stage-gobgp-artifact missing {seam}")
+    if gobgp_action.count("uses: actions/download-artifact@v8") != 1:
+        errors.append("stage-gobgp-artifact must download one same-run artifact")
+    if gobgp_action.count("--stage-archive") != 1:
+        errors.append("stage-gobgp-artifact must perform one offline stage")
+    for forbidden in (
+        "--prepare-archive",
+        "actions/cache@",
+        "actions/upload-artifact@",
+        "restore-keys:",
+        "continue-on-error:",
+        "releases/download/",
+        "curl ",
+    ):
+        if forbidden in gobgp_action:
+            errors.append(f"stage-gobgp-artifact permits {forbidden}")
     # split(...)[-1] returns the whole file when the step name drifts, which
     # turns every seam check below into a file-wide search that passes
     # vacuously. Scope the region only once the anchor is known to be present.
@@ -601,9 +731,18 @@ def check(root: Path) -> list[str]:
         errors.append("gnmic release URL escaped the producer helper")
     if re.search(r"curl\s.*gnmic|curl\s.*\|\s*(?:sudo\s+)?tar", gnmic_surfaces):
         errors.append("interop.yml retains a streaming gnmic download")
+    if texts["interop.yml"].count(GOBGP_ACTION) != 5:
+        errors.append("interop.yml: gobgp stage consumer inventory drifted")
+    if texts["kernel-dataplane.yml"].count(GOBGP_ACTION) != 3:
+        errors.append("kernel-dataplane.yml: gobgp stage consumer inventory drifted")
+    gobgp_surfaces = "\n".join(
+        (texts["interop.yml"], texts["kernel-dataplane.yml"], gobgp_action)
+    )
+    if "osrg/gobgp/releases" in gobgp_surfaces:
+        errors.append("gobgp release URL escaped the installer/Dockerfile")
 
     pins = collections.Counter()
-    for text in [*texts.values(), action, grpcurl_action, gnmic_action]:
+    for text in [*texts.values(), action, grpcurl_action, gnmic_action, gobgp_action]:
         for value in re.findall(r"^\s*(?:- )?uses:\s*(.+)$", text, re.MULTILINE):
             if not value.strip().startswith("./"):
                 pins[value.strip()] += 1
@@ -629,11 +768,14 @@ def check(root: Path) -> list[str]:
         "FROM debian:bookworm-slim AS gobgp-release",
         "ARG TARGETARCH",
         f"ENV GOBGP_VERSION={GOBGP_VERSION}",
+        "COPY gobgp-archive/ /tmp/gobgp-archive/",
         'archive="gobgp_${GOBGP_VERSION}_linux_${TARGETARCH}.tar.gz"',
         '*) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;;',
+        'if [ ! -f "/tmp/gobgp-archive/${archive}" ]; then',
         "https://github.com/osrg/gobgp/releases/download/v${GOBGP_VERSION}/${archive}",
-        'echo "${checksum}  /tmp/${archive}" | sha256sum --check --strict',
-        'tar --extract --gzip --file "/tmp/${archive}" --directory /usr/local/bin gobgp gobgpd',
+        'if [ "${attempt}" -ge 3 ]; then',
+        'echo "${checksum}  /tmp/gobgp-archive/${archive}" | sha256sum --check --strict',
+        'tar --extract --gzip --file "/tmp/gobgp-archive/${archive}" --directory /usr/local/bin gobgp gobgpd',
         'test "$(gobgp --version)" = "gobgp version ${GOBGP_VERSION}"',
         'test "$(gobgpd --version)" = "gobgpd version ${GOBGP_VERSION}"',
     ):
