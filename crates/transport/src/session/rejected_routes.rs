@@ -246,10 +246,11 @@ impl RejectedRouteStore {
         }
     }
 
-    /// The backing LRU, built at its configured size on first use.
+    /// The backing LRU, built without reserving the configured maximum.
+    /// [`Self::insert`] converts it to the configured bound exactly when it
+    /// first fills, before any later insertion can overflow that bound.
     fn storage(&mut self) -> &mut LruCache<ImportDecisionKey, RejectedRouteEntry> {
-        let capacity = NonZeroUsize::new(self.capacity).expect("capacity is clamped to at least 1");
-        self.entries.get_or_insert_with(|| LruCache::new(capacity))
+        self.entries.get_or_insert_with(LruCache::unbounded)
     }
 
     /// Insert or refresh a rejection. On overflow the least-recently
@@ -260,7 +261,13 @@ impl RejectedRouteStore {
     /// can exceed the documented per-entry budget.
     pub fn insert(&mut self, key: ImportDecisionKey, mut entry: RejectedRouteEntry) {
         entry.enforce_bounds();
-        self.storage().push(key, entry);
+        let capacity = NonZeroUsize::new(self.capacity).expect("capacity is clamped to at least 1");
+        let entries = self.storage();
+        entries.push(key, entry);
+        if entries.cap() == NonZeroUsize::MAX && entries.len() == capacity.get() {
+            entries.resize(capacity);
+        }
+        debug_assert!(entries.len() <= capacity.get());
     }
 
     /// Remove the entry for an identity that was subsequently accepted
