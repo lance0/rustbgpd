@@ -190,12 +190,12 @@ impl PeerSession {
         // cannot be asked, so the staleness window lasts until its next
         // natural re-advertisement — surfaced by the warning.
         if update.request_refresh_all_negotiated {
-            let peer_route_refresh = self
-                .negotiated
-                .as_ref()
-                .is_some_and(|n| n.peer_route_refresh);
-            if peer_route_refresh {
-                for (afi, safi) in self.negotiated_families().to_vec() {
+            let negotiated = match self.negotiated.clone() {
+                Some(negotiated) if negotiated.peer_route_refresh => Some(negotiated),
+                _ => None,
+            };
+            if let Some(negotiated) = negotiated {
+                for &(afi, safi) in &negotiated.negotiated_families {
                     let msg = Message::RouteRefresh(RouteRefreshMessage::new(afi, safi));
                     if let Err(e) = self.enqueue_bulk(&msg) {
                         warn!(
