@@ -307,11 +307,7 @@ impl RibManager {
                 {
                     continue;
                 }
-                let label = group
-                    .vpn_staged_labels
-                    .get(&route.nlri.key())
-                    .cloned()
-                    .unwrap_or(None);
+                let label = group.permit_policy_label.clone();
                 bump(&label, PolicyAction::Permit);
             }
             for (key, (source, label, rts)) in &group.vpn_policy_denied {

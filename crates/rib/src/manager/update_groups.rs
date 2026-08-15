@@ -454,17 +454,11 @@ pub(in crate::manager) struct GroupRibOut {
     /// empty ([`Self::record_policy_filtered`] removes whole prefixes),
     /// so outer emptiness remains "no denials".
     policy_filtered: FxHashMap<Prefix, FxHashMap<(IpAddr, u32), Option<PolicyLabel>>>,
-    /// Terminal policy label per staged entry — join-time counter replay
-    /// residue. Entries ONLY for labelled entries: an inline (unlabelled)
-    /// entry stores nothing and its key is removed, so absent and
-    /// present-`None` are the same verdict. Every reader collapses the
-    /// two, so keep the insert conditional — an unconditional insert
-    /// costs a slot per staged route across the whole table for a value
-    /// no reader can distinguish from absence.
-    staged_labels: FxHashMap<(Prefix, u32), Option<PolicyLabel>>,
-    /// VPN sibling of `staged_labels`, keyed by RD+prefix identity, with
-    /// the same absent-means-inline invariant.
-    vpn_staged_labels: FxHashMap<VpnRouteKey, Option<PolicyLabel>>,
+    /// Terminal Permit label for every staged unicast and VPN entry.
+    /// Export-chain identity is group-uniform and immutable, and a chain
+    /// Permit is always attributed to its final named policy, so retaining
+    /// this once per group replaces two route-keyed label maps.
+    permit_policy_label: Option<PolicyLabel>,
     /// Persistent group-verdict VPN export-policy denials: denied key →
     /// (source peer, denying policy label, the denied route's extended
     /// communities). The per-peer VPN path keeps no denial *records*
@@ -563,6 +557,11 @@ impl GroupRibOut {
         per_client_best: bool,
         capacity: usize,
     ) -> Self {
+        let permit_policy_label = export_chain
+            .as_ref()
+            .and_then(|chain| chain.policies.last())
+            .and_then(|policy| policy.name.as_deref())
+            .map(Arc::from);
         Self {
             table: AdjRibOut::with_capacity(GROUP_FILTERED_PLACEHOLDER, capacity),
             nh_overrides: FxHashMap::default(),
@@ -574,8 +573,7 @@ impl GroupRibOut {
             members: HashSet::new(),
             dirty_members: HashSet::new(),
             policy_filtered: FxHashMap::default(),
-            staged_labels: FxHashMap::default(),
-            vpn_staged_labels: FxHashMap::default(),
+            permit_policy_label,
             vpn_policy_denied: FxHashMap::default(),
             otc_blocked: FxHashMap::default(),
             otc_blocked_totals: [0; 2],
@@ -769,6 +767,11 @@ impl GroupRibOut {
             self.dec_source(old_peer, &delta.prefix);
         }
         if let Some((route, nh)) = &delta.new {
+            debug_assert_eq!(
+                delta.policy_label.as_deref(),
+                self.permit_policy_label.as_deref(),
+                "staged Permit attribution must match the immutable export-chain tail"
+            );
             self.inc_source(route.peer, &delta.prefix);
             match nh {
                 Some(action) => {
@@ -786,20 +789,11 @@ impl GroupRibOut {
                     self.source_attrs.remove(&key);
                 }
             }
-            match &delta.policy_label {
-                Some(label) => {
-                    self.staged_labels.insert(key, Some(label.clone()));
-                }
-                None => {
-                    self.staged_labels.remove(&key);
-                }
-            }
             self.table.insert(route.clone());
         } else {
             self.table.withdraw(&delta.prefix, delta.path_id);
             self.nh_overrides.remove(&key);
             self.source_attrs.remove(&key);
-            self.staged_labels.remove(&key);
         }
     }
 
@@ -861,20 +855,15 @@ impl GroupRibOut {
             self.dec_source_slot(old_peer, slot);
         }
         if let Some(route) = &delta.new {
+            debug_assert_eq!(
+                delta.policy_label.as_deref(),
+                self.permit_policy_label.as_deref(),
+                "staged VPN Permit attribution must match the immutable export-chain tail"
+            );
             self.inc_source_slot(route.peer, slot);
-            match &delta.policy_label {
-                Some(label) => {
-                    self.vpn_staged_labels
-                        .insert(delta.key, Some(label.clone()));
-                }
-                None => {
-                    self.vpn_staged_labels.remove(&delta.key);
-                }
-            }
             self.table.insert_vpn(route.clone());
         } else {
             self.table.remove_vpn(&rib_key);
-            self.vpn_staged_labels.remove(&delta.key);
         }
     }
 
@@ -964,7 +953,7 @@ impl GroupRibOut {
                 route: staged,
                 nh: self.nh_overrides.get(&key),
                 source_attrs: self.source_attrs.get(&key),
-                policy_label: self.staged_labels.get(&key).and_then(Option::as_ref),
+                policy_label: self.permit_policy_label.as_ref(),
             });
         }
         if !self.per_client_best {
@@ -1494,7 +1483,7 @@ impl RibManager {
                         // documented counter deviation).
                         let key = route.nlri.key();
                         count_delta[GroupRibOut::vpn_count_slot(&key) - 2] += 1;
-                        let label = group.vpn_staged_labels.get(&key).cloned().unwrap_or(None);
+                        let label = group.permit_policy_label.clone();
                         bump_counter_row(&mut permit_rows, label.as_ref(), PolicyAction::Permit);
                         vpn_announce.push(route.clone());
                     }

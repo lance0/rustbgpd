@@ -136,10 +136,7 @@ impl RibManager {
                 inventory.next_hop_override.push(next_hop);
             }
 
-            let label = new
-                .staged_labels
-                .get(&key)
-                .and_then(|label| label.as_deref());
+            let label = new.permit_policy_label.as_deref();
             run = Some(match run {
                 Some((peer, run_label, count)) if peer == route.peer && run_label == label => {
                     (peer, run_label, count + 1)
@@ -535,7 +532,7 @@ impl RibManager {
             // Counter fold: one permit per staged entry, labelled by its
             // retained terminal policy; per-source rows feed the
             // Decision 4 `totals − own + lane` synthesis below.
-            let label = destination.staged_labels.get(&key).cloned().unwrap_or(None);
+            let label = destination.permit_policy_label.clone();
             counters.record_permit(route.peer, label);
             // Member-scoped correction for the slot's own source — the
             // one member the shared exclusion silences at this key. Its

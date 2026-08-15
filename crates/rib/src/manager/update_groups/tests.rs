@@ -624,6 +624,12 @@ fn per_client_best_group(chain: Option<PolicyChain>) -> GroupRibOut {
     )
 }
 
+fn named_permit_chain(label: &str) -> PolicyChain {
+    let mut chain = empty_policy(PolicyAction::Permit);
+    chain.policies[0].name = Some(label.to_string());
+    chain
+}
+
 fn announce_delta(p: Prefix, src: IpAddr, old: Option<IpAddr>) -> GroupDelta {
     let new = route(p, src);
     let source_attrs = capture_source_attrs(&new);
@@ -1097,13 +1103,7 @@ fn pcb_winner_label_is_captured_at_its_permit_point() {
     // denial attributes to "screen". The winner keeps "tail".
     assert_eq!(out.deltas[0].policy_label.as_deref(), Some("tail"));
     let group = m.group_ribs.get(&PCB_GID).unwrap();
-    assert_eq!(
-        group
-            .staged_labels
-            .get(&(p, 0))
-            .and_then(|label| label.as_deref()),
-        Some("tail")
-    );
+    assert_eq!(group.permit_policy_label.as_deref(), Some("tail"));
     assert_eq!(
         group
             .policy_filtered
@@ -1655,7 +1655,7 @@ fn adv_entry_derivation_matrix() {
     let p = prefix(1);
 
     // Non-own staged entry: passthrough with its table residue.
-    let mut group = per_client_best_group(None);
+    let mut group = per_client_best_group(Some(named_permit_chain("staged")));
     group.apply_delta(&GroupDelta {
         prefix: p,
         path_id: 0,
@@ -1975,7 +1975,7 @@ fn pcb_grouped_count_queries_include_lane_term() {
 #[test]
 fn pcb_join_counters_replay_lane_permit() {
     let (p1, p2) = (prefix(1), prefix(2));
-    let mut group = per_client_best_group(None);
+    let mut group = per_client_best_group(Some(named_permit_chain("win")));
     // p1: winner MEMBER (label "win"), runner-up OTHER2 in the
     // lane (label "lane"). p2: winner OTHER1 (label "win").
     group.apply_delta(&GroupDelta {
@@ -3832,11 +3832,11 @@ fn vpn_counts_and_family_synthesis_track_deltas() {
     assert_eq!(group.vpn_advertised_count_for(MEMBER), 0);
     assert_eq!(group.vpn_advertised_count_for(OTHER1), 2);
 
-    // Withdraw drops the entry and its label residue.
+    // Withdraw drops the entry; the immutable group Permit label remains.
     group.apply_vpn_delta(&vpn_withdraw_delta(1, Some(MEMBER)));
     assert_eq!(group.vpn_advertised_count_for(OTHER1), 1);
     assert_eq!(group.table.vpn_len(), 1);
-    assert!(!group.vpn_staged_labels.contains_key(&vpn_key(1)));
+    assert!(group.permit_policy_label.is_none());
 
     // An RTC-negotiated sendable set stages VPN too (v2 slice 2):
     // Φ is applied per member at emit, not by a staging gate.
@@ -3859,15 +3859,11 @@ fn vpn_counts_and_family_synthesis_track_deltas() {
     assert!(rtc_group.rtc_negotiated());
 }
 
-/// Inline (unlabelled) staged entries leave NO slot in either label
-/// residue map. Absent and present-`None` are the same verdict at
-/// every reader, so the unlabelled case — the whole table when no
-/// export policy is configured — must not pay a slot per staged
-/// route. Asserted on map occupancy: the resolved label is `None`
-/// either way, so occupancy is the only observable difference.
+/// The group Permit label is derived once from the immutable chain tail.
+/// No chain, an empty chain, and an anonymous tail are inline.
 #[test]
-fn inline_staged_entries_leave_no_label_residue() {
-    let mut group = GroupRibOut::new(
+fn group_permit_label_is_the_named_chain_tail_or_inline() {
+    let group = GroupRibOut::new(
         None,
         false,
         false,
@@ -3878,89 +3874,88 @@ fn inline_staged_entries_leave_no_label_residue() {
         false,
         0,
     );
-    let key = (prefix(1), 0);
-    let resolved = |g: &GroupRibOut| {
-        (
-            g.staged_labels
-                .get(&key)
-                .and_then(|l| l.as_deref())
-                .is_none(),
-            g.vpn_staged_labels
-                .get(&vpn_key(1))
-                .cloned()
-                .unwrap_or(None)
-                .is_none(),
-        )
-    };
+    assert!(group.permit_policy_label.is_none());
 
-    // Unlabelled announce: no slot, and the readers still see None.
-    group.apply_delta(&announce_delta(prefix(1), OTHER1, None));
-    group.apply_vpn_delta(&vpn_announce_delta(1, OTHER1, None));
-    assert!(!group.staged_labels.contains_key(&key));
-    assert!(!group.vpn_staged_labels.contains_key(&vpn_key(1)));
-    assert_eq!(resolved(&group), (true, true));
-
-    // A labelled restage DOES take a slot — the residue still
-    // carries what join-time counter replay reads.
-    let mut labelled = announce_delta(prefix(1), OTHER1, Some(OTHER1));
-    labelled.policy_label = Some(Arc::from("export-chain"));
-    group.apply_delta(&labelled);
-    let mut vpn_labelled = vpn_announce_delta(1, OTHER1, Some(OTHER1));
-    vpn_labelled.policy_label = Some(Arc::from("export-chain"));
-    group.apply_vpn_delta(&vpn_labelled);
-    assert_eq!(
-        group.staged_labels.get(&key).and_then(|l| l.as_deref()),
-        Some("export-chain")
+    let empty = GroupRibOut::new(
+        Some(PolicyChain::default()),
+        false,
+        false,
+        true,
+        None,
+        vec![],
+        vec![],
+        false,
+        0,
     );
-    assert_eq!(
-        group
-            .vpn_staged_labels
-            .get(&vpn_key(1))
-            .and_then(|label| label.as_deref()),
-        Some("export-chain")
-    );
+    assert!(empty.permit_policy_label.is_none());
 
-    // Restaging inline REMOVES the slot rather than retaining the
-    // stale label — a skipped insert would leak the old verdict
-    // into the joining member's replayed counters.
-    group.apply_delta(&announce_delta(prefix(1), OTHER1, Some(OTHER1)));
-    group.apply_vpn_delta(&vpn_announce_delta(1, OTHER1, Some(OTHER1)));
-    assert!(!group.staged_labels.contains_key(&key));
-    assert!(!group.vpn_staged_labels.contains_key(&vpn_key(1)));
-    assert_eq!(resolved(&group), (true, true));
+    let anonymous = GroupRibOut::new(
+        Some(empty_policy(PolicyAction::Permit)),
+        false,
+        false,
+        true,
+        None,
+        vec![],
+        vec![],
+        false,
+        0,
+    );
+    assert!(anonymous.permit_policy_label.is_none());
 }
 
-/// Shared staging must retain the evaluator's policy-label allocation from
-/// one delta through the group-table residue. Two routes ending in the
-/// same policy therefore share one backing label rather than allocating a
-/// `String` per staged key.
-///
-/// Red proof: rebuilding either stored label with
-/// `Arc::from(label.as_ref())` leaves the operator-visible text unchanged
-/// but makes the pointer-identity assertion fail.
+/// A named multi-policy chain retains one group-owned terminal Permit label
+/// for both unicast and VPN staged routes, independent of restaging.
 #[test]
-fn staged_policy_labels_share_the_evaluation_allocation() {
-    let mut group = empty_group();
-    let label: Arc<str> = Arc::from("shared-export-policy");
-    for n in [1, 2] {
-        let mut delta = announce_delta(prefix(n), OTHER1, None);
-        delta.policy_label = Some(Arc::clone(&label));
-        group.apply_delta(&delta);
-    }
-
-    let first = group
-        .staged_labels
-        .get(&(prefix(1), 0))
-        .and_then(Option::as_ref)
-        .expect("first route carries its terminal policy");
-    let second = group
-        .staged_labels
-        .get(&(prefix(2), 0))
-        .and_then(Option::as_ref)
-        .expect("second route carries its terminal policy");
-    assert_eq!(first.as_ref(), "shared-export-policy");
-    assert!(Arc::ptr_eq(&label, first));
-    assert!(Arc::ptr_eq(first, second));
+fn named_chain_tail_is_one_group_owned_permit_label() {
+    let mut chain = PolicyChain::new(vec![
+        Policy {
+            entries: vec![],
+            default_action: PolicyAction::Permit,
+        },
+        Policy {
+            entries: vec![],
+            default_action: PolicyAction::Permit,
+        },
+    ]);
+    chain.policies[0].name = Some("screen".into());
+    chain.policies[1].name = Some("tail".into());
+    let mut group = GroupRibOut::new(
+        Some(chain),
+        false,
+        false,
+        true,
+        None,
+        vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)],
+        vec![],
+        false,
+        0,
+    );
+    let label = Arc::clone(group.permit_policy_label.as_ref().expect("named tail"));
+    let mut announce = announce_delta(prefix(1), OTHER1, Some(OTHER1));
+    announce.policy_label = Some(Arc::clone(&label));
+    group.apply_delta(&announce);
+    let mut vpn_announce = vpn_announce_delta(1, OTHER1, Some(OTHER1));
+    vpn_announce.policy_label = Some(Arc::clone(&label));
+    group.apply_vpn_delta(&vpn_announce);
+    assert_eq!(label.as_ref(), "tail");
+    assert!(Arc::ptr_eq(
+        &label,
+        group
+            .adv_entry(OTHER2, &prefix(1), 0)
+            .unwrap()
+            .policy_label
+            .unwrap()
+    ));
+    let mut restage = announce_delta(prefix(1), OTHER1, Some(OTHER2));
+    restage.policy_label = Some(Arc::clone(&label));
+    group.apply_delta(&restage);
+    let mut vpn_restage = vpn_announce_delta(1, OTHER1, Some(OTHER2));
+    vpn_restage.policy_label = Some(Arc::clone(&label));
+    group.apply_vpn_delta(&vpn_restage);
+    assert!(Arc::ptr_eq(
+        &label,
+        group.permit_policy_label.as_ref().unwrap()
+    ));
 }
 
 /// An RTC membership over a specific Route Target (full 96-bit
