@@ -1451,6 +1451,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn event_history_queue_depth_metrics_cover_startup_activity_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = BgpMetrics::new();
+        let mut config = test_config(dir.path().join("events.db"), 1);
+        config.metrics = Some(metrics.clone());
+        let manager = EventHistoryManager::start(config).await.unwrap();
+        let store = manager.storage.clone();
+        let queue_metrics = || {
+            metrics
+                .registry()
+                .gather()
+                .into_iter()
+                .find(|family| family.name() == "bgp_event_outbox_queue_depth")
+                .unwrap()
+        };
+        let initial = queue_metrics();
+        assert_eq!(initial.get_metric().len(), 6);
+
+        store.test_pause_after_send(Append);
+        let sender = manager.sender();
+        sender.try_send(event(Category::Route, 1)).unwrap();
+        wait_for_store(&store, Append).await;
+        sender.try_send(event(Category::Route, 2)).unwrap();
+        sender.try_send(event(Category::Policy, 3)).unwrap();
+        assert_eq!(
+            queue_metrics()
+                .get_metric()
+                .iter()
+                .map(|m| m.get_gauge().value())
+                .sum::<f64>(),
+            2.0
+        );
+
+        store.test_release(Append);
+        manager.shutdown().await;
+        assert!(
+            queue_metrics()
+                .get_metric()
+                .iter()
+                .all(|m| m.get_gauge().value() == 0.0)
+        );
+    }
+
+    #[tokio::test]
     async fn shutdown_continues_the_same_append_after_store_send() {
         // Load-bearing breaks: canceling the in-flight append at shutdown loses
         // the broadcast/state update; recreating it increments append_calls.
