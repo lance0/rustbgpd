@@ -85,6 +85,16 @@ impl ReadBuffer {
     pub fn clear(&mut self) {
         self.buf.clear();
     }
+
+    /// Drop buffered data and release any grown backing allocation.
+    ///
+    /// This is a cold transport-lifecycle operation: callers must first drop
+    /// the TCP read half so no active read can race the replacement. The
+    /// negotiated framing limit is deliberately preserved; the FSM owns its
+    /// per-session reset independently.
+    pub(crate) fn reset_storage(&mut self) {
+        self.buf = BytesMut::with_capacity(MAX_MESSAGE_LEN.into());
+    }
 }
 
 impl Default for ReadBuffer {
@@ -216,5 +226,28 @@ mod tests {
         rb.buf.put_slice(&[0xFF; 100]);
         rb.clear();
         assert!(rb.buf.is_empty());
+    }
+
+    #[test]
+    fn cold_reset_releases_extended_capacity_and_preserves_limit() {
+        let mut rb = ReadBuffer::new();
+        rb.set_max_message_len(EXTENDED_MAX_MESSAGE_LEN);
+        rb.buf.resize(usize::from(EXTENDED_MAX_MESSAGE_LEN), 0xab);
+        let grown_capacity = rb.buf.capacity();
+        assert!(
+            grown_capacity >= usize::from(EXTENDED_MAX_MESSAGE_LEN),
+            "extended framing must grow to at least the wire ceiling"
+        );
+
+        rb.reset_storage();
+
+        assert!(rb.buf.is_empty());
+        assert_eq!(rb.buf.capacity(), usize::from(MAX_MESSAGE_LEN));
+        assert_eq!(rb.max_message_len, EXTENDED_MAX_MESSAGE_LEN);
+        assert!(
+            grown_capacity - rb.buf.capacity()
+                >= usize::from(EXTENDED_MAX_MESSAGE_LEN - MAX_MESSAGE_LEN),
+            "cold reset must release at least the logical extended-message delta"
+        );
     }
 }

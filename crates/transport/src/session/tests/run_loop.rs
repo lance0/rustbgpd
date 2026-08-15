@@ -732,6 +732,44 @@ async fn send_hold_expiry_tears_down_without_notification() {
     );
 }
 
+fn assert_read_reset(
+    session: &mut PeerSession,
+    teardown: fn(&mut PeerSession),
+    initial_capacity: usize,
+) {
+    teardown(session);
+    assert!(session.read_half.is_none());
+    assert!(session.read_buf.buf.is_empty());
+    assert_eq!(session.read_buf.buf.capacity(), initial_capacity);
+}
+
+async fn assert_reconnected_extended_update_decodes(
+    session: &mut PeerSession,
+    encoded: &[u8],
+    initial_capacity: usize,
+) {
+    let (reconnected, mut reconnected_peer) = connected_stream_pair().await;
+    session.test_install_stream(reconnected);
+    reconnected_peer.write_all(encoded).await.unwrap();
+    while !session.read_buf.has_complete_frame() {
+        let bytes_read = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_tcp(&mut session.read_half, &mut session.read_buf.buf),
+        )
+        .await
+        .expect("reconnected session must read the extended UPDATE promptly")
+        .unwrap();
+        assert!(
+            bytes_read > 0,
+            "reconnected peer closed before the UPDATE was complete"
+        );
+    }
+    assert!(session.read_buf.buf.capacity() > initial_capacity);
+    let (decoded, raw) = session.read_buf.try_decode().unwrap().unwrap();
+    assert!(matches!(decoded, Message::Update(_)));
+    assert_eq!(raw.as_ref(), encoded);
+}
+
 /// RFC 8654 §2 directionality, inbound: OUR advertised Extended Message
 /// capability governs what we accept. The peer here did NOT advertise the
 /// capability (see `establish_test_session`'s OPEN), yet a >4096-byte
@@ -833,6 +871,23 @@ async fn inbound_extended_message_accepted_from_peer_without_capability() {
             break;
         }
     }
+
+    // The same PeerSession actor survives reconnects. A cold close must drop
+    // the grown backing allocation after taking the read half, while retaining
+    // the current logical framing limit until SessionDown resets it.
+    assert_read_reset(&mut session, PeerSession::close_tcp, initial_capacity);
+    drop(server);
+
+    // Reinstall a stream on the same actor and feed the same extended UPDATE.
+    // No limit setter is called here: successful decode proves the cold storage
+    // reset did not overwrite the independently-owned negotiated limit.
+    assert_reconnected_extended_update_decodes(&mut session, encoded.as_ref(), initial_capacity)
+        .await;
+
+    // The socket-error teardown site has the same cold-storage contract as
+    // close_tcp and likewise runs only after clearing read_half.
+    let disconnect = PeerSession::handle_tcp_disconnect;
+    assert_read_reset(&mut session, disconnect, initial_capacity);
 }
 
 /// RFC 8654 §2 directionality, outbound: the PEER's advertised Extended

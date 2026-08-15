@@ -462,8 +462,8 @@ impl PeerSession {
         self.handle_tcp_disconnect();
     }
 
-    /// Drop the TCP read half + writer channels and clear the read
-    /// buffer. Dropping the writer's `Sender` halves causes the writer
+    /// Drop the TCP read half + writer channels and reset the read
+    /// buffer storage. Dropping the writer's `Sender` halves causes the writer
     /// task's biased `select!` to fall through to its `else` arm and
     /// exit cleanly; the `JoinHandle` then resolves and the session's
     /// own select observes it via the writer-exit arm.
@@ -481,7 +481,7 @@ impl PeerSession {
         self.writer_priority_tx = None;
         self.writer_keepalive_tx = None;
         self.writer_teardown_tx = None;
-        self.read_buf.clear();
+        self.read_buf.reset_storage();
         self.tcp_ao_info = None;
         self.tcp_ao_stream_was_accepted = false;
         self.tcp_ao_selected_owner = None;
@@ -503,7 +503,7 @@ impl PeerSession {
         self.writer_priority_tx = None;
         self.writer_keepalive_tx = None;
         self.writer_teardown_tx = None;
-        self.read_buf.clear();
+        self.read_buf.reset_storage();
         self.tcp_ao_info = None;
         self.tcp_ao_stream_was_accepted = false;
         self.tcp_ao_selected_owner = None;
