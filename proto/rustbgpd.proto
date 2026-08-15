@@ -1041,14 +1041,15 @@ service PolicyService {
   // DEADLINE_EXCEEDED rather than NOT_FOUND.
   rpc ListRejectedRoutes(ListRejectedRoutesRequest) returns (ListRejectedRoutesResponse);
 
-  // TestPolicy — dry-run a candidate .rpol policy against a snapshot
-  // of the live RIB (ADR-0096 Decision 6). The daemon compiles the
+  // TestPolicy — dry-run a candidate .rpol policy against a
+  // version-fenced walk of the live RIB (ADR-0096 Decision 6). The daemon compiles the
   // submitted source server-side (compile diagnostics are returned in
-  // the response instead of routes), snapshots matching routes through
-  // the existing RIB query machinery, evaluates the selected policy
-  // read-only, and reports accepted / rejected / modified counts,
-  // per-term hit counters, and up to show_changes before/after
-  // attribute diffs.
+  // the response instead of routes), then evaluates at most 1,000 routes
+  // per page in canonical (prefix, peer, path_id) order. A
+  // conservative mutation of the selected Received or Best table during
+  // the walk aborts the whole RPC with ABORTED and no partial response;
+  // retry from the beginning. Exhausted paging generations and unavailable
+  // RIB backends return UNAVAILABLE.
   //
   // Side-effect free: no route state is touched, no session is
   // affected, no policy counters increment. V1 scope is IPv4 / IPv6
@@ -1652,7 +1653,8 @@ message TestPolicyRequest {
   // Address family filter. UNSPECIFIED evaluates IPv4 + IPv6 unicast;
   // only the unicast families are supported in V1.
   AddressFamily afi_safi = 5;
-  // Maximum routes to evaluate; 0 = the whole snapshot.
+  // Maximum routes to evaluate globally across all pages; 0 = the whole
+  // version-fenced walk in canonical (prefix, peer, path_id) order.
   uint32 limit = 6;
   // Maximum before/after attribute diffs to return (routes the policy
   // accepted with modifications). 0 = none.
@@ -1779,7 +1781,8 @@ message TestPolicyResponse {
   // Accepted routes whose attributes the policy changed.
   uint64 modified = 6;
   repeated TestPolicyTermHits term_hits = 7;
-  // Up to request.show_changes samples, in snapshot order.
+  // Up to request.show_changes samples, in canonical
+  // (prefix, peer, path_id) order across the whole walk.
   repeated TestPolicyDiff diffs = 8;
 }
 
