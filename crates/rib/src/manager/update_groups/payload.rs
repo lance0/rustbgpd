@@ -84,9 +84,10 @@ pub(in crate::manager) struct AdvEntry<'a> {
     pub(in crate::manager) route: &'a Route,
     /// Next-hop-override residue for the slot.
     pub(in crate::manager) nh: Option<&'a NextHopAction>,
-    /// Modifying-policy groups carry captured pre-policy RFC 7947 control
-    /// attributes. Proven passthrough groups leave this `None` and derive
-    /// equivalent input from [`Self::route`].
+    /// Modifying-policy groups and [`RunnerUp`] lane entries may carry captured
+    /// pre-policy RFC 7947 control attributes. Passthrough mode ignores this
+    /// field and derives equivalent input from [`Self::route`]; its dense
+    /// staged entries leave the field `None`.
     pub(in crate::manager) source_attrs: Option<&'a Arc<Vec<PathAttribute>>>,
     /// Terminal policy label of the permitting evaluation (`None` =
     /// inline verdict) — join-time counter replay residue.
