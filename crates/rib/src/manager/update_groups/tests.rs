@@ -1659,7 +1659,7 @@ fn adv_entry_derivation_matrix() {
     group.apply_delta(&GroupDelta {
         prefix: p,
         path_id: 0,
-        new: Some((route(p, OTHER1), Some(NextHopAction::Self_))),
+        new: Some((route_with_comm(p, OTHER1, 7), Some(NextHopAction::Self_))),
         old_source: None,
         policy_label: Some(Arc::from("staged")),
         source_attrs: Some(Arc::new(vec![PathAttribute::Communities(vec![7])])),
@@ -1670,7 +1670,12 @@ fn adv_entry_derivation_matrix() {
         .expect("non-own staged entry");
     assert_eq!((adv.route.peer, adv.route.path_id), (OTHER1, 0));
     assert!(matches!(adv.nh, Some(NextHopAction::Self_)));
-    assert_eq!(source_control_input(adv.source_attrs).0, &[7]);
+    assert_eq!(
+        group
+            .source_control_for_route(adv.route, adv.source_attrs)
+            .0,
+        &[7]
+    );
     assert_eq!(adv.policy_label.map(|label| &**label), Some("staged"));
 
     // Own-sourced + lane: the runner-up substitutes with ITS
@@ -1679,12 +1684,22 @@ fn adv_entry_derivation_matrix() {
     group.apply_delta(&announce_delta(p, MEMBER, None));
     group.apply_lane(
         p,
-        Some(lane_entry(route(p, OTHER2), MEMBER, "lane", Some(9))),
+        Some(lane_entry(
+            route_with_comm(p, OTHER2, 9),
+            MEMBER,
+            "lane",
+            Some(9),
+        )),
     );
     let adv = group.adv_entry(MEMBER, &p, 0).expect("lane substitutes");
     assert_eq!((adv.route.peer, adv.route.path_id), (OTHER2, 0));
     assert!(matches!(adv.nh, Some(NextHopAction::Self_)));
-    assert_eq!(source_control_input(adv.source_attrs).0, &[9]);
+    assert_eq!(
+        group
+            .source_control_for_route(adv.route, adv.source_attrs)
+            .0,
+        &[9]
+    );
     assert_eq!(adv.policy_label.map(|label| &**label), Some("lane"));
     // Any other member still sees the staged winner (with the
     // winner's residue: none was staged for it).
@@ -3011,7 +3026,7 @@ fn pcb_resync_substitution_applies_rs_control() {
 
     // Suppressing tag: skip + withdraw, and the extras filter
     // agrees (a suppressed substitution does not retain).
-    let mut group = per_client_best_group(None);
+    let mut group = per_client_best_group(Some(strip_communities_chain(vec![deny_comm])));
     group.apply_delta(&announce_delta(k, MEMBER, None));
     group.apply_lane(
         k,
@@ -3254,14 +3269,15 @@ fn replay_group(lane_comm: Option<u32>) -> GroupRibOut {
     group.apply_delta(&announce_delta(prefix(1), OTHER1, None));
     group.apply_delta(&announce_delta(prefix(2), MEMBER, None));
     group.apply_delta(&announce_delta(prefix(3), MEMBER, None));
+    let mut lane_route = route(prefix(2), OTHER2);
+    if let Some(community) = lane_comm {
+        let mut attrs = (*lane_route.attributes).clone();
+        attrs.push(PathAttribute::Communities(vec![community]));
+        lane_route.attributes = Arc::new(attrs);
+    }
     group.apply_lane(
         prefix(2),
-        Some(lane_entry(
-            route(prefix(2), OTHER2),
-            MEMBER,
-            "lane",
-            lane_comm,
-        )),
+        Some(lane_entry(lane_route, MEMBER, "lane", lane_comm)),
     );
     group
 }
@@ -4184,6 +4200,81 @@ fn join_view_and_count_synthesis_track_deltas() {
     group.apply_delta(&withdraw_delta(k1, Some(MEMBER)));
     assert_eq!(group.advertised_count_for(OTHER1), 1);
     assert_eq!(group.table.len(), 1);
+}
+
+#[test]
+fn source_control_passthrough_keeps_dense_residue_empty() {
+    const CONTROL: u32 = 65_001 << 16 | 7;
+    let p = prefix(1);
+    let source = cand_with_comm(p, OTHER1, 300, CONTROL);
+    let mut group = empty_group();
+    assert!(group.source_control_passthrough);
+    group.apply_delta(&GroupDelta {
+        prefix: p,
+        path_id: 0,
+        new: Some((source.clone(), None)),
+        old_source: None,
+        policy_label: None,
+        source_attrs: capture_source_attrs(&source),
+        lane: None,
+    });
+
+    assert_eq!(
+        (group.source_attrs.len(), group.source_attrs.capacity()),
+        (0, 0)
+    );
+    assert_eq!(group.source_control((p, 0)).0, &[CONTROL]);
+    let entry = group
+        .adv_entry(MEMBER, &p, 0)
+        .expect("non-source member retains staged route");
+    assert_eq!(
+        group
+            .source_control_for_route(entry.route, entry.source_attrs)
+            .0,
+        &[CONTROL]
+    );
+    assert!(group.rs_tag_transition(p, None).is_none());
+
+    group.apply_delta(&withdraw_delta(p, Some(OTHER1)));
+    assert_eq!(
+        (group.source_attrs.len(), group.source_attrs.capacity()),
+        (0, 0)
+    );
+}
+
+#[test]
+fn source_control_modifying_mode_preserves_historical_residue_and_transition() {
+    const CONTROL: u32 = 65_001 << 16 | 7;
+    let p = prefix(1);
+    let source = cand_with_comm(p, OTHER1, 300, CONTROL);
+    let staged = cand(p, OTHER1, 300);
+    let mut group = plain_group_with_chain(Some(strip_communities_chain(vec![CONTROL])));
+    assert!(!group.source_control_passthrough);
+    group.apply_delta(&GroupDelta {
+        prefix: p,
+        path_id: 0,
+        new: Some((staged, None)),
+        old_source: None,
+        policy_label: None,
+        source_attrs: capture_source_attrs(&source),
+        lane: None,
+    });
+
+    assert_eq!(group.source_attrs.len(), 1);
+    assert_eq!(group.source_control((p, 0)).0, &[CONTROL]);
+    let transition = group
+        .rs_tag_transition(p, None)
+        .expect("source tag removal is invisible post-policy");
+    assert_eq!(
+        source_control_input(transition.prior_source_attrs.as_ref()).0,
+        &[CONTROL]
+    );
+    assert!(transition.source_attrs.is_none());
+    group.commit_rs_transitions(&[transition]);
+    assert!(group.source_attrs.is_empty());
+
+    group.apply_delta(&withdraw_delta(p, Some(OTHER1)));
+    assert!(group.source_attrs.is_empty());
 }
 
 // --- ADR-0126 staging trigger: per-client-best groups stage from

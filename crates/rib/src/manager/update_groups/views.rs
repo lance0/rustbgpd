@@ -2,8 +2,7 @@ use super::{
     Afi, ExactExportKey, FxHashMap, GroupEvalAccumulator, GroupRibOut, HashSet, IpAddr,
     NextHopAction, PolicyAction, PolicyLabel, Prefix, RibManager, Route, RouteQueryKey,
     RtcMembership, Safi, VpnAddressFamily, VpnRibRoute, VpnRibRouteKey, VpnRouteKey,
-    bump_counter_row, route_query_key, routes_equal, rt_passes, source_control_input,
-    vpn_routes_equal,
+    bump_counter_row, route_query_key, routes_equal, rt_passes, vpn_routes_equal,
 };
 
 impl RibManager {
@@ -67,7 +66,7 @@ impl RibManager {
                 continue;
             };
             let (source_communities, source_large_communities) =
-                source_control_input(entry.source_attrs);
+                group.source_control_for_route(entry.route, entry.source_attrs);
             if rs_control_suppressed(source_communities, source_large_communities, rs_control) {
                 // Not on this member's wire going forward. Withdraw when
                 // it may be there now: always on a plain dirty resync
@@ -104,7 +103,8 @@ impl RibManager {
         // does not).
         let member_retains = |key: &(Prefix, u32)| {
             group.adv_entry(member, &key.0, key.1).is_some_and(|entry| {
-                let (communities, large_communities) = source_control_input(entry.source_attrs);
+                let (communities, large_communities) =
+                    group.source_control_for_route(entry.route, entry.source_attrs);
                 !rs_control_suppressed(communities, large_communities, rs_control)
             })
         };

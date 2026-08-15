@@ -344,7 +344,7 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::sync::Arc;
 
-    use rustbgpd_wire::{Ipv4Prefix, Prefix};
+    use rustbgpd_wire::{ExtendedCommunity, Ipv4Prefix, LargeCommunity, Prefix};
 
     use crate::engine::{
         NamedPolicy, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteContext,
@@ -523,6 +523,68 @@ policy bogon-filter {
         )]);
         assert!(chain.requires_as_path_string());
         assert!(!chain.requires_rpki_validation());
+    }
+
+    #[test]
+    fn source_control_mutation_classifier_covers_literals_and_nested_variables() {
+        let classifies = |modifications| {
+            let mut named = toml_deny_policy();
+            let statement = &mut named.policy.entries[0];
+            statement.prefix = None;
+            statement.action = PolicyAction::Permit;
+            statement.modifications = modifications;
+            PolicyChain::from_named(vec![named]).modifies_source_control_communities()
+        };
+        let large = LargeCommunity::new(65_000, 1, 2);
+        for modifications in [
+            RouteModifications {
+                communities_add: vec![1],
+                ..RouteModifications::default()
+            },
+            RouteModifications {
+                communities_remove: vec![1],
+                ..RouteModifications::default()
+            },
+            RouteModifications {
+                large_communities_add: vec![large],
+                ..RouteModifications::default()
+            },
+            RouteModifications {
+                large_communities_remove: vec![large],
+                ..RouteModifications::default()
+            },
+        ] {
+            assert!(classifies(modifications));
+        }
+        assert!(!classifies(RouteModifications::default()));
+        assert!(!classifies(RouteModifications {
+            extended_communities_add: vec![ExtendedCommunity::new(1)],
+            extended_communities_remove: vec![ExtendedCommunity::new(2)],
+            ..RouteModifications::default()
+        }));
+
+        let file = RpolFile::parse(
+            "asn-set one { 1 }
+            policy p { term t {
+                for outer in route.communities {
+                    for ignored in one {
+                        remove community outer;
+                        add community outer
+                    }
+                }
+                accept
+            } }",
+        )
+        .expect("clean nested community-variable program");
+        let mut store = SetStore::new();
+        let compiled = file
+            .compile_policy("p", &[], &mut store)
+            .expect("policy exists");
+        let chain = PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+            "p".to_string(),
+            Arc::new(compiled),
+        )]);
+        assert!(chain.modifies_source_control_communities());
     }
 
     /// An rpol member's placeholder `policy` never reaches evaluation:
