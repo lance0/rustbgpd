@@ -1190,7 +1190,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
     ) -> Result<Response<proto::TestPolicyResponse>, Status> {
         use rustbgpd_policy::rpol::{RpolFile, parse_call_form};
         use rustbgpd_policy::sets::SetStore;
-        use rustbgpd_rib::RibUpdate;
+        use rustbgpd_rib::{RouteQueryScope, route_query_key};
 
         let req = request.into_inner();
         let import = match req.direction.as_str() {
@@ -1264,23 +1264,19 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 ))
             })?;
 
-        // Read-only route snapshot via the existing RIB query
-        // machinery. Import evaluates Adj-RIB-In (optionally one
-        // peer's); export evaluates Loc-RIB best routes.
+        // Start the version-fenced route walk before reading peer context.
+        // Import evaluates Adj-RIB-In (optionally one peer's); export
+        // evaluates Loc-RIB best routes.
         let rib_tx = self.rib_tx.as_ref().ok_or_else(|| {
             Status::failed_precondition("route snapshot runtime unavailable on this listener")
         })?;
-        let routes = rib_manager_read(rib_tx, |reply| {
-            if import {
-                RibUpdate::QueryReceivedRoutes {
-                    peer: peer_filter,
-                    reply,
-                }
-            } else {
-                RibUpdate::QueryBestRoutes { reply }
-            }
-        })
-        .await?;
+        let query_scope = if import {
+            RouteQueryScope::Received { peer: peer_filter }
+        } else {
+            RouteQueryScope::Best
+        };
+        let mut page = query_test_policy_page(rib_tx, query_scope, None, None).await?;
+        let snapshot_version = page.version;
 
         // Peer context (ASN / peer-group) so guards on peer.* fields
         // see real values.
@@ -1293,18 +1289,40 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .map(|info| (info.address, (info.remote_asn, info.peer_group)))
             .collect();
 
-        Ok(Response::new(run_test_policy(
-            &chain,
-            &routes,
-            &TestPolicyScope {
-                import,
-                target_peer: peer_filter,
-                family_filter,
-                limit: req.limit as usize,
-                show_changes: req.show_changes as usize,
-            },
-            &peer_context,
-        )))
+        let scope = TestPolicyScope {
+            import,
+            target_peer: peer_filter,
+            family_filter,
+            limit: req.limit as usize,
+            show_changes: req.show_changes as usize,
+        };
+        let mut hits = chain.zero_term_hits();
+        let mut response = proto::TestPolicyResponse {
+            compiled: true,
+            ..Default::default()
+        };
+        loop {
+            run_test_policy_page(
+                &chain,
+                &page.routes,
+                &scope,
+                &peer_context,
+                &mut response,
+                &mut hits,
+            );
+            if (scope.limit != 0 && response.routes_evaluated >= req.limit.into()) || !page.has_more
+            {
+                break;
+            }
+            let after = page.routes.last().map(route_query_key).ok_or_else(|| {
+                Status::unavailable("route pagination returned an empty continuation page")
+            })?;
+            drop(page);
+            page = query_test_policy_page(rib_tx, query_scope, Some(after), Some(snapshot_version))
+                .await?;
+        }
+        response.term_hits = render_test_policy_term_hits(&chain, &hits);
+        Ok(Response::new(response))
     }
 
     #[expect(
@@ -1451,6 +1469,35 @@ impl proto::policy_service_server::PolicyService for PolicyService {
     }
 }
 
+const TEST_POLICY_PAGE_SIZE: usize = 1000;
+
+async fn query_test_policy_page(
+    rib_tx: &mpsc::Sender<rustbgpd_rib::RibUpdate>,
+    scope: rustbgpd_rib::RouteQueryScope,
+    after: Option<rustbgpd_rib::RouteQueryKey>,
+    expected_version: Option<rustbgpd_rib::RoutePageVersion>,
+) -> Result<rustbgpd_rib::RoutePage, Status> {
+    use rustbgpd_rib::{RibUpdate, RoutePageError};
+
+    rib_manager_read(rib_tx, |reply| RibUpdate::QueryRoutesPage {
+        scope,
+        filter: None,
+        after,
+        expected_version,
+        page_size: TEST_POLICY_PAGE_SIZE,
+        reply,
+    })
+    .await?
+    .map_err(|error| match error {
+        RoutePageError::Invalidated => Status::aborted(
+            "route table changed during TestPolicy; retry the whole RPC from the beginning",
+        ),
+        RoutePageError::GenerationExhausted => Status::unavailable(
+            "TestPolicy route pagination unavailable because its generation is exhausted",
+        ),
+    })
+}
+
 /// Route selection scope for one `TestPolicy` dry run.
 struct TestPolicyScope {
     /// Import (Adj-RIB-In snapshot, peer context from each route's
@@ -1472,20 +1519,23 @@ struct TestPolicyScope {
 /// snapshot: counts, per-term hit counters, and up to
 /// `scope.show_changes` before/after diff samples. Pure function of
 /// its inputs — no daemon state is touched (ADR-0096 Decision 6).
-fn run_test_policy(
+fn run_test_policy_page(
     chain: &rustbgpd_policy::ir::CompiledChain,
     routes: &[rustbgpd_rib::Route],
     scope: &TestPolicyScope,
     peer_context: &std::collections::HashMap<IpAddr, (u32, Option<String>)>,
-) -> proto::TestPolicyResponse {
+    response: &mut proto::TestPolicyResponse,
+    hits: &mut [Vec<u64>],
+) {
     use rustbgpd_policy::{PolicyAction, RouteContext, RouteType};
     use rustbgpd_rib::RouteOrigin;
 
     let needs_as_path_string = chain.requires_as_path_string();
-    let mut hits = chain.zero_term_hits();
-    let mut response = proto::TestPolicyResponse {
-        compiled: true,
-        ..Default::default()
+    let remaining = if scope.limit == 0 {
+        usize::MAX
+    } else {
+        let routes_evaluated = usize::try_from(response.routes_evaluated).unwrap_or(usize::MAX);
+        scope.limit.saturating_sub(routes_evaluated)
     };
     for route in routes
         .iter()
@@ -1494,11 +1544,7 @@ fn run_test_policy(
                 .family_filter
                 .is_none_or(|v4| matches!(route.prefix, Prefix::V4(_)) == v4)
         })
-        .take(if scope.limit == 0 {
-            usize::MAX
-        } else {
-            scope.limit
-        })
+        .take(remaining)
     {
         let ctx_peer = if scope.import {
             Some(route.peer)
@@ -1547,7 +1593,7 @@ fn run_test_policy(
             med: route.med_attr(),
         };
         response.routes_evaluated += 1;
-        let result = chain.evaluate_recording_hits(&ctx, &mut hits);
+        let result = chain.evaluate_recording_hits(&ctx, hits);
         if result.action == PolicyAction::Permit {
             response.accepted += 1;
             if !result.modifications.is_empty() {
@@ -1565,10 +1611,16 @@ fn run_test_policy(
             response.rejected += 1;
         }
     }
-    response.term_hits = chain
+}
+
+fn render_test_policy_term_hits(
+    chain: &rustbgpd_policy::ir::CompiledChain,
+    hits: &[Vec<u64>],
+) -> Vec<proto::TestPolicyTermHits> {
+    chain
         .policies
         .iter()
-        .zip(&hits)
+        .zip(hits)
         .flat_map(|(policy, policy_hits)| {
             policy
                 .terms
@@ -1580,8 +1632,7 @@ fn run_test_policy(
                     hits: *count,
                 })
         })
-        .collect();
-    response
+        .collect()
 }
 
 /// Render one modified route's attribute changes as human-readable
@@ -1635,7 +1686,7 @@ fn render_modification_changes(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::peer_types::{CatalogMutationError, PolicyAsPathPrependConfig};
@@ -1883,9 +1934,8 @@ mod tests {
             return;
         };
         match update {
-            rustbgpd_rib::RibUpdate::QueryReceivedRoutes { reply, .. }
-            | rustbgpd_rib::RibUpdate::QueryBestRoutes { reply } => {
-                let _ = reply.send(Vec::new());
+            rustbgpd_rib::RibUpdate::QueryRoutesPage { reply, .. } => {
+                let _ = reply.send(Ok(rustbgpd_rib::RoutePage::default()));
             }
             rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { reply, .. } => {
                 let _ = reply.send(Vec::new());
@@ -2945,8 +2995,12 @@ policy customer-in(peer_lp: u32) {
 
     fn test_route(prefix: &str, len: u8) -> rustbgpd_rib::Route {
         let addr: std::net::Ipv4Addr = prefix.parse().unwrap();
+        test_route_prefix(Prefix::V4(Ipv4Prefix::new(addr, len)))
+    }
+
+    fn test_route_prefix(prefix: Prefix) -> rustbgpd_rib::Route {
         rustbgpd_rib::Route {
-            prefix: Prefix::V4(Ipv4Prefix::new(addr, len)),
+            prefix,
             next_hop: "10.0.0.9".parse().unwrap(),
             link_local_next_hop: None,
             next_hop_scope: None,
@@ -2964,41 +3018,113 @@ policy customer-in(peer_lp: u32) {
         }
     }
 
-    /// Fake daemon backends for `TestPolicy`: a RIB task answering
-    /// received/best route queries with the given snapshot, and a
-    /// peer manager answering `ListPeers` with an empty peer set.
-    fn test_policy_service(routes: Vec<rustbgpd_rib::Route>) -> PolicyService {
+    fn customer_route(index: u32) -> rustbgpd_rib::Route {
+        let base = u32::from(std::net::Ipv4Addr::new(10, 10, 0, 0));
+        test_route_prefix(Prefix::V4(Ipv4Prefix::new((base + index * 16).into(), 28)))
+    }
+
+    fn ipv6_route(index: u16) -> rustbgpd_rib::Route {
+        test_route_prefix(Prefix::V6(Ipv6Prefix::new(
+            std::net::Ipv6Addr::new(0x2001, 0xdb8, index, 0, 0, 0, 0, 0),
+            64,
+        )))
+    }
+
+    /// Fake paged RIB plus peer-context backends. The RIB side enforces the
+    /// production page cap, unfiltered request, fixed first-page version, and
+    /// strict canonical cursor while recording cross-actor command order.
+    fn test_policy_service_with(
+        mut routes: Vec<rustbgpd_rib::Route>,
+        failure: Option<(usize, rustbgpd_rib::RoutePageError)>,
+    ) -> (PolicyService, Arc<Mutex<Vec<String>>>) {
+        routes.sort_unstable_by_key(rustbgpd_rib::route_query_key);
+        let commands = Arc::new(Mutex::new(Vec::new()));
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(8);
+        let peer_commands = Arc::clone(&commands);
         tokio::spawn(async move {
             while let Some(cmd) = peer_rx.recv().await {
                 match cmd {
                     PeerManagerCommand::ListPeers { reply } => {
+                        peer_commands.lock().unwrap().push("peers".to_string());
                         let _ = reply.send(Vec::new());
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
             }
         });
+        let rib_commands = Arc::clone(&commands);
         tokio::spawn(async move {
+            let version = rustbgpd_rib::RoutePageVersion {
+                epoch: 7,
+                generation: 11,
+            };
+            let mut query_index = 0;
+            let mut last_cursor = None;
             while let Some(update) = rib_rx.recv().await {
                 match update {
-                    rustbgpd_rib::RibUpdate::QueryReceivedRoutes { peer, reply } => {
-                        let filtered = routes
+                    rustbgpd_rib::RibUpdate::QueryRoutesPage {
+                        scope,
+                        filter,
+                        after,
+                        expected_version,
+                        page_size,
+                        reply,
+                    } => {
+                        assert!(filter.is_none());
+                        assert_eq!(page_size, TEST_POLICY_PAGE_SIZE);
+                        assert_eq!(after, last_cursor);
+                        assert_eq!(expected_version, (query_index != 0).then_some(version));
+                        rib_commands
+                            .lock()
+                            .unwrap()
+                            .push(format!("page:{query_index}"));
+                        if failure.is_some_and(|(at, _)| at == query_index) {
+                            let _ = reply.send(Err(failure.unwrap().1));
+                            continue;
+                        }
+                        let scoped: Vec<_> = routes
                             .iter()
-                            .filter(|route| peer.is_none_or(|p| route.peer == p))
-                            .cloned()
+                            .filter(|route| match scope {
+                                rustbgpd_rib::RouteQueryScope::Received { peer } => {
+                                    peer.is_none_or(|peer| route.peer == peer)
+                                }
+                                rustbgpd_rib::RouteQueryScope::Best => true,
+                                rustbgpd_rib::RouteQueryScope::Advertised { .. } => false,
+                            })
+                            .filter(|route| {
+                                after.is_none_or(|cursor| {
+                                    rustbgpd_rib::route_query_key(route) > cursor
+                                })
+                            })
                             .collect();
-                        let _ = reply.send(filtered);
-                    }
-                    rustbgpd_rib::RibUpdate::QueryBestRoutes { reply } => {
-                        let _ = reply.send(routes.clone());
+                        let page_routes: Vec<_> = scoped
+                            .iter()
+                            .take(page_size)
+                            .map(|route| (*route).clone())
+                            .collect();
+                        let has_more = scoped.len() > page_routes.len();
+                        last_cursor = page_routes.last().map(rustbgpd_rib::route_query_key);
+                        query_index += 1;
+                        let _ = reply.send(Ok(rustbgpd_rib::RoutePage {
+                            routes: page_routes,
+                            total: scoped.len() as u64,
+                            has_more,
+                            version,
+                        }));
                     }
                     _ => panic!("unexpected RIB query"),
                 }
             }
         });
-        PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx)
+        (
+            PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx),
+            commands,
+        )
+    }
+
+    fn test_policy_service(routes: Vec<rustbgpd_rib::Route>) -> PolicyService {
+        test_policy_service_with(routes, None).0
     }
 
     #[tokio::test]
@@ -3155,6 +3281,243 @@ policy customer-in(peer_lp: u32) {
         assert_eq!(resp.routes_evaluated, 2);
         assert_eq!(resp.accepted, 2);
         assert!(resp.diffs.is_empty());
+    }
+
+    async fn assert_test_policy_page_count(route_count: u32) {
+        let (svc, commands) =
+            test_policy_service_with((0..route_count).rev().map(customer_route).collect(), None);
+        let resp = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(proto::TestPolicyRequest {
+                limit: 0,
+                show_changes: 0,
+                ..test_policy_request()
+            }),
+        )
+        .await
+        .expect("paged dry run succeeds")
+        .into_inner();
+        assert_eq!(resp.routes_evaluated, u64::from(route_count));
+        assert_eq!(resp.accepted, u64::from(route_count));
+        let page_count = route_count
+            .div_ceil(u32::try_from(TEST_POLICY_PAGE_SIZE).expect("test page size fits in u32"));
+        let mut expected = vec!["page:0".to_string(), "peers".to_string()];
+        expected.extend((1..page_count).map(|page| format!("page:{page}")));
+        assert_eq!(*commands.lock().unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_policy_pages_1000_routes() {
+        assert_test_policy_page_count(1000).await;
+    }
+
+    #[tokio::test]
+    async fn test_policy_pages_1001_routes() {
+        assert_test_policy_page_count(1001).await;
+    }
+
+    #[tokio::test]
+    async fn test_policy_pages_2000_routes() {
+        assert_test_policy_page_count(2000).await;
+    }
+
+    #[tokio::test]
+    async fn test_policy_pages_2001_use_fixed_version_strict_cursor_and_no_filter() {
+        assert_test_policy_page_count(2001).await;
+    }
+
+    #[tokio::test]
+    async fn test_policy_mixed_family_filter_and_limit_are_global() {
+        let mut routes: Vec<_> = (0..1001).map(customer_route).collect();
+        routes.extend((0..5).map(ipv6_route));
+        let svc = test_policy_service(routes);
+        let resp = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(proto::TestPolicyRequest {
+                afi_safi: proto::AddressFamily::Ipv6Unicast as i32,
+                limit: 3,
+                ..test_policy_request()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resp.routes_evaluated, 3);
+        assert_eq!(resp.rejected, 3);
+        assert_eq!(resp.term_hits[0].hits, 0);
+        assert_eq!(resp.term_hits[1].hits, 3);
+    }
+
+    #[tokio::test]
+    async fn test_policy_import_one_peer_uses_received_scope_filter() {
+        let selected: IpAddr = "10.0.0.9".parse().unwrap();
+        let other: IpAddr = "10.0.0.10".parse().unwrap();
+        let routes = (0..1001)
+            .map(|index| {
+                let mut route = customer_route(index);
+                route.peer = if index % 2 == 0 { selected } else { other };
+                route
+            })
+            .collect();
+        let svc = test_policy_service(routes);
+        let resp = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(proto::TestPolicyRequest {
+                peer: selected.to_string(),
+                ..test_policy_request()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resp.routes_evaluated, 501);
+        assert_eq!(resp.accepted, 501);
+    }
+
+    #[tokio::test]
+    async fn test_policy_family_filtered_limit_boundaries_999_1000_1001() {
+        for limit in [999, 1000, 1001] {
+            let mut routes: Vec<_> = (0..1001).map(customer_route).collect();
+            routes.extend((0..1001).map(ipv6_route));
+            let svc = test_policy_service(routes);
+            let resp = PolicyServiceRpc::test_policy(
+                &svc,
+                Request::new(proto::TestPolicyRequest {
+                    afi_safi: proto::AddressFamily::Ipv6Unicast as i32,
+                    limit,
+                    ..test_policy_request()
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(resp.routes_evaluated, u64::from(limit));
+            assert_eq!(resp.rejected, u64::from(limit));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_policy_reverse_insertion_keeps_global_changes_counts_and_hits() {
+        let svc = test_policy_service((0..1001).rev().map(customer_route).collect());
+        let resp = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(proto::TestPolicyRequest {
+                show_changes: 3,
+                ..test_policy_request()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resp.routes_evaluated, 1001);
+        assert_eq!(resp.modified, 1001);
+        assert_eq!(resp.term_hits[0].hits, 1001);
+        assert_eq!(resp.diffs.len(), 3);
+        let expected: Vec<_> = (0..3)
+            .map(|index| customer_route(index).prefix.addr_string())
+            .collect();
+        assert_eq!(
+            resp.diffs
+                .iter()
+                .map(|diff| &diff.prefix)
+                .collect::<Vec<_>>(),
+            expected.iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_policy_canonical_order_covers_families_peers_and_path_ids() {
+        let peers: [IpAddr; 2] = ["10.0.0.8".parse().unwrap(), "10.0.0.9".parse().unwrap()];
+        let mut routes = vec![
+            customer_route(2),
+            ipv6_route(1),
+            customer_route(1),
+            ipv6_route(0),
+            customer_route(1),
+        ];
+        for (index, route) in routes.iter_mut().enumerate() {
+            route.peer = peers[index % 2];
+            route.path_id = u32::try_from(4 - index).expect("fixture path ID fits in u32");
+            route.next_hop = format!("192.0.2.{}", index + 1).parse().unwrap();
+        }
+        let mut expected = routes.clone();
+        expected.sort_unstable_by_key(rustbgpd_rib::route_query_key);
+        let expected: Vec<_> = expected
+            .iter()
+            .map(|route| {
+                (
+                    route.prefix.addr_string(),
+                    route.peer.to_string(),
+                    vec![format!("next_hop {} -> self", route.next_hop)],
+                )
+            })
+            .collect();
+        routes.reverse();
+        let svc = test_policy_service(routes);
+        let resp = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(proto::TestPolicyRequest {
+                rpol_source: "policy all { term all { set next-hop self; accept } }".to_string(),
+                policy: "all".to_string(),
+                show_changes: 10,
+                ..test_policy_request()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        let actual: Vec<_> = resp
+            .diffs
+            .into_iter()
+            .map(|diff| (diff.prefix, diff.peer, diff.changes))
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn test_policy_limit_stops_without_an_extra_continuation() {
+        let (svc, commands) =
+            test_policy_service_with((0..2001).map(customer_route).collect(), None);
+        let resp = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(proto::TestPolicyRequest {
+                limit: 1000,
+                ..test_policy_request()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resp.routes_evaluated, 1000);
+        assert_eq!(*commands.lock().unwrap(), ["page:0", "peers"]);
+    }
+
+    #[tokio::test]
+    async fn test_policy_conservative_invalidation_aborts_without_partial_response() {
+        let (svc, commands) = test_policy_service_with(
+            (0..1001).map(customer_route).collect(),
+            Some((1, rustbgpd_rib::RoutePageError::Invalidated)),
+        );
+        let status = PolicyServiceRpc::test_policy(&svc, Request::new(test_policy_request()))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Aborted);
+        assert!(status.message().contains("whole RPC"));
+        assert_eq!(*commands.lock().unwrap(), ["page:0", "peers", "page:1"]);
+    }
+
+    #[tokio::test]
+    async fn test_policy_generation_exhaustion_is_unavailable_before_peer_read() {
+        let (svc, commands) = test_policy_service_with(
+            vec![customer_route(0)],
+            Some((0, rustbgpd_rib::RoutePageError::GenerationExhausted)),
+        );
+        let status = PolicyServiceRpc::test_policy(&svc, Request::new(test_policy_request()))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert!(status.message().contains("generation is exhausted"));
+        assert_eq!(*commands.lock().unwrap(), ["page:0"]);
     }
 
     // -- GetPolicyStats (ADR-0096 Decision 3.3) ---------------------

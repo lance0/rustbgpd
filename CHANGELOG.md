@@ -11,6 +11,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `PolicyService.TestPolicy` now evaluates import and export routes through
+  version-fenced pages capped at 1,000 instead of retaining a whole-table route
+  snapshot. Compilation still precedes RIB access; evaluation and global
+  family/limit/diff/count/hit accounting follows the canonical
+  `(prefix, peer, path_id)` order. A conservative Received/Best mutation
+  aborts the whole RPC with `ABORTED` and no partial response (retry from the
+  beginning), while
+  paging-generation exhaustion or an unavailable RIB backend returns
+  `UNAVAILABLE`. (LAN-1042)
+
 - Runtime-config settlement logs now carry the operation ID, kind, phase,
   elapsed seconds, and budget at ownership registration, every phase
   transition, and settlement, matching the existing fencing diagnostic. The
