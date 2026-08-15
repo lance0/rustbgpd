@@ -11,11 +11,13 @@
 //! the cycle on the binary side.
 //!
 //! See `docs/adr/0072-durable-event-history.md` "Producer wiring"
-//! for the contract: the sink fires **after** the existing
-//! `route_event_history` ring + `route_events_tx` broadcast so the
-//! legacy live surfaces (`WatchRoutes`, `WatchEvents`,
-//! `ListRouteEvents`) are unchanged. The durable cursor
-//! (`SubscribeFromEvent`) is the consumer of the sink path.
+//! for the contract: after insertion into `route_event_history` or
+//! `evpn_route_event_history`, the non-blocking sink sidecar fires before the
+//! corresponding `route_events_tx` or `evpn_events_tx` live broadcast. The
+//! legacy live surfaces (`WatchRoutes`, `WatchEvents`, `ListRouteEvents`)
+//! remain unchanged; `SubscribeFromEvent` consumes the durable sink path.
+
+use std::sync::Arc;
 
 use crate::event::{EvpnRouteEvent, RouteEvent};
 
@@ -36,20 +38,34 @@ use crate::event::{EvpnRouteEvent, RouteEvent};
 /// another).
 pub trait RibEventSink: Send + Sync + 'static {
     /// Hand a route event to the sink. Called from
-    /// `RibManager::publish_route_event` **after** the event has been
+    /// `RibManager::publish_route_event` after the event has been
     /// stamped with its process-local `event_id`, appended to the
-    /// bounded ring, and broadcast on `route_events_tx`. Legacy
+    /// bounded ring; the shared sink callback (defaulting here) runs before
+    /// live broadcast on `route_events_tx`. Legacy
     /// `event_id` value is preserved as-is on the snapshot the sink
     /// sees; the durable cursor overwrites it from the EHM commit on
     /// the wire path.
     fn publish_route_event(&self, event: &RouteEvent);
 
+    /// Hand a shared route event to the sink. Legacy implementors keep
+    /// working through the borrowed-event method; sinks that can retain the
+    /// existing allocation may override this additive path.
+    fn publish_route_event_shared(&self, event: &Arc<RouteEvent>) {
+        self.publish_route_event(event.as_ref());
+    }
+
     /// Hand an EVPN best-path event to the sink. Called from
-    /// `RibManager::publish_evpn_route_event` after the existing
-    /// ring + broadcast work. EVPN events do not currently carry a
+    /// `RibManager::publish_evpn_route_event` after ring insertion and through
+    /// the shared sink callback (defaulting here) before live broadcast. EVPN
+    /// events do not currently carry a
     /// process-local `event_id`; the durable envelope id is the only
     /// id surfaced on the EHM-backed wire path.
     fn publish_evpn_event(&self, event: &EvpnRouteEvent);
+
+    /// Shared counterpart to [`Self::publish_evpn_event`].
+    fn publish_evpn_event_shared(&self, event: &Arc<EvpnRouteEvent>) {
+        self.publish_evpn_event(event.as_ref());
+    }
 }
 
 /// No-op sink used when `[event_history]` is disabled or EHM failed
@@ -62,5 +78,7 @@ pub struct NoopRibEventSink;
 
 impl RibEventSink for NoopRibEventSink {
     fn publish_route_event(&self, _event: &RouteEvent) {}
+    fn publish_route_event_shared(&self, _event: &Arc<RouteEvent>) {}
     fn publish_evpn_event(&self, _event: &EvpnRouteEvent) {}
+    fn publish_evpn_event_shared(&self, _event: &Arc<EvpnRouteEvent>) {}
 }

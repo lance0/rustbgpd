@@ -11,7 +11,7 @@
 //! - the proto-conversion helpers from `crate::event_service::convert`,
 //! - the workspace [`BgpMetrics`] for drop counters.
 //!
-//! The RIB sink's on-actor publish is clone + producer timestamp +
+//! The RIB sink's on-actor publish is one `Arc` clone + producer timestamp +
 //! bounded `try_send` of the owned event snapshot. Proto conversion,
 //! prost encoding, and envelope string construction run in the
 //! conversion stage task spawned by [`make_rib_event_sink`], which
@@ -53,20 +53,13 @@ use crate::proto;
 /// their already-assigned process-local `event_id` inside the event
 /// itself. No proto message, payload bytes, or envelope strings cross
 /// this channel.
-#[allow(
-    clippy::large_enum_variant,
-    reason = "the EVPN variant is several hundred bytes larger than the route \
-              variant, but boxing it would put a heap allocation back on the \
-              RIB actor's publish path — the exact cost this offload removes — \
-              so the enum stays by-value"
-)]
 enum RibEventSnapshot {
     Route {
-        event: RouteEvent,
+        event: Arc<RouteEvent>,
         timestamp_ns: i64,
     },
     Evpn {
-        event: EvpnRouteEvent,
+        event: Arc<EvpnRouteEvent>,
         timestamp_ns: i64,
     },
 }
@@ -80,7 +73,7 @@ impl RibEventSnapshot {
     }
 }
 
-/// Concrete sink installed on the RIB actor. Publish is a clone, a
+/// Concrete sink installed on the RIB actor. Publish is one `Arc` clone, a
 /// timestamp stamp, and a bounded `try_send`; proto conversion, prost
 /// encoding, and envelope string construction all run off-actor in
 /// the conversion stage spawned by [`make_rib_event_sink`].
@@ -118,15 +111,33 @@ impl EhmRibSink {
 
 impl RibEventSink for EhmRibSink {
     fn publish_route_event(&self, event: &RouteEvent) {
+        let event = Arc::new(event.clone());
+        let timestamp_ns = timestamp_ns_now();
         self.enqueue(RibEventSnapshot::Route {
-            event: event.clone(),
+            event,
+            timestamp_ns,
+        });
+    }
+
+    fn publish_route_event_shared(&self, event: &Arc<RouteEvent>) {
+        self.enqueue(RibEventSnapshot::Route {
+            event: Arc::clone(event),
             timestamp_ns: timestamp_ns_now(),
         });
     }
 
     fn publish_evpn_event(&self, event: &EvpnRouteEvent) {
+        let event = Arc::new(event.clone());
+        let timestamp_ns = timestamp_ns_now();
         self.enqueue(RibEventSnapshot::Evpn {
-            event: event.clone(),
+            event,
+            timestamp_ns,
+        });
+    }
+
+    fn publish_evpn_event_shared(&self, event: &Arc<EvpnRouteEvent>) {
+        self.enqueue(RibEventSnapshot::Evpn {
+            event: Arc::clone(event),
             timestamp_ns: timestamp_ns_now(),
         });
     }
@@ -194,11 +205,11 @@ fn convert_and_forward(
         RibEventSnapshot::Route {
             event,
             timestamp_ns,
-        } => route_event_envelope(event, timestamp_ns),
+        } => route_event_envelope(Arc::unwrap_or_clone(event), timestamp_ns),
         RibEventSnapshot::Evpn {
             event,
             timestamp_ns,
-        } => evpn_event_envelope(event, timestamp_ns),
+        } => evpn_event_envelope(Arc::unwrap_or_clone(event), timestamp_ns),
     };
     try_send_envelope(handle, metrics, envelope);
 }
@@ -260,7 +271,7 @@ fn evpn_event_envelope(event: EvpnRouteEvent, timestamp_ns: i64) -> EventEnvelop
 /// plus its off-actor conversion stage.
 ///
 /// The sink's publish path runs synchronously on the RIB actor and is
-/// deliberately minimal: clone the event, stamp `timestamp_ns`,
+/// deliberately minimal: clone the event's `Arc`, stamp `timestamp_ns`,
 /// bounded `try_send`. Proto conversion, prost encoding, and envelope
 /// construction run in the returned stage's task, in publish order
 /// (single producer, one FIFO channel). The snapshot channel is sized
@@ -709,6 +720,28 @@ mod tests {
         manager.shutdown().await;
     }
 
+    #[test]
+    fn shared_snapshot_queue_retains_the_published_arc() {
+        let state = Arc::new(EhmState::default());
+        let metrics = BgpMetrics::new();
+        let (snapshot_tx, mut snapshot_rx) = mpsc::channel(1);
+        let sink = EhmRibSink {
+            snapshot_tx,
+            state,
+            metrics,
+        };
+        let event = Arc::new(sample_route_event(RouteEventType::Added, 0));
+
+        sink.publish_route_event_shared(&event);
+
+        match snapshot_rx.try_recv().expect("snapshot accepted") {
+            RibEventSnapshot::Route { event: queued, .. } => {
+                assert!(Arc::ptr_eq(&event, &queued));
+            }
+            RibEventSnapshot::Evpn { .. } => panic!("route publish queued as EVPN"),
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn direct_queue_full_advances_loss_generation() {
         // Load-bearing break: removing `record_loss` from
@@ -756,12 +789,14 @@ mod tests {
             metrics: metrics.clone(),
         };
 
-        sink.publish_route_event(&sample_route_event(RouteEventType::Added, 0));
+        let first = Arc::new(sample_route_event(RouteEventType::Added, 0));
+        sink.publish_route_event_shared(&first);
         assert!(!state.degraded(), "accepted publish must not degrade");
         assert!(!losses.has_changed().unwrap());
         assert_eq!(drop_counter(&metrics, "route", "queue_full"), 0);
 
-        sink.publish_route_event(&sample_route_event(RouteEventType::Added, 1));
+        let second = Arc::new(sample_route_event(RouteEventType::Added, 1));
+        sink.publish_route_event_shared(&second);
         assert!(state.degraded(), "queue-full drop must flip EHM state");
         assert!(losses.has_changed().unwrap());
         assert_eq!(*losses.borrow_and_update(), 1);
@@ -771,7 +806,8 @@ mod tests {
         );
         assert_eq!(drop_counter(&metrics, "route", "queue_full"), 1);
 
-        sink.publish_route_event(&sample_route_event(RouteEventType::Added, 2));
+        let third = Arc::new(sample_route_event(RouteEventType::Added, 2));
+        sink.publish_route_event_shared(&third);
         assert!(losses.has_changed().unwrap());
         assert_eq!(*losses.borrow_and_update(), 2);
         assert_eq!(drop_counter(&metrics, "route", "queue_full"), 2);
@@ -793,7 +829,8 @@ mod tests {
             metrics: metrics.clone(),
         };
 
-        sink.publish_evpn_event(&sample_evpn_event());
+        let event = Arc::new(sample_evpn_event());
+        sink.publish_evpn_event_shared(&event);
         assert!(!state.degraded(), "closed drop must not flip EHM state");
         assert!(!losses.has_changed().unwrap());
         assert!(
@@ -819,7 +856,8 @@ mod tests {
         let (sink, stage) = make_rib_event_sink(handle.clone(), metrics.clone());
 
         for index in 0..16u32 {
-            sink.publish_route_event(&sample_route_event(RouteEventType::Added, index));
+            let event = Arc::new(sample_route_event(RouteEventType::Added, index));
+            sink.publish_route_event_shared(&event);
         }
         stage.shutdown().await;
 
@@ -831,7 +869,8 @@ mod tests {
             assert_eq!(committed.event_id, index + 1);
         }
 
-        sink.publish_route_event(&sample_route_event(RouteEventType::Added, 99));
+        let late = Arc::new(sample_route_event(RouteEventType::Added, 99));
+        sink.publish_route_event_shared(&late);
         assert_eq!(drop_counter(&metrics, "route", "closed"), 1);
         assert!(
             !handle.state().degraded(),

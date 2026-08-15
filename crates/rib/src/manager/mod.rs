@@ -2629,7 +2629,7 @@ impl RibManager {
         // not load-bearing for correctness; pick the order that
         // avoids the second clone (sink first, then move into
         // broadcast).
-        self.event_sink.publish_route_event(event.as_ref());
+        self.event_sink.publish_route_event_shared(&event);
         let _ = self.route_events_tx.send(event);
     }
 
@@ -2690,7 +2690,7 @@ impl RibManager {
         self.evpn_route_event_history.push_back(Arc::clone(&event));
         // ADR-0072: durable outbox sink fires alongside the legacy
         // broadcast. See `publish_route_event` for the ordering note.
-        self.event_sink.publish_evpn_event(event.as_ref());
+        self.event_sink.publish_evpn_event_shared(&event);
         let _ = self.evpn_events_tx.send(event);
     }
 
