@@ -62,17 +62,20 @@ kill_round_daemons() {
             ' sh "$comm" "$signal" >/dev/null 2>&1 || true
         done
     done
+    # grep reads to EOF (no -q): -q's early exit can SIGPIPE the docker
+    # exec writer, and under pipefail a surviving daemon would then read
+    # as a false "stopped" verdict (LAN-1039).
     for _ in $(seq 1 10); do
         if ! docker exec "$RUSTBGPD" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' \
-            | grep -Eq '^(rustbgpd|gobgpd|bird|tshark)$' \
+            | grep -E '^(rustbgpd|gobgpd|bird|tshark)$' >/dev/null \
             && ! docker exec "$GOBGP_RS" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' \
-            | grep -Eq '^(rustbgpd|gobgpd|bird|tshark)$' \
+            | grep -E '^(rustbgpd|gobgpd|bird|tshark)$' >/dev/null \
             && ! docker exec "$SOURCE1" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' \
-            | grep -Eq '^(rustbgpd|gobgpd|bird|tshark)$' \
+            | grep -E '^(rustbgpd|gobgpd|bird|tshark)$' >/dev/null \
             && ! docker exec "$SOURCE2" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' \
-            | grep -Eq '^(rustbgpd|gobgpd|bird|tshark)$' \
+            | grep -E '^(rustbgpd|gobgpd|bird|tshark)$' >/dev/null \
             && ! docker exec "$TARGET" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' \
-            | grep -Eq '^(rustbgpd|gobgpd|bird|tshark)$'; then
+            | grep -E '^(rustbgpd|gobgpd|bird|tshark)$' >/dev/null; then
             docker exec "$RUSTBGPD" rm -f /var/lib/rustbgpd/gr-restart.toml
             return
         fi
@@ -220,9 +223,12 @@ stop_capture() {
             pid=${file#/proc/}; pid=${pid%/comm}; kill -INT "$pid"
         done
     '
+    # grep reads to EOF (no -q): -q's early exit can SIGPIPE the docker
+    # exec writer, and under pipefail a still-running tshark would then
+    # read as a false "terminated" verdict (LAN-1039).
     for _ in $(seq 1 10); do
         if ! docker exec "$TARGET" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' \
-            | grep -qx tshark; then
+            | grep -x tshark >/dev/null; then
             docker exec "$TARGET" test -s /tmp/m92.pcap
             docker exec "$TARGET" tshark -r /tmp/m92.pcap -c 1 >/dev/null
             return

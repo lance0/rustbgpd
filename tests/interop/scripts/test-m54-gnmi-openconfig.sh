@@ -198,7 +198,7 @@ start_rustbgpd_gnmi() {
 
     local up=0
     for i in $(seq 1 10); do
-        if docker exec "$RUSTBGPD" sh -c 'cat /proc/*/comm 2>/dev/null' | grep -q rustbgpd; then
+        if rustbgpd_running; then
             log "rustbgpd process up (after ${i}s)"
             up=1
             break

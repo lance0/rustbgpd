@@ -126,7 +126,7 @@ start_rustbgpd_mtls() {
     docker exec -d "$RUSTBGPD" sh -c "/usr/local/bin/start-rustbgpd.sh"
     local up=0
     for i in $(seq 1 10); do
-        if docker exec "$RUSTBGPD" sh -c 'cat /proc/*/comm 2>/dev/null' | grep -q rustbgpd; then
+        if rustbgpd_running; then
             log "rustbgpd process up (after ${i}s)"
             up=1
             break
@@ -161,8 +161,7 @@ start_rustbgpd_mtls() {
 assert_daemon_healthy_after_settlement_window() {
     log "Waiting beyond the 5s runtime-config settlement window..."
     sleep 6
-    if docker exec "$RUSTBGPD" sh -c 'cat /proc/*/comm 2>/dev/null' \
-        | grep -q rustbgpd; then
+    if rustbgpd_running; then
         ok "rustbgpd remains live after the settlement window"
     else
         fail "rustbgpd exited after the authorized no-effect mutation"

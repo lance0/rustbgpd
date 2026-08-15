@@ -139,6 +139,15 @@ grpc_health() {
         "$GRPC_ADDR" rustbgpd.v1.ControlService/GetHealth 2>/dev/null
 }
 
+# Liveness probe: true iff a /proc/*/comm entry in the lab container
+# matches rustbgpd. grep runs inside the container on purpose: piping
+# docker exec output into a host-side `grep -q` lets grep exit at the
+# first match and SIGPIPE the still-writing docker side (exit 141),
+# which `set -o pipefail` reports as a false "daemon exited" (LAN-1039).
+rustbgpd_running() {
+    docker exec "$RUSTBGPD" sh -c 'grep -q rustbgpd /proc/*/comm 2>/dev/null'
+}
+
 # Standardized rustbgpd start, used by every interop script. Pass a
 # custom command string to run a non-default daemon invocation
 # (e.g. M21/M24 launch the binary directly against `/tmp/config.toml`
@@ -155,7 +164,7 @@ start_rustbgpd() {
     # environments room to land the fork.
     local found=0
     for i in $(seq 1 10); do
-        if docker exec "$RUSTBGPD" sh -c 'cat /proc/*/comm 2>/dev/null' | grep -q rustbgpd; then
+        if rustbgpd_running; then
             log "rustbgpd is running (after ${i}s)"
             found=1
             break
@@ -537,7 +546,9 @@ wait_vtep_established() {
     local timeout=$((attempts * 2))
     log "Waiting for $label session to reach Established..."
     for i in $(seq 1 "$attempts"); do
-        if vtep_ctl neighbor "$peer" 2>/dev/null | grep -qi "establ"; then
+        # grep reads to EOF (no -q): -q's early exit can SIGPIPE the
+        # vtep_ctl writer, a false failure under pipefail (LAN-1039).
+        if vtep_ctl neighbor "$peer" 2>/dev/null | grep -i "establ" >/dev/null; then
             ok "$label session established (attempt $i)"
             return 0
         fi
