@@ -255,6 +255,10 @@ fn saturated_eager(capacity: usize) -> EagerStore {
 }
 
 fn lazy_store_releases_default_reservation_without_saturated_allocations() {
+    // Verified-target floor for System-allocator requested-live bytes; not a
+    // portable allocator, RSS, or peak-memory guarantee.
+    const VERIFIED_TARGET_MIN_DEFAULT_FIRST_ENTRY_REQUESTED_LIVE_SAVING: usize = 24_576;
+
     let (first_candidate, candidate_first_live) = requested_live(|| {
         let mut store = RejectedRouteStore::with_capacity(DEFAULT_REJECT_RETENTION_CAPACITY);
         store.insert(key(0), entry(ImportRejectReason::PolicyReject));
@@ -273,7 +277,8 @@ fn lazy_store_releases_default_reservation_without_saturated_allocations() {
     black_box(&first_eager);
     drop(first_eager);
     assert!(
-        eager_first_live >= candidate_first_live + 24_576,
+        eager_first_live
+            >= candidate_first_live + VERIFIED_TARGET_MIN_DEFAULT_FIRST_ENTRY_REQUESTED_LIVE_SAVING,
         "default first entry saved only {} requested-live bytes (candidate {candidate_first_live}, eager {eager_first_live})",
         eager_first_live.saturating_sub(candidate_first_live)
     );
