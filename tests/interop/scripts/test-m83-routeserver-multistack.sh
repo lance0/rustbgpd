@@ -707,9 +707,12 @@ stop_capture() {
         return 1
     fi
 
+    # grep reads to EOF (no -q): -q's early exit can SIGPIPE the docker
+    # exec writer, and under pipefail a still-running tshark would then
+    # read as a false "terminated" verdict (LAN-1039).
     for _ in $(seq 1 10); do
         if ! docker exec "$BIRD" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' \
-            | grep -qx tshark; then
+            | grep -x tshark >/dev/null; then
             if docker exec "$BIRD" test -s /tmp/m83.pcap \
                 && docker exec "$BIRD" tshark -r /tmp/m83.pcap -c 1 >/dev/null 2>&1; then
                 log "tshark capture $signaled terminated; pcap is nonempty and readable"
