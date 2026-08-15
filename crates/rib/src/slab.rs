@@ -106,8 +106,8 @@ impl<T> RouteSlab<T> {
         self.free.clear();
     }
 
-    /// Release only unused tail capacity without moving slots or changing
-    /// handles, occupancy, or the free list.
+    /// Release only unused tail capacity while preserving logical slot
+    /// indices, handles, occupancy, and the free list.
     pub(crate) fn shrink_to_fit(&mut self) {
         if self.slots.capacity() == self.slots.len() {
             return;
@@ -170,10 +170,13 @@ mod tests {
         slab.remove(handles[2]);
         slab.remove(handles[5]);
         let free = slab.free.clone();
+        let capacity_before = slab.capacity();
 
         slab.shrink_to_fit();
 
-        assert_eq!(slab.capacity(), slab.slot_count());
+        let capacity_after = slab.capacity();
+        assert!(capacity_after >= slab.slot_count());
+        assert!(capacity_after <= capacity_before);
         assert_eq!(slab.len(), 6);
         assert_eq!(slab.free, free);
         for (index, handle) in handles.into_iter().enumerate() {

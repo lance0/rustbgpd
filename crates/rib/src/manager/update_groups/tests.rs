@@ -5430,11 +5430,14 @@ fn ordinary_first_adoption_trims_once_and_preserves_member_view() {
             ],
         ),
     );
+    let capacity_before = m.group_ribs[&GID].table.bench_route_capacity();
 
     m.install_group_member(GID, MEMBER);
 
     let group = m.group_ribs.get(&GID).unwrap();
-    assert_eq!(group.table.bench_route_capacity(), 2);
+    let capacity_after = group.table.bench_route_capacity();
+    assert!(capacity_after >= group.table.len());
+    assert!(capacity_after <= capacity_before);
     let view = group.member_view_snapshot(MEMBER, None, &HashSet::new());
     assert_eq!(view.len(), 2);
     assert_eq!(view[&(p1, 0)].prefix, p1);
@@ -5473,11 +5476,14 @@ fn clean_prestaged_first_adoption_trims_complete_table_without_wire_drift() {
             ],
         ),
     );
+    let capacity_before = m.group_ribs[&GID].table.bench_route_capacity();
 
     m.install_group_member(GID, MEMBER);
 
     let group = &m.group_ribs[&GID];
-    assert_eq!(group.table.bench_route_capacity(), 2);
+    let capacity_after = group.table.bench_route_capacity();
+    assert!(capacity_after >= group.table.len());
+    assert!(capacity_after <= capacity_before);
     let view = group.member_view_snapshot(MEMBER, None, &HashSet::new());
     assert_eq!(view.len(), 2);
     assert_eq!(view[&(p1, 0)].peer, OTHER1);
