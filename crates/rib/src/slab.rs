@@ -106,6 +106,15 @@ impl<T> RouteSlab<T> {
         self.free.clear();
     }
 
+    /// Release only unused tail capacity without moving slots or changing
+    /// handles, occupancy, or the free list.
+    pub(crate) fn shrink_to_fit(&mut self) {
+        if self.slots.capacity() == self.slots.len() {
+            return;
+        }
+        self.slots.shrink_to_fit();
+    }
+
     pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
         self.slots.iter().filter_map(Option::as_ref)
     }
@@ -152,6 +161,27 @@ mod tests {
             1000,
             "withdraw/re-insert churn must reuse freed slots, not grow"
         );
+    }
+
+    #[test]
+    fn shrink_to_fit_preserves_handles_occupancy_and_free_slots() {
+        let mut slab = RouteSlab::with_capacity(64);
+        let handles: Vec<_> = (0..8).map(|value| slab.insert(value)).collect();
+        slab.remove(handles[2]);
+        slab.remove(handles[5]);
+        let free = slab.free.clone();
+
+        slab.shrink_to_fit();
+
+        assert_eq!(slab.capacity(), slab.slot_count());
+        assert_eq!(slab.len(), 6);
+        assert_eq!(slab.free, free);
+        for (index, handle) in handles.into_iter().enumerate() {
+            assert_eq!(
+                slab.get(handle),
+                (![2, 5].contains(&index)).then_some(&index)
+            );
+        }
     }
 
     #[test]
