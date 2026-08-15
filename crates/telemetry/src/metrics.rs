@@ -2,8 +2,8 @@
 
 use std::cell::RefCell;
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use prometheus::{
@@ -85,6 +85,10 @@ const ORR_INPUT_CLASSIFICATIONS: [&str; 5] = [
     "malformed_attribute_29",
     "default_with_ignored_flex_algo",
 ];
+
+/// Fixed `category` label vocabulary emitted by the event-history manager.
+const EVENT_OUTBOX_QUEUE_DEPTH_CATEGORIES: [&str; 6] =
+    ["route", "evpn", "session", "policy", "bfd", "dataplane"];
 
 /// Shared wall-clock buckets for synchronous work on the single RIB actor.
 const RIB_ACTOR_DURATION_BUCKETS: [f64; 13] = [
@@ -386,6 +390,7 @@ struct BgpMetricsInner {
     event_outbox_committed: IntCounterVec,
     event_outbox_dropped: IntCounterVec,
     event_outbox_queue_depth: IntGaugeVec,
+    event_outbox_queue_depth_fixed: OnceLock<[IntGauge; 6]>,
     event_outbox_db_size_bytes: IntGauge,
     event_outbox_retention_evicted: IntCounterVec,
     event_outbox_latest_event_id: IntGauge,
@@ -2599,6 +2604,7 @@ impl BgpMetrics {
             event_outbox_committed,
             event_outbox_dropped,
             event_outbox_queue_depth,
+            event_outbox_queue_depth_fixed: OnceLock::new(),
             event_outbox_db_size_bytes,
             event_outbox_retention_evicted,
             event_outbox_latest_event_id,
@@ -4621,10 +4627,24 @@ impl BgpMetrics {
     /// Update the per-category queue depth gauge. EHM calls this
     /// from the actor loop after each batch drain.
     pub fn set_event_outbox_queue_depth(&self, category: &str, depth: i64) {
-        self.0
-            .event_outbox_queue_depth
-            .with_label_values(&[category])
-            .set(depth);
+        let Some(index) = EVENT_OUTBOX_QUEUE_DEPTH_CATEGORIES
+            .iter()
+            .position(|fixed| *fixed == category)
+        else {
+            self.0
+                .event_outbox_queue_depth
+                .with_label_values(&[category])
+                .set(depth);
+            return;
+        };
+        let fixed = self.0.event_outbox_queue_depth_fixed.get_or_init(|| {
+            EVENT_OUTBOX_QUEUE_DEPTH_CATEGORIES.map(|category| {
+                self.0
+                    .event_outbox_queue_depth
+                    .with_label_values(&[category])
+            })
+        });
+        fixed[index].set(depth);
     }
 
     pub fn set_event_outbox_db_size_bytes(&self, bytes: i64) {
@@ -4804,6 +4824,33 @@ mod tests {
         String::from_utf8(buf).unwrap()
     }
 
+    fn event_outbox_queue_depths(m: &BgpMetrics) -> Vec<(String, f64)> {
+        let Some(family) = m
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "bgp_event_outbox_queue_depth")
+        else {
+            return Vec::new();
+        };
+        let mut values = family
+            .get_metric()
+            .iter()
+            .map(|metric| {
+                let category = metric
+                    .get_label()
+                    .iter()
+                    .find(|label| label.name() == "category")
+                    .unwrap()
+                    .value()
+                    .to_owned();
+                (category, metric.get_gauge().value())
+            })
+            .collect::<Vec<_>>();
+        values.sort_by(|left, right| left.0.cmp(&right.0));
+        values
+    }
+
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn metrics_handle_is_one_pointer() {
@@ -4877,6 +4924,102 @@ mod tests {
         let text = gather_text(&m);
         // Dynamic peer-label vectors remain absent until observed.
         assert!(!text.contains("bgp_session_state_transitions_total"));
+    }
+
+    #[test]
+    fn event_outbox_queue_depth_cache_starts_fresh() {
+        let metrics = BgpMetrics::new();
+        assert!(metrics.0.event_outbox_queue_depth_fixed.get().is_none());
+        assert!(event_outbox_queue_depths(&metrics).is_empty());
+    }
+
+    #[test]
+    fn event_outbox_queue_depth_unknown_first_uses_fallback_without_fixed_cache() {
+        let metrics = BgpMetrics::new();
+        metrics.set_event_outbox_queue_depth("future", 9);
+        assert!(metrics.0.event_outbox_queue_depth_fixed.get().is_none());
+        assert_eq!(
+            event_outbox_queue_depths(&metrics),
+            vec![("future".to_owned(), 9.0)]
+        );
+    }
+
+    #[test]
+    fn event_outbox_queue_depth_first_known_initializes_exact_fixed_children() {
+        let metrics = BgpMetrics::new();
+        metrics.set_event_outbox_queue_depth("route", 3);
+        let fixed = metrics.0.event_outbox_queue_depth_fixed.get().unwrap();
+        assert_eq!(fixed[0].get(), 3);
+        assert!(fixed[1..].iter().all(|gauge| gauge.get() == 0));
+        let mut labels = event_outbox_queue_depths(&metrics)
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect::<Vec<_>>();
+        let mut expected = EVENT_OUTBOX_QUEUE_DEPTH_CATEGORIES.map(str::to_owned);
+        labels.sort();
+        expected.sort();
+        assert_eq!(labels, expected);
+    }
+
+    #[test]
+    fn event_outbox_queue_depth_mixed_known_unknown_preserves_values() {
+        let metrics = BgpMetrics::new();
+        metrics.set_event_outbox_queue_depth("route", 2);
+        metrics.set_event_outbox_queue_depth("future", 8);
+        metrics.set_event_outbox_queue_depth("policy", 4);
+        let values = event_outbox_queue_depths(&metrics);
+        assert_eq!(values.len(), 7);
+        assert!(values.contains(&("route".to_owned(), 2.0)));
+        assert!(values.contains(&("policy".to_owned(), 4.0)));
+        assert!(values.contains(&("future".to_owned(), 8.0)));
+    }
+
+    #[test]
+    fn event_outbox_queue_depth_clone_shares_fixed_cache() {
+        let metrics = BgpMetrics::new();
+        let clone = metrics.clone();
+        clone.set_event_outbox_queue_depth("evpn", 5);
+        let original_fixed = metrics.0.event_outbox_queue_depth_fixed.get().unwrap();
+        let clone_fixed = clone.0.event_outbox_queue_depth_fixed.get().unwrap();
+        assert!(std::ptr::eq(original_fixed, clone_fixed));
+        assert_eq!(original_fixed[1].get(), 5);
+    }
+
+    #[test]
+    fn event_outbox_queue_depth_registries_are_isolated() {
+        let first = BgpMetrics::with_registry(Registry::new());
+        let second = BgpMetrics::with_registry(Registry::new());
+        first.set_event_outbox_queue_depth("route", 1);
+        second.set_event_outbox_queue_depth("route", 7);
+        assert!(event_outbox_queue_depths(&first).contains(&("route".to_owned(), 1.0)));
+        assert!(event_outbox_queue_depths(&second).contains(&("route".to_owned(), 7.0)));
+        assert!(!Arc::ptr_eq(&first.0, &second.0));
+    }
+
+    #[test]
+    fn event_outbox_queue_depth_concurrent_first_use_is_single_cache() {
+        let metrics = BgpMetrics::new();
+        let barrier = Arc::new(std::sync::Barrier::new(12));
+        let workers = (0..12)
+            .map(|worker| {
+                let metrics = metrics.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let depth = i64::try_from(worker).expect("test worker index fits in i64");
+                    metrics.set_event_outbox_queue_depth(
+                        EVENT_OUTBOX_QUEUE_DEPTH_CATEGORIES[worker % 6],
+                        depth,
+                    );
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let fixed = metrics.0.event_outbox_queue_depth_fixed.get().unwrap();
+        assert_eq!(fixed.len(), 6);
+        assert_eq!(event_outbox_queue_depths(&metrics).len(), 6);
     }
 
     #[test]
