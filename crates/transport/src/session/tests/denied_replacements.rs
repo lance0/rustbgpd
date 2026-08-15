@@ -16,7 +16,7 @@ async fn denied_classic_replacement_withdraws_exact_route_and_remains_explainabl
     let mut session = PeerSession::new(
         config, metrics, cmd_rx, rib_tx, None, None, None, None, None, false,
     );
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),

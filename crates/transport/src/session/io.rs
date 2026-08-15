@@ -670,7 +670,7 @@ impl PeerSession {
                                 continue;
                             };
                             // Ignore requests for unnegotiated families
-                            if !self.negotiated_families.contains(&(afi, safi)) {
+                            if !self.negotiated_families().contains(&(afi, safi)) {
                                 warn!(
                                     peer = %self.peer_label,
                                     ?afi, ?safi,

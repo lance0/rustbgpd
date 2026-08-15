@@ -55,7 +55,7 @@ async fn accept_any_session_established_uses_learned_asn_for_bmp_and_rib() {
 #[tokio::test]
 async fn session_down_emits_bmp_peer_down() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     session.established_at = Some(Instant::now());
     session.last_down_reason = Some(PeerDownReason::RemoteNoNotification);
     session.execute_actions(vec![Action::SessionDown]).await;
@@ -71,8 +71,8 @@ async fn session_down_emits_bmp_peer_down() {
 #[tokio::test]
 async fn inbound_update_emits_bmp_route_monitoring() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
-    session.negotiated = Some(negotiated_session(65002, false));
-    session.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let negotiated = negotiated_session(65002, false);
+    session.negotiated = Some(Arc::new(negotiated));
     let update = rustbgpd_wire::UpdateMessage::build(
         &[Ipv4NlriEntry {
             path_id: 0,
@@ -225,8 +225,8 @@ async fn legacy_as4_suffix_reaches_loop_detection_after_raw_bmp_tap() {
 #[tokio::test]
 async fn ebgp_local_pref_is_ignored_after_pre_policy_bmp_tap() {
     let (mut session, mut rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
-    session.negotiated = Some(negotiated_session(65002, false));
-    session.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let negotiated = negotiated_session(65002, false);
+    session.negotiated = Some(Arc::new(negotiated));
     let update = UpdateMessage::build(
         &[Ipv4NlriEntry {
             path_id: 0,
@@ -287,8 +287,9 @@ async fn inbound_evpn_update_emits_bmp_route_monitoring() {
         RouteDistinguisher,
     };
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
-    session.negotiated = Some(negotiated_session(65002, false));
-    session.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
+    session.negotiated = Some(Arc::new(negotiated));
     let evpn_route = EvpnRoute::MacIp(EvpnMacIp {
         rd: RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]),
         esi: EthernetSegmentIdentifier::ZERO,
@@ -378,10 +379,7 @@ async fn outbound_update_emits_rib_out_bmp_route_monitoring() {
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     let negotiated = negotiated_session(65002, false);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let mut update = empty_outbound_update();
     update.exact_export_snapshot = Some(session.publish_export_profile());
     update.announce = vec![make_route(100)].into();
@@ -405,10 +403,7 @@ async fn outbound_withdraw_and_eor_emit_rib_out_bmp() {
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     let negotiated = negotiated_session(65002, false);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let mut update = empty_outbound_update();
     update.exact_export_snapshot = Some(session.publish_export_profile());
     update.withdraw = vec![(
@@ -436,10 +431,7 @@ async fn rib_out_tap_default_off_and_skips_non_update_messages() {
     session.test_install_stream(client);
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_route_refresh = true;
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     // Default: bmp_rib_out is false — outbound UPDATE not tapped.
     let mut update = empty_outbound_update();
     update.exact_export_snapshot = Some(session.publish_export_profile());
@@ -475,10 +467,7 @@ async fn outbound_vpn_update_emits_rib_out_bmp_byte_exact() {
     session.test_install_stream(client);
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::MplsVpn)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let mut update = empty_outbound_update();
     update.exact_export_snapshot = Some(session.publish_export_profile());
     update.vpn_announce = vec![make_vpn_rib_route(4093)];
@@ -501,10 +490,7 @@ async fn outbound_evpn_update_emits_rib_out_bmp_byte_exact() {
     session.test_install_stream(client);
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let evpn_route = rustbgpd_rib::EvpnRibRoute {
         route: EvpnRoute::MacIp(EvpnMacIp {
             rd: RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]),
@@ -552,10 +538,7 @@ async fn rib_out_tap_full_channel_increments_source_drop_counter() {
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     let negotiated = negotiated_session(65002, false);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     // The helper's BMP channel holds 16 events; never drain it. The
     // 17th tapped UPDATE hits Full and must count a source drop.
     for _ in 0..17 {
@@ -665,10 +648,7 @@ async fn bmp_channel_full_after_wire_send_forces_peer_state_reset() {
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     let negotiated = negotiated_session(65002, false);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     session.local_open_pdu = Some(Bytes::from_static(&[1, 2, 3]));
     session.remote_open_pdu = Some(Bytes::from_static(&[4, 5, 6]));
     // 16 mirrored UPDATEs fill the channel; the 17th reaches the wire
@@ -717,7 +697,7 @@ async fn bmp_channel_full_after_wire_send_forces_peer_state_reset() {
 #[tokio::test]
 async fn bmp_repair_timer_retries_until_channel_drains() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     // Fill the 16-deep channel, then latch divergence with one more RM.
     let tx = session.bmp_tx.clone().unwrap();
     for _ in 0..16 {
@@ -762,7 +742,7 @@ async fn bmp_repair_timer_retries_until_channel_drains() {
 #[tokio::test]
 async fn bmp_peer_down_survives_full_channel() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     session.established_at = Some(Instant::now());
     session.last_down_reason = Some(PeerDownReason::RemoteNoNotification);
     let tx = session.bmp_tx.clone().unwrap();
@@ -800,7 +780,7 @@ async fn bmp_peer_down_survives_full_channel() {
 #[tokio::test]
 async fn tcp_disconnect_clears_bmp_repair_latch() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     session.tcp_ao_info = Some(crate::TcpAoInfoSnapshot {
         has_current_key: true,
         has_rnext_key: true,
@@ -863,7 +843,7 @@ async fn tcp_disconnect_clears_bmp_repair_latch() {
 #[tokio::test]
 async fn repair_partial_enqueue_duplicate_peer_down_is_acceptable() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let tx = session.bmp_tx.clone().unwrap();
     // Leave exactly one free slot in the 16-deep channel: PeerDown will
     // enqueue, the following PeerUp hits Full.

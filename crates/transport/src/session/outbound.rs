@@ -190,12 +190,12 @@ impl PeerSession {
         // cannot be asked, so the staleness window lasts until its next
         // natural re-advertisement — surfaced by the warning.
         if update.request_refresh_all_negotiated {
-            let peer_route_refresh = self
-                .negotiated
-                .as_ref()
-                .is_some_and(|n| n.peer_route_refresh);
-            if peer_route_refresh {
-                for (afi, safi) in self.negotiated_families.clone() {
+            let negotiated = match self.negotiated.clone() {
+                Some(negotiated) if negotiated.peer_route_refresh => Some(negotiated),
+                _ => None,
+            };
+            if let Some(negotiated) = negotiated {
+                for &(afi, safi) in &negotiated.negotiated_families {
                     let msg = Message::RouteRefresh(RouteRefreshMessage::new(afi, safi));
                     if let Err(e) = self.enqueue_bulk(&msg) {
                         warn!(
@@ -673,7 +673,7 @@ impl PeerSession {
                     unreachable!("BGP-LS key must prepare as BGP-LS")
                 };
                 if !self
-                    .negotiated_families
+                    .negotiated_families()
                     .contains(&(prepared.afi, prepared.safi))
                 {
                     continue;
@@ -719,7 +719,7 @@ impl PeerSession {
                     unreachable!("VPN key must prepare as VPN")
                 };
                 let family = (prepared.afi, prepared.safi);
-                if !self.negotiated_families.contains(&family) {
+                if !self.negotiated_families().contains(&family) {
                     continue;
                 }
                 if let Some((_, _, _, routes)) = groups.iter_mut().find(|(afi, safi, mode, _)| {
@@ -768,7 +768,7 @@ impl PeerSession {
                     unreachable!("labeled key must prepare as labeled unicast")
                 };
                 let family = (prepared.afi, prepared.safi);
-                if !self.negotiated_families.contains(&family) {
+                if !self.negotiated_families().contains(&family) {
                     continue;
                 }
                 if let Some((_, _, _, routes)) = groups.iter_mut().find(|(afi, safi, mode, _)| {
@@ -804,7 +804,7 @@ impl PeerSession {
         // family tuple (AFI 1 only).
         if !update.rtc_withdraw.is_empty()
             && self
-                .negotiated_families
+                .negotiated_families()
                 .contains(&(Afi::Ipv4, Safi::RtConstrain))
         {
             let mut routes = Vec::with_capacity(update.rtc_withdraw.len());
@@ -868,7 +868,7 @@ impl PeerSession {
             )> = Vec::new();
             for bgpls_route in &update.bgpls_announce {
                 let safi = bgpls_route.family.to_afi_safi().1;
-                if !self.negotiated_families.contains(&(Afi::BgpLs, safi)) {
+                if !self.negotiated_families().contains(&(Afi::BgpLs, safi)) {
                     continue;
                 }
                 let prepared = export.prepare_bgpls_candidate(bgpls_route);
@@ -914,7 +914,7 @@ impl PeerSession {
             )> = Vec::new();
             for vpn_route in &update.vpn_announce {
                 let family = vpn_route.afi_safi();
-                if !self.negotiated_families.contains(&family) {
+                if !self.negotiated_families().contains(&family) {
                     continue;
                 }
                 let prepared = export.prepare_vpn_candidate(vpn_route);
@@ -967,7 +967,7 @@ impl PeerSession {
             )> = Vec::new();
             for labeled_route in &update.labeled_announce {
                 let family = labeled_route.afi_safi();
-                if !self.negotiated_families.contains(&family) {
+                if !self.negotiated_families().contains(&family) {
                     continue;
                 }
                 let prepared = export.prepare_labeled_candidate(labeled_route);
@@ -1009,7 +1009,7 @@ impl PeerSession {
         // emitted as the session-local address (mirroring next-hop-self).
         if !update.rtc_announce.is_empty()
             && self
-                .negotiated_families
+                .negotiated_families()
                 .contains(&(Afi::Ipv4, Safi::RtConstrain))
         {
             let mut rtc_groups: Vec<(IpAddr, Vec<PathAttribute>, Vec<rustbgpd_wire::RtcNlri>)> =
@@ -1954,7 +1954,9 @@ mod tests {
     fn ipv6_ebgp_without_local_next_hop_trips_debug_contract() {
         let mut session = make_test_session();
         session.config.peer.families = vec![(Afi::Ipv6, Safi::Unicast)];
-        session.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+        let mut negotiated = rustbgpd_fsm::NegotiatedSession::default();
+        negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+        session.negotiated = Some(Arc::new(negotiated));
         let snapshot = session
             .export_encoder
             .publish(SessionExportProfile::capture(&session).with_test_ebgp(true));

@@ -5,7 +5,7 @@ async fn inbound_orf_emits_peer_orf_update_when_negotiated() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
-    session.negotiated = Some(neg);
+    session.negotiated = Some(Arc::new(neg));
     let rr = orf_rr(OrfType::AddressPrefix, one_permit_entry());
     let (handled, update) =
         drive_inbound_orf_with_reply(&mut session, &mut rib_rx, &rr, Ok(())).await;
@@ -20,7 +20,7 @@ async fn inbound_orf_preserves_defer_when_negotiated() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
-    session.negotiated = Some(neg);
+    session.negotiated = Some(Arc::new(neg));
     let rr = orf_rr_with_when(
         WhenToRefresh::Defer,
         OrfType::AddressPrefix,
@@ -37,7 +37,7 @@ async fn inbound_orf_preserves_defer_when_negotiated() {
 async fn inbound_orf_ignored_when_family_not_negotiated() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     // negotiated_session() leaves negotiated_orf_recv empty.
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let rr = orf_rr(OrfType::AddressPrefix, one_permit_entry());
     let handled = session
         .process_inbound_orf(Afi::Ipv4, Safi::Unicast, &rr)
@@ -54,7 +54,7 @@ async fn inbound_orf_ignores_legacy_type_128() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
-    session.negotiated = Some(neg);
+    session.negotiated = Some(Arc::new(neg));
     // Family negotiated, but the legacy type 128 is never negotiated by us.
     let rr = orf_rr(OrfType::AddressPrefixLegacy, one_permit_entry());
     let handled = session
@@ -69,7 +69,7 @@ async fn inbound_orf_malformed_group_resets_via_remove_all() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
-    session.negotiated = Some(neg);
+    session.negotiated = Some(Arc::new(neg));
     // A malformed Address-Prefix group → RFC 5291 §6 reset (REMOVE-ALL).
     let rr = orf_rr(
         OrfType::AddressPrefix,
@@ -87,7 +87,7 @@ async fn inbound_orf_rejected_by_rib_falls_through_to_plain_refresh() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
-    session.negotiated = Some(neg);
+    session.negotiated = Some(Arc::new(neg));
     let rr = orf_rr(OrfType::AddressPrefix, one_permit_entry());
     let (handled, update) = drive_inbound_orf_with_reply(
         &mut session,
@@ -108,7 +108,7 @@ async fn inbound_orf_any_rib_group_rejection_falls_through_to_plain_refresh() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
-    session.negotiated = Some(neg);
+    session.negotiated = Some(Arc::new(neg));
     let rr = orf_rr_with_groups(vec![
         OrfEntryGroup {
             orf_type: OrfType::AddressPrefix,
@@ -153,7 +153,7 @@ async fn inbound_orf_dropped_rib_reply_falls_through_to_plain_refresh() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
-    session.negotiated = Some(neg);
+    session.negotiated = Some(Arc::new(neg));
     let rr = orf_rr(OrfType::AddressPrefix, one_permit_entry());
     let process = session.process_inbound_orf(Afi::Ipv4, Safi::Unicast, &rr);
     tokio::pin!(process);
@@ -177,7 +177,7 @@ async fn inbound_orf_rib_reply_timeout_falls_through_to_plain_refresh() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
-    session.negotiated = Some(neg);
+    session.negotiated = Some(Arc::new(neg));
     let rr = orf_rr(OrfType::AddressPrefix, one_permit_entry());
     let process = session.process_inbound_orf(Afi::Ipv4, Safi::Unicast, &rr);
     tokio::pin!(process);

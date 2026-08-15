@@ -189,7 +189,7 @@ async fn query_state_sorts_both_paths_limit_vectors_by_numeric_family() {
             .effective_add_path_send_limits
             .insert(family, effective_limit);
     }
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
 
     let (reply, state) = oneshot::channel();
     assert!(matches!(

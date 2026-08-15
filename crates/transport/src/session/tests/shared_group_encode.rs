@@ -6,10 +6,7 @@ async fn shared_transition_payload_excludes_only_the_target_source() {
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     let negotiated = negotiated_session(65002, false);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
 
     let own = make_route(100);
     assert_eq!(own.peer, session.peer_ip);
@@ -580,7 +577,9 @@ async fn shared_group_consumer_streams_concurrently_with_live_encoder() {
 async fn shared_group_wire_equivalence_proof_ignores_only_byte_inert_fields() {
     let (a, _wire_a) = shared_group_member(65001).await;
     let (mut b, _wire_b) = shared_group_member(65001).await;
-    b.negotiated.as_mut().unwrap().peer_extended_message = true;
+    let mut negotiated = b.negotiated.as_deref().unwrap().clone();
+    negotiated.peer_extended_message = true;
+    b.negotiated = Some(Arc::new(negotiated));
     let profile_a = a.publish_export_profile();
     let profile_b = b.publish_export_profile();
     assert!(
@@ -588,11 +587,11 @@ async fn shared_group_wire_equivalence_proof_ignores_only_byte_inert_fields() {
         "extended-message ceiling is byte-inert at the shared 4096 ceiling"
     );
     let (mut c, _wire_c) = shared_group_member(65001).await;
-    c.negotiated
-        .as_mut()
-        .unwrap()
+    let mut negotiated = c.negotiated.as_deref().unwrap().clone();
+    negotiated
         .add_path_families
         .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Send);
+    c.negotiated = Some(Arc::new(negotiated));
     let profile_c = c.publish_export_profile();
     assert!(
         !profile_a.has_same_wire_encoding(&profile_c),

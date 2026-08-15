@@ -7,10 +7,7 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
     session.test_install_stream(client);
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::BgpLs, Safi::BgpLs)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let route = make_bgpls_route(0xcc);
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
@@ -102,10 +99,7 @@ async fn oversized_bgpls_output_tears_down_session() {
     session.test_install_stream(client);
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::BgpLs, Safi::BgpLs)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let mut route = make_bgpls_route(0xdd);
     route.nlri = BgpLsNlri::try_new(
         BgpLsNlriType::Unknown(65_000),
@@ -556,10 +550,7 @@ async fn send_route_update_emits_rtc_reach_and_unreach() {
     session.test_install_stream(client);
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::RtConstrain)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let route = make_rtc_rib_route(100);
     let key = route.key();
     // A locally-originated default rides in the same update; its stored

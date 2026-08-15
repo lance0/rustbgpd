@@ -211,10 +211,7 @@ pub(crate) struct PeerSession {
     /// interface-bound peers. Built once from immutable transport config.
     link_local_next_hop_scope: Option<NextHopScope>,
     /// Negotiated session parameters (set when `SessionEstablished`).
-    negotiated: Option<NegotiatedSession>,
-    /// Address families negotiated via MP-BGP capabilities. Used to filter
-    /// inbound `MP_REACH_NLRI` and outbound route advertisements.
-    negotiated_families: Vec<(Afi, Safi)>,
+    negotiated: Option<Arc<NegotiatedSession>>,
     /// Families for which Add-Path receive was negotiated. Built once at
     /// `SessionEstablished` and reused by inbound UPDATE decode instead of
     /// rebuilding from `NegotiatedSession::add_path_families` per UPDATE.
@@ -827,6 +824,12 @@ impl PeerSession {
         self.add_path_receive_families.contains(&family)
     }
 
+    fn negotiated_families(&self) -> &[(Afi, Safi)] {
+        self.negotiated
+            .as_deref()
+            .map_or(&[], |negotiated| negotiated.negotiated_families.as_slice())
+    }
+
     fn receives_add_path_for_prefix(&self, prefix: Prefix) -> bool {
         self.receives_add_path_for_family(match prefix {
             Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
@@ -1097,7 +1100,6 @@ impl PeerSession {
             peer_ip,
             link_local_next_hop_scope,
             negotiated: None,
-            negotiated_families: Vec::new(),
             add_path_receive_families: Vec::new(),
             received_eor_families: HashSet::new(),
             stop_requested: false,
@@ -1266,7 +1268,6 @@ impl PeerSession {
             peer_ip,
             link_local_next_hop_scope,
             negotiated: None,
-            negotiated_families: Vec::new(),
             add_path_receive_families: Vec::new(),
             received_eor_families: HashSet::new(),
             stop_requested: false,

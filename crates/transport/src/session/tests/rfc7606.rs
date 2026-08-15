@@ -481,7 +481,11 @@ async fn rfc7606_treat_as_withdraw_covers_previously_accepted_evpn_routes() {
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
-    session.negotiated_families.push((Afi::L2Vpn, Safi::Evpn));
+    let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+    negotiated
+        .negotiated_families
+        .push((Afi::L2Vpn, Safi::Evpn));
+    session.negotiated = Some(Arc::new(negotiated));
     rfc7606_drain(&mut rib_rx);
     let evpn_route = EvpnRoute::MacIp(EvpnMacIp {
         rd: RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]),

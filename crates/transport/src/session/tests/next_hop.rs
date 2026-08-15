@@ -5,10 +5,7 @@ async fn process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer() 
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     configure_scoped_link_local_peer(&mut session);
     let negotiated = negotiated_session(65002, true);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let next_hop: Ipv6Addr = "fe80::1".parse().unwrap();
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -53,10 +50,7 @@ async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     configure_scoped_link_local_peer(&mut session);
     let negotiated = negotiated_session(65002, true);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let replacement_next_hop: IpAddr = "2001:db8::99".parse().unwrap();
     session.install_import_policy(Some(PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
@@ -126,10 +120,7 @@ async fn process_update_rejects_ipv4_mp_link_local_without_extended_nexthop() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     configure_scoped_link_local_peer(&mut session);
     let negotiated = negotiated_session(65002, false);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let next_hop: Ipv6Addr = "fe80::1".parse().unwrap();
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -175,10 +166,7 @@ async fn process_update_ignores_ipv4_body_nlri_for_scoped_unnumbered_peer() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     configure_scoped_link_local_peer(&mut session);
     let negotiated = negotiated_session(65002, true);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -211,10 +199,7 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
     session.test_install_stream(client);
     session.config.route_server_client = true;
     let negotiated = negotiated_session(65002, true);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let v6_nh: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let update = OutboundRouteUpdate {
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -288,10 +273,7 @@ async fn unnumbered_ipv4_extended_nexthop_sends_link_local_mp_reach() {
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     let negotiated = negotiated_session(65002, true);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let update = OutboundRouteUpdate {
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -344,10 +326,7 @@ async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     let negotiated = negotiated_session(65002, true);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let remote_ll: Ipv6Addr = "fe80::2".parse().unwrap();
     let mut route = make_route(100);
     route.next_hop = IpAddr::V6(remote_ll);
@@ -405,10 +384,7 @@ async fn extended_nexthop_clears_companion_when_primary_next_hop_is_rewritten() 
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     let negotiated = negotiated_session(65002, true);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let mut route = make_route(100);
     route.next_hop = IpAddr::V6("2001:db8::2".parse().unwrap());
     route.link_local_next_hop = Some("fe80::2".parse().unwrap());
@@ -463,10 +439,7 @@ async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     let negotiated = negotiated_session(65002, false);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let update = OutboundRouteUpdate {
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -509,10 +482,7 @@ async fn route_server_client_ipv6_preserves_next_hop() {
     session.config.route_server_client = true;
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let v6_nh: Ipv6Addr = "2001:db8::2".parse().unwrap();
     let update = OutboundRouteUpdate {
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -587,10 +557,7 @@ async fn ipv6_next_hop_self_clears_stale_link_local_companion() {
     session.config.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let remote_global: Ipv6Addr = "2001:db8::2".parse().unwrap();
     let mut route = make_v6_unicast_route(remote_global);
     route.link_local_next_hop = Some("fe80::2".parse().unwrap());
@@ -649,10 +616,7 @@ async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop
     session.test_install_stream(client);
     let mut negotiated = negotiated_session(65001, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let route_next_hop = "2001:db8::2".parse().unwrap();
     let update = OutboundRouteUpdate {
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -712,7 +676,7 @@ async fn strict_peer_next_hop_rejects_foreign_ipv4_body_and_withdraws_replacemen
 
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.next_hop_ownership_strict_peer = true;
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let accepted = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let first_seen = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
@@ -1076,7 +1040,7 @@ async fn strict_peer_next_hop_rejects_link_local_companion_pair() {
 #[tokio::test]
 async fn next_hop_ownership_disabled_by_default_accepts_foreign_next_hop() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),

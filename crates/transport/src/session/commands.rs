@@ -1141,7 +1141,7 @@ impl PeerSession {
                 // critical for collision detection: handle_inbound() reads
                 // remote_router_id via QueryState when the session is in
                 // OpenConfirm.
-                let neg = self.fsm.negotiated().or(self.negotiated.as_ref());
+                let neg = self.fsm.negotiated().or(self.negotiated.as_deref());
                 let (messages_received, messages_sent) =
                     self.metrics.peer_message_totals(&self.peer_label);
                 let prefix_count = self.known_prefix_count();
@@ -1250,7 +1250,7 @@ impl PeerSession {
                 ControlFlow::Continue(())
             }
             PeerCommand::QueryWarmCheckpointState { reply } => {
-                let neg = self.fsm.negotiated().or(self.negotiated.as_ref());
+                let neg = self.fsm.negotiated().or(self.negotiated.as_deref());
                 let mut negotiated_families = neg
                     .map(|negotiated| negotiated.negotiated_families.clone())
                     .unwrap_or_default();
@@ -1308,7 +1308,7 @@ impl PeerSession {
                     let _ = reply.send(Err(PeerCommandError::RouteRefreshUnsupported));
                     return ControlFlow::Continue(());
                 }
-                if !self.negotiated_families.contains(&(afi, safi)) {
+                if !self.negotiated_families().contains(&(afi, safi)) {
                     let _ = reply.send(Err(PeerCommandError::FamilyNotNegotiated { afi, safi }));
                     return ControlFlow::Continue(());
                 }

@@ -958,10 +958,7 @@ async fn evpn_routes_counted_toward_max_prefix() {
     negotiated.keepalive_interval = 30;
     negotiated.four_octet_as = true;
     negotiated.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let make_route = |mac_lo: u8| -> EvpnRoute {
         EvpnRoute::MacIp(EvpnMacIp {
             rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
@@ -1038,10 +1035,7 @@ async fn rtc_routes_counted_toward_max_prefix() {
     negotiated.keepalive_interval = 30;
     negotiated.four_octet_as = true;
     negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::RtConstrain)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let make_nlri = |admin: u64| RtcNlri::new(65001, 0x0002_FDE9_0000_0000 | admin, 96).unwrap();
     let send_announces = |nlris: Vec<RtcNlri>| {
         let attrs = vec![

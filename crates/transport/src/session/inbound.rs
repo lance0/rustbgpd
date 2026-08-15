@@ -523,7 +523,7 @@ impl PeerSession {
             let family = (mp.afi, mp.safi);
             if mp.safi != Safi::Unicast
                 || !matches!(mp.afi, Afi::Ipv4 | Afi::Ipv6)
-                || !self.negotiated_families.contains(&family)
+                || !self.negotiated_families().contains(&family)
                 || family == (Afi::Ipv4, Safi::Unicast) && !self.use_extended_nexthop_ipv4()
             {
                 continue;
@@ -575,7 +575,7 @@ impl PeerSession {
             if mp.announced.is_empty()
                 || mp.safi != Safi::Unicast
                 || !matches!(mp.afi, Afi::Ipv4 | Afi::Ipv6)
-                || !self.negotiated_families.contains(&family)
+                || !self.negotiated_families().contains(&family)
                 || family == (Afi::Ipv4, Safi::Unicast) && !self.use_extended_nexthop_ipv4()
             {
                 continue;
@@ -742,7 +742,7 @@ impl PeerSession {
             Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
             Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
         };
-        self.negotiated_families.contains(&family)
+        self.negotiated_families().contains(&family)
     }
     pub(super) fn use_extended_nexthop_ipv4(&self) -> bool {
         self.negotiated.as_ref().is_some_and(|n| {
@@ -849,7 +849,7 @@ impl PeerSession {
         for attr in &parsed.attributes {
             if let PathAttribute::MpUnreachNlri(mp) = attr {
                 let family = (mp.afi, mp.safi);
-                if self.negotiated_families.contains(&family) {
+                if self.negotiated_families().contains(&family) {
                     loop_withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
                     loop_fs_withdrawn.extend(
                         mp.flowspec_withdrawn
@@ -895,7 +895,7 @@ impl PeerSession {
             }
             if let PathAttribute::MpReachNlri(mp) = attr
                 && let Some(bgpls_family) = bgpls_family_from_safi(mp.safi)
-                && self.negotiated_families.contains(&(mp.afi, mp.safi))
+                && self.negotiated_families().contains(&(mp.afi, mp.safi))
             {
                 loop_bgpls_rejected.extend(mp.bgpls_announced.iter().map(|nlri| BgpLsRouteKey {
                     family: bgpls_family,
@@ -907,7 +907,7 @@ impl PeerSession {
             // that this session previously accepted.
             if let PathAttribute::MpReachNlri(mp) = attr
                 && mp.safi == Safi::MplsVpn
-                && self.negotiated_families.contains(&(mp.afi, mp.safi))
+                && self.negotiated_families().contains(&(mp.afi, mp.safi))
             {
                 loop_l3vpn_rejected.extend(mp.vpn_announced.iter().map(|entry| VpnRibRouteKey {
                     nlri_key: entry.nlri.key(),
@@ -916,7 +916,7 @@ impl PeerSession {
             }
             if let PathAttribute::MpReachNlri(mp) = attr
                 && mp.safi == Safi::LabeledUnicast
-                && self.negotiated_families.contains(&(mp.afi, mp.safi))
+                && self.negotiated_families().contains(&(mp.afi, mp.safi))
             {
                 loop_labeled_rejected.extend(mp.labeled_announced.iter().map(|entry| {
                     LabeledRibRouteKey {
@@ -927,7 +927,7 @@ impl PeerSession {
             }
             if let PathAttribute::MpReachNlri(mp) = attr
                 && mp.safi == Safi::RtConstrain
-                && self.negotiated_families.contains(&(mp.afi, mp.safi))
+                && self.negotiated_families().contains(&(mp.afi, mp.safi))
             {
                 loop_rtc_rejected.extend(mp.rtc_announced.iter().map(|nlri| RtcRibRouteKey {
                     nlri: *nlri,
@@ -941,7 +941,7 @@ impl PeerSession {
             // family-specific announced vectors are only populated for their
             // own SAFI, so the negotiated-family check is the only guard.
             if let PathAttribute::MpReachNlri(mp) = attr
-                && self.negotiated_families.contains(&(mp.afi, mp.safi))
+                && self.negotiated_families().contains(&(mp.afi, mp.safi))
             {
                 loop_fs_rejected.extend(
                     mp.flowspec_announced
@@ -1995,7 +1995,7 @@ impl PeerSession {
             match attr {
                 PathAttribute::MpReachNlri(mp) => {
                     let family = (mp.afi, mp.safi);
-                    if !self.negotiated_families.contains(&family) {
+                    if !self.negotiated_families().contains(&family) {
                         warn!(
                             peer = %self.peer_label,
                             afi = ?mp.afi,
@@ -2569,7 +2569,7 @@ impl PeerSession {
                 }
                 PathAttribute::MpUnreachNlri(mp) => {
                     let family = (mp.afi, mp.safi);
-                    if !self.negotiated_families.contains(&family) {
+                    if !self.negotiated_families().contains(&family) {
                         continue;
                     }
                     if family == (Afi::Ipv4, Safi::Unicast) && !self.use_extended_nexthop_ipv4() {

@@ -4,10 +4,7 @@ use super::*;
 async fn process_update_ignores_ipv4_mp_without_extended_nexthop() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let negotiated = negotiated_session(65002, false);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -39,10 +36,7 @@ async fn process_update_ignores_ipv4_mp_without_extended_nexthop() {
 async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let negotiated = negotiated_session(65002, true);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -87,7 +81,7 @@ async fn no_modification_update_shares_attribute_arc_across_nlri() {
     // no modifications. They must share one attribute `Arc` (the PR2 CoW
     // win), not deep-clone per route.
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -128,7 +122,7 @@ async fn no_modification_update_shares_attribute_arc_across_nlri() {
 #[tokio::test]
 async fn ibgp_local_pref_is_preserved() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
-    session.negotiated = Some(negotiated_session(65001, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65001, false)));
     let update = UpdateMessage::build(
         &[Ipv4NlriEntry {
             path_id: 0,
@@ -214,7 +208,7 @@ async fn ebgp_import_policy_sees_default_local_pref_and_can_set_it() {
         ],
         default_action: PolicyAction::Deny,
     }])));
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let update = UpdateMessage::build(
         &[Ipv4NlriEntry { path_id: 0, prefix }],
         &[],
@@ -305,7 +299,7 @@ async fn modified_policy_update_owns_distinct_arc_per_nlri() {
     // rather than sharing the canonical one, and the mutation must land.
     const ADDED_COMMUNITY: u32 = 0xFDE9_0064; // 65001:100
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     session.install_import_policy(Some(PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
             prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))),

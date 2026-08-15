@@ -251,7 +251,7 @@ fn llgr_peer_keeps_llgr_stale_community() {
         stale_time: 3600,
         forwarding_preserved: false,
     }];
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let route = Route {
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
