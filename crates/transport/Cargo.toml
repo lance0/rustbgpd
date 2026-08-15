@@ -41,6 +41,13 @@ rustbgpd-rib.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 criterion.workspace = true
 
+[[bin]]
+name = "rejected-route-store-allocation"
+path = "tools/rejected_route_store_allocation.rs"
+test = false
+bench = false
+doc = false
+
 [[bench]]
 name = "inbound_attrs"
 harness = false
