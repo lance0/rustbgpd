@@ -56,14 +56,14 @@ fn labelled_staged_routes_have_zero_per_route_permit_label_collection() {
     }
     let capacity = historical.capacity();
     let with_collection = ALLOC.live.load(Ordering::Relaxed);
-    let reclaimed = with_collection - before;
+    let historical_map_bytes = with_collection - before;
 
     println!(
-        "{{\"kind\":\"update_group_policy_label_profile\",\"routes\":{ROUTES},\"per_route_collections\":0,\"historical_capacity\":{capacity},\"reclaimed_bytes\":{reclaimed}}}"
+        "{{\"kind\":\"update_group_policy_label_profile\",\"routes\":{ROUTES},\"per_route_collections\":0,\"historical_capacity\":{capacity},\"historical_map_bytes\":{historical_map_bytes}}}"
     );
     assert_eq!(historical.len(), ROUTES);
     assert!(
-        reclaimed >= FOUR_MIB,
-        "route-keyed Permit-label collection used only {reclaimed} bytes"
+        historical_map_bytes >= FOUR_MIB,
+        "route-keyed Permit-label collection allocated only {historical_map_bytes} bytes"
     );
 }
