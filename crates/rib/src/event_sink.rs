@@ -11,11 +11,11 @@
 //! the cycle on the binary side.
 //!
 //! See `docs/adr/0072-durable-event-history.md` "Producer wiring"
-//! for the contract: the sink fires **after** the existing
-//! `route_event_history` ring + `route_events_tx` broadcast so the
-//! legacy live surfaces (`WatchRoutes`, `WatchEvents`,
-//! `ListRouteEvents`) are unchanged. The durable cursor
-//! (`SubscribeFromEvent`) is the consumer of the sink path.
+//! for the contract: after insertion into `route_event_history` or
+//! `evpn_route_event_history`, the non-blocking sink sidecar fires before the
+//! corresponding `route_events_tx` or `evpn_events_tx` live broadcast. The
+//! legacy live surfaces (`WatchRoutes`, `WatchEvents`, `ListRouteEvents`)
+//! remain unchanged; `SubscribeFromEvent` consumes the durable sink path.
 
 use std::sync::Arc;
 
