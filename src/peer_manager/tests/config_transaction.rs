@@ -18,7 +18,7 @@ log_format = "json"
     let (_tx, rx) = mpsc::channel(4);
     let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
     let (rib_tx, mut rib_rx) = mpsc::channel(4);
-    let mgr = PeerManager::new_with_config(
+    let mut mgr = PeerManager::new_with_config(
         rx,
         internal_rx,
         65001,
@@ -122,7 +122,7 @@ remote_asn = 65002
     let (_tx, rx) = mpsc::channel(4);
     let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
     let (rib_tx, mut rib_rx) = mpsc::channel(4);
-    let mgr = PeerManager::new_with_config(
+    let mut mgr = PeerManager::new_with_config(
         rx,
         internal_rx,
         65001,
@@ -215,7 +215,7 @@ import_policy_chain = ["edge-in"]
     let (_tx, rx) = mpsc::channel(4);
     let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
     let (rib_tx, mut rib_rx) = mpsc::channel(4);
-    let mgr = PeerManager::new_with_config(
+    let mut mgr = PeerManager::new_with_config(
         rx,
         internal_rx,
         65001,
@@ -950,7 +950,7 @@ log_format = "json"
     let (_tx, rx) = mpsc::channel(4);
     let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
     let (rib_tx, mut rib_rx) = mpsc::channel(4);
-    let mgr = PeerManager::new_with_config(
+    let mut mgr = PeerManager::new_with_config(
         rx,
         internal_rx,
         65001,

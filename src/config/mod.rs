@@ -2361,6 +2361,7 @@ impl RuntimeSnapshotKey {
     }
 
     /// Keyed token additionally bound to a canonical live-runtime context.
+    #[cfg(test)]
     pub fn token_with_context(&self, config: &Config, context: &[u8]) -> Result<String, String> {
         // The shared borrowed projection uses explicit sorted serializers for
         // every HashMap-valued config field, making this token independent of
@@ -2368,6 +2369,17 @@ impl RuntimeSnapshotKey {
         let normalized = canonical::render(config)
             .map_err(|error| format!("failed to serialize runtime config snapshot: {error}"))?;
         Ok(self.token_for_canonical_body(&normalized, context))
+    }
+
+    /// Keyed token rendered through the bounded canonical document path.
+    pub fn token_with_context_bounded(
+        &self,
+        config: &mut Config,
+        context: &[u8],
+    ) -> Result<String, String> {
+        let normalized = persisted_config_document_bounded(config)
+            .map_err(|error| format!("failed to serialize runtime config snapshot: {error}"))?;
+        self.token_with_normalized_document(&normalized, context)
     }
 
     /// Token a persisted candidate without serializing it a second time.
@@ -2466,6 +2478,11 @@ pub(crate) fn persisted_config_document_bounded(
     config: &mut Config,
 ) -> Result<String, toml::ser::Error> {
     canonical::render_document_bounded(config).map(|(document, _)| document)
+}
+
+/// Render the legacy raw `Config` TOML shape with bounded statement chunks.
+pub(crate) fn raw_config_document_bounded(config: &mut Config) -> Result<String, toml::ser::Error> {
+    canonical::render_raw_bounded(config).map(|(document, _)| document)
 }
 
 impl Config {

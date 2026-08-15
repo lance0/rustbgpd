@@ -146,7 +146,7 @@ impl PeerManager {
     }
 
     pub(super) async fn plan_config_transaction(
-        &self,
+        &mut self,
         candidate_toml: &str,
         expected_runtime_snapshot_token: Option<&str>,
     ) -> Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError> {
@@ -170,7 +170,7 @@ impl PeerManager {
     }
 
     pub(super) async fn plan_preloaded_config_transaction(
-        &self,
+        &mut self,
         candidate: &mut Config,
         expected_runtime_snapshot_token: Option<&str>,
     ) -> Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError> {
@@ -201,7 +201,7 @@ impl PeerManager {
     }
 
     async fn config_transaction_plan_context(
-        &self,
+        &mut self,
         expected_runtime_snapshot_token: Option<&str>,
     ) -> Result<
         (rustbgpd_rib::UpdateGroupSnapshot, [u8; 8], String),
@@ -218,7 +218,7 @@ impl PeerManager {
         let live_snapshot_identity = self.snapshot_key.digest_context(&live_snapshot);
         let runtime_snapshot_token = self
             .snapshot_key
-            .token_with_context(&self.current_config, &live_snapshot_identity)
+            .token_with_context_bounded(&mut self.current_config, &live_snapshot_identity)
             .map_err(RuntimeConfigTransactionPlanError::Internal)?;
         if let Some(expected) = expected_runtime_snapshot_token.filter(|token| !token.is_empty())
             && expected != runtime_snapshot_token
@@ -236,7 +236,7 @@ impl PeerManager {
     }
 
     fn finish_config_transaction_plan(
-        &self,
+        &mut self,
         candidate: &mut Config,
         materialization: Option<&crate::config::ConfigDiff>,
         live_snapshot: rustbgpd_rib::UpdateGroupSnapshot,
@@ -299,7 +299,7 @@ impl PeerManager {
         } else {
             let token = self
                 .snapshot_key
-                .token_with_context(candidate, &live_snapshot_identity)
+                .token_with_context_bounded(candidate, &live_snapshot_identity)
                 .map_err(RuntimeConfigTransactionPlanError::Internal)?;
             (token, None)
         };

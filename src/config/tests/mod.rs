@@ -1459,14 +1459,14 @@ fn verify_bounded_writer_receipt(source: &str) {
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "release-only six-child 3.2M-statement bounded-writer A/B"]
-fn bounded_writer_release_probe() {
+#[ignore = "release-only six-child 3.2M-statement raw bounded-writer A/B"]
+fn raw_bounded_writer_release_probe() {
     use sha2::{Digest as _, Sha256};
     use std::{fmt::Write as _, process::Command, time::Instant};
 
-    const ARM: &str = "RUSTBGPD_BOUNDED_WRITER_ARM";
-    const ATTEMPT: &str = "RUSTBGPD_BOUNDED_WRITER_ATTEMPT";
-    const RECEIPT: &str = "RUSTBGPD_BOUNDED_WRITER_RECEIPT";
+    const ARM: &str = "RUSTBGPD_RAW_BOUNDED_WRITER_ARM";
+    const ATTEMPT: &str = "RUSTBGPD_RAW_BOUNDED_WRITER_ATTEMPT";
+    const RECEIPT: &str = "RUSTBGPD_RAW_BOUNDED_WRITER_RECEIPT";
     assert!(
         !std::hint::black_box(cfg!(debug_assertions)),
         "run with --release"
@@ -1481,10 +1481,10 @@ fn bounded_writer_release_probe() {
         let started = Instant::now();
         let (document, stats) = match arm.as_str() {
             "legacy" => (
-                persisted_config_document(&config).unwrap(),
+                toml::to_string_pretty(&config).unwrap(),
                 super::canonical::BoundedRenderStats::default(),
             ),
-            "bounded" => super::canonical::render_document_bounded(&mut config).unwrap(),
+            "bounded" => super::canonical::render_raw_bounded(&mut config).unwrap(),
             other => panic!("unknown bounded-writer arm {other}"),
         };
         let elapsed = started.elapsed().as_nanos();
@@ -1526,7 +1526,7 @@ fn bounded_writer_release_probe() {
         assert!(
             Command::new(&executable)
                 .args([
-                    "config::tests::bounded_writer_release_probe",
+                    "config::tests::raw_bounded_writer_release_probe",
                     "--ignored",
                     "--exact",
                     "--nocapture"
@@ -1541,8 +1541,8 @@ fn bounded_writer_release_probe() {
         output.push_str(&fs::read_to_string(receipt.path()).unwrap());
     }
     verify_bounded_writer_receipt(&output);
-    let output_path = std::env::var("RUSTBGPD_BOUNDED_WRITER_OUTPUT")
-        .expect("RUSTBGPD_BOUNDED_WRITER_OUTPUT is required");
+    let output_path = std::env::var("RUSTBGPD_RAW_BOUNDED_WRITER_OUTPUT")
+        .expect("RUSTBGPD_RAW_BOUNDED_WRITER_OUTPUT is required");
     retain_persistence_phase_receipt(Path::new(&output_path), &output);
 }
 

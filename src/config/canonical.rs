@@ -14,6 +14,12 @@ const STATEMENT_CHUNK_LEN: usize = 256;
 const SENTINEL_ONE: &str = "rustbgpd_bounded_writer_sentinel_one";
 const SENTINEL_TWO: &str = "rustbgpd_bounded_writer_sentinel_two";
 
+#[derive(Clone, Copy)]
+enum DocumentShape {
+    Raw,
+    CanonicalPersisted,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct BoundedRenderStats {
     pub(super) neighbor_import_lanes: usize,
@@ -447,16 +453,31 @@ pub(super) fn render(config: &Config) -> Result<String, toml::ser::Error> {
 pub(super) fn render_document_bounded(
     config: &mut Config,
 ) -> Result<(String, BoundedRenderStats), toml::ser::Error> {
-    render_document_bounded_with_hook(config, |_| Ok(()))
+    render_document_bounded_with_hook(config, DocumentShape::CanonicalPersisted, |_| Ok(()))
+}
+
+/// Render the legacy raw `Config` shape without materializing its statement
+/// vectors in one serializer graph. Unlike the persisted shape, this preserves
+/// absent RFC 8212 fields and carries no maintenance header.
+pub(super) fn render_raw_bounded(
+    config: &mut Config,
+) -> Result<(String, BoundedRenderStats), toml::ser::Error> {
+    render_document_bounded_with_hook(config, DocumentShape::Raw, |_| Ok(()))
 }
 
 fn render_document_bounded_with_hook(
     config: &mut Config,
+    shape: DocumentShape,
     mut hook: impl FnMut(&'static str) -> Result<(), toml::ser::Error>,
 ) -> Result<(String, BoundedRenderStats), toml::ser::Error> {
     let extraction = StatementExtraction::new(config);
     hook("after-extraction")?;
-    let skeleton = toml::to_string_pretty(&CanonicalConfig::from(&*extraction.config))?;
+    let skeleton = match shape {
+        DocumentShape::Raw => toml::to_string_pretty(&*extraction.config)?,
+        DocumentShape::CanonicalPersisted => {
+            toml::to_string_pretty(&CanonicalConfig::from(&*extraction.config))?
+        }
+    };
     let mut templates = extraction
         .lanes
         .iter()
@@ -483,14 +504,16 @@ fn render_document_bounded_with_hook(
         }
     }
 
-    let mut document = String::with_capacity(
-        super::PERSISTED_CONFIG_HEADER.len()
-            + 1
-            + skeleton.len()
-            + stats.statements.saturating_mul(64),
-    );
-    document.push_str(super::PERSISTED_CONFIG_HEADER);
-    document.push('\n');
+    let header_len = match shape {
+        DocumentShape::Raw => 0,
+        DocumentShape::CanonicalPersisted => super::PERSISTED_CONFIG_HEADER.len() + 1,
+    };
+    let mut document =
+        String::with_capacity(header_len + skeleton.len() + stats.statements.saturating_mul(64));
+    if matches!(shape, DocumentShape::CanonicalPersisted) {
+        document.push_str(super::PERSISTED_CONFIG_HEADER);
+        document.push('\n');
+    }
     let mut cursor = 0;
     for (lane_index, template) in templates {
         document.push_str(&skeleton[cursor..template.range.start]);
@@ -516,7 +539,15 @@ pub(super) fn render_document_bounded_with_test_hook(
     config: &mut Config,
     hook: impl FnMut(&'static str) -> Result<(), toml::ser::Error>,
 ) -> Result<(String, BoundedRenderStats), toml::ser::Error> {
-    render_document_bounded_with_hook(config, hook)
+    render_document_bounded_with_hook(config, DocumentShape::CanonicalPersisted, hook)
+}
+
+#[cfg(test)]
+pub(super) fn render_raw_bounded_with_test_hook(
+    config: &mut Config,
+    hook: impl FnMut(&'static str) -> Result<(), toml::ser::Error>,
+) -> Result<(String, BoundedRenderStats), toml::ser::Error> {
+    render_document_bounded_with_hook(config, DocumentShape::Raw, hook)
 }
 
 /// Test-only decomposition of [`render`] at the TOML ownership boundaries.
