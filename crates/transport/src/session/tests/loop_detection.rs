@@ -24,10 +24,7 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
     negotiated.keepalive_interval = 30;
     negotiated.four_octet_as = true;
     negotiated.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     // Build the withdrawn EVPN Type 2 key.
     let withdrawn_route = EvpnRoute::MacIp(EvpnMacIp {
         rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
@@ -551,10 +548,7 @@ async fn rr_loop_detected_update_synthesizes_rtc_withdrawals() {
     negotiated.keepalive_interval = 30;
     negotiated.four_octet_as = true;
     negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::RtConstrain)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let announced_nlri = RtcNlri::new(65001, 0x0002_FDE9_0000_0064, 96).unwrap();
     let withdrawn_nlri = RtcNlri::new(65001, 0x0002_FDE9_0000_00C8, 96).unwrap();
     session.known_rtc.extend([
@@ -655,10 +649,7 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
     negotiated.keepalive_interval = 30;
     negotiated.four_octet_as = true;
     negotiated.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let withdrawn_route = EvpnRoute::MacIp(EvpnMacIp {
         rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
         esi: EthernetSegmentIdentifier::ZERO,

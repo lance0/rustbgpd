@@ -88,7 +88,7 @@ async fn otc_ingress_adds_remote_asn_for_route_from_provider_unicast() {
     for role in [BgpRole::Customer, BgpRole::Peer, BgpRole::RouteServerClient] {
         let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
         session.config.peer.local_role = Some(role);
-        session.negotiated = Some(negotiated_session(65002, false));
+        session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
@@ -125,7 +125,7 @@ async fn otc_ingress_provider_drops_tagged_unicast_from_customer_but_keeps_withd
     for role in [BgpRole::Provider, BgpRole::RouteServer] {
         let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
         session.config.peer.local_role = Some(role);
-        session.negotiated = Some(negotiated_session(65002, false));
+        session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
         let announced_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
         let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
         let attrs = vec![
@@ -327,7 +327,7 @@ async fn otc_replacements_withdraw_accepted_classic_and_mp_routes_only() {
 async fn otc_ingress_peer_drops_tagged_unicast_from_wrong_as() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Peer);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -446,7 +446,7 @@ async fn otc_ingress_malformed_length_withdraws_a_real_accepted_replacement() {
 fn rib_staged_otc_denial_publishes_existing_egress_diagnostics() {
     let mut session = make_test_session(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Customer);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let sink = install_recording_sink(&mut session);
     let route = replace_route_attrs(
         &make_route(100),
@@ -482,7 +482,7 @@ async fn otc_ingress_provider_publishes_structured_event() {
     // the decoded OTC value.
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Provider);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let sink = install_recording_sink(&mut session);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let attrs = vec![
@@ -519,7 +519,7 @@ async fn otc_ingress_peer_mismatch_publishes_structured_event() {
     // I2: Peer role with OTC ASN != peer ASN.
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Peer);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let sink = install_recording_sink(&mut session);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let attrs = vec![
@@ -555,7 +555,7 @@ async fn otc_ingress_malformed_publishes_structured_event_with_no_otc_value() {
     // event's otc_value field is None.
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Provider);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let sink = install_recording_sink(&mut session);
     let announced_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let attrs = vec![
@@ -601,7 +601,7 @@ async fn otc_ingress_event_collects_mp_reach_v6_prefixes() {
     // an IPv6-only OTC violation.
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Provider);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let sink = install_recording_sink(&mut session);
     let v6_prefix = Ipv6Prefix::new(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32);
     let mp_reach = rustbgpd_wire::MpReachNlri {
@@ -652,7 +652,7 @@ async fn otc_ingress_skips_event_when_rejected_count_is_zero() {
     // and the per-peer counter bump are skipped.
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Provider);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let sink = install_recording_sink(&mut session);
     let baseline_blocked = session.otc_routes_blocked;
     let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
@@ -703,7 +703,7 @@ async fn otc_ingress_no_event_when_no_decision() {
     // local — no OTC rule fires, so the sink must stay empty.
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Customer);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let sink = install_recording_sink(&mut session);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let attrs = vec![

@@ -15,10 +15,7 @@ async fn send_route_update_emits_labeled_reach_and_unreach() {
     session.test_install_stream(client);
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::LabeledUnicast)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let route = make_labeled_rib_route(4093);
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
@@ -134,10 +131,7 @@ async fn send_route_update_reflects_labeled_v6_link_local_next_hop() {
     session.test_install_stream(client);
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::LabeledUnicast)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
 
     let global: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let link_local: Ipv6Addr = "fe80::1".parse().unwrap();
@@ -224,10 +218,7 @@ async fn send_route_update_emits_labeled_add_path_reach_and_unreach() {
     negotiated
         .add_path_families
         .insert((Afi::Ipv4, Safi::LabeledUnicast), AddPathMode::Both);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let mut route = make_labeled_rib_route(4093);
     route.path_id = 2;
     let key = route.key();

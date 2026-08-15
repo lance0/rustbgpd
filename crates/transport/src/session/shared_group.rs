@@ -621,7 +621,7 @@ impl PeerSession {
     fn wants_shared_chunk(&self, update: &OutboundRouteUpdate, chunk: &SharedUnicastChunk) -> bool {
         update.announce_source_exclusion != Some(chunk.source)
             && self
-                .negotiated_families
+                .negotiated_families()
                 .contains(&(chunk.afi, Safi::Unicast))
     }
 }

@@ -288,9 +288,6 @@ fn negotiated_session(remote_asn: u32, extended_nexthop: bool) -> NegotiatedSess
     negotiated
 }
 fn install_test_negotiated_session(session: &mut PeerSession, negotiated: NegotiatedSession) {
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
     session.add_path_receive_families = negotiated
         .add_path_families
         .iter()
@@ -302,7 +299,7 @@ fn install_test_negotiated_session(session: &mut PeerSession, negotiated: Negoti
             }
         })
         .collect();
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
 }
 
 fn max_prefix_gauge(metrics: &BgpMetrics, name: &str, peer: &str, scope: &str) -> Option<f64> {
@@ -1023,10 +1020,7 @@ async fn shared_group_member(local_asn: u32) -> (PeerSession, TcpStream) {
     let (client, server) = connected_stream_pair().await;
     session.test_install_stream(client);
     let negotiated = negotiated_session(65002, false);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     session.config.route_server_client = true;
     (session, server)
 }
@@ -1668,10 +1662,7 @@ fn retention_session_with_chain(
         false,
     );
     let negotiated = negotiated_session(65002, false);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     (session, metrics)
 }
 
@@ -1714,6 +1705,134 @@ fn rejected_route_prototype_builds(session: &PeerSession) -> usize {
     session
         .rejected_route_prototype_builds
         .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[tokio::test]
+async fn real_establishment_shares_fsm_arc_until_transport_finishes_teardown() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.peer.graceful_restart = true;
+    session.fsm = Session::new(session.config.peer.clone());
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    session
+        .drive_fsm(Event::OpenReceived(rustbgpd_wire::OpenMessage {
+            version: 4,
+            my_as: 65002,
+            hold_time: 90,
+            bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+            capabilities: vec![
+                Capability::MultiProtocol {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                },
+                Capability::FourOctetAs { asn: 65002 },
+                Capability::GracefulRestart {
+                    restart_state: true,
+                    notification: true,
+                    restart_time: 120,
+                    families: vec![rustbgpd_wire::GracefulRestartFamily {
+                        afi: Afi::Ipv4,
+                        safi: Safi::Unicast,
+                        forwarding_preserved: true,
+                    }],
+                },
+                Capability::LongLivedGracefulRestart(vec![LlgrFamily {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                    forwarding_preserved: true,
+                    stale_time: 3600,
+                }]),
+            ],
+        }))
+        .await;
+
+    let actions = session.fsm.handle_event(Event::KeepaliveReceived);
+    let shared = session.fsm.negotiated_shared().unwrap();
+    let shared_ptr = Arc::as_ptr(&shared);
+    let legacy = actions
+        .iter()
+        .find_map(|action| match action {
+            Action::SessionEstablished(negotiated) => Some(negotiated.as_ref()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!std::ptr::eq(shared.as_ref(), legacy));
+    assert_ne!(
+        shared.peer_capabilities.as_ptr(),
+        legacy.peer_capabilities.as_ptr()
+    );
+    assert_ne!(
+        shared.negotiated_families.as_ptr(),
+        legacy.negotiated_families.as_ptr()
+    );
+    drop(shared);
+
+    session.execute_actions(actions).await;
+    let transport = session.negotiated.as_ref().unwrap();
+    assert_eq!(Arc::as_ptr(transport), shared_ptr);
+    assert!(std::ptr::eq(
+        session.fsm.negotiated().unwrap(),
+        transport.as_ref()
+    ));
+    assert_eq!(Arc::strong_count(transport), 2);
+    assert_eq!(session.add_path_receive_families, Vec::<(Afi, Safi)>::new());
+
+    let weak = Arc::downgrade(transport);
+    let down_actions = session.fsm.handle_event(Event::TcpConnectionFails);
+    assert!(session.fsm.negotiated_shared().is_none());
+    let final_owner = session.negotiated.as_ref().unwrap();
+    assert_eq!(Arc::strong_count(final_owner), 1);
+    assert_eq!(final_owner.peer_asn, 65002);
+    assert_eq!(final_owner.peer_router_id, Ipv4Addr::new(10, 0, 0, 2));
+    assert!(final_owner.four_octet_as);
+    assert!(final_owner.peer_gr_capable);
+    assert!(final_owner.peer_llgr_capable);
+    assert!(final_owner.peer_notification_gr);
+    session.execute_actions(down_actions).await;
+    assert!(session.negotiated.is_none());
+    assert!(weak.upgrade().is_none());
+}
+
+#[tokio::test]
+async fn direct_action_fallback_rebuilds_fresh_arc_and_add_path_projection() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut first = negotiated_session(65002, false);
+    first
+        .add_path_families
+        .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Receive);
+    session
+        .execute_actions(vec![Action::SessionEstablished(Box::new(first))])
+        .await;
+    let first_arc = session.negotiated.as_ref().unwrap();
+    assert_eq!(Arc::strong_count(first_arc), 1);
+    assert_eq!(
+        session.add_path_receive_families,
+        vec![(Afi::Ipv4, Safi::Unicast)]
+    );
+    let first_weak = Arc::downgrade(first_arc);
+    session.execute_actions(vec![Action::SessionDown]).await;
+    assert!(first_weak.upgrade().is_none());
+
+    let mut second = negotiated_session(65003, false);
+    second.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    second
+        .add_path_families
+        .insert((Afi::Ipv6, Safi::Unicast), AddPathMode::Both);
+    session
+        .execute_actions(vec![Action::SessionEstablished(Box::new(second))])
+        .await;
+    let second_arc = session.negotiated.as_ref().unwrap();
+    assert_ne!(Arc::as_ptr(second_arc), first_weak.as_ptr());
+    assert_eq!(second_arc.peer_asn, 65003);
+    assert_eq!(
+        second_arc.negotiated_families,
+        vec![(Afi::Ipv6, Safi::Unicast)]
+    );
+    assert_eq!(
+        session.add_path_receive_families,
+        vec![(Afi::Ipv6, Safi::Unicast)]
+    );
 }
 
 mod bmp;

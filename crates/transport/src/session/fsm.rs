@@ -1,6 +1,6 @@
 use super::{
-    Action, AddPathMode, Afi, BmpEvent, Bytes, Duration, Event, Instant, IpAddr, Ipv4Addr, Message,
-    NotificationCode, OUTBOUND_BUFFER, PeerDownReason, PeerSession, RibUpdate, Safi,
+    Action, AddPathMode, Afi, Arc, BmpEvent, Bytes, Duration, Event, Instant, IpAddr, Ipv4Addr,
+    Message, NotificationCode, OUTBOUND_BUFFER, PeerDownReason, PeerSession, RibUpdate, Safi,
     SessionLifecycleNotification, SessionNotification, SessionNotificationDirection, SessionState,
     cease_subcode, debug, info, mpsc, warn,
 };
@@ -362,7 +362,15 @@ impl PeerSession {
                         )));
                     }
                 }
-                Action::SessionEstablished(neg) => {
+                Action::SessionEstablished(legacy_negotiated) => {
+                    let negotiated = if let Some(shared) = self.fsm.negotiated_shared() {
+                        debug_assert_eq!(shared.as_ref(), legacy_negotiated.as_ref());
+                        drop(legacy_negotiated);
+                        shared
+                    } else {
+                        Arc::from(legacy_negotiated)
+                    };
+                    let neg = negotiated.as_ref();
                     let peer_asn = neg.peer_asn;
                     info!(
                         peer = %self.peer_label,
@@ -372,8 +380,6 @@ impl PeerSession {
                         four_octet_as = neg.four_octet_as,
                         "session established"
                     );
-                    self.negotiated_families
-                        .clone_from(&neg.negotiated_families);
                     self.add_path_receive_families = neg
                         .add_path_families
                         .iter()
@@ -479,7 +485,7 @@ impl PeerSession {
                         .map(|family| (family.afi, family.safi))
                         .collect();
                     let peer_enhanced_refresh = neg.peer_enhanced_route_refresh;
-                    self.negotiated = Some(*neg);
+                    self.negotiated = Some(negotiated);
                     self.publish_export_profile();
                     self.established_at = Some(Instant::now());
                     // Publish the empty/current capacity snapshot only after
@@ -721,7 +727,6 @@ impl PeerSession {
                     });
 
                     self.negotiated = None;
-                    self.negotiated_families.clear();
                     self.add_path_receive_families.clear();
                     self.clear_known_routes();
                     // A disconnected session has no live capacity usage.
@@ -792,7 +797,7 @@ impl PeerSession {
 
     fn try_send_lifecycle_state_changed(&self, old: SessionState, new: SessionState) {
         if let Some(ref lifecycle_tx) = self.session_lifecycle_tx {
-            let negotiated = self.fsm.negotiated().or(self.negotiated.as_ref());
+            let negotiated = self.fsm.negotiated().or(self.negotiated.as_deref());
             match lifecycle_tx.try_send(SessionLifecycleNotification::StateChanged {
                 session_id: self.session_identity.id,
                 role: self.session_identity.role,

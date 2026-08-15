@@ -59,10 +59,7 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
     );
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_enhanced_route_refresh = true;
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     // Send an UPDATE with 198.51.100.0/24 — should be denied by import policy
     let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let permitted_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
@@ -178,8 +175,9 @@ async fn import_policy_prefix_term_does_not_match_destination_less_flowspec() {
         ],
         default_action: PolicyAction::Permit,
     }])));
-    session.negotiated = Some(negotiated_session(65002, false));
-    session.negotiated_families = vec![(Afi::Ipv4, Safi::FlowSpec), (Afi::Ipv6, Safi::FlowSpec)];
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::FlowSpec), (Afi::Ipv6, Safi::FlowSpec)];
+    session.negotiated = Some(Arc::new(negotiated));
 
     let destless_v4 = destless_rule(6);
     let destless_v6 = destless_rule(17);
@@ -356,10 +354,7 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
     );
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_enhanced_route_refresh = true;
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -474,10 +469,7 @@ async fn session_down_flushes_import_decision_cache() {
     );
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_enhanced_route_refresh = true;
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -533,10 +525,7 @@ async fn explain_import_policy_command_does_not_touch_counters() {
     session.import_explain_enabled = true;
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_enhanced_route_refresh = true;
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     // Populate the cache with one permitted prefix (permit-all default).
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let attrs = vec![
@@ -624,10 +613,7 @@ async fn query_import_policy_term_hits_snapshots_without_counting() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_enhanced_route_refresh = true;
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
 
     // No import chain installed → nothing to report.
     assert!(snapshot(&mut session).await.is_none());
@@ -824,10 +810,7 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
     );
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_enhanced_route_refresh = true;
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -945,10 +928,7 @@ async fn import_decision_cache_records_ipv6_mp_reach() {
     session.import_explain_enabled = true;
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let v6 = Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64);
     let mp_reach = rustbgpd_wire::MpReachNlri {
         afi: Afi::Ipv6,
@@ -1011,10 +991,7 @@ async fn explain_disabled_stores_no_decisions() {
     );
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_enhanced_route_refresh = true;
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -1133,10 +1110,7 @@ async fn explain_trace_renders_as_path_from_the_cached_typed_value() {
     );
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_enhanced_route_refresh = true;
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -1329,7 +1303,7 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
         None,
         false,
     );
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 10, 0, 0), 16);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -1403,7 +1377,7 @@ async fn import_policy_match_next_hop_filters_route() {
         None,
         false,
     );
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {

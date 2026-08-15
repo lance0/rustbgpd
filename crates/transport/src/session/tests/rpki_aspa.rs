@@ -4,7 +4,7 @@ use super::*;
 fn aspa_validation_context_uses_negotiated_asn_and_local_role() {
     let mut session = make_test_session(65001, 65002);
     session.config.peer.local_role = Some(rustbgpd_wire::BgpRole::RouteServerClient);
-    session.negotiated = Some(negotiated_session(65099, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65099, false)));
     let context = session.aspa_validation_context();
     assert_eq!(context.neighbor_asn, Some(65099));
     assert_eq!(
@@ -19,7 +19,7 @@ fn aspa_validation_context_uses_negotiated_asn_and_local_role() {
 #[test]
 fn aspa_validation_context_carries_neighbor_asn_without_a_role() {
     let mut session = make_test_session(65001, 65002);
-    session.negotiated = Some(negotiated_session(65099, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65099, false)));
     let context = session.aspa_validation_context();
     assert_eq!(context.neighbor_asn, Some(65099));
     assert_eq!(context.local_role, None);
@@ -206,10 +206,7 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
         false,
     );
     let negotiated = negotiated_session(65002, false);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     // UPDATE with two prefixes from AS 65002:
     //   192.0.2.0/24   → RPKI Valid  (VRP: AS 65002 covers it)   → permitted
     //   198.51.100.0/24 → RPKI Invalid (VRP says AS 65099)        → denied
@@ -442,10 +439,7 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
         false,
     );
     let negotiated = negotiated_session(65002, false);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     // UPDATE with AS_PATH [65002, 65003] — ASPA Valid (65003 authorizes 65002).
     // Two prefixes: both should be permitted (same AS_PATH, same ASPA state).
     let valid_attrs = vec![

@@ -6,10 +6,7 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     let negotiated = negotiated_session(65002, false);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let attrs = Arc::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -77,10 +74,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
     session.config.route_server_client = true;
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let attrs = Arc::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -176,10 +170,7 @@ async fn send_route_update_splits_oversized_ipv4_group_across_updates() {
     session.config.route_server_client = true;
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
 
     // One shared attribute set + next hop => one attribute group. 1500 /24s
     // (4 NLRI bytes each = 6000 bytes) cannot fit a single 4096-byte UPDATE.
@@ -278,10 +269,7 @@ async fn send_route_update_splits_oversized_ipv4_withdrawals_across_updates() {
     session.config.route_server_client = true;
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
 
     let count: u32 = 2000;
     let withdraw: Vec<(Prefix, u32)> = (0..count)
@@ -627,7 +615,9 @@ async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
     assert!(withdraw_updates >= 2);
     assert_eq!(withdrawn.len(), count as usize);
 
-    session.negotiated.as_mut().unwrap().peer_extended_message = true;
+    let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+    negotiated.peer_extended_message = true;
+    session.negotiated = Some(Arc::new(negotiated));
     session.send_route_update(OutboundRouteUpdate {
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -1265,7 +1255,9 @@ async fn send_route_update_chunks_flowspec_without_infallible_build() {
     assert!(withdraw_updates >= 3);
     assert_eq!(withdrawn.len(), (count * 2) as usize);
 
-    session.negotiated.as_mut().unwrap().peer_extended_message = true;
+    let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+    negotiated.peer_extended_message = true;
+    session.negotiated = Some(Arc::new(negotiated));
     session.send_route_update(OutboundRouteUpdate {
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -1304,10 +1296,7 @@ async fn send_route_update_uses_ipv6_specific_next_hop_override() {
     session.test_install_stream(client);
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     let route = make_v6_unicast_route("2001:db8::1".parse().unwrap());
     let override_nh =
         rustbgpd_policy::NextHopAction::Specific(IpAddr::V6("2001:db8::42".parse().unwrap()));

@@ -334,7 +334,7 @@ async fn notification_teardown_without_n_bit_uses_peer_down() {
     }];
     neg.peer_notification_gr = false;
     session.config.peer.graceful_restart = true;
-    session.negotiated = Some(neg);
+    session.negotiated = Some(Arc::new(neg));
     session.notification_teardown = true;
     session.execute_actions(vec![Action::SessionDown]).await;
     match rib_rx.try_recv().unwrap() {
@@ -356,7 +356,7 @@ async fn notification_teardown_with_n_bit_uses_peer_graceful_restart() {
     }];
     neg.peer_notification_gr = true;
     session.config.peer.graceful_restart = true;
-    session.negotiated = Some(neg);
+    session.negotiated = Some(Arc::new(neg));
     session.notification_teardown = true;
     session.execute_actions(vec![Action::SessionDown]).await;
     match rib_rx.try_recv().unwrap() {
@@ -378,7 +378,7 @@ async fn peer_gr_restart_time_is_capped_before_rib_retention() {
     }];
     session.config.peer.graceful_restart = true;
     session.config.gr_peer_restart_time_max = 300;
-    session.negotiated = Some(neg);
+    session.negotiated = Some(Arc::new(neg));
 
     session.execute_actions(vec![Action::SessionDown]).await;
 
@@ -406,7 +406,7 @@ async fn hard_reset_always_bypasses_gr_even_with_n_bit() {
     }];
     neg.peer_notification_gr = true;
     session.config.peer.graceful_restart = true;
-    session.negotiated = Some(neg);
+    session.negotiated = Some(Arc::new(neg));
     session.notification_teardown = true;
     session.received_hard_reset = true;
     session.execute_actions(vec![Action::SessionDown]).await;

@@ -401,8 +401,8 @@ async fn saturation_teardown_from_run_loop_ceases_closes_and_deregisters() {
 #[tokio::test]
 async fn full_rib_channel_parks_session_and_never_drops_routes() {
     let (mut session, mut rib_rx, metrics) = backpressure_test_session(1);
-    session.negotiated = Some(negotiated_session(65002, false));
-    session.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let negotiated = negotiated_session(65002, false);
+    session.negotiated = Some(Arc::new(negotiated));
     // Fill the capacity-1 channel so the delivery must block.
     session
         .rib_tx
@@ -896,7 +896,7 @@ async fn inbound_extended_message_accepted_from_peer_without_capability() {
 #[tokio::test]
 async fn outbound_extended_message_gated_on_peer_capability() {
     let mut session = make_test_session(65001, 65002);
-    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     assert_eq!(
         session.outbound_max_message_len(),
         rustbgpd_wire::MAX_MESSAGE_LEN
@@ -910,7 +910,9 @@ async fn outbound_extended_message_gated_on_peer_capability() {
         session.enqueue_priority(&big).is_err(),
         "oversized NOTIFICATION must not encode toward a peer without the capability"
     );
-    session.negotiated.as_mut().unwrap().peer_extended_message = true;
+    let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+    negotiated.peer_extended_message = true;
+    session.negotiated = Some(Arc::new(negotiated));
     assert_eq!(
         session.outbound_max_message_len(),
         rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN

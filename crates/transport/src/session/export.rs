@@ -2271,7 +2271,7 @@ mod tests {
         );
         let mut negotiated = NegotiatedSession::default();
         negotiated.peer_asn = negotiated_remote_asn;
-        session.negotiated = Some(negotiated);
+        session.negotiated = Some(Arc::new(negotiated));
         SessionExportProfile::capture(&session)
     }
 

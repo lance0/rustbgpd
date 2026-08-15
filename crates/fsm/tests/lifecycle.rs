@@ -1,11 +1,14 @@
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 
 use bytes::Bytes;
 
 use rustbgpd_wire::notification::NotificationCode;
 use rustbgpd_wire::{Afi, Capability, OpenMessage, Safi};
 
-use rustbgpd_fsm::{Action, Event, PeerConfig, Session, SessionState, TimerType};
+use rustbgpd_fsm::{
+    Action, Event, NegotiatedSession, PeerConfig, Session, SessionState, TimerType,
+};
 
 fn test_config() -> PeerConfig {
     let mut config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
@@ -40,6 +43,7 @@ fn has_action(actions: &[Action], pred: impl Fn(&Action) -> bool) -> bool {
 fn full_lifecycle_idle_to_established_to_idle() {
     let mut s = Session::new(test_config());
     assert_eq!(s.state(), SessionState::Idle);
+    assert!(s.negotiated_shared().is_none());
 
     // ── Idle → Connect: ManualStart ────────────────────────────────
     let actions = s.handle_event(Event::ManualStart);
@@ -88,6 +92,22 @@ fn full_lifecycle_idle_to_established_to_idle() {
         Action::SessionEstablished(_)
     )));
 
+    let shared = s.negotiated_shared().unwrap();
+    let legacy = actions
+        .iter()
+        .find_map(|action| match action {
+            Action::SessionEstablished(negotiated) => Some(negotiated.as_ref()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(std::ptr::eq(s.negotiated().unwrap(), shared.as_ref()));
+    assert!(!std::ptr::eq(shared.as_ref(), legacy));
+    assert_ne!(
+        shared.negotiated_families.as_ptr(),
+        legacy.negotiated_families.as_ptr()
+    );
+    assert_eq!(Arc::strong_count(&shared), 2);
+
     // Verify negotiated parameters
     let neg = s.negotiated().unwrap();
     assert_eq!(neg.peer_asn, 65002);
@@ -107,11 +127,19 @@ fn full_lifecycle_idle_to_established_to_idle() {
     // ── Established → Idle: ManualStop ─────────────────────────────
     let actions = s.handle_event(Event::ManualStop { reason: None });
     assert_eq!(s.state(), SessionState::Idle);
+    assert!(s.negotiated_shared().is_none());
     assert!(has_action(&actions, |a| matches!(a, Action::SessionDown)));
     assert!(has_action(&actions, |a| matches!(
         a,
         Action::SendNotification(n) if n.code == NotificationCode::Cease
     )));
+}
+
+#[test]
+fn session_established_payload_remains_boxed_negotiated_session() {
+    let negotiated: Box<NegotiatedSession> = Box::default();
+    let action = Action::SessionEstablished(negotiated);
+    assert!(matches!(action, Action::SessionEstablished(_)));
 }
 
 /// Connect failure → Active → retry → Connect → full handshake

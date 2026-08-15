@@ -770,10 +770,7 @@ async fn send_route_update_emits_route_refresh_requests_for_all_negotiated_famil
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_route_refresh = true;
     negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     session.send_route_update(OutboundRouteUpdate {
         exact_export_snapshot: None,
         announce_source_exclusion: None,
@@ -829,10 +826,7 @@ async fn send_route_update_skips_route_refresh_request_without_capability() {
     session.test_install_stream(client);
     let negotiated = negotiated_session(65002, false);
     assert!(!negotiated.peer_route_refresh);
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    session.negotiated = Some(Arc::new(negotiated));
     session.send_route_update(OutboundRouteUpdate {
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,

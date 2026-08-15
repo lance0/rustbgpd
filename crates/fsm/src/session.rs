@@ -1,6 +1,7 @@
 //! Core FSM session — `(State, Event) -> (State, Vec<Action>)`.
 
 use bytes::Bytes;
+use std::sync::Arc;
 
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode, open_subcode};
 use rustbgpd_wire::{Capability, OpenMessage};
@@ -34,7 +35,7 @@ const INITIAL_HOLD_SECS: u32 = 240;
 pub struct Session {
     state: SessionState,
     config: PeerConfig,
-    negotiated: Option<NegotiatedSession>,
+    negotiated: Option<Arc<NegotiatedSession>>,
     connect_retry_counter: u32,
 }
 
@@ -62,7 +63,14 @@ impl Session {
     /// never report stale metadata from a failed handshake.
     #[must_use]
     pub fn negotiated(&self) -> Option<&NegotiatedSession> {
-        self.negotiated.as_ref()
+        self.negotiated.as_deref()
+    }
+
+    /// Shared negotiated session parameters for ownership across subsystem
+    /// boundaries while OpenConfirm/Established state is live.
+    #[must_use]
+    pub fn negotiated_shared(&self) -> Option<Arc<NegotiatedSession>> {
+        self.negotiated.clone()
     }
 
     /// Current connect-retry counter (for diagnostics).
@@ -264,7 +272,7 @@ impl Session {
                 Ok(neg) => {
                     let hold = u32::from(neg.hold_time);
                     let ka = u32::from(neg.keepalive_interval);
-                    self.negotiated = Some(neg);
+                    self.negotiated = Some(Arc::new(neg));
                     let mut actions = vec![Action::SendKeepalive];
                     if hold > 0 {
                         actions.push(Action::StartTimer(TimerType::Hold, hold));
@@ -362,7 +370,7 @@ impl Session {
                         actions.push(Action::StartTimer(TimerType::Hold, hold));
                     }
                     actions.push(self.transition_to(SessionState::Established));
-                    actions.push(Action::SessionEstablished(Box::new(neg)));
+                    actions.push(Action::SessionEstablished(Box::new((*neg).clone())));
                     actions
                 } else {
                     // Should not happen — negotiated is set in OpenSent
