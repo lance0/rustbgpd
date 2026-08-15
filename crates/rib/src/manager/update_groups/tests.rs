@@ -5395,6 +5395,101 @@ fn group_with(deltas: &[GroupDelta]) -> GroupRibOut {
     group
 }
 
+fn reserved_group(capacity: usize, deltas: &[GroupDelta]) -> GroupRibOut {
+    let mut group = GroupRibOut::new(
+        None,
+        false,
+        false,
+        true,
+        None,
+        vec![(Afi::Ipv4, Safi::Unicast)],
+        vec![],
+        false,
+        capacity,
+    );
+    for delta in deltas {
+        group.apply_delta(delta);
+    }
+    group
+}
+
+#[test]
+fn ordinary_first_adoption_trims_once_and_preserves_member_view() {
+    const GID: usize = 301;
+    let p1 = prefix(1);
+    let p2 = prefix(2);
+    let p3 = prefix(3);
+    let mut m = staging_manager();
+    m.group_ribs.insert(
+        GID,
+        reserved_group(
+            64,
+            &[
+                announce_delta(p1, OTHER1, None),
+                announce_delta(p2, OTHER1, None),
+            ],
+        ),
+    );
+    let capacity_before = m.group_ribs[&GID].table.bench_route_capacity();
+
+    m.install_group_member(GID, MEMBER);
+
+    let group = m.group_ribs.get(&GID).unwrap();
+    let capacity_after = group.table.bench_route_capacity();
+    assert!(capacity_after >= group.table.len());
+    assert!(capacity_after <= capacity_before);
+    let view = group.member_view_snapshot(MEMBER, None, &HashSet::new());
+    assert_eq!(view.len(), 2);
+    assert_eq!(view[&(p1, 0)].prefix, p1);
+    assert_eq!(view[&(p2, 0)].prefix, p2);
+
+    m.group_ribs
+        .get_mut(&GID)
+        .unwrap()
+        .apply_delta(&announce_delta(p3, OTHER1, None));
+    let grown = m.group_ribs[&GID].table.bench_route_capacity();
+    assert!(grown > 3);
+    m.install_group_member(GID, OTHER2);
+    let group = &m.group_ribs[&GID];
+    assert_eq!(group.table.bench_route_capacity(), grown);
+    assert_eq!(
+        group
+            .member_view_snapshot(OTHER2, None, &HashSet::new())
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn clean_prestaged_first_adoption_trims_complete_table_without_wire_drift() {
+    const GID: usize = 302;
+    let p1 = prefix(4);
+    let p2 = prefix(5);
+    let mut m = staging_manager();
+    m.group_ribs.insert(
+        GID,
+        reserved_group(
+            128,
+            &[
+                announce_delta(p1, OTHER1, None),
+                announce_delta(p2, OTHER2, None),
+            ],
+        ),
+    );
+    let capacity_before = m.group_ribs[&GID].table.bench_route_capacity();
+
+    m.install_group_member(GID, MEMBER);
+
+    let group = &m.group_ribs[&GID];
+    let capacity_after = group.table.bench_route_capacity();
+    assert!(capacity_after >= group.table.len());
+    assert!(capacity_after <= capacity_before);
+    let view = group.member_view_snapshot(MEMBER, None, &HashSet::new());
+    assert_eq!(view.len(), 2);
+    assert_eq!(view[&(p1, 0)].peer, OTHER1);
+    assert_eq!(view[&(p2, 0)].peer, OTHER2);
+}
+
 const CLEAN_SOURCE: usize = 1;
 const CLEAN_DESTINATION: usize = 2;
 

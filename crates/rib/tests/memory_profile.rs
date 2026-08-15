@@ -718,6 +718,37 @@ fn adj_rib_out_release_unicast_reclaims_100k_structural_capacity() {
     );
 }
 
+#[cfg(feature = "bench-internals")]
+#[test]
+fn adj_rib_out_first_adoption_tail_trim_reclaims_expected_slot_bytes() {
+    const RESERVED: usize = 100_000;
+    const STAGED: usize = 68_928;
+    const MIN_RECLAIMED_BYTES: usize = 7 * 1024 * 1024 / 2;
+
+    let prefixes = generate_prefixes(STAGED);
+    let attrs = typical_attributes(1);
+    let mut rib = AdjRibOut::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 11, 1)), RESERVED);
+    for prefix in prefixes {
+        rib.insert(make_route(prefix, 1, &attrs));
+    }
+    let capacity_before = rib.bench_route_capacity();
+    let bytes_before = capacity_before * std::mem::size_of::<Option<Route>>();
+
+    rib.shrink_unicast_to_fit();
+
+    let capacity_after = rib.bench_route_capacity();
+    let bytes_after = capacity_after * std::mem::size_of::<Option<Route>>();
+    let slot_delta_bytes = bytes_before.saturating_sub(bytes_after);
+    println!(
+        "reserved={RESERVED} staged={STAGED} capacity_before={capacity_before} capacity_after={capacity_after} bytes_before={bytes_before} bytes_after={bytes_after} slot_delta_bytes={slot_delta_bytes}"
+    );
+    assert_eq!(rib.len(), STAGED);
+    assert!(capacity_before >= RESERVED);
+    assert!(capacity_after >= STAGED);
+    assert!(capacity_after <= capacity_before);
+    assert!(slot_delta_bytes >= MIN_RECLAIMED_BYTES);
+}
+
 #[test]
 #[ignore = "manual high-N memory regression harness; use bench/compare-rib-memory.sh"]
 fn memory_profile_high_n() {

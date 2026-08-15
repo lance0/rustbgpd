@@ -315,6 +315,9 @@ impl RibManager {
         // the O(table) walk rides the join replay's existing cost.
         let filter = self.member_rt_filter(peer);
         if let Some(group) = self.group_ribs.get_mut(&gid) {
+            if group.members.is_empty() {
+                group.table.shrink_unicast_to_fit();
+            }
             group.members.insert(peer);
             group.recompute_vpn_member_counts(peer, filter.as_ref());
         }

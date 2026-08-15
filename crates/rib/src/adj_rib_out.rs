@@ -209,6 +209,13 @@ impl AdjRibOut {
         self.prefix_path_ids = FamilyPrefixMap::default();
     }
 
+    /// Release unused unicast route-slab tail capacity while preserving
+    /// logical slot indices, route handles, occupancy, the free list, the
+    /// prefix index, and every non-unicast family.
+    pub fn shrink_unicast_to_fit(&mut self) {
+        self.routes.shrink_to_fit();
+    }
+
     /// Remove only the VPN routes and their secondary key index, leaving
     /// every other family untouched. The VPN sibling of
     /// [`Self::clear_unicast`]: used when a peer's VPN advertised state
@@ -867,6 +874,28 @@ mod tests {
 
         assert!(rib.is_empty());
         assert_eq!(rib.bench_route_capacity(), 0);
+        assert_eq!(rib.vpn_len(), 1);
+        assert_eq!(rib.bgpls_len(), 1);
+    }
+
+    #[test]
+    fn shrink_unicast_to_fit_preserves_routes_index_and_other_families() {
+        let mut rib = AdjRibOut::with_capacity(IpAddr::V4(Ipv4Addr::LOCALHOST), 64);
+        rib.insert(make_route(prefix_a(), 0));
+        rib.insert(make_route(prefix_b(), 1));
+        rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 1, 0], 24, 100), 1));
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(17), 1));
+        let capacity_before = rib.bench_route_capacity();
+
+        rib.shrink_unicast_to_fit();
+
+        let capacity_after = rib.bench_route_capacity();
+        assert!(capacity_after >= rib.len());
+        assert!(capacity_after <= capacity_before);
+        assert_eq!(rib.get(&prefix_a(), 0).unwrap().prefix, prefix_a());
+        assert_eq!(rib.get(&prefix_b(), 1).unwrap().prefix, prefix_b());
+        assert_eq!(rib.path_ids_for_prefix(&prefix_a()).as_slice(), [0]);
+        assert_eq!(rib.path_ids_for_prefix(&prefix_b()).as_slice(), [1]);
         assert_eq!(rib.vpn_len(), 1);
         assert_eq!(rib.bgpls_len(), 1);
     }
