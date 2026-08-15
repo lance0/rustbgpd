@@ -38,9 +38,10 @@ use crate::event::{EvpnRouteEvent, RouteEvent};
 /// another).
 pub trait RibEventSink: Send + Sync + 'static {
     /// Hand a route event to the sink. Called from
-    /// `RibManager::publish_route_event` **after** the event has been
+    /// `RibManager::publish_route_event` after the event has been
     /// stamped with its process-local `event_id`, appended to the
-    /// bounded ring, and broadcast on `route_events_tx`. Legacy
+    /// bounded ring; the shared sink callback (defaulting here) runs before
+    /// live broadcast on `route_events_tx`. Legacy
     /// `event_id` value is preserved as-is on the snapshot the sink
     /// sees; the durable cursor overwrites it from the EHM commit on
     /// the wire path.
@@ -54,8 +55,9 @@ pub trait RibEventSink: Send + Sync + 'static {
     }
 
     /// Hand an EVPN best-path event to the sink. Called from
-    /// `RibManager::publish_evpn_route_event` after the existing
-    /// ring + broadcast work. EVPN events do not currently carry a
+    /// `RibManager::publish_evpn_route_event` after ring insertion and through
+    /// the shared sink callback (defaulting here) before live broadcast. EVPN
+    /// events do not currently carry a
     /// process-local `event_id`; the durable envelope id is the only
     /// id surfaced on the EHM-backed wire path.
     fn publish_evpn_event(&self, event: &EvpnRouteEvent);

@@ -112,7 +112,11 @@ impl EhmRibSink {
 impl RibEventSink for EhmRibSink {
     fn publish_route_event(&self, event: &RouteEvent) {
         let event = Arc::new(event.clone());
-        self.publish_route_event_shared(&event);
+        let timestamp_ns = timestamp_ns_now();
+        self.enqueue(RibEventSnapshot::Route {
+            event,
+            timestamp_ns,
+        });
     }
 
     fn publish_route_event_shared(&self, event: &Arc<RouteEvent>) {
@@ -124,7 +128,11 @@ impl RibEventSink for EhmRibSink {
 
     fn publish_evpn_event(&self, event: &EvpnRouteEvent) {
         let event = Arc::new(event.clone());
-        self.publish_evpn_event_shared(&event);
+        let timestamp_ns = timestamp_ns_now();
+        self.enqueue(RibEventSnapshot::Evpn {
+            event,
+            timestamp_ns,
+        });
     }
 
     fn publish_evpn_event_shared(&self, event: &Arc<EvpnRouteEvent>) {
