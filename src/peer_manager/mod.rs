@@ -1200,7 +1200,10 @@ impl PeerManager {
                             .map_err(StageConfigSnapshotError::InvalidCandidate)
                             .and_then(|candidate| {
                                 let previous =
-                                    toml::to_string_pretty(&self.current_config).map_err(
+                                    crate::config::raw_config_document_bounded(
+                                        &mut self.current_config,
+                                    )
+                                    .map_err(
                                         |error| {
                                             StageConfigSnapshotError::SerializePreviousSnapshot(
                                                 error.to_string(),
@@ -1252,7 +1255,9 @@ impl PeerManager {
                             }
                         }
                         PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
-                            let result = toml::to_string_pretty(&self.current_config)
+                            let result = crate::config::raw_config_document_bounded(
+                                &mut self.current_config,
+                            )
                                 .map_err(|error| {
                                     format!(
                                         "failed to serialize runtime config snapshot: {error}"

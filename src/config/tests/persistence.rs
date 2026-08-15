@@ -47,6 +47,169 @@ fn persisted_config_sorts_every_hash_map_and_round_trips_to_a_fixpoint() {
     assert_eq!(statements[1].action, "deny");
 }
 
+fn raw_bounded_fixture(
+    reverse: bool,
+    statement_count: usize,
+    epoch: Option<ConfigEpoch>,
+    policy: Option<bool>,
+) -> Config {
+    let mut config = persistence_order_fixture(reverse, 1);
+    let statement = config.policy.definitions["zeta"].statements[0].clone();
+    config
+        .policy
+        .definitions
+        .get_mut("zeta")
+        .unwrap()
+        .statements
+        .clear();
+    config.config_epoch = epoch;
+    config.global.ebgp_requires_policy = policy;
+    config.neighbors[0].import_policy = vec![statement.clone(); statement_count];
+    config.neighbors[0].export_policy = vec![statement.clone(); statement_count];
+    config.peer_groups.insert(
+        "dotted.key \"雪\"".to_string(),
+        PeerGroupConfig {
+            import_policy: vec![statement.clone(); statement_count],
+            export_policy: vec![statement.clone(); statement_count],
+            ..PeerGroupConfig::default()
+        },
+    );
+    config.policy.definitions.insert(
+        "quoted.\"policy\".雪".to_string(),
+        NamedPolicyConfig {
+            default_action: "deny".to_string(),
+            statements: vec![statement; statement_count],
+        },
+    );
+    config
+}
+
+#[test]
+fn bounded_raw_matches_legacy_for_every_lane_boundary_key_and_posture() {
+    use sha2::{Digest as _, Sha256};
+
+    for (epoch, policy) in [
+        (None, None),
+        (Some(ConfigEpoch::V2), None),
+        (None, Some(false)),
+        (Some(ConfigEpoch::V2), Some(true)),
+    ] {
+        for count in [0, 1, 255, 256, 257] {
+            let mut config = raw_bounded_fixture(true, count, epoch, policy);
+            let original = config.clone();
+            let legacy = toml::to_string_pretty(&config).unwrap();
+            let (bounded, stats) = super::canonical::render_raw_bounded(&mut config).unwrap();
+            assert_eq!(config, original);
+            assert_eq!(
+                bounded, legacy,
+                "count={count} epoch={epoch:?} policy={policy:?}"
+            );
+            assert_eq!(Sha256::digest(&bounded), Sha256::digest(&legacy));
+            assert!(!bounded.contains(PERSISTED_CONFIG_HEADER));
+            assert_eq!(stats.statements, count * 5);
+            assert_eq!(
+                stats.max_chunk_statements,
+                if count == 0 { 0 } else { count.min(256) }
+            );
+            let lanes = usize::from(count != 0);
+            assert_eq!(stats.neighbor_import_lanes, lanes);
+            assert_eq!(stats.neighbor_export_lanes, lanes);
+            assert_eq!(stats.peer_group_import_lanes, lanes);
+            assert_eq!(stats.peer_group_export_lanes, lanes);
+            assert_eq!(stats.named_policy_lanes, lanes);
+            for field in [
+                "match_community",
+                "set_community_add",
+                "set_community_remove",
+            ] {
+                assert!(!bounded.contains(field), "{field} count={count}");
+            }
+        }
+    }
+}
+
+fn raw_lane_storage(config: &Config) -> [(usize, usize, Vec<PolicyStatementConfig>); 5] {
+    let group = &config.peer_groups["dotted.key \"雪\""];
+    let policy = &config.policy.definitions["quoted.\"policy\".雪"];
+    let snapshot =
+        |lane: &Vec<PolicyStatementConfig>| (lane.as_ptr() as usize, lane.capacity(), lane.clone());
+    [
+        snapshot(&config.neighbors[0].import_policy),
+        snapshot(&config.neighbors[0].export_policy),
+        snapshot(&group.import_policy),
+        snapshot(&group.export_policy),
+        snapshot(&policy.statements),
+    ]
+}
+
+#[test]
+fn bounded_raw_error_restores_every_lane_allocation_order_and_content() {
+    let mut config = raw_bounded_fixture(false, 257, None, None);
+    let before = raw_lane_storage(&config);
+    let error = super::canonical::render_raw_bounded_with_test_hook(&mut config, |phase| {
+        if phase == "before-statement-chunk" {
+            Err(<toml::ser::Error as serde::ser::Error>::custom(
+                "injected raw bounded-writer failure",
+            ))
+        } else {
+            Ok(())
+        }
+    })
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("injected raw bounded-writer failure")
+    );
+    assert_eq!(raw_lane_storage(&config), before);
+}
+
+#[test]
+fn bounded_tokens_equal_legacy_across_lanes_order_posture_context_and_secrets() {
+    let key = RuntimeSnapshotKey::random();
+    let context = [9_u8; 8];
+    for (epoch, policy) in [
+        (None, None),
+        (Some(ConfigEpoch::V2), None),
+        (None, Some(false)),
+        (Some(ConfigEpoch::V2), Some(true)),
+    ] {
+        let mut left = raw_bounded_fixture(false, 257, epoch, policy);
+        let mut right = raw_bounded_fixture(true, 257, epoch, policy);
+        for config in [&mut left, &mut right] {
+            let original = config.clone();
+            for token_context in [&[][..], &context[..]] {
+                let legacy = key.token_with_context(config, token_context).unwrap();
+                let bounded = key
+                    .token_with_context_bounded(config, token_context)
+                    .unwrap();
+                assert_eq!(bounded, legacy);
+                assert!(bounded.starts_with(if token_context.is_empty() {
+                    "kv1:"
+                } else {
+                    "kv2:"
+                }));
+            }
+            assert_eq!(*config, original);
+        }
+        assert_eq!(
+            key.token_with_context_bounded(&mut left, &context).unwrap(),
+            key.token_with_context_bounded(&mut right, &context)
+                .unwrap()
+        );
+    }
+
+    let mut old = raw_bounded_fixture(false, 1, None, None);
+    old.neighbors[0].md5_password = Some("old-secret".to_string());
+    let mut rotated = old.clone();
+    rotated.neighbors[0].md5_password = Some("new-secret".to_string());
+    assert_ne!(
+        key.token_with_context_bounded(&mut old, &context).unwrap(),
+        key.token_with_context_bounded(&mut rotated, &context)
+            .unwrap()
+    );
+}
+
 #[test]
 fn bounded_persistence_matches_oracle_for_every_statement_lane_and_boundary() {
     use sha2::{Digest as _, Sha256};
@@ -178,6 +341,30 @@ fn production_persisted_document_roster_uses_only_the_bounded_writer() {
         );
         assert!(!source.contains("persisted_config_document("), "{name}");
     }
+}
+
+#[test]
+fn production_raw_and_token_roster_uses_only_bounded_rendering() {
+    let peer_manager = include_str!("../../peer_manager/mod.rs");
+    assert_eq!(
+        peer_manager.matches("raw_config_document_bounded").count(),
+        2
+    );
+    assert!(!peer_manager.contains("toml::to_string_pretty(&self.current_config)"));
+
+    let reconciliation = include_str!("../../peer_manager/reconcile.rs");
+    assert_eq!(
+        reconciliation.matches("token_with_context_bounded").count(),
+        2
+    );
+    assert!(!reconciliation.contains(".token_with_context("));
+
+    let controller = include_str!("../../config_transaction_control.rs")
+        .split("#[cfg(test)]\nmod tests {")
+        .next()
+        .unwrap();
+    assert_eq!(controller.matches("raw_config_document_bounded").count(), 1);
+    assert!(!controller.contains("toml::to_string_pretty(&candidate)"));
 }
 
 /// Every canonical sink materializes the effective epoch and policy through

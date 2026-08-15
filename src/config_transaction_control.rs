@@ -808,14 +808,15 @@ impl ConfigTransactionController {
                     let current = self_.accepted_runtime_snapshot().await.map_err(|error| {
                         OwnedGnmiSetError::Clean(GnmiSetError::Unavailable(error))
                     })?;
-                    let candidate =
+                    let mut candidate =
                         gnmi_set_bridge::apply_transaction_to_config(current, &transaction)
                             .map_err(OwnedGnmiSetError::Clean)?;
-                    let candidate_toml = toml::to_string_pretty(&candidate).map_err(|error| {
-                        GnmiSetError::Internal(format!(
-                            "failed to serialize gNMI Set candidate config: {error}"
-                        ))
-                    })?;
+                    let candidate_toml = crate::config::raw_config_document_bounded(&mut candidate)
+                        .map_err(|error| {
+                            GnmiSetError::Internal(format!(
+                                "failed to serialize gNMI Set candidate config: {error}"
+                            ))
+                        })?;
                     let (confirm_id, confirm_timeout_seconds) = match transaction.commit_action {
                         Some(GnmiSetCommitAction::Commit {
                             confirm_id,
