@@ -84,8 +84,10 @@ pub(in crate::manager) struct AdvEntry<'a> {
     pub(in crate::manager) route: &'a Route,
     /// Next-hop-override residue for the slot.
     pub(in crate::manager) nh: Option<&'a NextHopAction>,
-    /// Captured pre-policy SOURCE attributes (RFC 7947 rs-control
-    /// decisions read these, never the post-policy route).
+    /// Modifying-policy groups and [`RunnerUp`] lane entries may carry captured
+    /// pre-policy RFC 7947 control attributes. Passthrough mode ignores this
+    /// field and derives equivalent input from [`Self::route`]; its dense
+    /// staged entries leave the field `None`.
     pub(in crate::manager) source_attrs: Option<&'a Arc<Vec<PathAttribute>>>,
     /// Terminal policy label of the permitting evaluation (`None` =
     /// inline verdict) — join-time counter replay residue.
@@ -367,7 +369,8 @@ impl GroupStageOutput {
     ///   substitution is rs-suppressed toward it, a per-member verdict
     ///   this method cannot see — so the key is recorded
     ///   unconditionally: the resync's `member_retains` guard (routed
-    ///   through [`GroupRibOut::adv_entry`]) drops it exactly when the
+    ///   through [`GroupRibOut::adv_entry`] and
+    ///   [`GroupRibOut::source_control_for_route`]) drops it exactly when the
     ///   lane still substitutes, and the resync substitution announces
     ///   `adv(m)` in its place;
     /// - the ADR-0126 lane-retire arm — a retire toward its

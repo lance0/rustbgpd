@@ -416,14 +416,18 @@ pub(in crate::manager) struct GroupRibOut {
     /// Next-hop-override flags for staged entries (`Some` values only)
     /// so joins/replays don't re-run policy to recover them.
     nh_overrides: FxHashMap<(Prefix, u32), NextHopAction>,
-    /// Captured pre-policy SOURCE attributes per staged entry (entries
-    /// only for sources carrying communities; the `Arc` is shared with
-    /// the Adj-RIB-In/Loc-RIB copy). RFC 7947 decisions at the table
-    /// replay seams — resync, join, refresh, regroup baseline — read
-    /// these, never the staged (post-policy) route: policy may have
-    /// stripped a control community (deciding post-policy leaks a
-    /// source-prohibited route) or added one (spurious steering).
+    /// Captured pre-policy SOURCE attributes per staged entry for a policy
+    /// that can modify source-control communities (entries only for sources
+    /// carrying communities; the `Arc` is shared with the Adj-RIB-In/Loc-RIB
+    /// copy). RFC 7947 replay decisions for such groups read these, never the
+    /// staged route: policy may have stripped a control community (deciding
+    /// post-policy leaks a source-prohibited route) or added one (spurious
+    /// steering). Proven passthrough groups leave this map empty.
     source_attrs: FxHashMap<(Prefix, u32), Arc<Vec<PathAttribute>>>,
+    /// Group-uniform proof that export policy preserves the standard and
+    /// large communities used by RFC 7947 control. Such groups derive the
+    /// control input from their staged route and keep `source_attrs` empty.
+    source_control_passthrough: bool,
     /// Staged-entry count per source peer — O(1) per-member advertised
     /// count synthesis (`len − own`), one slot per staged family
     /// (v4-unicast, v6-unicast, vpnv4, vpnv6) for the BMP stat-17
@@ -557,6 +561,9 @@ impl GroupRibOut {
         per_client_best: bool,
         capacity: usize,
     ) -> Self {
+        let source_control_passthrough = export_chain
+            .as_ref()
+            .is_none_or(|chain| !chain.modifies_source_control_communities());
         let permit_policy_label = export_chain
             .as_ref()
             .and_then(|chain| chain.policies.last())
@@ -566,6 +573,7 @@ impl GroupRibOut {
             table: AdjRibOut::with_capacity(GROUP_FILTERED_PLACEHOLDER, capacity),
             nh_overrides: FxHashMap::default(),
             source_attrs: FxHashMap::default(),
+            source_control_passthrough,
             source_counts: FxHashMap::default(),
             family_totals: [0; 4],
             tombstones: HashSet::new(),
@@ -781,19 +789,23 @@ impl GroupRibOut {
                     self.nh_overrides.remove(&key);
                 }
             }
-            match &delta.source_attrs {
-                Some(attrs) => {
-                    self.source_attrs.insert(key, Arc::clone(attrs));
-                }
-                None => {
-                    self.source_attrs.remove(&key);
+            if !self.source_control_passthrough {
+                match &delta.source_attrs {
+                    Some(attrs) => {
+                        self.source_attrs.insert(key, Arc::clone(attrs));
+                    }
+                    None => {
+                        self.source_attrs.remove(&key);
+                    }
                 }
             }
             self.table.insert(route.clone());
         } else {
             self.table.withdraw(&delta.prefix, delta.path_id);
             self.nh_overrides.remove(&key);
-            self.source_attrs.remove(&key);
+            if !self.source_control_passthrough {
+                self.source_attrs.remove(&key);
+            }
         }
     }
 
@@ -872,15 +884,35 @@ impl GroupRibOut {
         self.nh_overrides.get(&key).cloned()
     }
 
-    /// RFC 7947 control-decision input for a staged table entry: the
-    /// SOURCE route's communities as captured at staging (empty when
-    /// the source carried none). Table replay seams must decide
-    /// suppression/prepend on this, never on the post-policy entry.
+    /// RFC 7947 control-decision input for a staged table entry: either the
+    /// source snapshot required by a modifying policy or the staged route for
+    /// a policy proven to preserve source-control communities.
     pub(in crate::manager) fn source_control(
         &self,
         key: (Prefix, u32),
     ) -> (&[u32], &[LargeCommunity]) {
+        if self.source_control_passthrough {
+            return self.table.get(&key.0, key.1).map_or((&[], &[]), |route| {
+                (route.communities(), route.large_communities())
+            });
+        }
         source_control_input(self.source_attrs.get(&key))
+    }
+
+    /// RFC 7947 input for a resolved staged or exception-lane entry.
+    /// Passthrough groups read the post-policy route because the immutable
+    /// compiled-policy classification proves its source control partitions
+    /// unchanged; modifying groups retain the historical source snapshot.
+    pub(in crate::manager) fn source_control_for_route<'a>(
+        &self,
+        route: &'a Route,
+        source_attrs: Option<&'a Arc<Vec<PathAttribute>>>,
+    ) -> (&'a [u32], &'a [LargeCommunity]) {
+        if self.source_control_passthrough {
+            (route.communities(), route.large_communities())
+        } else {
+            source_control_input(source_attrs)
+        }
     }
 
     /// Tag-only transition check for a pass that staged NO delta for
@@ -894,6 +926,9 @@ impl GroupRibOut {
         prefix: Prefix,
         source_attrs: Option<&Arc<Vec<PathAttribute>>>,
     ) -> Option<RsTagTransition> {
+        if self.source_control_passthrough {
+            return None;
+        }
         let staged = self.table.get(&prefix, 0)?;
         let key = (prefix, 0);
         let prior = self.source_attrs.get(&key);
@@ -912,6 +947,10 @@ impl GroupRibOut {
     /// Commit a pass's tag-only transitions into the source-attribute
     /// residue (the delta-borne updates ride [`Self::apply_delta`]).
     fn commit_rs_transitions(&mut self, transitions: &[RsTagTransition]) {
+        if self.source_control_passthrough {
+            debug_assert!(transitions.is_empty());
+            return;
+        }
         for transition in transitions {
             let key = (transition.prefix, transition.path_id);
             match &transition.source_attrs {
@@ -952,7 +991,11 @@ impl GroupRibOut {
             return Some(AdvEntry {
                 route: staged,
                 nh: self.nh_overrides.get(&key),
-                source_attrs: self.source_attrs.get(&key),
+                source_attrs: if self.source_control_passthrough {
+                    None
+                } else {
+                    self.source_attrs.get(&key)
+                },
                 policy_label: self.permit_policy_label.as_ref(),
             });
         }
@@ -1166,7 +1209,8 @@ impl GroupRibOut {
                     return None;
                 }
                 let entry = self.adv_entry(member, &staged.prefix, staged.path_id)?;
-                let (communities, large_communities) = source_control_input(entry.source_attrs);
+                let (communities, large_communities) =
+                    self.source_control_for_route(entry.route, entry.source_attrs);
                 // LAN-474: a key whose SOURCE communities suppress it
                 // toward the member was never on its wire — the
                 // snapshot records true wire state, not the shared

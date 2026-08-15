@@ -1045,7 +1045,7 @@ impl RibManager {
                         continue;
                     };
                     let (source_communities, source_large_communities) =
-                        super::update_groups::source_control_input(entry.source_attrs);
+                        group.source_control_for_route(entry.route, entry.source_attrs);
                     if super::distribution::rs_control::rs_control_suppressed(
                         source_communities,
                         source_large_communities,

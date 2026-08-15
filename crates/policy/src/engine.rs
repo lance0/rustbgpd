@@ -11,7 +11,7 @@ use rustbgpd_wire::{
 };
 
 use crate::eval::PolicyHitCounters;
-use crate::ir::CompiledChain;
+use crate::ir::{CompiledChain, TermAction};
 use crate::sets::SetStore;
 
 /// Implicit `LOCAL_PREF` used when a route arrives without the
@@ -1589,6 +1589,36 @@ impl PolicyChain {
     #[must_use]
     pub fn requires_peer_context(&self) -> bool {
         self.compiled().requires_peer_context()
+    }
+
+    /// Whether this chain can change the standard or large communities
+    /// consumed by RFC 7947 route-server control.
+    ///
+    /// The classification walks compiled IR so TOML and `.rpol` chains share
+    /// one conservative answer, including actions nested in bounded loops.
+    /// Extended-community-only changes are deliberately excluded: RFC 7947
+    /// source control does not read that attribute partition.
+    #[must_use]
+    pub fn modifies_source_control_communities(&self) -> bool {
+        let modifies = |term: &crate::ir::Term| match &term.action {
+            TermAction::Permit(mods) | TermAction::Continue(mods) => {
+                !mods.communities_add.is_empty()
+                    || !mods.communities_remove.is_empty()
+                    || !mods.large_communities_add.is_empty()
+                    || !mods.large_communities_remove.is_empty()
+            }
+            TermAction::CommunityVar { .. } => true,
+            TermAction::Deny
+            | TermAction::Bind { .. }
+            | TermAction::ForEach(_)
+            | TermAction::Break
+            | TermAction::ContinueLoop => false,
+        };
+        self.compiled()
+            .policies
+            .iter()
+            .flat_map(|policy| &policy.terms)
+            .any(|term| term.any_term(&modifies))
     }
 
     /// Evaluate a route against this chain of policies. Hit counters
