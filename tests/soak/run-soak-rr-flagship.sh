@@ -167,12 +167,14 @@ tree_rss_mb() {
         if (p == root) total+=rss[pid]} printf "%.1f", total/1024}'
 }
 
-# Engine event lines -> cycles.log (analyzer input). The rr_hold and
+# Engine event lines -> cycles.log (analyzer input). The rr_hold,
+# rr_terminal refresh (terminal-window start marker) and
 # rr_terminal_receipt lines pass through verbatim; everything else in
 # the engine log is diagnostic only.
 handle_line() {
     local line=$1
-    if [[ $line == rr_hold\ * || $line == rr_terminal_receipt,* ]]; then
+    if [[ $line == rr_hold\ * || $line == rr_terminal\ refresh\ * ||
+        $line == rr_terminal_receipt,* ]]; then
         cycle_log "$line"
     fi
 }
@@ -362,7 +364,30 @@ main() {
     ((hrc == 0)) || abort "engine exited non-zero: $hrc"
     grep -q '^rr_terminal_receipt,' "$RELOADSTALL_LOG" ||
         abort "engine exited clean without a terminal receipt"
-    log "engine completed cleanly; running analyzer"
+    log "engine completed cleanly; probing post-terminal readyz recovery"
+
+    # Recovery bound (gates doc scenario 11, readyz row c): after the
+    # terminal refresh avalanche the daemon may fail closed (503) while
+    # saturated, but must serve 200 within 250 ms again no later than
+    # 60 s after the terminal receipt.
+    local recover_start recovered readyz code seconds
+    recover_start=$(date +%s%3N)
+    recovered=""
+    while :; do
+        readyz=$(curl -sS -o /dev/null --max-time 5 -w '%{http_code} %{time_total}' \
+            "http://127.0.0.1:${METRICS_PORT}/readyz" 2>/dev/null) || readyz="000 0"
+        read -r code seconds <<<"$readyz"
+        if [[ $code == 200 ]] &&
+            awk -v t="$seconds" 'BEGIN { exit !(t * 1000 <= 250) }'; then
+            recovered=$(($(date +%s%3N) - recover_start))
+            break
+        fi
+        (($(date +%s%3N) - recover_start < 60000)) ||
+            abort "readyz did not recover (200 within 250ms) within 60s of the terminal receipt (last: code=$code time=${seconds}s)"
+        sleep 2
+    done
+    cycle_log "terminal_readyz recovered_ms=$recovered"
+    log "readyz recovered ${recovered}ms after the terminal receipt; running analyzer"
 
     terminate "$DAEMON_PID"
     DAEMON_PID=""
