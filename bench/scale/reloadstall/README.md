@@ -109,6 +109,42 @@ columns report 0); that requires `reload_cmd`, `--flapstorm`, or `--convergence-
 9/10-positional-arg SIGHUP invocation above is a frozen contract and behaves
 exactly as before.
 
+### Soak extensions (env vars, all additive)
+
+Every knob absent reproduces the frozen one-shot contract exactly. The
+route-server flagship soak (`tests/soak/run-soak-rs-flagship.sh`) sets them to
+turn the fixed reload sequence into a self-paced long window with periodic
+max-prefix trip cycles:
+
+- `RELOADSTALL_CYCLE_QUIESCE_SECS` — inter-reload quiesce in seconds
+  (default 20, the historical value). The soak sets this to its reload
+  interval, so `reloads × interval` paces the whole window.
+- `RELOADSTALL_TRIP_EVERY` — after every K-th reload cycle, run one
+  max-prefix trip cycle on the designated member, stub 0 (0/absent = never).
+  Requires the SIGHUP reload mode with `changed_peers == n_peers`, no
+  overlap file, and `n_peers > 8` (stub 0 must not be a churner). A trip
+  cycle: disarm generation markers → arm survivors' withdraw bitmap over
+  stub 0's slice → announce `RELOADSTALL_TRIP_PREFIXES` prefixes over the
+  daemon's configured `max_prefixes` bound → wait for the Cease teardown →
+  verify withdraw propagation at every survivor → arm the announce bitmap →
+  reconnect-retry through the hold-down until the daemon's one timed
+  restart admits the session → re-announce only the compliant base slice →
+  verify re-announce propagation → integrity check (all sessions up, zero
+  parse errors). Each phase prints a `trip N <phase> wall_us=…` marker and
+  each cycle emits one `trip_csv` record
+  (`trip_csv_header,trip,peers_total,teardown_s,withdraw_s,holddown_s,reannounce_s,rss_mib,sessions_up,parse_errors`).
+- `RELOADSTALL_TRIP_PREFIXES` — over-limit block size (default 64), drawn
+  from base indexes `[total, total + K)`: outside every observer's
+  completion bitmap and the churn space, but shaped like base routes for
+  the daemon's import path and session accounting.
+- `RELOADSTALL_TRIP_REESTABLISH_SECS` — teardown-to-re-established deadline
+  (default 300); must exceed the daemon-side `max_prefix_restart_seconds`.
+
+`gen-scenario.py` grows a matching additive pair: setting both
+`GEN_TRIP_MAX_PREFIXES` and `GEN_TRIP_RESTART_SECONDS` adds
+`max_prefixes` / `max_prefix_restart_seconds` to neighbor 0; absent, the
+emitted config is byte-for-byte the historical one.
+
 Cross-daemon cells (BIRD 3.3.1 / OpenBGPD 9.1) generate their route-server
 configs with `gen-bird-scenario.py` / `gen-obgpd-scenario.py` (same
 addressing contract) and are sequenced by `bench/scale/matrix/run-matrix.sh`.

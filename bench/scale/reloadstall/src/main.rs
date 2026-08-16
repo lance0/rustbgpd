@@ -40,6 +40,27 @@
 //!   all K slices' withdrawals, reconnect the K after 10 s, re-announce
 //!   their slices, and timestamp survivors' re-announce completion.
 //!   3 rounds, per-round percentiles + `flapstorm_csv` lines.
+//!
+//! Soak extensions (route-server flagship soak) — all additive env vars;
+//! every one absent reproduces the frozen one-shot contract exactly:
+//! - `RELOADSTALL_CYCLE_QUIESCE_SECS`: inter-reload quiesce (default 20).
+//!   The 24 h soak sets this to its reload interval so the existing
+//!   reload loop self-paces for the whole window.
+//! - `RELOADSTALL_TRIP_EVERY`: after every K-th reload cycle, run one
+//!   max-prefix trip cycle on the designated member (stub 0): announce
+//!   `RELOADSTALL_TRIP_PREFIXES` prefixes over the daemon-configured
+//!   `max_prefixes` bound, ride the Cease teardown, verify withdraw
+//!   propagation at every survivor, reconnect-retry through the
+//!   hold-down until the daemon's one timed restart admits the session,
+//!   re-announce only the compliant base slice, and verify re-announce
+//!   propagation. 0/absent = never. Requires the SIGHUP reload mode with
+//!   `changed_peers == n_peers`, no overlap, and `n_peers > CHURNERS`.
+//! - `RELOADSTALL_TRIP_PREFIXES`: over-limit block size (default 64);
+//!   drawn from base indexes `[total, total + K)` so observers'
+//!   completion bitmaps ignore it and member-in treats it as base.
+//! - `RELOADSTALL_TRIP_REESTABLISH_SECS`: teardown-to-re-established
+//!   deadline (default 300); must exceed the daemon's configured
+//!   `max_prefix_restart_seconds`.
 
 // Event.other and Ctx.n_peers are recorded for the observation/context
 // model but not read by the percentile analysis; keep them so the
@@ -98,6 +119,19 @@ const FIRST_OUTPUT_WINDOW: Duration = Duration::from_secs(600);
 const CONNECT_WINDOW: Duration = Duration::from_secs(120);
 const FLAP_ROUNDS: u32 = 3;
 const FLAP_RECONNECT_SECS: u64 = 10;
+/// Designated max-prefix trip member (soak mode): always stub 0, which is
+/// never a churner (churners are the last CHURNERS stubs) and whose slice
+/// is the contiguous window `[0, per_peer)` the flapstorm bitmap shape
+/// already tracks.
+const TRIP_MEMBER: u32 = 0;
+/// How long the daemon may take to tear the designated member down after
+/// the over-limit announcement (breach detection is per-UPDATE, so this is
+/// generous headroom, not a measurement).
+const TRIP_TEARDOWN_WINDOW: Duration = Duration::from_secs(60);
+/// Cap on one reconnect attempt during the trip hold-down: a daemon that
+/// accepts and then silently holds the socket must not wedge the retry
+/// loop (the loop itself runs until the configured re-establish deadline).
+const TRIP_ATTEMPT_WINDOW: Duration = Duration::from_secs(30);
 const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(15);
 const PRE_CHURN_EVIDENCE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -915,6 +949,13 @@ fn arm_survivors(ctx: &Ctx, k: u32, flap_prefixes: u32, total: u32, mode: u32) {
     }
 }
 
+/// Disarm every survivor's shared bitmap (flapstorm rounds and trip cycles).
+fn disarm_survivors(ctx: &Ctx, first: usize) {
+    for observer in ctx.obs.iter().skip(first) {
+        observer.flap_mode.store(FLAP_OFF, Ordering::Release);
+    }
+}
+
 /// `--flapstorm K` mode: the alternative to the reload loop (see the crate
 /// doc). The flapped cohort is the first K stubs — never the churners,
 /// which are the last CHURNERS.
@@ -998,9 +1039,7 @@ async fn run_flapstorm(ctx: &Arc<Ctx>, stubs: &mut [Stub], k: u32, pid: i32) {
             })
             .collect();
         stats_line(&format!("flap {round} first_reann_s"), first_s);
-        for observer in ctx.obs.iter().skip(k as usize) {
-            observer.flap_mode.store(FLAP_OFF, Ordering::Release);
-        }
+        disarm_survivors(ctx, k as usize);
         let rss = rss_mib(pid);
         let up = ctx
             .obs
@@ -1029,6 +1068,166 @@ async fn run_flapstorm(ctx: &Arc<Ctx>, stubs: &mut [Stub], k: u32, pid: i32) {
         // Quiesce between rounds.
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
+}
+
+/// Strictly-parsed u64 env knob: absent = default, garbage = usage error.
+fn env_u64(name: &str, default: u64) -> u64 {
+    match std::env::var(name) {
+        Err(_) => default,
+        Ok(value) => value.parse().unwrap_or_else(|_| {
+            eprintln!("{name} must be a non-negative integer, got {value:?}");
+            std::process::exit(2);
+        }),
+    }
+}
+
+/// Reload slots that carry a trailing max-prefix trip cycle (soak mode).
+fn is_trip_slot(reload: u32, trip_every: u32) -> bool {
+    trip_every != 0 && reload.is_multiple_of(trip_every)
+}
+
+/// Over-limit trip block: base indexes `[total, total + count)`. Outside
+/// every observer's completion bitmap (`base_prefix_index` rejects
+/// `>= total`) and outside the churn space, but shaped exactly like base
+/// routes for the daemon's import path and session accounting.
+fn trip_block(total: u32, count: u32) -> Vec<Ipv4Prefix> {
+    (total..total + count).map(base_prefix).collect()
+}
+
+/// One max-prefix trip cycle on the designated member (soak mode). The
+/// flap bitmap machinery is reused with the K=1 window shape: survivors
+/// track the designated member's slice `[0, per_peer)` through the
+/// daemon-driven teardown (withdraws) and the post-restart re-announce.
+/// Fail-closed at every phase, mirroring the flapstorm discipline.
+async fn run_trip_cycle(
+    ctx: &Arc<Ctx>,
+    stubs: &mut [Stub],
+    trip: u32,
+    pid: i32,
+    trip_prefix_count: u32,
+    reestablish_window: Duration,
+) {
+    let n_peers = ctx.n_peers;
+    let total = n_peers * ctx.per_peer;
+    let survivors = TRIP_MEMBER as usize + 1;
+    // Stale reload-generation markers must not feed the trip bitmaps.
+    for observer in &ctx.obs {
+        observer.expected_community.store(0, Ordering::Release);
+    }
+    // Arm withdraw tracking before the breach so no withdrawal is missed.
+    arm_survivors(ctx, 1, ctx.per_peer, total, FLAP_TRACK_WITHDRAWS);
+    println!(
+        "trip {trip} announce_over wall_us={} member={TRIP_MEMBER} prefixes={trip_prefix_count}",
+        wall_us()
+    );
+    let t_over = now_us(ctx);
+    for msg in announce_msgs(TRIP_MEMBER, &trip_block(total, trip_prefix_count)) {
+        if stubs[TRIP_MEMBER as usize].tx.send(msg).await.is_err() {
+            eprintln!("FAIL: trip {trip} over-limit announce send failed");
+            std::process::exit(1);
+        }
+    }
+    let teardown_deadline = Instant::now() + TRIP_TEARDOWN_WINDOW;
+    while ctx.obs[TRIP_MEMBER as usize]
+        .established
+        .load(Ordering::Relaxed)
+    {
+        if Instant::now() >= teardown_deadline {
+            eprintln!(
+                "FAIL: trip {trip} daemon did not tear down the designated member within {}s",
+                TRIP_TEARDOWN_WINDOW.as_secs()
+            );
+            std::process::exit(1);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Abort the dead session's split-half tasks so a lingering writer
+    // keepalive cannot stomp the NEW session's established flag later
+    // (same discipline as the flapstorm close).
+    stubs[TRIP_MEMBER as usize].reader.abort();
+    stubs[TRIP_MEMBER as usize].writer.abort();
+    let t_down = now_us(ctx);
+    let teardown_s = t_down.saturating_sub(t_over) as f64 / 1e6;
+    println!(
+        "trip {trip} torn_down wall_us={} after_s={teardown_s:.3}",
+        wall_us()
+    );
+    wait_flap_completion(ctx, survivors, trip, "trip-withdraw").await;
+    let withdraw_s = (survivors..ctx.obs.len())
+        .filter_map(|i| completion_us(ctx, i))
+        .max()
+        .map_or(f64::NAN, |tc| tc.saturating_sub(t_down) as f64 / 1e6);
+    // Re-arm announce tracking before any reconnect can succeed so no
+    // re-announce is missed.
+    arm_survivors(ctx, 1, ctx.per_peer, total, FLAP_TRACK_ANNOUNCES);
+    let reconnect_deadline = Instant::now() + reestablish_window;
+    let stub = loop {
+        match tokio::time::timeout(
+            TRIP_ATTEMPT_WINDOW,
+            establish_stub(Arc::clone(ctx), TRIP_MEMBER),
+        )
+        .await
+        {
+            Ok(Ok(stub)) => break stub,
+            Ok(Err(error)) => {
+                if Instant::now() >= reconnect_deadline {
+                    eprintln!(
+                        "FAIL: trip {trip} designated member not re-established within {}s: {error}",
+                        reestablish_window.as_secs()
+                    );
+                    std::process::exit(1);
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Err(_) => {
+                if Instant::now() >= reconnect_deadline {
+                    eprintln!(
+                        "FAIL: trip {trip} designated member not re-established within {}s: attempt timed out",
+                        reestablish_window.as_secs()
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+    stubs[TRIP_MEMBER as usize] = stub;
+    let t_up = now_us(ctx);
+    let holddown_s = t_up.saturating_sub(t_down) as f64 / 1e6;
+    println!(
+        "trip {trip} reestablished wall_us={} holddown_s={holddown_s:.3}",
+        wall_us()
+    );
+    // Compliant base slice only — the over-limit block stays withdrawn.
+    for msg in announce_msgs(TRIP_MEMBER, &own_slice(ctx, TRIP_MEMBER)) {
+        if stubs[TRIP_MEMBER as usize].tx.send(msg).await.is_err() {
+            eprintln!("FAIL: trip {trip} compliant re-announce send failed");
+            std::process::exit(1);
+        }
+    }
+    println!("trip {trip} reannounced wall_us={}", wall_us());
+    wait_flap_completion(ctx, survivors, trip, "trip-reannounce").await;
+    let reannounce_s = (survivors..ctx.obs.len())
+        .filter_map(|i| completion_us(ctx, i))
+        .max()
+        .map_or(f64::NAN, |tc| tc.saturating_sub(t_up) as f64 / 1e6);
+    disarm_survivors(ctx, survivors);
+    let up = ctx
+        .obs
+        .iter()
+        .filter(|o| o.established.load(Ordering::Relaxed))
+        .count();
+    let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
+    if up != n_peers as usize || parse_errors != 0 {
+        eprintln!(
+            "FAIL: trip {trip} integrity check failed: sessions_up={up}/{n_peers}, parse_errors={parse_errors}"
+        );
+        std::process::exit(1);
+    }
+    let rss = rss_mib(pid);
+    println!(
+        "trip_csv,{trip},{n_peers},{teardown_s:.3},{withdraw_s:.3},{holddown_s:.3},{reannounce_s:.3},{rss},{up},{parse_errors}"
+    );
+    println!("trip {trip} complete wall_us={} rss_mib={rss}", wall_us());
 }
 
 /// Hold the live stub sessions open while an outer measurement runner captures
@@ -1212,6 +1411,11 @@ fn main() {
         std::env::var_os("RELOADSTALL_PRE_CHURN_EVIDENCE_DIR").map(PathBuf::from);
     let overlap_file = std::env::var_os("RELOADSTALL_OVERLAP_FILE").map(PathBuf::from);
     let received_view_file = std::env::var_os("RELOADSTALL_RECEIVED_VIEW_FILE").map(PathBuf::from);
+    // Soak-mode knobs; every default reproduces the frozen one-shot contract.
+    let cycle_quiesce_secs = env_u64("RELOADSTALL_CYCLE_QUIESCE_SECS", 20);
+    let trip_every = u32::try_from(env_u64("RELOADSTALL_TRIP_EVERY", 0)).unwrap();
+    let trip_prefix_count = u32::try_from(env_u64("RELOADSTALL_TRIP_PREFIXES", 64)).unwrap();
+    let trip_reestablish = Duration::from_secs(env_u64("RELOADSTALL_TRIP_REESTABLISH_SECS", 300));
     assert!(n_peers >= CHURNERS, "n_peers must be at least {CHURNERS}");
     assert!(
         (1..=n_peers).contains(&changed_peers),
@@ -1246,6 +1450,28 @@ fn main() {
     }
     let per_peer = total / n_peers;
     assert_eq!(total % n_peers, 0, "total must divide evenly");
+    if trip_every > 0 {
+        assert!(
+            reloads > 0 && flapstorm.is_none() && !convergence_only && reload_cmd.is_none(),
+            "RELOADSTALL_TRIP_EVERY requires the SIGHUP reload mode (reloads > 0)"
+        );
+        assert!(
+            n_peers > CHURNERS,
+            "trips need a non-churner designated member: n_peers must exceed {CHURNERS}"
+        );
+        assert!(
+            changed_peers == n_peers,
+            "trips require the all-changed reload shape (changed_peers == n_peers)"
+        );
+        assert!(
+            overlap_file.is_none(),
+            "trips require disjoint announcements (no RELOADSTALL_OVERLAP_FILE)"
+        );
+        assert!(
+            trip_prefix_count >= 1,
+            "RELOADSTALL_TRIP_PREFIXES must be at least 1"
+        );
+    }
     // Overlap and the received-view dump are reload-mode instruments only:
     // flapstorm and convergence-only completion accounting assumes the
     // historical disjoint announcements.
@@ -1561,6 +1787,12 @@ fn main() {
              changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,\
              rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors"
         );
+        if trip_every > 0 {
+            println!(
+                "trip_csv_header,trip,peers_total,teardown_s,withdraw_s,holddown_s,\
+                 reannounce_s,rss_mib,sessions_up,parse_errors"
+            );
+        }
 
         // --- Reload loop. ---
         for r in 1..=reloads {
@@ -1803,8 +2035,20 @@ fn main() {
                 first_generation_update.p95,
                 first_generation_update.max,
             );
-            // Quiesce between reloads.
-            tokio::time::sleep(Duration::from_secs(20)).await;
+            // Quiesce between cycles (soak mode overrides the historical 20 s
+            // to self-pace the whole window).
+            tokio::time::sleep(Duration::from_secs(cycle_quiesce_secs)).await;
+            if is_trip_slot(r, trip_every) {
+                run_trip_cycle(
+                    &ctx,
+                    &mut stubs,
+                    r / trip_every,
+                    pid,
+                    trip_prefix_count,
+                    trip_reestablish,
+                )
+                .await;
+            }
         }
 
         let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
@@ -2221,6 +2465,42 @@ mod tests {
         progress.reset(8, 6, 2, 2);
         assert!(progress.excluded_extra.is_empty(), "reset clears extras");
         assert!(progress.received.iter().all(|&slot| slot == 0));
+    }
+
+    #[test]
+    fn trip_slot_schedule_matches_planned_counts() {
+        // trip_every 0 (the frozen one-shot default) never trips.
+        assert!((1..=48).all(|r| !is_trip_slot(r, 0)));
+        // The flagship shape: 48 reloads, trip every 8th -> 6 trips.
+        let slots: Vec<u32> = (1..=48).filter(|&r| is_trip_slot(r, 8)).collect();
+        assert_eq!(slots, vec![8, 16, 24, 32, 40, 48]);
+        // The smoke shape: 5 reloads, trip every 2nd -> 2 trips.
+        let slots: Vec<u32> = (1..=5).filter(|&r| is_trip_slot(r, 2)).collect();
+        assert_eq!(slots, vec![2, 4]);
+    }
+
+    #[test]
+    fn trip_block_is_outside_every_completion_bitmap() {
+        for total in [600, 400_000] {
+            let block = trip_block(total, 64);
+            assert_eq!(block.len(), 64);
+            assert_eq!(block[0], base_prefix(total));
+            for prefix in &block {
+                assert_eq!(
+                    base_prefix_index(*prefix, total),
+                    None,
+                    "trip prefixes must never advance an observer bitmap"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn soak_env_defaults_preserve_the_one_shot_contract() {
+        // Absent env vars must reproduce the historical quiesce and
+        // trip-free behavior exactly.
+        assert_eq!(env_u64("RELOADSTALL_TEST_UNSET_KNOB", 20), 20);
+        assert!(!is_trip_slot(4, 0));
     }
 
     #[test]

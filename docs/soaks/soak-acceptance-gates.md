@@ -211,6 +211,48 @@ every post-warmup sample; `tenant_present` ↔ `pe1_observed_routes`
 agree within one sample interval (wake-path latency ceiling);
 `churn_cycles` strictly monotone.
 
+### 10. Route-server flagship (SIGHUP reload + max-prefix trip) — `run-soak-rs-flagship.sh` (`analyze-soak-rs-flagship.py`)
+
+The flagship shape on a bare-host daemon: 1000 real eBGP route-server-client
+sessions × 400 routes each (400 k total), driven by the
+`bench/scale/reloadstall` engine with its steady churn running throughout.
+Two serialized injections: a real SIGHUP policy-file reload every
+`RELOAD_INTERVAL_SEC` (default 1800 s → 48/24 h), each verified by the
+engine's generation-marker completion barriers, and a max-prefix
+trip/timed-restart cycle every `TRIP_INTERVAL_SEC` (default 14 400 s →
+6/24 h) on the designated member (stub 0, `127.1.0.1`,
+`max_prefixes = routes + 50`, `max_prefix_restart_seconds = 120`).
+
+RSS bounds rationale: the ceiling is calibrated from the
+`bench/scale/route-server-1000` retained receipt, whose one-shot
+4-reload run at this exact shape enforces a 2 GiB process-tree ceiling;
+repeated reload cycles add glibc allocator retention (a known-benign
+pattern — see the LAN-461 finding: jemalloc erases it, it is not an
+intern/RIB leak), so the soak ceiling adds 1 GiB of reload-cycle
+headroom (3 GiB). Because that retention front-loads, the slope gate
+bounds only the LATE window (final 25 % of the run), not the early
+settle; 10 MB/h is well above the ±30–50 MiB allocator-arena noise
+floor averaged over ≥ 6 h of 30 s samples, while still catching a
+~240 MB/day leak. The late-window slope gates are evaluated only when
+the late window spans ≥ 1 h (`--min-slope-seconds`); on shorter smokes
+the analyzer records the values and annotates them as not evaluated —
+never as silent green.
+
+| Gate | Precommitted bound | Evidence | Refreshes under scenario via |
+|------|--------------------|----------|------------------------------|
+| Session floor | `established == 1000` on every post-warmup sample, EXCEPT exactly `999` inside a declared trip window (`announce_over` → `reestablished` ± one sample interval, from `cycles.log`) for the designated member only | sum of `bgp_peer_session_established` → CSV `established`; windows from `cycles.log` | Every trip flips the designated member 1→0→1; reload barriers fail the engine closed if any other session drops. |
+| Reload accounting exact | issued == barrier-verified complete; complete ≥ 0.9 × planned | `cycles.log` `reload N issued` (engine SIGHUP marker) / `reload N complete` (only after the engine's completion + marker barriers and integrity check pass) | Every reload cycle appends both lines; a reload whose barrier never completes stalls the engine's fail-closed watchdog. |
+| Trip accounting exact | executed == planned; per cycle the full evidence chain: breach counter reaches exactly N, hold-down countdown observed via `rbgp neighbor -j` (`max_prefix_restart_remaining_millis`, action `restart`), re-Established ≤ `max_prefix_restart_seconds` + 60 s after teardown, post-recovery `usage == routes`, `limit == max_prefixes`, `usage + headroom == limit`; zero unexpected latch-offs | `cycles.log` trip lines; `bgp_max_prefix_exceeded_total`, `bgp_max_prefix_usage/limit/headroom` (scope `aggregate`) | Each trip cycle drives breach → teardown → countdown → timed restart → compliant re-announce; the runner polls the CLI and metrics inside every window and fails closed on any missing link. |
+| Exceeded-counter exact | final `bgp_max_prefix_exceeded_total` == executed trips | CSV `max_prefix_exceeded_total` | Incremented once per deliberate breach; any spurious latch-off breaks the equality. |
+| Session-flap budget exact | flap delta over the run == executed trips (one per deliberate teardown) | sum of `bgp_session_flaps_total` → CSV `flaps_total` | Each trip teardown adds exactly one flap; reload cycles must add zero (the engine's per-reload `sessions_up` integrity check backs this). |
+| Peak RSS | < 3072 MB (rationale above) | daemon process-tree RSS → CSV `rss_mb` | Full-table re-advertisement on every reload; teardown/re-announce churn on every trip. |
+| RSS late-window slope | < 10 MB/h over the final 25 % of the run (evaluated only when that window ≥ 1 h; rationale above) | CSV `rss_mb` | Same. |
+| Intern-table late-window slope | < 100 entries/h over the same window (the scenario's attribute universe is fixed; reload re-interning must return to plateau) | `bgp_rib_attr_intern_global_size` → CSV `intern_size` | Every reload re-interns per-chain attributes; GC reclaims after transition. |
+| Counter monotonicity (no restart) | `bgp_messages_sent_total` never decreases between samples | CSV `msgs_sent_total` | Advances with every keepalive/UPDATE across 1000 sessions; a decrease means a daemon restart (abort criterion). |
+| readyz availability | HTTP 200 within 250 ms on every sample (the route-server-1000 receipt enforces this bound during reloads at this exact shape) | CSV `readyz_code`, `readyz_ms` | Probed every sample, including mid-reload and mid-trip. |
+| Minimum sample count | ≥ 0.9 × (`SOAK_SECONDS` ÷ `SAMPLE_INTERVAL`) | CSV row count | One row per interval; scrape failures skip the row (and ≥ 5 consecutive failures abort). |
+| No abort record | zero `ABORT:` lines | `cycles.log` | The runner writes one before any fail-closed exit (daemon death, blind sampler, evidence deadline, disk floor, watchdog). |
+
 ## Failure-injection inventory
 
 What each scenario actually injects (inventoried from the harness
@@ -228,6 +270,8 @@ scripts), mapped to the daemon guarantee it tests.
 | MAC mobility move | same MAC deleted on src PE, added on dst PE | 8 | RFC 7432 §15.1 sequence ratchet under concurrent ESI churn |
 | Link carrier down/up | AC interface down/up | 6 | ES drain trigger, DF failover, recovery hold-off, bounded blackout |
 | Tenant route add/del | `ip addr add/del` in VRF | 9 | L3 owned-state transactionality; route-wake path |
+| SIGHUP policy-file reload at scale | engine copies next `.rpol` generation over the live file + real SIGHUP, every 30 min under churn | 10 | Signal-driven reload path: barrier-verified full-fleet re-advertisement, no session impact, no reload-cycle leak |
+| Max-prefix trip + timed restart | designated member announces over its `max_prefixes` bound; daemon Cease teardown, hold-down, one timed restart; compliant re-announce | 10 | ADR-0108 enforcement + latch/restart cycle: exact breach accounting, countdown visibility, bounded recovery, headroom re-arm |
 
 ### Coverage gaps — guarantees with NO soak injection
 
@@ -240,9 +284,14 @@ coverage:
    the GR soak restarts the *peer*. Crash-recovery of the core BGP
    daemon (durable commit-confirm boot-revert included) has test
    coverage but no soak-duration injection.
-2. **SIGHUP file-reload path.** The daemon handles SIGHUP
+2. **SIGHUP file-reload path.** ~~The daemon handles SIGHUP
    (`src/main.rs`), but the hot-reload soak drives only the gRPC
-   transactional apply. The signal-driven reload path is unsoaked.
+   transactional apply. The signal-driven reload path is unsoaked.~~
+   **Closed by scenario 10**, which drives real SIGHUP policy-file
+   reloads every 30 minutes at the 1000-peer flagship shape, each
+   verified by the engine's completion barriers. (Config-file reload of
+   *neighbor* shape via SIGHUP remains uncovered — scenario 10 reloads
+   the policy file only.)
 3. **Listener kill.** No scenario kills or wedges the gRPC listener or
    the Prometheus exporter mid-soak; listener-death behavior (audit
    continuity, reconnect handling) is untested at duration.
@@ -252,8 +301,14 @@ coverage:
 5. **Rapid peer flap storm.** The fastest failure cadence in the suite
    is one event per 90 s (scenario 6). Sub-minute repeated flaps
    (damping/pending-delete pressure) have bench coverage but no soak.
-6. **Prefix-limit trip and timed restart.** No soak drives a peer over
-   a configured max-prefix bound and through the timed-restart cycle.
+6. **Prefix-limit trip and timed restart.** ~~No soak drives a peer over
+   a configured max-prefix bound and through the timed-restart cycle.~~
+   **Closed by scenario 10**, which trips the designated member's
+   aggregate `max_prefixes` bound every 4 hours and asserts the full
+   breach → countdown → timed-restart → compliant-recovery evidence
+   chain per cycle. (Per-family `max_prefixes_ipv4/ipv6` bounds and the
+   failed-restart indefinite latch remain soak-uncovered — they have
+   unit coverage only.)
 7. **Transport-level disturbance.** No packet loss / latency / MTU
    churn (netem) injection anywhere in the suite.
 8. **BMP / BFD subsystems.** No soak establishes a BMP station or BFD

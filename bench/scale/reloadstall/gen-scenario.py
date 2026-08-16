@@ -40,7 +40,14 @@ per-neighbor `stable-out` chain, while the import chain remains content-stable
 for every neighbor. Omitting it preserves the historical changed-import-plus-
 export scenario. The mixed export-only receipt uses 700 peers, 600 changed
 peers, 400400 total prefixes (harness arg), and port 1790.
+
+Soak extension (route-server flagship soak): setting BOTH
+`GEN_TRIP_MAX_PREFIXES` and `GEN_TRIP_RESTART_SECONDS` in the environment adds
+`max_prefixes` / `max_prefix_restart_seconds` to neighbor 0 — the harness's
+designated max-prefix trip member. Absent (the default), the emitted config is
+byte-for-byte the historical one.
 """
+import os
 import pathlib
 import sys
 
@@ -54,6 +61,15 @@ changed_peers = int(sys.argv[4]) if len(sys.argv) > 4 else n_peers
 if not 0 < changed_peers <= n_peers:
     sys.exit(f"changed_peers must be in 1..={n_peers}, got {changed_peers}")
 mixed_export_only = len(sys.argv) > 4
+trip_max_prefixes = os.environ.get("GEN_TRIP_MAX_PREFIXES")
+trip_restart_seconds = os.environ.get("GEN_TRIP_RESTART_SECONDS")
+if (trip_max_prefixes is None) != (trip_restart_seconds is None):
+    sys.exit("GEN_TRIP_MAX_PREFIXES and GEN_TRIP_RESTART_SECONDS must be set together")
+if trip_max_prefixes is not None:
+    trip_max_prefixes = int(trip_max_prefixes)
+    trip_restart_seconds = int(trip_restart_seconds)
+    if trip_max_prefixes < 1 or trip_restart_seconds < 1:
+        sys.exit("GEN_TRIP_MAX_PREFIXES and GEN_TRIP_RESTART_SECONDS must be positive")
 out.mkdir(parents=True, exist_ok=True)
 rundir = out.resolve()
 
@@ -172,13 +188,24 @@ for i in range(n_peers):
         'families = ["ipv4_unicast"]',
         "hold_time = 180",
     ]
+    if i == 0 and trip_max_prefixes is not None:
+        # The soak's designated trip member: the harness announces over
+        # this bound and rides the Cease teardown + timed restart.
+        neighbor.append(f"max_prefixes = {trip_max_prefixes}")
+        neighbor.append(f"max_prefix_restart_seconds = {trip_restart_seconds}")
     if i >= changed_peers:
         neighbor.append('export_policy_chain = ["stable-out"]')
     config += neighbor + [""]
 (out / "config.toml").write_text("\n".join(config))
 
+trip_note = (
+    f", trip_member_0(max_prefixes={trip_max_prefixes}, "
+    f"max_prefix_restart_seconds={trip_restart_seconds})"
+    if trip_max_prefixes is not None
+    else ""
+)
 print(
     f"wrote {rundir}/config.toml ({n_peers} neighbors), member.rpol, "
     f"gen-a.rpol, gen-b.rpol; listen_port={port}, changed_peers={changed_peers}, "
-    f"stable_peers={n_peers - changed_peers}, grpc_uds={rundir}/grpc.sock"
+    f"stable_peers={n_peers - changed_peers}, grpc_uds={rundir}/grpc.sock{trip_note}"
 )

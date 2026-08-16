@@ -858,3 +858,43 @@ per-cycle events recorded in `churn.log`.
 Each pairs a containerlab topology with a post-hoc analyzer and runs under the
 shared host mutex (see the top-of-file bench-vs-soak section); consult each
 script's header for the deploy step and its env vars.
+
+---
+
+# Route-server flagship soak (SIGHUP reload + max-prefix trip)
+
+`run-soak-rs-flagship.sh` drives the flagship shape — 1000 real eBGP
+route-server-client sessions × 400 routes each — against a bare-host
+daemon via the `bench/scale/reloadstall` engine (no containerlab), with
+the engine's steady churn running throughout. Two serialized injections:
+
+- a real SIGHUP policy-file reload every `RELOAD_INTERVAL_SEC`
+  (default 1800 s), each verified by the engine's generation-marker
+  completion barriers;
+- a max-prefix trip/timed-restart cycle every `TRIP_INTERVAL_SEC`
+  (default 14 400 s) on the designated member (stub 0), with the
+  runner asserting the daemon-side evidence chain per cycle:
+  `bgp_max_prefix_exceeded_total` reaches exactly N → hold-down
+  countdown visible in `rbgp neighbor -j` → re-Established within
+  `max_prefix_restart_seconds` + 60 s → headroom sane.
+
+```bash
+# Full 24 h flagship run (defaults):
+bash tests/soak/run-soak-rs-flagship.sh
+
+# ~7-minute smoke:
+SOAK_PEERS=12 SOAK_ROUTES_PER_PEER=50 SOAK_SECONDS=300 \
+RELOAD_INTERVAL_SEC=60 TRIP_INTERVAL_SEC=120 \
+TRIP_RESTART_SECONDS=20 WARMUP_SEC=30 SAMPLE_INTERVAL=10 \
+bash tests/soak/run-soak-rs-flagship.sh
+```
+
+Requires host ports 1790 (BGP) and 9179 (metrics) free — the runner
+refuses to start otherwise and never kills unknown processes. Output
+lands in `tests/soak/runs/soak-rs-flagship-<UTC>/` (`samples.csv`,
+`cycles.log`, `reloadstall.log`, `rustbgpd.log`, `run.json`,
+`verdict.json`); the analyzer is `analyze-soak-rs-flagship.py` and the
+precommitted gates are scenario 10 in
+`docs/soaks/soak-acceptance-gates.md`. Note the short scenario
+directory under `/tmp` is required by the gRPC UDS `sun_path` cap; the
+scenario is regenerated fresh per run and copied into the run dir.
