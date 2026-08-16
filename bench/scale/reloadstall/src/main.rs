@@ -912,6 +912,19 @@ fn completion_us(ctx: &Ctx, i: usize) -> Option<u64> {
     ctx.obs[i].generation.lock().unwrap().completed_at_us
 }
 
+/// Per-cycle events drain (end of every reload cycle, after its CSV row).
+/// A cycle's gap stats consume only its own `[t_hup, reload_end]` window,
+/// so events from completed cycles are dead weight — without this the
+/// per-observer Vec grows for the entire soak window (the iBGP-RR hold
+/// bounds the same growth by disabling recording instead, since nothing
+/// consumes gap stats there). `clear()` keeps capacity, so memory stays
+/// bounded by the busiest single cycle.
+fn drain_cycle_events(obs: &[Obs]) {
+    for observer in obs {
+        observer.events.lock().unwrap().clear();
+    }
+}
+
 fn stable_marker_is_fresh(seen_at_us: u64, since_us: u64) -> bool {
     seen_at_us != 0 && seen_at_us >= since_us
 }
@@ -2289,6 +2302,7 @@ fn main() {
                 first_generation_update.p95,
                 first_generation_update.max,
             );
+            drain_cycle_events(&ctx.obs);
             // Quiesce between cycles (soak mode overrides the historical 20 s
             // to self-pace the whole window).
             tokio::time::sleep(Duration::from_secs(cycle_quiesce_secs)).await;
@@ -2740,6 +2754,52 @@ mod tests {
         // The smoke shape: 5 reloads, trip every 2nd -> 2 trips.
         let slots: Vec<u32> = (1..=5).filter(|&r| is_trip_slot(r, 2)).collect();
         assert_eq!(slots, vec![2, 4]);
+    }
+
+    #[test]
+    fn reload_cycle_drain_keeps_observer_events_bounded() {
+        let observer = || Obs {
+            events: Mutex::new(
+                (0..1000)
+                    .map(|t_us| Event {
+                        t_us,
+                        base_ann: 1,
+                        other: 0,
+                    })
+                    .collect(),
+            ),
+            base_ann_total: AtomicU64::new(0),
+            established: AtomicBool::new(true),
+            last_comms: Mutex::new(Vec::new()),
+            stable_marker_seen_at_us: AtomicU64::new(0),
+            expected_community: AtomicU32::new(0),
+            generation: Mutex::new(GenerationProgress::default()),
+            refresh_pending: AtomicBool::new(false),
+            flap_mode: AtomicU32::new(FLAP_OFF),
+        };
+        let obs = vec![observer(), observer()];
+        let capacity_before = obs[0].events.lock().unwrap().capacity();
+        drain_cycle_events(&obs);
+        for o in &obs {
+            let events = o.events.lock().unwrap();
+            assert!(events.is_empty(), "cycle drain must empty every observer");
+            assert_eq!(
+                events.capacity(),
+                capacity_before,
+                "drain keeps capacity: memory bound = busiest single cycle"
+            );
+        }
+        // The drain must run inside the reload loop, after the cycle's CSV
+        // row (its stats consumed the events) and before the quiesce.
+        let source = include_str!("main.rs");
+        let call = ["drain_cycle_events", "(&ctx.obs)"].concat();
+        assert_eq!(source.matches(&call).count(), 1);
+        let csv_needle = ["reloadstall_csv,", "{r}"].concat();
+        let csv = source.find(&csv_needle).unwrap();
+        let drain = source.find(&call).unwrap();
+        let quiesce_needle = ["from_secs(cycle_", "quiesce_secs)"].concat();
+        let quiesce = source.find(&quiesce_needle).unwrap();
+        assert!(csv < drain && drain < quiesce);
     }
 
     #[test]
