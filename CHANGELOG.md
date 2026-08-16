@@ -11,6 +11,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Route-server flagship 24 h soak (`tests/soak/run-soak-rs-flagship.sh` +
+  `analyze-soak-rs-flagship.py`): 1000 real eBGP RS-client sessions × 400
+  routes against a bare-host daemon, with periodic real SIGHUP policy-file
+  reloads (barrier-verified by the reloadstall engine) and periodic
+  max-prefix trip/timed-restart cycles on a designated member, asserting
+  the full breach → countdown → timed-restart → compliant-recovery
+  evidence chain per cycle. Precommitted gates land as scenario 10 in
+  `docs/soaks/soak-acceptance-gates.md`, closing the SIGHUP-reload and
+  prefix-limit soak coverage gaps. The reloadstall engine grows additive
+  soak env knobs (`RELOADSTALL_CYCLE_QUIESCE_SECS`,
+  `RELOADSTALL_TRIP_EVERY`, `RELOADSTALL_TRIP_PREFIXES`,
+  `RELOADSTALL_TRIP_REESTABLISH_SECS`) and `gen-scenario.py` gains
+  `GEN_TRIP_MAX_PREFIXES` / `GEN_TRIP_RESTART_SECONDS`; every knob absent
+  reproduces the frozen one-shot contract byte-for-byte. (LAN-18)
+
 - `PolicyService.TestPolicy` now evaluates import and export routes through
   version-fenced pages capped at 1,000 instead of retaining a whole-table route
   snapshot. Compilation still precedes RIB access; evaluation and global
