@@ -898,3 +898,44 @@ precommitted gates are scenario 10 in
 `docs/soaks/soak-acceptance-gates.md`. Note the short scenario
 directory under `/tmp` is required by the gRPC UDS `sun_path` cap; the
 scenario is regenerated fresh per run and copied into the run dir.
+
+---
+
+# Route-reflector flagship soak (reflection correctness under churn)
+
+`run-soak-rr-flagship.sh` drives the documented RR flagship shape —
+1000 real iBGP route-reflector-client sessions × 100 routes each
+(100 k total) — against a bare-host daemon via the
+`bench/scale/reloadstall` engine's iBGP-RR mode (no containerlab),
+with the engine's steady churn running throughout. No SIGHUP reloads
+and no max-prefix trips (the route-server flagship soak above covers
+those); this receipt's job is the flagship-RR shape + churn +
+stability:
+
+- the 24 h window is the engine's `RELOADSTALL_IBGP_RR_HOLD_SECS`
+  hold, with a fail-closed integrity check (all sessions up, zero
+  decode errors) and one `rr_hold` status line per minute;
+- at the end of the hold, the terminal reflected-delivery
+  verification: every observer sends a Normal ROUTE_REFRESH, the
+  daemon re-sends its Adj-RIB-Out, and every observer must complete
+  its full-table-minus-own-slice bitmap exactly (99 900 non-self
+  prefixes per observer at the flagship shape).
+
+```bash
+# Full 24 h flagship run (defaults):
+bash tests/soak/run-soak-rr-flagship.sh
+
+# ~6-minute smoke:
+SOAK_PEERS=12 SOAK_ROUTES_PER_PEER=20 SOAK_SECONDS=300 \
+WARMUP_SEC=30 SAMPLE_INTERVAL=10 \
+bash tests/soak/run-soak-rr-flagship.sh
+```
+
+Requires host ports 1790 (BGP) and 9179 (metrics) free — the runner
+refuses to start otherwise and never kills unknown processes. Output
+lands in `tests/soak/runs/soak-rr-flagship-<UTC>/` (`samples.csv`,
+`cycles.log`, `reloadstall.log`, `rustbgpd.log`, `run.json`,
+`verdict.json`); the analyzer is `analyze-soak-rr-flagship.py` and the
+precommitted gates are scenario 11 in
+`docs/soaks/soak-acceptance-gates.md`. The same short-`/tmp`-scenario
+and fresh-per-run rules as the route-server flagship soak apply.

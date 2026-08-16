@@ -253,6 +253,55 @@ never as silent green.
 | Minimum sample count | ≥ 0.9 × (`SOAK_SECONDS` ÷ `SAMPLE_INTERVAL`) | CSV row count | One row per interval; scrape failures skip the row (and ≥ 5 consecutive failures abort). |
 | No abort record | zero `ABORT:` lines | `cycles.log` | The runner writes one before any fail-closed exit (daemon death, blind sampler, evidence deadline, disk floor, watchdog). |
 
+### 11. Route-reflector flagship (reflection correctness under churn) — `run-soak-rr-flagship.sh` (`analyze-soak-rr-flagship.py`)
+
+The documented RR flagship shape on a bare-host daemon: 1000 real iBGP
+route-reflector-client sessions × 100 routes each (100 k total, the
+`docs/cookbook/route-reflector.md` / 1000-peer-scale-receipt shape),
+driven by the `bench/scale/reloadstall` engine's iBGP-RR mode
+(`RELOADSTALL_IBGP_RR_ASN`) with its steady churn running throughout.
+No SIGHUP reloads and no max-prefix trips — scenario 10 covers those;
+this receipt's job is the flagship-RR shape + churn + stability. The
+24 h window is the engine's `RELOADSTALL_IBGP_RR_HOLD_SECS` hold (one
+fail-closed status line per minute), closed by the terminal
+reflected-delivery verification: every observer re-requests the
+daemon's Adj-RIB-Out with a Normal ROUTE_REFRESH and must complete its
+full-table-minus-own-slice bitmap exactly (99 900 non-self prefixes per
+observer).
+
+RSS bounds rationale: calibrated from the in-process rrharness
+flood-1000×100k receipt, which converges at 213 MiB manager-direct at
+this exact route shape. Real transport adds 1000 TCP sessions,
+per-peer Adj-RIB-Out state, and update-group buffers on top; the
+historical real-transport measurement at this shape is the DATED
+419 MiB scratch-harness figure (quoted as calibration input only, not
+as a refreshed number — LAN-694). The 1024 MB ceiling is ~2.4× that
+dated transport figure: wide enough that allocator-arena noise
+(±30–50 MiB at 100p×1k) and measurement drift cannot trip it, tight
+enough to catch a leak of a few hundred MB. There are no reload cycles
+here, so no glibc reload-retention headroom is added (contrast
+scenario 10's 3 GiB). The late-window slope bounds match scenario 10:
+10 MB/h is above the arena noise floor averaged over a ≥ 6 h late
+window while catching a ~240 MB/day leak; slope gates are evaluated
+only when the late window spans ≥ 1 h (`--min-slope-seconds`), else
+recorded and annotated as not evaluated — never silent green.
+
+| Gate | Precommitted bound | Evidence | Refreshes under scenario via |
+|------|--------------------|----------|------------------------------|
+| Session floor | `established == 1000` on every post-warmup sample, no exceptions (this scenario has no deliberate teardowns) | sum of `bgp_peer_session_established` → CSV `established` | Every churn UPDATE rides the sessions; the engine's per-minute hold check fails closed on any drop, and the sampler sees it within one interval. |
+| Session-flap budget exact | flap delta over the run == 0 | sum of `bgp_session_flaps_total` → CSV `flaps_total` | Any reconnect increments it; there is no legitimate source of flaps in this scenario. |
+| Terminal reflected-delivery exact | engine `rr_terminal_receipt`: `min_unique == max_unique == expected == 99 900`, `sessions_up == 1000`, `parse_errors == 0` — the load-bearing correctness gate | `cycles.log` `rr_terminal_receipt` line (engine fails closed on the same equality before emitting it; the analyzer re-checks independently) | The terminal ROUTE_REFRESH forces the daemon to re-send every observer's Adj-RIB-Out after 24 h of churn; a single lost, duplicated-as-missing, or mis-reflected prefix breaks the exact equality. |
+| Churn-cycle floor | final `churn_cycles` ≥ 0.5 × 64 × `SOAK_SECONDS` (8 churners × one flap message per 125 ms nominal; 0.5× tolerates timer drift + send backpressure, same rationale as scenario 3's floor), nondecreasing across hold lines | engine churn counter → `cycles.log` `rr_hold` lines + `rr_terminal_receipt` `churn_cycles` | Incremented on every churner announce/withdraw actually written to a live session; a wedged churner or dead session stalls it. |
+| Reflection under churn | churn add + withdraw propagate to the full fleet for the whole window | CSV `msgs_sent_total` advancing every sample (1000-session fan-out of every churn flap) + the terminal gate above (a daemon that stopped reflecting cannot re-deliver an exact table) | Churners flap dedicated blocks every 125 ms; the daemon reflects each to 999 other clients. |
+| Max-prefix flat | `bgp_max_prefix_exceeded_total` == 0 on every sample (no bounds configured; any latch is spurious enforcement) | CSV `max_prefix_exceeded_total` | Column kept from the shared sampler; the scenario never breaches. |
+| Peak RSS | < 1024 MB (rationale above) | daemon process-tree RSS → CSV `rss_mb` | 100 k-route table held + churn allocation/free every 125 ms. |
+| RSS late-window slope | < 10 MB/h over the final 25 % of the run (evaluated only when that window ≥ 1 h; rationale above) | CSV `rss_mb` | Same. |
+| Intern-table late-window slope | < 100 entries/h over the same window (the attribute universe is fixed; churn re-interns the same attribute sets) | `bgp_rib_attr_intern_global_size` → CSV `intern_size` | Every churn announce interns; every withdraw releases. |
+| Counter monotonicity (no restart) | `bgp_messages_sent_total` never decreases between samples | CSV `msgs_sent_total` | Advances with every keepalive/UPDATE across 1000 sessions; a decrease means a daemon restart (abort criterion). |
+| readyz availability | HTTP 200 within 250 ms on every sample | CSV `readyz_code`, `readyz_ms` | Probed every sample, including during the terminal full-table re-send. |
+| Minimum sample count | ≥ 0.9 × (`SOAK_SECONDS` ÷ `SAMPLE_INTERVAL`) | CSV row count | One row per interval; scrape failures skip the row (and ≥ 5 consecutive failures abort). |
+| No abort record | zero `ABORT:` lines | `cycles.log` | The runner writes one before any fail-closed exit (daemon death, blind sampler, disk floor, watchdog). |
+
 ## Failure-injection inventory
 
 What each scenario actually injects (inventoried from the harness
@@ -272,6 +321,7 @@ scripts), mapped to the daemon guarantee it tests.
 | Tenant route add/del | `ip addr add/del` in VRF | 9 | L3 owned-state transactionality; route-wake path |
 | SIGHUP policy-file reload at scale | engine copies next `.rpol` generation over the live file + real SIGHUP, every 30 min under churn | 10 | Signal-driven reload path: barrier-verified full-fleet re-advertisement, no session impact, no reload-cycle leak |
 | Max-prefix trip + timed restart | designated member announces over its `max_prefixes` bound; daemon Cease teardown, hold-down, one timed restart; compliant re-announce | 10 | ADR-0108 enforcement + latch/restart cycle: exact breach accounting, countdown visibility, bounded recovery, headroom re-arm |
+| Route churn at RR flagship scale | engine churners flap dedicated blocks every 125 ms across 1000 real iBGP RR-client sessions for 24 h, closed by a full-fleet ROUTE_REFRESH re-request | 11 | RFC 4456 reflection correctness under sustained churn: exact terminal Adj-RIB-Out delivery (99 900 non-self prefixes per observer), zero flaps, no RIB/intern leak |
 
 ### Coverage gaps — guarantees with NO soak injection
 

@@ -145,6 +145,40 @@ max-prefix trip cycles:
 `max_prefixes` / `max_prefix_restart_seconds` to neighbor 0; absent, the
 emitted config is byte-for-byte the historical one.
 
+### iBGP-RR extensions (env vars, all additive)
+
+The route-reflector flagship soak (`tests/soak/run-soak-rr-flagship.sh`)
+switches the stubs to iBGP route-reflector-client mode. Both knobs
+absent reproduces the frozen eBGP route-server contract exactly:
+
+- `RELOADSTALL_IBGP_RR_ASN` — 1..=65535: every stub OPENs with this
+  shared local AS (the daemon's ASN, so it must be u16-representable),
+  announces with an EMPTY `AS_PATH` plus `LOCAL_PREF 100` (real-world
+  iBGP origination), and initial convergence gates on the exact
+  per-observer bitmap. Requires the zero-reload shape: `reloads = 0`,
+  no flapstorm / reload command / convergence-only, no overlap or
+  evidence files, no trip cycles, all-peer `changed_peers`.
+- `RELOADSTALL_IBGP_RR_HOLD_SECS` — after the control window, hold the
+  fleet under the steady churn for this long (one fail-closed
+  `rr_hold elapsed_s=… churn_cycles=… sessions_up=… rss_mib=…` status
+  line per minute; any session drop or decode error aborts), with
+  per-UPDATE event recording disabled to bound 24 h memory. Then the
+  terminal reflected-delivery verification runs: every stub sends a
+  Normal ROUTE_REFRESH, the daemon re-sends its Adj-RIB-Out, and every
+  observer must complete its full-table-minus-own-slice bitmap exactly
+  (min == max == expected across the fleet), emitting one
+  `rr_terminal_receipt,peers=…,prefixes=…,per_peer=…,expected=…,min_unique=…,max_unique=…,sessions_up=…,parse_errors=…,churn_cycles=…`
+  record. Requires `RELOADSTALL_IBGP_RR_ASN`.
+
+`gen-scenario.py` grows the matching additive knob: `GEN_IBGP_RR_ASN`
+emits the iBGP route-reflector scenario (`asn = <value>`,
+`cluster_id = "10.0.0.1"`, every neighbor `remote_asn = <value>` +
+`route_reflector_client = true`, and no `[policy]` section — iBGP is
+outside RFC 8212's default-deny and the RR soak runs zero reloads; the
+`.rpol` files are still written to satisfy the harness's positional arg
+contract). Mutually exclusive with the `GEN_TRIP_*` knobs; absent, the
+emitted config is byte-for-byte the historical one.
+
 Cross-daemon cells (BIRD 3.3.1 / OpenBGPD 9.1) generate their route-server
 configs with `gen-bird-scenario.py` / `gen-obgpd-scenario.py` (same
 addressing contract) and are sequenced by `bench/scale/matrix/run-matrix.sh`.

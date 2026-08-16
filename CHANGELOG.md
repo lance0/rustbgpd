@@ -11,6 +11,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Route-reflector flagship 24 h soak (`tests/soak/run-soak-rr-flagship.sh` +
+  `analyze-soak-rr-flagship.py`): 1000 real iBGP route-reflector-client
+  sessions × 100 routes (the documented RR flagship shape) against a
+  bare-host daemon, with the reloadstall engine's steady churn running
+  for the whole window and a terminal reflected-delivery verification —
+  every observer re-requests the daemon's Adj-RIB-Out via ROUTE_REFRESH
+  and must receive exactly its 99,900 non-self prefixes. Precommitted
+  gates land as scenario 11 in `docs/soaks/soak-acceptance-gates.md`.
+  The reloadstall engine grows an additive iBGP-RR mode
+  (`RELOADSTALL_IBGP_RR_ASN`: shared-AS OPENs, empty AS_PATH +
+  LOCAL_PREF origination; `RELOADSTALL_IBGP_RR_HOLD_SECS`: the churn
+  hold + terminal verification) and `gen-scenario.py` gains
+  `GEN_IBGP_RR_ASN` (u16 daemon ASN, cluster-id,
+  `route_reflector_client` neighbors, no policy section); every knob
+  absent reproduces the frozen eBGP one-shot contract byte-for-byte.
+  (LAN-18)
+
 - Route-server flagship 24 h soak (`tests/soak/run-soak-rs-flagship.sh` +
   `analyze-soak-rs-flagship.py`): 1000 real eBGP RS-client sessions × 400
   routes against a bare-host daemon, with periodic real SIGHUP policy-file

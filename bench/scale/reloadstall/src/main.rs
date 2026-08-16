@@ -61,6 +61,26 @@
 //! - `RELOADSTALL_TRIP_REESTABLISH_SECS`: teardown-to-re-established
 //!   deadline (default 300); must exceed the daemon's configured
 //!   `max_prefix_restart_seconds`.
+//!
+//! iBGP-RR extensions (route-reflector flagship soak) — additive env
+//! vars; absent, the frozen eBGP route-server contract is untouched:
+//! - `RELOADSTALL_IBGP_RR_ASN`: 1..=65535 switches the stubs to iBGP
+//!   route-reflector-client mode: every stub OPENs with this shared
+//!   local AS (the daemon's ASN), announces with an EMPTY AS_PATH plus
+//!   LOCAL_PREF 100 (real-world iBGP origination; the daemon's
+//!   validator mandates only ORIGIN+AS_PATH inbound), and the initial
+//!   convergence uses the exact per-observer bitmap. Requires the
+//!   zero-reload shape: reloads == 0, no flapstorm/reload_cmd/
+//!   convergence-only, no overlap or evidence files, no trips.
+//! - `RELOADSTALL_IBGP_RR_HOLD_SECS`: after the control window, hold
+//!   the fleet under the steady churn for this many seconds (the 24 h
+//!   soak window), with per-UPDATE event recording disabled to bound
+//!   memory, then run the terminal reflected-delivery verification:
+//!   every stub sends a Normal ROUTE_REFRESH and must complete its
+//!   full-table-minus-own-slice bitmap exactly from the daemon's
+//!   re-sent Adj-RIB-Out. Fail-closed throughout (any session drop or
+//!   parse error during the hold aborts). Requires
+//!   `RELOADSTALL_IBGP_RR_ASN`.
 
 // Event.other and Ctx.n_peers are recorded for the observation/context
 // model but not read by the percentile analysis; keep them so the
@@ -80,7 +100,9 @@ use rustbgpd_wire::header::peek_message_length;
 use rustbgpd_wire::message::{decode_message, encode_message, Message};
 use rustbgpd_wire::open::OpenMessage;
 use rustbgpd_wire::update::{Ipv4UnicastMode, UpdateMessage};
-use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4NlriEntry, Ipv4Prefix, Origin, PathAttribute};
+use rustbgpd_wire::{
+    AsPath, AsPathSegment, Ipv4NlriEntry, Ipv4Prefix, Origin, PathAttribute, RouteRefreshMessage,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpSocket;
 use tokio::sync::mpsc;
@@ -134,6 +156,29 @@ const TRIP_TEARDOWN_WINDOW: Duration = Duration::from_secs(60);
 const TRIP_ATTEMPT_WINDOW: Duration = Duration::from_secs(30);
 const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(15);
 const PRE_CHURN_EVIDENCE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// iBGP-RR mode (`RELOADSTALL_IBGP_RR_ASN`): 0 = off, the frozen eBGP
+/// route-server contract. Set exactly once in `main` before the runtime
+/// starts; read by every OPEN and announcement built afterwards
+/// (including trip/flap reconnects, which re-run `establish_stub`).
+static IBGP_RR_ASN: AtomicU32 = AtomicU32::new(0);
+
+fn ibgp_rr_asn() -> u32 {
+    IBGP_RR_ASN.load(Ordering::Relaxed)
+}
+
+/// Validated `RELOADSTALL_IBGP_RR_ASN`: 0/absent = eBGP (`None`);
+/// 1..=65535 = the shared iBGP local AS (must fit the stub OPEN's u16
+/// `my_as`, mirroring the generator's u16 daemon-ASN requirement).
+fn ibgp_rr_mode(value: u64) -> Result<Option<u16>, String> {
+    match value {
+        0 => Ok(None),
+        1..=65535 => Ok(Some(u16::try_from(value).unwrap())),
+        other => Err(format!(
+            "RELOADSTALL_IBGP_RR_ASN must be in 1..=65535 (u16 OPEN my_as), got {other}"
+        )),
+    }
+}
 
 /// What the shared per-observer bitmap is armed to track (flapstorm mode).
 const FLAP_OFF: u32 = 0;
@@ -267,6 +312,13 @@ struct Ctx {
     /// Daemon UPDATEs the stub failed to decode — a daemon defect that
     /// invalidates the run (see the reader and the exit check in `main`).
     parse_errors: AtomicU64,
+    /// Total churner flap messages sent (one announce or withdraw each) —
+    /// the soak churn-cycle accounting. Unread outside the iBGP-RR soak.
+    churn_cycles: AtomicU64,
+    /// Reader per-UPDATE event recording. Disabled for the iBGP-RR hold
+    /// window: gap stats are not consumed there, and 24 h of events at
+    /// churn cadence across 1000 observers would exhaust host memory.
+    record_events: AtomicBool,
 }
 
 fn now_us(ctx: &Ctx) -> u64 {
@@ -349,20 +401,35 @@ fn churn_prefix(churner: u32, j: u32) -> Ipv4Prefix {
 }
 
 fn base_attrs(i: u32) -> Vec<PathAttribute> {
+    // Non-loopback synthetic next-hop: the daemon rejects 127/8
+    // NEXT_HOP with UPDATE error subcode 8. Route-server mode passes
+    // it through untouched; RR mode reflects it unchanged (no next-hop
+    // resolution requirement — ORR interior cost is opt-in only);
+    // observers never resolve it.
+    let next_hop = PathAttribute::NextHop(Ipv4Addr::new(
+        10,
+        9,
+        u8::try_from(i / 200).unwrap(),
+        u8::try_from(i % 200 + 1).unwrap(),
+    ));
+    if ibgp_rr_asn() != 0 {
+        // iBGP origination: EMPTY AS_PATH (locally-originated inside the
+        // shared AS) plus LOCAL_PREF, mandatory-by-convention on iBGP
+        // UPDATEs (the daemon's inbound validator mandates only
+        // ORIGIN+AS_PATH, but real iBGP speakers always attach it).
+        return vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath { segments: vec![] }),
+            next_hop,
+            PathAttribute::LocalPref(100),
+        ];
+    }
     vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![stub_asn(i)])],
         }),
-        // Non-loopback synthetic next-hop: the daemon rejects 127/8
-        // NEXT_HOP with UPDATE error subcode 8. Route-server mode passes
-        // it through untouched; observers never resolve it.
-        PathAttribute::NextHop(Ipv4Addr::new(
-            10,
-            9,
-            u8::try_from(i / 200).unwrap(),
-            u8::try_from(i % 200 + 1).unwrap(),
-        )),
+        next_hop,
     ]
 }
 
@@ -524,9 +591,15 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
     };
     stream.set_nodelay(true).ok();
 
+    // iBGP-RR mode: every stub OPENs with the shared local AS (the
+    // daemon's own ASN); otherwise the per-stub eBGP ASN.
+    let open_asn = match ibgp_rr_asn() {
+        0 => stub_asn(i),
+        shared => shared,
+    };
     let open = OpenMessage {
         version: 4,
-        my_as: u16::try_from(stub_asn(i)).unwrap(),
+        my_as: u16::try_from(open_asn).unwrap(),
         hold_time: HOLD_TIME,
         bgp_identifier: Ipv4Addr::new(
             240,
@@ -539,7 +612,7 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
                 afi: Afi::Ipv4,
                 safi: Safi::Unicast,
             },
-            Capability::FourOctetAs { asn: stub_asn(i) },
+            Capability::FourOctetAs { asn: open_asn },
             Capability::RouteRefresh,
         ],
     };
@@ -747,11 +820,13 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
                         }
                         ob.base_ann_total
                             .fetch_add(u64::from(base), Ordering::Relaxed);
-                        ob.events.lock().unwrap().push(Event {
-                            t_us,
-                            base_ann: base,
-                            other,
-                        });
+                        if rctx.record_events.load(Ordering::Relaxed) {
+                            ob.events.lock().unwrap().push(Event {
+                                t_us,
+                                base_ann: base,
+                                other,
+                            });
+                        }
                     }
                     Message::RouteRefresh(_) => {
                         // Answer off-thread so the reader never blocks on a full
@@ -1230,6 +1305,101 @@ async fn run_trip_cycle(
     println!("trip {trip} complete wall_us={} rss_mib={rss}", wall_us());
 }
 
+/// iBGP-RR soak phase (`RELOADSTALL_IBGP_RR_ASN` +
+/// `RELOADSTALL_IBGP_RR_HOLD_SECS`): hold the fleet under the steady
+/// churn for the whole window (fail-closed integrity check + one
+/// `rr_hold` status line per minute), then verify terminal reflected
+/// delivery: every observer re-requests the daemon's Adj-RIB-Out with a
+/// Normal ROUTE_REFRESH and must complete its full-table-minus-own-slice
+/// bitmap exactly. Churn prefixes (172.16+.x) sit outside the base
+/// space, so in-flight churn cannot advance or pollute the bitmaps.
+async fn run_ibgp_rr_soak(ctx: &Arc<Ctx>, stubs: &[Stub], hold_secs: u64, pid: i32) {
+    let n_peers = ctx.n_peers;
+    let total = n_peers * ctx.per_peer;
+    let expected = u64::from(total - ctx.per_peer);
+    // Bound hold-phase memory: stop recording per-UPDATE events and
+    // release what convergence + the control window accumulated (gap
+    // stats are never consumed past this point).
+    ctx.record_events.store(false, Ordering::Release);
+    for observer in &ctx.obs {
+        let mut events = observer.events.lock().unwrap();
+        events.clear();
+        events.shrink_to_fit();
+    }
+    let hold_start = Instant::now();
+    let hold = Duration::from_secs(hold_secs);
+    loop {
+        let elapsed = hold_start.elapsed();
+        let up = ctx
+            .obs
+            .iter()
+            .filter(|o| o.established.load(Ordering::Relaxed))
+            .count();
+        let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
+        if up != n_peers as usize || parse_errors != 0 {
+            eprintln!(
+                "FAIL: rr hold integrity check failed at {}s: \
+                 sessions_up={up}/{n_peers}, parse_errors={parse_errors}",
+                elapsed.as_secs()
+            );
+            std::process::exit(1);
+        }
+        println!(
+            "rr_hold elapsed_s={} churn_cycles={} sessions_up={up} rss_mib={}",
+            elapsed.as_secs(),
+            ctx.churn_cycles.load(Ordering::Relaxed),
+            rss_mib(pid)
+        );
+        if elapsed >= hold {
+            break;
+        }
+        tokio::time::sleep((hold - elapsed).min(Duration::from_secs(60))).await;
+    }
+    // Terminal verification: re-arm the initial-convergence bitmap shape
+    // and ask the daemon to re-send its Adj-RIB-Out to every observer.
+    disarm_survivors(ctx, 0);
+    let mode = FLAP_TRACK_ANNOUNCES;
+    for (i, observer) in ctx.obs.iter().enumerate() {
+        let own_start = u32::try_from(i).unwrap() * ctx.per_peer;
+        let mut generation = observer.generation.lock().unwrap();
+        generation.reset(total, expected, own_start, ctx.per_peer);
+        drop(generation);
+        observer.flap_mode.store(mode, Ordering::Release);
+    }
+    println!("rr_terminal refresh wall_us={}", wall_us());
+    for (i, stub) in stubs.iter().enumerate() {
+        let msg = Message::RouteRefresh(RouteRefreshMessage::new(Afi::Ipv4, Safi::Unicast));
+        if stub.tx.send(msg).await.is_err() {
+            eprintln!("FAIL: rr terminal refresh send failed for stub {i}");
+            std::process::exit(1);
+        }
+    }
+    wait_flap_completion(ctx, 0, 1, "rr-terminal").await;
+    let (up, parse_errors, min_unique, max_unique) = convergence_integrity(ctx);
+    if !convergence_integrity_valid(
+        n_peers as usize,
+        expected,
+        up,
+        parse_errors,
+        min_unique,
+        max_unique,
+    ) {
+        eprintln!(
+            "FAIL: rr terminal integrity check failed: unique={min_unique}..{max_unique} \
+             expected={expected}, sessions_up={up}/{n_peers}, parse_errors={parse_errors}"
+        );
+        std::process::exit(1);
+    }
+    disarm_survivors(ctx, 0);
+    println!(
+        "rr_terminal_receipt,peers={n_peers},prefixes={total},per_peer={},expected={expected},\
+         min_unique={min_unique},max_unique={max_unique},sessions_up={up},\
+         parse_errors={parse_errors},churn_cycles={}",
+        ctx.per_peer,
+        ctx.churn_cycles.load(Ordering::Relaxed)
+    );
+}
+
 /// Hold the live stub sessions open while an outer measurement runner captures
 /// its final daemon evidence.
 ///
@@ -1416,6 +1586,15 @@ fn main() {
     let trip_every = u32::try_from(env_u64("RELOADSTALL_TRIP_EVERY", 0)).unwrap();
     let trip_prefix_count = u32::try_from(env_u64("RELOADSTALL_TRIP_PREFIXES", 64)).unwrap();
     let trip_reestablish = Duration::from_secs(env_u64("RELOADSTALL_TRIP_REESTABLISH_SECS", 300));
+    // iBGP-RR soak knobs; both absent reproduces the frozen eBGP contract.
+    let ibgp_rr = ibgp_rr_mode(env_u64("RELOADSTALL_IBGP_RR_ASN", 0)).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
+    let ibgp_hold_secs = env_u64("RELOADSTALL_IBGP_RR_HOLD_SECS", 0);
+    if let Some(shared_as) = ibgp_rr {
+        IBGP_RR_ASN.store(u32::from(shared_as), Ordering::Relaxed);
+    }
     assert!(n_peers >= CHURNERS, "n_peers must be at least {CHURNERS}");
     assert!(
         (1..=n_peers).contains(&changed_peers),
@@ -1472,6 +1651,36 @@ fn main() {
             "RELOADSTALL_TRIP_PREFIXES must be at least 1"
         );
     }
+    if ibgp_rr.is_some() {
+        // The iBGP-RR soak is the zero-reload shape: no policy
+        // generations exist toward iBGP clients, and every other
+        // instrument assumes the eBGP route-server scenario.
+        assert!(
+            reloads == 0
+                && flapstorm.is_none()
+                && !convergence_only
+                && reload_cmd.is_none()
+                && trip_every == 0,
+            "RELOADSTALL_IBGP_RR_ASN requires reloads == 0 with no flapstorm, \
+             reload_cmd, --convergence-only, or trip cycles"
+        );
+        assert!(
+            overlap_file.is_none()
+                && evidence_dir.is_none()
+                && pre_churn_evidence_dir.is_none()
+                && received_view_file.is_none(),
+            "RELOADSTALL_IBGP_RR_ASN is incompatible with overlap, evidence, \
+             and received-view files"
+        );
+        assert!(
+            changed_peers == n_peers,
+            "RELOADSTALL_IBGP_RR_ASN requires the all-peer shape (omit changed_peers)"
+        );
+    }
+    assert!(
+        ibgp_hold_secs == 0 || ibgp_rr.is_some(),
+        "RELOADSTALL_IBGP_RR_HOLD_SECS requires RELOADSTALL_IBGP_RR_ASN"
+    );
     // Overlap and the received-view dump are reload-mode instruments only:
     // flapstorm and convergence-only completion accounting assumes the
     // historical disjoint announcements.
@@ -1535,6 +1744,8 @@ fn main() {
                 .collect(),
             extras,
             parse_errors: AtomicU64::new(0),
+            churn_cycles: AtomicU64::new(0),
+            record_events: AtomicBool::new(true),
         });
         println!(
             "# reloadstall peers={n_peers} changed_peers={changed_peers} \
@@ -1578,6 +1789,9 @@ fn main() {
             .map(|extra| expected - extra.len() as u64)
             .collect();
         let exact_initial = convergence_only || needs_first_exact_bitmap(reloads, flapstorm); // FIRST_EXACT_ARM:
+        // The iBGP-RR soak gates its initial convergence on the same
+        // exact bitmap (its terminal verification re-arms it later).
+        let exact_initial = exact_initial || ibgp_rr.is_some();
         if exact_initial {
             for (i, observer) in ctx.obs.iter().enumerate() {
                 let own_start = u32::try_from(i).unwrap() * per_peer;
@@ -1661,6 +1875,8 @@ fn main() {
                     "convergence-only"
                 } else if flapstorm.is_some() {
                     "flapstorm"
+                } else if ibgp_rr.is_some() {
+                    "ibgp-rr"
                 } else {
                     "reload"
                 },
@@ -1730,6 +1946,7 @@ fn main() {
             let i = n_peers - CHURNERS + c;
             let tx = stubs[i as usize].tx.clone();
             let block: Vec<Ipv4Prefix> = (0..CHURN_BLOCK).map(|j| churn_prefix(c, j)).collect();
+            let cctx = Arc::clone(&ctx);
             tokio::spawn(async move {
                 // Stagger churners across the interval.
                 tokio::time::sleep(Duration::from_millis(
@@ -1747,6 +1964,7 @@ fn main() {
                     if tx.send(msg).await.is_err() {
                         return;
                     }
+                    cctx.churn_cycles.fetch_add(1, Ordering::Relaxed);
                     tokio::time::sleep(Duration::from_millis(CHURN_MS)).await;
                 }
             });
@@ -1767,6 +1985,20 @@ fn main() {
         // --- Flapstorm mode: an alternative to the reload loop. ---
         if let Some(k) = flapstorm {
             run_flapstorm(&ctx, &mut stubs, k, pid).await;
+            println!("done rss_mib={}", rss_mib(pid));
+            let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
+            if parse_errors > 0 {
+                eprintln!(
+                    "FAIL: {parse_errors} daemon UPDATE decode error(s) — a wire defect; measurement is invalid"
+                );
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
+
+        // --- iBGP-RR soak mode: churn hold + terminal refresh verify. ---
+        if ibgp_rr.is_some() {
+            run_ibgp_rr_soak(&ctx, &stubs, ibgp_hold_secs, pid).await;
             println!("done rss_mib={}", rss_mib(pid));
             let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
             if parse_errors > 0 {
@@ -2501,6 +2733,73 @@ mod tests {
         // trip-free behavior exactly.
         assert_eq!(env_u64("RELOADSTALL_TEST_UNSET_KNOB", 20), 20);
         assert!(!is_trip_slot(4, 0));
+    }
+
+    #[test]
+    fn ibgp_rr_mode_accepts_u16_asns_only() {
+        assert_eq!(ibgp_rr_mode(0), Ok(None));
+        assert_eq!(ibgp_rr_mode(1), Ok(Some(1)));
+        assert_eq!(ibgp_rr_mode(64512), Ok(Some(64512)));
+        assert_eq!(ibgp_rr_mode(65535), Ok(Some(65535)));
+        assert!(ibgp_rr_mode(65536).is_err());
+        assert!(ibgp_rr_mode(4_200_000_000).is_err());
+    }
+
+    #[test]
+    fn ibgp_rr_attrs_switch_and_ebgp_default_is_untouched() {
+        // Single test for both modes: the mode static is process-global,
+        // so this is the only test allowed to flip it (and it restores
+        // the eBGP default before returning).
+        let ebgp = base_attrs(7);
+        assert_eq!(
+            ebgp,
+            vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![64519])],
+                }),
+                PathAttribute::NextHop(Ipv4Addr::new(10, 9, 0, 8)),
+            ],
+            "eBGP announcement attributes are a frozen contract"
+        );
+
+        IBGP_RR_ASN.store(64512, Ordering::Relaxed);
+        let ibgp = base_attrs(7);
+        IBGP_RR_ASN.store(0, Ordering::Relaxed);
+        assert_eq!(
+            ibgp,
+            vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath { segments: vec![] }),
+                PathAttribute::NextHop(Ipv4Addr::new(10, 9, 0, 8)),
+                PathAttribute::LocalPref(100),
+            ],
+            "iBGP origination: empty AS_PATH + LOCAL_PREF, same next-hop"
+        );
+        // The iBGP UPDATE must encode (empty AS_PATH is a valid empty
+        // attribute) and decode back to the same generated shape.
+        let messages = {
+            IBGP_RR_ASN.store(64512, Ordering::Relaxed);
+            let messages = announce_msgs(7, &[base_prefix(3)]);
+            IBGP_RR_ASN.store(0, Ordering::Relaxed);
+            messages
+        };
+        assert_eq!(messages.len(), 1);
+        let bytes = encode_message(&messages[0]).expect("iBGP UPDATE encodes");
+        let mut buf = bytes::Bytes::copy_from_slice(&bytes);
+        let Message::Update(update) = decode_message(&mut buf, MAX_MESSAGE_LEN).unwrap() else {
+            panic!("expected an UPDATE");
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        assert_eq!(parsed.announced.len(), 1);
+        assert!(parsed
+            .attributes
+            .iter()
+            .any(|a| matches!(a, PathAttribute::LocalPref(100))));
+        assert!(parsed
+            .attributes
+            .iter()
+            .any(|a| matches!(a, PathAttribute::AsPath(path) if path.segments.is_empty())));
     }
 
     #[test]
