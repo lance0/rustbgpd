@@ -139,6 +139,12 @@ max-prefix trip cycles:
   the daemon's import path and session accounting.
 - `RELOADSTALL_TRIP_REESTABLISH_SECS` — teardown-to-re-established deadline
   (default 300); must exceed the daemon-side `max_prefix_restart_seconds`.
+- `RELOADSTALL_FINAL_QUIESCE_SECS` — post-run session hold in seconds
+  (default: the cycle quiesce), applied only when the LAST reload carries a
+  trip cycle: the engine sleeps with every stub session still up after
+  `trip N complete`, so an outer runner can drain the trip's daemon-side
+  evidence (`bgp_max_prefix_usage`/`limit`/`headroom`) from live metrics
+  before teardown. Never applies to the one-shot contract (no trips).
 
 `gen-scenario.py` grows a matching additive pair: setting both
 `GEN_TRIP_MAX_PREFIXES` and `GEN_TRIP_RESTART_SECONDS` adds

@@ -50,6 +50,9 @@ TRIP_LIMIT_MARGIN="${TRIP_LIMIT_MARGIN:-50}"
 TRIP_PREFIXES="${TRIP_PREFIXES:-64}"
 TRIP_RESTART_SECONDS="${TRIP_RESTART_SECONDS:-120}"
 TRIP_REESTABLISH_SEC="${TRIP_REESTABLISH_SEC:-300}"
+# Engine-side session hold after a final-cycle trip; the runner's final
+# evidence drain window is half of it, so the sessions always outlive it.
+TRIP_FINAL_QUIESCE_SEC="${TRIP_FINAL_QUIESCE_SEC:-120}"
 CONVERGE_CAP_SEC="${CONVERGE_CAP_SEC:-900}"
 LISTEN_PORT="${LISTEN_PORT:-1790}"
 # gen-scenario.py pins prometheus_addr to 127.0.0.1:9179.
@@ -80,6 +83,10 @@ if ((SOAK_PEERS <= 8)); then
 fi
 if ((TRIP_RESTART_SECONDS < 10)); then
     echo "TRIP_RESTART_SECONDS must be >= 10 so the 1 s countdown poll can observe it" >&2
+    exit 2
+fi
+if ((TRIP_FINAL_QUIESCE_SEC < 30)); then
+    echo "TRIP_FINAL_QUIESCE_SEC must be >= 30 (the final-trip evidence drain runs inside it)" >&2
     exit 2
 fi
 OVERALL_CAP_SEC="${OVERALL_CAP_SEC:-$((SOAK_SECONDS + RELOADS * 300 + PLANNED_TRIPS * (TRIP_RESTART_SECONDS + TRIP_REESTABLISH_SEC + 300) + 3600))}"
@@ -369,6 +376,7 @@ write_run_json() {
         printf '  "trip_prefixes": %d,\n' "$TRIP_PREFIXES"
         printf '  "trip_restart_seconds": %d,\n' "$TRIP_RESTART_SECONDS"
         printf '  "trip_reestablish_sec": %d,\n' "$TRIP_REESTABLISH_SEC"
+        printf '  "trip_final_quiesce_sec": %d,\n' "$TRIP_FINAL_QUIESCE_SEC"
         printf '  "listen_port": %d,\n' "$LISTEN_PORT"
         printf '  "metrics_port": %d,\n' "$METRICS_PORT"
         printf '  "designated_member": "%s"\n' "$DESIGNATED_ADDR"
@@ -440,6 +448,7 @@ main() {
         RELOADSTALL_TRIP_EVERY=$TRIP_EVERY \
         RELOADSTALL_TRIP_PREFIXES=$TRIP_PREFIXES \
         RELOADSTALL_TRIP_REESTABLISH_SECS=$TRIP_REESTABLISH_SEC \
+        RELOADSTALL_FINAL_QUIESCE_SECS=$TRIP_FINAL_QUIESCE_SEC \
         "$HARNESS" "$SOAK_PEERS" "$TOTAL_PREFIXES" "$LISTEN_PORT" "$DAEMON_PID" \
         "$SCEN/member.rpol" "$SCEN/gen-a.rpol" "$SCEN/gen-b.rpol" \
         "$RELOADS" "$CONTROL_SECS" "$SOAK_PEERS" >"$RELOADSTALL_LOG" 2>&1 &
@@ -482,8 +491,12 @@ main() {
     H_PID=""
     ((hrc == 0)) || abort "engine exited non-zero: $hrc"
     if [[ -n $TRIP_N ]]; then
-        # Drain the last trip's headroom evidence (bounded).
-        local drain_deadline=$(($(date +%s) + 60))
+        # Drain the last trip's headroom evidence (bounded). When the last
+        # trip rides the last reload, the engine holds every session up for
+        # TRIP_FINAL_QUIESCE_SEC after `trip N complete`, so the live loop
+        # above normally settles this before the engine exits; this drain
+        # (half the hold) is the fail-closed backstop.
+        local drain_deadline=$(($(date +%s) + TRIP_FINAL_QUIESCE_SEC / 2))
         while [[ -n $TRIP_N ]]; do
             (($(date +%s) < drain_deadline)) || abort "trip $TRIP_N headroom evidence never settled"
             trip_evidence_tick
