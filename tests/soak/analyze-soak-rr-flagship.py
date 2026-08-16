@@ -17,7 +17,15 @@ precommitted gates in docs/soaks/soak-acceptance-gates.md (scenario 11):
   - max-prefix flat: bgp_max_prefix_exceeded_total stays 0 (no bounds
     are configured; any latch is a spurious enforcement)
   - counter monotonicity: bgp_messages_sent_total never decreases
-  - readyz availability: 200 within 250 ms on every sample
+  - readyz availability, split at the terminal-refresh window (the
+    engine's rr_terminal refresh marker in cycles.log): hold-window
+    samples need 200 within 250 ms; terminal-window samples need any
+    recorded HTTP response (the documented fail-closed 503 is the
+    expected busy signal under the refresh avalanche; a timeout or
+    refusal — code 0 — still fails); and the runner's
+    terminal_readyz recovered_ms line must be present with
+    recovered_ms <= 60000 (200 within 250 ms restored no later than
+    60 s after the terminal receipt)
   - RSS peak ceiling; late-window RSS/intern slope (evaluated only when
     the late window spans >= --min-slope-seconds)
   - no ABORT record in cycles.log
@@ -51,12 +59,15 @@ RSS_PEAK_LIMIT_MB = 1024.0
 RSS_LATE_SLOPE_LIMIT = 10.0     # MB/h over the late window
 INTERN_LATE_SLOPE_LIMIT = 100.0  # entries/h over the late window
 READYZ_MS_LIMIT = 250.0
+READYZ_RECOVERY_LIMIT_MS = 60000
 
 CYCLE_RE = re.compile(r"^\[(?P<ts>[0-9T:\-]+Z)\] (?P<body>.*)$")
 HOLD_RE = re.compile(
     r"^rr_hold elapsed_s=(?P<elapsed>\d+) churn_cycles=(?P<cycles>\d+) "
     r"sessions_up=(?P<up>\d+) rss_mib=(?P<rss>\d+)$"
 )
+TERMINAL_START_RE = re.compile(r"^rr_terminal refresh wall_us=\d+$")
+RECOVERY_RE = re.compile(r"^terminal_readyz recovered_ms=(?P<ms>\d+)$")
 RECEIPT_RE = re.compile(r"^rr_terminal_receipt,(?P<fields>.+)$")
 
 
@@ -107,11 +118,13 @@ def parse_receipt(fields: str) -> dict[str, int]:
 
 
 def parse_cycles(lines: list[str]) -> dict:
-    """Structured view of cycles.log: hold trace, terminal receipt,
-    abort records."""
+    """Structured view of cycles.log: hold trace, terminal-window start
+    marker, terminal receipt, readyz recovery record, abort records."""
     holds: list[dict[str, int]] = []
     receipts: list[dict[str, int]] = []
     aborts: list[str] = []
+    terminal_start: Optional[float] = None
+    recoveries: list[int] = []
     for raw in lines:
         m = CYCLE_RE.match(raw.strip())
         if not m:
@@ -124,10 +137,18 @@ def parse_cycles(lines: list[str]) -> dict:
         if h:
             holds.append({k: int(v) for k, v in h.groupdict().items()})
             continue
+        if terminal_start is None and TERMINAL_START_RE.match(body):
+            terminal_start = parse_ts(m.group("ts"))
+            continue
+        rec = RECOVERY_RE.match(body)
+        if rec:
+            recoveries.append(int(rec.group("ms")))
+            continue
         r = RECEIPT_RE.match(body)
         if r:
             receipts.append(parse_receipt(r.group("fields")))
-    return {"holds": holds, "receipts": receipts, "aborts": aborts}
+    return {"holds": holds, "receipts": receipts, "aborts": aborts,
+            "terminal_start": terminal_start, "recoveries": recoveries}
 
 
 def check_receipt(receipts: list[dict[str, int]], meta: dict) -> list[str]:
@@ -190,10 +211,29 @@ def analyze(rows: list[dict[str, str]], cycles: dict, meta: dict,
     )
 
     monotone_breaks = sum(1 for a, b in zip(msgs, msgs[1:]) if b < a)
-    readyz_bad = sum(
-        1 for code, ms in zip(readyz_code, readyz_ms)
-        if code != 200 or ms > READYZ_MS_LIMIT
+
+    # readyz split (gates doc scenario 11): strict 200-within-250ms on
+    # hold-window samples; samples inside the terminal-refresh window
+    # (at/after the engine's rr_terminal refresh marker) only need a
+    # recorded HTTP response — the fail-closed 503 is the documented
+    # busy signal under the refresh avalanche, but a timeout/refusal
+    # (code 0) still fails. Recovery (200 within 250ms again <= 60s
+    # after the receipt) is evidenced by the runner's terminal_readyz
+    # recovered_ms line.
+    terminal_start = cycles["terminal_start"]
+    in_terminal = [
+        terminal_start is not None and parse_ts(r["timestamp"]) >= terminal_start
+        for r in rows
+    ]
+    readyz_hold_bad = sum(
+        1 for i, (code, ms) in enumerate(zip(readyz_code, readyz_ms))
+        if not in_terminal[i] and (code != 200 or ms > READYZ_MS_LIMIT)
     )
+    readyz_terminal_no_response = sum(
+        1 for i, code in enumerate(readyz_code)
+        if in_terminal[i] and code == 0
+    )
+    recovered_ms = cycles["recoveries"][0] if cycles["recoveries"] else None
 
     peak_rss = max(rss) if rss else float("nan")
 
@@ -250,9 +290,18 @@ def analyze(rows: list[dict[str, str]], cycles: dict, meta: dict,
             "pass": monotone_breaks == 0,
         },
         "readyz": {
-            "value": {"bad_samples": readyz_bad,
-                      "limit_ms": READYZ_MS_LIMIT},
-            "pass": readyz_bad == 0,
+            "value": {
+                "hold_bad_samples": readyz_hold_bad,
+                "terminal_window_samples": sum(in_terminal),
+                "terminal_no_response": readyz_terminal_no_response,
+                "recovered_ms": recovered_ms,
+                "limit_ms": READYZ_MS_LIMIT,
+                "recovery_limit_ms": READYZ_RECOVERY_LIMIT_MS,
+            },
+            "pass": (readyz_hold_bad == 0
+                     and readyz_terminal_no_response == 0
+                     and recovered_ms is not None
+                     and recovered_ms <= READYZ_RECOVERY_LIMIT_MS),
         },
         "rss_peak_mb": {
             "value": peak_rss if not math.isnan(peak_rss) else None,

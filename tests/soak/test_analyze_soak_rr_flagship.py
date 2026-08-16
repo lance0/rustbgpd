@@ -51,7 +51,8 @@ def receipt_line(elapsed, **over):
     return cline(elapsed, f"rr_terminal_receipt,{joined}")
 
 
-def smoke_cycles(receipt_over=None, with_receipt=True):
+def smoke_cycles(receipt_over=None, with_receipt=True, terminal_at=245,
+                 recovered_ms=2100):
     lines = []
     for minute in range(5):
         elapsed = minute * 60
@@ -59,8 +60,12 @@ def smoke_cycles(receipt_over=None, with_receipt=True):
             f"rr_hold elapsed_s={elapsed} churn_cycles={elapsed * 60} "
             "sessions_up=12 rss_mib=200"
         )))
+    if terminal_at is not None:
+        lines.append(cline(terminal_at, "rr_terminal refresh wall_us=123456"))
     if with_receipt:
         lines.append(receipt_line(250, **(receipt_over or {})))
+    if recovered_ms is not None:
+        lines.append(cline(252, f"terminal_readyz recovered_ms={recovered_ms}"))
     return lines
 
 
@@ -91,7 +96,9 @@ def long_cycles():
             f"rr_hold elapsed_s={elapsed} churn_cycles={elapsed * 60} "
             "sessions_up=12 rss_mib=500"
         )))
+    lines.append(cline(86450, "rr_terminal refresh wall_us=987654"))
     lines.append(receipt_line(86500, churn_cycles=86400 * 60))
+    lines.append(cline(86505, "terminal_readyz recovered_ms=4800"))
     return lines
 
 
@@ -199,6 +206,66 @@ class RrFlagshipAnalyzerContracts(unittest.TestCase):
         result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
         self.assertEqual(result.returncode, 1)
         self.assertFalse(payload["gates"]["msgs_sent_monotone"]["pass"])
+
+    def test_hold_window_readyz_503_fails(self):
+        # Strictness where the operational claim lives: any non-200 (or
+        # >250ms) sample before the terminal-refresh marker fails.
+        rows = smoke_rows()
+        rows[4]["readyz_code"] = "503"
+        rows[4]["readyz_ms"] = "208.0"
+        result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
+        self.assertEqual(result.returncode, 1)
+        gate = payload["gates"]["readyz"]
+        self.assertFalse(gate["pass"])
+        self.assertEqual(gate["value"]["hold_bad_samples"], 1)
+
+    def test_hold_window_slow_200_fails(self):
+        rows = smoke_rows()
+        rows[4]["readyz_ms"] = "300.0"
+        result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["readyz"]["pass"])
+
+    def test_terminal_window_503_passes(self):
+        # The refresh avalanche may saturate the core actors; a
+        # fail-closed 503 inside the terminal-refresh window is the
+        # documented busy signal, not a gate failure.
+        rows = smoke_rows()
+        rows[-1]["readyz_code"] = "503"
+        rows[-1]["readyz_ms"] = "208.0"
+        cycles = smoke_cycles(terminal_at=235)
+        result, payload = run_analyzer(rows, cycles, smoke_meta())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        gate = payload["gates"]["readyz"]
+        self.assertTrue(gate["pass"])
+        self.assertEqual(gate["value"]["terminal_window_samples"], 1)
+
+    def test_terminal_window_no_response_fails(self):
+        # A timeout/refusal (curl records code 000) is not fail-closed
+        # busyness — the endpoint must respond even mid-avalanche.
+        rows = smoke_rows()
+        rows[-1]["readyz_code"] = "000"
+        rows[-1]["readyz_ms"] = "5000.0"
+        cycles = smoke_cycles(terminal_at=235)
+        result, payload = run_analyzer(rows, cycles, smoke_meta())
+        self.assertEqual(result.returncode, 1)
+        gate = payload["gates"]["readyz"]
+        self.assertFalse(gate["pass"])
+        self.assertEqual(gate["value"]["terminal_no_response"], 1)
+
+    def test_missing_recovery_line_fails(self):
+        cycles = smoke_cycles(recovered_ms=None)
+        result, payload = run_analyzer(smoke_rows(), cycles, smoke_meta())
+        self.assertEqual(result.returncode, 1)
+        gate = payload["gates"]["readyz"]
+        self.assertFalse(gate["pass"])
+        self.assertIsNone(gate["value"]["recovered_ms"])
+
+    def test_recovery_over_60s_fails(self):
+        cycles = smoke_cycles(recovered_ms=61000)
+        result, payload = run_analyzer(smoke_rows(), cycles, smoke_meta())
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["readyz"]["pass"])
 
     def test_rss_over_ceiling_fails(self):
         rows = smoke_rows()
