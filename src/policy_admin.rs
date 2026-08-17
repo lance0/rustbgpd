@@ -264,7 +264,7 @@ pub(crate) fn config_peer_group_to_api(definition: &PeerGroupConfig) -> PeerGrou
         llgr_stale_time: definition.llgr_stale_time,
         local_ipv6_nexthop: definition.local_ipv6_nexthop.clone(),
         route_reflector_client: definition.route_reflector_client,
-        orr_vantage: definition.orr_vantage,
+        orr_vantage: definition.orr_vantage.clone(),
         route_server_client: definition.route_server_client,
         per_client_best: definition.per_client_best,
         remove_private_as: definition.remove_private_as.clone(),
@@ -602,7 +602,9 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     },
                     local_ipv6_nexthop: cfg.local_ipv6_nexthop.map(|addr| addr.to_string()),
                     route_reflector_client: Some(cfg.route_reflector_client),
-                    orr_vantage: cfg.orr_vantage,
+                    // `cfg` is a resolved TransportConfig, so this is already
+                    // a concrete IGP location — render it literally.
+                    orr_vantage: cfg.orr_vantage.map(|addr| addr.to_string()),
                     route_server_client: Some(cfg.route_server_client),
                     per_client_best: Some(cfg.per_client_best),
                     next_hop_ownership: cfg

@@ -14,6 +14,18 @@ fn dynamic_neighbor_effective_mode_validation_matrix() {
         (rr, 0, "route_reflector_client requires iBGP"),
         (orr, 65002, "orr_vantage requires iBGP"),
         (orr, 65001, "requires route_reflector_client = true"),
+        // The `peer_address` sentinel is exempt from the
+        // address-shape checks, never from the mode checks.
+        (
+            "orr_vantage = \"peer_address\"",
+            65002,
+            "orr_vantage requires iBGP",
+        ),
+        (
+            "orr_vantage = \"peer_address\"",
+            65001,
+            "requires route_reflector_client = true",
+        ),
         (rr_router, 65001, "router_id"),
         (rr_unspecified, 65001, "unspecified or loopback"),
         (rr_loopback, 65001, "unspecified or loopback"),

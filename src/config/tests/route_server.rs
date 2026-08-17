@@ -121,20 +121,26 @@ orr_vantage = "192.0.2.7"
 }
 
 #[test]
-fn orr_vantage_rejected_when_equal_to_neighbor_or_local_address() {
-    // Vantage == the neighbor's own peering address (10.0.0.2).
+fn orr_vantage_equal_to_the_neighbor_own_address_is_accepted() {
+    // RFC 9107: the vantage IS the client's IGP location, so a
+    // client's own address is the canonical value — and the one that
+    // `"peer_address"` derives. Only the reflector's own router_id
+    // degenerates to plain non-ORR reflection.
     let toml = orr_toml(
         "route_reflector_client = true\norr_vantage = \"10.0.0.2\"",
         "",
     );
-    let err = parse(&toml).unwrap_err();
-    assert!(matches!(err, ConfigError::InvalidRrConfig { .. }));
-    assert!(
-        err.to_string().contains("orr_vantage")
-            && err.to_string().contains("neighbor's own address"),
-        "diagnostic names the field and offending address: {err}"
+    let config = parse(&toml).expect("a client's own address is a valid vantage");
+    let resolved = config.resolved_neighbors().unwrap();
+    assert_eq!(
+        resolved[0].transport_config.orr_vantage,
+        Some("10.0.0.2".parse().unwrap()),
+        "the literal form resolves to the same value peer_address derives"
     );
+}
 
+#[test]
+fn orr_vantage_rejected_when_equal_to_local_router_id() {
     // Vantage == the reflector's own router_id (10.0.0.1).
     let toml = orr_toml(
         "route_reflector_client = true\norr_vantage = \"10.0.0.1\"",
@@ -864,4 +870,212 @@ route_server_client = true
     let config = parse(toml_str).unwrap();
     let peers = config.to_peer_configs().unwrap();
     assert!(peers[0].0.route_server_client);
+}
+
+// --- `orr_vantage = "peer_address"` ---
+
+#[test]
+fn parse_orr_vantage_accepts_addresses_and_the_peer_address_sentinel() {
+    assert_eq!(
+        parse_orr_vantage("192.0.2.7"),
+        Ok(OrrVantage::Address("192.0.2.7".parse().unwrap())),
+        "a literal IPv4 vantage parses to the address form"
+    );
+    assert_eq!(
+        parse_orr_vantage("2001:db8::7"),
+        Ok(OrrVantage::Address("2001:db8::7".parse().unwrap())),
+        "a literal IPv6 vantage parses to the address form"
+    );
+    assert_eq!(
+        parse_orr_vantage("peer_address"),
+        Ok(OrrVantage::PeerAddress),
+        "the canonical snake_case sentinel parses"
+    );
+    assert_eq!(
+        parse_orr_vantage("peer-address"),
+        Ok(OrrVantage::PeerAddress),
+        "the kebab-case alias parses (BgpRoleConfig rs-client precedent)"
+    );
+
+    let err = parse_orr_vantage("not-an-address").unwrap_err();
+    assert!(
+        err.contains("not-an-address") && err.contains("peer_address"),
+        "the reason names the offending value and the sentinel: {err}"
+    );
+    // Reject near-misses rather than guessing intent.
+    assert!(parse_orr_vantage("PEER_ADDRESS").is_err());
+    assert!(parse_orr_vantage("").is_err());
+}
+
+#[test]
+fn orr_vantage_peer_address_resolves_to_each_dynamic_peer_own_address() {
+    // The point of the feature: one range, one peer group, one `orr_vantage`
+    // value — but every accepted peer lands in its own vantage, because the
+    // sentinel resolves against that peer's address.
+    let toml = dynamic_modes_toml(
+        "route_reflector_client = true\norr_vantage = \"peer_address\"",
+        65001,
+    );
+    let config = parse(&toml).unwrap();
+    let group = &config.peer_groups["modes"];
+
+    for peer in ["10.0.0.42", "10.0.0.77"] {
+        let resolved = config
+            .resolve_dynamic_neighbor(
+                peer.parse().unwrap(),
+                65001,
+                "dynamic",
+                group,
+                "modes",
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            resolved.transport_config.orr_vantage,
+            Some(peer.parse().unwrap()),
+            "dynamic peer {peer} resolves the sentinel to its own address"
+        );
+    }
+}
+
+#[test]
+fn orr_vantage_peer_address_derives_ipv6_vantages_for_an_ipv6_range() {
+    // The derivation is family-agnostic: it collapses to `peer_addr`, which
+    // carries whatever family the accepted session used. An IPv6 range must
+    // therefore yield IPv6 vantages, which `OrrTopology::resolve_node` looks
+    // up via the /128 prefix_v6 LPM arm.
+    let toml = format!(
+        r#"
+{base}
+
+[peer_groups.v6-rr]
+route_reflector_client = true
+orr_vantage = "peer_address"
+
+[[dynamic_neighbors]]
+prefix = "2001:db8::/64"
+peer_group = "v6-rr"
+remote_asn = 65001
+"#,
+        base = valid_toml()
+    );
+    let config = parse(&toml).unwrap();
+    let group = &config.peer_groups["v6-rr"];
+
+    for peer in ["2001:db8::42", "2001:db8::77"] {
+        let addr: std::net::IpAddr = peer.parse().unwrap();
+        let resolved = config
+            .resolve_dynamic_neighbor(addr, 65001, "dynamic", group, "v6-rr", false)
+            .unwrap();
+        assert_eq!(
+            resolved.transport_config.orr_vantage,
+            Some(addr),
+            "IPv6 dynamic peer {peer} resolves the sentinel to its own v6 address"
+        );
+        assert!(
+            resolved.transport_config.orr_vantage.unwrap().is_ipv6(),
+            "the derived vantage must stay in the peer's own address family"
+        );
+    }
+}
+
+#[test]
+fn orr_vantage_peer_address_resolves_for_a_static_neighbor() {
+    // `orr_toml` declares neighbor 10.0.0.2 in AS 65001 (iBGP).
+    let toml = orr_toml(
+        "",
+        "route_reflector_client = true\norr_vantage = \"peer_address\"",
+    );
+    let config = parse(&toml).unwrap();
+    let resolved = config.resolved_neighbors().unwrap();
+    assert_eq!(
+        resolved[0].transport_config.orr_vantage,
+        Some("10.0.0.2".parse().unwrap()),
+        "a static neighbor resolves the sentinel to its own peering address"
+    );
+}
+
+#[test]
+fn orr_vantage_peer_address_alias_and_bad_values_are_classified() {
+    // The kebab alias loads and resolves identically.
+    let toml = orr_toml(
+        "",
+        "route_reflector_client = true\norr_vantage = \"peer-address\"",
+    );
+    let resolved = parse(&toml).unwrap().resolved_neighbors().unwrap();
+    assert_eq!(
+        resolved[0].transport_config.orr_vantage,
+        Some("10.0.0.2".parse().unwrap())
+    );
+
+    // Garbage fails closed at load with an operator-actionable diagnostic,
+    // on the neighbor field and on the peer-group field alike.
+    for (neighbor_fields, group_fields) in [
+        ("orr_vantage = \"bogus\"", "route_reflector_client = true"),
+        ("", "route_reflector_client = true\norr_vantage = \"bogus\""),
+    ] {
+        let err = parse(&orr_toml(neighbor_fields, group_fields)).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidOrrVantage { .. }),
+            "expected InvalidOrrVantage, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("bogus") && err.to_string().contains("peer_address"),
+            "diagnostic names the offending value and the sentinel: {err}"
+        );
+    }
+}
+
+/// `resolve_neighbor` rejects an unparseable vantage instead of panicking.
+///
+/// Every caller resolves from a validated `Config`, so this is only
+/// reachable by mutating the config after load — exactly what a future
+/// resolve path that skips `validate()` would do. Pinning the `Err` keeps
+/// that mistake a one-neighbor rejection instead of a daemon panic.
+#[test]
+fn orr_vantage_resolution_rejects_unvalidated_garbage_without_panicking() {
+    let toml = orr_toml(
+        "",
+        "route_reflector_client = true\norr_vantage = \"peer_address\"",
+    );
+    let mut config = parse(&toml).unwrap();
+    config.neighbors[0].orr_vantage = Some("bogus".to_string());
+
+    // `ResolvedNeighbor` is not `Debug`, so match rather than `unwrap_err`.
+    let Err(err) = config.resolve_neighbor(&config.neighbors[0].clone()) else {
+        panic!("an unparseable vantage must not resolve");
+    };
+    assert!(
+        matches!(err, ConfigError::InvalidOrrVantage { .. }),
+        "expected InvalidOrrVantage, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("10.0.0.2") && err.to_string().contains("bogus"),
+        "the error names the neighbor and the offending value: {err}"
+    );
+
+    // The inherited group value takes the same path when the neighbor
+    // itself carries none.
+    config.neighbors[0].orr_vantage = None;
+    config.peer_groups.get_mut("clients").unwrap().orr_vantage = Some("bogus".to_string());
+    let Err(inherited) = config.resolve_neighbor(&config.neighbors[0].clone()) else {
+        panic!("an inherited unparseable vantage must not resolve");
+    };
+    assert!(
+        matches!(inherited, ConfigError::InvalidOrrVantage { .. }),
+        "an inherited garbage vantage is rejected the same way, got {inherited:?}"
+    );
+}
+
+#[test]
+fn orr_vantage_peer_address_still_requires_rr_client() {
+    // The sentinel is exempt from the address-shape checks, never from the
+    // mode checks. (The iBGP half is pinned by the dynamic-range matrix in
+    // `dynamic_neighbors.rs`, which drives remote_asn through the range.)
+    let err = parse(&orr_toml("", "orr_vantage = \"peer_address\"")).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("requires route_reflector_client = true"),
+        "peer_address without route_reflector_client is rejected: {err}"
+    );
 }

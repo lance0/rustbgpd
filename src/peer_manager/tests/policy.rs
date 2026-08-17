@@ -864,6 +864,75 @@ async fn set_peer_group_policy_only_change_reaches_live_dynamic_peers() {
     rib_drainer.abort();
 }
 
+/// The gRPC boundary forwards `orr_vantage` unvalidated by design
+/// (`crates/api::peer_group_service::proto_definition_to_input` cannot reach
+/// `parse_orr_vantage`, and an `IpAddr` parse there would reject the
+/// `"peer_address"` sentinel). That is only safe because this apply path
+/// re-runs `Config::validate` before touching anything — pin it: an
+/// unparseable vantage is rejected as `Invalid` and the stored group keeps
+/// its previous value.
+#[tokio::test]
+async fn set_peer_group_rejects_an_unparseable_orr_vantage_on_apply() {
+    let (tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let rib_drainer = tokio::spawn(async move { while rib_rx.recv().await.is_some() {} });
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    mgr.current_config = make_dynamic_manager_config();
+    let mut definition = crate::policy_admin::config_peer_group_to_api(
+        mgr.current_config.peer_groups.get("ix-members").unwrap(),
+    );
+    definition.orr_vantage = Some("bogus".to_string());
+
+    let manager_task = tokio::spawn(mgr.run());
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::SetPeerGroup {
+        name: "ix-members".to_string(),
+        definition,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    let error = reply_rx
+        .await
+        .unwrap()
+        .expect_err("an unparseable orr_vantage must not apply");
+    let message = format!("{error:?}");
+    assert!(
+        matches!(error, CatalogMutationError::Invalid(_)),
+        "expected Invalid (gRPC InvalidArgument), got {message}"
+    );
+    assert!(
+        message.contains("orr_vantage") && message.contains("bogus"),
+        "the rejection names the field and the offending value: {message}"
+    );
+
+    let (get_tx, get_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::GetPeerGroup {
+        name: "ix-members".to_string(),
+        reply: get_tx,
+    })
+    .await
+    .unwrap();
+    let stored = get_rx.await.unwrap().expect("the group still exists");
+    assert_eq!(
+        stored.orr_vantage, None,
+        "a rejected apply must leave the stored group untouched"
+    );
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    manager_task.await.unwrap();
+    rib_drainer.abort();
+}
+
 /// Load-bearing dynamic inheritance proof: dropping the post-commit sync in
 /// `apply_peer_group_change` leaves an accepted dynamic peer on the duration
 /// it inherited at accept time. The None -> 30 assertion and the 30 -> 60

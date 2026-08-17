@@ -131,7 +131,7 @@ reload).
 | `llgr_stale_time` | live (effective next session) | RFC 9494 LLGR capability stale time. |
 | `local_ipv6_nexthop` | live | Used on outbound advertisements; new value applied on next route emission. |
 | `route_reflector_client` | live (effective next session) | RFC 4456 RR-client flag affects iBGP best-path + reflection behavior. Toggling re-evaluates the existing Adj-RIB-Out on the next distribution pass. |
-| `orr_vantage` | live (effective next session) | RFC 9107 ORR vantage point (the client's IGP location as a BGP-LS topology node). Registered with the RIB manager at session establishment, so a change takes effect on the next session. Currently drives the vantage registry, cached SPF state, and `rbgp orr` status only; the per-vantage best-path selection ships with the ORR distribution switch. |
+| `orr_vantage` | live (effective next session) | RFC 9107 ORR vantage point (the client's IGP location as a BGP-LS topology node), or `"peer_address"` for the peer's own peering address. Resolved to a concrete address during neighbor resolution and registered with the RIB manager at session establishment, so a change takes effect on the next session. Drives the vantage registry, cached SPF state, per-vantage best-path selection, and `rbgp orr` status. |
 | `route_server_client` | live (effective next session) | Transparent RS-client behavior on egress. |
 | `per_client_best` | live (effective next session) | RFC 7947 §2.3.2 per-client best-path selection mode. Registered with the RIB manager at session establishment (like `orr_vantage`), so a change takes effect on the next session. |
 | `next_hop_ownership` | live (effective next session) | ADR-0107 pre-policy `NEXT_HOP` ownership enforcement for route-server clients (RFC 7948 §4.8). Bound at session establishment; on SIGHUP the reconciler rebuilds the session so the new mode applies right away. Annotated "session reset: session re-establish" by `rustbgpd --diff`. |
@@ -183,7 +183,7 @@ configure their keyring directly.
 | `llgr_stale_time` | live (effective next session) | |
 | `local_ipv6_nexthop` | live | |
 | `route_reflector_client` | live (effective next session) | |
-| `orr_vantage` | live (effective next session) | Inherited RFC 9107 vantage; same semantics as the neighbor field. |
+| `orr_vantage` | live (effective next session) | Inherited RFC 9107 vantage; same semantics as the neighbor field. `"peer_address"` on a group backing a `[[dynamic_neighbors]]` range gives every accepted peer its own vantage. |
 | `route_server_client` | live (effective next session) | |
 | `per_client_best` | live (effective next session) | Inherited per-client best-path mode; same semantics as the neighbor field. |
 | `next_hop_ownership` | live (effective next session) | Inherited ADR-0107 ownership enforcement; same semantics as the neighbor field. |

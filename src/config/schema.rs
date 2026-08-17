@@ -1149,11 +1149,14 @@ pub struct Neighbor {
     /// Mark this neighbor as a route reflector client (RFC 4456).
     /// Only valid for iBGP neighbors (`remote_asn` == `global.asn`).
     pub route_reflector_client: Option<bool>,
-    /// Optimal Route Reflection vantage point (RFC 9107): an IP address
-    /// identifying this client's IGP location as a BGP-LS topology node
-    /// (a link interface/neighbor address, or an address covered by a
-    /// Prefix NLRI). Requires `route_reflector_client = true` (iBGP).
-    pub orr_vantage: Option<IpAddr>,
+    /// Optimal Route Reflection vantage point (RFC 9107): either an IP
+    /// address identifying this client's IGP location as a BGP-LS topology
+    /// node (a link interface/neighbor address, or an address covered by a
+    /// Prefix NLRI), or the literal `"peer_address"` to use this peer's own
+    /// peering address — which gives every peer accepted from a
+    /// `[[dynamic_neighbors]]` range its own vantage. Requires
+    /// `route_reflector_client = true` (iBGP).
+    pub orr_vantage: Option<String>,
     /// Mark this eBGP neighbor as a transparent route-server client.
     ///
     /// When enabled, outbound unicast advertisements preserve the original
@@ -1495,8 +1498,10 @@ pub struct PeerGroupConfig {
     /// Mark neighbors in this group as route reflector clients (RFC 4456).
     pub route_reflector_client: Option<bool>,
     /// Optimal Route Reflection vantage point (RFC 9107) inherited by
-    /// neighbors in this group. See the neighbor-level `orr_vantage`.
-    pub orr_vantage: Option<IpAddr>,
+    /// neighbors in this group. See the neighbor-level `orr_vantage`;
+    /// `"peer_address"` is the value that makes a dynamic range give each
+    /// accepted peer its own vantage.
+    pub orr_vantage: Option<String>,
     /// Mark neighbors in this group as transparent route-server clients.
     /// See the neighbor-level `route_server_client`.
     pub route_server_client: Option<bool>,
@@ -1614,6 +1619,38 @@ pub enum NextHopOwnershipConfig {
     /// Accept a unicast announcement only when its complete wire
     /// next-hop identity is the advertising session's own address.
     StrictPeer,
+}
+
+/// Effective RFC 9107 ORR vantage selector, parsed from the `orr_vantage`
+/// config string. The config surface is a `String` (the `remove_private_as`
+/// pattern) so the unresolved value survives the `PeerGroupConfig` ⇄
+/// `PeerGroupDefinition` round-trip without adding a serde dependency to
+/// `crates/api`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OrrVantage {
+    /// `"peer_address"`: resolve per peer to that peer's own peering
+    /// address. Every peer accepted from a dynamic range therefore gets a
+    /// distinct vantage.
+    PeerAddress,
+    /// A literal IGP location address shared by every neighbor that names it.
+    Address(IpAddr),
+}
+
+/// Parse an `orr_vantage` config value. `Err` carries a reason fragment;
+/// callers prepend the offending subject.
+pub(crate) fn parse_orr_vantage(raw: &str) -> Result<OrrVantage, String> {
+    match raw {
+        "peer_address" | "peer-address" => Ok(OrrVantage::PeerAddress),
+        other => other
+            .parse::<IpAddr>()
+            .map(OrrVantage::Address)
+            .map_err(|e| {
+                format!(
+                    "invalid orr_vantage {other:?}: {e}; expected an IP address \
+                     or \"peer_address\""
+                )
+            }),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2688,6 +2725,8 @@ pub enum ConfigError {
     InvalidMrtConfig { reason: String },
     #[error("invalid remove_private_as config: {reason}")]
     InvalidRemovePrivateAs { reason: String },
+    #[error("invalid orr_vantage config: {reason}")]
+    InvalidOrrVantage { reason: String },
     #[error("invalid log_level {value:?}: expected error, warn, info, debug, or trace")]
     InvalidLogLevel { value: String },
     #[error("invalid dynamic neighbor config: {reason}")]

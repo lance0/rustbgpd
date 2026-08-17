@@ -19,6 +19,7 @@ use super::parse::{
 };
 use super::schema::{
     BGP_PORT, DEFAULT_CONNECT_RETRY_SECS, DEFAULT_DYNAMIC_NEIGHBOR_LIMIT, DEFAULT_HOLD_TIME,
+    OrrVantage, parse_orr_vantage,
 };
 use super::{
     AddPathConfig, BgpRoleConfig, Config, ConfigError, Neighbor, NextHopOwnershipConfig,
@@ -847,9 +848,31 @@ impl Config {
             .route_reflector_client
             .or_else(|| group.and_then(|g| g.route_reflector_client))
             .unwrap_or(false);
+        // RFC 9107 ORR: `"peer_address"` collapses here, where the peer's own
+        // address is in scope, so `TransportConfig` only ever carries a
+        // resolved IGP location. A dynamic peer reaches this through
+        // `synthetic_dynamic_neighbor`, whose `address` is the accepted
+        // peer's IP — which is what gives every dynamic peer its own vantage.
+        //
+        // Every caller resolves from a `Config` that already passed
+        // `validate()`, so the syntax error is unreachable in practice — but
+        // it is returned rather than panicked. This function is already
+        // fallible, and a future resolve path that skips validation should
+        // reject one neighbor, not take the daemon down.
         transport.orr_vantage = neighbor
             .orr_vantage
-            .or_else(|| group.and_then(|g| g.orr_vantage));
+            .as_deref()
+            .or_else(|| group.and_then(|g| g.orr_vantage.as_deref()))
+            .map(|raw| {
+                parse_orr_vantage(raw).map(|vantage| match vantage {
+                    OrrVantage::PeerAddress => peer_addr,
+                    OrrVantage::Address(addr) => addr,
+                })
+            })
+            .transpose()
+            .map_err(|reason| ConfigError::InvalidOrrVantage {
+                reason: format!("neighbor {}: {reason}", neighbor.address),
+            })?;
         transport.remove_private_as = Self::resolved_remove_private_as(neighbor, group);
         // RFC 4456: thread the local cluster-id just like
         // `PeerManager::build_transport_config`. Without it a runtime-added

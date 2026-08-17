@@ -889,13 +889,23 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `disable_ipv4_unicast` | bool     | no       | false   | True IPv6-only peering: never negotiate IPv4 unicast on this session (suppresses the RFC 4760 §8 implicit-IPv4 fallback; see below) |
 | `remove_private_as`   | string   | no       | --      | Remove private ASNs from AS_PATH: `"remove"`, `"all"`, or `"replace"` (eBGP only) |
 | `route_reflector_client` | bool   | no       | false   | Mark this iBGP peer as a route reflector client (RFC 4456) |
-| `orr_vantage`          | string   | no       | --      | RFC 9107 Optimal Route Reflection IGP location: an IP identifying a node in the BGP-LS-sourced topology; this client's best paths use the interior-cost tiebreak from that node's SPF. Requires `route_reflector_client = true` + iBGP; inherits from the peer-group; an unresolved vantage falls back silently to the standard best (see `rbgp orr`). ADR-0095 |
+| `orr_vantage`          | string   | no       | --      | RFC 9107 Optimal Route Reflection IGP location: either an IP identifying a node in the BGP-LS-sourced topology, or the literal `"peer_address"` (alias `"peer-address"`) meaning this peer's own peering address — on a `[[dynamic_neighbors]]` peer group that gives every accepted peer its own vantage. This client's best paths use the interior-cost tiebreak from that node's SPF. Requires `route_reflector_client = true` + iBGP; inherits from the peer-group; an unresolved vantage falls back silently to the standard best (see `rbgp orr`). ADR-0095 |
 | `local_ipv6_nexthop`   | string   | no       | --      | Override IPv6 next-hop for eBGP exports (must be valid non-link-local IPv6) |
 | `import_policy_chain`  | [string] | no       | --      | Named policy chain for import (mutually exclusive with inline import_policy) |
 | `export_policy_chain`  | [string] | no       | --      | Named policy chain for export (mutually exclusive with inline export_policy) |
 | `llgr_stale_time`      | u32      | no       | 0       | LLGR stale time in seconds (0 = disabled, max 16777215; RFC 9494)    |
 | `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
 | `log_level`            | string   | no       | --      | Override log level for this peer: `"error"`, `"warn"`, `"info"`, `"debug"`, or `"trace"` |
+
+> **`orr_vantage = "peer_address"` on a dynamic range.** Each accepted peer's
+> vantage is its own peering address, so it must resolve in the BGP-LS
+> topology — as a link interface/neighbor address (TLVs 259–262) or an
+> address covered by a Topology Prefix NLRI. Clients peering from a loopback
+> need that loopback advertised as a prefix NLRI. A vantage that does not
+> resolve is not an error: the peer falls back to the standard best path,
+> counts in the `bgp_orr_unresolved_vantages` gauge, and is listed by
+> `rbgp orr`. Because ORR peers are never grouped into shared update groups,
+> a range using this value produces one update group per peer.
 
 Use `rbgp neighbor <addr>` to inspect the actor's current aggregate
 max-prefix-counted NLRI identity count and unique IPv4- and IPv6-unicast prefix

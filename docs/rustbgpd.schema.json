@@ -1999,12 +1999,11 @@
           ]
         },
         "orr_vantage": {
-          "description": "Optimal Route Reflection vantage point (RFC 9107): an IP address\nidentifying this client's IGP location as a BGP-LS topology node\n(a link interface/neighbor address, or an address covered by a\nPrefix NLRI). Requires `route_reflector_client = true` (iBGP).",
+          "description": "Optimal Route Reflection vantage point (RFC 9107): either an IP\naddress identifying this client's IGP location as a BGP-LS topology\nnode (a link interface/neighbor address, or an address covered by a\nPrefix NLRI), or the literal `\"peer_address\"` to use this peer's own\npeering address — which gives every peer accepted from a\n`[[dynamic_neighbors]]` range its own vantage. Requires\n`route_reflector_client = true` (iBGP).",
           "type": [
             "string",
             "null"
-          ],
-          "format": "ip"
+          ]
         },
         "peer_group": {
           "description": "Optional peer-group reference for inherited transport/policy defaults.",
@@ -2441,12 +2440,11 @@
           ]
         },
         "orr_vantage": {
-          "description": "Optimal Route Reflection vantage point (RFC 9107) inherited by\nneighbors in this group. See the neighbor-level `orr_vantage`.",
+          "description": "Optimal Route Reflection vantage point (RFC 9107) inherited by\nneighbors in this group. See the neighbor-level `orr_vantage`;\n`\"peer_address\"` is the value that makes a dynamic range give each\naccepted peer its own vantage.",
           "type": [
             "string",
             "null"
-          ],
-          "format": "ip"
+          ]
         },
         "per_client_best": {
           "description": "RFC 7947 §2.3.2 per-client best-path inherited by neighbors in\nthis group. See the neighbor-level `per_client_best`.",

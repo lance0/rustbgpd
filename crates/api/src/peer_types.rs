@@ -1757,9 +1757,11 @@ pub struct PeerGroupDefinition {
     pub local_ipv6_nexthop: Option<String>,
     /// Optional route-reflector-client override.
     pub route_reflector_client: Option<bool>,
-    /// Optional RFC 9107 ORR vantage point (IGP location) inherited by
-    /// neighbors in this group. Requires `route_reflector_client`.
-    pub orr_vantage: Option<IpAddr>,
+    /// Optional RFC 9107 ORR vantage inherited by neighbors in this group:
+    /// an IP address, or `"peer_address"` for each peer's own peering
+    /// address. Unresolved — the config layer collapses and validates it.
+    /// Requires `route_reflector_client`.
+    pub orr_vantage: Option<String>,
     /// Optional route-server-client override.
     pub route_server_client: Option<bool>,
     /// Optional RFC 7947 §2.3.2 per-client best-path override
