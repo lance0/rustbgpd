@@ -410,7 +410,8 @@ operations the EVPN reconciler issues:
 4. **FDB nexthop group programming** (ADR-0059, slices 1-4 on
    `main`). When a multi-homed Type 2 lands, the reconcile actor
    constructs an FDB nexthop group via the `nexthop_raw`
-   raw-netlink primitive (`rtnetlink 0.21` exposes no nexthop
+   raw-netlink primitive (`rtnetlink 0.22` /
+   `netlink-packet-route 0.32` still expose no typed nexthop
    API) and points an FDB row at it via `NDA_NH_ID`. Requires
    `CAP_NET_ADMIN` for the nexthop add/del + FDB write paths,
    plus a Linux kernel ≥ 5.8 for `NDA_NH_ID` support. The

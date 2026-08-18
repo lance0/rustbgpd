@@ -364,13 +364,17 @@ new AFI/SAFI and EVPN dataplane expansion.
   rules current while EVPN VTEP/IRB remains alpha and outside this contract.
   What tagging v1.0 means — the frozen surfaces, evidence bar, and post-1.0
   deprecation policy — is accepted in
-  [ADR-0125](docs/adr/0125-v1-stability-contract.md). The remaining hard gates
-  are execution, not design: exactly two ≥24 h RS/RR soak receipts, the
-  remaining v0.65 compatibility-debt batch, proof-gated RFC 8212 epoch-2
-  activation, the latest-1.x security-support row, and the final upgrade-chain
-  extension. The external shadow pilot is advisory since the 2026-08-08
-  DR1 revision — actively pursued, disclosed if absent at tag time, not
-  blocking. The comparative IRR-scale gate is already satisfied.
+  [ADR-0125](docs/adr/0125-v1-stability-contract.md). Its E2 pair of ≥24 h
+  soak receipts is archived — route server
+  ([docs/soaks/soak-rs-flagship-24h.md](docs/soaks/soak-rs-flagship-24h.md))
+  and route reflector
+  ([docs/soaks/soak-rr-flagship-24h.md](docs/soaks/soak-rr-flagship-24h.md)) —
+  and the proof-gated RFC 8212 epoch-2 activation landed in #1666 (DR4/E5).
+  The remaining hard gates are execution, not design: the rest of the v0.65
+  compatibility-debt batch, the latest-1.x security-support row, and the final
+  upgrade-chain extension. The external shadow pilot is advisory since the
+  2026-08-08 DR1 revision — actively pursued, disclosed if absent at tag time,
+  not blocking. The comparative IRR-scale gate is already satisfied.
 - **Make changed-policy reload the primary performance program.** The corrected
   700-client × 400,400-route mixed run is now measured: shared cohort work cuts
   median completion p50 116.185x and median completion maximum 149.261x, while
@@ -529,23 +533,22 @@ receipt. REL was deferred from the arc (zero collectors decode it
 today; the policy-discard/validation inputs it needs already exist).
 Details in the "Recently shipped" section below and ADR-0097.
 
+**RFC 8212 secure-by-default — activated 2026-08-14 (#1666, ADR-0119
+under ADR-0125 DR4)**: opt-in `ebgp_requires_policy` enforcement
+(ADR-0112), the typed config-epoch/raw-presence representation, the
+full-tuple restart pin, allocation-safe canonical rendering,
+transaction-scoped canonical tuple materialization, the
+`rfc8212_secure_default_ready` `--check` advisory (gating under
+`--check --strict`), and the Linux-only offline migration tool all landed
+ahead of the switch. Activation itself replaced the pre-activation
+rejection: `config_epoch = 2` with `[global].ebgp_requires_policy` omitted
+now resolves to effective `true` with source `epoch_2_default`. Epoch-less
+and epoch-1 omission stay permissive forever, explicit booleans keep their
+value in every epoch, and the M95 FRR/BIRD presence lab runs the whole
+proof on the activated cell in hosted CI.
+
 **Next, in rough order** (each research-backed, sized about one slice):
 
-- **RFC 8212 secure-by-default.** Opt-in enforcement
-  (`ebgp_requires_policy`, ADR-0112) is shipped and receipted; the
-  typed config-epoch/raw-presence representation, pre-activation rejection,
-  full-tuple restart pin, allocation-safe canonical rendering, and transaction-scoped canonical tuple materialization are shipped.
-  The pre-activation `rfc8212_secure_default_ready` advisory is also shipped:
-  legacy omission remains effective `false`, but `--check` now gives both exact
-  operator choices and `--check --strict` gates on that warning.
-  The explicit Linux-only offline migration tool is shipped too: operators can
-  pin epoch 1/false, prepare epoch 2/true, dry-run the complete proof, or emit
-  epoch-less v0.64-compatible bytes behind an exact external v0.64.0 validator.
-  ADR-0125 authorizes activation only after ADR-0119's remaining mutation and
-  interop proofs pass; activation changes only epoch-2 omission to effective
-  `true`. Epoch-less and epoch-1 omission stay permissive, and explicit
-  booleans keep their value. This remains evidence-gated, not
-  release-date-triggered.
 - **Trust/adoption hygiene sweep** (all small): keep the cargo-fuzz / OSS-Fuzz
   onboarding and per-RFC receipts/conformance page current, and keep the
   published Grafana dashboard aligned with the shipped metrics. The secure
@@ -728,8 +731,11 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   drain/undrain soak shape now exists as the M67 link-driven drain churn
   harness under `tests/soak/`: it repeats the real carrier-loss trigger and
   analyzes route withdrawal/return, DF-role gauges, drain reasons, AC-gate
-  state, blackout/release timing, restart counters, and RSS. It is a harness,
-  not yet an archived 24 h receipt. **Done:** bounded
+  state, blackout/release timing, restart counters, and RSS. Its archived 24 h
+  receipt is
+  [docs/soaks/soak-m67-link-drain-24h-evpn-leak.md](docs/soaks/soak-m67-link-drain-24h-evpn-leak.md)
+  — 960 link-drain failover cycles under live MAC-mobility churn, all six RSS
+  gates flat, blackout max 300 ms. **Done:** bounded
   `bgp_config_transaction_lifecycle_total{operation,outcome}` exposes confirmed
   transaction confirm / abort / auto-revert failures without unbounded labels
   (`confirm_id`, candidate content, and error text stay out of Prometheus).
@@ -742,12 +748,12 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   into one operator-facing proof index. The precommitted soak acceptance
   gates
   ([docs/soaks/soak-acceptance-gates.md](docs/soaks/soak-acceptance-gates.md))
-  name eight guarantees with no soak injection today; of those, the SIGHUP
-  file-reload path and the max-prefix trip / timed-restart cycle are
-  scheduled into the authorized soak window, while RPKI cache withdrawal,
-  the sub-minute peer flap storm, plain-path daemon SIGKILL, listener kill,
-  transport-level disturbance, and BMP/BFD duration coverage are explicitly
-  deferred.
+  named eight guarantees with no soak injection; two are now closed by the
+  route-server flagship scenario 10 — the SIGHUP policy-file reload path and
+  the max-prefix trip / timed-restart cycle — each proven by an archived 24 h
+  receipt. RPKI cache withdrawal, the sub-minute peer flap storm, plain-path
+  daemon SIGKILL, listener kill, transport-level disturbance, and BMP/BFD
+  duration coverage stay explicitly deferred.
   Exit: one repeatable soak result operators can inspect, bench comparison
   receipts for perf PRs, and memory tracking that covers full-table scale
   without relying only on bgperf2.
@@ -2199,8 +2205,9 @@ If you need these features, combine rustbgpd with purpose-built tools.
   this roadmap).
 - **[docs/INTEROP.md](docs/INTEROP.md)** — the full M-NN interop test matrix.
   The automated scripts cover the M-series against FRR 10.3.1, BIRD 2.0.12 /
-  3.2.1, GoBGP 4.3.0, and StayRTR; M0 (FRR, BIRD) are manual smokes. Privileged
-  kernel-dataplane smokes now run in the hosted `kernel-dataplane` workflow for
+  3.3.1, GoBGP 3.37.0 / 4.6.0 / 4.7.0, and StayRTR; M0 (FRR, BIRD) are manual
+  smokes. Privileged kernel-dataplane smokes now run in the hosted
+  `kernel-dataplane` workflow for
   the EVPN VTEP / IRB / adoption / multihoming / VLAN / overlay-index receipts
   plus the FIB, BFD, TCP-AO, BGP-unnumbered, and BLACKHOLE kernel receipts; see
   `INTEROP.md` for the current M36-M72 span. Large-scale churn (M33) is a
