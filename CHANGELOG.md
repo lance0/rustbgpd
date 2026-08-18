@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.65.0] — 2026-08-18
+
 ### Security
 
 - **`h2` 0.4.13 → 0.4.16 clears RUSTSEC-2026-0258** (unbounded empty DATA

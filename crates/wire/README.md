@@ -67,6 +67,17 @@ analyzers, test harnesses, MRT readers, etc.
 | 10005 | Link Bandwidth Extended Community receiver subset: decode exact transitive/non-transitive types 0x00/0x40, subtype 0x04, as raw AS + IEEE-754 bytes/second; the constructor remains non-transitive type 0x40 |
 | draft-abraitis-idr-addpath-paths-limit-04 | Experimental Paths-Limit capability (`PathsLimitFamily`, IANA-assigned capability code 76). The draft is expired and archived; interoperability and behavior remain experimental |
 
+### 0.17.1 compatibility note
+
+`rustbgpd-wire` 0.17.1 is a **documentation-only patch**. There is no public
+API change, no wire-format change, and no decoder or encoder behavior change:
+every edit corrects an RFC section citation in a doc comment or a test
+assertion message — the RFC 5291 ORF Send/Receive, When-to-refresh, entry-header
+and reset sections, the Default Gateway extended community's RFC 7432 §7.8
+citation, and the FlowSpec next-hop citation to RFC 8955 §4. Code that builds
+against 0.17.0 builds and behaves identically against 0.17.1; there is nothing
+to migrate.
+
 ### 0.17.0 compatibility note
 
 `rustbgpd-wire` 0.17.0 is a **breaking release**: `encode_evpn_nlri` now
