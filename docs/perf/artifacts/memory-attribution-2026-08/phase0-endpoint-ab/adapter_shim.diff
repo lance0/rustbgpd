@@ -1,0 +1,20 @@
+diff --git a/rustbgpd.py b/rustbgpd.py
+index 8b905bb..56c51bf 100644
+--- a/rustbgpd.py
++++ b/rustbgpd.py
+@@ -384,6 +384,15 @@ class RustBGPdTarget(RustBGPd, Target):
+         config += 'prometheus_addr = "0.0.0.0:9179"\n'
+         config += 'log_format = "json"\n'
+         config += '\n'
++        # phase 0 campaign shim (uncommitted, reverted after the campaign):
++        # pre-v0.63.0 daemons default to tier enforcement and refuse to boot
++        # with an empty roles map; render the [security.grpc] legacy block
++        # their own era's harness rendered. Inert unless the env var is set;
++        # v0.63.0+ daemons reject the key, so never set it for those.
++        if os.environ.get('RUSTBGPD_GRPC_ENFORCEMENT') == 'legacy':
++            config += '[security.grpc]\n'
++            config += 'enforcement = "legacy"\n'
++            config += '\n'
+         # The durable event-history outbox (ADR-0072) is opt-in/default-off on
+         # current rustbgpd. Render explicit selections, while leaving the block
+         # absent when unset so pre-v0.30 daemon revisions remain benchmarkable.

@@ -1,0 +1,129 @@
+phase 1 — tip measurement: does the merged memory tranche (#1678-#1689)
+move settled memory at 100p x 1k?
+================================================================================
+Written BEFORE measurement. The preregistered outcome bands below are frozen
+and never edited. The sealed image-digest section is appended after builds
+complete and before the first measurement pair (same discipline as phase 0).
+
+PROTOCOL BASE
+  Reuses the phase 0 sealed-image A/B protocol verbatim (kit at ../phase0-endpoint-ab/):
+  sealed source exports, one build per arm, pinned harness, behavioral
+  event-history verification per run, quiet-lane checks per pair, digests.
+  Deviations from phase 0, all ordered by the campaign spec:
+  - Arms are B/T (below), both post-v0.63.0 -> NO legacy authz shim anywhere;
+    RUSTBGPD_GRPC_ENFORCEMENT stays unset for every run.
+  - Per-run smaps_rollup + smaps snapshots captured post-bench (target
+    container survives bench; capture is docker-exec AFTER sampling stops, so
+    it cannot inflate the recorded cgroup surfaces) for the anomaly watch.
+  - Per-run behavioral event-history proof (the daemon "event history
+    disabled" line) appended to every run log, not just the last run.
+
+FROZEN ARMS (campaign spec, 2026-08-15)
+  B = 07f6eb5299b0373c031b7fdd2d9a9f98cb15b0b9
+      "Derive the grpcurl consumer roster instead of pinning its count (#1672)"
+      = the phase 0 candidate endpoint. Spec reference medians: settled
+      RssAnon 239.7 MiB, cg memory.peak 283.6 MiB, convergence 11.9 s.
+      B is re-measured fresh in this campaign; old numbers are never reused
+      as data points.
+  T = 1dcf1ff955ba0b95e144018a87f5feba62d62a5a
+      "bound TestPolicy route materialization by page (#1689)"
+      = current main tip, contains the 12-merge memory tranche #1678-#1689.
+
+BUILD DISCIPLINE
+  Each arm built ONCE from a sealed export: fresh `git clone` of the primary
+  repo into this directory, detached at the exact SHA, clean tree (satisfies
+  the adapter's clean-checkout gate; the primary checkout is never entered).
+  bgperf2 adapter clean at ad8a7de; builds run nocache via
+    RUSTBGPD_SOURCE=<clone> bgperf2.py update rustbgpd --tag <tag> -n -c <sha>
+  Tags: bgperf/rustbgpd:ab1032-b, bgperf/rustbgpd:ab1032-t.
+  Recorded per arm: image ID, binary SHA-256, rustc -V (builder provenance).
+  B-rebuild digest comparison: phase 0's SHA256SUMS records campaign files
+  only (no binary hash); its sealed ab-head image was deleted post-campaign.
+  The comparable identities are the pinned builder image digest (rust:1.95
+  -bookworm@6258907a) + rustc -V + source SHA; any delta is recorded and the
+  campaign proceeds (B is re-measured fresh regardless).
+
+HARNESS HELD CONSTANT (= phase 0)
+  bgperf2 ad8a7deba21e8ffa1aed609b86e0d0236b0489cd
+  tester  bgperf/bird   sha256:1187aaa54a535659f4929b2068c3533fdf0ce97df571f1a270565c2dfb012732
+  monitor bgperf/gobgp  sha256:e783a1d91600f613ec9e8b7d4b23d7142696397b8ef6860c64e2cdafc1b91f99
+  shape   bench -t rustbgpd -n 100 -p 1000, sequential, cleanup between runs
+  config  both arms boot the phase 0 campaign's config_head.toml surface
+          (sha256 64fb4f7b...); per-side rendered configs are verified
+          byte-identical to it. If T fails to boot it, the campaign STOPS and
+          diagnoses the config-compat break by commit — no silent patching.
+  event history: RUSTBGPD_EVENT_HISTORY=disabled both sides, verified
+  BEHAVIORALLY per run (rendered config carries [event_history] enabled=false
+  AND the daemon logs the disabled line), not just environmentally.
+
+PREREGISTERED OUTCOME BANDS (frozen before any measurement; verbatim from the
+campaign spec)
+  - Metric: paired (T-B)/B on settled RssAnon and on cg memory.peak, >=5
+    clean interleaved pairs (alternate BT/TB order), 95% CI over pairs.
+  - CI entirely within +/-5% -> NO LAB-SHAPE MOVEMENT (the tranche's owners
+    don't fire at this shape — the predicted outcome).
+  - CI upper bound below -10% -> TRANCHE IMPROVES the lab shape.
+  - CI lower bound above +10% -> NEW REGRESSION inside #1678-#1689 -> report
+    as escalation, no narration, no bisect yet.
+  - Anything else -> INCONCLUSIVE, report the interval.
+  Also record per-run convergence time (B's reference median 11.9 s) as
+  secondary, no gate.
+  Surface mapping: "settled RssAnon" = ptree_anon_settled_mib (sum of
+  RssAnon over the target cgroup's processes at the last sample);
+  cg_anon_settled_mib is reported alongside as corroboration. "cg
+  memory.peak" = cg_peak_mib. t-CI over per-pair percentage deltas, same
+  computation as phase 0's analyze.py.
+
+ANOMALY WATCH (phase 0 bimodality signature: r23 at 172.6 vs ~283 series)
+  Any run landing >=50 MiB below its own arm's series (cg peak or settled
+  anon) is flagged loudly; its smaps_rollup + smaps snapshots (captured for
+  EVERY run post-bench, before teardown) are the attribution lead.
+
+QUIET-LANE / CONTAMINATION POLICY (= phase 0)
+  Owner workloads (cargo/rustc plus unrelated resident services and
+  containers) are never touched; cleanup filters strictly on bgperf-named containers +
+  this campaign's own clones/images (ab1032-* tags only; the pre-existing
+  current-cbefe848 image belongs to other phase work and is not
+  touched). Lane verified before each pair (loadavg + ps by comm + top CPU
+  snapshot); a resident idle service at ~zero CPU is acceptable, anything
+  eating CPU pauses the campaign. Runs record lane-start/lane-end telemetry.
+  Pairs overlapping foreign load are CONTAMINATED, excluded from the contract
+  set, and replaced after the lane clears.
+
+RUN PLAN
+  r01..r10 = pairs 1..5, order alternating BT / TB / BT / TB / BT.
+  Pair replacement runs, if any, continue r11+ with their order stated.
+
+FILES
+  run_one.sh, preflight.sh, analyze.py    adapted from ../phase0-endpoint-ab/ (deltas above)
+  rNN_<side>.log / .samples.tsv           per-run bench output + 1 Hz samples
+  rNN_<side>.smaps_rollup / .smaps        post-bench daemon memory snapshots
+  config_<side>.toml, runtime-manifest_<side>.json   per-side rendered surfaces
+  build_B.log / build_T.log               nocache image build transcripts
+  build_identity.txt                      image IDs, binary SHA-256s, rustc -V
+  preflight_<side>_off.txt                boot + behavioral event-history proof
+  lane.log                                per-pair quiet-lane checks
+  results.txt                             table, distributions, paired CIs, VERDICT
+  SHA256SUMS                              written at campaign end
+
+SEALED IMAGE DIGESTS (both builds complete, adapter tree clean at ad8a7de
+during every build; sealed BEFORE the first measurement pair)
+  ab1032-b sha256:5a4c3e5df2ab55a22accebfc28c2b86461797c99df6de89381779a0a38a35eae
+           rustbgpd 07f6eb5299b0373c031b7fdd2d9a9f98cb15b0b9, reports "rustbgpd 0.64.0"
+           binary sha256 b68b1e8ba6775c203261d09023b08dc1ef8a30ef3e63303c8f560db811f3a22d
+  ab1032-t sha256:b706e99cfb5c4d9c2024bb1325ddd25a315bf80d0e33cfd4feecc2d6036ddf86
+           rustbgpd 1dcf1ff955ba0b95e144018a87f5feba62d62a5a, reports "rustbgpd 0.64.0"
+           binary sha256 58e6cab4cb5375c12846c8839be5aa96065cbb7f93e114bd1a1d923d2944cfd5
+  rustc 1.95.0 (59807616e 2026-04-14) both arms, builder base
+  rust:1.95-bookworm@6258907a — identical to phase 0's pin by construction.
+B-REBUILD DIGEST COMPARISON
+  phase 0's SHA256SUMS records campaign files only — it contains no binary
+  SHA-256, and its sealed ab-head image (sha256:2c590f20...) was deleted
+  post-campaign, so no byte-level binary comparison is possible. Image IDs
+  necessarily differ on a nocache rebuild (layer timestamps). Matching
+  identities: source SHA (07f6eb52), adapter SHA (ad8a7de), builder-base
+  digest (6258907a), rustc -V. No toolchain delta detected. B is re-measured
+  fresh in this campaign regardless.
+B..T WINDOW (first-parent): 17 commits, #1673..#1689. The 12-merge memory
+  tranche #1678-#1689 is its tail; the #1673-#1677 prefix was phase 0's
+  B->C bridge, measured NULL at this shape (all C-arm CIs straddled zero).

@@ -1,0 +1,97 @@
+run	side	pair	clean	total_s	monitor_s	elapsed_s	maxcpu	minidle	conv	bgperf_maxmem_mib	cg_peak_mib	cg_cur_max_mib	cg_anon_max_mib	cg_anon_settled_mib	ptree_rss_max_mib	ptree_rss_settled_mib	ptree_anon_settled_mib
+r01	base	1	True	13.97	0	5	126.0	94	100000/100000	173.1	188.9	185.2	162.6	141.3	199.4	163.4	141.3
+r02	head	1	True	11.93	0	3	125.0	94	100000/100000	233.5	258.3	233.6	222.8	221.6	245.2	244.1	221.6
+r03	head	2	True	11.87	0	3	127.0	94	100000/100000	261.1	287.0	260.8	251.8	239.7	273.8	261.7	239.7
+r04	base	2	True	13.99	0	5	127.0	94	100000/100000	178.2	190.8	178.1	166.3	149.7	194.8	171.2	149.7
+r05	base	3	True	14.05	0	5	121.0	95	100000/100000	192.5	195.1	179.7	167.4	153.8	198.9	175.3	153.8
+r06	head	3	True	11.93	0	3	133.0	94	100000/100000	250.9	275.8	250.5	240.6	240.5	262.8	262.7	240.5
+r07	head	4	True	11.91	0	3	134.0	94	100000/100000	266.2	283.6	266.7	255.1	231.5	288.9	253.8	231.5
+r08	base	4	True	14.0	0	5	120.0	95	100000/100000	212.0	222.0	205.2	196.0	167.7	220.4	190.0	167.7
+r09	base	5	True	13.97	0	5	127.0	95	100000/100000	215.0	229.2	217.1	206.5	178.2	234.2	199.9	178.2
+r10	head	5	True	11.88	0	3	137.0	95	100000/100000	269.3	300.1	287.6	264.9	242.4	287.5	264.9	242.4
+r21	head	11	True	11.9	0	3	135.0	93	100000/100000	269.3	293.2	280.6	270.4	234.3	286.8	256.7	234.3
+r22	c	11	True	11.9	0	3	130.0	94	100000/100000	268.3	286.7	262.7	251.9	237.8	273.2	260.1	237.8
+r23	c	12	True	11.89	0	3	119.0	95	100000/100000	163.8	172.6	154.2	141.5	134.2	164.1	156.8	134.2
+r24	head	12	True	16.05	0	7	126.0	95	100000/100000	287.7	300.7	275.4	265.8	197.5	289.3	219.5	197.5
+r25	head	13	True	11.9	0	3	133.0	94	100000/100000	275.5	278.5	265.3	242.3	229.2	264.6	251.5	229.2
+r26	c	13	True	11.93	0	3	128.0	95	100000/100000	278.5	295.5	269.1	260.2	236.2	287.6	258.7	236.2
+r27	c	14	True	11.89	0	3	133.0	95	100000/100000	276.5	294.4	274.0	266.4	221.2	291.3	243.5	221.2
+r28	head	14	True	11.9	0	3	136.0	95	100000/100000	263.2	279.1	259.3	251.8	223.8	278.6	246.2	223.8
+r29	head	15	True	11.9	0	3	124.0	95	100000/100000	275.5	300.4	275.3	265.6	255.6	287.8	277.8	255.6
+r30	c	15	True	11.9	0	3	132.0	94	100000/100000	260.1	278.4	260.2	249.7	231.4	271.8	253.4	231.4
+
+== base CLEAN (n=5)
+  bgperf_maxmem_mib        n=5 min=173.1 med=192.5 max=215.0 spread=(max-min)/med=21.8% stdev=19.06
+  cg_peak_mib              n=5 min=188.9 med=195.1 max=229.2 spread=(max-min)/med=20.7% stdev=18.93
+  cg_anon_max_mib          n=5 min=162.6 med=167.4 max=206.5 spread=(max-min)/med=26.2% stdev=20.04
+  cg_anon_settled_mib      n=5 min=141.3 med=153.8 max=178.2 spread=(max-min)/med=24.0% stdev=14.73
+  ptree_rss_max_mib        n=5 min=194.8 med=199.4 max=234.2 spread=(max-min)/med=19.8% stdev=17.02
+  ptree_rss_settled_mib    n=5 min=163.4 med=175.3 max=199.9 spread=(max-min)/med=20.8% stdev=14.76
+  ptree_anon_settled_mib   n=5 min=141.3 med=153.8 max=178.2 spread=(max-min)/med=24.0% stdev=14.73
+  total_s                  n=5 min=14.0 med=14.0 max=14.1 spread=(max-min)/med=0.6% stdev=0.03
+== head CLEAN (n=10)
+  bgperf_maxmem_mib        n=10 min=233.5 med=267.8 max=287.7 spread=(max-min)/med=20.2% stdev=14.84
+  cg_peak_mib              n=10 min=258.3 med=285.3 max=300.7 spread=(max-min)/med=14.9% stdev=13.56
+  cg_anon_max_mib          n=10 min=222.8 med=253.4 max=270.4 spread=(max-min)/med=18.8% stdev=14.74
+  cg_anon_settled_mib      n=10 min=197.5 med=232.9 max=255.6 spread=(max-min)/med=24.9% stdev=15.54
+  ptree_rss_max_mib        n=10 min=245.2 med=282.7 max=289.3 spread=(max-min)/med=15.6% stdev=14.88
+  ptree_rss_settled_mib    n=10 min=219.5 med=255.2 max=277.8 spread=(max-min)/med=22.8% stdev=15.57
+  ptree_anon_settled_mib   n=10 min=197.5 med=232.9 max=255.6 spread=(max-min)/med=24.9% stdev=15.54
+  total_s                  n=10 min=11.9 med=11.9 max=16.1 spread=(max-min)/med=35.1% stdev=1.31
+== c CLEAN (n=5)
+  bgperf_maxmem_mib        n=5 min=163.8 med=268.3 max=278.5 spread=(max-min)/med=42.8% stdev=48.43
+  cg_peak_mib              n=5 min=172.6 med=286.7 max=295.5 spread=(max-min)/med=42.9% stdev=52.40
+  cg_anon_max_mib          n=5 min=141.5 med=251.9 max=266.4 spread=(max-min)/med=49.6% stdev=52.10
+  cg_anon_settled_mib      n=5 min=134.2 med=231.4 max=237.8 spread=(max-min)/med=44.8% stdev=44.06
+  ptree_rss_max_mib        n=5 min=164.1 med=273.2 max=291.3 spread=(max-min)/med=46.6% stdev=52.97
+  ptree_rss_settled_mib    n=5 min=156.8 med=253.4 max=260.1 spread=(max-min)/med=40.8% stdev=43.92
+  ptree_anon_settled_mib   n=5 min=134.2 med=231.4 max=237.8 spread=(max-min)/med=44.8% stdev=44.06
+  total_s                  n=5 min=11.9 med=11.9 max=11.9 spread=(max-min)/med=0.3% stdev=0.02
+
+== PRIMARY A/B: paired (B-A)/A, clean pairs only
+  bgperf_maxmem_mib        pairs=5 deltas%=[+34.9, +46.5, +30.3, +25.6, +25.3] mean=+32.5% 95%CI=[+21.6%, +43.4%]
+  cg_peak_mib              pairs=5 deltas%=[+36.7, +50.4, +41.4, +27.7, +30.9] mean=+37.4% 95%CI=[+26.3%, +48.6%]  -> PREREGISTERED BAND: DAEMON-SIDE
+  cg_anon_max_mib          pairs=5 deltas%=[+37.0, +51.4, +43.7, +30.2, +28.3] mean=+38.1% 95%CI=[+26.2%, +50.1%]
+  cg_anon_settled_mib      pairs=5 deltas%=[+56.8, +60.1, +56.4, +38.0, +36.0] mean=+49.5% 95%CI=[+35.2%, +63.7%]
+  ptree_rss_max_mib        pairs=5 deltas%=[+23.0, +40.6, +32.1, +31.1, +22.8] mean=+29.9% 95%CI=[+20.7%, +39.1%]
+  ptree_rss_settled_mib    pairs=5 deltas%=[+49.4, +52.9, +49.9, +33.6, +32.5] mean=+43.6% 95%CI=[+31.5%, +55.8%]
+  ptree_anon_settled_mib   pairs=5 deltas%=[+56.8, +60.1, +56.4, +38.0, +36.0] mean=+49.5% 95%CI=[+35.2%, +63.7%]
+
+== C ARM (separate series): paired (C-B)/B, clean pairs only
+  bgperf_maxmem_mib        pairs=5 deltas%=[-0.4, -43.1, +1.1, +5.1, -5.6] mean=-8.6% 95%CI=[-33.0%, +15.8%]
+  cg_peak_mib              pairs=5 deltas%=[-2.2, -42.6, +6.1, +5.5, -7.3] mean=-8.1% 95%CI=[-33.0%, +16.8%]
+  cg_anon_max_mib          pairs=5 deltas%=[-6.8, -46.8, +7.4, +5.8, -6.0] mean=-9.3% 95%CI=[-36.5%, +18.0%]
+  cg_anon_settled_mib      pairs=5 deltas%=[+1.5, -32.1, +3.1, -1.2, -9.5] mean=-7.6% 95%CI=[-25.6%, +10.4%]
+  ptree_rss_max_mib        pairs=5 deltas%=[-4.7, -43.3, +8.7, +4.6, -5.6] mean=-8.1% 95%CI=[-33.6%, +17.5%]
+  ptree_rss_settled_mib    pairs=5 deltas%=[+1.3, -28.6, +2.9, -1.1, -8.8] mean=-6.9% 95%CI=[-22.9%, +9.2%]
+  ptree_anon_settled_mib   pairs=5 deltas%=[+1.5, -32.1, +3.1, -1.2, -9.5] mean=-7.6% 95%CI=[-25.6%, +10.4%]
+  abs med(B)-med(C) cg_anon_settled_mib      -2.2 MiB (prediction: C ~= B - ~4.8 MiB on settled surfaces)
+  abs med(B)-med(C) ptree_rss_settled_mib    -1.9 MiB (prediction: C ~= B - ~4.8 MiB on settled surfaces)
+  abs med(B)-med(C) ptree_anon_settled_mib   -2.2 MiB (prediction: C ~= B - ~4.8 MiB on settled surfaces)
+  abs med(B)-med(C) cg_peak_mib              +6.5 MiB (prediction: C ~= B - ~4.8 MiB on settled surfaces)
+
+== VERDICT (against the preregistered bands in MANIFEST.txt)
+PRIMARY A/B: DAEMON-SIDE GROWTH.
+  cg memory.peak paired (B-A)/A: mean +37.4%, 95% CI [+26.3%, +48.6%] over 5
+  clean pairs — the CI lower bound is 2.6x the +10% DAEMON-SIDE threshold.
+  Same harness (bgperf2 ad8a7de), same bird/gobgp images, event history
+  behaviorally disabled on every measured side. Every secondary surface
+  agrees (CI lower bounds +20.7% to +35.2%). Settled-anon grew MORE (+49.5%)
+  than peak (+37.4%): anonymous-memory growth, not page cache.
+  Absolute medians: A cg-peak 195.1 MiB / bgperf-peak 192.5 MiB (r08 hit the
+  published 212.0 exactly; published figure sits inside A's 173-215 band).
+  B cg-peak 283.6 MiB — consistent with the prior rebaseline's 292.1 median.
+  B converges faster: total 11.9s vs A 14.0s on every run (a speed/memory
+  trade shipped somewhere in the 20 intervening days).
+C ARM (07f6eb52 -> cbefe848 bridge): NULL / UNRESOLVED at this shape+n.
+  All 5-pair CIs straddle zero; settled-surface medians differ ~2 MiB with
+  sign against the prediction; the preregistered ~-4.8 MiB (#1675) effect is
+  ~2% of the level and unresolvable under the observed ~+/-10% pair spread.
+  Calibration: this setup resolves ~25%+ effects decisively, not ~2%.
+  Bimodality note for the low-mode follow-up: r23 (ab-c) completed at 172.6 MiB cg-peak —
+  ~100 MiB below its own series — with normal convergence (11.89s,
+  100000/100000, image digest verified). 1 of 15 v0.64-code runs. The
+  current-code memory distribution at this shape has a rare low mode; the
+  owner attribution work should account for it.
+CONTAMINATION: none — all 15 runs clean (lane.log + per-run lane-start/end:
+  cargo_rustc=0 throughout, loadavg <= 1.9 on 64 cores).

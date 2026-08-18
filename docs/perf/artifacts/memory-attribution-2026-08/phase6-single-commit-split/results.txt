@@ -1,0 +1,103 @@
+run	arm	clean	total_s	monitor_s	elapsed_s	maxcpu	minidle	conv	bgperf_maxmem_mib	cg_peak_mib	cg_cur_max_mib	cg_anon_max_mib	cg_anon_settled_mib	ptree_rss_max_mib	ptree_rss_settled_mib	ptree_anon_settled_mib
+r01	s1	True	13.97	0	5	116.0	93	100000/100000	185.3	205.3	192.6	184.5	155.0	213.8	176.7	155.0
+r02	m	True	12.99	0	4	129.0	93	100000/100000	174.1	182.3	178.0	159.2	129.0	189.2	150.7	129.0
+r03	s2	True	11.86	0	3	132.0	94	100000/100000	290.8	315.6	289.9	280.1	262.0	301.5	283.4	262.0
+r04	s1	True	13.95	0	5	119.0	95	100000/100000	167.9	180.8	170.5	156.2	132.4	165.7	151.5	130.1
+r05	m	True	12.93	0	4	127.0	94	100000/100000	167.9	183.9	169.4	156.6	131.1	172.9	152.6	131.1
+r06	s2	True	11.97	0	3	137.0	94	100000/100000	272.4	297.5	272.4	262.4	241.3	283.7	262.6	241.3
+r07	s1	True	12.91	0	4	124.0	94	100000/100000	202.8	220.8	199.3	187.1	152.8	216.0	174.7	152.8
+r08	m	True	12.96	0	4	121.0	95	100000/100000	203.8	209.2	196.3	185.0	165.1	210.2	186.5	165.1
+r09	s2	True	11.97	0	3	133.0	94	100000/100000	260.1	284.9	259.7	250.2	228.1	271.7	249.4	228.1
+r10	s1	True	14.01	0	5	120.0	94	100000/100000	162.8	181.4	155.2	147.7	113.9	181.0	135.5	113.9
+r11	m	True	12.92	0	4	129.0	94	100000/100000	165.9	195.8	180.8	171.0	126.8	194.0	146.4	125.0
+r12	s2	True	11.93	0	3	133.0	94	100000/100000	263.2	282.8	257.6	248.3	230.1	269.7	251.6	230.1
+r13	s1	True	12.97	0	4	128.0	95	100000/100000	203.8	213.2	211.7	188.3	162.3	216.7	183.9	162.3
+r14	m	True	12.99	0	4	124.0	95	100000/100000	172.0	180.6	169.4	160.7	124.2	188.2	146.1	124.2
+r15	s2	True	11.94	0	3	128.0	95	100000/100000	273.4	290.5	272.3	251.2	214.4	273.3	235.6	214.4
+
+== s1 (99ee74ba (merge #1184 revised-update-duplicate-table)) CLEAN (n=5)
+  bgperf_maxmem_mib        n=5 min=162.8 med=185.3 max=203.8 spread=(max-min)/med=22.1% stdev=19.07
+  cg_peak_mib              n=5 min=180.8 med=205.3 max=220.8 spread=(max-min)/med=19.5% stdev=18.37
+  cg_anon_max_mib          n=5 min=147.7 med=184.5 max=188.3 spread=(max-min)/med=22.0% stdev=19.28
+  cg_anon_settled_mib      n=5 min=113.9 med=152.8 max=162.3 spread=(max-min)/med=31.7% stdev=19.82
+  ptree_rss_max_mib        n=5 min=165.7 med=213.8 max=216.7 spread=(max-min)/med=23.9% stdev=23.74
+  ptree_rss_settled_mib    n=5 min=135.5 med=174.7 max=183.9 spread=(max-min)/med=27.7% stdev=20.24
+  ptree_anon_settled_mib   n=5 min=113.9 med=152.8 max=162.3 spread=(max-min)/med=31.7% stdev=20.16
+  total_s                  n=5 min=12.9 med=13.9 max=14.0 spread=(max-min)/med=7.9% stdev=0.57
+== m (9c1ebb12 (merge #1188 share-policy-attribution-name)) CLEAN (n=5)
+  bgperf_maxmem_mib        n=5 min=165.9 med=172.0 max=203.8 spread=(max-min)/med=22.0% stdev=15.47
+  cg_peak_mib              n=5 min=180.6 med=183.9 max=209.2 spread=(max-min)/med=15.6% stdev=12.11
+  cg_anon_max_mib          n=5 min=156.6 med=160.7 max=185.0 spread=(max-min)/med=17.7% stdev=11.70
+  cg_anon_settled_mib      n=5 min=124.2 med=129.0 max=165.1 spread=(max-min)/med=31.7% stdev=16.89
+  ptree_rss_max_mib        n=5 min=172.9 med=189.2 max=210.2 spread=(max-min)/med=19.7% stdev=13.38
+  ptree_rss_settled_mib    n=5 min=146.1 med=150.7 max=186.5 spread=(max-min)/med=26.8% stdev=17.02
+  ptree_anon_settled_mib   n=5 min=124.2 med=129.0 max=165.1 spread=(max-min)/med=31.7% stdev=17.13
+  total_s                  n=5 min=12.9 med=13.0 max=13.0 spread=(max-min)/med=0.5% stdev=0.03
+== s2 (21aeba73 (merge #1189 coalesce-neighbor-rib-snapshots)) CLEAN (n=5)
+  bgperf_maxmem_mib        n=5 min=260.1 med=272.4 max=290.8 spread=(max-min)/med=11.3% stdev=11.99
+  cg_peak_mib              n=5 min=282.8 med=290.5 max=315.6 spread=(max-min)/med=11.3% stdev=13.22
+  cg_anon_max_mib          n=5 min=248.3 med=251.2 max=280.1 spread=(max-min)/med=12.7% stdev=13.30
+  cg_anon_settled_mib      n=5 min=214.4 med=230.1 max=262.0 spread=(max-min)/med=20.7% stdev=17.78
+  ptree_rss_max_mib        n=5 min=269.7 med=273.3 max=301.5 spread=(max-min)/med=11.6% stdev=13.19
+  ptree_rss_settled_mib    n=5 min=235.6 med=251.6 max=283.4 spread=(max-min)/med=19.0% stdev=17.83
+  ptree_anon_settled_mib   n=5 min=214.4 med=230.1 max=262.0 spread=(max-min)/med=20.7% stdev=17.78
+  total_s                  n=5 min=11.9 med=11.9 max=12.0 spread=(max-min)/med=0.9% stdev=0.05
+
+== ANOMALY TRIPWIRE (>=40 MiB below arm running median; smaps captured every run)
+  none
+
+== GROWTH CURVE (commit order; ALL arms measured fresh in-campaign)
+  arm median cg_peak  median settled_anon  median total_s   n
+  s1           205.3                152.8           13.95   5
+  m            183.9                129.0           12.96   5
+  s2           290.5                230.1           11.94   5
+
+== STEP VERDICTS (median cg_peak step; preregistered rule)
+  s1 -> m  (5 commits) peak_step= -21.4 MiB anon_step=-23.8 conv_step=-0.99s  -> REDUCTION (reported factually; rule defines growth only)
+   m -> s2 (1 commits) peak_step=+106.6 MiB anon_step=+101.1 conv_step=-1.02s  -> OWNS GROWTH (>= +25 MiB)
+
+== SUM CHECK / CROSS-CAMPAIGN LEVEL DISCLOSURE (no correction, preregistered)
+  in-campaign S1->S2: peak +85.2 MiB, anon +77.3 MiB, conv -2.01 s
+  bisect4 reference : peak +90.1 MiB, anon +84.6 MiB, conv -1.08 s
+  residual (in-campaign - reference): peak -4.9 MiB, anon -7.3 MiB, conv -0.93 s
+  s1 level vs bisect4: peak 205.3 vs 178.2 (+27.1), anon 152.8 vs 133.6 (+19.2), conv 13.95 vs 12.99 (+0.96)
+  s2 level vs bisect4: peak 290.5 vs 268.3 (+22.2), anon 230.1 vs 218.2 (+11.9), conv 11.94 vs 11.91 (+0.03)
+
+== VERDICT (against the preregistered attribution rule in MANIFEST.txt)
+SINGLE OWNER: merge #1189 (21aeba73, perf/coalesce-neighbor-rib-snapshots).
+  M -> S2 (exactly 1 commit = #1189): peak +106.6 MiB, anon +101.1 MiB
+    -> OWNS GROWTH (>= +25 MiB). This exceeds the endpoint delta because
+    the other step is negative.
+  S1 -> M (5 commits, only #1188 runtime code): peak -21.4 MiB,
+    anon -23.8 MiB -> REDUCTION (beyond the -15 flat band, reported
+    factually). #1188 share-policy-attribution-name REDUCED memory
+    modestly; it owns NONE of the growth. Joint-ownership branch of the
+    prereg not triggered.
+  Sum: -21.4 + 106.6 = +85.2 = the in-campaign S1->S2 endpoint step (exact).
+CONVERGENCE LOCALIZATION (secondary; reported factually per prereg):
+  in-campaign median split: S1->M -0.99 s (13.95 -> 12.96),
+  M->S2 -1.02 s (12.96 -> 11.94).
+  CAVEAT the medians need: s1's total_s is BIMODAL here (12.91/12.97 fast
+  mode vs 13.95/13.97/14.01 slow mode, 3-of-5 slow; the same slow mode hit
+  2-of-5 s1 runs in bisect4, same byte-identical binary), so its 13.95
+  median sits in the slow mode. m is TIGHT at 12.92-12.99 (spread 0.5%) =
+  exactly s1's fast mode and bisect4's s1 level (12.99); s2 is TIGHT at
+  11.86-11.97. Read against the stable levels, the durable -1.08 s
+  reference gain (12.99 -> 11.91, bisect4) is carried by #1189
+  (M -> S2, -1.02 s in-campaign); #1188 leaves convergence at the s1
+  level (m 12.96 vs bisect4 s1 12.99, -0.03 s).
+SUM CHECK / CROSS-CAMPAIGN DISCLOSURE (no correction, preregistered):
+  in-campaign S1->S2 peak +85.2 MiB vs bisect4's +90.1 (residual -4.9);
+  anon +77.3 vs +84.6 (residual -7.3). Levels: s1 205.3 vs 178.2 (+27.1
+  peak; slightly above the +9..+19 cross-campaign band seen previously,
+  disclosed), s2 290.5 vs 268.3 (+22.2). s1's conv median +0.96 s vs
+  bisect4 is the bimodal-mode composition, not a level shift (fast-mode
+  runs 12.91/12.97 straddle bisect4's 12.99).
+ANOMALIES: no low-mode tripwire hits (0 of 15); smaps captured every run
+  anyway. Two pre-run lane waits (r01, r12) on residual bench self-load
+  (load1 4.21 / 5.92, cargo_rustc=0 both); driver held until the lane
+  cleared — no run overlapped a busy lane. 15/15 runs clean, converged
+  100000/100000, bench-exit 0, rendered legacy-block count 1 and
+  event-history-disabled logged on every run.
+BUILD IDENTITY: s1 and s2 binaries BYTE-IDENTICAL to bisect4's (d881d4df...,
+  d9c82887...); m (9c1ebb12) first-ever build, binary b7128cd0... .

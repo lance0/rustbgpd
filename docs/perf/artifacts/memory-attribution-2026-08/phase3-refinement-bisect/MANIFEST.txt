@@ -1,0 +1,179 @@
+phase 3 refinement bisect — localize the +75.6 MiB cg-peak growth inside
+515659b1..9fe58871 (271 first-parent commits, 2026-07-25..2026-08-03), 100p x 1k
+================================================================================
+Written BEFORE any build or measurement. The preregistrations below are frozen
+and never edited. Per protocol (phase 0 / phase 2 coarse bisect), the sealed
+image-digest section and per-arm era-config record are APPENDED after builds/
+preflights complete and before the first measurement run; nothing above that
+appended section is ever modified.
+
+PROTOCOL BASE
+  Identical to ../phase2-coarse-bisect/ (which reuses the phase 0 sealed-image
+  protocol): sealed source exports (fresh local clones detached at exact SHAs;
+  the primary checkout at <repo> is never entered or
+  built from), one nocache build per arm, pinned harness, behavioral
+  event-history verification per run, per-run smaps/smaps_rollup capture
+  post-bench, quiet-lane checks before every run, digests sealed
+  pre-measurement, full cleanup after.
+
+FROZEN ARMS (4) — resolved SHAs, recorded before building
+  Q1      = 9b46432c3ea6399132c740602b33af82d2077fac
+            "Fence route page versions after lifecycle acceptance (#1246)",
+            2026-07-28 — first-parent midpoint of 515659b1..v0.62.0
+            (splits the 171-commit half into 86/85).
+            PICK DEVIATION (documented before building): the spec asks for the
+            merge-commit nearest the midpoint. This repo lands PRs as
+            first-parent squash commits, each a coherent PR-boundary tree; the
+            nearest true 2-parent merge (b592362b, position 129 of 171) is 43
+            positions off-midpoint and would unbalance the bisect. The exact-
+            midpoint squash PR landing is taken instead.
+  Q2      = 5ef6a0660f72b66e4bcd50a315a9e4e25c0002c5
+            "release: prep v0.62.0 — bump workspace, roll CHANGELOG",
+            2026-07-30 = the v0.62.0 tag, VERIFIED: the expected adb206cc is
+            the annotated TAG OBJECT (adb206ccd3983c579488d2fe151e32ffff1e2f81);
+            it peels to commit 5ef6a066. Same object either way.
+  Q3      = fb4b586e60daad60c5a994f95ecec119a8a090a6
+            "Merge pull request #1377 from lance0/fix/fib-table-read-
+            unavailable", 2026-08-01 — the TRUE merge commit nearest the
+            first-parent midpoint of v0.62.0..9fe58871 (position 55 of 100,
+            5 off the 50/51 midpoint; splits the 100-commit half into 46/54).
+            Literal spec honored here because a true merge sits near midpoint.
+  ANCHOR2 = 9fe588717d210563cc04e956fc65844fdae29fb3
+            "authz: retire legacy gRPC enforcement; tier is mandatory (#1431)",
+            2026-08-03 — the authz cut; re-measured fresh as the in-campaign
+            anchor. Its level last campaign (phase2-coarse-bisect, arm p2, n=5):
+            cg peak median 270.7 / settled anon 216.2 MiB.
+  A (NOT re-measured) = 515659b191b7fde91a1a1c9f973e7c8ae3731086, phase 0
+            recorded medians: cg peak 195.1 / settled anon 153.8 MiB /
+            convergence 14.0 s (n=5).
+
+CHAIN ORDER AND INTERVAL FIRST-PARENT COMMIT COUNTS
+(git rev-list --first-parent --count; sum verified = 271 = full range)
+    A(515659b1)  -> Q1(9b46432c):   86
+    Q1(9b46432c) -> Q2(5ef6a066):   85
+    Q2(5ef6a066) -> Q3(fb4b586e):   46
+    Q3(fb4b586e) -> ANCHOR2(9fe58871): 54
+
+BUILD DISCIPLINE
+  Each arm built ONCE from a sealed export: fresh local `git clone` of the
+  primary repo into this directory (clone-<arm>/), detached at the exact SHA,
+  clean tree. bgperf2 adapter tree CLEAN at ad8a7de during every build; builds
+  run nocache via
+    RUSTBGPD_SOURCE=<clone> bgperf2.py update rustbgpd --tag <tag> -n -c <sha>
+  Tags: bgperf/rustbgpd:ab1032c-q1 / -q2 / -q3 / -an2.
+  Recorded per arm: image ID, binary SHA-256, version report (build_identity.txt).
+  Builds sequential.
+
+HARNESS HELD CONSTANT (= phase 0 / phase2-coarse-bisect)
+  bgperf2 ad8a7deba21e8ffa1aed609b86e0d0236b0489cd
+  tester  bgperf/bird   sha256:1187aaa54a53...
+  monitor bgperf/gobgp  sha256:e783a1d91600...
+  shape   bench -t rustbgpd -n 100 -p 1000, sequential, cleanup between runs
+  event history: RUSTBGPD_EVENT_HISTORY=disabled every run, verified
+  BEHAVIORALLY per run (rendered config carries [event_history] enabled=false
+  AND the daemon logs the disabled line).
+
+ERA COMPAT PLAN (frozen before preflight)
+  Q1/Q2/Q3 all PREDATE the 2026-08-03 authz arc (#1429 implicit
+  local-operator, #1431 legacy cut) — same era as phase 0's A arm: they
+  default to tier enforcement and refuse an empty roles map, so they need the
+  era-correct [security.grpc] enforcement="legacy" block. Mechanism = the
+  phase 0 bundle exactly as used for A there:
+    - measurement runs: the env-gated adapter shim (../phase0-endpoint-ab/
+      adapter_shim.diff) applied to the bgperf2 tree AFTER all builds seal;
+      RUSTBGPD_GRPC_ENFORCEMENT=legacy exported for Q1/Q2/Q3 runs ONLY,
+      unset for ANCHOR2 runs (the shim is inert with the var unset, proven
+      by phase 0's interleaved A/B runs). Shim reverted at campaign end.
+    - preflights: Q1/Q2/Q3 boot the phase 0 config_base.toml surface
+      (= config_head + legacy block); ANCHOR2 boots the phase 0
+      config_head.toml VERBATIM (proven for this exact SHA last campaign).
+  Every arm is preflight-booted BEFORE measurement. A boot failure not
+  mappable to a documented era difference is STOP-and-report.
+
+PREREGISTERED DESIGN (frozen)
+  - 5 runs per arm, 20 runs total, ROUND-ROBIN order (Q1,Q2,Q3,ANCHOR2) x 5
+    -> r01..r20. Lane check before every run (loadavg + ps -C cargo,rustc by
+    comm; recorded in lane.log and as lane-start/lane-end in every run log).
+    Runs overlapping foreign load are CONTAMINATED, excluded, and replaced
+    (r21+) after the lane clears.
+  - PRIMARY metric: cg memory.peak per-arm MEDIAN. SECONDARY: settled RssAnon
+    median (ptree_anon_settled), convergence time (total_s).
+  - ATTRIBUTION RULE over the chain A -> Q1 -> Q2 -> Q3 -> ANCHOR2 (A fixed
+    at its recorded 195.1 cg-peak median / 153.8 anon): an interval OWNS
+    growth when its median cg-peak step is >= +25 MiB. Steps within +/-15 MiB
+    are FLAT. Between (+15, +25) = MINOR CONTRIBUTOR, no ownership claim.
+    Negative steps beyond -15 reported factually as reductions.
+  - CONVERGENCE TRACKING (secondary observation, no gate): A recorded 14.0 s;
+    the tip era runs ~11.9 s. Report WHICH interval the speed-up moves in
+    (median total_s per arm along the chain).
+  - SUM CHECK: the A->ANCHOR2 chain of median steps reconciled against the
+    +75.6 MiB reference (last campaign: p2 270.7 - A 195.1). By construction
+    the residual equals ANCHOR2's in-campaign offset vs 270.7; disclosed, NO
+    correction applied.
+  - ANCHOR OFFSET: ANCHOR2's in-campaign medians vs last campaign's p2
+    (270.7 peak / 216.2 anon, n=5) disclosed as the campaign offset.
+  - LOW-MODE TRIPWIRE: any run >= 40 MiB below its arm's RUNNING median
+    (that arm's runs so far, including it) on cg peak or settled anon ->
+    smaps/smaps_rollup preserved pre-teardown (captured every run anyway)
+    and the run is KEPT (known glibc arena low mode; medians absorb it).
+  - REPORT for any OWNING interval: its first-parent commit count, verbatim
+    `git log --oneline --first-parent` if <= ~40 commits; if larger, the 10
+    largest-diffstat merges in it as candidates.
+
+QUIET-LANE / CONTAMINATION POLICY (= prior campaigns)
+  Owner workloads never touched; cleanup filters strictly on bgperf-named
+  containers + this campaign's own clones + ab1032c-* image tags. Resident
+  idle services acceptable; anything eating CPU pauses the campaign.
+
+FILES
+  run_one.sh, preflight.sh, analyze.py   adapted from ../phase2-coarse-bisect/
+  rNN_<arm>.log / .samples.tsv           per-run bench output + 1 Hz samples
+  rNN_<arm>.smaps_rollup / .smaps        post-bench daemon memory snapshots
+  config_<arm>.toml, runtime-manifest_<arm>.json  per-arm rendered surfaces
+  build_<arm>.log                        nocache build transcripts
+  build_identity.txt                     image IDs, binary SHA-256s
+  preflight_<arm>.txt                    boot + behavioral event-history proof
+  lane.log                               per-run quiet-lane checks
+  results.txt                            table, medians, steps, verdicts
+  SHA256SUMS                             written at campaign end
+
+================================================================================
+APPENDED SECTIONS (per protocol: after builds/preflights, before measurement)
+
+SEALED IMAGE DIGESTS (all 4 builds complete, adapter tree clean at ad8a7de
+during every build; sealed BEFORE preflights and the first measurement run)
+  ab1032c-q1  sha256:04c1bb6abbbcbd8950cd1a879971291cfcaf1aa52a24f4c0c9549582f679a10a
+              rustbgpd 9b46432c... (#1246), reports "rustbgpd 0.61.0"
+              (mid-v0.62-cycle, pre-prep-bump; correct)
+              binary sha256 6690b0829b7e67b4f17faeacfeeb1abb28d0e0b7705cd5d581ddd5fd325ee9ef
+  ab1032c-q2  sha256:a4d0e42de86288de07d7ec7308e616c3cdea662dddd3dd17800d39feac1384ef
+              rustbgpd 5ef6a066... (v0.62.0), reports "rustbgpd 0.62.0"
+              binary sha256 ecab5adf519f6b5aa47595c462b07c6b13e6a0b48c8d0ce0723f2d94a378321a
+  ab1032c-q3  sha256:ff2e04c885b80be3ecdb873d75753f2e90a2dab877d4d9bdb0a79ce73ccc7b02
+              rustbgpd fb4b586e... (merge #1377), reports "rustbgpd 0.62.0"
+              (post-v0.62.0-tag, pre-v0.63-prep; correct)
+              binary sha256 db11a7688620185572934ab5bf0de7383ac13a6d2eb8f6e422d3cf0aee466cb5
+  ab1032c-an2 sha256:2e42354b6185367cd2d93400590df11b10780e0693abdd80b5245c16d8b62b51
+              rustbgpd 9fe58871... (#1431 ANCHOR2), reports "rustbgpd 0.62.0"
+              binary sha256 0a14ef6c0872290d6ebdd654bdcd8528a836ed9066b81d63e906fa3cccd98090
+              = BYTE-IDENTICAL to phase2-coarse-bisect's ab1032b-p2 binary (same
+              source SHA): reproducible-build tie between the two campaigns.
+  Builder base pinned for all 4: rust:1.95-bookworm@sha256:6258907a...
+  (identical to all prior phase 0/1032 campaigns.)
+
+PER-ARM ERA-CONFIG RECORD (preflights complete, before first measurement)
+  q1/q2/q3: booted the phase 0 config_base.toml surface (= config_head +
+  [security.grpc] enforcement="legacy"; sha256 3316fed0a8356b6a627a4fdd7a
+  66967243828c35b9f48415b6ed95902f2ea062): running=true, "event history
+  disabled via [event_history].enabled = false" logged, zero db files, on
+  every arm. Era expectation confirmed: all three predate the 2026-08-03
+  authz arc and take the legacy block.
+  an2: booted the phase 0 config_head.toml VERBATIM (sha256 64fb4f7b84a6
+  24b69968d77027af6749e1a7696569feaa70332540c12777e07f), no legacy block:
+  running=true, same disabled line, zero db files (matches last campaign's
+  p2 preflight for this SHA).
+  Measurement runs: RUSTBGPD_GRPC_ENFORCEMENT=legacy exported for q1/q2/q3
+  only (env-gated phase 0 adapter shim applied post-build, post-digest-
+  seal); unset for an2. Per-run logs record the env value AND count the
+  rendered legacy-block lines in the harness config.
+  NO boot failures; nothing to map to undocumented era differences.
