@@ -8,6 +8,8 @@
 [![Rust](https://img.shields.io/badge/rust-1.95+-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
 
+Project site: <https://rbgp.rs>
+
 An API-first BGP daemon in Rust for IXP route servers, route reflectors, and
 automation-heavy control planes. gRPC is the primary interface for all peer
 lifecycle, routing, and policy operations — the config file bootstraps initial

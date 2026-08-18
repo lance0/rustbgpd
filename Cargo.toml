@@ -27,6 +27,7 @@ version = "0.64.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
+homepage = "https://rbgp.rs"
 repository = "https://github.com/lance0/rustbgpd"
 keywords = ["bgp", "networking", "routing", "grpc"]
 categories = ["network-programming"]
