@@ -207,6 +207,22 @@ class RrFlagshipAnalyzerContracts(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertFalse(payload["gates"]["msgs_sent_monotone"]["pass"])
 
+    def test_msgs_sent_flat_interval_fails_with_exact_first_interval(self):
+        rows = smoke_rows()
+        rows[5]["msgs_sent_total"] = rows[4]["msgs_sent_total"]
+        result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(payload["gates"]["terminal_delivery_exact"]["pass"])
+        gate = payload["gates"]["msgs_sent_monotone"]
+        self.assertFalse(gate["pass"])
+        self.assertEqual(gate["value"]["breaks"], 0)
+        self.assertEqual(gate["value"]["flats"], 1)
+        self.assertEqual(gate["value"]["first_flat"], {
+            "from_timestamp": ts(120),
+            "to_timestamp": ts(150),
+            "value": 3000,
+        })
+
     def test_hold_window_readyz_503_fails(self):
         # Strictness where the operational claim lives: any non-200 (or
         # >250ms) sample before the terminal-refresh marker fails.

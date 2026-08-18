@@ -211,6 +211,16 @@ def analyze(rows: list[dict[str, str]], cycles: dict, meta: dict,
     )
 
     monotone_breaks = sum(1 for a, b in zip(msgs, msgs[1:]) if b < a)
+    flat_intervals = [
+        {
+            "from_timestamp": previous["timestamp"],
+            "to_timestamp": current["timestamp"],
+            "value": int(previous["msgs_sent_total"]),
+        }
+        for previous, current, previous_value, current_value
+        in zip(rows, rows[1:], msgs, msgs[1:])
+        if current_value == previous_value
+    ]
 
     # readyz split (gates doc scenario 11): strict 200-within-250ms on
     # hold-window samples; samples inside the terminal-refresh window
@@ -286,8 +296,12 @@ def analyze(rows: list[dict[str, str]], cycles: dict, meta: dict,
             "pass": bool(exceeded) and max(exceeded) == 0,
         },
         "msgs_sent_monotone": {
-            "value": {"breaks": monotone_breaks},
-            "pass": monotone_breaks == 0,
+            "value": {
+                "breaks": monotone_breaks,
+                "flats": len(flat_intervals),
+                "first_flat": flat_intervals[0] if flat_intervals else None,
+            },
+            "pass": monotone_breaks == 0 and not flat_intervals,
         },
         "readyz": {
             "value": {
