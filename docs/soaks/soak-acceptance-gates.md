@@ -227,7 +227,7 @@ RSS bounds rationale: the ceiling is calibrated from the
 `bench/scale/route-server-1000` retained receipt, whose one-shot
 4-reload run at this exact shape enforces a 2 GiB process-tree ceiling;
 repeated reload cycles add glibc allocator retention (a known-benign
-pattern — see the LAN-461 finding: jemalloc erases it, it is not an
+pattern: jemalloc erases it, it is not an
 intern/RIB leak), so the soak ceiling adds 1 GiB of reload-cycle
 headroom (3 GiB). Because that retention front-loads, the slope gate
 bounds only the LATE window (final 25 % of the run), not the early
@@ -275,7 +275,8 @@ this exact route shape. Real transport adds 1000 TCP sessions,
 per-peer Adj-RIB-Out state, and update-group buffers on top; the
 historical real-transport measurement at this shape is the DATED
 419 MiB scratch-harness figure (quoted as calibration input only, not
-as a refreshed number — LAN-694). The 1024 MB ceiling is ~2.4× that
+as a refreshed number; refreshing it is a separate decision). The
+1024 MB ceiling is ~2.4× that
 dated transport figure: wide enough that allocator-arena noise
 (±30–50 MiB at 100p×1k) and measurement drift cannot trip it, tight
 enough to catch a leak of a few hundred MB. There are no reload cycles

@@ -1,0 +1,86 @@
+{
+  "verdict": "pass",
+  "samples": 2914,
+  "reloads_issued": 48,
+  "reloads_complete": 48,
+  "trips_executed": 6,
+  "trips_planned": 6,
+  "peak_rss_mb": 581.7,
+  "rss_late_slope_per_hour": 0.07241918633457362,
+  "intern_late_slope_per_hour": -0.0034487756758836263,
+  "slope_window_evaluated": true,
+  "gates": {
+    "min_samples": {
+      "value": 2914,
+      "limit": 2592.0,
+      "pass": true
+    },
+    "session_floor": {
+      "value": {
+        "violations": 0,
+        "first": []
+      },
+      "pass": true
+    },
+    "reload_accounting": {
+      "value": {
+        "issued": 48,
+        "complete": 48,
+        "planned": 48
+      },
+      "pass": true
+    },
+    "trip_accounting": {
+      "value": {
+        "executed": 6,
+        "planned": 6,
+        "defects": {}
+      },
+      "pass": true
+    },
+    "exceeded_exact": {
+      "value": 6,
+      "limit": 6,
+      "pass": true
+    },
+    "flap_budget": {
+      "value": 6,
+      "limit": 6,
+      "pass": true
+    },
+    "msgs_sent_monotone": {
+      "value": {
+        "breaks": 0
+      },
+      "pass": true
+    },
+    "readyz": {
+      "value": {
+        "bad_samples": 0,
+        "limit_ms": 250.0
+      },
+      "pass": true
+    },
+    "rss_peak_mb": {
+      "value": 581.7,
+      "limit": 3072.0,
+      "pass": true
+    },
+    "rss_late_slope_per_hour": {
+      "value": 0.07241918633457362,
+      "limit": 10.0,
+      "pass": true,
+      "note": null
+    },
+    "intern_late_slope_per_hour": {
+      "value": -0.0034487756758836263,
+      "limit": 100.0,
+      "pass": true,
+      "note": null
+    },
+    "no_abort": {
+      "value": [],
+      "pass": true
+    }
+  }
+}
