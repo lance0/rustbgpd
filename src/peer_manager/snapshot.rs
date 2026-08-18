@@ -278,7 +278,7 @@ impl PeerManager {
         reason = "one blocked peer-manager turn binds live config, policy, and every bounded session query"
     )]
     pub(super) async fn query_warm_checkpoint_capture(
-        &self,
+        &mut self,
     ) -> Result<WarmCheckpointCapture, String> {
         // Capture config identity before awaiting session actors. The peer
         // manager remains inside this one command while those queries run, so
@@ -498,7 +498,7 @@ impl PeerManager {
     /// capture future and therefore every abort-on-drop per-session driver;
     /// successful callers still receive one all-or-nothing, sorted capture.
     pub(super) async fn answer_warm_checkpoint_capture(
-        &self,
+        &mut self,
         mut reply: tokio::sync::oneshot::Sender<Result<WarmCheckpointCapture, String>>,
     ) {
         if reply.is_closed() {

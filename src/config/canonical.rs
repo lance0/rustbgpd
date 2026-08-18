@@ -17,6 +17,7 @@ const SENTINEL_TWO: &str = "rustbgpd_bounded_writer_sentinel_two";
 #[derive(Clone, Copy)]
 enum DocumentShape {
     Raw,
+    CanonicalBody,
     CanonicalPersisted,
 }
 
@@ -439,6 +440,7 @@ impl<'a> From<&'a Config> for CanonicalConfig<'a> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn render(config: &Config) -> Result<String, toml::ser::Error> {
     toml::to_string_pretty(&CanonicalConfig::from(config))
 }
@@ -465,6 +467,14 @@ pub(super) fn render_raw_bounded(
     render_document_bounded_with_hook(config, DocumentShape::Raw, |_| Ok(()))
 }
 
+/// Render the effective canonical body from a sentinel-only materialized
+/// config while borrowing the source statements in bounded chunks.
+pub(super) fn render_effective_bounded(
+    config: &mut Config,
+) -> Result<(String, BoundedRenderStats), toml::ser::Error> {
+    render_effective_bounded_with_hook(config, |_| Ok(()))
+}
+
 fn render_document_bounded_with_hook(
     config: &mut Config,
     shape: DocumentShape,
@@ -472,10 +482,30 @@ fn render_document_bounded_with_hook(
 ) -> Result<(String, BoundedRenderStats), toml::ser::Error> {
     let extraction = StatementExtraction::new(config);
     hook("after-extraction")?;
+    render_extraction_bounded(&extraction, extraction.config, shape, hook)
+}
+
+fn render_effective_bounded_with_hook(
+    config: &mut Config,
+    mut hook: impl FnMut(&'static str) -> Result<(), toml::ser::Error>,
+) -> Result<(String, BoundedRenderStats), toml::ser::Error> {
+    let extraction = StatementExtraction::new(config);
+    hook("after-extraction")?;
+    let effective = extraction.config.effective_redacted();
+    hook("after-materialization")?;
+    render_extraction_bounded(&extraction, &effective, DocumentShape::CanonicalBody, hook)
+}
+
+fn render_extraction_bounded(
+    extraction: &StatementExtraction<'_>,
+    skeleton_config: &Config,
+    shape: DocumentShape,
+    mut hook: impl FnMut(&'static str) -> Result<(), toml::ser::Error>,
+) -> Result<(String, BoundedRenderStats), toml::ser::Error> {
     let skeleton = match shape {
-        DocumentShape::Raw => toml::to_string_pretty(&*extraction.config)?,
-        DocumentShape::CanonicalPersisted => {
-            toml::to_string_pretty(&CanonicalConfig::from(&*extraction.config))?
+        DocumentShape::Raw => toml::to_string_pretty(skeleton_config)?,
+        DocumentShape::CanonicalBody | DocumentShape::CanonicalPersisted => {
+            toml::to_string_pretty(&CanonicalConfig::from(skeleton_config))?
         }
     };
     let mut templates = extraction
@@ -505,7 +535,7 @@ fn render_document_bounded_with_hook(
     }
 
     let header_len = match shape {
-        DocumentShape::Raw => 0,
+        DocumentShape::Raw | DocumentShape::CanonicalBody => 0,
         DocumentShape::CanonicalPersisted => super::PERSISTED_CONFIG_HEADER.len() + 1,
     };
     let mut document =
@@ -548,6 +578,14 @@ pub(super) fn render_raw_bounded_with_test_hook(
     hook: impl FnMut(&'static str) -> Result<(), toml::ser::Error>,
 ) -> Result<(String, BoundedRenderStats), toml::ser::Error> {
     render_document_bounded_with_hook(config, DocumentShape::Raw, hook)
+}
+
+#[cfg(test)]
+pub(super) fn render_effective_bounded_with_test_hook(
+    config: &mut Config,
+    hook: impl FnMut(&'static str) -> Result<(), toml::ser::Error>,
+) -> Result<(String, BoundedRenderStats), toml::ser::Error> {
+    render_effective_bounded_with_hook(config, hook)
 }
 
 /// Test-only decomposition of [`render`] at the TOML ownership boundaries.
