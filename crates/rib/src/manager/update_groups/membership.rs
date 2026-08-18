@@ -123,7 +123,7 @@ impl RibManager {
                 if let Some(rib_out) = self.adj_ribs_out.get_mut(&peer) {
                     rib_out.release_unicast();
                     if vpn_groupable {
-                        rib_out.clear_vpn();
+                        rib_out.release_vpn();
                     }
                 }
             }

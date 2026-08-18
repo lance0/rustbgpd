@@ -941,6 +941,96 @@ fn grouped_peer_slow_round_trip_releases_private_unicast_without_wire_delta() {
     }
 }
 
+#[test]
+fn grouped_peer_slow_round_trip_releases_private_vpn_without_wire_delta() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 1, 5));
+    let mut outbound = register_direct_peer_with_families(&mut manager, peer, vpn_sendable());
+    assert_eq!(outbound.try_recv().unwrap().end_of_rib, vpn_sendable());
+    let mut route = make_vpn_rib_route(Ipv4Addr::new(192, 0, 2, 7), 31, 100, 100);
+    route.origin_type = crate::route::RouteOrigin::Ebgp;
+    let route_key = route.key();
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        peer: route.peer,
+        session_id: 0,
+        announced: vec![route.clone()],
+        withdrawn: vec![],
+    });
+    while manager.process_next_route_chunk() {}
+    let announced = outbound.try_recv().unwrap();
+    assert_eq!(announced.vpn_announce.len(), 1);
+    assert_eq!(announced.vpn_announce[0].key(), route_key);
+    assert!(crate::manager::helpers::vpn_routes_equal(
+        &announced.vpn_announce[0],
+        &route
+    ));
+    let initial_gid = manager.grouped_member_of(peer).expect("initial group");
+    let initial_group = manager.group_ribs[&initial_gid]
+        .table
+        .get_vpn(&route_key)
+        .expect("initial grouped VPN route");
+    assert!(crate::manager::helpers::vpn_routes_equal(
+        initial_group,
+        &route
+    ));
+
+    manager.handle_update(RibUpdate::PeerSlowState {
+        peer,
+        session_id: 0,
+        slow: true,
+    });
+    while manager.process_next_route_chunk() {}
+
+    assert!(manager.grouped_member_of(peer).is_none());
+    let private = manager
+        .adj_ribs_out
+        .get(&peer)
+        .expect("private fallback state");
+    let retained = private.get_vpn(&route_key).expect("private VPN route");
+    assert!(crate::manager::helpers::vpn_routes_equal(retained, &route));
+    assert_eq!(retained.nlri, route.nlri);
+    assert_eq!(retained.next_hop, route.next_hop);
+    assert_eq!(retained.peer, route.peer);
+    assert_eq!(retained.attributes, route.attributes);
+    assert_eq!(retained.received_at, route.received_at);
+    assert_eq!(private.vpn_path_ids_for_key(&route_key.nlri_key), [0]);
+    let capacities = private.bench_vpn_capacities();
+    assert!(capacities.0 > 0 && capacities.1 > 0);
+    assert!(matches!(
+        outbound.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+
+    manager.handle_update(RibUpdate::PeerSlowState {
+        peer,
+        session_id: 0,
+        slow: false,
+    });
+    while manager.process_next_route_chunk() {}
+
+    assert!(manager.grouped_member_of(peer).is_some());
+    let final_gid = manager.grouped_member_of(peer).expect("rebuilt group");
+    let final_group = manager.group_ribs[&final_gid]
+        .table
+        .get_vpn(&route_key)
+        .expect("rebuilt grouped VPN route");
+    assert!(crate::manager::helpers::vpn_routes_equal(
+        final_group,
+        &route
+    ));
+    let private = manager
+        .adj_ribs_out
+        .get(&peer)
+        .expect("private grouped state");
+    assert_eq!(private.vpn_len(), 0);
+    assert_eq!(private.bench_vpn_capacities(), (0, 0));
+    assert!(matches!(
+        outbound.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+}
+
 fn drive_exact_precommit_step(
     manager: &mut RibManager,
     peers: [IpAddr; 2],

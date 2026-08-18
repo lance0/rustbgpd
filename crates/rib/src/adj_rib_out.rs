@@ -217,12 +217,24 @@ impl AdjRibOut {
     }
 
     /// Remove only the VPN routes and their secondary key index, leaving
-    /// every other family untouched. The VPN sibling of
-    /// [`Self::clear_unicast`]: used when a peer's VPN advertised state
-    /// moves onto the update-group path.
+    /// every other family untouched. This keeps the backing allocations for
+    /// callers that expect the VPN table to refill. Use [`Self::release_vpn`]
+    /// when ownership moves to an update group.
     pub fn clear_vpn(&mut self) {
         self.vpn_routes.clear();
         self.vpn_key_path_ids.clear();
+    }
+
+    /// Remove only the VPN routes and their secondary key index, releasing
+    /// their backing allocations while leaving every other family untouched.
+    pub fn release_vpn(&mut self) {
+        self.vpn_routes = HashMap::default();
+        self.vpn_key_path_ids = HashMap::default();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bench_vpn_capacities(&self) -> (usize, usize) {
+        (self.vpn_routes.capacity(), self.vpn_key_path_ids.capacity())
     }
 
     /// Remove every advertised route — unicast, `FlowSpec`, EVPN, BGP-LS,
@@ -875,6 +887,43 @@ mod tests {
         assert!(rib.is_empty());
         assert_eq!(rib.bench_route_capacity(), 0);
         assert_eq!(rib.vpn_len(), 1);
+        assert_eq!(rib.bgpls_len(), 1);
+    }
+
+    #[test]
+    fn clear_vpn_keeps_capacity_and_other_families() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        for octet in 1..=64 {
+            rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, octet, 0], 24, 100), 1));
+        }
+        rib.insert(make_route(prefix_a(), 0));
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(17), 1));
+        let capacities = rib.bench_vpn_capacities();
+
+        rib.clear_vpn();
+
+        assert_eq!(rib.vpn_len(), 0);
+        assert_eq!(rib.bench_vpn_capacities(), capacities);
+        assert!(rib.get(&prefix_a(), 0).is_some());
+        assert_eq!(rib.bgpls_len(), 1);
+    }
+
+    #[test]
+    fn release_vpn_drops_capacity_and_keeps_other_families() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        for octet in 1..=64 {
+            rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, octet, 0], 24, 100), 1));
+        }
+        rib.insert(make_route(prefix_a(), 0));
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(18), 1));
+        let capacities = rib.bench_vpn_capacities();
+        assert!(capacities.0 > 0 && capacities.1 > 0);
+
+        rib.release_vpn();
+
+        assert_eq!(rib.vpn_len(), 0);
+        assert_eq!(rib.bench_vpn_capacities(), (0, 0));
+        assert!(rib.get(&prefix_a(), 0).is_some());
         assert_eq!(rib.bgpls_len(), 1);
     }
 
