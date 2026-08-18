@@ -1,0 +1,188 @@
+phase 5 candidate-targeted micro-bisect — localize the +84.4 MiB cg-peak
+(+95.5 settled-anon) growth and the -1.07 s convergence gain inside
+6294f0e5..b592362b (21 first-parent commits, all 2026-07-26). 100p x 1k shape.
+================================================================================
+Written BEFORE any build or measurement. The preregistrations below are frozen
+and never edited. Per protocol (phase 0 / phase2-coarse-bisect / phase3-refinement-bisect /
+phase4-quartile-split), the sealed image-digest section and per-arm era-config record
+are APPENDED after builds/preflights complete and before the first measurement
+run; nothing above that appended section is ever modified.
+
+PROTOCOL BASE
+  Identical to ../phase4-quartile-split/ (which reuses the phase 0 sealed-image
+  protocol): sealed source exports (fresh local clones detached at exact SHAs;
+  the primary checkout at <repo> is never entered or
+  built from — SHAs were resolved from a --no-checkout clone repo-resolve/ in
+  this directory), one nocache build per arm, pinned harness, behavioral
+  event-history verification per run, per-run smaps/smaps_rollup capture
+  post-bench, quiet-lane checks before every run, digests sealed
+  pre-measurement, full cleanup after.
+
+FROZEN ARMS (4) — CANDIDATE-TARGETED placement (not quartiles), resolved SHAs
+recorded before building. Window = R1(6294f0e5)..ANCHOR4(b592362b), 21
+first-parent commits (bisect3's owning interval, positions 23..43 of the
+86-commit window; renumbered here 1..21, oldest = position 1). Placement
+targets the three ranked DHAT-pass candidates from phase4-quartile-split.
+  S1      = 99ee74ba67ec24ce8e09c0c18a83b652da35712b
+            "Merge pull request #1184 from lance0/perf/revised-update-
+            duplicate-table", 2026-07-26 — window position 1, the FIRST
+            commit after R1, so step R1->S1 isolates merge #1184 ALONE
+            (bisect3 candidate #3).
+  S2      = 21aeba738bca1113453781ffdacd263e1758a074
+            "Merge pull request #1189 from lance0/perf/coalesce-neighbor-
+            rib-snapshots", 2026-07-26 — position 7; step S1->S2 (6 commits)
+            ENDS at #1189 (bisect3 candidate #1).
+  S3      = 870062f0ce0d24e1d31241d4a71138c96c45ef2f
+            "Merge pull request #1198 from lance0/perf/share-policy-set-
+            store", 2026-07-26 — position 15; step S2->S3 (8 commits) ENDS
+            at #1198 (bisect3 candidate #2).
+  ANCHOR4 = b592362b7ec7a9063f9e38c7cd50a005fd113150
+            "Merge pull request #1204 from lance0/fix/lan-660-top-truth",
+            2026-07-26 — position 21, re-measured fresh as the in-campaign
+            anchor. Its level last campaign (phase4-quartile-split, arm r2, n=5):
+            cg peak median 272.1 / settled anon 225.6 MiB / convergence
+            11.90 s.
+  R1 (NOT re-measured) = 6294f0e5b5837e7aa83a4cfb4346954c80bd4ce2 (merge
+            #1183 lazy-inbound-buffer), phase4-quartile-split recorded medians:
+            cg peak 187.7 / settled anon 130.1 MiB / convergence 12.97 s (n=5).
+
+CHAIN ORDER AND INTERVAL FIRST-PARENT COMMIT COUNTS
+(git rev-list --first-parent --count on repo-resolve/; sum verified = 21 =
+full range; window positions verified 1/7/15/21)
+    R1(6294f0e5)  -> S1(99ee74ba):      1   (merge #1184 ALONE)
+    S1(99ee74ba)  -> S2(21aeba73):      6   (#1185,#1186,#1192,#1187,#1188,#1189)
+    S2(21aeba73)  -> S3(870062f0):      8   (#1190,#1193,#1194,#1191,#1195,#1196,#1197,#1198)
+    S3(870062f0)  -> ANCHOR4(b592362b): 6   (#1200,#1199,#1201,#1202,#1203,#1204)
+
+BUILD DISCIPLINE
+  Each arm built ONCE from a sealed export: fresh local `git clone` of the
+  primary repo into this directory (clone-<arm>/), detached at the exact SHA,
+  clean tree. bgperf2 adapter tree CLEAN at ad8a7de during every build
+  (verified clean before this MANIFEST was written; shim from phase4-quartile-split
+  already reverted); builds run nocache via
+    RUSTBGPD_SOURCE=<clone> bgperf2.py update rustbgpd --tag <tag> -n -c <sha>
+  Tags: bgperf/rustbgpd:ab1032e-s1 / -s2 / -s3 / -an4.
+  Recorded per arm: image ID, binary SHA-256, version report (build_identity.txt).
+  Builds sequential. ANCHOR4's binary SHA-256 compared against phase4-quartile-split's
+  ab1032d-r2 record (a02f2c6cc4a29db5778ff38a3a3109acc54374e7702bac37ec93d5323b4d2624,
+  same source SHA b592362b) as a reproducible-build check; recorded either way.
+
+HARNESS HELD CONSTANT (= phase 0 / phase2-coarse-bisect / -bisect2 / -bisect3)
+  bgperf2 ad8a7deba21e8ffa1aed609b86e0d0236b0489cd
+  tester  bgperf/bird   sha256:1187aaa54a53...  (verified present)
+  monitor bgperf/gobgp  sha256:e783a1d91600...  (verified present)
+  shape   bench -t rustbgpd -n 100 -p 1000, sequential, cleanup between runs
+  event history: RUSTBGPD_EVENT_HISTORY=disabled every run, verified
+  BEHAVIORALLY per run (rendered config carries [event_history] enabled=false
+  AND the daemon logs the disabled line).
+
+ERA COMPAT PLAN (frozen before preflight)
+  ALL FOUR ARMS (S1/S2/S3/ANCHOR4, all 2026-07-26) PREDATE the 2026-08-03
+  authz arc (#1429 implicit local-operator, #1431 legacy cut) — same era as
+  every arm of phase4-quartile-split: they default to tier enforcement and refuse
+  an empty roles map, so every arm needs the era-correct [security.grpc]
+  enforcement="legacy" block. Mechanism = the phase 0 bundle exactly as
+  used there:
+    - measurement runs: the env-gated adapter shim (../phase0-endpoint-ab/
+      adapter_shim.diff) applied to the bgperf2 tree AFTER all builds seal;
+      RUSTBGPD_GRPC_ENFORCEMENT=legacy exported for EVERY run of EVERY arm
+      (this campaign has no post-authz arm). Shim reverted at campaign end.
+    - preflights: every arm boots the phase 0 config_base.toml surface
+      (= config_head + legacy block; sha256 3316fed0a8356b6a627a4fdd7a
+      66967243828c35b9f48415b6ed95902f2ea062, re-verified today). ANCHOR4's
+      SHA booted exactly this surface as phase4-quartile-split's r2.
+  Every arm is preflight-booted BEFORE measurement. Every run's log records
+  the env value AND the rendered legacy-block line count (must be 1).
+  A boot failure not mappable to a documented era difference is
+  STOP-and-report.
+
+PREREGISTERED DESIGN (frozen)
+  - 5 runs per arm, 20 runs total, ROUND-ROBIN order (S1,S2,S3,ANCHOR4) x 5
+    -> r01..r20. Lane check before every run (loadavg + ps -C cargo,rustc by
+    comm; recorded in lane.log and as lane-start/lane-end in every run log).
+    Runs overlapping foreign load are CONTAMINATED, excluded, and replaced
+    (r21+) after the lane clears.
+  - PRIMARY metric: cg memory.peak per-arm MEDIAN. SECONDARY: settled RssAnon
+    median (ptree_anon_settled), convergence time (total_s) tracked per arm.
+  - ATTRIBUTION RULE over the chain R1 -> S1 -> S2 -> S3 -> ANCHOR4 (R1 fixed
+    at its recorded 187.7 cg-peak median / 130.1 anon / 12.97 s): an interval
+    OWNS growth when its median cg-peak step is >= +25 MiB. Steps within
+    +/-15 MiB are FLAT. Between (+15, +25) = MINOR CONTRIBUTOR, no ownership
+    claim. Negative steps beyond -15 reported factually as reductions.
+  - CONVERGENCE LOCALIZATION (secondary observation, no gate): R1 recorded
+    12.97 s; ANCHOR4's era runs ~11.90 s. Report WHICH step(s) the -1.07 s
+    lands in (median total_s per arm along the chain); it may split across
+    steps — report the split factually.
+  - SUM CHECK: the R1->ANCHOR4 chain of median steps reconciled against the
+    +84.4 MiB reference (phase4-quartile-split: r2 272.1 - R1 187.7). By
+    construction the residual equals ANCHOR4's in-campaign offset vs 272.1;
+    disclosed, NO correction applied.
+  - ANCHOR OFFSET: ANCHOR4's in-campaign medians vs phase4-quartile-split's r2
+    (272.1 peak / 225.6 anon / 11.90 s, n=5) disclosed as the campaign offset.
+  - LOW-MODE TRIPWIRE: any run >= 40 MiB below its arm's RUNNING median
+    (that arm's runs so far, including it) on cg peak or settled anon ->
+    smaps/smaps_rollup preserved pre-teardown (captured every run anyway)
+    and the run is KEPT (known glibc arena low mode; medians absorb it).
+  - REPORT: growth-curve table (arm, SHA, PR#, medians, n); step verdicts;
+    convergence localization; sum check + anchor offset; anomalies. For
+    EVERY step >= +25 MiB OR carrying >= 0.3 s of convergence movement,
+    the verbatim `git log --oneline --first-parent` commit list of that
+    step (every step here is <= 8 commits, so always listable). Close with
+    the NAMED owner(s): the specific PR(s) whose step carries the growth,
+    with measured magnitude; a multi-commit owning step is reported as
+    needing one further single-commit split, NOT guessed at.
+
+QUIET-LANE / CONTAMINATION POLICY (= prior campaigns)
+  Owner workloads never touched (unrelated containers resident); cleanup
+  filters strictly on bgperf-named containers + this campaign's own clones +
+  ab1032e-* image tags + builder-stage dangling layers from these builds.
+  Resident idle services acceptable; anything eating CPU pauses the campaign.
+
+FILES
+  run_one.sh, preflight.sh, analyze.py   adapted from ../phase4-quartile-split/
+  window_commits.txt                     the 21-commit first-parent window list
+  rNN_<arm>.log / .samples.tsv           per-run bench output + 1 Hz samples
+  rNN_<arm>.smaps_rollup / .smaps        post-bench daemon memory snapshots
+  config_<arm>.toml, runtime-manifest_<arm>.json  per-arm rendered surfaces
+  build_<arm>.log                        nocache build transcripts
+  build_identity.txt                     image IDs, binary SHA-256s
+  preflight_<arm>.txt                    boot + behavioral event-history proof
+  lane.log                               per-run quiet-lane checks
+  results.txt                            table, medians, steps, verdicts
+  SHA256SUMS                             written at campaign end
+
+================================================================================
+APPENDED SECTIONS (per protocol: after builds/preflights, before measurement)
+
+SEALED IMAGE DIGESTS (all 4 builds complete, adapter tree clean at ad8a7de
+during every build; sealed BEFORE preflights and the first measurement run)
+  ab1032e-s1  sha256:bca85f524d47f5e77abfd3b6175581b3bf93f60b9d4c68f19cc7c97e15b30016
+              rustbgpd 99ee74ba... (merge #1184), reports "rustbgpd 0.60.0"
+              (pre-#1186 v0.61 release prep at window position 4; correct)
+              binary sha256 d881d4df53d4d1c414d8fc7b5dd043293ce241c4b19623fba65ebb0344a275dd
+  ab1032e-s2  sha256:a8f60834459daf738ce2bb9810004e55099650b29a46410a3048282870d791a9
+              rustbgpd 21aeba73... (merge #1189), reports "rustbgpd 0.61.0"
+              (post-#1186 prep; correct)
+              binary sha256 d9c828876a41847a091a707d34a40e84f59fc0ce684986a2eb0bd068bb52276d
+  ab1032e-s3  sha256:ed17d39450ad7386ced8c0cf3f11e34001564c333f83c7df5f67869a21f4a025
+              rustbgpd 870062f0... (merge #1198), reports "rustbgpd 0.61.0" (correct)
+              binary sha256 6e526417d8d99c603f28ec06dab381d68cb9a0823b964f4c84163257eff07d6a
+  ab1032e-an4 sha256:8daf4024f4cad14e74b50f49327af5618430bae9ae025e6155677aef94e05af4
+              rustbgpd b592362b... (merge #1204 ANCHOR4), reports "rustbgpd 0.61.0"
+              binary sha256 a02f2c6cc4a29db5778ff38a3a3109acc54374e7702bac37ec93d5323b4d2624
+              = BYTE-IDENTICAL to phase4-quartile-split's ab1032d-r2 binary (same
+              source SHA): reproducible-build tie between the two campaigns.
+
+PER-ARM ERA-CONFIG RECORD (preflights complete, before first measurement)
+  s1/s2/s3/an4: ALL booted the phase 0 config_base.toml surface (= config_
+  head + [security.grpc] enforcement="legacy"; sha256 3316fed0a8356b6a627a
+  4fdd7a66967243828c35b9f48415b6ed95902f2ea062): running=true, "event history
+  disabled via [event_history].enabled = false" logged, zero db files, on
+  every arm. Era expectation confirmed: all four predate the 2026-08-03
+  authz arc and take the legacy block (s1 reports 0.60.0 — pre-#1186 v0.61
+  prep at window position 4; s2/s3/an4 report 0.61.0).
+  Measurement runs: RUSTBGPD_GRPC_ENFORCEMENT=legacy exported for EVERY run
+  (env-gated phase 0 adapter shim applied post-build, post-digest-seal).
+  Per-run logs record the env value AND count the rendered legacy-block
+  lines in the harness config.
+  NO boot failures; nothing to map to undocumented era differences.

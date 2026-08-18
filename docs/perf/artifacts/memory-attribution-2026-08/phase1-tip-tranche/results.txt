@@ -1,0 +1,83 @@
+run	side	pair	clean	total_s	monitor_s	elapsed_s	maxcpu	minidle	conv	bgperf_maxmem_mib	cg_peak_mib	cg_cur_max_mib	cg_anon_max_mib	cg_anon_settled_mib	ptree_rss_max_mib	ptree_rss_settled_mib	ptree_anon_settled_mib
+r01	b	1	True	11.95	0	3	126.0	95	100000/100000	249.9	274.4	267.1	260.7	234.4	274.9	256.8	234.4
+r02	t	1	True	11.95	0	3	136.0	95	100000/100000	258.0	275.3	260.9	251.4	220.3	282.9	240.7	218.5
+r03	t	2	True	11.93	0	3	131.0	94	100000/100000	257.0	283.7	260.2	250.2	232.0	274.5	254.0	232.0
+r04	b	2	True	11.88	0	3	133.0	95	100000/100000	268.3	286.1	274.6	252.8	227.6	275.5	250.2	227.6
+r05	b	3	True	11.93	0	3	129.0	95	100000/100000	235.5	248.1	234.2	225.9	181.5	255.6	204.0	181.5
+r06	t	3	True	11.89	0	3	140.0	94	100000/100000	265.2	289.6	276.7	266.3	247.0	288.6	269.2	247.0
+r07	t	4	True	11.91	0	3	129.0	94	100000/100000	258.0	289.3	257.8	249.3	230.2	271.5	252.4	230.2
+r08	b	4	True	11.91	0	3	134.0	94	100000/100000	254.0	277.4	263.7	255.1	243.8	284.7	266.3	243.8
+r09	b	5	True	11.85	0	3	131.0	94	100000/100000	289.8	307.0	289.2	278.7	244.9	300.9	267.2	244.9
+r10	t	5	True	11.86	0	3	136.0	95	100000/100000	242.7	268.0	248.4	226.4	215.4	248.7	237.7	215.4
+r11	t	6	True	11.9	0	3	136.0	95	100000/100000	258.0	267.9	254.5	242.4	195.5	267.6	217.9	195.5
+r12	b	6	True	11.91	0	3	135.0	95	100000/100000	250.9	272.2	250.8	240.9	224.4	267.6	246.9	224.4
+r13	b	7	True	11.95	0	3	132.0	95	100000/100000	243.7	272.7	256.0	245.1	213.8	255.1	235.9	213.8
+r14	t	7	True	11.91	0	3	135.0	94	100000/100000	242.7	273.9	258.3	250.3	227.0	268.4	249.4	227.0
+
+== b CLEAN (n=7)
+  bgperf_maxmem_mib        n=7 min=235.5 med=250.9 max=289.8 spread=(max-min)/med=21.6% stdev=17.95
+  cg_peak_mib              n=7 min=248.1 med=274.4 max=307.0 spread=(max-min)/med=21.5% stdev=17.64
+  cg_anon_max_mib          n=7 min=225.9 med=252.8 max=278.7 spread=(max-min)/med=20.9% stdev=16.57
+  cg_anon_settled_mib      n=7 min=181.5 med=227.6 max=244.9 spread=(max-min)/med=27.9% stdev=21.83
+  ptree_rss_max_mib        n=7 min=255.1 med=274.9 max=300.9 spread=(max-min)/med=16.7% stdev=16.21
+  ptree_rss_settled_mib    n=7 min=204.0 med=250.2 max=267.2 spread=(max-min)/med=25.3% stdev=21.83
+  ptree_anon_settled_mib   n=7 min=181.5 med=227.6 max=244.9 spread=(max-min)/med=27.9% stdev=21.83
+  total_s                  n=7 min=11.8 med=11.9 max=11.9 spread=(max-min)/med=0.8% stdev=0.04
+== t CLEAN (n=7)
+  bgperf_maxmem_mib        n=7 min=242.7 med=258.0 max=265.2 spread=(max-min)/med=8.7% stdev=8.52
+  cg_peak_mib              n=7 min=267.9 med=275.3 max=289.6 spread=(max-min)/med=7.9% stdev=9.31
+  cg_anon_max_mib          n=7 min=226.4 med=250.2 max=266.3 spread=(max-min)/med=15.9% stdev=11.95
+  cg_anon_settled_mib      n=7 min=195.5 med=227.0 max=247.0 spread=(max-min)/med=22.7% stdev=16.02
+  ptree_rss_max_mib        n=7 min=248.7 med=271.5 max=288.6 spread=(max-min)/med=14.7% stdev=12.75
+  ptree_rss_settled_mib    n=7 min=217.9 med=249.4 max=269.2 spread=(max-min)/med=20.6% stdev=16.03
+  ptree_anon_settled_mib   n=7 min=195.5 med=227.0 max=247.0 spread=(max-min)/med=22.7% stdev=16.10
+  total_s                  n=7 min=11.9 med=11.9 max=11.9 spread=(max-min)/med=0.8% stdev=0.03
+
+== ANOMALY WATCH (>=50 MiB below own-arm median)
+  none
+
+== PRIMARY: paired (T-B)/B, clean pairs only
+  bgperf_maxmem_mib        pairs=7 deltas%=[+3.2, -4.2, +12.6, +1.6, -16.3, +2.8, -0.4] mean=-0.1% 95%CI=[-8.2%, +8.0%]
+  cg_peak_mib              pairs=7 deltas%=[+0.3, -0.8, +16.7, +4.3, -12.7, -1.6, +0.4] mean=+1.0% 95%CI=[-7.1%, +9.0%]  -> PREREGISTERED BAND (cg memory.peak): INCONCLUSIVE (interval reported)
+  cg_anon_max_mib          pairs=7 deltas%=[-3.6, -1.0, +17.9, -2.3, -18.8, +0.6, +2.1] mean=-0.7% 95%CI=[-10.6%, +9.2%]
+  cg_anon_settled_mib      pairs=7 deltas%=[-6.0, +1.9, +36.1, -5.6, -12.0, -12.9, +6.2] mean=+1.1% 95%CI=[-14.5%, +16.7%]
+  ptree_rss_max_mib        pairs=7 deltas%=[+2.9, -0.4, +12.9, -4.6, -17.3, +0.0, +5.2] mean=-0.2% 95%CI=[-8.8%, +8.5%]
+  ptree_rss_settled_mib    pairs=7 deltas%=[-6.3, +1.5, +32.0, -5.2, -11.0, -11.7, +5.7] mean=+0.7% 95%CI=[-13.3%, +14.7%]
+  ptree_anon_settled_mib   pairs=7 deltas%=[-6.8, +1.9, +36.1, -5.6, -12.0, -12.9, +6.2] mean=+1.0% 95%CI=[-14.7%, +16.7%]  -> PREREGISTERED BAND (settled RssAnon): INCONCLUSIVE (interval reported)
+  total_s (secondary)      pairs=7 deltas%=[+0.0, +0.4, -0.3, +0.0, +0.1, -0.1, -0.3] mean=-0.0% 95%CI=[-0.3%, +0.2%]  (no gate; B reference median 11.9 s)
+
+== VERDICT (against the preregistered bands in MANIFEST.txt)
+BOTH PRIMARY SURFACES: INCONCLUSIVE — interval reported.
+  settled RssAnon (ptree_anon_settled): paired (T-B)/B mean +1.0%,
+    95% CI [-14.7%, +16.7%] over 7 clean pairs.
+  cg memory.peak: mean +1.0%, 95% CI [-7.1%, +9.0%] over 7 clean pairs.
+  Neither CI fits inside +/-5% (NO-MOVEMENT band not claimable), neither
+  bound clears -10%/+10% (not IMPROVES, not REGRESSION).
+CHARACTER: variance-driven, not signal-driven. Arm medians are within
+  ~1 MiB on every settled surface (settled anon B 227.6 vs T 227.0 MiB;
+  cg peak B 274.4 vs T 275.3 MiB) and every mean pair-delta is within
+  +/-1.1%. The interval is blown by the run-to-run low-mode bimodality
+  phase 0 first recorded (its r23): here r05_b settled at 181.5 MiB
+  (52.9 MiB below its then-5-run arm median — tripwire fired) and r11_t
+  at 195.5 MiB, i.e. the low mode appears on BOTH arms, so it is a
+  property of the v0.64-era daemon at this shape, not of the tranche.
+  Series extended 5 -> 7 pairs after the tripwire (phase 0 C-series
+  precedent); at the observed pair-delta stdev (~16.9 points on settled
+  anon) a +/-5% CI needs ~50+ pairs — unreachable, so INCONCLUSIVE is
+  the terminal preregistered verdict for this campaign.
+SECONDARY (no gate): convergence total_s dead heat — B median 11.91 s,
+  T median 11.91 s (B reference 11.9 s), paired CI [-0.3%, +0.2%].
+ANOMALY / ATTRIBUTION LEAD (the low-mode follow-up): r05_b smaps preserved
+  (r05_b.smaps_rollup/.smaps, captured post-bench pre-teardown).
+  vs normal r01_b: Rss 205.9 vs 260.0 MB, delta entirely
+  Anonymous/Private_Dirty (185.6 vs 239.8 MB); file-backed identical
+  (~1.6 MB Shared_Clean). Same anon-VMA count (84 vs 85); every large
+  arena uniformly less resident (largest 68.8 vs 90.8 MB, second
+  cluster 45.7+13.5 vs 25.2+19.1+12.7...). Signature = glibc arena
+  fill/touch variance (fewer dirty pages per arena), not a different
+  allocation profile or an untriggered subsystem. r11_t rollup shows the
+  same shape at 199.9 MB anonymous. smaps captured for ALL 14 runs.
+CONTAMINATION: none — all 14 runs clean (lane.log + per-run
+  lane-start/end: cargo_rustc=0 throughout, loadavg <= 1.12 at every
+  pair start on 64 cores, no foreign CPU eater; resident unrelated services
+  idle as permitted).

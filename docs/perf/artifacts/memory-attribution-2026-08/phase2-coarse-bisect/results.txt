@@ -1,0 +1,137 @@
+run	arm	clean	total_s	monitor_s	elapsed_s	maxcpu	minidle	conv	bgperf_maxmem_mib	cg_peak_mib	cg_cur_max_mib	cg_anon_max_mib	cg_anon_settled_mib	ptree_rss_max_mib	ptree_rss_settled_mib	ptree_anon_settled_mib
+r01	p1	True	11.92	0	3	134.0	94	100000/100000	270.3	282.4	245.6	235.4	228.3	264.5	250.4	228.3
+r02	p2	True	11.91	0	3	132.0	94	100000/100000	246.8	270.7	246.2	236.1	232.1	257.9	253.9	232.1
+r03	p3	True	11.87	0	3	119.0	95	100000/100000	172.0	181.5	158.9	152.6	138.7	172.7	160.9	138.7
+r04	p4	True	11.9	0	3	133.0	94	100000/100000	275.5	292.6	285.2	264.6	246.6	287.6	269.6	246.6
+r05	an	True	11.91	0	3	128.0	94	100000/100000	263.2	275.3	250.6	240.3	228.4	266.8	250.6	228.4
+r06	p1	True	12.0	0	3	132.0	94	100000/100000	284.7	309.5	285.0	273.8	243.7	295.6	265.5	243.7
+r07	p2	True	11.91	0	3	126.0	94	100000/100000	239.6	264.6	239.6	228.5	204.0	250.0	225.4	204.0
+r08	p3	True	11.93	0	3	132.0	94	100000/100000	250.9	279.5	253.1	244.5	234.6	270.0	256.8	234.6
+r09	p4	True	11.97	0	3	130.0	95	100000/100000	224.3	249.2	228.6	221.3	205.9	234.0	228.2	205.9
+r10	an	True	11.99	0	3	134.0	95	100000/100000	271.4	299.1	289.0	281.5	241.7	292.3	261.6	239.0
+r11	p1	True	11.96	0	3	127.0	95	100000/100000	298.0	302.8	277.5	268.1	243.6	290.4	265.9	243.6
+r12	p2	True	11.93	0	3	125.0	95	100000/100000	158.7	170.4	162.5	156.1	122.1	173.2	143.7	122.1
+r13	p3	True	11.93	0	3	131.0	94	100000/100000	248.8	277.1	245.8	237.9	218.3	257.3	240.5	218.3
+r14	p4	True	11.85	0	3	129.0	93	100000/100000	246.8	281.6	243.7	235.3	223.4	258.0	246.0	223.4
+r15	an	True	11.92	0	3	129.0	95	100000/100000	260.1	292.0	259.9	249.4	241.6	271.8	264.0	241.6
+r16	p1	True	11.96	0	3	131.0	94	100000/100000	264.2	295.1	264.4	254.2	239.5	275.6	260.9	239.5
+r17	p2	True	11.91	0	3	138.0	94	100000/100000	266.2	290.6	262.8	252.0	231.2	278.7	252.6	231.2
+r18	p3	True	11.94	0	3	134.0	95	100000/100000	277.5	296.4	276.6	267.6	261.0	289.8	283.3	261.0
+r19	p4	True	11.92	0	3	133.0	94	100000/100000	260.1	273.2	260.5	250.2	225.1	260.5	247.6	225.1
+r20	an	True	11.91	0	3	129.0	94	100000/100000	289.8	305.5	295.6	279.6	247.2	304.5	269.7	247.2
+r21	p1	True	11.89	0	3	136.0	94	100000/100000	267.3	289.7	263.3	255.2	249.2	283.1	271.3	249.2
+r22	p2	True	11.86	0	3	131.0	94	100000/100000	251.9	278.2	250.4	241.3	216.2	262.4	237.3	216.2
+r23	p3	True	11.83	0	3	136.0	94	100000/100000	241.7	253.8	243.6	236.3	201.2	248.5	223.1	201.2
+r24	p4	True	11.9	0	3	130.0	95	100000/100000	289.8	309.3	283.8	274.7	259.5	297.3	282.1	259.5
+r25	an	True	11.84	0	3	120.0	95	100000/100000	155.6	168.0	150.9	139.1	120.7	167.5	143.1	120.7
+
+== p2 (9fe58871 authz legacy cut (#1431)) CLEAN (n=5)
+  bgperf_maxmem_mib        n=5 min=158.7 med=246.8 max=266.2 spread=(max-min)/med=43.6% stdev=42.47
+  cg_peak_mib              n=5 min=170.4 med=270.7 max=290.6 spread=(max-min)/med=44.4% stdev=48.22
+  cg_anon_max_mib          n=5 min=156.1 med=236.1 max=252.0 spread=(max-min)/med=40.6% stdev=38.25
+  cg_anon_settled_mib      n=5 min=122.1 med=216.2 max=232.1 spread=(max-min)/med=50.9% stdev=45.67
+  ptree_rss_max_mib        n=5 min=173.2 med=257.9 max=278.7 spread=(max-min)/med=40.9% stdev=41.18
+  ptree_rss_settled_mib    n=5 min=143.7 med=237.3 max=253.9 spread=(max-min)/med=46.4% stdev=45.63
+  ptree_anon_settled_mib   n=5 min=122.1 med=216.2 max=232.1 spread=(max-min)/med=50.9% stdev=45.67
+  total_s                  n=5 min=11.9 med=11.9 max=11.9 spread=(max-min)/med=0.6% stdev=0.03
+== p1 (39ebf370 v0.63.0) CLEAN (n=5)
+  bgperf_maxmem_mib        n=5 min=264.2 med=270.3 max=298.0 spread=(max-min)/med=12.5% stdev=14.17
+  cg_peak_mib              n=5 min=282.4 med=295.1 max=309.5 spread=(max-min)/med=9.2% stdev=10.65
+  cg_anon_max_mib          n=5 min=235.4 med=255.2 max=273.8 spread=(max-min)/med=15.0% stdev=14.85
+  cg_anon_settled_mib      n=5 min=228.3 med=243.6 max=249.2 spread=(max-min)/med=8.6% stdev=7.82
+  ptree_rss_max_mib        n=5 min=264.5 med=283.1 max=295.6 spread=(max-min)/med=11.0% stdev=12.29
+  ptree_rss_settled_mib    n=5 min=250.4 med=265.5 max=271.3 spread=(max-min)/med=7.9% stdev=7.85
+  ptree_anon_settled_mib   n=5 min=228.3 med=243.6 max=249.2 spread=(max-min)/med=8.6% stdev=7.82
+  total_s                  n=5 min=11.9 med=12.0 max=12.0 spread=(max-min)/med=0.9% stdev=0.04
+== p3 (9077984b ADR-0126 Phase 3 flip (#1512)) CLEAN (n=5)
+  bgperf_maxmem_mib        n=5 min=172.0 med=248.8 max=277.5 spread=(max-min)/med=42.4% stdev=39.41
+  cg_peak_mib              n=5 min=181.5 med=277.1 max=296.4 spread=(max-min)/med=41.5% stdev=45.20
+  cg_anon_max_mib          n=5 min=152.6 med=237.9 max=267.6 spread=(max-min)/med=48.3% stdev=43.85
+  cg_anon_settled_mib      n=5 min=138.7 med=218.3 max=261.0 spread=(max-min)/med=56.0% stdev=45.92
+  ptree_rss_max_mib        n=5 min=172.7 med=257.3 max=289.8 spread=(max-min)/med=45.5% stdev=44.69
+  ptree_rss_settled_mib    n=5 min=160.9 med=240.5 max=283.3 spread=(max-min)/med=50.9% stdev=45.96
+  ptree_anon_settled_mib   n=5 min=138.7 med=218.3 max=261.0 spread=(max-min)/med=56.0% stdev=45.92
+  total_s                  n=5 min=11.8 med=11.9 max=11.9 spread=(max-min)/med=0.9% stdev=0.05
+== p4 (295d1f37 v0.64.0) CLEAN (n=5)
+  bgperf_maxmem_mib        n=5 min=224.3 med=260.1 max=289.8 spread=(max-min)/med=25.2% stdev=25.37
+  cg_peak_mib              n=5 min=249.2 med=281.6 max=309.3 spread=(max-min)/med=21.3% stdev=22.40
+  cg_anon_max_mib          n=5 min=221.3 med=250.2 max=274.7 spread=(max-min)/med=21.3% stdev=21.56
+  cg_anon_settled_mib      n=5 min=205.9 med=225.1 max=259.5 spread=(max-min)/med=23.8% stdev=21.05
+  ptree_rss_max_mib        n=5 min=234.0 med=260.5 max=297.3 spread=(max-min)/med=24.3% stdev=25.27
+  ptree_rss_settled_mib    n=5 min=228.2 med=247.6 max=282.1 spread=(max-min)/med=21.8% stdev=21.22
+  ptree_anon_settled_mib   n=5 min=205.9 med=225.1 max=259.5 spread=(max-min)/med=23.8% stdev=21.05
+  total_s                  n=5 min=11.8 med=11.9 max=12.0 spread=(max-min)/med=1.0% stdev=0.04
+== an (07f6eb52 ANCHOR (#1672)) CLEAN (n=5)
+  bgperf_maxmem_mib        n=5 min=155.6 med=263.2 max=289.8 spread=(max-min)/med=51.0% stdev=52.94
+  cg_peak_mib              n=5 min=168.0 med=292.0 max=305.5 spread=(max-min)/med=47.1% stdev=57.01
+  cg_anon_max_mib          n=5 min=139.1 med=249.4 max=281.5 spread=(max-min)/med=57.1% stdev=58.18
+  cg_anon_settled_mib      n=5 min=120.7 med=241.6 max=247.2 spread=(max-min)/med=52.4% stdev=53.68
+  ptree_rss_max_mib        n=5 min=167.5 med=271.8 max=304.5 spread=(max-min)/med=50.4% stdev=54.23
+  ptree_rss_settled_mib    n=5 min=143.1 med=261.6 max=269.7 spread=(max-min)/med=48.4% stdev=53.39
+  ptree_anon_settled_mib   n=5 min=120.7 med=239.0 max=247.2 spread=(max-min)/med=52.9% stdev=53.37
+  total_s                  n=5 min=11.8 med=11.9 max=12.0 spread=(max-min)/med=1.3% stdev=0.05
+
+== ANOMALY TRIPWIRE (>=40 MiB below arm running median; smaps captured every run)
+  LOW-MODE: r12_p2 cg_peak_mib=170.4 vs running median 264.6 (delta 94.2 MiB) — smaps at r12_p2.smaps_rollup/.smaps
+  LOW-MODE: r12_p2 ptree_anon_settled_mib=122.1 vs running median 204.0 (delta 81.9 MiB) — smaps at r12_p2.smaps_rollup/.smaps
+  LOW-MODE: r25_an cg_peak_mib=168.0 vs running median 292.0 (delta 124.0 MiB) — smaps at r25_an.smaps_rollup/.smaps
+  LOW-MODE: r25_an ptree_anon_settled_mib=120.7 vs running median 239.0 (delta 118.3 MiB) — smaps at r25_an.smaps_rollup/.smaps
+
+== GROWTH CURVE (true first-parent order; A fixed at recorded phase 0 medians)
+  arm  median cg_peak  median settled_anon  median total_s   n
+  A             195.1                153.8     (14.0 rec.) (5)
+  p2            270.7                216.2           11.91   5
+  p1            295.1                243.6           11.96   5
+  p3            277.1                218.3           11.93   5
+  p4            281.6                225.1           11.90   5
+  an            292.0                239.0           11.91   5
+
+== INTERVAL STEPS (median cg_peak step; ownership per preregistered rule)
+    A -> p2  (271 commits) peak_step= +75.6 MiB anon_step=+62.4  -> OWNS GROWTH (>= +25 MiB)
+   p2 -> p1  ( 34 commits) peak_step= +24.4 MiB anon_step=+27.4  -> MINOR CONTRIBUTOR (+15..+25 MiB, no ownership claim)
+   p1 -> p3  ( 48 commits) peak_step= -18.0 MiB anon_step=-25.3  -> REDUCTION (reported factually; rule defines growth only)
+   p3 -> p4  ( 11 commits) peak_step=  +4.5 MiB anon_step=+6.8  -> FLAT (within +/-15 MiB)
+   p4 -> an  (145 commits) peak_step= +10.4 MiB anon_step=+13.9  -> FLAT (within +/-15 MiB)
+
+== SUM CHECK / ANCHOR OFFSET
+  chain sum of peak steps A->ANCHOR: +96.9 MiB (= in-campaign ANCHOR median 292.0 - A recorded 195.1)
+  measured endpoint delta (phase 0): +88.5 MiB
+  residual (chain - endpoint) = +8.4 MiB = the campaign's anchor offset by construction (A is fixed)
+  anchor offset vs phase 0 (n=15): peak +8.4 MiB, settled anon -0.7 MiB
+  anchor offset vs phase-1 (n=7): peak +17.6 MiB, settled anon +11.4 MiB
+  NO correction applied; disclosure only (preregistered).
+
+== VERDICT (against the preregistered attribution rule in MANIFEST.txt)
+OWNING INTERVAL: A(515659b1) -> P2(9fe58871 #1431), 271 first-parent commits
+  (2026-07-25 .. 2026-08-03): median cg-peak step +75.6 MiB (anon +62.4).
+  ~85% of the endpoint delta is already present at the ADR-0122 authz-cut
+  commit. The A-era 14.0 s convergence also becomes 11.9 s INSIDE this same
+  interval (P2 already converges at 11.91 s): the speed/memory trade phase 0
+  inferred lives in A->P2, not in v0.64 feature work.
+MINOR CONTRIBUTOR: P2 -> P1(v0.63.0), 34 commits: +24.4 MiB (anon +27.4) —
+  just under the +25 ownership threshold; reported without ownership claim.
+EVERYTHING AFTER v0.63.0 IS FLAT at this shape:
+  P1->P3 (48 commits, listener hardening + ADR-0126 phases 1-3): -18.0 MiB,
+    beyond the +/-15 flat band on the negative side but within the observed
+    arm-median noise (p3's series carries an unflagged first-run low-ish
+    181.5; p1 is the campaign's tightest arm). No ownership semantics defined
+    for negative steps; factual report only.
+  P3->P4 (11 commits): +4.5 MiB FLAT.  P4->ANCHOR (145 commits): +10.4 MiB
+    FLAT — consistent with phase 0's null B->C bridge and phase-1's null
+    tranche verdict.
+  ADR-0126 shared-group per-client-best is thereby EXONERATED at this shape.
+SUM CHECK: chain sum +96.9 MiB vs measured endpoint +88.5 MiB; residual
+  +8.4 MiB = anchor offset vs phase 0 (in-campaign ANCHOR 292.0 vs prior
+  283.6). Offsets: vs phase 0 peak +8.4 / anon -0.7; vs phase-1 peak +17.6 /
+  anon +11.4. No correction applied (preregistered disclosure).
+ANOMALIES: 3 of 25 runs in the known glibc arena low mode, all with smaps
+  preserved: r12_p2 (170.4 peak), r25_an (168.0), plus r03_p3 (181.5,
+  unflagged by the running-median tripwire because it was its arm's first
+  run; identified against the final median). Rollup comparison confirms the
+  signature: low-mode delta entirely Anonymous (r12_p2 121.9 vs r07_p2
+  203.7 MB), file-backed identical (~1.5 MB Shared_Clean) — matching
+  phase-1's r05_b attribution lead. NEW datum: the low mode appears on
+  0.62-era code (r12_p2, #1431), so it predates the v0.63/v0.64 growth.
+  Medians absorb all three (runs KEPT per preregistration).
+CONTAMINATION: none — 25/25 clean; every lane check ok (cargo_rustc=0
+  throughout, load1 <= 1.89 on 64 cores).

@@ -1,0 +1,115 @@
+phase 0 — Pinned exact-SHA memory A/B: 515659b1 vs 07f6eb52 at 100p x 1k
+==========================================================================
+Written BEFORE measurement. Preregistrations below are frozen; the sealed
+image-digest section and the results reference are appended after builds
+complete and before the first measurement pair, respectively.
+
+FROZEN CANDIDATES (protocol revision, owner, 2026-08-14)
+  A (base) = 515659b191b7fde91a1a1c9f973e7c8ae3731086
+             "Make the import-decision explain cache opt-in (#1161)", 2026-07-25
+             = the commit of the published 212.0 MiB figure
+  B (head) = 07f6eb5299b0373c031b7fdd2d9a9f98cb15b0b9
+             "Derive the grpcurl consumer roster instead of pinning its count (#1672)", 2026-08-14
+             = the exact tip the prior rebaseline measured (277.5 MiB median cg peak)
+  C (bridge, OPTIONAL, separate series, never folded into A/B) =
+             cbefe84899713a9d7da45dd1bce2a7b849ae3267
+             "Delta-scope RPKI revalidation to routes covered by the VRP incremental (#1677)", 2026-08-14
+             = current origin/main at campaign start (five merges past B, incl. #1675)
+
+HARNESS HELD CONSTANT
+  bgperf2 ad8a7deba21e8ffa1aed609b86e0d0236b0489cd (same as the prior rebaseline)
+  tester  bgperf/bird   sha256:1187aaa54a535659f4929b2068c3533fdf0ce97df571f1a270565c2dfb012732
+  monitor bgperf/gobgp  sha256:e783a1d91600f613ec9e8b7d4b23d7142696397b8ef6860c64e2cdafc1b91f99
+  shape   bench -t rustbgpd -n 100 -p 1000, sequential, cleanup between runs
+  event history: RUSTBGPD_EVENT_HISTORY=disabled both sides, verified
+  BEHAVIORALLY per side (rendered config carries [event_history] enabled=false
+  AND daemon-side confirmation), not just environmentally.
+
+KNOWN, DOCUMENTED ASYMMETRY (config authz block only)
+  A predates the v0.63.0 authz legacy-cut and refuses tier enforcement with an
+  empty roles map (src/config/validation.rs at 515659b1); B/C removed the
+  enforcement knob and refuse `enforcement = "legacy"`. No single config boots
+  both. Resolution: env-gated adapter shim renders
+    [security.grpc]\nenforcement = "legacy"
+  for A runs ONLY — exactly the block A's own era of the harness rendered for
+  the published figure. B/C rendered configs stay byte-identical to the prior rebaseline's.
+  gRPC authz is control-plane only, not in the measured data path. The shim
+  diff is preserved in this bundle (adapter_shim.diff) and reverted after the
+  campaign; images were built with the adapter tree clean at ad8a7de.
+
+PREREGISTERED OUTCOME BANDS (primary A/B; frozen before measurement)
+  Statistic: per-pair (B - A) / A on cgroup memory.peak (authoritative peak
+  surface; bgperf's ~1 Hz sampling undersamples true peak by 10-30 MiB), with
+  a 95% t-CI over pair deltas, >=5 clean pairs, alternating AB/BA order.
+  - DAEMON-SIDE:            lower 95% bound above +10%
+  - HARNESS-SIDE COLLAPSE:  upper 95% bound below +5%
+  - Anything between:       INCONCLUSIVE — no causal documentation claim.
+  Secondary surfaces (bgperf peak usage, settled process-tree RSS, settled
+  RssAnon) are reported with separate per-surface verdicts; peak vs
+  settled-anon divergence is itself informative (page-cache vs anonymous).
+
+PREREGISTERED C-ARM PREDICTION (frozen before any C measurement)
+  Between B and C the only memory-relevant change at this shape is PR #1675's
+  WatchEvents ring shrink; the bgperf config runs neither [[fib_tables]] nor
+  BFD, so the 1-slot placeholder path applies to both rings.
+  Prediction: C ~= B - ~4.8 MiB on settled-anonymous / process-RSS surfaces
+  (eager slot capacity avoided); possibly partially or wholly invisible on
+  peak surfaces if those slots were never faulted in — the report must state
+  which surfaces show it. A B->C delta near that magnitude doubles as a
+  calibration proof that this setup resolves changes of the size the
+  structural PRs claim; a null result means never-faulted pages were never
+  resident and is reported as such, not as a failure. C changes nothing about
+  the primary A/B verdict or its bands. C series: >=3 pairs, separate heading.
+
+QUIET-LANE / CONTAMINATION POLICY (owner orders, 2026-08-14)
+  Owner workloads (unrelated resident processes and containers) are
+  never touched; cleanup filters strictly on bgperf-named
+  containers + this campaign's own clones/images. Lane re-verified before each
+  pair (ps -C by comm + loadavg); runs record lane-start/lane-end telemetry.
+  Pairs overlapping foreign load are marked CONTAMINATED, excluded from the
+  contract set, and replaced after the lane clears; the verdict uses clean
+  pairs only. Hard stop 05:30Z (bench nightly 06:06Z); partials reported as
+  partials rather than rushed contaminated measurements.
+
+FILES
+  run_one.sh                 per-run driver (adapted from rebaseline/run_one.sh)
+  analyze.py                 post-processing: table, distributions, paired CI
+  rNN_<side>.log             bgperf2 bench output + lane telemetry per run
+  rNN_<side>.samples.tsv     1 Hz cgroup + /proc process-tree samples
+  config_<side>.toml         rendered target config per side
+  runtime-manifest_<side>.json  container/image identities per side
+  build_A.log / build_B.log / build_C.log  nocache image build transcripts
+  adapter_shim.diff          the env-gated legacy-block shim (reverted after)
+  preflight.sh / preflight_*.txt  boot + behavioral event-history matrix
+  incampaign_eventhistory_r30.txt  daemon disabled-line from the last
+                             measured run (in-campaign behavioral proof)
+  lane.log                   per-pair quiet-lane checks (all clean)
+  results.txt                per-run table, distributions, paired CIs, VERDICT
+RUN LEDGER
+  Primary: r01-r10, pairs 1-5, alternating AB/BA, all clean, all converged.
+  C arm:   r21-r30, pairs 11-15, alternating BC/CB, all clean, all converged
+           (extended from 3 to 5 pairs after the r23 low-mode outlier).
+POST-CAMPAIGN STATE
+  bgperf2 tree restored clean at ad8a7de (shim reverted); rustbgpd main repo
+  never left main; bgperf containers + bgperf2-br network removed; ab-base /
+  ab-head / ab-c tags and their builder-stage dangling layers deleted;
+  clones and preflight dirs deleted. bgperf/rustbgpd:latest (the prior rebaseline's)
+  untouched. Owner workloads untouched throughout.
+  SEALED IMAGE DIGESTS       appended below after builds, before measurement
+
+SEALED IMAGE DIGESTS (all builds complete, adapter tree clean at ad8a7de
+during every build; sealed BEFORE the first measurement pair)
+  ab-base sha256:ceada02b998f19e141e0726308958839e1749b6b62b2b429e3b977ff1d26e03a
+          rustbgpd 515659b191b7fde91a1a1c9f973e7c8ae3731086, reports "rustbgpd 0.60.0"
+  ab-head sha256:2c590f20256b5c4864b2ddf19c6359294dd2420ae0af9aeb29f41dfe820f8d6b
+          rustbgpd 07f6eb5299b0373c031b7fdd2d9a9f98cb15b0b9, reports "rustbgpd 0.64.0"
+  ab-c    sha256:df66ae2aaf10e2b89cfbca55af3a55ca690fa67697c543632c5609ba3b08c2f9
+          rustbgpd cbefe84899713a9d7da45dd1bce2a7b849ae3267, reports "rustbgpd 0.64.0"
+PREFLIGHT (before measurement; transcripts preflight_*.txt)
+  base/off: boots with the shim's legacy block; logs "event history disabled
+    via [event_history].enabled = false"; zero db files; FSM active.
+  base/on (control): logs "event history manager started" with
+    /var/lib/rustbgpd/events.db — proves the off-signal discriminates.
+  head/off, c/off: boot WITHOUT the legacy block; same disabled log line;
+    zero db files. Event-history disablement is therefore verified
+    BEHAVIORALLY on every measured side, not just environmentally.

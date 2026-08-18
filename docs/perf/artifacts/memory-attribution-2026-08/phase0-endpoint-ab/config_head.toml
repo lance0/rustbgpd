@@ -1,0 +1,416 @@
+[global]
+asn = 1000
+router_id = "10.10.255.254"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[event_history]
+enabled = false
+
+[[neighbors]]
+address = "10.10.0.10"
+remote_asn = 1010
+
+[[neighbors]]
+address = "10.10.0.100"
+remote_asn = 1100
+
+[[neighbors]]
+address = "10.10.0.101"
+remote_asn = 1101
+
+[[neighbors]]
+address = "10.10.0.102"
+remote_asn = 1102
+
+[[neighbors]]
+address = "10.10.0.11"
+remote_asn = 1011
+
+[[neighbors]]
+address = "10.10.0.12"
+remote_asn = 1012
+
+[[neighbors]]
+address = "10.10.0.13"
+remote_asn = 1013
+
+[[neighbors]]
+address = "10.10.0.14"
+remote_asn = 1014
+
+[[neighbors]]
+address = "10.10.0.15"
+remote_asn = 1015
+
+[[neighbors]]
+address = "10.10.0.16"
+remote_asn = 1016
+
+[[neighbors]]
+address = "10.10.0.17"
+remote_asn = 1017
+
+[[neighbors]]
+address = "10.10.0.18"
+remote_asn = 1018
+
+[[neighbors]]
+address = "10.10.0.19"
+remote_asn = 1019
+
+[[neighbors]]
+address = "10.10.0.20"
+remote_asn = 1020
+
+[[neighbors]]
+address = "10.10.0.21"
+remote_asn = 1021
+
+[[neighbors]]
+address = "10.10.0.22"
+remote_asn = 1022
+
+[[neighbors]]
+address = "10.10.0.23"
+remote_asn = 1023
+
+[[neighbors]]
+address = "10.10.0.24"
+remote_asn = 1024
+
+[[neighbors]]
+address = "10.10.0.25"
+remote_asn = 1025
+
+[[neighbors]]
+address = "10.10.0.26"
+remote_asn = 1026
+
+[[neighbors]]
+address = "10.10.0.27"
+remote_asn = 1027
+
+[[neighbors]]
+address = "10.10.0.28"
+remote_asn = 1028
+
+[[neighbors]]
+address = "10.10.0.29"
+remote_asn = 1029
+
+[[neighbors]]
+address = "10.10.0.3"
+remote_asn = 1003
+
+[[neighbors]]
+address = "10.10.0.30"
+remote_asn = 1030
+
+[[neighbors]]
+address = "10.10.0.31"
+remote_asn = 1031
+
+[[neighbors]]
+address = "10.10.0.32"
+remote_asn = 1032
+
+[[neighbors]]
+address = "10.10.0.33"
+remote_asn = 1033
+
+[[neighbors]]
+address = "10.10.0.34"
+remote_asn = 1034
+
+[[neighbors]]
+address = "10.10.0.35"
+remote_asn = 1035
+
+[[neighbors]]
+address = "10.10.0.36"
+remote_asn = 1036
+
+[[neighbors]]
+address = "10.10.0.37"
+remote_asn = 1037
+
+[[neighbors]]
+address = "10.10.0.38"
+remote_asn = 1038
+
+[[neighbors]]
+address = "10.10.0.39"
+remote_asn = 1039
+
+[[neighbors]]
+address = "10.10.0.4"
+remote_asn = 1004
+
+[[neighbors]]
+address = "10.10.0.40"
+remote_asn = 1040
+
+[[neighbors]]
+address = "10.10.0.41"
+remote_asn = 1041
+
+[[neighbors]]
+address = "10.10.0.42"
+remote_asn = 1042
+
+[[neighbors]]
+address = "10.10.0.43"
+remote_asn = 1043
+
+[[neighbors]]
+address = "10.10.0.44"
+remote_asn = 1044
+
+[[neighbors]]
+address = "10.10.0.45"
+remote_asn = 1045
+
+[[neighbors]]
+address = "10.10.0.46"
+remote_asn = 1046
+
+[[neighbors]]
+address = "10.10.0.47"
+remote_asn = 1047
+
+[[neighbors]]
+address = "10.10.0.48"
+remote_asn = 1048
+
+[[neighbors]]
+address = "10.10.0.49"
+remote_asn = 1049
+
+[[neighbors]]
+address = "10.10.0.5"
+remote_asn = 1005
+
+[[neighbors]]
+address = "10.10.0.50"
+remote_asn = 1050
+
+[[neighbors]]
+address = "10.10.0.51"
+remote_asn = 1051
+
+[[neighbors]]
+address = "10.10.0.52"
+remote_asn = 1052
+
+[[neighbors]]
+address = "10.10.0.53"
+remote_asn = 1053
+
+[[neighbors]]
+address = "10.10.0.54"
+remote_asn = 1054
+
+[[neighbors]]
+address = "10.10.0.55"
+remote_asn = 1055
+
+[[neighbors]]
+address = "10.10.0.56"
+remote_asn = 1056
+
+[[neighbors]]
+address = "10.10.0.57"
+remote_asn = 1057
+
+[[neighbors]]
+address = "10.10.0.58"
+remote_asn = 1058
+
+[[neighbors]]
+address = "10.10.0.59"
+remote_asn = 1059
+
+[[neighbors]]
+address = "10.10.0.6"
+remote_asn = 1006
+
+[[neighbors]]
+address = "10.10.0.60"
+remote_asn = 1060
+
+[[neighbors]]
+address = "10.10.0.61"
+remote_asn = 1061
+
+[[neighbors]]
+address = "10.10.0.62"
+remote_asn = 1062
+
+[[neighbors]]
+address = "10.10.0.63"
+remote_asn = 1063
+
+[[neighbors]]
+address = "10.10.0.64"
+remote_asn = 1064
+
+[[neighbors]]
+address = "10.10.0.65"
+remote_asn = 1065
+
+[[neighbors]]
+address = "10.10.0.66"
+remote_asn = 1066
+
+[[neighbors]]
+address = "10.10.0.67"
+remote_asn = 1067
+
+[[neighbors]]
+address = "10.10.0.68"
+remote_asn = 1068
+
+[[neighbors]]
+address = "10.10.0.69"
+remote_asn = 1069
+
+[[neighbors]]
+address = "10.10.0.7"
+remote_asn = 1007
+
+[[neighbors]]
+address = "10.10.0.70"
+remote_asn = 1070
+
+[[neighbors]]
+address = "10.10.0.71"
+remote_asn = 1071
+
+[[neighbors]]
+address = "10.10.0.72"
+remote_asn = 1072
+
+[[neighbors]]
+address = "10.10.0.73"
+remote_asn = 1073
+
+[[neighbors]]
+address = "10.10.0.74"
+remote_asn = 1074
+
+[[neighbors]]
+address = "10.10.0.75"
+remote_asn = 1075
+
+[[neighbors]]
+address = "10.10.0.76"
+remote_asn = 1076
+
+[[neighbors]]
+address = "10.10.0.77"
+remote_asn = 1077
+
+[[neighbors]]
+address = "10.10.0.78"
+remote_asn = 1078
+
+[[neighbors]]
+address = "10.10.0.79"
+remote_asn = 1079
+
+[[neighbors]]
+address = "10.10.0.8"
+remote_asn = 1008
+
+[[neighbors]]
+address = "10.10.0.80"
+remote_asn = 1080
+
+[[neighbors]]
+address = "10.10.0.81"
+remote_asn = 1081
+
+[[neighbors]]
+address = "10.10.0.82"
+remote_asn = 1082
+
+[[neighbors]]
+address = "10.10.0.83"
+remote_asn = 1083
+
+[[neighbors]]
+address = "10.10.0.84"
+remote_asn = 1084
+
+[[neighbors]]
+address = "10.10.0.85"
+remote_asn = 1085
+
+[[neighbors]]
+address = "10.10.0.86"
+remote_asn = 1086
+
+[[neighbors]]
+address = "10.10.0.87"
+remote_asn = 1087
+
+[[neighbors]]
+address = "10.10.0.88"
+remote_asn = 1088
+
+[[neighbors]]
+address = "10.10.0.89"
+remote_asn = 1089
+
+[[neighbors]]
+address = "10.10.0.9"
+remote_asn = 1009
+
+[[neighbors]]
+address = "10.10.0.90"
+remote_asn = 1090
+
+[[neighbors]]
+address = "10.10.0.91"
+remote_asn = 1091
+
+[[neighbors]]
+address = "10.10.0.92"
+remote_asn = 1092
+
+[[neighbors]]
+address = "10.10.0.93"
+remote_asn = 1093
+
+[[neighbors]]
+address = "10.10.0.94"
+remote_asn = 1094
+
+[[neighbors]]
+address = "10.10.0.95"
+remote_asn = 1095
+
+[[neighbors]]
+address = "10.10.0.96"
+remote_asn = 1096
+
+[[neighbors]]
+address = "10.10.0.97"
+remote_asn = 1097
+
+[[neighbors]]
+address = "10.10.0.98"
+remote_asn = 1098
+
+[[neighbors]]
+address = "10.10.0.99"
+remote_asn = 1099
+
+[[neighbors]]
+address = "10.10.0.2"
+remote_asn = 1001
+

@@ -1,0 +1,180 @@
+run	arm	clean	total_s	monitor_s	elapsed_s	maxcpu	minidle	conv	bgperf_maxmem_mib	cg_peak_mib	cg_cur_max_mib	cg_anon_max_mib	cg_anon_settled_mib	ptree_rss_max_mib	ptree_rss_settled_mib	ptree_anon_settled_mib
+r01	r1	True	12.97	0	4	128.0	95	100000/100000	191.5	212.2	202.8	185.7	155.6	227.0	177.0	155.6
+r02	r2	True	11.87	0	3	128.0	95	100000/100000	285.7	310.6	285.7	275.8	253.5	297.0	274.7	253.5
+r03	r3	True	11.95	0	3	139.0	94	100000/100000	247.8	273.0	248.0	238.2	216.1	259.5	237.3	216.1
+r04	an3	True	11.92	0	3	136.0	95	100000/100000	217.1	240.0	215.3	204.9	188.5	226.5	210.1	188.5
+r05	r1	True	12.99	0	4	124.0	94	100000/100000	199.7	213.4	207.6	194.4	135.2	216.7	157.0	135.2
+r06	r2	True	11.91	0	3	139.0	94	100000/100000	232.4	259.1	232.1	222.6	205.6	244.2	227.2	205.6
+r07	r3	True	11.87	0	3	124.0	95	100000/100000	162.8	173.6	156.6	148.0	128.9	169.6	150.4	128.9
+r08	an3	True	11.88	0	3	132.0	95	100000/100000	285.7	312.7	284.7	275.2	241.5	296.6	262.9	241.5
+r09	r1	True	12.94	0	4	130.0	93	100000/100000	167.9	181.5	168.5	159.2	127.4	191.8	149.0	127.4
+r10	r2	True	11.82	0	3	135.0	95	100000/100000	245.8	272.1	241.6	231.6	225.6	253.2	247.3	225.6
+r11	r3	True	11.9	0	3	131.0	94	100000/100000	267.3	294.5	266.6	256.7	246.7	278.0	267.9	246.7
+r12	an3	True	11.94	0	3	134.0	95	100000/100000	275.5	300.0	274.9	263.8	247.7	285.5	269.4	247.7
+r13	r1	True	14.01	0	5	115.0	95	100000/100000	182.3	187.7	179.5	172.2	115.2	190.3	136.9	115.2
+r14	r2	True	11.9	0	3	128.0	94	100000/100000	264.2	289.6	263.7	253.9	247.6	275.7	269.4	247.6
+r15	r3	True	16.09	0	7	135.0	95	100000/100000	273.4	304.3	273.6	263.5	204.2	285.2	225.9	204.2
+r16	an3	True	11.88	0	3	128.0	94	100000/100000	274.4	294.6	263.7	256.0	253.5	282.3	275.0	253.5
+r17	r1	True	12.94	0	4	123.0	95	100000/100000	167.9	180.9	167.3	157.1	132.0	185.7	151.7	130.1
+r18	r2	True	11.93	0	3	127.0	94	100000/100000	243.7	266.4	249.1	239.1	193.9	260.5	215.4	193.9
+r19	r3	True	11.9	0	3	138.0	94	100000/100000	270.3	295.2	269.8	259.3	255.6	282.5	277.0	255.6
+r20	an3	True	11.92	0	3	124.0	95	100000/100000	156.7	172.5	148.7	142.0	122.7	168.4	143.8	122.7
+
+== r1 (6294f0e5 pos 22 (merge #1183 lazy-inbound-buffer)) CLEAN (n=5)
+  bgperf_maxmem_mib        n=5 min=167.9 med=182.3 max=199.7 spread=(max-min)/med=17.4% stdev=14.15
+  cg_peak_mib              n=5 min=180.9 med=187.7 max=213.4 spread=(max-min)/med=17.3% stdev=16.35
+  cg_anon_max_mib          n=5 min=157.1 med=172.2 max=194.4 spread=(max-min)/med=21.7% stdev=16.28
+  cg_anon_settled_mib      n=5 min=115.2 med=132.0 max=155.6 spread=(max-min)/med=30.6% stdev=14.70
+  ptree_rss_max_mib        n=5 min=185.7 med=191.8 max=227.0 spread=(max-min)/med=21.5% stdev=18.35
+  ptree_rss_settled_mib    n=5 min=136.9 med=151.7 max=177.0 spread=(max-min)/med=26.4% stdev=14.66
+  ptree_anon_settled_mib   n=5 min=115.2 med=130.1 max=155.6 spread=(max-min)/med=31.1% stdev=14.76
+  total_s                  n=5 min=12.9 med=13.0 max=14.0 spread=(max-min)/med=8.2% stdev=0.47
+== r2 (b592362b pos 43 midpoint (merge #1204 top-truth)) CLEAN (n=5)
+  bgperf_maxmem_mib        n=5 min=232.4 med=245.8 max=285.7 spread=(max-min)/med=21.7% stdev=20.91
+  cg_peak_mib              n=5 min=259.1 med=272.1 max=310.6 spread=(max-min)/med=18.9% stdev=20.69
+  cg_anon_max_mib          n=5 min=222.6 med=239.1 max=275.8 spread=(max-min)/med=22.3% stdev=20.88
+  cg_anon_settled_mib      n=5 min=193.9 med=225.6 max=253.5 spread=(max-min)/med=26.4% stdev=25.82
+  ptree_rss_max_mib        n=5 min=244.2 med=260.5 max=297.0 spread=(max-min)/med=20.3% stdev=20.76
+  ptree_rss_settled_mib    n=5 min=215.4 med=247.3 max=274.7 spread=(max-min)/med=24.0% stdev=25.79
+  ptree_anon_settled_mib   n=5 min=193.9 med=225.6 max=253.5 spread=(max-min)/med=26.4% stdev=25.82
+  total_s                  n=5 min=11.8 med=11.9 max=11.9 spread=(max-min)/med=0.9% stdev=0.04
+== r3 (048a8293 pos 64 (#1225 scale-harness gate)) CLEAN (n=5)
+  bgperf_maxmem_mib        n=5 min=162.8 med=267.3 max=273.4 spread=(max-min)/med=41.4% stdev=46.65
+  cg_peak_mib              n=5 min=173.6 med=294.5 max=304.3 spread=(max-min)/med=44.4% stdev=54.07
+  cg_anon_max_mib          n=5 min=148.0 med=256.7 max=263.5 spread=(max-min)/med=45.0% stdev=48.57
+  cg_anon_settled_mib      n=5 min=128.9 med=216.1 max=255.6 spread=(max-min)/med=58.6% stdev=50.18
+  ptree_rss_max_mib        n=5 min=169.6 med=278.0 max=285.2 spread=(max-min)/med=41.6% stdev=48.76
+  ptree_rss_settled_mib    n=5 min=150.4 med=237.3 max=277.0 spread=(max-min)/med=53.4% stdev=50.09
+  ptree_anon_settled_mib   n=5 min=128.9 med=216.1 max=255.6 spread=(max-min)/med=58.6% stdev=50.18
+  total_s                  n=5 min=11.9 med=11.9 max=16.1 spread=(max-min)/med=35.5% stdev=1.87
+== an3 (9b46432c pos 86 (#1246), in-campaign anchor) CLEAN (n=5)
+  bgperf_maxmem_mib        n=5 min=156.7 med=274.4 max=285.7 spread=(max-min)/med=47.0% stdev=54.72
+  cg_peak_mib              n=5 min=172.5 med=294.6 max=312.7 spread=(max-min)/med=47.6% stdev=58.21
+  cg_anon_max_mib          n=5 min=142.0 med=256.0 max=275.2 spread=(max-min)/med=52.0% stdev=55.28
+  cg_anon_settled_mib      n=5 min=122.7 med=241.5 max=253.5 spread=(max-min)/med=54.2% stdev=55.65
+  ptree_rss_max_mib        n=5 min=168.4 med=282.3 max=296.6 spread=(max-min)/med=45.4% stdev=54.01
+  ptree_rss_settled_mib    n=5 min=143.8 med=262.9 max=275.0 spread=(max-min)/med=49.9% stdev=55.81
+  ptree_anon_settled_mib   n=5 min=122.7 med=241.5 max=253.5 spread=(max-min)/med=54.2% stdev=55.65
+  total_s                  n=5 min=11.9 med=11.9 max=11.9 spread=(max-min)/med=0.5% stdev=0.03
+
+== ANOMALY TRIPWIRE (>=40 MiB below arm running median; smaps captured every run)
+  LOW-MODE: r07_r3 cg_peak_mib=173.6 vs running median 223.3 (delta 49.7 MiB) — smaps at r07_r3.smaps_rollup/.smaps
+  LOW-MODE: r07_r3 ptree_anon_settled_mib=128.9 vs running median 172.5 (delta 43.6 MiB) — smaps at r07_r3.smaps_rollup/.smaps
+  LOW-MODE: r20_an3 cg_peak_mib=172.5 vs running median 294.6 (delta 122.1 MiB) — smaps at r20_an3.smaps_rollup/.smaps
+  LOW-MODE: r20_an3 ptree_anon_settled_mib=122.7 vs running median 241.5 (delta 118.8 MiB) — smaps at r20_an3.smaps_rollup/.smaps
+
+== GROWTH CURVE (commit order; A fixed at recorded phase 0 medians)
+  arm  median cg_peak  median settled_anon  median total_s   n
+  A             195.1                153.8    14.00 (rec.) (5)
+  r1            187.7                130.1           12.97   5
+  r2            272.1                225.6           11.90   5
+  r3            294.5                216.1           11.90   5
+  an3           294.6                241.5           11.92   5
+
+== INTERVAL STEPS (median cg_peak step; ownership per preregistered rule)
+    A -> r1  ( 22 commits) peak_step=  -7.4 MiB anon_step=-23.7 conv_step=-1.03s  -> FLAT (within +/-15 MiB)
+   r1 -> r2  ( 21 commits) peak_step= +84.4 MiB anon_step=+95.5 conv_step=-1.07s  -> OWNS GROWTH (>= +25 MiB)
+   r2 -> r3  ( 21 commits) peak_step= +22.4 MiB anon_step=-9.5 conv_step=+0.00s  -> MINOR CONTRIBUTOR (+15..+25 MiB, no ownership claim)
+   r3 -> an3 ( 22 commits) peak_step=  +0.1 MiB anon_step=+25.4 conv_step=+0.02s  -> FLAT (within +/-15 MiB)
+
+== SUM CHECK / ANCHOR OFFSET
+  chain sum of peak steps A->ANCHOR3: +99.5 MiB (= in-campaign ANCHOR3 median 294.6 - A recorded 195.1)
+  reference endpoint delta (phase3-refinement-bisect): +90.3 MiB
+  residual (chain - reference) = +9.2 MiB = the campaign's anchor offset by construction (A is fixed)
+  anchor offset vs phase3-refinement-bisect q1 (n=5): peak +9.2 MiB, settled anon +24.3 MiB
+  NO correction applied; disclosure only (preregistered).
+
+== VERDICT (against the preregistered attribution rule in MANIFEST.txt)
+OWNING INTERVAL: R1(6294f0e5 merge #1183) -> R2(b592362b merge #1204),
+  21 first-parent commits (all 2026-07-26, window positions 23..43): median
+  cg-peak step +84.4 MiB (anon +95.5). Essentially the ENTIRE A->ANCHOR3
+  growth lands in this quarter.
+  A -> R1 (22 commits): peak -7.4 FLAT, anon -23.7 (a small REDUCTION on the
+    secondary surface; peak rule governs).
+  R2 -> R3 (21 commits): peak +22.4 MINOR CONTRIBUTOR (anon -9.5).
+  R3 -> ANCHOR3 (22 commits): peak +0.1 FLAT (anon +25.4 — anon-only drift,
+    peak rule governs; same pattern bisect2 saw on its flat q1->q2).
+CONVERGENCE LOCALIZATION: the -2.1 s SPLITS almost exactly in half:
+  A 14.00 (rec.) -> R1 12.97 (-1.03 s) -> R2 11.90 (-1.07 s); R3 11.90,
+  ANCHOR3 11.92. r1's five runs are 12.94/12.94/12.97/12.99/14.01 —
+  genuinely intermediate, not a mixture of 14s and 12s modes.
+SUM CHECK: chain sum +99.5 MiB vs the +90.3 reference (bisect2 q1 285.4 -
+  A 195.1); residual +9.2 MiB = ANCHOR3's in-campaign offset vs 285.4 by
+  construction (A fixed). Anchor offset vs bisect2 q1: peak +9.2 MiB,
+  settled anon +24.3 MiB. NO correction (preregistered). ANCHOR3's binary is
+  byte-identical to bisect2's q1 binary (6690b082...), so the offset is pure
+  run-to-run/arena variation, not a build difference.
+ANOMALIES: 2 of 20 runs in the known glibc arena low mode, smaps preserved:
+  r07_r3 (173.6 peak) and r20_an3 (172.5 peak). Runs KEPT per
+  preregistration; medians absorb them. r15_r3 converged slow (16.09 s, the
+  campaign's only non-mode run; lane clean before/after); kept.
+CONTAMINATION: none — 20/20 clean; every lane check ok (cargo_rustc=0
+  throughout, load1 < 4.0).
+
+== OWNING INTERVAL R1->R2 VERBATIM (git log --oneline --first-parent
+   6294f0e5..b592362b; 21 commits, newest first)
+b592362b Merge pull request #1204 from lance0/fix/lan-660-top-truth
+654d76d2 Merge pull request #1203 from lance0/test/m83-stream-scoped-eor
+4d99756b Merge pull request #1202 from lance0/bench/outbound-prefix-limit-scale
+06ce6da8 Merge pull request #1201 from lance0/fix/lan-661-policy-query-outcomes
+4acbc4ff Merge pull request #1199 from lance0/test/enhanced-route-refresh-receipt
+b6debf10 Merge pull request #1200 from lance0/docs/roadmap-clippy-truth
+870062f0 Merge pull request #1198 from lance0/perf/share-policy-set-store
+68212e14 Merge pull request #1197 from lance0/fix/fence-refresh-route-page-generation
+a67c0a35 Merge pull request #1196 from lance0/perf/route-refresh-actor-duration
+2112a24a Merge pull request #1195 from lance0/fix/preserve-prefix-limit-transaction
+8897b42d Merge pull request #1191 from lance0/chore/drop-stale-large-error-allows
+4a195386 Merge pull request #1194 from lance0/perf/outbound-prefix-limit-actor-duration
+9ce3be8f Merge pull request #1193 from lance0/perf/bound-tui-telemetry
+f354324f Merge pull request #1190 from lance0/fix/doctor-partial-event-history
+21aeba73 Merge pull request #1189 from lance0/perf/coalesce-neighbor-rib-snapshots
+9c1ebb12 Merge pull request #1188 from lance0/perf/share-policy-attribution-name
+3d64bf56 Merge pull request #1187 from lance0/chore/expand-clippy-reason-scope
+ed6aa1b7 Merge pull request #1192 from lance0/docs/correct-watchroutes-lag-behavior
+9a7b6461 Merge pull request #1186 from lance0/release/v061-prep
+eeefab2f Merge pull request #1185 from lance0/perf/v061-final-performance-receipt
+99ee74ba Merge pull request #1184 from lance0/perf/revised-update-duplicate-table
+
+== CONVERGENCE-HALF INTERVAL A->R1 VERBATIM (git log --oneline --first-parent
+   515659b1..6294f0e5; 22 commits, newest first; conv_step -1.03 s, peak FLAT)
+6294f0e5 Merge pull request #1183 from lance0/perf/lan-647-lazy-inbound-buffer
+c1276763 Merge pull request #1182 from lance0/docs/rewrite-tier-auth-threat-model
+5c4fdc8f Merge pull request #1181 from lance0/chore/clippy-reason-ratchet-bfd-mrt-telemetry
+e840770e Merge pull request #1180 from lance0/perf/lan-630-rss-attribution-harness
+7fbe02b6 fix: report strict shutdown communications (#1179)
+27553194 feat: expose negotiated peer capabilities (#1178)
+2e4411c7 perf(wire): eliminate temporary codec allocation churn (#1177)
+e68e8e5b perf(rib): remove peer-multiplied fanout bookkeeping (#1176)
+ffc13f6e perf(transport): allocate rejected-route storage lazily (#1175)
+cb90c474 docs(compose): build the current checkout in quickstarts (#1174)
+89ebc506 docs: align operator validation and prefix-limit contracts (#1173)
+13b43634 fix(cli): restore RPKI VRP operator visibility (#1172)
+7955fccc test(interop): make route-server receipts tell the truth (#1171)
+a8e7e67e test(interop): make maintained RR receipts fail closed (#1170)
+da8bcfe4 perf(wire): benchmark the production revised parser (#1169)
+ee47f8ee fix(rib): avoid grouped private route slab reservations (#1167)
+c7c34389 fix(perf): make memory receipt attribution fail closed (#1166)
+0adab68b test(interop): restore policy explain receipts after opt-in default (#1168)
+aea3d413 docs(perf): land the four-way cross-stack bgperf2 receipt (#1164)
+e058c2cf fix(bench): restore the wire codec bench and smoke every bench target (#1163)
+6729411d Re-pin the v1 stable-surface digests after the explain default flip (#1165)
+211c2571 docs(perf): land the explain-cache memory and RIB criterion noise-floor receipts (#1162)
+
+== DHAT-PASS CANDIDATES (character match: anon-memory growth + convergence
+   gain; CANDIDATES, NOT VERDICTS — ranked for the owning R1->R2 step)
+  1. 21aeba73 Merge #1189 perf/coalesce-neighbor-rib-snapshots (780 non-docs
+     lines): snapshot coalescing across neighbor RIBs — batching/coalescing
+     holds more per-batch state (anon growth) while cutting per-neighbor
+     work (convergence gain). Best single character match.
+  2. 870062f0 Merge #1198 perf/share-policy-set-store (1009 non-docs lines):
+     introduces a shared persistent policy-set store — retained shared state
+     raises settled anon while eliminating per-peer rebuild work.
+  3. 99ee74ba Merge #1184 perf/revised-update-duplicate-table (115 non-docs
+     lines): a new duplicate table on the revised-update inbound path —
+     memory-for-speed cache exactly in the convergence hot path; small diff
+     but the most literal "new table" in the interval.
+  (For the A->R1 convergence half, which came with FLAT peak and LOWER anon:
+   6294f0e5 merge #1183 lazy-inbound-buffer, e68e8e5b #1176 peer-multiplied
+   fanout removal, 2e4411c7 #1177 codec allocation churn — allocation
+   reductions, consistent with faster convergence at lower memory; these are
+   speed candidates only, not memory-growth candidates.)

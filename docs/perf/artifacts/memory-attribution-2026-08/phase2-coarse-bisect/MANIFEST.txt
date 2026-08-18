@@ -1,0 +1,169 @@
+phase 2 coarse bisect — localize the +86 MiB daemon memory growth across
+515659b1..07f6eb52 to owning commit interval(s), 100p x 1k
+================================================================================
+Written BEFORE any build or measurement. The preregistrations below are frozen
+and never edited. Per protocol (phase 0 / phase 1), the sealed
+image-digest section and per-arm era-config record are APPENDED after builds/
+preflights complete and before the first measurement run; nothing above that
+appended section is ever modified.
+
+PROTOCOL BASE
+  Reuses the phase 0 sealed-image A/B protocol verbatim (kit at ../phase0-endpoint-ab/,
+  phase-1 adaptation at ../phase1-tip-tranche/): sealed source exports (fresh local
+  clones detached at exact SHAs; the primary checkout at
+  <repo> is never entered or built from), one nocache
+  build per arm, pinned harness, behavioral event-history verification per
+  run, per-run smaps/smaps_rollup capture post-bench (phase1-tip-tranche mechanic),
+  quiet-lane checks before every run, digests sealed pre-measurement, full
+  cleanup after.
+
+FROZEN ARMS (5) — resolved SHAs, recorded before building
+  P1     = 39ebf370b9c3d564fffc432e6ddbf1e576bb944b
+           tag v0.63.0 ("ci(release): install aarch64 cross libc headers",
+           2026-08-04)
+  P2     = 9fe588717d210563cc04e956fc65844fdae29fb3
+           "authz: retire legacy gRPC enforcement; tier is mandatory (#1431)",
+           2026-08-03 — the ADR-0122 authz legacy-cut landing (v0.63-era).
+  P3     = 9077984be82af61761a78429554cf7f9736bcffa
+           "Group per-client-best peers on a dedicated key bit (ADR-0126
+           Phase 3) (#1512)", 2026-08-07 — the commit where ADR-0126
+           shared-group per-client-best activates (classifier flip). Chosen
+           over the acceptance merge 02fe779f (#1520, 8 commits later) because
+           the flip is the behavior-landing; #1520 is receipt/acceptance docs.
+           Recorded alternative: 02fe779f sits 8 first-parent commits after P3.
+  P4     = 295d1f375451d4a58d605006c87770e4743f3011
+           tag v0.64.0 ("release: prep v0.64.0", 2026-08-08) — matches the
+           expected 295d1f37.
+  ANCHOR = 07f6eb5299b0373c031b7fdd2d9a9f98cb15b0b9
+           "Derive the grpcurl consumer roster instead of pinning its count
+           (#1672)", 2026-08-14 — ties to phase 0 (cg peak median 283.6 /
+           settled anon 239.7 MiB, 15 runs) and phase 1 (274.4 / 227.6, 7 runs).
+  A (NOT re-measured) = 515659b191b7fde91a1a1c9f973e7c8ae3731086, phase 0
+           recorded medians: cg peak 195.1 / settled anon 153.8 MiB (n=5).
+
+ORDERING FINDING (campaign-spec deviation, resolved before preregistration)
+  The spec's expected order P1 <= P2 <= P3 <= P4 DOES NOT HOLD: the ADR-0122
+  legacy cut (#1431) landed 2026-08-03, 34 first-parent commits BEFORE the
+  v0.63.0 tag (2026-08-04). The only other legacy-enforcement commit in range,
+  be38622c "config: retire legacy gRPC enforcement value (#1541)", sits AFTER
+  the v0.64.0 tag (position 126 vs 146 from tip), so no legacy-cut commit
+  exists between the tags at all. True first-parent order, used for all
+  interval adjacency in this campaign:
+    A -> P2 -> P1 -> P3 -> P4 -> ANCHOR
+  Interval first-parent commit counts (git rev-list --first-parent --count):
+    A(515659b1)..P2(9fe58871):    271
+    P2(9fe58871)..P1(39ebf370):    34
+    P1(39ebf370)..P3(9077984b):    48
+    P3(9077984b)..P4(295d1f37):    11
+    P4(295d1f37)..ANCHOR(07f6eb52): 145   (sum 509 = full range, verified)
+
+BUILD DISCIPLINE
+  Each arm built ONCE from a sealed export: fresh local `git clone` of the
+  primary repo into this directory (clone-<arm>/), detached at the exact SHA,
+  clean tree. bgperf2 adapter clean at ad8a7de; builds run nocache via
+    RUSTBGPD_SOURCE=<clone> bgperf2.py update rustbgpd --tag <tag> -n -c <sha>
+  Tags: bgperf/rustbgpd:ab1032b-p1 / -p2 / -p3 / -p4 / -an.
+  Recorded per arm: image ID, binary SHA-256, rustc -V. Builds sequential.
+
+HARNESS HELD CONSTANT (= phase 0 / phase 1)
+  bgperf2 ad8a7deba21e8ffa1aed609b86e0d0236b0489cd
+  tester  bgperf/bird   sha256:1187aaa54a53...
+  monitor bgperf/gobgp  sha256:e783a1d91600...
+  shape   bench -t rustbgpd -n 100 -p 1000, sequential, cleanup between runs
+  event history: RUSTBGPD_EVENT_HISTORY=disabled every run, verified
+  BEHAVIORALLY per run (rendered config carries [event_history] enabled=false
+  AND the daemon logs the disabled line).
+
+ERA COMPAT PLAN
+  All five arms postdate #1429 (implicit local-operator) and #1431 (tier
+  mandatory), so the expectation is that every arm boots the phase 0
+  config_head.toml surface verbatim with NO legacy authz shim and
+  RUSTBGPD_GRPC_ENFORCEMENT unset everywhere. Each arm is preflight-booted on
+  config_head.toml BEFORE measurement; if an arm fails, fall back to the
+  documented era-correct config/shim (phase 0 bundle) and record which was
+  used and why. A boot failure not mappable to a known era difference is a
+  STOP-and-report finding. The per-arm era-config record is appended below
+  after preflights, before measurement.
+
+PREREGISTERED DESIGN (frozen)
+  - 5 runs per arm, 25 runs total, ROUND-ROBIN order
+    (P1,P2,P3,P4,ANCHOR) x 5 -> r01..r25. Lane check before every run
+    (loadavg + ps -C cargo,rustc by comm; recorded as lane-start/lane-end in
+    every run log). Runs overlapping foreign load are CONTAMINATED, excluded,
+    and replaced (r26+) after the lane clears.
+  - PRIMARY metric: cg memory.peak per-arm MEDIAN (phase 1 showed it ~2x
+    tighter than settled anon). SECONDARY: settled RssAnon median
+    (ptree_anon_settled), convergence time (total_s).
+  - ATTRIBUTION RULE: an interval (adjacent-arm pair in TRUE order, plus
+    A->P2 and P4->ANCHOR, with A fixed at its recorded 195.1 cg-peak median)
+    OWNS growth when its median cg-peak step is >= +25 MiB. Steps within
+    +/-15 MiB are FLAT. Between (+15, +25) = MINOR CONTRIBUTOR, reported
+    without ownership claim. Negative steps beyond -15 reported factually as
+    reductions.
+  - CROSS-CAMPAIGN ANCHOR: report ANCHOR's in-campaign medians vs its two
+    priors (283.6/239.7 phase 0 n=15; 274.4/227.6 phase-1 n=7) as the
+    campaign offset; NO correction applied, disclosure only.
+  - SUM CHECK: the A->ANCHOR chain of median steps must be reconciled against
+    the measured endpoint delta (+88.5 MiB cg peak = 283.6 - 195.1);
+    unexplained residual reported as such (by construction the residual
+    equals the anchor offset; stated explicitly either way).
+  - ANOMALY TRIPWIRE: any run >= 40 MiB below its arm's RUNNING median (over
+    that arm's runs so far, including it) on cg peak or settled anon ->
+    preserve smaps/smaps_rollup pre-teardown and continue; the run is KEPT
+    (known glibc arena low mode; medians absorb it). smaps are captured for
+    EVERY run post-bench regardless, so preservation is automatic.
+  - For any OWNING interval <= ~30 commits, the report includes the verbatim
+    `git log --oneline --first-parent` list of that interval.
+
+QUIET-LANE / CONTAMINATION POLICY (= phase 1)
+  Owner workloads never touched; cleanup filters strictly on bgperf-named
+  containers + this campaign's own clones + ab1032b-* image tags. Resident
+  idle services acceptable; anything eating CPU pauses the campaign.
+
+FILES
+  run_one.sh, preflight.sh, analyze.py   adapted from ../phase1-tip-tranche/
+  rNN_<arm>.log / .samples.tsv           per-run bench output + 1 Hz samples
+  rNN_<arm>.smaps_rollup / .smaps        post-bench daemon memory snapshots
+  config_<arm>.toml, runtime-manifest_<arm>.json  per-arm rendered surfaces
+  build_<arm>.log                        nocache build transcripts
+  build_identity.txt                     image IDs, binary SHA-256s, rustc -V
+  preflight_<arm>.txt                    boot + behavioral event-history proof
+  lane.log                               per-run quiet-lane checks
+  results.txt                            table, medians, steps, verdicts
+  SHA256SUMS                             written at campaign end
+
+================================================================================
+APPENDED SECTIONS (per protocol: after builds/preflights, before measurement)
+
+SEALED IMAGE DIGESTS (all 5 builds complete, adapter tree clean at ad8a7de
+during every build; sealed BEFORE preflights and the first measurement run)
+  ab1032b-p1 sha256:041525b800891de4de36bc4905506e67b121b086b4d4cd550a6a97c2fdef528c
+             rustbgpd 39ebf370... (v0.63.0), reports "rustbgpd 0.63.0"
+             binary sha256 171b9efa74d2042e04a949d1f8f753eaad18dcc718c710d8b50c1b431d3ba71e
+  ab1032b-p2 sha256:2572c41654f9831bf83cad3672eab38bed31a737d2aff6295190df24a2c74bb9
+             rustbgpd 9fe58871... (#1431), reports "rustbgpd 0.62.0"
+             (pre-release-prep version string; correct for a mid-v0.63-cycle commit)
+             binary sha256 0a14ef6c0872290d6ebdd654bdcd8528a836ed9066b81d63e906fa3cccd98090
+  ab1032b-p3 sha256:8a2ccb73dadf650208460b7ea3a7d83c944cf11e96521ead9e7d94ff6d7c1154
+             rustbgpd 9077984b... (#1512), reports "rustbgpd 0.63.0"
+             (mid-v0.64-cycle, pre-prep-bump; correct)
+             binary sha256 06942d9c1b9d0d31071ebbb85e6d74f2ae6933154e515982f8389b4aba6c8dcc
+  ab1032b-p4 sha256:8b009410cc671c226082e1a9796b6c8859734ee40707252c23a46bf8b70c45b5
+             rustbgpd 295d1f37... (v0.64.0), reports "rustbgpd 0.64.0"
+             binary sha256 808bf58ade3ae909b4641df13b3c19150310bf0b2a697dddda989f7ad0f6e476
+  ab1032b-an sha256:f376d3400ae9f336f09bd31e961247e8f5fb4b68fe0e1d7856b260b5371dccf7
+             rustbgpd 07f6eb52... (ANCHOR), reports "rustbgpd 0.64.0"
+             binary sha256 b68b1e8ba6775c203261d09023b08dc1ef8a30ef3e63303c8f560db811f3a22d
+             = BYTE-IDENTICAL to phase-1's ab1032-b binary (same source SHA):
+             reproducible-build tie between this campaign and phase 1.
+  Builder base pinned for all 5: rust:1.95-bookworm@sha256:6258907a...
+  (identical to phase 0/phase-1 => rustc 1.95.0 by construction; the ANCHOR
+  binary byte-match proves the toolchain identity empirically.)
+
+PER-ARM ERA-CONFIG RECORD (preflights complete, before first measurement)
+  All five arms booted the phase 0 config_head.toml VERBATIM
+  (sha256 64fb4f7b84a624b69968d77027af6749e1a7696569feaa70332540c12777e07f):
+  running=true, "event history disabled via [event_history].enabled = false"
+  logged, zero db files, on every arm (transcripts preflight_<arm>.txt).
+  NO legacy authz shim used for ANY arm; RUSTBGPD_GRPC_ENFORCEMENT unset for
+  every run. Era expectation confirmed: all arms postdate #1429/#1431.
