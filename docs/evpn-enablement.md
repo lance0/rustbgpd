@@ -939,8 +939,10 @@ did not take on:
 - PBB-EVPN (RFC 7623)
 - Multicast EVPN / MVPN (including RFC 9251 IGMP/MLD proxy routes)
 - MPLS encapsulation
-- `match_evpn_route_type` / `match_vni` / `match_mac` policy clauses
-  (Phase 1.5 nicety, not blocking)
+- `match_evpn_route_type` policy clause (shipped in v0.11.0 — see
+  [CONFIGURATION.md — Match conditions](CONFIGURATION.md#match-conditions))
+- `match_vni` / `match_mac` policy clauses (Phase 1.5 nicety, not
+  blocking)
 - EVPN MRT dump
 - EVPN BMP export (wire records already pass through, but no typed
   extraction in BMP message generation)

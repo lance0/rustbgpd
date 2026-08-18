@@ -2575,6 +2575,7 @@ same entry are ANDed.
 | `match_as_path`          | string   | no*      | AS_PATH regex (Cisco/Quagga style, `_` = boundary)    |
 | `match_neighbor_set`     | string   | no*      | Named neighbor set matched against the evaluation peer |
 | `match_route_type`       | string   | no*      | Route source type: `"local"`, `"internal"`, `"external"` |
+| `match_evpn_route_type`  | u8       | no*      | EVPN route type (RFC 7432 §7 / RFC 9136): 1 EAD, 2 MAC/IP, 3 IMET, 4 Ethernet Segment, 5 IP Prefix. Non-EVPN routes never match a set value |
 | `match_as_path_length_ge`| u32      | no*      | Minimum AS_PATH length to match (inclusive)           |
 | `match_as_path_length_le`| u32      | no*      | Maximum AS_PATH length to match (inclusive)           |
 | `match_local_pref_ge`    | u32      | no*      | Minimum `LOCAL_PREF` to match (inclusive)             |
@@ -2587,9 +2588,10 @@ same entry are ANDed.
 | `action`                 | string   | yes      | `"permit"` or `"deny"`                                |
 
 *At least one of `prefix`, `match_community`, `match_as_path`,
-`match_neighbor_set`, `match_route_type`, `match_as_path_length_ge`,
-`match_as_path_length_le`, `match_local_pref_ge`, `match_local_pref_le`,
-`match_med_ge`, `match_med_le`, `match_next_hop`, or
+`match_neighbor_set`, `match_route_type`, `match_evpn_route_type`,
+`match_as_path_length_ge`, `match_as_path_length_le`,
+`match_local_pref_ge`, `match_local_pref_le`, `match_med_ge`,
+`match_med_le`, `match_next_hop`, or
 `match_rpki_validation` / `match_aspa_validation` is required.
 
 ASPA verification is an IPv4/IPv6-unicast edge-ingress signal. eBGP routes
@@ -4143,14 +4145,12 @@ neighbor-reconcile step returns `None` on partial failure because
 live state is genuinely ambiguous after a delete-then-readd partial;
 earlier reload steps still land at the manager and remain in effect.
 
-Inline `policy.import` / `policy.export` (the legacy global-fallback
-statements), `[global]` ASN/router-id/families,
+`[global]` identity and daemon-wide flags (ASN, router-id, listen
+port, cluster-id, admission and multipath knobs),
 `[global.telemetry.grpc_*]` listener config, `[rpki]`, `[bmp]`,
 `[mrt]`, and `apply_bum_enforcement` are
 **restart-required** — they're surfaced under "Restart-required" in
-`rustbgpd --diff` and logged at reload time with a one-line migration
-hint to named definitions plus `import_chain` / `export_chain` where
-applicable. EVPN tables (`[[evpn_instances]]`, `[[ethernet_segments]]`,
+`rustbgpd --diff`. EVPN tables (`[[evpn_instances]]`, `[[ethernet_segments]]`,
 and `[[evpn_ip_vrfs]]`) are coordinator-gated instead: SIGHUP and the
 whole-model `EvpnService.ApplyEvpnRuntime` RPC validate a full candidate,
 converge the daemon actors in order, and advance the committed runtime
@@ -4209,7 +4209,7 @@ starting:
 | `gr_peer_restart_time_max` must be <= 4095 | `gr_peer_restart_time_max <value> exceeds 4095 (12-bit max)` |
 | `gr_stale_routes_time` must be > 0 and <= 3600 | `invalid gr_stale_routes_time` |
 | Policy prefix length must not exceed AFI max (32 for IPv4, 128 for IPv6) | `invalid prefix length` |
-| Policy entry must have at least one match condition (`prefix`, `match_community`, `match_as_path`, `match_as_path_length_ge`, `match_as_path_length_le`, `match_rpki_validation`, or `match_aspa_validation`) | `must have at least one match condition` |
+| Policy entry must have at least one match condition (see [Match conditions](#match-conditions)) | `must have at least one match condition` |
 | Import `match_rpki_validation`/`match_aspa_validation` evaluates against the current snapshot — routes arriving before the first VRP/ASPA table loads see `not_found`/`unknown`; later cache updates trigger inbound Route Refresh for established peers whose import policy depends on validation state | *(informational — no error)* |
 | `match_as_path_length_ge` must not exceed `match_as_path_length_le` | `match_as_path_length_ge (...) exceeds match_as_path_length_le (...)` |
 | `set_*` fields cannot be used with `action = "deny"` | `set_* fields cannot be used with action = "deny"` |

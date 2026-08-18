@@ -211,6 +211,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Streamed config Plan/Apply now gives one bounded, nonpreemptive admission
+  waiter to operators and protects operator-issued plan tokens at capacity.
 - Rejected-route retention now installs its configured LRU bound on the lazily
   created empty store before retaining the first rejection. This removes
   rustbgpd’s explicit dependency on `lru`’s unbounded-capacity sentinel while
