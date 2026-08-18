@@ -1324,8 +1324,8 @@ carries inactive (absent), unlimited (zero), or finite.
   VTEP originator, FRR as consumer. 4/4 PASS: Type 3 IMET originated
   at startup, Type 2 originated within ~3 s of `bridge fdb add`,
   Type 2 withdrawn within ~3 s of `bridge fdb del`, Type 3 IMET
-  drained on shutdown. Local-only / privileged smoke (not in
-  PR-CI); the Gate 7b downward path retains its M36 coverage.
+  drained on shutdown. Gated in hosted `kernel-dataplane` CI
+  alongside the Gate 7b downward path (M36).
 - **Closed after v0.16.0 (v0.17.0 follow-ups):** `advertise_svi_mac`
   consumption (origination of the bridge's own MAC on
   instance-Ready via `InstanceDataplaneStatus.bridge_mac`),
