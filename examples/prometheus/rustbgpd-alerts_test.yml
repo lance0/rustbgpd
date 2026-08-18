@@ -41,6 +41,38 @@ tests:
                 edge1:9179 for 2 minutes. The daemon is down,
                 unreachable, or `prometheus_addr` is no longer configured.
 
+  # ── RustbgpdRestarted ────────────────────────────────────────
+  # Pins a stable target, a sampled start-time change, job scoping, and
+  # expiry after the ten-minute lookback.
+  - interval: 1m
+    input_series:
+      - series: 'process_start_time_seconds{job="rustbgpd", instance="edge1:9179"}'
+        values: "100x10 200x12"
+      - series: 'process_start_time_seconds{job="rustbgpd", instance="edge2:9179"}'
+        values: "300x22"
+      - series: 'process_start_time_seconds{job="other", instance="edge3:9179"}'
+        values: "400x10 500x12"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: RustbgpdRestarted
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: RustbgpdRestarted
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: rustbgpd
+              instance: edge1:9179
+            exp_annotations:
+              summary: "rustbgpd restarted (edge1:9179)"
+              description: >-
+                The sampled process start time for rustbgpd at edge1:9179
+                changed in the last 10 minutes. This is a generic restart
+                signal; inspect logs and the service manager for the reason.
+      - eval_time: 22m
+        alertname: RustbgpdRestarted
+        exp_alerts: []
+
   # ── BgpRuntimeConfigSettlementSlow ────────────────────────────
   # Label names and values mirror the daemon's closed metric surface in
   # crates/api/src/runtime_config_settlement.rs: labels kind/phase/

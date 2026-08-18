@@ -24,6 +24,17 @@ log_format = "json"
 The same listener serves `/metrics`, `/livez`, and `/readyz`. Omit
 `prometheus_addr` to disable it.
 
+On Linux, each private registry also registers the standard process collector.
+Readable, usable `/proc` process data is required: inaccessible data can omit
+`process_start_time_seconds`, while unusable boot or stat data can leave its
+value zero, preventing the alert from establishing a restart. The shipped
+`RustbgpdRestarted` rule reports a sampled start-time change for the stable
+`job="rustbgpd"` target over ten minutes. It is a generic restart signal:
+planned, manual, and package-driven restarts fire too. Missing pre- or
+post-restart samples or changing target labels can miss a restart, and the
+signal expires after ten minutes. It cannot attribute exit 70, a crash, or any
+other reason; logs and the service manager remain authoritative.
+
 ## Prometheus scrape config
 
 ```yaml

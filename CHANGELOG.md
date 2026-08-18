@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Linux metrics registries now register the standard process collector, with a
+  tested generic restart alert whose ten-minute sampled-change boundary and
+  attribution limits are documented. Readable, usable `/proc` process data is
+  required for the collector to expose a nonzero start time. (LAN-1056)
+
 - v1-gating flagship soak receipts (ADR-0125 evidence bar E2): the 24 h
   route-server flagship run (`soak-rs-flagship-20260816T062037Z` — 48/48
   barrier-verified SIGHUP reloads, 6/6 max-prefix trip/timed-restart
