@@ -15,6 +15,7 @@ use super::schema::{
     ManagedSvdVxlanNetdevConfig, ManagedVlanUpperNetdevConfig, ManagedVrfNetdevConfig,
     ManagedVxlanNetdevConfig, Rfc8212PolicySource,
 };
+use super::schema::{OrrVantage, parse_orr_vantage};
 use super::{
     Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig, InboundAdmissionConfig, Neighbor,
     PeerGroupConfig, SecurityConfig, TcpAoConfig, TcpAoKeyringConfig, dynamic_prefixes_intersect,
@@ -108,7 +109,7 @@ impl ConfigAdvisory {
 struct EffectivePeerModes {
     remote_asn: u32,
     route_reflector_client: bool,
-    orr_vantage: Option<IpAddr>,
+    orr_vantage: Option<OrrVantage>,
     route_server_client: bool,
     per_client_best: bool,
     next_hop_ownership: bool,
@@ -126,7 +127,9 @@ impl EffectivePeerModes {
                 .unwrap_or(false),
             orr_vantage: neighbor
                 .orr_vantage
-                .or_else(|| group.and_then(|g| g.orr_vantage)),
+                .as_deref()
+                .or_else(|| group.and_then(|g| g.orr_vantage.as_deref()))
+                .and_then(|raw| parse_orr_vantage(raw).ok()),
             route_server_client: neighbor
                 .route_server_client
                 .or_else(|| group.and_then(|g| g.route_server_client))
@@ -154,7 +157,10 @@ impl EffectivePeerModes {
         Self {
             remote_asn,
             route_reflector_client: group.route_reflector_client.unwrap_or(false),
-            orr_vantage: group.orr_vantage,
+            orr_vantage: group
+                .orr_vantage
+                .as_deref()
+                .and_then(|raw| parse_orr_vantage(raw).ok()),
             route_server_client: group.route_server_client.unwrap_or(false),
             per_client_best: group.per_client_best.unwrap_or(false),
             next_hop_ownership: group.next_hop_ownership.is_some(),
@@ -198,7 +204,6 @@ fn validate_effective_peer_modes(
     local_asn: u32,
     local_router_id: &str,
     subject: &str,
-    exact_peer_addr: Option<IpAddr>,
 ) -> Result<(), PeerModeViolation> {
     if modes.route_reflector_client && modes.remote_asn != local_asn {
         return Err(PeerModeViolation::RouteReflector(format!(
@@ -219,23 +224,27 @@ fn validate_effective_peer_modes(
                 "orr_vantage on neighbor {subject} requires route_reflector_client = true"
             )));
         }
-        if exact_peer_addr == Some(vantage) {
-            return Err(PeerModeViolation::RouteReflector(format!(
-                "orr_vantage {vantage} on neighbor {subject} must not equal the \
-                 neighbor's own address"
-            )));
-        }
-        if local_router_id.parse::<IpAddr>().ok() == Some(vantage) {
-            return Err(PeerModeViolation::RouteReflector(format!(
-                "orr_vantage {vantage} on neighbor {subject} must not equal the \
-                 reflector's local router_id {local_router_id}"
-            )));
-        }
-        if vantage.is_unspecified() || vantage.is_loopback() {
-            return Err(PeerModeViolation::RouteReflector(format!(
-                "orr_vantage {vantage} on neighbor {subject} must be a real topology \
-                 address, not an unspecified or loopback address"
-            )));
+        // `peer_address` resolves per session to the peer's own peering
+        // address — not knowable here, and absent entirely for a dynamic
+        // range. The address-shape checks below only bind a literal vantage.
+        if let OrrVantage::Address(vantage) = vantage {
+            // A vantage equal to the client's own peering address is
+            // legal — per RFC 9107 the vantage *is* the client's IGP location,
+            // and it is exactly what `"peer_address"` derives. Only a vantage
+            // equal to the reflector's own router_id degenerates to plain
+            // non-ORR reflection.
+            if local_router_id.parse::<IpAddr>().ok() == Some(vantage) {
+                return Err(PeerModeViolation::RouteReflector(format!(
+                    "orr_vantage {vantage} on neighbor {subject} must not equal the \
+                     reflector's local router_id {local_router_id}"
+                )));
+            }
+            if vantage.is_unspecified() || vantage.is_loopback() {
+                return Err(PeerModeViolation::RouteReflector(format!(
+                    "orr_vantage {vantage} on neighbor {subject} must be a real topology \
+                     address, not an unspecified or loopback address"
+                )));
+            }
         }
     }
 
@@ -637,13 +646,26 @@ impl Config {
                 return Err(ConfigError::InvalidSlowPeerThreshold { value });
             }
 
+            // Reject bad `orr_vantage` syntax before the mode checks, which
+            // parse leniently (`.ok()`) and would otherwise treat garbage as
+            // "no vantage configured" and skip the RR/iBGP requirements.
+            if let Some(raw) = neighbor
+                .orr_vantage
+                .as_deref()
+                .or_else(|| group.and_then(|g| g.orr_vantage.as_deref()))
+                && let Err(reason) = parse_orr_vantage(raw)
+            {
+                return Err(ConfigError::InvalidOrrVantage {
+                    reason: format!("neighbor {}: {reason}", neighbor.address),
+                });
+            }
+
             let modes = EffectivePeerModes::for_neighbor(neighbor, group);
             validate_effective_peer_modes(
                 modes,
                 self.global.asn,
                 &self.global.router_id,
                 &neighbor.address,
-                neighbor.address.parse().ok(),
             )
             .map_err(|violation| violation.into_static_error(&neighbor.address))?;
 
@@ -1078,7 +1100,6 @@ impl Config {
                 self.global.asn,
                 &self.global.router_id,
                 &dn.prefix,
-                None,
             )
             .map_err(|violation| ConfigError::InvalidDynamicNeighbor {
                 reason: format!(
@@ -1367,7 +1388,8 @@ impl Config {
         };
         let any_vantage = self.neighbors.iter().any(|n| {
             n.orr_vantage
-                .or_else(|| group_of(n).and_then(|g| g.orr_vantage))
+                .as_deref()
+                .or_else(|| group_of(n).and_then(|g| g.orr_vantage.as_deref()))
                 .is_some()
         }) || dynamic_groups().any(|group| group.orr_vantage.is_some());
         if !any_vantage {
@@ -2518,6 +2540,14 @@ fn validate_peer_group(
                 });
             }
         }
+    }
+
+    if let Some(raw) = group.orr_vantage.as_deref()
+        && let Err(reason) = parse_orr_vantage(raw)
+    {
+        return Err(ConfigError::InvalidOrrVantage {
+            reason: format!("peer_group {name:?}: {reason}"),
+        });
     }
 
     if let Some(mode) = group.remove_private_as.as_deref() {

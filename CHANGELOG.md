@@ -129,6 +129,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `share/monitoring/` in the archive or
   `/usr/share/doc/rustbgpd/monitoring/` after a `.deb`/`.rpm` install; the
   canonical dashboard and rule files remain the packaging sources (LAN-928).
+- `orr_vantage = "peer_address"` (alias `"peer-address"`): the RFC 9107 ORR
+  vantage resolves per peer to that peer's own peering address, so every
+  peer accepted from a `[[dynamic_neighbors]]` range gets its own vantage
+  and its own per-vantage best paths instead of sharing one hard-coded
+  vantage with the whole range. The `orr_vantage` config field is now a
+  string (it previously accepted only an IP address); existing IP values are
+  unchanged. A vantage equal to the client's own peering address is now
+  accepted — per RFC 9107 the vantage *is* the client's IGP location — while
+  a vantage equal to the reflector's `router_id` stays rejected.
 
 ### Removed
 

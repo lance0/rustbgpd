@@ -136,14 +136,10 @@ fn proto_definition_to_input(
             rustbgpd_transport::RemovePrivateAs::Replace => "replace".to_string(),
         });
 
-    let orr_vantage = definition
-        .orr_vantage
-        .as_deref()
-        .map(|raw| {
-            raw.parse::<std::net::IpAddr>()
-                .map_err(|e| Status::invalid_argument(format!("invalid orr_vantage {raw:?}: {e}")))
-        })
-        .transpose()?;
+    // Unresolved passthrough: `orr_vantage` accepts an IP address or the
+    // literal "peer_address", and the config layer owns both the syntax
+    // rejection (`ConfigError::InvalidOrrVantage`) and the per-peer collapse.
+    let orr_vantage = definition.orr_vantage.clone();
     let paths_limit_receive_max = definition
         .paths_limit_receive_max
         .map(|value| {
@@ -228,7 +224,7 @@ fn input_definition_to_proto(definition: &PeerGroupDefinition) -> proto::PeerGro
         llgr_stale_time: definition.llgr_stale_time,
         local_ipv6_nexthop: definition.local_ipv6_nexthop.clone(),
         route_reflector_client: definition.route_reflector_client,
-        orr_vantage: definition.orr_vantage.map(|addr| addr.to_string()),
+        orr_vantage: definition.orr_vantage.clone(),
         route_server_client: definition.route_server_client,
         per_client_best: definition.per_client_best,
         remove_private_as: definition.remove_private_as.clone(),
@@ -872,23 +868,44 @@ mod tests {
         );
     }
 
-    /// `orr_vantage` round-trips proto string → typed `IpAddr` → proto
-    /// string, and an unparseable vantage is rejected with
-    /// `InvalidArgument` rather than silently dropped.
+    /// `orr_vantage` round-trips proto string → definition → proto string
+    /// unchanged, for both the literal-address form and the
+    /// `"peer_address"` sentinel.
+    ///
+    /// This layer deliberately does NOT validate the value. The sentinel has
+    /// no `IpAddr` parse, and `parse_orr_vantage` lives in the binary's config
+    /// module, which `crates/api` cannot reach — so an `IpAddr` parse here
+    /// would reject the very value the feature exists to accept. Syntax
+    /// rejection is the config layer's job (`ConfigError::InvalidOrrVantage`),
+    /// which the `SetPeerGroup` apply path re-runs, matching how
+    /// `send_hold_time` and `remove_private_as` are already handled.
     #[test]
-    fn orr_vantage_round_trips_and_rejects_invalid() {
-        let mut definition = sample_definition();
-        definition.orr_vantage = Some("192.0.2.7".into());
-        let input = proto_definition_to_input(definition).unwrap();
-        assert_eq!(input.orr_vantage, Some("192.0.2.7".parse().unwrap()));
-        let back = input_definition_to_proto(&input);
-        assert_eq!(back.orr_vantage.as_deref(), Some("192.0.2.7"));
+    fn orr_vantage_round_trips_both_forms_unvalidated() {
+        for raw in ["192.0.2.7", "2001:db8::7", "peer_address", "peer-address"] {
+            let mut definition = sample_definition();
+            definition.orr_vantage = Some(raw.into());
+            let input = proto_definition_to_input(definition).unwrap();
+            assert_eq!(
+                input.orr_vantage.as_deref(),
+                Some(raw),
+                "{raw} survives proto -> definition unchanged"
+            );
+            let back = input_definition_to_proto(&input);
+            assert_eq!(
+                back.orr_vantage.as_deref(),
+                Some(raw),
+                "{raw} survives definition -> proto unchanged"
+            );
+        }
 
+        // Garbage passes this boundary untouched rather than being rejected
+        // here; the config layer classifies it on apply. Pinning it keeps the
+        // moved validation boundary explicit instead of looking like an
+        // accidentally dropped check.
         let mut invalid = sample_definition();
         invalid.orr_vantage = Some("not-an-ip".into());
-        let err = proto_definition_to_input(invalid).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("orr_vantage"));
+        let input = proto_definition_to_input(invalid).unwrap();
+        assert_eq!(input.orr_vantage.as_deref(), Some("not-an-ip"));
     }
 
     /// Load-bearing: dropping either conversion assignment loses the cap on

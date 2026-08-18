@@ -598,3 +598,48 @@ async fn replace_config_snapshot_rebuilds_dynamic_range_matcher() {
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     handle.await.unwrap();
 }
+
+/// Load-bearing producer-path proof: `peer_address` must survive
+/// `resolve_dynamic_neighbor` -> `peer_manager_config_from_resolved` ->
+/// `build_transport_config`. Dropping it at any hop leaves the knob parsing
+/// and validating while every session registers with no vantage at all.
+#[test]
+fn dynamic_peers_derive_distinct_orr_vantages_from_peer_address() {
+    let config = load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[peer_groups.rr-clients]
+route_reflector_client = true
+orr_vantage = "peer_address"
+
+[[dynamic_neighbors]]
+prefix = "10.0.8.0/24"
+peer_group = "rr-clients"
+remote_asn = 65001
+"#,
+    );
+    let mgr = test_peer_manager();
+    let group = &config.peer_groups["rr-clients"];
+
+    for peer in ["10.0.8.42", "10.0.8.77"] {
+        let addr: IpAddr = peer.parse().unwrap();
+        let resolved = config
+            .resolve_dynamic_neighbor(addr, 65001, "dynamic", group, "rr-clients", false)
+            .unwrap();
+        let peer_config = PeerManager::peer_manager_config_from_resolved(resolved, false);
+        let transport = mgr.build_transport_config(&peer_config);
+        assert_eq!(
+            transport.orr_vantage,
+            Some(addr),
+            "dynamic peer {peer} must register its OWN address as its ORR vantage"
+        );
+    }
+}
