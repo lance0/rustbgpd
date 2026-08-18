@@ -38,7 +38,7 @@ class EmbeddingVersionContractTests(unittest.TestCase):
 
     def test_each_wire_snippet_is_guarded(self) -> None:
         """Red if either wire dependency example drifts to 0.15.0."""
-        old = 'rustbgpd-wire = "0.17.0"'
+        old = 'rustbgpd-wire = "0.17.1"'
         for occurrence in (0, 1):
             with self.subTest(occurrence=occurrence):
                 self.assert_fails(
@@ -49,13 +49,13 @@ class EmbeddingVersionContractTests(unittest.TestCase):
     def test_fsm_snippet_is_guarded(self) -> None:
         """Red if the FSM dependency example drifts to 0.3.1."""
         self.assert_fails(
-            self.replace_nth('rustbgpd-fsm = "0.4.0"', 'rustbgpd-fsm = "0.3.1"'),
+            self.replace_nth('rustbgpd-fsm = "0.4.1"', 'rustbgpd-fsm = "0.3.1"'),
             "fsm-snippet-version",
         )
 
     def test_publish_statuses_are_guarded(self) -> None:
         """Red if either numbered publish heading names an old version."""
-        mutations = (("wire", "0.17.0", "0.16.2"), ("fsm", "0.4.0", "0.3.1"))
+        mutations = (("wire", "0.17.1", "0.17.0"), ("fsm", "0.4.1", "0.4.0"))
         for package, current, old in mutations:
             with self.subTest(package=package):
                 self.assert_fails(
@@ -68,7 +68,7 @@ class EmbeddingVersionContractTests(unittest.TestCase):
     def test_current_boundary_is_guarded(self) -> None:
         """Red if §7 loses either authoritative current-version slot."""
         self.assert_fails(
-            self.replace_nth("`rustbgpd-fsm 0.4.0`", "rustbgpd-fsm 0.4.0"),
+            self.replace_nth("`rustbgpd-fsm 0.4.1`", "rustbgpd-fsm 0.4.1"),
             "current-boundary-version",
         )
 
@@ -76,7 +76,7 @@ class EmbeddingVersionContractTests(unittest.TestCase):
         """Red if an actual publish status changes from published to prepared."""
         self.assert_fails(
             self.replace_nth(
-                "(published as `0.17.0`)", "(prepared as `0.17.0`)"
+                "(published as `0.17.1`)", "(prepared as `0.17.1`)"
             ),
             "publish-status-version",
         )

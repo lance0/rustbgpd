@@ -153,7 +153,7 @@ This is the "MRT reader / monitor / analyzer" consumer. Links only
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.17.0"
+rustbgpd-wire = "0.17.1"
 bytes = "1"
 ```
 
@@ -213,8 +213,8 @@ intentional split (ADR-0002: inherent methods, no I/O in the FSM).
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.17.0"
-rustbgpd-fsm = "0.4.0"
+rustbgpd-wire = "0.17.1"
+rustbgpd-fsm = "0.4.1"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```
@@ -312,7 +312,7 @@ once that crate is published.
 **Status: `wire` → `fsm` are published; `rpki` is next; `rib`, `bmp`, `mrt`,
 and `policy` are later.**
 
-1. **`rustbgpd-wire` (published as `0.17.0`).** This is the
+1. **`rustbgpd-wire` (published as `0.17.1`).** This is the
    foundation — dependent crate versions cannot publish before their wire
    dependency exists on crates.io. `0.15.0` brought `Capability::PathsLimit`
    with its `PathsLimitFamily` entry type (experimental capability code 76),
@@ -332,18 +332,30 @@ and `policy` are later.**
    `UpdateMessage::try_build` / `encode_message`) surface the same routes as
    errors where they previously emitted silently altered wire bytes.
    `crates/wire/README.md` carries the itemized note under "0.17.0
-   compatibility note".
+   compatibility note". `0.17.1` is a **documentation-only patch**: every
+   change in it corrects an RFC section reference in a doc comment or a test
+   assertion message (RFC 5291 ORF sections, the Default Gateway community's
+   RFC 7432 §7.8 citation, and the FlowSpec next-hop citation to RFC 8955 §4).
+   There is no public API, wire-format, or decoder/encoder behavior change,
+   and therefore nothing to migrate — code that builds against `0.17.0`
+   builds and behaves identically against `0.17.1`.
 
-2. **`rustbgpd-fsm` (published as `0.4.0`).** The `0.4.0` release makes no
+2. **`rustbgpd-fsm` (published as `0.4.1`).** The `0.4.0` release makes no
    FSM API changes of its own — it exists because the FSM's public surface
    re-exports `rustbgpd-wire` types (`Action` carries wire messages), so the
    wire `0.16.2 → 0.17.0` breaking transition changes the identity of those
    types. `0.4.0` re-pins `rustbgpd-wire ^0.17.0`; upgrade both crates
    together, or the re-exported types stop unifying across the two wire
-   versions in one dependency tree. (History: `0.3.1` added `min_hold_time`
-   and `required_families` to the `#[non_exhaustive]` `PeerConfig`, made the
-   last duplicate Graceful Restart capability win, and rejected invalid OPEN
-   identities.) Why the FSM was the second published crate:
+   versions in one dependency tree. `0.4.1` is **additive**: it adds
+   `Session::negotiated_shared() -> Option<Arc<NegotiatedSession>>` for
+   embedders that need to hold the negotiated parameters across a subsystem
+   boundary while the session is live. `Session::negotiated()` keeps its
+   `Option<&NegotiatedSession>` signature, nothing was removed or changed,
+   and `0.4.1` re-pins `rustbgpd-wire ^0.17.1` — a patch-level wire move with
+   no API change, so there is nothing to migrate. (History: `0.3.1` added
+   `min_hold_time` and `required_families` to the `#[non_exhaustive]`
+   `PeerConfig`, made the last duplicate Graceful Restart capability win, and
+   rejected invalid OPEN identities.) Why the FSM was the second published crate:
    - It depends *only* on `rustbgpd-wire` + `thiserror` + `bytes`. Zero
      daemon-tier coupling.
    - It is the smallest, purest building block a second consumer needs. A test
@@ -431,7 +443,7 @@ To be the de facto Rust BGP codec, the concrete gaps:
 
 ## 7. Published-crate release boundary
 
-`rustbgpd-wire 0.17.0` and `rustbgpd-fsm 0.4.0` are published and are the
+`rustbgpd-wire 0.17.1` and `rustbgpd-fsm 0.4.1` are published and are the
 versions the §3 dependency examples name. The ordering rules that govern every
 future publish are:
 
