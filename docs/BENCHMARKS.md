@@ -1157,6 +1157,83 @@ HashMap overhead is structural (power-of-2 rounding), not rehash churn.
 Remaining memory is HashMap bucket arrays (~78%) and actual Route data (~19%).
 No obvious accidental overhead remains.
 
+### Where the July 2026 memory step went — single-commit attribution
+
+The history table above stops at v0.32.0. The step it does not show is the one
+the July 2026 performance batch introduced at route-server scale, and that
+bill is not spread across the batch: a single-commit attribution campaign at
+100 peers × 1,000 routes traced the whole settled-memory step to **one change
+— #1189, `perf(api): coalesce neighbor RIB snapshots`** (merged 2026-07-26,
+shipped in v0.61.0). It was taken deliberately as a memory-for-speed trade,
+and the campaign confirms it behaved exactly as designed: it is the single
+place where both the memory and the convergence moved.
+
+The rest of that batch's convergence gain cost nothing. #1183 (lazy inbound
+receive buffer), #1176 (`perf(rib): remove peer-multiplied fanout
+bookkeeping`), and #1177 (`perf(wire): eliminate temporary codec allocation
+churn`) — all merged the same day, all in v0.61.0 — each moved convergence
+down with memory going down alongside it, and #1188 (`perf(policy): share
+attribution names across evaluations`) reduced memory on its own. Roughly half
+the batch's speed-up was free; only #1189 was paid for.
+
+The later arcs the campaign covered all measured flat at this shape — the
+authz work, v0.63.0, ADR-0126's grouped per-client-best, and v0.64.0. The
+#1678–#1689 hardening tranche is a separate case worth stating plainly: its
+structural reclaims
+(private unicast storage released after regrouping, unused group route-slab
+tails trimmed, read-buffer storage released on disconnect, rejected-route
+retention grown incrementally) are **lifecycle-conditional**. They pay back on
+isolate/rejoin, oversized messages, and flood-then-adopt — not on a daemon
+sitting at steady state, which is why a settled-memory number does not move
+when they land.
+
+**Method, and why the per-commit deltas are not quoted here.** The campaign
+ran interleaved round-robin A/B arms with medians over five runs per arm,
+reproducible builds byte-identical across campaigns, cgroup `memory.peak` as
+the primary surface (not process-tree RSS, and not the raw container
+`memory_stats.usage` counter the bgperf2 rows above report), and bands
+preregistered before the runs. Settled memory at 100 peers × 1,000 routes
+carries a **±30–50 MiB allocator-arena residency noise floor** — the same
+figure the soak gates are calibrated against, see
+[`soaks/soak-acceptance-gates.md`](soaks/soak-acceptance-gates.md) — so any
+figure at this shape is a band, never a point. This page quotes only numbers
+with a checked-in artifact behind them, and the campaign's receipt is not yet
+published under [`perf/`](perf/); the attribution above is therefore stated as
+which commit and which direction, without magnitudes, until that receipt
+lands.
+
+**Open follow-up: thin the #1189 trade.** ADR-0126's shared-group machinery
+did not exist when #1189 landed — it can hold coalesced snapshot state once
+per update group instead of once per neighbor, which is the shape of the
+retention #1189 introduced. Reworking it that way is planned, and hard-gated:
+no more than a 2% convergence regression at the shape #1189 bought its
+speed-up at. The trade is only worth undoing if the speed survives.
+
+### Steady-state memory at flagship scale — 24 h soak observations
+
+The two archived v1-gating flagship soaks are the current published
+steady-state observations at 1,000 sessions. They are **stability evidence,
+not comparisons**: no control daemon ran alongside either run, so neither
+licenses a performance claim, and their surface is daemon process-tree RSS —
+a third surface again, distinct from both cgroup `memory.peak` and the raw
+container counter used by bgperf2.
+
+| Shape | Steady band | Peak | Late-window slope |
+|---|---|---|---|
+| Route server — 1000 eBGP RS-client sessions × 400 routes (400,000), 24 h under churn with 48 SIGHUP reloads and 6 max-prefix trip/restart cycles | **432–449 MB** between injections | 581.7 MB (reload re-advertisement and trip re-announce bursts, settling back into the band each time) | 0.0724 MB/h |
+| Route reflector — 1000 iBGP RR-client sessions × 100 routes (100,000), 24 h under 5,486,092 churn cycles | **~220–235 MB** for the whole hold | 342.5 MB, in the terminal 1,000-way full-table refresh | 0.2958 MB/h |
+
+Receipts, gates, and artifacts:
+[`soaks/soak-rs-flagship-24h.md`](soaks/soak-rs-flagship-24h.md) and
+[`soaks/soak-rr-flagship-24h.md`](soaks/soak-rr-flagship-24h.md); both are
+indexed with the rest of the operational evidence in
+[`OPERATIONAL_PROOF.md`](OPERATIONAL_PROOF.md) and
+[`RECEIPTS.md`](RECEIPTS.md). The intern gauge
+(`bgp_rib_attr_intern_global_size`) was pinned across both runs, and the RR
+run closed on an exact terminal reflected-delivery receipt — 99,900 non-self
+prefixes to every observer, zero parse errors, zero session flaps — so those
+flat bands were held while the daemon was demonstrably still doing the work.
+
 ### Shared `RouteData` — measured and rejected
 
 Splitting `Route` into a shared immutable `RouteData` (referenced from each RIB)

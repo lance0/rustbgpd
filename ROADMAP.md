@@ -1463,6 +1463,20 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
     isolated attribution and repeat the full typical/rich/unique insert,
     bulk-load, and churn measurement matrix. Only a measurement GO may proceed
     to a prototype's collision and memory gates.
+  - Neighbor RIB snapshot coalescing — thin the memory-for-speed trade
+    (LAN-1050). The single-commit attribution campaign at 100 peers × 1,000
+    routes traced the whole settled-memory step introduced by the July 2026
+    performance batch (all of it shipped in v0.61.0) to one change: #1189's
+    coalesced neighbor RIB snapshots, taken deliberately to buy convergence at
+    the route-server shape. The same campaign shows roughly half that batch's
+    convergence gain — #1183, #1176, #1177 — cost no memory at all, and that
+    v0.63.0, ADR-0126, and v0.64.0 are flat there.
+    ADR-0126's shared-group machinery postdates #1189 and can hold the
+    coalesced snapshot state once per update group rather than once per
+    neighbor. Hard-gated: no more than a 2% convergence regression at the
+    shape #1189 bought its speed-up at, or the trade stays as it is. The
+    narrative lives in `docs/BENCHMARKS.md`; the campaign receipt is not yet
+    published under `docs/perf/`, so no per-commit magnitudes are public.
   - General FIB runtime: investigate prefix-dirty reconcile so a single prefix
     change does not necessarily trigger full RIB query + full kernel dump +
     full projection. Design-gated because drift recovery, ECMP siblings,
