@@ -222,6 +222,18 @@ The diagnostic deliberately carries no config contents, paths, tokens,
 confirm IDs, or raw error text; `kind` + `phase` + `fence_reason` are
 the complete classification.
 
+The Prometheus `RustbgpdRestarted` alert can reveal a sampled change in
+`process_start_time_seconds` for the stable rustbgpd scrape target. It covers
+the restart after the five-second supervised-recovery gap, but it is not proof
+of a settlement fail-stop: planned, manual, package, and crash restarts fire as
+well. The registered collector requires readable, usable Linux `/proc` process
+data; inaccessible data can omit the family, while unusable boot or stat data
+can leave start time zero and prevent the alert from establishing a restart.
+Missing samples on either side of the restart or a target-label change can
+also miss it, and it expires after the ten-minute lookback. The metric cannot
+attribute exit 70 or any restart reason; the settlement log above and systemd
+remain authoritative.
+
 ### 2. Let the restart happen — it is safe by design
 
 The shipped unit restarts the daemon after `RestartSec=5`. Restart is

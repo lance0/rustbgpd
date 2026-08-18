@@ -453,6 +453,13 @@ impl BgpMetrics {
         reason = "the constructor keeps the complete metric inventory and registration wiring together"
     )]
     pub fn with_registry(registry: Registry) -> Self {
+        #[cfg(target_os = "linux")]
+        registry
+            .register(Box::new(
+                prometheus::process_collector::ProcessCollector::for_self(),
+            ))
+            .expect("process collector registration");
+
         let state_transitions = IntCounterVec::new(
             Opts::new(
                 "bgp_session_state_transitions_total",
@@ -4822,6 +4829,22 @@ mod tests {
         let mut buf = Vec::new();
         encoder.encode(&families, &mut buf).unwrap();
         String::from_utf8(buf).unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_collector_is_registered_on_private_registry() {
+        let metrics = BgpMetrics::new();
+        let samples = metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .filter(|family| family.name() == "process_start_time_seconds")
+            .flat_map(|family| family.get_metric().to_vec())
+            .collect::<Vec<_>>();
+
+        assert_eq!(samples.len(), 1);
+        assert!(samples[0].get_gauge().value() > 0.0);
     }
 
     fn event_outbox_queue_depths(m: &BgpMetrics) -> Vec<(String, f64)> {

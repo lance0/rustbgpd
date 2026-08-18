@@ -36,6 +36,19 @@ groups:
             {{ $labels.instance }} for 2 minutes. The daemon is down,
             unreachable, or `prometheus_addr` is no longer configured.
 
+      - alert: RustbgpdRestarted
+        expr: changes(process_start_time_seconds{job="rustbgpd"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "rustbgpd restarted ({{ $labels.instance }})"
+          description: >-
+            The sampled process start time for rustbgpd at
+            {{ $labels.instance }} changed in the last 10 minutes. This is a
+            generic restart signal; inspect logs and the service manager for
+            the reason.
+
       - alert: BgpRuntimeConfigSettlementSlow
         # Early advisory: ten minutes of owned settlement is far past any
         # measured normal apply but leaves twenty minutes of the fixed
