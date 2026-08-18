@@ -152,12 +152,12 @@ development. L1, L3, A1, A2, C1, D1, and D3 are complete; the scheduled
 v0.65 removals are finished.
 
 **E5 — RFC 8212 secure default (DR4).** Opt-in enforcement is shipped and
-receipted (ADR-0112, M95). ADR-0119's config-epoch representation and
-activation are accepted but not implemented. Once every named
-production-mutation proof passes, activation changes only epoch-2 omission
-from invalid to effective `true`; legacy and explicit epoch-1 omission remain
-effective `false`, and explicit booleans retain their value. The proof-gated
-implementation must land before the tag.
+receipted (ADR-0112, M95). ADR-0119's config-epoch representation and every
+named production-mutation proof landed, and activation shipped in #1666:
+`config_epoch = 2` with the boolean omitted now resolves to effective `true`
+with source `epoch_2_default`. Legacy and explicit epoch-1 omission remain
+effective `false`, explicit booleans retain their value, and the M95 FRR/BIRD
+presence lab runs on the activated cell.
 
 **E6 — Security and fuzz posture line items.** Current state, largely
 satisfied: the exact fail-closed 19-target fuzz inventory runs in PR CI with
@@ -203,7 +203,7 @@ The actionable backlog seed: criterion → current state → what closes it.
 | E2 RS/RR soaks | **Satisfied:** two green 24 h receipts archived — route-server flagship (SIGHUP reload + max-prefix trip/timed restart) and route-reflector flagship (reflection under churn) | Keep the receipts and their artifacts indexed in `docs/RECEIPTS.md`; the six remaining uninjected gate guarantees stay post-1.0 |
 | E3 comparative IRR row | **Satisfied:** four-root same-harness comparison against BIRD and OpenBGPD publishes wins and losses | Keep the published receipt linked from the evidence index |
 | E4 debt schedule | L1, A2, D1, and D3 are complete; remaining v0.65 items are open | Land the rest of the v0.65 removal batch before the tag |
-| E5 RFC 8212 | Activation authorized; ADR-0119 representation and proofs unimplemented | Land the representation and every named production-mutation proof; activate only epoch-2 omission |
+| E5 RFC 8212 | **Satisfied:** ADR-0119's representation and every named production-mutation proof landed, and #1666 activated the epoch-2 omitted cell to effective `true` (`epoch_2_default`) with M95 rerun on it | Keep activation isolated to that one cell — epoch-less, epoch-1, and explicit booleans stay frozen by the ADR-0119 matrix |
 | E6 security posture | Fuzz/audit/reporting in place | SECURITY.md 1.x supported-versions row; keep artifact build floor |
 | E7 upgrade chain | Chain contiguous through the current anchor | Extend to the v1.0 anchor at tag time (existing process) |
 | DR6 re-bless list | Streaming ingress, history/rollback RPCs outside v1 | Deliberate re-bless review for each, or defer to a 1.x minor |
