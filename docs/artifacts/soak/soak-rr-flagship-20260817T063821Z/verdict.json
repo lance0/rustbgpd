@@ -1,0 +1,100 @@
+{
+  "verdict": "pass",
+  "samples": 2883,
+  "hold_lines": 1441,
+  "final_churn_cycles": 5486092,
+  "terminal_receipt_defects": [],
+  "peak_rss_mb": 342.5,
+  "rss_late_slope_per_hour": 0.295773919720356,
+  "intern_late_slope_per_hour": 0.0,
+  "slope_window_evaluated": true,
+  "gates": {
+    "min_samples": {
+      "value": 2883,
+      "limit": 2592.0,
+      "pass": true
+    },
+    "session_floor": {
+      "value": {
+        "violations": 0,
+        "first": []
+      },
+      "pass": true
+    },
+    "flap_budget": {
+      "value": 0,
+      "limit": 0,
+      "pass": true
+    },
+    "terminal_delivery_exact": {
+      "value": {
+        "receipt": [
+          {
+            "peers": 1000,
+            "prefixes": 100000,
+            "per_peer": 100,
+            "expected": 99900,
+            "min_unique": 99900,
+            "max_unique": 99900,
+            "sessions_up": 1000,
+            "parse_errors": 0,
+            "churn_cycles": 5486092
+          }
+        ],
+        "defects": []
+      },
+      "pass": true
+    },
+    "churn_cycle_floor": {
+      "value": {
+        "final": 5486092,
+        "monotone_breaks": 0
+      },
+      "limit": 2764800,
+      "pass": true
+    },
+    "max_prefix_flat": {
+      "value": 0,
+      "limit": 0,
+      "pass": true
+    },
+    "msgs_sent_monotone": {
+      "value": {
+        "breaks": 0
+      },
+      "pass": true
+    },
+    "readyz": {
+      "value": {
+        "hold_bad_samples": 0,
+        "terminal_window_samples": 2,
+        "terminal_no_response": 0,
+        "recovered_ms": 112,
+        "limit_ms": 250.0,
+        "recovery_limit_ms": 60000
+      },
+      "pass": true
+    },
+    "rss_peak_mb": {
+      "value": 342.5,
+      "limit": 1024.0,
+      "pass": true
+    },
+    "rss_late_slope_per_hour": {
+      "value": 0.295773919720356,
+      "limit": 10.0,
+      "pass": true,
+      "note": null
+    },
+    "intern_late_slope_per_hour": {
+      "value": 0.0,
+      "limit": 100.0,
+      "pass": true,
+      "note": null
+    },
+    "no_abort": {
+      "value": [],
+      "pass": true
+    }
+  }
+}

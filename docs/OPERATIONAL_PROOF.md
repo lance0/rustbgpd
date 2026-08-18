@@ -16,7 +16,7 @@ operator-facing index that answers "what has actually been proved?"
 | Privileged dataplane interop | Hosted GitHub `kernel-dataplane` workflow covers EVPN VTEP/IRB, FIB, BFD, TCP-AO where supported, and Linux netns dataplane selectors. | [`kernel-dataplane-runner.md`](kernel-dataplane-runner.md), [`INTEROP.md`](INTEROP.md#ci-coverage) |
 | Performance and scale | Criterion, bgperf2, distribution fanout, EVPN load, and RIB memory measurements are documented with hardware, noise floor, and measurement state. | [`BENCHMARKS.md`](BENCHMARKS.md) |
 | High-N memory regression tracking | Ignored RIB memory profile covers Adj-RIB-In, Full-RIB, and RR/route-server fanout at 100k/500k/900k prefixes; A/B summaries come from `bench/compare-rib-memory.sh`. | [`BENCHMARKS.md`](BENCHMARKS.md#memory-footprint), [`../bench/README.md`](../bench/README.md#rib-memory-compare) |
-| Long-running soak evidence | Archived 24-hour EVPN and local-origination soaks include run metadata, pass/fail gates, RSS slopes, and git-tracked artifacts. | [Soak receipts](#soak-receipts) |
+| Long-running soak evidence | Archived 24-hour soaks — the flagship route-server and route-reflector runs on the bare-host daemon, plus the earlier EVPN and local-origination runs — include run metadata, pass/fail gates, RSS slopes, and git-tracked artifacts. | [Soak receipts](#soak-receipts) |
 | EVPN link-drain churn soak | Archived M67 24-hour run covers the single-active ES link-drain surface with route/session/gauge/timing/RSS gates under live MAC-mobility churn. | [`soak-m67-link-drain-24h-evpn-leak.md`](soaks/soak-m67-link-drain-24h-evpn-leak.md), [`../tests/soak/README.md`](../tests/soak/README.md#m67-link-drain-churn-soak) |
 
 ## Interop and dataplane receipts
@@ -73,8 +73,14 @@ Compact M36-M90 index (details and assertions stay in
 
 ## Soak receipts
 
+The two flagship runs below are the standing route-server and
+route-reflector operational proof (ADR-0125 evidence bar E2); the
+remaining receipts cover the EVPN and local-origination surfaces.
+
 | Receipt | Verdict | Key signals | Artifacts |
 |---------|---------|-------------|-----------|
+| [Route-server flagship 24h](soaks/soak-rs-flagship-24h.md) | PASS | 24h 17m; 1000 eBGP RS-client sessions × 400 routes with steady churn; 48/48 barrier-verified SIGHUP reloads; 6/6 max-prefix trip/timed-restart chains with exact breach/flap accounting; peak RSS 581.7 MB against a 3072 MB ceiling; late-window slope 0.0724 MB/h. | [`artifacts/soak/soak-rs-flagship-20260816T062037Z/`](artifacts/soak/soak-rs-flagship-20260816T062037Z/) |
+| [Route-reflector flagship 24h](soaks/soak-rr-flagship-24h.md) | PASS | 24h 2m; 1000 iBGP RR-client sessions × 100 routes; 5,486,092 churn cycles; terminal reflected-delivery exact at 99,900 non-self prefixes per observer with 0 parse errors; zero flaps; peak RSS 342.5 MB against a 1024 MB ceiling. | [`artifacts/soak/soak-rr-flagship-20260817T063821Z/`](artifacts/soak/soak-rr-flagship-20260817T063821Z/) |
 | [Gate 8b BUM-state 24h](soaks/soak-gate8b-24h-bum-state.md) | PASS | 24h 00m 32s; 71 complete DF-flip cycles; PE1 RSS steady-state slope 0.000 MB/h after settle; BUM-port flag triplet survived every sampled flip. | [`artifacts/soak/gate8b-20260510T152451Z/`](artifacts/soak/gate8b-20260510T152451Z/) |
 | [Gate 8b MAC-churn 24h](soaks/soak-gate8b-mac-churn-24h.md) | PASS | 24h 0m 14s; 69 post-flip reconverges; zero WARN/FATAL/topology-link-loss events; PE1 peak RSS 18.93 MB and post-settle envelope about 0.08 MB/h. | [`artifacts/soak/gate8b-mac-churn-24h-20260515T214043Z/`](artifacts/soak/gate8b-mac-churn-24h-20260515T214043Z/) |
 | [Gate 9 symmetric IRB 24h](soaks/soak-gate9-slice6-24h-symmetric-irb.md) | PASS | 24h 00m 44s; 703 churn cycles; zero BGP established violations; zero installed-route violations; PE1 peak RSS 14.3438 MB and steady-state slope 0.025 MB/h. | [`artifacts/soak/gate9-slice6-20260511T214936Z/`](artifacts/soak/gate9-slice6-20260511T214936Z/) |
@@ -92,7 +98,7 @@ Compact M36-M90 index (details and assertions stay in
 - Some interop rows require local fixtures or longer runtime and remain manual:
   RTR-cache-driven RPKI/ASPA tests, selected BIRD/GoBGP/platform-diversity
   checks, and GR/LLGR long-wall-clock gates.
-- EVPN is still alpha. The archived soaks prove specific gates and defaults;
+- EVPN is still alpha. The archived EVPN soaks prove specific gates and defaults;
   they do not claim full EVPN/MPLS/PBB/MVPN parity.
 
 ## Refreshing the receipts

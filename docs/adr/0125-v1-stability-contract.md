@@ -121,12 +121,17 @@ every receipt behind the contract is self-generated.
 receipts of at least 24 hours each against the precommitted acceptance gates
 (`docs/soaks/soak-acceptance-gates.md`). Together the two receipts must cover
 route-server and route-reflector flagship shapes, a real SIGHUP file reload,
-and a max-prefix trip followed by timed restart. Current state: all archived
-24 h soaks are EVPN-shaped; the precommitted gates name eight guarantees with
-no soak injection today, of which these two scenarios are scheduled and the
-rest deferred. Exactly two final qualifying receipts must be green. Preserve
-earlier red attempts and their fixes as evidence, but do not count them toward
-the two; the deferred six remain post-1.0 work.
+and a max-prefix trip followed by timed restart. Current state: satisfied —
+the two qualifying receipts exist and are green, both at git `a88666c4`:
+run `soak-rs-flagship-20260816T062037Z`
+(`docs/soaks/soak-rs-flagship-24h.md` — route-server flagship, 48
+barrier-verified SIGHUP reloads, six max-prefix trip/timed-restart chains)
+and run `soak-rr-flagship-20260817T063821Z`
+(`docs/soaks/soak-rr-flagship-24h.md` — route-reflector flagship, reflection
+under churn closed by an exact terminal reflected-delivery verification).
+The earlier red dry-run attempts and their fixes (#1692, #1694) are
+preserved as evidence and do not count toward the two; the six remaining
+gate guarantees with no soak injection stay post-1.0 work.
 
 **E3 — Comparative reload evidence at IRR scale (DR3).** The IXP receipt
 matrix (700 clients × 400,400 routes vs BIRD 3.3.1 and OpenBGPD 9.1) exists
@@ -195,7 +200,7 @@ The actionable backlog seed: criterion → current state → what closes it.
 | Criterion | Current state | Closes the gap |
 |-----------|---------------|----------------|
 | E1 external pilot | Zero pilots; cookbook + tooling shipped, unused externally | Advisory since the 2026-08-08 DR1 revision — pursue per the shadow-pilot cookbook (weekly checkpoints, semantic diff, support bundle, tested rollback, recorded feedback); absence is disclosed at tag time, not blocking |
-| E2 RS/RR soaks | Archived soaks are EVPN-shaped; eight precommitted gates uninjected | Archive exactly two receipts of at least 24 h that collectively cover flagship RS/RR, real SIGHUP reload, and max-prefix trip/timed restart |
+| E2 RS/RR soaks | **Satisfied:** two green 24 h receipts archived — route-server flagship (SIGHUP reload + max-prefix trip/timed restart) and route-reflector flagship (reflection under churn) | Keep the receipts and their artifacts indexed in `docs/RECEIPTS.md`; the six remaining uninjected gate guarantees stay post-1.0 |
 | E3 comparative IRR row | **Satisfied:** four-root same-harness comparison against BIRD and OpenBGPD publishes wins and losses | Keep the published receipt linked from the evidence index |
 | E4 debt schedule | L1, A2, D1, and D3 are complete; remaining v0.65 items are open | Land the rest of the v0.65 removal batch before the tag |
 | E5 RFC 8212 | Activation authorized; ADR-0119 representation and proofs unimplemented | Land the representation and every named production-mutation proof; activate only epoch-2 omission |

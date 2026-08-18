@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- v1-gating flagship soak receipts (ADR-0125 evidence bar E2): the 24 h
+  route-server flagship run (`soak-rs-flagship-20260816T062037Z` — 48/48
+  barrier-verified SIGHUP reloads, 6/6 max-prefix trip/timed-restart
+  chains, 12/12 gates green) and the 24 h route-reflector flagship run
+  (`soak-rr-flagship-20260817T063821Z` — 5,486,092 churn cycles closed
+  by an exact terminal reflected-delivery receipt, all gates green) are
+  documented in `docs/soaks/soak-rs-flagship-24h.md` and
+  `docs/soaks/soak-rr-flagship-24h.md`, with redacted run artifacts
+  archived under `docs/artifacts/soak/` and the receipt indexes and
+  ADR-0125 E2 state updated. (LAN-18)
+
 - Route-reflector flagship 24 h soak (`tests/soak/run-soak-rr-flagship.sh` +
   `analyze-soak-rr-flagship.py`): 1000 real iBGP route-reflector-client
   sessions × 100 routes (the documented RR flagship shape) against a

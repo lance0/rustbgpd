@@ -1,0 +1,16 @@
+{
+  "run_id": "20260817T063821Z",
+  "git_head": "a88666c418de3531a0485a6bd1e248a76696f5f0",
+  "peers": 1000,
+  "routes_per_peer": 100,
+  "total_prefixes": 100000,
+  "expected_nonself": 99900,
+  "soak_seconds": 86400,
+  "sample_interval_sec": 30,
+  "warmup_sec": 300,
+  "control_secs": 30,
+  "churn_cycle_floor": 2764800,
+  "ibgp_asn": 64512,
+  "listen_port": 1790,
+  "metrics_port": 9179
+}
