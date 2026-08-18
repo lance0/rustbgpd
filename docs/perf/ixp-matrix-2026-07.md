@@ -653,14 +653,17 @@ are in-band.
 |---|---|---|---|---|
 | rustbgpd | 419 / 419 MiB | 597 / 666 MiB | 441 / 451 MiB | 515 / 514 MiB |
 | BIRD 3.3.1 | 422 / 412 MiB | 422 / 412 MiB | **337 / 328 MiB** | 337 / 328 MiB |
-| OpenBGPD 9.1 | 756 / 753 MiB | 974 / 974 MiB | ~750–770 MiB | 974 / 974 MiB |
+| OpenBGPD 9.1 | 756 / 753 MiB | 974 / 974 MiB | 813 / 815 MiB | 974 / 974 MiB |
 
 <a id="settled-memory"></a>
 
-Settled memory at the reload shape is a dead heat: rustbgpd 419 MiB,
-BIRD 422/412 MiB. BIRD keeps a clear advantage at the flapstorm
-shape (337/328 vs 441/451 MiB). OpenBGPD sits near 750–770 MiB at
-both.
+The v0.61.0-refresh S2 settled picture holds shape: rustbgpd
+419 / 419 MiB against BIRD's 422 / 412 MiB is a dead heat at this
+shape (one run each way), not a win for either; **BIRD's S3 settled
+advantage remains clear** (337 / 328 vs 441 / 451 MiB). OpenBGPD
+measured S2 settled 756 / 753 MiB and S3 settled 813 / 815 MiB.
+Public characterization: OpenBGPD sits near 750–770 MiB at both
+shapes.
 
 ### 1000-client RR cell — in-repo manager-direct harness
 
