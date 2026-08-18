@@ -84,12 +84,14 @@ grpcurl \
   default UDS is owner-only, so the daemon authorizes its clients by filesystem
   ownership; the client certificate identity stops at Envoy and never reaches
   the authorization layer. mTLS is an admission gate here, not per-client RBAC
-  — a monitoring-only certificate gets full mutating control. For tier
-  separation, either cap the backend with an explicit
-  `[global.telemetry.grpc_uds] max_tier` and run a second socket for mutating
-  access, or use the native mTLS TCP listener, which derives a per-certificate
-  principal that `[security.grpc.roles]` maps to `observer` / `automation` /
-  `operator`.
+  — a monitoring-only certificate gets full mutating control. A daemon has at
+  most one UDS listener and one TCP listener, so tier separation needs two
+  different listeners: either cap the Envoy-facing UDS with an explicit
+  `[global.telemetry.grpc_uds] max_tier` and do mutating work over a separate
+  authenticated loopback TCP listener (`token_file` + `principal`, mapped in
+  `[security.grpc.roles]`), or use the native mTLS TCP listener, which derives
+  a per-certificate principal that `[security.grpc.roles]` maps to `observer` /
+  `automation` / `operator`.
 - Firewall the exposed Envoy listener to known management hosts even when mTLS
   is enabled.
 - Prefer a dedicated management VLAN/interface instead of `0.0.0.0` where

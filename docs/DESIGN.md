@@ -60,12 +60,12 @@ For crate dependency graph, runtime model, ownership model, data flow, lifecycle
 **RIB snapshot model:** Snapshots are generation-based, not deep copies. The RIB stores immutable per-prefix route sets behind `Arc`. Paginated gRPC queries iterate a snapshot handle while the active RIB advances generations without blocking readers. This avoids O(n) cloning on every query.
 
 **Redesign triggers (instrumented from day one):**
-- `rib_update_latency_p99` — if p99 exceeds 10ms under sustained load, evaluate sharding or batch coalescing.
-- `rib_channel_backpressure_total` — any non-zero sustained rate means session tasks are stalling.
-- `adjribout_channel_drops_total` — non-zero means a peer is falling behind.
-- `rib_snapshot_generation_lag` — high lag means a slow consumer is pinning old state.
+- `bgp_rib_ingest_channel_depth` — queued `RibUpdate` messages sampled once per manager loop. Pegged at the channel capacity means producers are parked; evaluate sharding or batch coalescing. The `bgp_rib_outbound_prefix_limit_actor_duration_seconds` and `bgp_rib_route_refresh_actor_duration_seconds` histograms time the actor operations that hold the loop.
+- `bgp_inbound_rib_backpressure_total` — any non-zero sustained rate means session tasks are stalling on a full RIB channel (ADR-0078).
+- `bgp_outbound_route_drops_total` — non-zero means a peer's writer channel was full or closed and outbound work was dropped.
+- `bgp_event_stream_lagged_total` — non-zero means a live event-stream subscriber is too slow to keep up and is missing events.
 
-The threshold for triggering a redesign conversation is: sustained p99 RIB latency above 10ms, or any backpressure-induced session flap in the interop test suite.
+The threshold for triggering a redesign conversation is: sustained ingest-channel depth at capacity, or any backpressure-induced session flap in the interop test suite.
 
 ---
 
@@ -349,25 +349,27 @@ Implement OPEN, KEEPALIVE, NOTIFICATION. FSM transitions and timer handling. Ses
 
 UPDATE processing is where most BGP implementations accumulate subtle bugs. rustbgpd validates every attribute against RFC 4271 with explicit, auditable checks.
 
+Dispositions follow RFC 7606, not RFC 4271's blanket session reset: `wire::validate::ErrorDisposition` classifies each error as attribute-discard, treat-as-withdraw, or session-reset, and the session applies the strongest disposition in the message (§3 (h)). Treat-as-withdraw and attribute-discard keep the session Established. See [RFC_NOTES.md — RFC 7606](RFC_NOTES.md#rfc-7606--revised-bgp-update-error-handling) for the authoritative per-attribute table.
+
 | Validation | RFC Reference | Behavior on Failure |
 |---|---|---|
-| Mandatory attributes present (ORIGIN, AS_PATH, NEXT_HOP for eBGP) | RFC 4271 §5.1.2 | NOTIFICATION (3, 3) — Missing Well-known Attribute |
-| No duplicate attributes in a single UPDATE | RFC 4271 §5 | NOTIFICATION (3, 1) — Malformed Attribute List |
-| Attribute flags match type (well-known, transitive, etc.) | RFC 4271 §4.3 | NOTIFICATION (3, 4) — Attribute Flags Error |
-| Attribute ordering (well-known before optional) | RFC 4271 §4.3 | Accept out-of-order but log; strict mode configurable |
-| AS_PATH segment type valid (AS_SET, AS_SEQUENCE) | RFC 4271 §4.3 | NOTIFICATION (3, 11) — Malformed AS_PATH |
-| AS_PATH length consistent with segment encoding | RFC 4271 §4.3 | NOTIFICATION (3, 11) — Malformed AS_PATH |
+| Mandatory attributes present (ORIGIN, AS_PATH, NEXT_HOP for eBGP) | RFC 4271 §5.1.2, RFC 7606 §3 (d) | Treat-as-withdraw; subcode (3, 3) travels on the §5.2 escalation only |
+| No duplicate attributes in a single UPDATE | RFC 7606 §3 (g) | Attribute-discard, keeping the first occurrence — except a duplicate MP_REACH_NLRI / MP_UNREACH_NLRI, which is session-reset with NOTIFICATION (3, 1) |
+| Attribute flags match type (well-known, transitive, etc.) | RFC 4271 §4.3, RFC 7606 §3 (c) | Treat-as-withdraw; session-reset on MP_REACH_NLRI / MP_UNREACH_NLRI (§5.3) |
+| Attribute ordering (well-known before optional) | RFC 4271 §4.3 | Accepted out of order; ordering is not enforced |
+| AS_PATH segment type valid (AS_SET, AS_SEQUENCE) | RFC 4271 §4.3, RFC 7606 §7.2 | Treat-as-withdraw; subcode (3, 11) |
+| AS_PATH length consistent with segment encoding | RFC 4271 §4.3, RFC 7606 §7.2 | Treat-as-withdraw; subcode (3, 11) |
 | 4-byte ASN handling (AS_TRANS mapping) | RFC 6793 | Reconstruct valid AS4 compatibility attributes; discard or ignore inconsistent sidecars per RFC 6793 |
-| NEXT_HOP is valid IP, not 0.0.0.0, not multicast | RFC 4271 §5.1.3 | NOTIFICATION (3, 8) — Invalid NEXT_HOP Attribute |
-| ORIGIN value is valid (IGP, EGP, INCOMPLETE) | RFC 4271 §4.3 | NOTIFICATION (3, 6) — Invalid ORIGIN Attribute |
-| Attribute length does not exceed UPDATE length | RFC 4271 §4.3 | NOTIFICATION (3, 1) — Malformed Attribute List |
-| Total path attributes length consistent with UPDATE length | RFC 4271 §4.3 | NOTIFICATION (3, 1) — Malformed Attribute List |
-| Unrecognized well-known attribute | RFC 4271 §5 | NOTIFICATION (2, 7) — Unrecognized Well-known Attribute |
-| Unrecognized optional non-transitive attribute | RFC 4271 §5 | Silently ignore (do NOT drop silently — emit structured event) |
+| NEXT_HOP is valid IP, not 0.0.0.0, not multicast | RFC 4271 §5.1.3, RFC 7606 §7.3 | Treat-as-withdraw; subcode (3, 8) |
+| ORIGIN value is valid (IGP, EGP, INCOMPLETE) | RFC 4271 §4.3, RFC 7606 §7.1 | Treat-as-withdraw; subcode (3, 6) |
+| Attribute length does not exceed the attribute section | RFC 7606 §4 | Treat-as-withdraw; subcode (3, 1) |
+| Total path attributes length consistent with UPDATE length | RFC 7606 §3 (b) | Session-reset — NOTIFICATION (3, 1), the NLRI field boundaries cannot be trusted |
+| Unrecognized well-known attribute | RFC 4271 §5, RFC 7606 §3 (c) | Treat-as-withdraw; subcode (3, 2) |
+| Unrecognized optional non-transitive attribute | RFC 4271 §5 | Not a failure — accepted and ignored |
 | Unrecognized optional transitive attribute | RFC 4271 §5 | Pass through, set Partial bit (see policy below) |
-| Attribute exceeds configured max size | rustbgpd limit | NOTIFICATION (3, 1) + structured event |
+| Message exceeds the negotiated maximum length | RFC 4271 §4.1, RFC 8654 | NOTIFICATION (1, 2) — Bad Message Length + structured event |
 
-Every validation failure produces a structured log event with the peer address, attribute type code, raw bytes (truncated), and the RFC section violated. No silent drops.
+Every validation failure produces a structured log event with the peer address, attribute type code, raw bytes (truncated), and the RFC section violated, and increments `bgp_update_malformed_total{peer,disposition}`. No silent drops.
 
 #### Partial Bit Policy
 
@@ -473,7 +475,7 @@ Added 2026-04 per ADR-0050. Extends the RIB / transport / gRPC stack with a para
 
 **Best-path: type-specific head + shared BGP body.** `evpn_tiebreak_simple` runs a Type-2-specific MAC Mobility head (sticky flag + sequence per RFC 7432 §15.1), then falls through to the standard BGP chain (LocalPref → AS_PATH → MED → eBGP>iBGP → peer). Type 1/4 DF-election tiebreaks are not implemented — the RR reflects, downstream VTEPs elect. Types 3/5 have no type-specific head.
 
-**Policy uses placeholder prefix.** EVPN `RouteContext` carries a synthesized `0.0.0.0/0` prefix — the existing context fields (extended communities, communities, AS_PATH, peer metadata) are what operators actually filter on. RT-based filtering works through the existing `match_community` clause. A dedicated `match_evpn_route_type` clause is a Phase 1.5 item if operators need it.
+**Policy uses placeholder prefix.** EVPN `RouteContext` carries a synthesized `0.0.0.0/0` prefix — the existing context fields (extended communities, communities, AS_PATH, peer metadata) are what operators actually filter on. RT-based filtering works through the existing `match_community` clause. A dedicated `match_evpn_route_type` clause shipped in v0.11.0 and matches the RFC 7432 §7 / RFC 9136 route type directly.
 
 **Next-hop preserved across reflection.** Outbound EVPN MP_REACH_NLRI carries the originating VTEP's loopback IP as next-hop, not the RR's address. This is what lets downstream VTEPs build VXLAN tunnels correctly — the RR is a control-plane waypoint, not a data-plane middlebox.
 
@@ -651,7 +653,7 @@ key edits/reordering remain restart-required.
 ### Malformed Message Handling Philosophy
 
 - **Never panic on malformed input.** Any input from the network is untrusted. Panics on malformed BGP messages are security vulnerabilities.
-- **Always NOTIFICATION.** Every malformed message produces the correct NOTIFICATION error code per RFC 4271, followed by session teardown. No silent drops, no "log and ignore."
+- **Never silently ignore.** Malformed framing — header, message length, NLRI or Withdrawn Routes fields — produces the RFC 4271 NOTIFICATION and tears the session down. Malformed path attributes follow RFC 7606: attribute-discard or treat-as-withdraw keeps the session Established, and session-reset is retained only where the NLRI cannot be trusted. Every case emits a structured event and increments `bgp_update_malformed_total{peer,disposition}`.
 - **Always log.** Every malformed message produces a structured event with peer address, message type, error description, and truncated raw bytes for forensic analysis.
 - **Fuzz everything.** The wire decoder is the attack surface. It runs under continuous fuzzing in CI.
 

@@ -156,7 +156,7 @@ exact total; `--count` bounds response transfer, not server-side query work. It
 cannot be combined with the rejected-route or explain views.
 
 The full unary listings (`rib bgpls|vpn|labeled|rtc|blackholes|fib`,
-`flowspec`, `evpn list|diagnose`, `topology nodes|links`, `orr`) return the
+`flowspec`, `evpn|evpn diagnose`, `topology nodes|links`, `orr`) return the
 whole table in one response and decode up to a finite 64 MiB ceiling (roughly
 0.7-1.3 million rows). A response above the ceiling still fails closed,
 currently as `out of range`. The ceiling is client-side compatibility headroom
