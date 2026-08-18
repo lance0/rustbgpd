@@ -10,3 +10,7 @@ The portable `persisted_config_phase_receipt_is_load_bearing` test validates the
 
 `candidate.tsv` is the final same-shape legacy/bounded AB/BA/AB receipt on `f02d8a9a`. Reproduce under the same shared lock with `RUSTBGPD_BOUNDED_WRITER_OUTPUT=/tmp/candidate.tsv cargo test --release --bin rustbgpd config::tests::bounded_writer_release_probe -- --ignored --exact --nocapture`.
 The portable `bounded_writer_candidate_receipt_is_load_bearing` test pins byte identity, the 3.2M/256-statement bound, the serialization-attributable HWM cap, and pairwise/median latency limits.
+
+`effective-candidate.tsv` is the header-free effective-config legacy/candidate AB/BA/AB receipt on ref-less measurement object `a1cb1296`. Both arms emitted identical bytes; candidate rows pin the 3.2M/256-statement bound and passed the memory and latency gates.
+
+Reproduce under the shared host fence with `RUSTBGPD_EFFECTIVE_BOUNDED_WRITER_OUTPUT=/tmp/effective-candidate.tsv cargo test --release --locked --all-features --bin rustbgpd config::tests::effective_bounded_writer_release_probe -- --ignored --exact --nocapture`.

@@ -1546,6 +1546,122 @@ fn raw_bounded_writer_release_probe() {
     retain_persistence_phase_receipt(Path::new(&output_path), &output);
 }
 
+fn verify_effective_writer_receipt(source: &str) {
+    let baselines: Vec<usize> = source
+        .lines()
+        .skip(1)
+        .map(|line| line.split('\t').nth(7).unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(baselines.len(), 6);
+    assert!(baselines.iter().max().unwrap() - baselines.iter().min().unwrap() <= 64 * 1024 * 1024);
+    verify_bounded_writer_receipt(&source.replace("\tcandidate\t", "\tbounded\t"));
+}
+
+#[test]
+fn effective_bounded_writer_candidate_receipt_is_load_bearing() {
+    let receipt = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/docs/perf/artifacts/persisted-config-serialization-2026-08/effective-candidate.tsv"
+    ));
+    verify_effective_writer_receipt(receipt);
+    let invalid = receipt.replacen("\t256\n", "\t257\n", 1);
+    assert!(std::panic::catch_unwind(|| verify_effective_writer_receipt(&invalid)).is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "release-only six-child 3.2M-statement effective bounded-writer A/B"]
+fn effective_bounded_writer_release_probe() {
+    use sha2::{Digest as _, Sha256};
+    use std::{fmt::Write as _, process::Command, time::Instant};
+
+    const ARM: &str = "RUSTBGPD_EFFECTIVE_BOUNDED_WRITER_ARM";
+    const ATTEMPT: &str = "RUSTBGPD_EFFECTIVE_BOUNDED_WRITER_ATTEMPT";
+    const RECEIPT: &str = "RUSTBGPD_EFFECTIVE_BOUNDED_WRITER_RECEIPT";
+    assert!(
+        !std::hint::black_box(cfg!(debug_assertions)),
+        "run with --release"
+    );
+    if let (Ok(arm), Ok(attempt), Ok(receipt)) = (
+        std::env::var(ARM),
+        std::env::var(ATTEMPT),
+        std::env::var(RECEIPT),
+    ) {
+        let mut config = persistence_probe_fixture();
+        let baseline = linux_vm_hwm_bytes();
+        let started = Instant::now();
+        let (document, stats) = match arm.as_str() {
+            "legacy" => (
+                super::canonical::render(&config.effective_redacted()).unwrap(),
+                super::canonical::BoundedRenderStats::default(),
+            ),
+            "candidate" => super::canonical::render_effective_bounded(&mut config).unwrap(),
+            other => panic!("unknown effective bounded-writer arm {other}"),
+        };
+        let elapsed = started.elapsed().as_nanos();
+        let peak = linux_vm_hwm_bytes();
+        let sha = Sha256::digest(document.as_bytes()).iter().fold(
+            String::with_capacity(64),
+            |mut out, byte| {
+                write!(&mut out, "{byte:02x}").unwrap();
+                out
+            },
+        );
+        fs::write(
+            receipt,
+            format!(
+                "{}\t{}\t{}\t{arm}\t{}\t{sha}\t{elapsed}\t{baseline}\t{peak}\t{}\t{}\t{}\n",
+                attempt,
+                attempt.parse::<usize>().unwrap().div_ceil(2),
+                (attempt.parse::<usize>().unwrap() - 1) % 2 + 1,
+                document.len(),
+                peak.saturating_sub(baseline),
+                stats.statements,
+                stats.max_chunk_statements,
+            ),
+        )
+        .unwrap();
+        return;
+    }
+    let executable = std::env::current_exe().unwrap();
+    let mut output = String::from(
+        "attempt\tpair\tslot\tarm\tdocument_bytes\tsha256\telapsed_ns\tbaseline_hwm_bytes\tpeak_hwm_bytes\tgrowth_bytes\tstatements\tmax_chunk_statements\n",
+    );
+    for (index, arm) in [
+        "legacy",
+        "candidate",
+        "candidate",
+        "legacy",
+        "legacy",
+        "candidate",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let receipt = NamedTempFile::new().unwrap();
+        assert!(
+            Command::new(&executable)
+                .args([
+                    "config::tests::effective_bounded_writer_release_probe",
+                    "--ignored",
+                    "--exact",
+                    "--nocapture"
+                ])
+                .env(ARM, arm)
+                .env(ATTEMPT, (index + 1).to_string())
+                .env(RECEIPT, receipt.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        output.push_str(&fs::read_to_string(receipt.path()).unwrap());
+    }
+    verify_effective_writer_receipt(&output);
+    let output_path = std::env::var("RUSTBGPD_EFFECTIVE_BOUNDED_WRITER_OUTPUT")
+        .expect("RUSTBGPD_EFFECTIVE_BOUNDED_WRITER_OUTPUT is required");
+    retain_persistence_phase_receipt(Path::new(&output_path), &output);
+}
+
 #[derive(Clone, Debug)]
 struct PersistencePhaseRow {
     attempt: usize,

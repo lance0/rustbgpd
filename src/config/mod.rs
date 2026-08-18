@@ -2694,8 +2694,9 @@ impl Config {
     /// Canonicalized through the shared borrowed projection exactly like the
     /// runtime snapshot token, so the output is stable across `HashMap`
     /// iteration orders without a second large config clone.
-    pub fn effective_redacted_toml(&self) -> Result<String, String> {
-        canonical::render(&self.effective_redacted())
+    pub fn effective_redacted_toml(&mut self) -> Result<String, String> {
+        canonical::render_effective_bounded(self)
+            .map(|(document, _)| document)
             .map_err(|error| format!("failed to serialize effective config: {error}"))
     }
 }

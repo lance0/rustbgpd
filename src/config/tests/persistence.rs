@@ -165,6 +165,124 @@ fn bounded_raw_error_restores_every_lane_allocation_order_and_content() {
 }
 
 #[test]
+fn bounded_effective_matches_legacy_for_every_lane_boundary_key_and_posture() {
+    use sha2::{Digest as _, Sha256};
+
+    for (epoch, policy) in [
+        (None, None),
+        (Some(ConfigEpoch::V2), None),
+        (None, Some(false)),
+        (Some(ConfigEpoch::V2), Some(true)),
+    ] {
+        for count in [0, 1, 255, 256, 257] {
+            let mut config = raw_bounded_fixture(true, count, epoch, policy);
+            config.neighbors[0].md5_password = Some("neighbor-8cc4f711f01a".into());
+            config
+                .peer_groups
+                .get_mut("dotted.key \"雪\"")
+                .unwrap()
+                .md5_password = Some("group-7ab98100de32".into());
+            let original = config.clone();
+            let legacy = super::canonical::render(&config.effective_redacted()).unwrap();
+            let (bounded, stats) = super::canonical::render_effective_bounded(&mut config).unwrap();
+            assert_eq!(config, original);
+            assert_eq!(
+                bounded, legacy,
+                "count={count} epoch={epoch:?} policy={policy:?}"
+            );
+            assert_eq!(Sha256::digest(&bounded), Sha256::digest(&legacy));
+            assert!(!bounded.contains(PERSISTED_CONFIG_HEADER));
+            assert!(!bounded.contains("8cc4f711f01a") && !bounded.contains("7ab98100de32"));
+            assert!(bounded.contains(REDACTED_SECRET));
+            assert_eq!(stats.statements, count * 5);
+            assert_eq!(stats.max_chunk_statements, count.min(256));
+            let mut reloaded = toml::from_str::<Config>(&bounded).unwrap();
+            assert_eq!(reloaded.effective_redacted_toml().unwrap(), bounded);
+        }
+    }
+}
+
+#[test]
+fn bounded_effective_errors_restore_whole_config_and_lane_allocations() {
+    for rejected in [
+        "after-extraction",
+        "after-materialization",
+        "before-statement-chunk",
+    ] {
+        let mut config = raw_bounded_fixture(false, 257, None, None);
+        config.neighbors[0].md5_password = Some("source-secret-4ed9".into());
+        let original = config.clone();
+        let storage = raw_lane_storage(&config);
+        let error =
+            super::canonical::render_effective_bounded_with_test_hook(&mut config, |phase| {
+                if phase == rejected {
+                    Err(<toml::ser::Error as serde::ser::Error>::custom(
+                        "injected effective failure",
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("injected effective failure"));
+        assert_eq!(config, original);
+        assert_eq!(raw_lane_storage(&config), storage);
+        assert_eq!(
+            config.neighbors[0].md5_password.as_deref(),
+            Some("source-secret-4ed9")
+        );
+    }
+}
+
+#[test]
+fn bounded_effective_panics_restore_whole_config_and_lane_allocations() {
+    for rejected in ["after-materialization", "before-statement-chunk"] {
+        let mut config = raw_bounded_fixture(false, 257, None, None);
+        let original = config.clone();
+        let storage = raw_lane_storage(&config);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ =
+                super::canonical::render_effective_bounded_with_test_hook(&mut config, |phase| {
+                    assert_ne!(phase, rejected, "injected effective panic");
+                    Ok(())
+                });
+        }));
+        assert!(panic.is_err());
+        assert_eq!(config, original);
+        assert_eq!(raw_lane_storage(&config), storage);
+    }
+}
+
+#[test]
+fn production_effective_roster_uses_only_header_free_bounded_rendering() {
+    let config = include_str!("../mod.rs");
+    let method = config
+        .split("pub fn effective_redacted_toml")
+        .nth(1)
+        .unwrap();
+    assert!(method.contains("render_effective_bounded(self)"));
+    for forbidden in [
+        "canonical::render(",
+        "PERSISTED_CONFIG_HEADER",
+        "trim_start",
+        "replace(",
+    ] {
+        assert!(
+            !method
+                .lines()
+                .take(8)
+                .collect::<String>()
+                .contains(forbidden),
+            "{forbidden}"
+        );
+    }
+    let canonical = include_str!("../canonical.rs");
+    assert!(canonical.contains("DocumentShape::CanonicalBody"));
+    assert!(canonical.contains("let effective = extraction.config.effective_redacted()"));
+    assert!(!canonical.contains("lane.statements.clone()"));
+}
+
+#[test]
 fn bounded_tokens_equal_legacy_across_lanes_order_posture_context_and_secrets() {
     let key = RuntimeSnapshotKey::random();
     let context = [9_u8; 8];
@@ -375,12 +493,12 @@ fn rfc8212_canonical_sinks_materialize_without_rewriting_boot_input() {
     let raw_source = tier_authorized_uds_test_config(valid_toml());
     let file = NamedTempFile::new().unwrap();
     fs::write(file.path(), &raw_source).unwrap();
-    let raw = Config::load_with_diagnostics(file.path().to_str().unwrap()).unwrap();
+    let mut raw = Config::load_with_diagnostics(file.path().to_str().unwrap()).unwrap();
     assert_eq!(fs::read_to_string(file.path()).unwrap(), raw_source);
     assert_eq!(raw.config_epoch, None);
     assert_eq!(raw.global.ebgp_requires_policy, None);
 
-    let explicit = parse(&rfc8212_representation_toml(Some("1"), Some(false))).unwrap();
+    let mut explicit = parse(&rfc8212_representation_toml(Some("1"), Some(false))).unwrap();
     let persisted = persisted_config_document(&raw).unwrap();
     assert!(persisted.contains("config_epoch = 1"), "{persisted}");
     assert!(
@@ -412,7 +530,7 @@ fn rfc8212_epoch_two_omission_canonical_sinks_equal_explicit_true() {
     );
     let file = NamedTempFile::new().unwrap();
     fs::write(file.path(), &raw_source).unwrap();
-    let raw = Config::load_with_diagnostics(file.path().to_str().unwrap()).unwrap();
+    let mut raw = Config::load_with_diagnostics(file.path().to_str().unwrap()).unwrap();
     assert_eq!(fs::read_to_string(file.path()).unwrap(), raw_source);
     assert_eq!(raw.config_epoch, Some(ConfigEpoch::V2));
     assert_eq!(raw.global.ebgp_requires_policy, None);
@@ -421,7 +539,7 @@ fn rfc8212_epoch_two_omission_canonical_sinks_equal_explicit_true() {
         Rfc8212PolicySource::Epoch2Default
     );
 
-    let explicit = parse(&rfc8212_representation_toml(Some("2"), Some(true))).unwrap();
+    let mut explicit = parse(&rfc8212_representation_toml(Some("2"), Some(true))).unwrap();
     let persisted = persisted_config_document(&raw).unwrap();
     assert!(persisted.contains("config_epoch = 2"), "{persisted}");
     assert!(
@@ -678,9 +796,9 @@ fn persisted_config_header_stays_out_of_the_token_and_the_effective_dump() {
 
     // Same config, one document with the header and one without. Everything
     // downstream must agree.
-    let from_persisted = Config::load_toml_with_diagnostics(&document, "persisted.toml")
+    let mut from_persisted = Config::load_toml_with_diagnostics(&document, "persisted.toml")
         .expect("the header must stay inert TOML that the loader ignores");
-    let from_bare = Config::load_toml_with_diagnostics(&bare, "bare.toml").unwrap();
+    let mut from_bare = Config::load_toml_with_diagnostics(&bare, "bare.toml").unwrap();
 
     let key = RuntimeSnapshotKey::random();
     assert_eq!(
@@ -873,7 +991,7 @@ log_format = "json"
 address = "10.0.0.2"
 remote_asn = 65002
 "#;
-    let config =
+    let mut config =
         Config::load_toml_with_diagnostics(&tier_authorized_uds_test_config(toml_str), "test.toml")
             .unwrap();
     let rendered = config.effective_redacted_toml().unwrap();
@@ -1001,7 +1119,7 @@ address = "10.0.0.4"
 remote_asn = 65001
 peer_group = "md5-group"
 "#;
-    let config =
+    let mut config =
         Config::load_toml_with_diagnostics(&tier_authorized_uds_test_config(toml_str), "test.toml")
             .unwrap();
     let rendered = config.effective_redacted_toml().unwrap();
@@ -1035,7 +1153,7 @@ peer_group = "alpha"
 address = "2001:db8::2"
 remote_asn = 65002
 "#;
-    let config =
+    let mut config =
         Config::load_toml_with_diagnostics(&tier_authorized_uds_test_config(toml_str), "test.toml")
             .unwrap();
     let first = config.effective_redacted_toml().unwrap();
@@ -1043,7 +1161,7 @@ remote_asn = 65002
     assert_eq!(first, second, "effective dump must be deterministic");
 
     // Secretless dumps round-trip through the normal loader + validator.
-    let reloaded = Config::load_toml_with_diagnostics(&first, "effective.toml")
+    let mut reloaded = Config::load_toml_with_diagnostics(&first, "effective.toml")
         .expect("secretless effective dump must reload cleanly");
     assert_eq!(reloaded.neighbors[0].hold_time, Some(45));
     // Implicit-family default for the IPv6 neighbor is materialized.
@@ -1107,7 +1225,7 @@ address = "10.0.0.2"
 remote_asn = 65002
 md5_password = "hunter2"
 "#;
-    let config =
+    let mut config =
         Config::load_toml_with_diagnostics(&tier_authorized_uds_test_config(toml_str), "test.toml")
             .unwrap();
     let rendered = config.effective_redacted_toml().unwrap();

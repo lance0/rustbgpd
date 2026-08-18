@@ -17,3 +17,9 @@ This is one synthetic host shape, not a daemon RSS or throughput claim. Raw rows
 The follow-up on `f02d8a9ac2fced902095f384942b4bde8b5fca71` ran the same shape in legacy/bounded AB/BA/AB order. Both arms produced the same 342,422,071 bytes and SHA-256 above. The bounded writer moved statement lanes out under an RAII guard, serialized at most 256 borrowed statements per chunk, and retained one header-bearing document.
 
 Legacy serialization added 1,608.9-1,610.0 MB VmHWM; bounded serialization added 411.3-412.2 MB, a 74% reduction. Bounded elapsed time was 1.57-1.59s versus 2.35-2.36s. All pairwise memory caps and the 1.25x median/1.5x pair latency guards passed; exact rows are in `candidate.tsv`.
+
+## Effective-config result
+
+On `a1cb1296eccba284eb42dc774bf2dc9c1974294c`, the effective path produced identical 342,422,158-byte documents with SHA-256 `e8d2ea86c81672cccd3463f52c2c32f510b57ebb7fbc379d223f08a268578b27`. The candidate uses a sentinel-only effective skeleton and serializes at most 256 borrowed source statements per chunk, eliminating the full source statement clone and unbounded TOML statement graph.
+
+Candidate VmHWM growth was 346.2-346.5 MB versus 3,132.8-3,134.3 MB legacy, and elapsed time was 1.745-1.796s versus 3.280-3.351s. This is one pinned synthetic effective-config serialization shape, not daemon RSS, RPC latency, actor responsiveness, reload throughput, or a universal-host claim.
