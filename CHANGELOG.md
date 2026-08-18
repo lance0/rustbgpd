@@ -9,6 +9,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **`h2` 0.4.13 → 0.4.16 clears RUSTSEC-2026-0258** (unbounded empty DATA
+  frames). `h2` accepted and queued empty HTTP/2 DATA frames without limit,
+  so a stream that was not actively drained could grow memory without bound,
+  or panic once the length overflowed. The crate is transitive via
+  `hyper`/`tonic`, which makes the gRPC API listener the exposed surface.
+  Lockfile-only: no manifest constraint and no code change were needed.
+
 ### Added
 
 - Linux metrics registries now register the standard process collector, with a
