@@ -1163,24 +1163,25 @@ The history table above stops at v0.32.0. The step it does not show is the one
 the July 2026 performance batch introduced at route-server scale, and that
 bill is not spread across the batch: a single-commit attribution campaign at
 100 peers × 1,000 routes traced the whole settled-memory step to **one change
-— #1189, `perf(api): coalesce neighbor RIB snapshots`** (merged 2026-07-26,
-shipped in v0.61.0). Measured as a single-commit step against its immediate
-parent, it is **+106.6 MiB cgroup `memory.peak` and +101.1 MiB settled
-anonymous RSS, for −1.02 s of convergence**. It was taken deliberately as a
-memory-for-speed trade, and the campaign confirms it behaved exactly as
-designed: it is the single place where both the memory and the convergence
-moved.
+— #1189, `perf(api): coalesce neighbor RIB snapshots`** (merged
+2026-07-27T01:53Z, ~14 h before the v0.61.0 tagged commit and shipped in
+it). Measured as a single-commit step against its immediate parent, it is
+**+106.6 MiB cgroup `memory.peak` and +101.1 MiB settled anonymous RSS, for
+−1.02 s of convergence**. It was taken deliberately as a memory-for-speed
+trade, and the campaign confirms it behaved exactly as designed: it is the
+single place where both the memory and the convergence moved.
 
 The rest of that batch's convergence gain cost nothing. The 22 commits ending
 at #1183 (`perf: grow extended-message receive buffers on demand`), which also
 carry #1176 (`perf(rib): remove peer-multiplied fanout bookkeeping`) and #1177
-(`perf(wire): eliminate temporary codec allocation churn`) — all merged the
-same day, all in v0.61.0 — moved convergence down **−1.03 s with memory going
-down alongside it** (−7.4 MiB peak, −23.7 MiB settled anon). That half is
-resolved to the interval, not to individual PRs. #1188 (`perf(policy): share
-attribution labels through group staging`) reduced memory on its own, by
-**−21.4 MiB peak / −23.8 MiB settled anon**, and the two steps reconcile
-exactly: −21.4 + 106.6 = +85.2 MiB, the measured endpoint delta across them.
+(`perf(wire): eliminate temporary codec allocation churn`) — all merged
+2026-07-26 UTC, all in v0.61.0 — moved convergence down **−1.03 s with
+memory going down alongside it** (−7.4 MiB peak, −23.7 MiB settled anon).
+That half is resolved to the interval, not to individual PRs. #1188
+(`perf(policy): share attribution labels through group staging`) reduced
+memory on its own, by **−21.4 MiB peak / −23.8 MiB settled anon**, and the
+two steps reconcile exactly: −21.4 + 106.6 = +85.2 MiB, the measured
+endpoint delta across them.
 Roughly half the batch's speed-up was free; only #1189 was paid for.
 
 The later arcs the campaign covered measured flat or negative at this shape —

@@ -35,8 +35,9 @@ endpoint delta because the step before it is negative.
 
 **#1189 is the sole owner of the memory step, and it is also where the
 speed came from.** #1188 is a memory *reducer* that owns none of the
-growth. Both merged 2026-07-26 and shipped in **v0.61.0** (tag cut
-2026-07-27) — not v0.62.0.
+growth. Both merged **2026-07-27T01:53Z** and shipped in **v0.61.0**,
+whose tagged commit landed 2026-07-27T16:17Z — ~14 h later, the same UTC
+day — not v0.62.0.
 
 † The #1184 arm's convergence is bimodal here (12.91/12.97 fast mode vs
 13.95/13.97/14.01 slow mode, 3 of 5 slow), so its 13.95 s median sits in
@@ -233,7 +234,7 @@ lower**. See the limits section on what that does and does not attribute.
 
 | Role | Commit(s) | Magnitude | Evidence |
 |---|---|---|---|
-| **Sole owner** | **#1189 `perf(api): coalesce neighbor RIB snapshots`** (merge `21aeba73`, 2026-07-26, v0.61.0) | **+106.6 MiB cg peak, +101.1 MiB settled anon, for −1.02 s convergence** | phase 6, single-commit step, n = 5/arm |
+| **Sole owner** | **#1189 `perf(api): coalesce neighbor RIB snapshots`** (merge `21aeba73`, 2026-07-27T01:53Z, v0.61.0) | **+106.6 MiB cg peak, +101.1 MiB settled anon, for −1.02 s convergence** | phase 6, single-commit step, n = 5/arm |
 | **Reducer** | #1188 `perf(policy): share attribution labels through group staging` (merge `9c1ebb12`) | **−21.4 MiB cg peak, −23.8 MiB settled anon** | phase 6, 5-commit step of which only #1188 touches runtime code |
 | **Free speed** | the 22-commit interval ending at merge #1183, whose perf-labeled landings are #1183 `perf: grow extended-message receive buffers on demand`, #1176 `perf(rib): remove peer-multiplied fanout bookkeeping`, #1177 `perf(wire): eliminate temporary codec allocation churn` | **−1.03 s with peak −7.4 MiB (flat) and settled anon −23.7 MiB** | phase 4, interval-level — **not** split per commit |
 | **Exonerated (measured, flat or negative)** | #1184 alone (−9.5 MiB peak, +0.02 s); the authz arc (−15.5 MiB over its 54-commit interval); the 48-commit interval that lands listener hardening and ADR-0126 phases 1–3 (−18.0 MiB); v0.64.0 (+4.5 MiB over 11 commits); the 145 commits from v0.64.0 to the anchor (+10.4 MiB) | inside the ±15 MiB flat band, or a reduction beyond it | phases 2 and 5 |

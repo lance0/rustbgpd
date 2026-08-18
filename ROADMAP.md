@@ -1468,15 +1468,20 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
     routes traced the whole settled-memory step introduced by the July 2026
     performance batch (all of it shipped in v0.61.0) to one change: #1189's
     coalesced neighbor RIB snapshots, taken deliberately to buy convergence at
-    the route-server shape. The same campaign shows roughly half that batch's
-    convergence gain — #1183, #1176, #1177 — cost no memory at all, and that
-    v0.63.0, ADR-0126, and v0.64.0 are flat there.
+    the route-server shape. The same campaign puts roughly half that batch's
+    convergence gain in the 22-commit interval ending at #1183 (which also
+    carries #1176 and #1177), measured as convergence down with memory down
+    alongside it — an interval result, with no per-PR resolution. Everything
+    after v0.63.0 — ADR-0126 and v0.64.0 — measured flat there; the 34-commit
+    v0.63.0 run-up is a minor contributor at +24.4 MiB, above the flat band
+    and published without an ownership claim.
     ADR-0126's shared-group machinery postdates #1189 and can hold the
     coalesced snapshot state once per update group rather than once per
     neighbor. Hard-gated: no more than a 2% convergence regression at the
     shape #1189 bought its speed-up at, or the trade stays as it is. The
-    narrative lives in `docs/BENCHMARKS.md`; the campaign receipt is not yet
-    published under `docs/perf/`, so no per-commit magnitudes are public.
+    narrative lives in `docs/BENCHMARKS.md`; the per-commit magnitudes and
+    the preregistered bands are in the
+    [August 2026 receipt](docs/perf/memory-attribution-2026-08.md).
   - General FIB runtime: investigate prefix-dirty reconcile so a single prefix
     change does not necessarily trigger full RIB query + full kernel dump +
     full projection. Design-gated because drift recovery, ECMP siblings,
