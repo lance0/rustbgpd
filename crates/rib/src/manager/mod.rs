@@ -2393,6 +2393,10 @@ impl RibManager {
                 queries::send_filtered_rows(self.loc_rib.iter_labeled(), filter.as_ref(), reply);
             }
             RibUpdate::QueryVpnRoutes { filter, reply } => {
+                if reply.is_closed() {
+                    debug!("VPN route listing canceled before materialization");
+                    return;
+                }
                 #[cfg(feature = "bench-internals")]
                 let started = std::time::Instant::now();
                 let routes = queries::filter_rows(self.loc_rib.iter_vpn(), filter.as_ref());

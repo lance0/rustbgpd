@@ -173,3 +173,17 @@ fn canceled_listing_skips_the_scan() {
         "a dropped receiver must skip the scan entirely"
     );
 }
+
+#[test]
+fn canceled_vpn_listing_skips_materialization() {
+    let (mut manager, _kept, _dropped) = manager_with_two_peers_per_family();
+    let (reply, receiver) = oneshot::channel();
+    drop(receiver);
+
+    manager.handle_update(RibUpdate::QueryVpnRoutes {
+        filter: Some(Box::new(|_: &VpnRibRoute| {
+            panic!("canceled VPN query invoked its filter")
+        })),
+        reply,
+    });
+}

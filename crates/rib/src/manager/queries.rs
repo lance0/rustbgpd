@@ -48,6 +48,19 @@ pub(super) fn filter_rows<'a, T: Clone + 'a>(
     }
 }
 
+fn send_materialized_rows<T>(
+    reply: tokio::sync::oneshot::Sender<Vec<T>>,
+    materialize: impl FnOnce() -> Vec<T>,
+) {
+    if reply.is_closed() {
+        debug!("route query canceled before materialization");
+        return;
+    }
+    if reply.send(materialize()).is_err() {
+        warn!("query caller dropped before receiving response");
+    }
+}
+
 /// [`filter_rows`] plus the reply, sharing `send_mrt_snapshot`'s cancellation
 /// rule: an abandoned caller (dropped receiver — e.g. a canceled gRPC request
 /// whose query was already queued behind other work) skips the copy entirely.
@@ -643,10 +656,7 @@ impl RibManager {
         &mut self,
         reply: tokio::sync::oneshot::Sender<Vec<crate::route::Route>>,
     ) {
-        let routes: Vec<_> = self.loc_rib.iter().cloned().collect();
-        if reply.send(routes).is_err() {
-            warn!("query caller dropped before receiving response");
-        }
+        send_materialized_rows(reply, || self.loc_rib.iter().cloned().collect());
     }
     /// Build the per-prefix FIB install-candidate view: each Loc-RIB best plus
     /// the equal-cost (ECMP) next-hop set, bounded by `max_paths`. Loc-RIB holds
@@ -2128,6 +2138,13 @@ impl RibManager {
 #[cfg(test)]
 mod cancellation_tests {
     use super::*;
+
+    #[test]
+    fn canceled_materialized_rows_does_not_invoke_builder() {
+        let (reply, receiver) = tokio::sync::oneshot::channel::<Vec<crate::route::Route>>();
+        drop(receiver);
+        send_materialized_rows(reply, || panic!("canceled query materialized"));
+    }
 
     #[test]
     fn canceled_neighbor_rib_snapshot_does_not_invoke_builder() {
