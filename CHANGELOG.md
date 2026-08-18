@@ -195,6 +195,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Rejected-route retention now installs its configured LRU bound on the lazily
+  created empty store before retaining the first rejection. This removes
+  rustbgpd’s explicit dependency on `lru`’s unbounded-capacity sentinel while
+  preserving incremental index growth and eviction behavior. (LAN-1048)
+
 - A confirmed apply whose v3 pending-authority publication fails before the
   locator rename — no authority retained, candidate and runtime untouched —
   now returns `FAILED_PRECONDITION` instead of `INTERNAL`, matching the

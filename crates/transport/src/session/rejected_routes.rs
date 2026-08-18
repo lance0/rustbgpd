@@ -246,11 +246,17 @@ impl RejectedRouteStore {
         }
     }
 
-    /// The backing LRU, built without reserving the configured maximum.
-    /// [`Self::insert`] converts it to the configured bound exactly when it
-    /// first fills, before any later insertion can overflow that bound.
+    /// The backing LRU, built without reserving the configured maximum. Its
+    /// bound is installed while the lazily created cache is still empty, before
+    /// the first retained rejection is pushed.
     fn storage(&mut self) -> &mut LruCache<ImportDecisionKey, RejectedRouteEntry> {
-        self.entries.get_or_insert_with(LruCache::unbounded)
+        self.entries.get_or_insert_with(|| {
+            let mut entries = LruCache::unbounded();
+            let capacity =
+                NonZeroUsize::new(self.capacity).expect("capacity is clamped to at least 1");
+            entries.resize(capacity);
+            entries
+        })
     }
 
     /// Insert or refresh a rejection. On overflow the least-recently
@@ -261,13 +267,10 @@ impl RejectedRouteStore {
     /// can exceed the documented per-entry budget.
     pub fn insert(&mut self, key: ImportDecisionKey, mut entry: RejectedRouteEntry) {
         entry.enforce_bounds();
-        let capacity = NonZeroUsize::new(self.capacity).expect("capacity is clamped to at least 1");
+        let capacity = self.capacity;
         let entries = self.storage();
         entries.push(key, entry);
-        if entries.cap() == NonZeroUsize::MAX && entries.len() == capacity.get() {
-            entries.resize(capacity);
-        }
-        debug_assert!(entries.len() <= capacity.get());
+        debug_assert!(entries.len() <= capacity);
     }
 
     /// Remove the entry for an identity that was subsequently accepted
@@ -370,6 +373,7 @@ mod tests {
     fn insert_then_snapshot_returns_entry() {
         let mut store = RejectedRouteStore::with_capacity(4);
         store.insert(key(1), entry(ImportRejectReason::PolicyReject));
+        assert_eq!(store.entries.as_ref().unwrap().cap().get(), 4);
         let snap = store.snapshot();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].0, key(1));
