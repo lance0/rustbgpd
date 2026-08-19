@@ -14,6 +14,9 @@ import check_fuzz_toolchain_pin as guard
 PIN_LINE = f'toolchain="$(cat {guard.PIN_PATH})"'
 
 FLOATING_SELECTIONS = (
+    "      - uses: dtolnay/rust-toolchain@master",
+    "      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c",
+    "      - uses: dtolnay/rust-toolchain@v1.2.3",
     "      - uses: dtolnay/rust-toolchain@nightly",
     "      - uses: dtolnay/rust-toolchain@stable",
     "      - uses: dtolnay/rust-toolchain@beta",
@@ -26,7 +29,7 @@ FLOATING_SELECTIONS = (
 )
 
 PIN_DERIVED_SELECTIONS = (
-    "      - uses: dtolnay/rust-toolchain@master",
+    "      - uses: dtolnay/rust-toolchain@v1",
     "          toolchain: ${{ steps.nightly.outputs.toolchain }}",
     '    && cargo "+$toolchain" install cargo-fuzz --version 0.13.2 --locked',
     '        cargo +"$TOOLCHAIN" fuzz build',
