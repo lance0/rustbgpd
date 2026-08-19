@@ -23,8 +23,10 @@ by editing this guard.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -62,6 +64,7 @@ SCANNED_FILES = frozenset(
 SKIPPED_SUFFIXES = frozenset({".gz", ".png", ".svg", ".zst", ".bin"})
 
 TRACKER_ID = re.compile(r"\bLAN-\d+\b")
+HOME_PATH = re.compile(rb"/(?:home|Users)/(?![<$\{])[^/\s\"'<>]+")
 
 SEAL_NAME = "SHA256SUMS"
 SEAL_ROOT = Path("docs/perf/artifacts")
@@ -233,6 +236,47 @@ def audit_document(relative: str, text: str) -> list[str]:
     return failures
 
 
+def audit_artifact_home_paths(
+    paths: list[Path] | None = None, root: Path | None = None
+) -> list[str]:
+    """Reject literal absolute home paths in tracked performance artifacts."""
+    root = (root or ROOT).resolve()
+    artifacts = []
+    for path in paths if paths is not None else tracked_files():
+        try:
+            relative = path.relative_to(root).as_posix()
+        except ValueError as error:
+            raise TrackerIdGuardError(
+                f"tracked path escapes the repository root: {path}"
+            ) from error
+        if relative.startswith("docs/perf/artifacts/"):
+            artifacts.append((relative, path))
+    if not artifacts:
+        raise TrackerIdGuardError("no tracked performance artifacts were discovered")
+
+    failures: list[str] = []
+    for relative, path in artifacts:
+        if path.is_symlink():
+            raise TrackerIdGuardError(f"tracked artifact {relative} is a symlink")
+        try:
+            mode = path.stat().st_mode
+            if not stat.S_ISREG(mode) or mode & 0o444 == 0:
+                raise OSError("not a readable regular file")
+            opener = gzip.open if path.suffix == ".gz" else Path.open
+            with opener(path, "rb") as handle:
+                for number, line in enumerate(handle, start=1):
+                    if match := HOME_PATH.search(line):
+                        failures.append(
+                            f"{relative}:{number} contains literal absolute home path "
+                            f"{match.group(0).decode(errors='replace')!r}"
+                        )
+        except (OSError, EOFError) as error:
+            raise TrackerIdGuardError(
+                f"cannot read tracked artifact {relative}: {error}"
+            ) from error
+    return failures
+
+
 def main() -> int:
     try:
         documents = discover_documents()
@@ -245,6 +289,11 @@ def main() -> int:
         for relative, text in documents.items()
         for failure in audit_document(relative, text)
     ]
+    try:
+        failures.extend(audit_artifact_home_paths())
+    except TrackerIdGuardError as error:
+        print(f"public tracker ID check failed: {error}", file=sys.stderr)
+        return 1
     if failures:
         for failure in failures:
             print(f"public tracker ID check failed: {failure}", file=sys.stderr)

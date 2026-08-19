@@ -190,6 +190,27 @@ class PrimerContractTests(unittest.TestCase):
     def test_live_contract(self):
         self.assertEqual([], check(ROOT))
 
+    def test_v064_producer_is_load_bearing(self):
+        cache_key = (
+            "key: rustbgpd-v0.64.0-linux-amd64-"
+            "bd4829de08d0c50074f9ecd5c351399fae42be06d456b3880a04aa4a7cda1137"
+        )
+        cases = (
+            ("  v064_validator:\n", "  renamed_validator:\n"),
+            ("uses: actions/cache@v6", "uses: actions/cache@main"),
+            (cache_key, f"{cache_key}\n          restore-keys: rustbgpd-v0.64"),
+            ("--self-test", "--skipped-self-test"),
+            ("--prepare-archive", "--skipped-prepare-archive"),
+            (
+                "uses: actions/upload-artifact@v7",
+                "uses: actions/upload-artifact@main",
+            ),
+            ("if-no-files-found: error", "if-no-files-found: ignore"),
+        )
+        for old, new in cases:
+            with self.subTest(seam=old):
+                self.mutate(".github/workflows/ci.yml", old, new)
+
     def test_empty_flow_needs_is_empty(self):
         self.assertEqual([], _list_needs("    needs: []\n"))
         self.assertEqual(
