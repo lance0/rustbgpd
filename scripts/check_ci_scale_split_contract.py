@@ -22,7 +22,7 @@ TRIGGER_HASH = "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8
 PERMISSION_HASH = "9691400b3b1036bcdfe724926816dbe71b0aa22ed9b5eb89627e2eeb75079898"
 JOB_HASHES = {
     "v064_validator": "b3f0ae8906bd28397a5f82bab0db5467e09a8e312aa24a8c8f2db8fd01c6310a",
-    "core": "b2afd36bb65640496181d311b2d528cf9e7de052c6299f93b0cc58e45be16abe",
+    "core": "962f91a26c1091edbae07341ef3b457f4d42d7cbbcf9ea5874359626fd1509cf",
     "core_tests": "c5d8ed560cd4e572f535bb4eabe065372fddfc1dbefe0c341a9c5af76ed6df0f",
     "scale_receipts": "57a201b5691dd08fecb49860deb942a74a4dcf4d2b3a77a18716b3fc9d981b85",
     "check": "736f69ca686c06e889962d5fb93d80ee848090718dcf63aeff695febc6cbfcc5",

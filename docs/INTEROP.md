@@ -111,6 +111,20 @@ receipt and a separate destructive crash-restart recovery receipt. The
 workflow still probes the selected runner kernel first; a future runner without
 TCP-AO support reports a warning and skips only that topology.
 
+M43 is also the only scenario fed by a third-party source archive
+(`bird-3.3.1.tar.gz`, fetched once per run by the `bird3_archive` job). When
+that host refuses to serve the pinned tarball, the `check` aggregate tolerates
+`m43=skipped` and prints it as `m43=skipped (bird3 archive unavailable
+upstream)` alongside a `::warning::` and a job-summary line naming the URL, so
+the outage never hard-fails a release gate on evidence about somebody else's
+web server. The tolerance is that narrow by construction: it is keyed on the
+producer publishing `bird3_status=unavailable`, which only happens when no
+bytes ever arrived. An archive that downloads and then fails its pinned
+checksum or source-version check is a supply-chain signal, reports
+`bird3_status=corrupt`, and stays hard-red; so does an M43 that actually runs
+and fails. `scripts/test_kernel_dataplane_bird3_tolerance.py` executes the real
+aggregate body against stubbed job results to keep those paths honest.
+
 #### M-series proof quality contract
 
 A `Tested (Mxx)` receipt is only as strong as the evidence its driver asserts.

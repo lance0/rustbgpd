@@ -113,12 +113,26 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  # This archive feeds exactly one scenario, m43. Its host is a third party:
+  # when it refuses to serve the pinned tarball (nic.cz returned 403 on all
+  # three attempts with a cold cache on 2026-08-18) the run is carrying
+  # evidence about somebody else's web server, not about rustbgpd, and it
+  # hard-failed a release gate. So a *fetch* outage degrades to a loud,
+  # non-blocking skip of m43; nothing else does. In particular bytes that DID
+  # download and then failed the pinned checksum or source-version check are a
+  # supply-chain signal, not an outage, and stay hard-red. install-bird3.sh
+  # separates the two by exit code (3 = never fetched, 4 = fetched but
+  # unverifiable) and this job republishes the call as bird3_status for the
+  # m43 job gate and the check aggregate to read, so neither has to infer
+  # intent from a bare job conclusion.
   bird3_archive:
     needs: classify_changes
     if: needs.classify_changes.outputs.run_labs == 'true'
     name: Prepare exact bird3 archive
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      bird3_status: ${{ steps.prepare.outputs.bird3_status }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -129,11 +143,25 @@ jobs:
           path: ${{ runner.temp }}/bird3-cache/bird-3.3.1.tar.gz
           key: bird3-v3.3.1-source-d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190
       - name: Prepare exact bird3 archive
+        id: prepare
         run: |
+          set -uo pipefail
+          rc=0
           .github/scripts/install-bird3.sh \
             --prepare-archive \
-            "$RUNNER_TEMP/bird3-cache/bird-3.3.1.tar.gz"
+            "$RUNNER_TEMP/bird3-cache/bird-3.3.1.tar.gz" || rc=$?
+          case "$rc" in
+            0) status=ok ;;
+            3) status=unavailable ;;
+            4) status=corrupt ;;
+            *) status=error ;;
+          esac
+          echo "bird3_status=$status" >> "$GITHUB_OUTPUT"
+          if [ "$status" != ok ] && [ "$status" != unavailable ]; then
+            exit "$rc"
+          fi
       - name: Upload verified bird3 archive
+        if: steps.prepare.outputs.bird3_status == 'ok'
         uses: actions/upload-artifact@v7
         with:
           name: bird3-v3.3.1-source
@@ -447,6 +475,11 @@ jobs:
 
   m43:
     needs: [grpcurl_archive, bird3_archive, prime_dev_image]
+    # No archive means no BIRD 3.3.1 image, so nothing here can run. Skipping
+    # the whole job rather than letting it report success with its lab steps
+    # quietly disabled is what lets the check aggregate print the skip and name
+    # its cause: a success with a hole in it is invisible coverage loss.
+    if: needs.bird3_archive.outputs.bird3_status != 'unavailable'
     name: M43 — TCP-AO live rotation and crash recovery (BIRD 3.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -900,11 +933,35 @@ jobs:
           run_labs = classifier.get("outputs", {}).get("run_labs")
           failed = classifier.get("result") != "success" or run_labs not in {"true", "false"}
           expected_result = "success" if run_labs == "true" else "skipped"
+          # The only tolerated deviation: m43 reporting skipped because the
+          # bird3 producer succeeded and told us the pinned archive was
+          # unavailable upstream. A producer that failed, a corrupt archive, or
+          # an m43 that actually ran and failed all stay red. The excuse prints
+          # next to the roster entry so a tolerated skip never reads like a
+          # normal not-applicable one.
+          bird3 = needs["bird3_archive"]
+          excused = (
+              "m43"
+              if run_labs == "true"
+              and bird3.get("result") == "success"
+              and bird3.get("outputs", {}).get("bird3_status") == "unavailable"
+              and needs["m43"].get("result") == "skipped"
+              else ""
+          )
           for job in expected:
               result = needs[job].get("result")
-              print(f"{job}={result}")
-              if job != "classify_changes" and result != expected_result:
+              note = " (bird3 archive unavailable upstream)" if job == excused else ""
+              print(f"{job}={result}{note}")
+              if job in ("classify_changes", excused):
+                  continue
+              if result != expected_result:
                   failed = True
+          if excused:
+              print(
+                  "::warning::m43=skipped (bird3 archive unavailable upstream): "
+                  "TCP-AO interop against BIRD 3.3.1 did not run in this Kernel "
+                  "Dataplane run; this gate passed without that coverage"
+              )
           if failed:
               sys.exit(1)
           PY
