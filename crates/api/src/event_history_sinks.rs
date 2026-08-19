@@ -430,7 +430,13 @@ fn event_type_label(e: &proto::BgpEvent) -> String {
 fn afi_safi_label(v: i32) -> Option<String> {
     match proto::AddressFamily::try_from(v).ok()? {
         proto::AddressFamily::Unspecified => None,
-        af => Some(af.as_str_name().to_lowercase()),
+        proto::AddressFamily::Ipv4Unicast => Some("address_family_ipv4_unicast".to_string()),
+        proto::AddressFamily::Ipv6Unicast => Some("address_family_ipv6_unicast".to_string()),
+        proto::AddressFamily::Ipv4Flowspec => Some("address_family_ipv4_flowspec".to_string()),
+        proto::AddressFamily::Ipv6Flowspec => Some("address_family_ipv6_flowspec".to_string()),
+        proto::AddressFamily::L2vpnEvpn => Some("address_family_l2vpn_evpn".to_string()),
+        proto::AddressFamily::BgpLs => Some("address_family_bgp_ls".to_string()),
+        proto::AddressFamily::BgpLsVpn => Some("address_family_bgp_ls_vpn".to_string()),
     }
 }
 
@@ -540,6 +546,40 @@ mod tests {
             .map_or(0, |value| {
                 value.trim().parse().expect("drop counter is integral")
             })
+    }
+
+    #[test]
+    fn afi_safi_labels_preserve_exact_stored_values() {
+        let cases = [
+            (
+                proto::AddressFamily::Ipv4Unicast,
+                "address_family_ipv4_unicast",
+            ),
+            (
+                proto::AddressFamily::Ipv6Unicast,
+                "address_family_ipv6_unicast",
+            ),
+            (
+                proto::AddressFamily::Ipv4Flowspec,
+                "address_family_ipv4_flowspec",
+            ),
+            (
+                proto::AddressFamily::Ipv6Flowspec,
+                "address_family_ipv6_flowspec",
+            ),
+            (proto::AddressFamily::L2vpnEvpn, "address_family_l2vpn_evpn"),
+            (proto::AddressFamily::BgpLs, "address_family_bgp_ls"),
+            (proto::AddressFamily::BgpLsVpn, "address_family_bgp_ls_vpn"),
+        ];
+
+        for (family, expected) in cases {
+            assert_eq!(afi_safi_label(family as i32).as_deref(), Some(expected));
+        }
+        assert_eq!(
+            afi_safi_label(proto::AddressFamily::Unspecified as i32),
+            None
+        );
+        assert_eq!(afi_safi_label(i32::MAX), None);
     }
 
     /// Payload-byte stability pin (LAN-393): the off-actor envelope
