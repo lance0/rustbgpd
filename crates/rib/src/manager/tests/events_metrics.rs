@@ -5,26 +5,11 @@ use crate::event_sink::RibEventSink;
 struct SharedRouteCapture(std::sync::Mutex<Option<Arc<crate::event::RouteEvent>>>);
 
 impl RibEventSink for SharedRouteCapture {
-    fn publish_route_event(&self, _event: &crate::event::RouteEvent) {
-        panic!("manager must use the shared route-event path")
-    }
-
-    fn publish_route_event_shared(&self, event: &Arc<crate::event::RouteEvent>) {
+    fn publish_route_event(&self, event: &Arc<crate::event::RouteEvent>) {
         *self.0.lock().unwrap() = Some(Arc::clone(event));
     }
 
-    fn publish_evpn_event(&self, _event: &crate::event::EvpnRouteEvent) {}
-}
-
-#[derive(Default)]
-struct LegacyRouteSink(std::sync::atomic::AtomicUsize);
-
-impl RibEventSink for LegacyRouteSink {
-    fn publish_route_event(&self, _event: &crate::event::RouteEvent) {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn publish_evpn_event(&self, _event: &crate::event::EvpnRouteEvent) {}
+    fn publish_evpn_event(&self, _event: &Arc<crate::event::EvpnRouteEvent>) {}
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -78,28 +63,6 @@ async fn route_history_and_live_broadcast_share_arc_but_queries_are_owned() {
         manager.route_event_history.back().unwrap().reason,
         "original"
     );
-}
-
-#[test]
-fn shared_trait_default_preserves_legacy_sink_and_noop_is_empty() {
-    let event = Arc::new(crate::event::RouteEvent {
-        event_id: 0,
-        event_type: RouteEventType::Added,
-        prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24)),
-        peer: None,
-        previous_peer: None,
-        target_peer: None,
-        timestamp: String::new(),
-        path_id: 0,
-        reason: String::new(),
-    });
-    let legacy = LegacyRouteSink::default();
-    legacy.publish_route_event_shared(&event);
-    assert_eq!(legacy.0.load(std::sync::atomic::Ordering::Relaxed), 1);
-
-    let before = Arc::strong_count(&event);
-    crate::event_sink::NoopRibEventSink.publish_route_event_shared(&event);
-    assert_eq!(Arc::strong_count(&event), before);
 }
 
 async fn subscribe_events(

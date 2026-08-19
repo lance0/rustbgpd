@@ -110,32 +110,14 @@ impl EhmRibSink {
 }
 
 impl RibEventSink for EhmRibSink {
-    fn publish_route_event(&self, event: &RouteEvent) {
-        let event = Arc::new(event.clone());
-        let timestamp_ns = timestamp_ns_now();
-        self.enqueue(RibEventSnapshot::Route {
-            event,
-            timestamp_ns,
-        });
-    }
-
-    fn publish_route_event_shared(&self, event: &Arc<RouteEvent>) {
+    fn publish_route_event(&self, event: &Arc<RouteEvent>) {
         self.enqueue(RibEventSnapshot::Route {
             event: Arc::clone(event),
             timestamp_ns: timestamp_ns_now(),
         });
     }
 
-    fn publish_evpn_event(&self, event: &EvpnRouteEvent) {
-        let event = Arc::new(event.clone());
-        let timestamp_ns = timestamp_ns_now();
-        self.enqueue(RibEventSnapshot::Evpn {
-            event,
-            timestamp_ns,
-        });
-    }
-
-    fn publish_evpn_event_shared(&self, event: &Arc<EvpnRouteEvent>) {
+    fn publish_evpn_event(&self, event: &Arc<EvpnRouteEvent>) {
         self.enqueue(RibEventSnapshot::Evpn {
             event: Arc::clone(event),
             timestamp_ns: timestamp_ns_now(),
@@ -634,12 +616,12 @@ mod tests {
             let event = sample_route_event(RouteEventType::Added, index);
             expected_payloads
                 .push(convert::route_event_to_bgp_event(event.clone()).encode_to_vec());
-            sink.publish_route_event(&event);
+            sink.publish_route_event(&Arc::new(event));
             if index == 3 {
                 let evpn = sample_evpn_event();
                 expected_payloads
                     .push(convert::evpn_event_to_bgp_event(evpn.clone()).encode_to_vec());
-                sink.publish_evpn_event(&evpn);
+                sink.publish_evpn_event(&Arc::new(evpn));
             }
         }
         let after_ns = timestamp_ns_now();
@@ -691,7 +673,7 @@ mod tests {
             metrics: metrics.clone(),
         };
         let before_ns = timestamp_ns_now();
-        sink.publish_route_event(&sample_route_event(RouteEventType::Added, 0));
+        sink.publish_route_event(&Arc::new(sample_route_event(RouteEventType::Added, 0)));
         let after_ns = timestamp_ns_now();
 
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -732,7 +714,7 @@ mod tests {
         };
         let event = Arc::new(sample_route_event(RouteEventType::Added, 0));
 
-        sink.publish_route_event_shared(&event);
+        sink.publish_route_event(&event);
 
         match snapshot_rx.try_recv().expect("snapshot accepted") {
             RibEventSnapshot::Route { event: queued, .. } => {
@@ -790,13 +772,13 @@ mod tests {
         };
 
         let first = Arc::new(sample_route_event(RouteEventType::Added, 0));
-        sink.publish_route_event_shared(&first);
+        sink.publish_route_event(&first);
         assert!(!state.degraded(), "accepted publish must not degrade");
         assert!(!losses.has_changed().unwrap());
         assert_eq!(drop_counter(&metrics, "route", "queue_full"), 0);
 
         let second = Arc::new(sample_route_event(RouteEventType::Added, 1));
-        sink.publish_route_event_shared(&second);
+        sink.publish_route_event(&second);
         assert!(state.degraded(), "queue-full drop must flip EHM state");
         assert!(losses.has_changed().unwrap());
         assert_eq!(*losses.borrow_and_update(), 1);
@@ -807,7 +789,7 @@ mod tests {
         assert_eq!(drop_counter(&metrics, "route", "queue_full"), 1);
 
         let third = Arc::new(sample_route_event(RouteEventType::Added, 2));
-        sink.publish_route_event_shared(&third);
+        sink.publish_route_event(&third);
         assert!(losses.has_changed().unwrap());
         assert_eq!(*losses.borrow_and_update(), 2);
         assert_eq!(drop_counter(&metrics, "route", "queue_full"), 2);
@@ -830,7 +812,7 @@ mod tests {
         };
 
         let event = Arc::new(sample_evpn_event());
-        sink.publish_evpn_event_shared(&event);
+        sink.publish_evpn_event(&event);
         assert!(!state.degraded(), "closed drop must not flip EHM state");
         assert!(!losses.has_changed().unwrap());
         assert!(
@@ -857,7 +839,7 @@ mod tests {
 
         for index in 0..16u32 {
             let event = Arc::new(sample_route_event(RouteEventType::Added, index));
-            sink.publish_route_event_shared(&event);
+            sink.publish_route_event(&event);
         }
         stage.shutdown().await;
 
@@ -870,7 +852,7 @@ mod tests {
         }
 
         let late = Arc::new(sample_route_event(RouteEventType::Added, 99));
-        sink.publish_route_event_shared(&late);
+        sink.publish_route_event(&late);
         assert_eq!(drop_counter(&metrics, "route", "closed"), 1);
         assert!(
             !handle.state().degraded(),
