@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Make peer-scoped `rbgp rib --prefix … --explain --explain-peer …` mirror
+  live ORR selection. ORR clients now show their per-vantage winner from the
+  reflection-eligible candidate set instead of the global Loc-RIB best, so
+  existing explain output can intentionally change; global and non-ORR scopes
+  retain their prior selection behavior. The effective vantage is exposed in
+  the additive `ExplainBestPathResponse.orr_vantage` field. (LAN-1068)
+
 - Apply the existing ORR topology-address validity rules after resolving
   `orr_vantage = "peer_address"`, so a derived unspecified, loopback, or local
   reflector `router_id` is rejected. Empty human `rbgp orr` output now
