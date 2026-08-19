@@ -106,10 +106,11 @@ IPv4/IPv6 `Prefix` routes.
     EVPN, iBGP roles, AS-confederation sub-AS roles, and operator overrides of
     OTC behavior are intentionally out of scope for v1.
 
-[^gobgp-extmsg]: GoBGP upstream support was added in the exact `v4.7.0` tag,
-    verified 2026-07-12 from the tagged
-    [release notes](https://github.com/osrg/gobgp/releases/tag/v4.7.0). This
-    records upstream support, not a rustbgpd/GoBGP interoperability receipt.
+[^gobgp-extmsg]: GoBGP upstream support was added in the exact `v4.7.0` tag
+    and is retained in the exact `v4.8.0` tagged
+    [capability definitions](https://github.com/osrg/gobgp/blob/v4.8.0/pkg/packet/bgp/bgp.go#L406-L438),
+    verified 2026-08-19. This records upstream support, not a rustbgpd/GoBGP
+    interoperability receipt.
 
 ## Policy Engine
 
@@ -145,7 +146,7 @@ IPv4/IPv6 `Prefix` routes.
     and export policy for external BGP; this claim is limited to those release
     lines.
 [^rfc8212-gobgp]: GoBGP
-    [v4.7.0 policy documentation](https://raw.githubusercontent.com/osrg/gobgp/v4.7.0/docs/sources/policy.md)
+    [v4.8.0 policy documentation](https://github.com/osrg/gobgp/blob/v4.8.0/docs/sources/policy.md#L886-L899)
     says unmatched import and export policy defaults to `accept-route`.
 [^rfc8212-openbgpd]: The
     [OpenBSD-current `bgpd.conf(5)` filter documentation](https://man.openbsd.org/bgpd.conf#FILTER)
