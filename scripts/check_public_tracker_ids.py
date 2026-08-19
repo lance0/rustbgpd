@@ -65,6 +65,7 @@ SKIPPED_SUFFIXES = frozenset({".gz", ".png", ".svg", ".zst", ".bin"})
 
 TRACKER_ID = re.compile(r"\bLAN-\d+\b")
 HOME_PATH = re.compile(rb"/(?:home|Users)/(?![<$\{])[^/\s\"'<>]+")
+READ_SIZE, OVERLAP, EXCERPT_SIZE = 64 * 1024, 8, 160
 
 SEAL_NAME = "SHA256SUMS"
 SEAL_ROOT = Path("docs/perf/artifacts")
@@ -73,6 +74,29 @@ SEAL_LINE = re.compile(r"([0-9a-f]{64})  (.+)")
 
 class TrackerIdGuardError(RuntimeError):
     """The public documentation surface could not be enumerated."""
+
+
+def _audit_artifact_stream(relative: str, handle: object) -> list[str]:
+    failures: list[str] = []
+    carry = b""
+    line = 1
+    reported_line = 0
+    while chunk := handle.read(READ_SIZE):
+        window = carry + chunk
+        window_line = line - carry.count(b"\n")
+        for match in HOME_PATH.finditer(window):
+            number = window_line + window[: match.start()].count(b"\n")
+            if match.end() <= len(carry) or number == reported_line:
+                continue
+            excerpt = window[match.start() : match.start() + EXCERPT_SIZE]
+            failures.append(
+                f"{relative}:{number} contains literal absolute home path "
+                f"{excerpt.decode(errors='replace')!r}"
+            )
+            reported_line = number
+        line += chunk.count(b"\n")
+        carry = window[-OVERLAP:]
+    return failures
 
 
 def tracked_files() -> list[Path]:
@@ -264,12 +288,7 @@ def audit_artifact_home_paths(
                 raise OSError("not a readable regular file")
             opener = gzip.open if path.suffix == ".gz" else Path.open
             with opener(path, "rb") as handle:
-                for number, line in enumerate(handle, start=1):
-                    if match := HOME_PATH.search(line):
-                        failures.append(
-                            f"{relative}:{number} contains literal absolute home path "
-                            f"{match.group(0).decode(errors='replace')!r}"
-                        )
+                failures.extend(_audit_artifact_stream(relative, handle))
         except (OSError, EOFError) as error:
             raise TrackerIdGuardError(
                 f"cannot read tracked artifact {relative}: {error}"

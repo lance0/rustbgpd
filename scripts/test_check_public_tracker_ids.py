@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import io
 import sys
 import tempfile
 import unittest
@@ -83,6 +84,25 @@ class PublicTrackerIdTests(unittest.TestCase):
             failures = guard.audit_artifact_home_paths([clean, linux, mac], root)
             self.assertTrue(any("/home/alice" in failure for failure in failures))
             self.assertTrue(any("/Users/bob" in failure for failure in failures))
+
+    def test_artifact_scan_is_chunk_bounded_and_boundary_safe(self) -> None:
+        class RecordingStream(io.BytesIO):
+            def read(self, size: int = -1) -> bytes:
+                if not 0 < size <= guard.READ_SIZE:
+                    raise AssertionError(f"unbounded read request: {size}")
+                return super().read(size)
+            def readline(self, _size: int = -1) -> bytes:
+                raise AssertionError("readline must not be used")
+
+        prefix = b"x\n" * (guard.READ_SIZE // 2) + b"x" * (guard.READ_SIZE - 10)
+        payload = prefix + b"/home/alice/" + b"z" * (guard.READ_SIZE * 2)
+        failures = guard._audit_artifact_stream("artifact", RecordingStream(payload))
+        self.assertEqual(len(failures), 1)
+        self.assertIn(f"artifact:{guard.READ_SIZE // 2 + 1}", failures[0])
+        self.assertLess(len(failures[0]), guard.EXCERPT_SIZE + 100)
+        placeholder = b"x" * (guard.READ_SIZE - 3) + b"/home/<user>/run"
+        failures = guard._audit_artifact_stream("artifact", RecordingStream(placeholder))
+        self.assertEqual(failures, [])
 
     def test_artifact_walk_failures_are_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
