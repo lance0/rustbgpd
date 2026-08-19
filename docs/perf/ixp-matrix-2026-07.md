@@ -661,9 +661,9 @@ The v0.61.0-refresh S2 settled picture holds shape: rustbgpd
 419 / 419 MiB against BIRD's 422 / 412 MiB is a dead heat at this
 shape (one run each way), not a win for either; **BIRD's S3 settled
 advantage remains clear** (337 / 328 vs 441 / 451 MiB). OpenBGPD
-measured S2 settled 756 / 753 MiB and S3 settled 813 / 815 MiB.
-Public characterization: OpenBGPD sits near 750–770 MiB at both
-shapes.
+measured S2 settled 756 / 753 MiB and S3 settled 813 / 815 MiB. There
+is no separate normalized OpenBGPD figure; those A/B cells are the
+published numbers.
 
 ### 1000-client RR cell — in-repo manager-direct harness
 
