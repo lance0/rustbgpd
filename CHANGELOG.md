@@ -9,6 +9,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Apply the existing ORR topology-address validity rules after resolving
+  `orr_vantage = "peer_address"`, so a derived unspecified, loopback, or local
+  reflector `router_id` is rejected. Empty human `rbgp orr` output now
+  describes the active registration state accurately. (LAN-1067)
+
 ## [0.65.0] — 2026-08-18
 
 ### Security

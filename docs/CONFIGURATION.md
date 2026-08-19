@@ -904,7 +904,9 @@ complete atomic block. There is no probe or automatic legacy fallback.
 > need that loopback advertised as a prefix NLRI. A vantage that does not
 > resolve is not an error: the peer falls back to the standard best path,
 > counts in the `bgp_orr_unresolved_vantages` gauge, and is listed by
-> `rbgp orr`. Because ORR peers are never grouped into shared update groups,
+> `rbgp orr`. The derived address is rejected if it is unspecified, loopback,
+> or equal to the reflector's own `router_id`. Because ORR peers are never
+> grouped into shared update groups,
 > a range using this value produces one update group per peer.
 
 Use `rbgp neighbor <addr>` to inspect the actor's current aggregate

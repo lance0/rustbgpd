@@ -108,6 +108,17 @@ remote_asn = 65000
 description = "client-region-b"
 peer_group = "rr-clients"
 orr_vantage = "10.0.8.1"
+
+# Give every established client in a dynamic range its own peering address as
+# the ORR vantage. The address must not equal this reflector's router_id.
+[peer_groups.dynamic-rr-clients]
+route_reflector_client = true
+orr_vantage = "peer_address"
+
+[[dynamic_neighbors]]
+prefix = "10.0.1.0/24"
+peer_group = "dynamic-rr-clients"
+remote_asn = 65000
 ```
 
 ## Verify
@@ -143,7 +154,7 @@ ORR (if configured):
 
 ```console
 $ rbgp topology nodes        # BGP-LS-sourced graph is populated
-$ rbgp orr                   # each vantage: resolved, SPF reach, bound peers
+$ rbgp orr                   # each live vantage: resolved, SPF reach, bound peers
 ```
 
 An unresolved vantage row means that client is silently getting the

@@ -9,6 +9,9 @@ use crate::proto::{
 };
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
+use std::io::Write;
+
+const NO_ACTIVE_VANTAGES: &str = "No active ORR vantages (none registered by live peers)";
 
 pub async fn status(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
@@ -37,11 +40,7 @@ fn print_orr_status(resp: &ListOrrStatusResponse, json: bool) -> Result<(), CliE
     if json {
         output::print_json_pretty(&JsonOrrStatus(resp))?;
     } else if resp.vantages.is_empty() {
-        println!("No ORR vantages configured");
-        println!(
-            "Topology: {} nodes, {} links",
-            resp.topology_nodes, resp.topology_links
-        );
+        write_inactive_status(&mut std::io::stdout().lock(), resp)?;
     } else {
         println!(
             "{:<40} {:<10} {:<18} {:<8} Peers",
@@ -75,6 +74,18 @@ fn print_orr_status(resp: &ListOrrStatusResponse, json: bool) -> Result<(), CliE
         );
     }
     Ok(())
+}
+
+fn write_inactive_status(
+    writer: &mut impl Write,
+    resp: &ListOrrStatusResponse,
+) -> std::io::Result<()> {
+    writeln!(writer, "{NO_ACTIVE_VANTAGES}")?;
+    writeln!(
+        writer,
+        "Topology: {} nodes, {} links",
+        resp.topology_nodes, resp.topology_links
+    )
 }
 
 fn input_diagnostics(resp: &ListOrrStatusResponse) -> OrrInputDiagnostics {
@@ -217,7 +228,20 @@ mod tests {
             false,
         )
         .unwrap();
-        print_orr_status(&ListOrrStatusResponse::default(), false).unwrap();
+        let mut inactive_output = Vec::new();
+        write_inactive_status(
+            &mut inactive_output,
+            &ListOrrStatusResponse {
+                topology_nodes: 3,
+                topology_links: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(inactive_output).unwrap(),
+            "No active ORR vantages (none registered by live peers)\nTopology: 3 nodes, 2 links\n"
+        );
     }
 
     // The ORR JSON output is produced by hand-rolled `Serialize` impls

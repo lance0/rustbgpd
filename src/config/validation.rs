@@ -15,7 +15,7 @@ use super::schema::{
     ManagedSvdVxlanNetdevConfig, ManagedVlanUpperNetdevConfig, ManagedVrfNetdevConfig,
     ManagedVxlanNetdevConfig, Rfc8212PolicySource,
 };
-use super::schema::{OrrVantage, parse_orr_vantage};
+use super::schema::{OrrVantage, parse_orr_vantage, validate_orr_vantage_address};
 use super::{
     Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig, InboundAdmissionConfig, Neighbor,
     PeerGroupConfig, SecurityConfig, TcpAoConfig, TcpAoKeyringConfig, dynamic_prefixes_intersect,
@@ -233,18 +233,8 @@ fn validate_effective_peer_modes(
             // and it is exactly what `"peer_address"` derives. Only a vantage
             // equal to the reflector's own router_id degenerates to plain
             // non-ORR reflection.
-            if local_router_id.parse::<IpAddr>().ok() == Some(vantage) {
-                return Err(PeerModeViolation::RouteReflector(format!(
-                    "orr_vantage {vantage} on neighbor {subject} must not equal the \
-                     reflector's local router_id {local_router_id}"
-                )));
-            }
-            if vantage.is_unspecified() || vantage.is_loopback() {
-                return Err(PeerModeViolation::RouteReflector(format!(
-                    "orr_vantage {vantage} on neighbor {subject} must be a real topology \
-                     address, not an unspecified or loopback address"
-                )));
-            }
+            validate_orr_vantage_address(vantage, local_router_id, subject)
+                .map_err(PeerModeViolation::RouteReflector)?;
         }
     }
 
