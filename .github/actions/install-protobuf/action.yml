@@ -1,8 +1,7 @@
-name: "Install protobuf compiler (hardened)"
+name: "Install pinned protobuf compiler"
 description: >-
-  Install protoc from the Ubuntu archive while tolerating transient failures
-  from preinstalled third-party apt repositories. The package install and
-  protoc sanity check remain hard failures.
+  Install the official protoc 25.3 archive after verifying its checksum and
+  architecture.
 runs:
   using: "composite"
   steps:
@@ -10,11 +9,30 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        if command -v protoc >/dev/null 2>&1; then
-          protoc --version
-          exit 0
+
+        if [[ "$(uname -m)" != "x86_64" ]]; then
+          echo "::error::the pinned protoc archive supports only x86_64 runners"
+          exit 1
         fi
-        sudo apt-get update -o Acquire::Retries=3 || \
-          echo "::warning::apt-get update reported repo errors; installing protobuf-compiler using existing package lists"
-        sudo apt-get install -y protobuf-compiler
-        protoc --version
+
+        version="25.3"
+        sha256="f853e691868d0557425ea290bf7ba6384eef2fa9b04c323afab49a770ba9da80"
+        install_root="$(mktemp -d "${RUNNER_TEMP}/protoc-${version}.XXXXXX")"
+        archive="${install_root}/protoc.zip"
+
+        curl -sSfL \
+          -o "$archive" \
+          "https://github.com/protocolbuffers/protobuf/releases/download/v${version}/protoc-${version}-linux-x86_64.zip"
+        printf '%s  %s\n' "$sha256" "$archive" | sha256sum -c -
+        unzip -q "$archive" -d "$install_root" 'bin/protoc' 'include/*'
+        rm -f "$archive"
+        chmod 0755 "${install_root}/bin/protoc"
+
+        echo "${install_root}/bin" >> "$GITHUB_PATH"
+        export PATH="${install_root}/bin:${PATH}"
+        actual_version="$(protoc --version)"
+        if [[ "$actual_version" != "libprotoc ${version}" ]]; then
+          echo "::error::expected libprotoc ${version}, got ${actual_version}"
+          exit 1
+        fi
+        echo "$actual_version"
