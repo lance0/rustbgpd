@@ -1712,6 +1712,7 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
             }],
             peer_address: response_peer,
             add_path_send_max: 0,
+            orr_vantage: String::new(),
             best_reason: "higher_local_pref".to_string(),
             best_reason_detail: "local_pref 200 > 100".to_string(),
         }))

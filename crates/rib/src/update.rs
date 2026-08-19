@@ -1145,16 +1145,28 @@ pub struct ExplainReason {
 pub struct ExplainBestPath {
     /// Prefix being explained.
     pub prefix: Prefix,
-    /// The best route for this prefix, if one exists.
+    /// The best route for this prefix, if one exists. A peer-scoped
+    /// explanation with a resolved ORR vantage reports that peer's
+    /// reflection-eligible per-vantage best; other explanations report
+    /// the ordinary Loc-RIB best.
     pub best: Option<Route>,
-    /// All candidates with their comparison against the best route.
+    /// Candidates with their comparison against the best route. An ORR
+    /// peer scope contains the same split-horizon / reflection-eligible
+    /// candidate set as live ORR distribution; other scopes retain every
+    /// non-best Adj-RIB-In route for the prefix.
     pub candidates: Vec<BestPathCandidate>,
     /// Peer this explanation was scoped to, when the request named one.
     /// `None` = global Loc-RIB view (the pre-Add-Path explain shape).
     pub peer: Option<IpAddr>,
+    /// Resolved RFC 9107 ORR vantage used for this peer-scoped
+    /// explanation. `None` for the global view, a non-ORR peer, or an
+    /// ORR peer whose vantage has no usable SPF result (which falls back
+    /// to the ordinary Loc-RIB best).
+    pub orr_vantage: Option<IpAddr>,
     /// Peer's Add-Path `send_max` when scoped to a peer (`0` =
     /// single-best send, or global view). When non-zero, the top
-    /// `add_path_send_max` candidates by best-path preference get a
+    /// `add_path_send_max` candidates by the effective peer-aware
+    /// best-path preference get a
     /// non-zero `BestPathCandidate::advertised_path_id`.
     pub add_path_send_max: u32,
     /// The decision step that selected the winner over the runner-up —

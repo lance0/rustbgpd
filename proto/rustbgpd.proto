@@ -2114,12 +2114,13 @@ message ExplainBestPathRequest {
   string prefix = 1;
   uint32 prefix_length = 2;
   // Optional IP address (IPv4 or IPv6 literal) of the peer to
-  // scope the explanation to. The response shape is unchanged
-  // from the v0.7.0 form: the Loc-RIB best for this prefix lives
-  // in `best_route`, and `candidates` lists every *non-best*
-  // route the RIB knows about for this prefix (the winner is
-  // never repeated in `candidates`). When set, the explanation
-  // additionally tags peer-aware advertisement: every candidate
+  // scope the explanation to. With a resolved RFC 9107 ORR vantage,
+  // `best_route` is the peer's per-vantage winner and `candidates`
+  // contains the same split-horizon / reflection-eligible set as live
+  // ORR distribution. Otherwise `best_route` remains the ordinary
+  // Loc-RIB best and `candidates` lists every non-best route the RIB
+  // knows for the prefix. The winner is never repeated in candidates.
+  // A peer scope also tags Add-Path advertisement: every candidate
   // that the named peer would receive — passes the peer's
   // export policy + sendable-family check + split-horizon / RR
   // suppression and falls within the peer's effective
@@ -2127,7 +2128,7 @@ message ExplainBestPathRequest {
   // `advertised_path_id` reflecting its advertised rank.
   // Everything else stays at `advertised_path_id = 0`. Note
   // that ranks in `candidates` may start at 2 when the
-  // Loc-RIB winner (in `best_route`) is itself advertised at
+  // selected winner (in `best_route`) is itself advertised at
   // rank 1 to the peer; rank 1 is therefore not always present
   // in the `candidates` list. Empty = global view, the v0.7.0
   // behavior. Unknown peer → NOT_FOUND. Named `peer_address`
@@ -2163,7 +2164,7 @@ message BestPathCandidate {
   // reject, family mismatch, split-horizon, iBGP / RFC 4456
   // route-reflector suppression, or beyond `send_max`). Always
   // zero in single-best send mode (`add_path_send_max == 0`) —
-  // single-best advertises only the Loc-RIB best (`best_route`)
+  // single-best advertises only the selected best (`best_route`)
   // at `path_id = 0`, and never falls back to the next-best
   // candidate when the winner is suppressed, so this field cannot
   // represent that selection. In single-best mode operators infer
@@ -2198,7 +2199,9 @@ message ExplainBestPathResponse {
   // (stale_preference, rpki_preference, aspa_preference,
   // higher_local_pref, shorter_as_path, lower_origin, lower_med,
   // ebgp_over_ibgp, shorter_cluster_list, lower_originator_id,
-  // lower_peer_address, lower_path_id). "only_path" when the prefix has
+  // lower_peer_address, lower_path_id, plus orr_interior_cost for a
+  // peer-scoped explanation using a resolved RFC 9107 vantage).
+  // "only_path" when the prefix has
   // exactly one path (trivial winner, no competing candidates). A prefix
   // with no paths at all is NOT_FOUND at the RPC layer, so this field is
   // never empty on a successful response.
@@ -2207,6 +2210,10 @@ message ExplainBestPathResponse {
   // (e.g. "local_pref 200 > 100"). Empty when best_reason is
   // "only_path". Human-oriented diagnostic text, like vs_best_detail.
   string best_reason_detail = 8;
+  // Resolved RFC 9107 vantage used to select and attribute this
+  // peer-scoped best. Empty for a global view, a non-ORR peer, or an
+  // unresolved vantage that fell back to the ordinary Loc-RIB best.
+  string orr_vantage = 9;
 }
 
 message ListBlackholeDiscardsRequest {}

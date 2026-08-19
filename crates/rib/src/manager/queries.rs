@@ -16,7 +16,6 @@ use super::{
 };
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
-use crate::best_path::best_path_cmp_with_reason;
 use crate::event::{RouteEvent, RouteEventType};
 use crate::update::{
     BestPathCandidate, ExactExportKey, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
@@ -1304,7 +1303,10 @@ impl RibManager {
         peer: Option<IpAddr>,
         reply: tokio::sync::oneshot::Sender<Option<ExplainBestPath>>,
     ) {
-        use crate::best_path::best_path_cmp;
+        use crate::best_path::{
+            BestPathReason, best_path_cmp, best_path_cmp_orr, best_path_cmp_orr_with_reason,
+            best_path_cmp_with_reason, best_path_reason_detail, orr_interior_cost_detail,
+        };
         use crate::manager::helpers::should_suppress_ibgp_inner;
         use rustbgpd_policy::{PolicyAction, RouteContext, RouteType, evaluate_chain};
 
@@ -1331,6 +1333,17 @@ impl RibManager {
             return;
         }
 
+        // A usable resolved vantage changes both the candidate set and
+        // comparator in exactly the same way as live ORR distribution:
+        // split horizon / RFC 4456 filtering happens before the
+        // per-vantage ranking. An unresolved vantage deliberately falls
+        // back to the ordinary global best, matching distribution.
+        let orr_ctx = peer.and_then(|peer_addr| {
+            self.peer_orr_vantage
+                .get(&peer_addr)
+                .and_then(|vantage| self.orr.spf.get(vantage).map(|spf| (*vantage, spf)))
+        });
+
         // Collect all candidates from all Adj-RIB-In tables.
         let mut all_candidates: Vec<crate::route::Route> = self
             .ribs
@@ -1338,13 +1351,67 @@ impl RibManager {
             .flat_map(|rib| rib.iter_prefix(&prefix).cloned())
             .collect();
 
-        // Best by RFC 4271 best-path comparison — independent of
-        // peer scope, and used as the reference point for every
-        // candidate's `vs_best_reason`.
-        let best = all_candidates
-            .iter()
-            .min_by(|a, b| best_path_cmp(a, b))
-            .cloned();
+        if let (Some(peer_addr), Some(_)) = (peer, orr_ctx) {
+            let target_is_ebgp = self.peer_is_ebgp.get(&peer_addr).copied().unwrap_or(true);
+            let target_is_rr_client = self
+                .peer_is_rr_client
+                .get(&peer_addr)
+                .copied()
+                .unwrap_or(false);
+            all_candidates.retain(|route| {
+                route.peer != peer_addr
+                    && !should_suppress_ibgp_inner(
+                        route,
+                        target_is_ebgp,
+                        target_is_rr_client,
+                        self.cluster_id,
+                        &self.peer_is_rr_client,
+                    )
+            });
+        }
+
+        let compare = |a: &crate::route::Route, b: &crate::route::Route| {
+            orr_ctx.map_or_else(
+                || best_path_cmp(a, b),
+                |(_, spf)| {
+                    best_path_cmp_orr(
+                        a,
+                        b,
+                        spf.cost_to(&self.orr.topology, a.next_hop),
+                        spf.cost_to(&self.orr.topology, b.next_hop),
+                    )
+                },
+            )
+        };
+        let compare_with_reason = |a: &crate::route::Route, b: &crate::route::Route| {
+            orr_ctx.map_or_else(
+                || best_path_cmp_with_reason(a, b),
+                |(_, spf)| {
+                    best_path_cmp_orr_with_reason(
+                        a,
+                        b,
+                        spf.cost_to(&self.orr.topology, a.next_hop),
+                        spf.cost_to(&self.orr.topology, b.next_hop),
+                    )
+                },
+            )
+        };
+        let reason_detail =
+            |reason: BestPathReason, a: &crate::route::Route, b: &crate::route::Route| {
+                if reason == BestPathReason::OrrInteriorCost {
+                    let (_, spf) = orr_ctx.expect("ORR reason requires a resolved vantage");
+                    orr_interior_cost_detail(
+                        spf.cost_to(&self.orr.topology, a.next_hop),
+                        spf.cost_to(&self.orr.topology, b.next_hop),
+                    )
+                } else {
+                    best_path_reason_detail(reason, a, b)
+                }
+            };
+
+        // Global/non-ORR queries use the ordinary best-path ladder;
+        // a resolved ORR peer uses its per-vantage ladder.
+        let best = all_candidates.iter().min_by(|a, b| compare(a, b)).cloned();
 
         // For the peer-aware path, build the ranked advertised set so
         // each candidate can be tagged with its `advertised_path_id`.
@@ -1422,7 +1489,7 @@ impl RibManager {
                         true
                     })
                     .collect();
-                filtered.sort_by(|a, b| best_path_cmp(a, b));
+                filtered.sort_by(|a, b| compare(a, b));
 
                 let limit = if add_path_send_max == u32::MAX {
                     usize::MAX
@@ -1520,9 +1587,8 @@ impl RibManager {
                 .drain(..)
                 .filter(|c| !(c.peer == best_route.peer && c.path_id == best_route.path_id))
                 .map(|candidate| {
-                    let (ordering, reason) = best_path_cmp_with_reason(&candidate, best_route);
-                    let vs_best_detail =
-                        crate::best_path::best_path_reason_detail(reason, &candidate, best_route);
+                    let (ordering, reason) = compare_with_reason(&candidate, best_route);
+                    let vs_best_detail = reason_detail(reason, &candidate, best_route);
                     let multipath = crate::best_path::multipath_eligibility(best_route, &candidate);
                     let advertised_path_id = advertised_rank
                         .get(&(candidate.peer, candidate.path_id))
@@ -1552,11 +1618,10 @@ impl RibManager {
                 let runner_up = candidates
                     .iter()
                     .map(|c| &c.route)
-                    .min_by(|a, b| best_path_cmp(a, b))
+                    .min_by(|a, b| compare(a, b))
                     .expect("non-empty candidate list has a minimum");
-                let (_, reason) = best_path_cmp_with_reason(best_route, runner_up);
-                let detail =
-                    crate::best_path::best_path_reason_detail(reason, best_route, runner_up);
+                let (_, reason) = compare_with_reason(best_route, runner_up);
+                let detail = reason_detail(reason, best_route, runner_up);
                 (Some(reason), detail)
             }
             // Single-path trivial winner or no best route at all.
@@ -1568,6 +1633,7 @@ impl RibManager {
             best,
             candidates,
             peer,
+            orr_vantage: orr_ctx.map(|(vantage, _)| vantage),
             add_path_send_max,
             best_reason,
             best_reason_detail,
