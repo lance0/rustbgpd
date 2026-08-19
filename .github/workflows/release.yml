@@ -328,9 +328,10 @@ jobs:
 
       - name: Notify rbgp.rs
         # Private site; default GITHUB_TOKEN cannot dispatch across
-        # repos. RBGP_RS_TOKEN is a fine-grained PAT with Actions write
-        # on lance0/rbgp.rs. If unset, rbgp.rs's daily 07:07 UTC job
-        # still picks up the latest GitHub release.
+        # repos. RBGP_RS_TOKEN is a fine-grained PAT with Contents:
+        # write on lance0/rbgp.rs (POST /dispatches). Actions write
+        # 403s. If unset, rbgp.rs's daily 07:07 UTC job still picks
+        # up the latest GitHub release.
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.RBGP_RS_TOKEN }}
