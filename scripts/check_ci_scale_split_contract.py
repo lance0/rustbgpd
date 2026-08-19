@@ -41,6 +41,14 @@ def aggregate_shell(job: str) -> str:
     return "" if match is None else re.sub(r"(?m)^          ", "", match.group(1))
 
 
+def named_step(job: str, name: str) -> str:
+    match = re.search(
+        rf"(?ms)^      - name: {re.escape(name)}\n(.*?)(?=^      - |\Z)",
+        job,
+    )
+    return "" if match is None else match.group(1)
+
+
 def check(root: Path) -> list[str]:
     text = (root / ".github/workflows/ci.yml").read_text()
     jobs = _jobs(text)
@@ -54,6 +62,20 @@ def check(root: Path) -> list[str]:
             errors.append(f"{command} must exist exactly once in core_tests")
     if 'RUSTDOCFLAGS: "-D warnings"' not in core_tests:
         errors.append("core_tests rustdoc warnings contract drifted")
+
+    wire_step_name = "Wire crate README freshness gate"
+    wire_step = named_step(jobs.get("core", ""), wire_step_name)
+    if text.count(f"- name: {wire_step_name}") != 1 or not wire_step:
+        errors.append("wire README freshness gate must exist exactly once in core")
+    else:
+        for seam in (
+            'git diff "$base"...HEAD -- crates/wire/Cargo.toml \\',
+            'git diff "$base"...HEAD -- crates/wire/README.md \\',
+            r"'^\+version\s*='",
+            "exit 1",
+        ):
+            if seam not in wire_step:
+                errors.append(f"wire README freshness gate missing {seam}")
 
     aggregate = jobs.get("check", "")
     if "if: ${{ always() }}" not in aggregate:

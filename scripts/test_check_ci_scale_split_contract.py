@@ -44,6 +44,20 @@ class ScaleSplitContractTests(unittest.TestCase):
             ("- run: cargo test --workspace", "- run: true"),
             ("- run: cargo doc --workspace --lib --no-deps", "- run: true"),
             ('RUSTDOCFLAGS: "-D warnings"', 'RUSTDOCFLAGS: ""'),
+            (
+                "- name: Wire crate README freshness gate",
+                "- name: Unchecked wire README",
+            ),
+            (
+                'git diff "$base"...HEAD -- crates/wire/Cargo.toml',
+                'git diff "$base"...HEAD -- crates/wire/README.md',
+            ),
+            (
+                'git diff "$base"...HEAD -- crates/wire/README.md',
+                'git diff "$base"...HEAD -- crates/wire/NOTES.md',
+            ),
+            (r"'^\+version\s*='", r"'^version\s*='"),
+            ("              exit 1", "              true"),
             ("if: ${{ always() }}", "if: ${{ success() }}"),
             (
                 "needs: [v064_validator, core, core_tests, scale_receipts]",
