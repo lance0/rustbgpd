@@ -2368,7 +2368,12 @@ impl RibManager {
             RibUpdate::RpkiCacheUpdate { table, delta } => {
                 self.handle_rpki_cache_update(table, delta);
             }
-            RibUpdate::AspaTableUpdate { table } => self.handle_aspa_cache_update(table),
+            RibUpdate::AspaTableUpdate {
+                table,
+                changed_customer_asns,
+            } => {
+                self.handle_aspa_cache_update(table, changed_customer_asns);
+            }
             RibUpdate::InjectFlowSpec { route, reply } => self.handle_inject_flowspec(route, reply),
             RibUpdate::WithdrawFlowSpec { key, reply } => {
                 let retired = ExactExportKey::FlowSpec(key.clone());
