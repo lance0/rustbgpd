@@ -4,13 +4,15 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 
 This document is the canonical source for GoBGP capability claims in the
 project docs (the [comparison matrix](COMPARISON.md) defers to it). GoBGP
-cells are verified against the exact GoBGP `v4.7.0` tag and its
-[release notes](https://github.com/osrg/gobgp/releases/tag/v4.7.0): Enhanced
-Route Refresh is present (`BGP_CAP_ENHANCED_ROUTE_REFRESH = 70`); no ORF
-capability is defined (no code 3 in the constant block); no BGP Role
-capability is defined (RFC 9234, tracked upstream as the still-open feature
-request [osrg/gobgp#3244](https://github.com/osrg/gobgp/issues/3244)); and
-Extended Messages support was added in v4.7.0. Verified 2026-07-12. These are
+cells are verified against the exact GoBGP `v4.8.0` tag, its
+[release notes](https://github.com/osrg/gobgp/releases/tag/v4.8.0), and the
+tagged [capability definitions](https://github.com/osrg/gobgp/blob/v4.8.0/pkg/packet/bgp/bgp.go#L406-L438):
+Extended Messages (code 6, added in v4.7.0) and Enhanced Route Refresh (code
+70) are present; ORF (code 3), BGP Role (code 9), and Add-Path Paths-Limit
+(code 76) are absent. The latter two remain open upstream as
+[osrg/gobgp#3244](https://github.com/osrg/gobgp/issues/3244) and
+[osrg/gobgp#2786](https://github.com/osrg/gobgp/issues/2786), respectively,
+and the tag contains no ASPA implementation. Verified 2026-08-19. These are
 upstream capability claims, not rustbgpd interoperability receipts; receipts
 are identified explicitly where they exist.
 
@@ -106,7 +108,7 @@ releases rather than carried forward from older measurements.
 | Next-hop set/self | Yes | Yes | set_next_hop = "self" or IP |
 | Named policy definitions | Yes | Yes | TOML definitions with configurable default_action |
 | Policy chaining | Yes | Yes | GoBGP-style: permit=continue, deny=stop, implicit permit |
-| Default eBGP policy (RFC 8212) | No | Opt-in | GoBGP v4.7.0 defaults unmatched import/export policy to `accept-route`; rustbgpd requires explicit `ebgp_requires_policy = true` |
+| Default eBGP policy (RFC 8212) | No | Opt-in | GoBGP [v4.8.0 policy documentation](https://github.com/osrg/gobgp/blob/v4.8.0/docs/sources/policy.md#L886-L899) defaults unmatched import/export policy to `accept-route`; rustbgpd requires explicit `ebgp_requires_policy = true` |
 | Scriptable policy language | No | Yes | `.rpol` (ADR-0096): typed + compiled, named prefix/community sets as indexed matchers, parameterized policies, `apply()` composition, in-language unit tests via `rbgp policy check`; route-for-route parity vs FRR route-maps proven in M80 |
 | Policy dry-run against the live RIB | No | Yes | `rbgp policy test` / `TestPolicy` RPC — a candidate `.rpol` policy evaluated read-only over an Adj-RIB-In / Loc-RIB snapshot: counts, per-term hits, before/after diffs |
 | Live per-term policy hit counters | No | Yes | `rbgp policy stats --direction import\|export\|both` / `GetPolicyStats` — since-chain-install counters on installed import and export chains; import rows also carry the session-local policy generation |
