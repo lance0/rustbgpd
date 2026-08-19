@@ -2043,13 +2043,9 @@ async fn subscribe_evpn_events(
 struct SharedEvpnCapture(std::sync::Mutex<Option<Arc<crate::event::EvpnRouteEvent>>>);
 
 impl crate::event_sink::RibEventSink for SharedEvpnCapture {
-    fn publish_route_event(&self, _event: &crate::event::RouteEvent) {}
+    fn publish_route_event(&self, _event: &Arc<crate::event::RouteEvent>) {}
 
-    fn publish_evpn_event(&self, _event: &crate::event::EvpnRouteEvent) {
-        panic!("manager must use the shared EVPN-event path")
-    }
-
-    fn publish_evpn_event_shared(&self, event: &Arc<crate::event::EvpnRouteEvent>) {
+    fn publish_evpn_event(&self, event: &Arc<crate::event::EvpnRouteEvent>) {
         *self.0.lock().unwrap() = Some(Arc::clone(event));
     }
 }

@@ -30,42 +30,24 @@ use crate::event::{EvpnRouteEvent, RouteEvent};
 /// in the publish hot path; a panic here would unwind through the
 /// RIB actor.
 ///
-/// Trait methods take `&RouteEvent` / `&EvpnRouteEvent` rather than
-/// owned values so the existing `publish_*_event` paths can clone
-/// only when needed (EVPN events carry `Arc<EvpnRibRoute>` payloads
-/// that are cheap to clone, but the legacy ring already takes one
-/// clone for its `push_back` so passing by reference here saves
-/// another).
 pub trait RibEventSink: Send + Sync + 'static {
     /// Hand a route event to the sink. Called from
     /// `RibManager::publish_route_event` after the event has been
     /// stamped with its process-local `event_id`, appended to the
-    /// bounded ring; the shared sink callback (defaulting here) runs before
+    /// bounded ring; the sink callback runs before
     /// live broadcast on `route_events_tx`. Legacy
     /// `event_id` value is preserved as-is on the snapshot the sink
     /// sees; the durable cursor overwrites it from the EHM commit on
     /// the wire path.
-    fn publish_route_event(&self, event: &RouteEvent);
-
-    /// Hand a shared route event to the sink. Legacy implementors keep
-    /// working through the borrowed-event method; sinks that can retain the
-    /// existing allocation may override this additive path.
-    fn publish_route_event_shared(&self, event: &Arc<RouteEvent>) {
-        self.publish_route_event(event.as_ref());
-    }
+    fn publish_route_event(&self, event: &Arc<RouteEvent>);
 
     /// Hand an EVPN best-path event to the sink. Called from
-    /// `RibManager::publish_evpn_route_event` after ring insertion and through
-    /// the shared sink callback (defaulting here) before live broadcast. EVPN
+    /// `RibManager::publish_evpn_route_event` after ring insertion and before
+    /// live broadcast. EVPN
     /// events do not currently carry a
     /// process-local `event_id`; the durable envelope id is the only
     /// id surfaced on the EHM-backed wire path.
-    fn publish_evpn_event(&self, event: &EvpnRouteEvent);
-
-    /// Shared counterpart to [`Self::publish_evpn_event`].
-    fn publish_evpn_event_shared(&self, event: &Arc<EvpnRouteEvent>) {
-        self.publish_evpn_event(event.as_ref());
-    }
+    fn publish_evpn_event(&self, event: &Arc<EvpnRouteEvent>);
 }
 
 /// No-op sink used when `[event_history]` is disabled or EHM failed
@@ -77,8 +59,6 @@ pub trait RibEventSink: Send + Sync + 'static {
 pub struct NoopRibEventSink;
 
 impl RibEventSink for NoopRibEventSink {
-    fn publish_route_event(&self, _event: &RouteEvent) {}
-    fn publish_route_event_shared(&self, _event: &Arc<RouteEvent>) {}
-    fn publish_evpn_event(&self, _event: &EvpnRouteEvent) {}
-    fn publish_evpn_event_shared(&self, _event: &Arc<EvpnRouteEvent>) {}
+    fn publish_route_event(&self, _event: &Arc<RouteEvent>) {}
+    fn publish_evpn_event(&self, _event: &Arc<EvpnRouteEvent>) {}
 }
