@@ -58,6 +58,11 @@ pub enum ConfigMutation {
         snapshot: Arc<AcceptedConfigSnapshot>,
         adopted: oneshot::Sender<()>,
     },
+    /// Observe the actor-owned snapshot without adding a production mutation
+    /// path. Tests use this to prove that acknowledgements and reload adoption
+    /// leave the intended snapshot retained after the message is processed.
+    #[cfg(test)]
+    InspectCurrent(oneshot::Sender<Arc<AcceptedConfigSnapshot>>),
 }
 
 /// Listens for config mutations and persists them atomically.
@@ -190,6 +195,10 @@ impl ConfigPersister {
                     self.current = snapshot;
                     self.record_current_history();
                     let _ = adopted.send(());
+                }
+                #[cfg(test)]
+                ConfigMutation::InspectCurrent(reply) => {
+                    let _ = reply.send(Arc::clone(&self.current));
                 }
             }
         }
@@ -429,6 +438,14 @@ log_format = "json"
         }
     }
 
+    async fn inspect_current(tx: &mpsc::Sender<ConfigMutation>) -> Arc<AcceptedConfigSnapshot> {
+        let (reply, observed) = oneshot::channel();
+        tx.send(ConfigMutation::InspectCurrent(reply))
+            .await
+            .unwrap();
+        observed.await.expect("persister retained-snapshot reply")
+    }
+
     #[tokio::test]
     async fn persist_is_durable_atomic_write_no_temp_left() {
         // LAN-206: persist() must go through the fsync'd atomic-write primitive
@@ -528,10 +545,11 @@ log_format = "json"
         let config = minimal_config();
         std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
 
-        let mut refreshed = config.clone();
-        refreshed.neighbors.push(test_neighbor("10.0.0.2", 65002));
-        let mut following = refreshed.clone();
-        following.neighbors.push(test_neighbor("10.0.0.3", 65003));
+        let mut refreshed_config = config.clone();
+        refreshed_config
+            .neighbors
+            .push(test_neighbor("10.0.0.2", 65002));
+        let refreshed = AcceptedConfigSnapshot::from_config_for_test(refreshed_config);
 
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), config, None);
@@ -539,7 +557,7 @@ log_format = "json"
 
         let (adopted, adopted_rx) = oneshot::channel();
         tx.send(ConfigMutation::AdoptReloadSnapshot {
-            snapshot: AcceptedConfigSnapshot::from_config_for_test(refreshed),
+            snapshot: Arc::clone(&refreshed),
             adopted,
         })
         .await
@@ -547,8 +565,15 @@ log_format = "json"
         adopted_rx
             .await
             .expect("persister adoption acknowledgement");
+        let observed = inspect_current(&tx).await;
+        assert!(
+            Arc::ptr_eq(&observed, &refreshed),
+            "the adoption acknowledgement must follow retention of the exact accepted snapshot"
+        );
+        let mut following = observed.config();
+        following.neighbors.push(test_neighbor("10.0.0.3", 65003));
         tx.send(ConfigMutation::ReplaceConfig(
-            AcceptedConfigSnapshot::from_config_for_test(following),
+            observed.derive_config(following).unwrap(),
         ))
         .await
         .unwrap();
@@ -857,12 +882,18 @@ log_format = "json"
             ConfigPersistCommitOutcome::PublishedDurable
         );
 
-        // A following mutation must build from the accepted replacement,
-        // proving the warning-only history failure did not roll it back.
-        let mut following = changed.config();
+        let observed = inspect_current(&tx).await;
+        assert!(
+            Arc::ptr_eq(&observed, &changed),
+            "the durable acknowledgement must retain the exact accepted snapshot despite the history failure"
+        );
+
+        // A following mutation builds from the actor-owned replacement rather
+        // than a snapshot assembled independently by the test.
+        let mut following = observed.config();
         following.neighbors.push(test_neighbor("10.0.0.3", 65003));
         tx.send(ConfigMutation::ReplaceConfig(
-            changed.derive_config(following).unwrap(),
+            observed.derive_config(following).unwrap(),
         ))
         .await
         .unwrap();
