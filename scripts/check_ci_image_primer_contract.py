@@ -99,9 +99,9 @@ CALL_HASHES = {
 PINS = collections.Counter(
     {
         "actions/checkout@v7": 87,
-        "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 3,
+        "dtolnay/rust-toolchain@v1 # stable": 3,
         "Swatinem/rust-cache@v2": 5,
-        "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95": 2,
+        "dtolnay/rust-toolchain@v1 # 1.95": 2,
         "docker/setup-buildx-action@v4": 45,
         "docker/build-push-action@v7": 46,
         "actions/cache@v6": 7,
