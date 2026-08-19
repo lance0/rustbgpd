@@ -1,5 +1,6 @@
 <p align="center">
-  <img src="rustbgpd-logo.png" alt="rustbgpd logo" width="250">
+  <img src="rustbgpd-logo.png#gh-light-mode-only" alt="rustbgpd" width="420">
+  <img src="rustbgpd-logo-dark.png#gh-dark-mode-only" alt="rustbgpd" width="420">
 </p>
 
 # rustbgpd
