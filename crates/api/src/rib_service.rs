@@ -1187,6 +1187,9 @@ fn explain_best_path_to_proto(explain: ExplainBestPath) -> proto::ExplainBestPat
             .collect(),
         peer_address: explain.peer.map(|p| p.to_string()).unwrap_or_default(),
         add_path_send_max: explain.add_path_send_max,
+        orr_vantage: explain
+            .orr_vantage
+            .map_or_else(String::new, |vantage| vantage.to_string()),
     }
 }
 
@@ -3790,6 +3793,7 @@ mod tests {
                 multipath: rustbgpd_rib::MultipathEligibility::None,
             }],
             peer: None,
+            orr_vantage: None,
             add_path_send_max: 0,
             best_reason: Some(rustbgpd_rib::BestPathReason::HigherLocalPref),
             best_reason_detail: "local_pref 200 > 100".to_string(),
@@ -3812,6 +3816,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_best_path_returns_orr_vantage() {
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+        let vantage: IpAddr = "10.0.1.9".parse().unwrap();
+        let explanation = rustbgpd_rib::ExplainBestPath {
+            prefix,
+            best: Some(test_route(prefix, vec![PathAttribute::LocalPref(100)])),
+            candidates: vec![],
+            peer: Some("10.0.0.9".parse().unwrap()),
+            orr_vantage: Some(vantage),
+            add_path_send_max: 0,
+            best_reason: None,
+            best_reason_detail: String::new(),
+        };
+
+        let resp = make_explain_best_path_service(Some(explanation))
+            .explain_best_path(Request::new(proto::ExplainBestPathRequest {
+                peer_address: "10.0.0.9".to_string(),
+                ..explain_best_path_request()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.peer_address, "10.0.0.9");
+        assert_eq!(resp.orr_vantage, vantage.to_string());
+        assert_eq!(resp.best_reason, "only_path");
+    }
+
+    #[tokio::test]
     async fn explain_best_path_single_path_reports_only_path() {
         let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
         let explanation = rustbgpd_rib::ExplainBestPath {
@@ -3819,6 +3852,7 @@ mod tests {
             best: Some(test_route(prefix, vec![PathAttribute::LocalPref(100)])),
             candidates: vec![],
             peer: None,
+            orr_vantage: None,
             add_path_send_max: 0,
             best_reason: None,
             best_reason_detail: String::new(),
@@ -3845,6 +3879,7 @@ mod tests {
             best: None,
             candidates: vec![],
             peer: None,
+            orr_vantage: None,
             add_path_send_max: 0,
             best_reason: None,
             best_reason_detail: String::new(),

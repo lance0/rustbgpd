@@ -1443,12 +1443,18 @@ impl Serialize for JsonExplainBestPathRef<'_> {
         if peer_scoped {
             len += 2;
         }
+        if !resp.orr_vantage.is_empty() {
+            len += 1;
+        }
 
         let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry("prefix", &JsonExplainPrefix(resp))?;
         if peer_scoped {
             map.serialize_entry("peer_address", &resp.peer_address)?;
             map.serialize_entry("add_path_send_max", &resp.add_path_send_max)?;
+        }
+        if !resp.orr_vantage.is_empty() {
+            map.serialize_entry("orr_vantage", &resp.orr_vantage)?;
         }
         map.serialize_entry(
             "best_route",
@@ -1564,6 +1570,9 @@ fn print_explain_best_path(
             "Scope:      peer {} (Add-Path send_max={})",
             resp.peer_address, resp.add_path_send_max
         );
+    }
+    if !resp.orr_vantage.is_empty() {
+        println!("ORR vantage: {}", resp.orr_vantage);
     }
 
     if let Some(ref best) = resp.best_route {
@@ -3082,6 +3091,7 @@ mod tests {
             prefix_length: 24,
             peer_address: "192.0.2.99".to_string(),
             add_path_send_max: 4,
+            orr_vantage: String::new(),
             best_route: Some(route_for_json(7, "valid")),
             best_reason: "higher_local_pref".to_string(),
             best_reason_detail: "local_pref 200 > 100".to_string(),
@@ -3165,6 +3175,7 @@ mod tests {
             }],
             peer_address: String::new(),
             add_path_send_max: 0,
+            orr_vantage: String::new(),
             best_reason: "higher_local_pref".to_string(),
             best_reason_detail: "local_pref 200 > 100".to_string(),
         };
@@ -3216,6 +3227,7 @@ mod tests {
             }],
             peer_address: String::new(),
             add_path_send_max: 0,
+            orr_vantage: String::new(),
             best_reason: "higher_local_pref".to_string(),
             best_reason_detail: "local_pref 200 > 100".to_string(),
         };
@@ -3258,6 +3270,7 @@ mod tests {
             }],
             peer_address: "10.0.0.99".to_string(),
             add_path_send_max: 4,
+            orr_vantage: "10.0.1.99".to_string(),
             best_reason: "higher_local_pref".to_string(),
             best_reason_detail: "local_pref 200 > 100".to_string(),
         };
@@ -3265,6 +3278,7 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&out).unwrap();
         assert_eq!(v["peer_address"], "10.0.0.99");
         assert_eq!(v["add_path_send_max"], 4);
+        assert_eq!(v["orr_vantage"], "10.0.1.99");
         assert_eq!(v["candidates"][0]["advertised_path_id"], 2);
     }
 
@@ -3288,6 +3302,7 @@ mod tests {
             }],
             peer_address: String::new(),
             add_path_send_max: 0,
+            orr_vantage: String::new(),
             best_reason: "higher_local_pref".to_string(),
             best_reason_detail: "local_pref 200 > 100".to_string(),
         };

@@ -55,9 +55,25 @@ With competing paths, the candidate table lists each loser with its
 eligibility. `--json` returns the same as `best_reason`,
 `best_reason_detail`, and a `candidates[]` array.
 
-Scope the explanation to one peer's Add-Path send view with
-`--explain-peer <addr>`: candidates the peer would actually receive
-get their advertised rank; filtered ones show why they are not sent.
+Scope the explanation to one peer with `--explain-peer <addr>`. For an
+Add-Path sender, candidates the peer would actually receive get their
+advertised rank and filtered candidates remain at rank 0. For a peer with a
+resolved RFC 9107 ORR vantage, the command instead selects and compares the
+best route from that client's vantage and prints the effective `ORR vantage`:
+
+```console
+$ rbgp rib --prefix 203.0.113.0/24 --explain --explain-peer 10.0.0.7
+Best-path explanation for 203.0.113.0/24
+Scope:      peer 10.0.0.7 (Add-Path send_max=0)
+ORR vantage: 10.0.0.7
+Selected:   orr_interior_cost (orr_cost 12 < 40) vs runner-up
+```
+
+The `orr_interior_cost` reason is emitted only when vantage interior cost
+is decisive. Its detail prints both costs; `unreachable` means the vantage
+has no known cost to that next hop and therefore ranks it last. A non-ORR peer,
+an unresolved vantage, or an explanation without `--explain-peer` retains
+the ordinary global Loc-RIB ladder.
 Details: [OPERATIONS.md](OPERATIONS.md#explain-a-best-path-decision).
 
 ## Export explain — the full gate ladder, from the real export body
@@ -107,6 +123,29 @@ the re-advertiser to assign its own ID, so the latter is the compact eligible,
 policy-permitted rank. It stays 0 before ranking or beyond `send_max`; an OTC
 or exact-wire denial after ranking retains the attempted rank. Omit the flags
 for the legacy winner-oriented explanation.
+
+### ORR: why two clients received different winners
+
+For an ORR client, the advertised-route explanation ranks the same
+split-horizon/RR-eligible candidates as live distribution, using that target's
+resolved vantage:
+
+```console
+$ rbgp rib --prefix 203.0.113.0/24 advertised 10.0.0.7 --explain
+ORR vantage: 10.0.0.7
+ORR candidates (per-vantage best first):
+- 192.0.2.2 next-hop 10.0.2.1 cost=12 (selected)
+- 192.0.2.1 next-hop 10.0.1.1 cost=40
+```
+
+In JSON, `orr_vantage` identifies the applied vantage,
+`orr_candidates` contains the per-vantage ranking, the `best_route` gate
+uses code `orr_vantage_best`, and the reasons include
+`orr_interior_cost` when cost broke the tie. With
+`orr_vantage = "peer_address"` on a dynamic-neighbor range, each client
+resolves to its own address; different clients can therefore select different
+winners for the same prefix. Run the advertised explanation once per client,
+then use `--explain-peer <client>` for the candidate-by-candidate comparison.
 
 ## Import explain — the per-session decision cache
 

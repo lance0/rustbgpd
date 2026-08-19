@@ -659,6 +659,74 @@ async fn two_clients_different_vantages_receive_divergent_bests() {
     );
 }
 
+/// A peer-scoped best-path explanation must report the same divergent
+/// per-vantage winners as live ORR distribution, including the decisive
+/// cost reason and an unreachable candidate's least-preferred detail.
+#[tokio::test]
+async fn explain_best_path_for_orr_peer_uses_that_peers_vantage() {
+    let (tx, handle) = orr_rr_manager().await;
+    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let _out_a = orr_client_peer_up(&tx, client_a, Some(vantage_at_node_a())).await;
+    let _out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
+
+    announce_divergent_bests(&tx).await;
+    let unknown_peer = Ipv4Addr::new(192, 0, 2, 3);
+    let unknown_next_hop = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 99));
+    announce_unicast(
+        &tx,
+        unknown_peer,
+        vec![ibgp_route(orr_prefix(), unknown_peer, unknown_next_hop)],
+    )
+    .await;
+
+    let explain_a = query_explain_best_path_for_peer(&tx, Prefix::V4(orr_prefix()), client_a)
+        .await
+        .expect("known ORR client");
+    let explain_b = query_explain_best_path_for_peer(&tx, Prefix::V4(orr_prefix()), client_b)
+        .await
+        .expect("known ORR client");
+    let global = query_explain_best_path(&tx, Prefix::V4(orr_prefix())).await;
+
+    assert_eq!(explain_a.orr_vantage, Some(vantage_at_node_a()));
+    assert_eq!(explain_b.orr_vantage, Some(vantage_at_node_b()));
+    assert_eq!(
+        explain_a.best.as_ref().map(|route| route.next_hop),
+        Some(orr_nh_x())
+    );
+    assert_eq!(
+        explain_b.best.as_ref().map(|route| route.next_hop),
+        Some(orr_nh_y())
+    );
+    for explain in [&explain_a, &explain_b] {
+        assert_eq!(
+            explain.best_reason,
+            Some(crate::best_path::BestPathReason::OrrInteriorCost)
+        );
+        assert_eq!(explain.best_reason_detail, "orr_cost 1 < 10");
+        let unreachable = explain
+            .candidates
+            .iter()
+            .find(|candidate| candidate.route.next_hop == unknown_next_hop)
+            .expect("unreachable candidate remains visible");
+        assert_eq!(
+            unreachable.vs_best_reason,
+            crate::best_path::BestPathReason::OrrInteriorCost
+        );
+        assert_eq!(unreachable.vs_best_detail, "orr_cost unreachable > 1");
+    }
+
+    assert_eq!(global.orr_vantage, None);
+    assert_eq!(
+        global.best.as_ref().map(|route| route.next_hop),
+        Some(orr_nh_x()),
+        "unscoped explain retains the ordinary Loc-RIB winner"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// A topology metric flip re-stages ONLY the peers bound to the vantage
 /// whose SPF surface changed: the affected client's best flips, while
 /// the other vantage's client and a non-ORR client see zero messages.
