@@ -370,11 +370,11 @@ new AFI/SAFI and EVPN dataplane expansion.
   and route reflector
   ([docs/soaks/soak-rr-flagship-24h.md](docs/soaks/soak-rr-flagship-24h.md)) —
   and the proof-gated RFC 8212 epoch-2 activation landed in #1666 (DR4/E5).
-  The remaining hard gates are execution, not design: the rest of the v0.65
-  compatibility-debt batch, the latest-1.x security-support row, and the final
-  upgrade-chain extension. The external shadow pilot is advisory since the
-  2026-08-08 DR1 revision — actively pursued, disclosed if absent at tag time,
-  not blocking. The comparative IRR-scale gate is already satisfied.
+  The remaining hard gates are execution, not design: the latest-1.x
+  security-support row and the final upgrade-chain extension. The external
+  shadow pilot is advisory since the 2026-08-08 DR1 revision — actively pursued,
+  disclosed if absent at tag time, not blocking. The comparative IRR-scale gate
+  is already satisfied.
 - **Make changed-policy reload the primary performance program.** The corrected
   700-client × 400,400-route mixed run is now measured: shared cohort work cuts
   median completion p50 116.185x and median completion maximum 149.261x, while
@@ -1765,7 +1765,7 @@ lower the cost of every future PR. None block a v0.x release; ADR-0122's
 accepted v0.65 batch is an explicit v1.0 tag gate. Grab another item when your
 branch is between features.
 
-- [ ] **Compatibility-debt removal schedule (ADR-0122, Accepted).**
+- [x] **Compatibility-debt removal schedule (ADR-0122, Accepted).**
   [docs/adr/0122-compatibility-debt-inventory.md](docs/adr/0122-compatibility-debt-inventory.md)
   is the single inventory of retained compat shims under the alpha
   posture, grouped by surface with per-item removal releases and
