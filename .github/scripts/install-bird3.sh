@@ -7,6 +7,13 @@ readonly BIRD3_SHA256="d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45
 readonly BIRD3_ASSET="bird-${BIRD3_VERSION}.tar.gz"
 readonly BIRD3_URL="https://bird.nic.cz/download/${BIRD3_ASSET}"
 readonly BIRD3_ATTEMPTS=3
+# prepare_archive separates a third-party outage from a supply-chain signal so
+# callers can act on the difference. 3 = the archive bytes never arrived (every
+# attempt failed to fetch); 4 = bytes arrived and failed the pinned checksum or
+# source-version check. Only 3 is tolerated downstream; see the bird3_archive
+# job in .github/workflows/kernel-dataplane.yml.
+readonly BIRD3_RC_UNAVAILABLE=3
+readonly BIRD3_RC_CORRUPT=4
 
 verify_archive() {
     local sha256=${1:?sha256}
@@ -61,6 +68,26 @@ stage_archive() (
     printf 'staged verified bird %s source archive\n' "$BIRD3_VERSION"
 )
 
+# The upstream archive is a third party. When it will not serve the pinned
+# tarball at all, say so where a human reading the run will see it: an
+# annotation in the run UI plus a line in the job summary naming the scenario
+# that loses coverage, the reason, and the URL that refused. This is the only
+# site that holds the URL, so the loud text cannot drift from the real target.
+announce_unavailable() {
+    local url=${1:?url}
+    local message
+
+    message="M43 (TCP-AO interop vs BIRD ${BIRD3_VERSION}) skipped: the pinned"
+    message+=" bird ${BIRD3_VERSION} source archive is unavailable upstream"
+    message+=" after ${BIRD3_ATTEMPTS} attempts (${url})."
+    message+=" This is third-party unavailability, not a rustbgpd failure;"
+    message+=" re-run once upstream recovers."
+    echo "::warning::${message}" >&2
+    if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+        printf '%s\n' "$message" >>"$GITHUB_STEP_SUMMARY"
+    fi
+}
+
 download_archive_once() {
     local url=${1:?url}
     local destination=${2:?destination}
@@ -77,6 +104,7 @@ prepare_archive() {
     local url=${2:?url}
     local archive=${3:?archive}
     local attempt staged_archive
+    local fetched=0
 
     if verify_archive_contents "$sha256" "$archive" 2>/dev/null; then
         echo "using verified cached bird3 archive"
@@ -90,11 +118,13 @@ prepare_archive() {
     mkdir -p "$(dirname "$archive")"
     for ((attempt = 1; attempt <= BIRD3_ATTEMPTS; attempt++)); do
         staged_archive=$(mktemp "${archive}.download.XXXXXX")
-        if download_archive_once "$url" "$staged_archive" \
-            && verify_archive_contents "$sha256" "$staged_archive"; then
-            mv -f -- "$staged_archive" "$archive"
-            echo "downloaded and verified bird3 archive"
-            return 0
+        if download_archive_once "$url" "$staged_archive"; then
+            fetched=1
+            if verify_archive_contents "$sha256" "$staged_archive"; then
+                mv -f -- "$staged_archive" "$archive"
+                echo "downloaded and verified bird3 archive"
+                return 0
+            fi
         fi
         rm -f -- "$staged_archive"
         if ((attempt < BIRD3_ATTEMPTS)); then
@@ -103,8 +133,15 @@ prepare_archive() {
         fi
     done
 
-    echo "::error::bird3 download/verification failed after ${BIRD3_ATTEMPTS} attempts: ${url}" >&2
-    return 1
+    if ((fetched)); then
+        # Bytes arrived and did not match the pinned checksum or the pinned
+        # source version. That is a supply-chain signal, not an outage, and it
+        # stays hard-red no matter how many times it repeats.
+        echo "::error::bird3 archive failed verification after ${BIRD3_ATTEMPTS} attempts: ${url}" >&2
+        return "$BIRD3_RC_CORRUPT"
+    fi
+    announce_unavailable "$url"
+    return "$BIRD3_RC_UNAVAILABLE"
 }
 
 fail_self_test() {
@@ -115,6 +152,7 @@ fail_self_test() {
 self_test() (
     local fixture_dir source_dir valid_archive valid_checksum wrong_dir wrong_archive
     local wrong_checksum partial_archive expected_url staged_hash attempts
+    local summary_file rc
 
     fixture_dir=$(mktemp -d)
     trap 'rm -rf -- "$fixture_dir"' EXIT
@@ -209,19 +247,59 @@ self_test() (
         | grep -Fxq "using verified cached bird3 archive" \
         || fail_self_test "warm cache attempted an upstream fetch"
 
+    # Upstream refused to serve the bytes at all (a 403/5xx makes curl -f
+    # exit non-zero). That is third-party unavailability: distinct exit code,
+    # loud annotation, and a job-summary line naming scenario/reason/URL.
+    attempts=0
+    download_archive_once() {
+        ((attempts += 1))
+        return 22
+    }
+    summary_file="$fixture_dir/step-summary.md"
+    : >"$summary_file"
+    rc=0
+    GITHUB_STEP_SUMMARY="$summary_file" \
+        prepare_archive "$valid_checksum" "https://example.invalid/unavailable" \
+        "$fixture_dir/cold-cache.tar.gz" >/dev/null 2>"$fixture_dir/unavailable.err" \
+        || rc=$?
+    [[ "$rc" -eq "$BIRD3_RC_UNAVAILABLE" ]] \
+        || fail_self_test "unreachable upstream did not report BIRD3_RC_UNAVAILABLE"
+    [[ "$attempts" -eq "$BIRD3_ATTEMPTS" ]] \
+        || fail_self_test "cold-cache retry bound was not enforced"
+    [[ ! -e "$fixture_dir/cold-cache.tar.gz" ]] \
+        || fail_self_test "failed cold-cache fetch left an artifact"
+    grep -Fq '::warning::M43' "$fixture_dir/unavailable.err" \
+        || fail_self_test "unavailable upstream did not emit a warning annotation"
+    grep -Fq 'https://example.invalid/unavailable' "$summary_file" \
+        || fail_self_test "job summary did not name the upstream URL"
+    grep -Fq 'M43' "$summary_file" \
+        || fail_self_test "job summary did not name the skipped scenario"
+
+    # Bytes arrived and failed verification. A checksum mismatch on a file that
+    # DID download is a supply-chain signal, not an outage: separate exit code,
+    # no skip annotation, no job-summary excuse.
     attempts=0
     download_archive_once() {
         ((attempts += 1))
         printf '<html>503</html>\n' >"$2"
     }
-    if prepare_archive "$valid_checksum" "https://example.invalid/unavailable" \
-        "$fixture_dir/cold-cache.tar.gz" >/dev/null 2>&1; then
-        fail_self_test "cold-cache upstream failure was accepted"
-    fi
+    : >"$summary_file"
+    rc=0
+    GITHUB_STEP_SUMMARY="$summary_file" \
+        prepare_archive "$valid_checksum" "https://example.invalid/corrupt" \
+        "$fixture_dir/corrupt-cache.tar.gz" >/dev/null 2>"$fixture_dir/corrupt.err" \
+        || rc=$?
+    [[ "$rc" -eq "$BIRD3_RC_CORRUPT" ]] \
+        || fail_self_test "unverifiable download did not report BIRD3_RC_CORRUPT"
     [[ "$attempts" -eq "$BIRD3_ATTEMPTS" ]] \
-        || fail_self_test "cold-cache retry bound was not enforced"
-    [[ ! -e "$fixture_dir/cold-cache.tar.gz" ]] \
-        || fail_self_test "failed cold-cache fetch left an artifact"
+        || fail_self_test "corrupt-download retry bound was not enforced"
+    [[ ! -e "$fixture_dir/corrupt-cache.tar.gz" ]] \
+        || fail_self_test "failed corrupt download left an artifact"
+    [[ ! -s "$summary_file" ]] \
+        || fail_self_test "corrupt download wrote a skip excuse to the job summary"
+    if grep -Fq '::warning::M43' "$fixture_dir/corrupt.err"; then
+        fail_self_test "corrupt download emitted a skip annotation"
+    fi
 
     # shellcheck disable=SC2317
     curl() { fail_self_test "offline stage invoked curl"; }
