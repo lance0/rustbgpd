@@ -203,6 +203,17 @@ impl Category {
         Self::Dataplane,
     ];
 
+    const fn index(self) -> usize {
+        match self {
+            Self::Route => 0,
+            Self::Evpn => 1,
+            Self::Session => 2,
+            Self::Policy => 3,
+            Self::Bfd => 4,
+            Self::Dataplane => 5,
+        }
+    }
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -465,8 +476,15 @@ fn record_append_metrics(
     outcome: &storage::AppendOutcome,
 ) {
     if let Some(metrics) = metrics {
+        let mut committed_by_category = [0_u64; Category::ALL.len()];
         for env in envelopes {
-            metrics.record_event_outbox_committed(env.category.as_str());
+            committed_by_category[env.category.index()] += 1;
+        }
+        for category in Category::ALL {
+            let count = committed_by_category[category.index()];
+            if count > 0 {
+                metrics.record_event_outbox_committed_by(category.as_str(), count);
+            }
         }
         metrics.set_event_outbox_latest_event_id(
             i64::try_from(outcome.new_high_water).unwrap_or(i64::MAX),
@@ -1362,6 +1380,119 @@ mod tests {
             payload_codec: PayloadCodec::Opaque,
             payload: vec![value],
         }
+    }
+
+    fn metric_value(metrics: &BgpMetrics, family_name: &str, category: &str) -> Option<f64> {
+        metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == family_name)?
+            .get_metric()
+            .iter()
+            .find(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "category" && label.value() == category)
+            })
+            .map(|metric| metric.get_counter().value())
+    }
+
+    fn gauge_value(metrics: &BgpMetrics, family_name: &str) -> f64 {
+        metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == family_name)
+            .unwrap()
+            .get_metric()[0]
+            .get_gauge()
+            .value()
+    }
+
+    #[test]
+    fn append_metrics_batch_committed_counts_by_category() {
+        let metrics = BgpMetrics::new();
+        let empty_outcome = storage::AppendOutcome {
+            assigned_ids: Vec::new(),
+            new_high_water: 7,
+            daemon_boot_id: Arc::from("test-boot"),
+            db_size_bytes: 800,
+        };
+        record_append_metrics(Some(&metrics), &[], &empty_outcome);
+        assert_eq!(
+            metric_value(&metrics, "bgp_event_outbox_committed_total", "route"),
+            None
+        );
+        assert_eq!(
+            gauge_value(&metrics, "bgp_event_outbox_latest_event_id"),
+            7.0
+        );
+        assert_eq!(
+            gauge_value(&metrics, "bgp_event_outbox_db_size_bytes"),
+            800.0
+        );
+
+        let envelopes = [
+            Arc::new(event(Category::Route, 1)),
+            Arc::new(event(Category::Policy, 2)),
+            Arc::new(event(Category::Route, 3)),
+            Arc::new(event(Category::Evpn, 4)),
+            Arc::new(event(Category::Policy, 5)),
+            Arc::new(event(Category::Policy, 6)),
+        ];
+        let first_outcome = storage::AppendOutcome {
+            assigned_ids: vec![8, 9, 10, 11, 12, 13],
+            new_high_water: 13,
+            daemon_boot_id: Arc::from("test-boot"),
+            db_size_bytes: 1_600,
+        };
+        record_append_metrics(Some(&metrics), &envelopes, &first_outcome);
+        assert_eq!(
+            metric_value(&metrics, "bgp_event_outbox_committed_total", "route"),
+            Some(2.0)
+        );
+        assert_eq!(
+            metric_value(&metrics, "bgp_event_outbox_committed_total", "evpn"),
+            Some(1.0)
+        );
+        assert_eq!(
+            metric_value(&metrics, "bgp_event_outbox_committed_total", "policy"),
+            Some(3.0)
+        );
+        assert_eq!(
+            metric_value(&metrics, "bgp_event_outbox_committed_total", "bfd"),
+            None
+        );
+
+        let repeated = [
+            Arc::new(event(Category::Route, 7)),
+            Arc::new(event(Category::Session, 8)),
+        ];
+        let repeated_outcome = storage::AppendOutcome {
+            assigned_ids: vec![14, 15],
+            new_high_water: 15,
+            daemon_boot_id: Arc::from("test-boot"),
+            db_size_bytes: 2_400,
+        };
+        record_append_metrics(Some(&metrics), &repeated, &repeated_outcome);
+        assert_eq!(
+            metric_value(&metrics, "bgp_event_outbox_committed_total", "route"),
+            Some(3.0)
+        );
+        assert_eq!(
+            metric_value(&metrics, "bgp_event_outbox_committed_total", "session"),
+            Some(1.0)
+        );
+        assert_eq!(
+            gauge_value(&metrics, "bgp_event_outbox_latest_event_id"),
+            15.0
+        );
+        assert_eq!(
+            gauge_value(&metrics, "bgp_event_outbox_db_size_bytes"),
+            2_400.0
+        );
     }
 
     async fn wait_for_store(store: &storage::StoreHandle, op: storage::TestStoreOp) {

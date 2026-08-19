@@ -4596,13 +4596,21 @@ impl BgpMetrics {
 
     // ── Event history outbox (ADR-0072) ─────────────────────────
 
-    /// Record a successful durable commit. Called by EHM after each
-    /// committed batch, once per event in the batch.
+    /// Record one successful durable commit.
     pub fn record_event_outbox_committed(&self, category: &str) {
+        self.record_event_outbox_committed_by(category, 1);
+    }
+
+    /// Bulk version of [`Self::record_event_outbox_committed`] for a
+    /// committed batch containing `count` events in the same category.
+    pub fn record_event_outbox_committed_by(&self, category: &str, count: u64) {
+        if count == 0 {
+            return;
+        }
         self.0
             .event_outbox_committed
             .with_label_values(&[category])
-            .inc();
+            .inc_by(count);
     }
 
     /// Record an outbox drop or cursor-delivery skip. `reason` is
@@ -4631,8 +4639,8 @@ impl BgpMetrics {
             .inc_by(count);
     }
 
-    /// Update the per-category queue depth gauge. EHM calls this
-    /// from the actor loop after each batch drain.
+    /// Update the per-category queue depth gauge. EHM calls this on
+    /// enqueue/dequeue and when initializing or reconciling lifecycle state.
     pub fn set_event_outbox_queue_depth(&self, category: &str, depth: i64) {
         let Some(index) = EVENT_OUTBOX_QUEUE_DEPTH_CATEGORIES
             .iter()
@@ -4818,7 +4826,7 @@ mod jemalloc_stats {
 mod tests {
     use std::net::Ipv4Addr;
 
-    use prometheus::Encoder;
+    use prometheus::{Encoder, core::Collector};
 
     use super::*;
 
@@ -4954,6 +4962,55 @@ mod tests {
         let metrics = BgpMetrics::new();
         assert!(metrics.0.event_outbox_queue_depth_fixed.get().is_none());
         assert!(event_outbox_queue_depths(&metrics).is_empty());
+    }
+
+    #[test]
+    fn event_outbox_committed_single_and_bulk_paths_are_additive() {
+        let metrics = BgpMetrics::new();
+
+        metrics.record_event_outbox_committed_by("session", 0);
+        metrics.record_event_outbox_committed("route");
+        metrics.record_event_outbox_committed_by("route", 4);
+        metrics.record_event_outbox_committed_by("evpn", 3);
+
+        assert_eq!(
+            metrics
+                .0
+                .event_outbox_committed
+                .with_label_values(&["route"])
+                .get(),
+            5
+        );
+        assert_eq!(
+            metrics
+                .0
+                .event_outbox_committed
+                .with_label_values(&["evpn"])
+                .get(),
+            3
+        );
+        assert!(
+            !metrics
+                .0
+                .event_outbox_committed
+                .collect()
+                .iter()
+                .any(|family| family
+                    .get_metric()
+                    .iter()
+                    .flat_map(prometheus::proto::Metric::get_label)
+                    .any(|label| label.value() == "session"))
+        );
+
+        let isolated = BgpMetrics::new();
+        assert_eq!(
+            isolated
+                .0
+                .event_outbox_committed
+                .with_label_values(&["route"])
+                .get(),
+            0
+        );
     }
 
     #[test]
