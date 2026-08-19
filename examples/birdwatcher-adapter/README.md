@@ -170,11 +170,11 @@ the real decision. Precisely what the view contains:
 makes one `ExplainAdvertisedRoute` call per suppressed prefix. Each paged
 snapshot is version-fenced independently: concurrent churn within either walk
 can fail the request rather than mix generations in that snapshot, so clients
-should retry a 502. The two snapshots are not fenced to the same generation,
-however, so churn between them can make the diff incomplete. The per-prefix
-`ExplainAdvertisedRoute` re-check drops candidates that would be advertised,
-so the race cannot fabricate a "not exported" claim; the re-check cannot
-recover a route omitted by the cross-snapshot diff.
+should retry the request when it returns a 502. The two snapshots are not fenced
+to the same generation, however, so churn between them can make the diff
+incomplete. The per-prefix `ExplainAdvertisedRoute` re-check drops candidates
+that would be advertised, so the race cannot fabricate a "not exported" claim;
+the re-check cannot recover a route omitted by the cross-snapshot diff.
 Alice-LG's `[noexport] load_on_demand` (its default) fits this — the view is
 only computed when an operator opens it. Do not poll it as a metrics endpoint;
 for very large or fast-changing Loc-RIBs, use a caching proxy and expect the
