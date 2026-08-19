@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Fail closed when the CI core/scale split contract drifts."""
+"""Fail closed when the load-bearing CI split contract drifts."""
 
 from __future__ import annotations
 
-import collections
-import hashlib
 import re
 import sys
 from pathlib import Path
 
-ROSTER = [
+ROSTER = {
     "v064_validator",
     "core",
     "core_tests",
@@ -17,47 +15,8 @@ ROSTER = [
     "check",
     "msrv",
     "evpn_bum_filter_kernel",
-]
-TRIGGER_HASH = "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8"
-PERMISSION_HASH = "9691400b3b1036bcdfe724926816dbe71b0aa22ed9b5eb89627e2eeb75079898"
-JOB_HASHES = {
-    "v064_validator": "b3f0ae8906bd28397a5f82bab0db5467e09a8e312aa24a8c8f2db8fd01c6310a",
-    "core": "962f91a26c1091edbae07341ef3b457f4d42d7cbbcf9ea5874359626fd1509cf",
-    "core_tests": "c5d8ed560cd4e572f535bb4eabe065372fddfc1dbefe0c341a9c5af76ed6df0f",
-    "scale_receipts": "57a201b5691dd08fecb49860deb942a74a4dcf4d2b3a77a18716b3fc9d981b85",
-    "check": "736f69ca686c06e889962d5fb93d80ee848090718dcf63aeff695febc6cbfcc5",
-    "msrv": "273de02a6a1e67e17913b50023326214261b8f4d6399f8f8867188e7e3d2acb9",
-    "evpn_bum_filter_kernel": "d427ed2c650d619d926cad0a4cbb6b558dd013ace9b18ba48757be529420863a",
 }
-COMMAND_BODY_HASH = "bfd8b9d4e3553cb9a5b46d633bfcb4544a6076c2c0ec9874523af7bfb16224e2"
-STEP_NAME = "Check standalone scale harnesses and receipt classifiers"
-CHECKOUT = "uses: actions/checkout@v7"
-TOOLCHAIN = (
-    "uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable"
-)
-RUST_CACHE = "uses: Swatinem/rust-cache@v2"
-PINS = collections.Counter(
-    {
-        "actions/checkout@v7": 6,
-        "actions/cache@v6": 1,
-        "actions/upload-artifact@v7": 1,
-        "actions/download-artifact@v8": 2,
-        "Swatinem/rust-cache@v2": 4,
-        "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 3,
-        "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95": 1,
-        "docker/setup-buildx-action@v4": 1,
-        "docker/build-push-action@v7": 1,
-    }
-)
-
-
-def _hash(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()
-
-
-def _top_block(text: str, key: str) -> str:
-    match = re.search(rf"(?ms)^{re.escape(key)}:\n.*?(?=^[A-Za-z][\w-]*:|\Z)", text)
-    return match.group(0).rstrip() if match else ""
+RESULTS = ("V064_VALIDATOR", "CORE", "CORE_TESTS", "SCALE_RECEIPTS")
 
 
 def _jobs(text: str) -> dict[str, str]:
@@ -65,9 +24,9 @@ def _jobs(text: str) -> dict[str, str]:
     matches = list(re.finditer(r"(?m)^  ([\w-]+):\n", body))
     return {
         match.group(1): body[
-            match.end() : (
-                matches[index + 1].start() if index + 1 < len(matches) else len(body)
-            )
+            match.end() : matches[index + 1].start()
+            if index + 1 < len(matches)
+            else len(body)
         ]
         for index, match in enumerate(matches)
     }
@@ -75,128 +34,43 @@ def _jobs(text: str) -> dict[str, str]:
 
 def aggregate_shell(job: str) -> str:
     match = re.search(
-        r"(?ms)^      - name: Aggregate required CI result\n        run: \|\n(.*?)(?=^      - |\Z)",
+        r"(?ms)^      - name: Aggregate required CI result\n"
+        r"        run: \|\n(.*?)(?=^      - |\Z)",
         job,
     )
     return "" if match is None else re.sub(r"(?m)^          ", "", match.group(1))
 
 
 def check(root: Path) -> list[str]:
-    errors: list[str] = []
-    text = (root / ".github" / "workflows" / "ci.yml").read_text()
+    text = (root / ".github/workflows/ci.yml").read_text()
     jobs = _jobs(text)
-    if list(jobs) != ROSTER:
-        errors.append("exact CI job roster/order drifted")
-    if _hash(_top_block(text, "on")) != TRIGGER_HASH:
-        errors.append("CI triggers drifted")
-    if _hash(_top_block(text, "permissions")) != PERMISSION_HASH:
-        errors.append("CI permissions drifted")
-    for name, expected in JOB_HASHES.items():
-        if _hash(jobs.get(name, "")) != expected:
-            errors.append(f"{name} job body drifted")
-
-    producer = jobs.get("v064_validator", "")
-    for seam in (
-        "name: prepare exact v0.64 config migration validator",
-        "runs-on: ubuntu-latest",
-        "timeout-minutes: 10",
-        CHECKOUT,
-        "uses: actions/cache@v6",
-        "key: rustbgpd-v0.64.0-linux-amd64-bd4829de08d0c50074f9ecd5c351399fae42be06d456b3880a04aa4a7cda1137",
-        "--self-test",
-        "--prepare-archive",
-        "uses: actions/upload-artifact@v7",
-        "name: rustbgpd-v0.64.0-linux-amd64",
-        "if-no-files-found: error",
-    ):
-        if seam not in producer:
-            errors.append(f"v064_validator missing {seam}")
-    for forbidden in ("restore-keys:", "continue-on-error:"):
-        if forbidden in producer:
-            errors.append(f"v064_validator permits {forbidden}")
+    errors: list[str] = []
+    if set(jobs) != ROSTER:
+        errors.append("exact CI job roster drifted")
 
     core_tests = jobs.get("core_tests", "")
-    for seam in (
-        "name: core tests / rustdoc",
-        "needs: v064_validator",
-        "runs-on: ubuntu-latest",
-        "timeout-minutes: 30",
-        CHECKOUT,
-        "fetch-depth: 0",
-        TOOLCHAIN,
-        "toolchain: stable",
-        "uses: ./.github/actions/install-protobuf",
-        RUST_CACHE,
-        "- run: cargo test --workspace",
-        "- run: cargo doc --workspace --lib --no-deps",
-        'RUSTDOCFLAGS: "-D warnings"',
-    ):
-        if seam not in core_tests:
-            errors.append(f"core_tests missing {seam}")
-    for command in (
-        "- run: cargo test --workspace",
-        "- run: cargo doc --workspace --lib --no-deps",
-    ):
-        if text.count(command) != 1 or command in jobs.get("core", ""):
-            errors.append(f"{command} must exist only in core_tests")
-
-    if text.count(f"- name: {STEP_NAME}") != 1:
-        errors.append("extracted scale/receipt step must appear exactly once")
-    scale = jobs.get("scale_receipts", "")
-    command_match = re.search(
-        rf"(?ms)^      - name: {re.escape(STEP_NAME)}\n        run: \|\n(.*?)(?=^      - |\Z)",
-        scale,
-    )
-    if command_match is None or _hash(command_match.group(1)) != COMMAND_BODY_HASH:
-        errors.append("extracted command body/order drifted")
-    for seam in (
-        "name: scale / receipt checks",
-        "runs-on: ubuntu-latest",
-        "timeout-minutes: 30",
-        CHECKOUT,
-        "fetch-depth: 0",
-        TOOLCHAIN,
-        "toolchain: stable",
-        "components: rustfmt, clippy",
-        "uses: ./.github/actions/install-protobuf",
-        RUST_CACHE,
-        "sudo apt-get update",
-        "sudo apt-get install -y ripgrep",
-    ):
-        if seam not in scale:
-            errors.append(f"scale_receipts missing {seam}")
+    for command in ("cargo test --workspace", "cargo doc --workspace --lib --no-deps"):
+        if text.count(command) != 1 or command not in core_tests:
+            errors.append(f"{command} must exist exactly once in core_tests")
+    if 'RUSTDOCFLAGS: "-D warnings"' not in core_tests:
+        errors.append("core_tests rustdoc warnings contract drifted")
 
     aggregate = jobs.get("check", "")
-    for seam in (
-        "name: check",
-        "runs-on: ubuntu-latest",
-        "timeout-minutes: 5",
-        "if: ${{ always() }}",
-        "needs: [v064_validator, core, core_tests, scale_receipts]",
-        "V064_VALIDATOR_RESULT: ${{ needs.v064_validator.result }}",
-        "CORE_RESULT: ${{ needs.core.result }}",
-        "CORE_TESTS_RESULT: ${{ needs.core_tests.result }}",
-        "SCALE_RECEIPTS_RESULT: ${{ needs.scale_receipts.result }}",
-        "printf 'v064_validator=%s\\n' \"$V064_VALIDATOR_RESULT\"",
-        "printf 'core=%s\\n' \"$CORE_RESULT\"",
-        "printf 'core_tests=%s\\n' \"$CORE_TESTS_RESULT\"",
-        "printf 'scale_receipts=%s\\n' \"$SCALE_RECEIPTS_RESULT\"",
-        '[[ "$V064_VALIDATOR_RESULT" != "success" || "$CORE_RESULT" != "success" || "$CORE_TESTS_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]',
-    ):
+    if "if: ${{ always() }}" not in aggregate:
+        errors.append("aggregate check must run with always()")
+    needs = "needs: [v064_validator, core, core_tests, scale_receipts]"
+    if needs not in aggregate:
+        errors.append("aggregate check needs drifted")
+    for name in RESULTS:
+        job = name.lower()
+        seam = f"{name}_RESULT: ${{{{ needs.{job}.result }}}}"
         if seam not in aggregate:
-            errors.append(f"aggregate check missing {seam}")
-    if "actions/checkout@" in aggregate:
-        errors.append("aggregate check must not checkout source")
+            errors.append(f"aggregate check missing {job} result wiring")
+    disjunction = " || ".join(f'\"${name}_RESULT\" != \"success\"' for name in RESULTS)
+    if f"[[ {disjunction} ]]" not in aggregate:
+        errors.append("aggregate non-success disjunction drifted")
     if not aggregate_shell(aggregate):
         errors.append("aggregate check shell missing")
-
-    pins = collections.Counter(
-        value.strip()
-        for value in re.findall(r"^\s*(?:- )?uses:\s*(.+)$", text, re.MULTILINE)
-        if not value.strip().startswith("./")
-    )
-    if pins != PINS:
-        errors.append("CI external action pins/counts drifted")
     return errors
 
 

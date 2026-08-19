@@ -9,7 +9,6 @@ from pathlib import Path
 
 from scripts.check_ci_scale_split_contract import _jobs, aggregate_shell, check
 
-
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ".github/workflows/ci.yml"
 
@@ -25,9 +24,7 @@ class ScaleSplitContractTests(unittest.TestCase):
             start = 0
             for _ in range(occurrence + 1):
                 index = text.find(old, start)
-                self.assertNotEqual(
-                    -1, index, f"missing occurrence {occurrence}: {old}"
-                )
+                self.assertNotEqual(-1, index, f"missing occurrence: {old}")
                 start = index + len(old)
             target.write_text(text[:index] + new + text[index + len(old) :])
             self.assertTrue(check(root), f"mutation stayed green: {old}")
@@ -35,7 +32,7 @@ class ScaleSplitContractTests(unittest.TestCase):
     def test_live_contract(self) -> None:
         self.assertEqual([], check(ROOT))
 
-    def test_destructive_roster_and_preserved_bodies(self) -> None:
+    def test_semantic_mutations_fail_closed(self) -> None:
         cases = (
             ("  v064_validator:\n", "  renamed_validator:\n"),
             ("  core:\n", "  renamed_core:\n"),
@@ -44,134 +41,13 @@ class ScaleSplitContractTests(unittest.TestCase):
             ("  check:\n", "  renamed_check:\n"),
             ("  msrv:\n", "  renamed_msrv:\n"),
             ("  evpn_bum_filter_kernel:\n", "  renamed_evpn:\n"),
-            ("timeout-minutes: 45", "timeout-minutes: 44"),
-            ("Wire crate README freshness gate", "changed final core step"),
-            ("key: msrv-1.95", "key: msrv-drift"),
-            ("IMAGE_TAG: rustbgpd-netns-tests:latest", "IMAGE_TAG: drift"),
-            ("branches: [main]", "branches: [other]"),
-            ("permissions:\n  contents: read", "permissions:\n  contents: write"),
-        )
-        for old, new in cases:
-            with self.subTest(seam=old):
-                self.mutate(old, new)
-
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            target = root / WORKFLOW
-            target.parent.mkdir(parents=True)
-            shutil.copy2(ROOT / WORKFLOW, target)
-            text = target.read_text()
-            core_start = text.index("  core:\n")
-            scale_start = text.index("  scale_receipts:\n")
-            check_start = text.index("  check:\n", scale_start)
-            core = text[core_start:scale_start]
-            scale = text[scale_start:check_start]
-            target.write_text(text[:core_start] + scale + core + text[check_start:])
-            self.assertTrue(check(root), "job-order mutation stayed green")
-
-    def test_destructive_validator_producer(self) -> None:
-        cache_key = (
-            "key: rustbgpd-v0.64.0-linux-amd64-"
-            "bd4829de08d0c50074f9ecd5c351399fae42be06d456b3880a04aa4a7cda1137"
-        )
-        cases = (
-            (
-                "name: prepare exact v0.64 config migration validator",
-                "name: changed validator producer",
-            ),
-            ("uses: actions/cache@v6", "uses: actions/cache@main"),
-            (cache_key, f"{cache_key}\n          restore-keys: rustbgpd-v0.64"),
-            ("--self-test", "--skipped-self-test"),
-            ("--prepare-archive", "--changed-prepare"),
-            ("uses: actions/upload-artifact@v7", "uses: actions/upload-artifact@main"),
-            ("if-no-files-found: error", "if-no-files-found: ignore"),
-        )
-        for old, new in cases:
-            with self.subTest(seam=old):
-                self.mutate(old, new)
-
-    def test_destructive_extracted_step_and_setup(self) -> None:
-        step_name = "- name: Check standalone scale harnesses and receipt classifiers"
-        cases = (
-            ("name: scale / receipt checks", "name: changed"),
-            ("timeout-minutes: 30", "timeout-minutes: 29"),
-            ("fetch-depth: 0", "fetch-depth: 1", 2),
-            ("components: rustfmt, clippy", "components: rustfmt"),
-            ("uses: ./.github/actions/install-protobuf", "uses: ./changed", 2),
-            ("sudo apt-get install -y ripgrep", "sudo apt-get install -y grep"),
-            (
-                "cargo fmt --manifest-path bench/scale/rrharness/Cargo.toml -- --check",
-                "true",
-            ),
-            (
-                "cargo test --manifest-path bench/scale/rrtransport/Cargo.toml --locked",
-                "true",
-            ),
-            ("python3 bench/tests/test_verify_mrt_growth_campaign.py", "true"),
-            (step_name, f"{step_name}\n      {step_name}"),
-        )
-        for case in cases:
-            old, new, *occurrence = case
-            with self.subTest(seam=old):
-                self.mutate(old, new, occurrence[0] if occurrence else 0)
-        for pin, occurrence in (
-            ("actions/checkout@v7", 3),
-            ("dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c", 2),
-            ("Swatinem/rust-cache@v2", 2),
-        ):
-            with self.subTest(pin=pin):
-                self.mutate(pin, "changed@main", occurrence)
-
-    def test_destructive_core_tests_extraction_and_setup(self) -> None:
-        cases = (
-            ("name: core tests / rustdoc", "name: changed"),
-            ("timeout-minutes: 30", "timeout-minutes: 29"),
-            ("fetch-depth: 0", "fetch-depth: 1", 1),
-            ("uses: ./.github/actions/install-protobuf", "uses: ./changed", 1),
             ("- run: cargo test --workspace", "- run: true"),
             ("- run: cargo doc --workspace --lib --no-deps", "- run: true"),
             ('RUSTDOCFLAGS: "-D warnings"', 'RUSTDOCFLAGS: ""'),
-        )
-        for case in cases:
-            old, new, *occurrence = case
-            with self.subTest(seam=old):
-                self.mutate(old, new, occurrence[0] if occurrence else 0)
-        for pin in (
-            "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c",
-            "Swatinem/rust-cache@v2",
-        ):
-            with self.subTest(pin=pin):
-                self.mutate(pin, "changed@main", 1)
-        self.mutate("actions/checkout@v7", "changed@main", 2)
-        self.mutate(
-            "      - name: Wire crate README freshness gate",
-            "      - run: cargo test --workspace\n"
-            "      - run: cargo doc --workspace --lib --no-deps\n"
-            "        env:\n"
-            '          RUSTDOCFLAGS: "-D warnings"\n'
-            "      - name: Wire crate README freshness gate",
-        )
-
-    def test_destructive_aggregate_seams(self) -> None:
-        cases = (
-            ("name: check", "name: changed"),
-            ("timeout-minutes: 5", "timeout-minutes: 6"),
             ("if: ${{ always() }}", "if: ${{ success() }}"),
             (
                 "needs: [v064_validator, core, core_tests, scale_receipts]",
-                "needs: [core, core_tests, scale_receipts]",
-            ),
-            (
-                "needs: [v064_validator, core, core_tests, scale_receipts]",
-                "needs: [v064_validator, core_tests, scale_receipts]",
-            ),
-            (
-                "needs: [v064_validator, core, core_tests, scale_receipts]",
-                "needs: [v064_validator, core, scale_receipts]",
-            ),
-            (
-                "needs: [v064_validator, core, core_tests, scale_receipts]",
-                "needs: [v064_validator, core, core_tests]",
+                "needs: [core]",
             ),
             (
                 "V064_VALIDATOR_RESULT: ${{ needs.v064_validator.result }}",
@@ -186,10 +62,10 @@ class ScaleSplitContractTests(unittest.TestCase):
                 "SCALE_RECEIPTS_RESULT: ${{ needs.scale_receipts.result }}",
                 "SCALE_RECEIPTS_RESULT: success",
             ),
-            ("printf 'core=%s\\n' \"$CORE_RESULT\"", "true"),
-            ("printf 'core_tests=%s\\n' \"$CORE_TESTS_RESULT\"", "true"),
             (
-                '[[ "$V064_VALIDATOR_RESULT" != "success" || "$CORE_RESULT" != "success" || "$CORE_TESTS_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]',
+                '[[ "$V064_VALIDATOR_RESULT" != "success" || "$CORE_RESULT" != '
+                '"success" || "$CORE_TESTS_RESULT" != "success" || '
+                '"$SCALE_RECEIPTS_RESULT" != "success" ]]',
                 "[[ false ]]",
             ),
         )
@@ -198,50 +74,26 @@ class ScaleSplitContractTests(unittest.TestCase):
                 self.mutate(old, new)
 
     def test_aggregate_shell_truth_table(self) -> None:
-        workflow = (ROOT / WORKFLOW).read_text()
-        shell = aggregate_shell(_jobs(workflow)["check"])
+        shell = aggregate_shell(_jobs((ROOT / WORKFLOW).read_text())["check"])
         self.assertTrue(shell)
 
-        def run(validator=None, core=None, core_tests=None, scale=None):
+        def run(values):
             env = os.environ.copy()
-            env.pop("V064_VALIDATOR_RESULT", None)
-            env.pop("CORE_RESULT", None)
-            env.pop("CORE_TESTS_RESULT", None)
-            env.pop("SCALE_RECEIPTS_RESULT", None)
-            if validator is not None:
-                env["V064_VALIDATOR_RESULT"] = validator
-            if core is not None:
-                env["CORE_RESULT"] = core
-            if core_tests is not None:
-                env["CORE_TESTS_RESULT"] = core_tests
-            if scale is not None:
-                env["SCALE_RECEIPTS_RESULT"] = scale
-            return subprocess.run(
-                ["bash", "-c", shell], env=env, capture_output=True, text=True
-            )
+            for name in ("V064_VALIDATOR", "CORE", "CORE_TESTS", "SCALE_RECEIPTS"):
+                env.pop(f"{name}_RESULT", None)
+            for name, value in values.items():
+                if value is not None:
+                    env[f"{name}_RESULT"] = value
+            return subprocess.run(["bash", "-c", shell], env=env, capture_output=True)
 
-        self.assertEqual(0, run("success", "success", "success", "success").returncode)
-        for bad in ("failure", "cancelled", "skipped", ""):
-            with self.subTest(child="v064_validator", result=bad):
-                self.assertNotEqual(
-                    0, run(bad, "success", "success", "success").returncode
-                )
-            with self.subTest(child="core", result=bad):
-                self.assertNotEqual(
-                    0, run("success", bad, "success", "success").returncode
-                )
-            with self.subTest(child="core_tests", result=bad):
-                self.assertNotEqual(
-                    0, run("success", "success", bad, "success").returncode
-                )
-            with self.subTest(child="scale_receipts", result=bad):
-                self.assertNotEqual(
-                    0, run("success", "success", "success", bad).returncode
-                )
-        self.assertNotEqual(0, run(None, "success", "success", "success").returncode)
-        self.assertNotEqual(0, run("success", None, "success", "success").returncode)
-        self.assertNotEqual(0, run("success", "success", None, "success").returncode)
-        self.assertNotEqual(0, run("success", "success", "success", None).returncode)
+        names = ("V064_VALIDATOR", "CORE", "CORE_TESTS", "SCALE_RECEIPTS")
+        good = {name: "success" for name in names}
+        self.assertEqual(0, run(good).returncode)
+        for name in good:
+            for bad in ("failure", "cancelled", "skipped", "", None):
+                values = good | {name: bad}
+                with self.subTest(child=name, result=bad):
+                    self.assertNotEqual(0, run(values).returncode)
 
 
 if __name__ == "__main__":

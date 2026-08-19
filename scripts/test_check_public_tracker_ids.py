@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
+import io
 import sys
 import tempfile
 import unittest
@@ -66,6 +68,77 @@ class PublicTrackerIdTests(unittest.TestCase):
             with self.subTest(line=line):
                 failures = guard.audit_document("docs/example.md", f"{line}\n")
                 self.assertEqual(failures, [], f"{line!r} must be accepted")
+
+    def test_artifact_home_paths_cover_plain_gzip_and_placeholders(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clean = write_fixture(
+                root,
+                "docs/perf/artifacts/example/clean.txt",
+                "/home/<user>/run $HOME/run ${HOME}/run\n",
+            )
+            linux = write_fixture(root, "docs/perf/artifacts/linux.txt", "/home/alice/run\n")
+            mac = root / "docs/perf/artifacts/example/mac.txt.gz"
+            with gzip.open(mac, "wb") as handle:
+                handle.write(b"/Users/bob/run\n")
+            failures = guard.audit_artifact_home_paths([clean, linux, mac], root)
+            self.assertTrue(any("/home/alice" in failure for failure in failures))
+            self.assertTrue(any("/Users/bob" in failure for failure in failures))
+
+    def test_artifact_scan_is_chunk_bounded_and_boundary_safe(self) -> None:
+        class RecordingStream(io.BytesIO):
+            def read(self, size: int = -1) -> bytes:
+                if not 0 < size <= guard.READ_SIZE:
+                    raise AssertionError(f"unbounded read request: {size}")
+                return super().read(size)
+            def readline(self, _size: int = -1) -> bytes:
+                raise AssertionError("readline must not be used")
+
+        prefix = b"x\n" * (guard.READ_SIZE // 2) + b"x" * (guard.READ_SIZE - 10)
+        payload = prefix + b"/home/alice/" + b"z" * (guard.READ_SIZE * 2)
+        failures = guard._audit_artifact_stream("artifact", RecordingStream(payload))
+        self.assertEqual(len(failures), 1)
+        self.assertIn(f"artifact:{guard.READ_SIZE // 2 + 1}", failures[0])
+        self.assertLess(len(failures[0]), guard.EXCERPT_SIZE + 100)
+        placeholder = b"x" * (guard.READ_SIZE - 3) + b"/home/<user>/run"
+        failures = guard._audit_artifact_stream("artifact", RecordingStream(placeholder))
+        self.assertEqual(failures, [])
+
+    def test_artifact_walk_failures_are_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(guard.TrackerIdGuardError, "no tracked"):
+                guard.audit_artifact_home_paths([], root)
+
+            corrupt = write_fixture(root, "docs/perf/artifacts/corrupt.gz", b"not gzip")
+            with self.assertRaisesRegex(guard.TrackerIdGuardError, "cannot read"):
+                guard.audit_artifact_home_paths([corrupt], root)
+
+            unreadable = write_fixture(root, "docs/perf/artifacts/unreadable", "clean\n")
+            unreadable.chmod(0)
+            try:
+                with self.assertRaisesRegex(guard.TrackerIdGuardError, "cannot read"):
+                    guard.audit_artifact_home_paths([unreadable], root)
+            finally:
+                unreadable.chmod(0o600)
+
+            target = write_fixture(root, "target.txt", "clean\n")
+            symlink = root / "docs/perf/artifacts/example/link.txt"
+            symlink.parent.mkdir(parents=True)
+            symlink.symlink_to(target)
+            with self.assertRaisesRegex(guard.TrackerIdGuardError, "symlink"):
+                guard.audit_artifact_home_paths([symlink], root)
+
+    def test_artifact_git_enumeration_failure_is_closed(self) -> None:
+        original = guard.tracked_files
+        guard.tracked_files = lambda: (_ for _ in ()).throw(
+            guard.TrackerIdGuardError("cannot list tracked files: synthetic failure")
+        )
+        try:
+            with self.assertRaisesRegex(guard.TrackerIdGuardError, "synthetic failure"):
+                guard.audit_artifact_home_paths()
+        finally:
+            guard.tracked_files = original
 
     def test_failure_reports_the_line_number(self) -> None:
         failures = guard.audit_document("docs/example.md", "clean\nLAN-931 here\n")
