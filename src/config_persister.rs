@@ -6,16 +6,15 @@
 
 #![deny(unsafe_code)]
 
-use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, warn};
 
+use crate::config::AcceptedConfigSnapshot;
 #[cfg(test)]
-use crate::config::Config;
-use crate::config::{AcceptedConfigSnapshot, Neighbor};
+use crate::config::{Config, Neighbor};
 use rustbgpd_api::peer_types::ConfigPersistCommitOutcome;
 
 /// File under `runtime_state_dir` recording the config file's mtime as of the
@@ -28,10 +27,7 @@ use rustbgpd_api::peer_types::ConfigPersistCommitOutcome;
 pub const LAST_PERSIST_FILE: &str = "config-last-persist";
 
 /// A mutation to apply to the persisted config.
-#[allow(dead_code)]
 pub enum ConfigMutation {
-    AddNeighbor(Box<Neighbor>),
-    DeleteNeighbor(IpAddr),
     /// Replace the entire config snapshot and persist it to disk.
     ReplaceConfig(Arc<AcceptedConfigSnapshot>),
     /// Replace the entire config snapshot, persist it to disk, then acknowledge
@@ -62,6 +58,11 @@ pub enum ConfigMutation {
         snapshot: Arc<AcceptedConfigSnapshot>,
         adopted: oneshot::Sender<()>,
     },
+    /// Observe the actor-owned snapshot without adding a production mutation
+    /// path. Tests use this to prove that acknowledgements and reload adoption
+    /// leave the intended snapshot retained after the message is processed.
+    #[cfg(test)]
+    InspectCurrent(oneshot::Sender<Arc<AcceptedConfigSnapshot>>),
 }
 
 /// Listens for config mutations and persists them atomically.
@@ -122,6 +123,24 @@ impl ConfigPersister {
         // accepted mutations without rereading external sources.
         while let Some(mutation) = self.rx.recv().await {
             match mutation {
+                ConfigMutation::ReplaceConfig(new_config) => {
+                    self.discard_staged();
+                    info!("replacing persister config snapshot and persisting it");
+                    self.current = new_config;
+                    match self.persist() {
+                        ConfigPersistCommitOutcome::PublishedDurable => {}
+                        ConfigPersistCommitOutcome::NotPublished(error) => error!(
+                            path = %self.config_path.display(),
+                            error = %error,
+                            "config was not published — in-memory state diverges from disk"
+                        ),
+                        ConfigPersistCommitOutcome::PublicationAmbiguous(error) => error!(
+                            path = %self.config_path.display(),
+                            error = %error,
+                            "config is visible but crash durability is unproved"
+                        ),
+                    }
+                }
                 ConfigMutation::ReplaceConfigAck(new_config, ack) => {
                     #[cfg(debug_assertions)]
                     let drop_ack = rustbgpd_api::runtime_config_settlement::settlement_test_control::persister_checkpoint(
@@ -150,11 +169,9 @@ impl ConfigPersister {
                     if !drop_ack {
                         let _ = ack.send(result);
                     }
-                    continue;
                 }
                 ConfigMutation::StageConfigAck(new_config, ack) => {
                     let _ = ack.send(self.stage(new_config).map_err(|e| e.to_string()));
-                    continue;
                 }
                 ConfigMutation::CommitStagedConfig(ack) => {
                     #[cfg(debug_assertions)]
@@ -168,11 +185,9 @@ impl ConfigPersister {
                     if !drop_ack {
                         let _ = ack.send(result);
                     }
-                    continue;
                 }
                 ConfigMutation::DiscardStagedConfig => {
                     self.discard_staged();
-                    continue;
                 }
                 ConfigMutation::AdoptReloadSnapshot { snapshot, adopted } => {
                     self.discard_staged();
@@ -180,28 +195,10 @@ impl ConfigPersister {
                     self.current = snapshot;
                     self.record_current_history();
                     let _ = adopted.send(());
-                    continue;
                 }
-                _ => {}
-            }
-
-            // Any other durable write reuses the same temp path, so a stage
-            // that is still outstanding here can no longer be published.
-            self.discard_staged();
-            let should_persist = self.apply(mutation);
-            if should_persist {
-                match self.persist() {
-                    ConfigPersistCommitOutcome::PublishedDurable => {}
-                    ConfigPersistCommitOutcome::NotPublished(error) => error!(
-                        path = %self.config_path.display(),
-                        error = %error,
-                        "config was not published — in-memory state diverges from disk"
-                    ),
-                    ConfigPersistCommitOutcome::PublicationAmbiguous(error) => error!(
-                        path = %self.config_path.display(),
-                        error = %error,
-                        "config is visible but crash durability is unproved"
-                    ),
+                #[cfg(test)]
+                ConfigMutation::InspectCurrent(reply) => {
+                    let _ = reply.send(Arc::clone(&self.current));
                 }
             }
         }
@@ -267,63 +264,6 @@ impl ConfigPersister {
                 "discarding the staged config write"
             );
             staged.discard();
-        }
-    }
-
-    fn apply(&mut self, mutation: ConfigMutation) -> bool {
-        match mutation {
-            // Handled directly in `run`; a staging mutation never reaches the
-            // single-phase applier.
-            ConfigMutation::StageConfigAck(..)
-            | ConfigMutation::CommitStagedConfig(_)
-            | ConfigMutation::DiscardStagedConfig
-            | ConfigMutation::AdoptReloadSnapshot { .. } => false,
-            ConfigMutation::AddNeighbor(neighbor) => {
-                if self
-                    .current
-                    .neighbors
-                    .iter()
-                    .any(|n| n.address == neighbor.address)
-                {
-                    warn!(
-                        address = %neighbor.address,
-                        "neighbor already exists in persisted config, skipping"
-                    );
-                } else {
-                    info!(address = %neighbor.address, "persisting added neighbor");
-                    let mut config = self.current.config();
-                    config.neighbors.push(*neighbor);
-                    self.current = self
-                        .current
-                        .derive_config(config)
-                        .expect("validated config remains serializable");
-                }
-                true
-            }
-            ConfigMutation::DeleteNeighbor(address) => {
-                let addr_str = address.to_string();
-                let mut config = self.current.config();
-                let before = config.neighbors.len();
-                config.neighbors.retain(|n| n.address != addr_str);
-                if config.neighbors.len() < before {
-                    info!(%address, "persisting deleted neighbor");
-                }
-                self.current = self
-                    .current
-                    .derive_config(config)
-                    .expect("validated config remains serializable");
-                true
-            }
-            ConfigMutation::ReplaceConfig(new_config) => {
-                info!("replacing persister config snapshot and persisting it");
-                self.current = new_config;
-                true
-            }
-            ConfigMutation::ReplaceConfigAck(new_config, _) => {
-                info!("replacing persister config snapshot and persisting it");
-                self.current = new_config;
-                true
-            }
         }
     }
 
@@ -498,127 +438,12 @@ log_format = "json"
         }
     }
 
-    #[tokio::test]
-    async fn add_neighbor_persists_to_disk() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        let config = minimal_config();
-        std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
-
-        let (tx, rx) = mpsc::channel(16);
-        let persister = ConfigPersister::new(rx, path.clone(), config, None);
-        let handle = tokio::spawn(persister.run());
-
-        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
-            "10.0.0.2", 65002,
-        ))))
-        .await
-        .unwrap();
-        drop(tx);
-        handle.await.unwrap();
-
-        let reloaded: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(reloaded.neighbors.len(), 1);
-        assert_eq!(reloaded.neighbors[0].address, "10.0.0.2");
-        assert_eq!(reloaded.neighbors[0].remote_asn, 65002);
-    }
-
-    #[tokio::test]
-    async fn delete_neighbor_persists_to_disk() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        let mut config = minimal_config();
-        config.neighbors.push(test_neighbor("10.0.0.2", 65002));
-        config.neighbors.push(test_neighbor("10.0.0.3", 65003));
-        std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
-
-        let (tx, rx) = mpsc::channel(16);
-        let persister = ConfigPersister::new(rx, path.clone(), config, None);
-        let handle = tokio::spawn(persister.run());
-
-        tx.send(ConfigMutation::DeleteNeighbor("10.0.0.2".parse().unwrap()))
+    async fn inspect_current(tx: &mpsc::Sender<ConfigMutation>) -> Arc<AcceptedConfigSnapshot> {
+        let (reply, observed) = oneshot::channel();
+        tx.send(ConfigMutation::InspectCurrent(reply))
             .await
             .unwrap();
-        drop(tx);
-        handle.await.unwrap();
-
-        let reloaded: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(reloaded.neighbors.len(), 1);
-        assert_eq!(reloaded.neighbors[0].address, "10.0.0.3");
-    }
-
-    #[tokio::test]
-    async fn delete_neighbor_matches_noncanonical_on_disk_spelling() {
-        // The delete path compares the config string against
-        // `IpAddr::to_string()`; a non-canonical on-disk spelling must
-        // still delete the same neighbor.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        let toml_str = r#"
-[global]
-asn = 65001
-router_id = "10.0.0.1"
-listen_port = 179
-
-[global.telemetry]
-prometheus_addr = "0.0.0.0:9179"
-log_format = "json"
-
-[[neighbors]]
-address = "2001:DB8:0:0:0:0:0:1"
-remote_asn = 65002
-"#;
-        std::fs::write(&path, toml_str).unwrap();
-        let config = Config::load_toml_with_diagnostics(
-            &crate::test_support::tier_authorized_uds_test_config(toml_str),
-            "noncanonical spelling test",
-        )
-        .unwrap();
-
-        let (tx, rx) = mpsc::channel(16);
-        let persister = ConfigPersister::new(rx, path.clone(), config, None);
-        let handle = tokio::spawn(persister.run());
-
-        tx.send(ConfigMutation::DeleteNeighbor(
-            "2001:db8::1".parse().unwrap(),
-        ))
-        .await
-        .unwrap();
-        drop(tx);
-        handle.await.unwrap();
-
-        let reloaded: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(
-            reloaded.neighbors.is_empty(),
-            "delete must match the respelled neighbor: {:?}",
-            reloaded.neighbors
-        );
-    }
-
-    #[tokio::test]
-    async fn add_then_delete_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        let config = minimal_config();
-        std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
-
-        let (tx, rx) = mpsc::channel(16);
-        let persister = ConfigPersister::new(rx, path.clone(), config, None);
-        let handle = tokio::spawn(persister.run());
-
-        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
-            "10.0.0.2", 65002,
-        ))))
-        .await
-        .unwrap();
-        tx.send(ConfigMutation::DeleteNeighbor("10.0.0.2".parse().unwrap()))
-            .await
-            .unwrap();
-        drop(tx);
-        handle.await.unwrap();
-
-        let reloaded: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(reloaded.neighbors.is_empty());
+        observed.await.expect("persister retained-snapshot reply")
     }
 
     #[tokio::test]
@@ -633,9 +458,11 @@ remote_asn = 65002
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), config, None);
         let handle = tokio::spawn(persister.run());
-        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
-            "10.0.0.2", 65002,
-        ))))
+        let mut replacement = minimal_config();
+        replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
+        tx.send(ConfigMutation::ReplaceConfig(
+            AcceptedConfigSnapshot::from_config_for_test(replacement),
+        ))
         .await
         .unwrap();
         drop(tx);
@@ -669,9 +496,11 @@ remote_asn = 65002
         let persister =
             ConfigPersister::new(rx, path.clone(), config.clone(), Some(state_dir.clone()));
         let handle = tokio::spawn(persister.run());
-        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
-            "10.0.0.2", 65002,
-        ))))
+        let mut replacement = config.clone();
+        replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
+        tx.send(ConfigMutation::ReplaceConfig(
+            AcceptedConfigSnapshot::from_config_for_test(replacement),
+        ))
         .await
         .unwrap();
         drop(tx);
@@ -716,8 +545,11 @@ remote_asn = 65002
         let config = minimal_config();
         std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
 
-        let mut refreshed = config.clone();
-        refreshed.neighbors.push(test_neighbor("10.0.0.2", 65002));
+        let mut refreshed_config = config.clone();
+        refreshed_config
+            .neighbors
+            .push(test_neighbor("10.0.0.2", 65002));
+        let refreshed = AcceptedConfigSnapshot::from_config_for_test(refreshed_config);
 
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), config, None);
@@ -725,7 +557,7 @@ remote_asn = 65002
 
         let (adopted, adopted_rx) = oneshot::channel();
         tx.send(ConfigMutation::AdoptReloadSnapshot {
-            snapshot: AcceptedConfigSnapshot::from_config_for_test(refreshed),
+            snapshot: Arc::clone(&refreshed),
             adopted,
         })
         .await
@@ -733,9 +565,16 @@ remote_asn = 65002
         adopted_rx
             .await
             .expect("persister adoption acknowledgement");
-        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
-            "10.0.0.3", 65003,
-        ))))
+        let observed = inspect_current(&tx).await;
+        assert!(
+            Arc::ptr_eq(&observed, &refreshed),
+            "the adoption acknowledgement must follow retention of the exact accepted snapshot"
+        );
+        let mut following = observed.config();
+        following.neighbors.push(test_neighbor("10.0.0.3", 65003));
+        tx.send(ConfigMutation::ReplaceConfig(
+            observed.derive_config(following).unwrap(),
+        ))
         .await
         .unwrap();
         drop(tx);
@@ -768,14 +607,17 @@ remote_asn = 65002
         let persister = ConfigPersister::new(rx, path.clone(), config, None);
         let handle = tokio::spawn(persister.run());
         // Two durable writes, so a second header would have somewhere to land.
-        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
-            "10.0.0.2", 65002,
-        ))))
+        let mut first = minimal_config();
+        first.neighbors.push(test_neighbor("10.0.0.2", 65002));
+        tx.send(ConfigMutation::ReplaceConfig(
+            AcceptedConfigSnapshot::from_config_for_test(first.clone()),
+        ))
         .await
         .unwrap();
-        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
-            "10.0.0.3", 65003,
-        ))))
+        first.neighbors.push(test_neighbor("10.0.0.3", 65003));
+        tx.send(ConfigMutation::ReplaceConfig(
+            AcceptedConfigSnapshot::from_config_for_test(first),
+        ))
         .await
         .unwrap();
         drop(tx);
@@ -825,11 +667,13 @@ log_format = "json"
         let config = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
 
         let (tx, rx) = mpsc::channel(16);
-        let persister = ConfigPersister::new(rx, path.clone(), config, None);
+        let persister = ConfigPersister::new(rx, path.clone(), config.clone(), None);
         let handle = tokio::spawn(persister.run());
-        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
-            "10.0.0.2", 65002,
-        ))))
+        let mut replacement = config;
+        replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
+        tx.send(ConfigMutation::ReplaceConfig(
+            AcceptedConfigSnapshot::from_config_for_test(replacement),
+        ))
         .await
         .unwrap();
         drop(tx);
@@ -876,9 +720,11 @@ log_format = "json"
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), config, Some(state_dir.clone()));
         let handle = tokio::spawn(persister.run());
-        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
-            "10.0.0.2", 65002,
-        ))))
+        let mut replacement = minimal_config();
+        replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
+        tx.send(ConfigMutation::ReplaceConfig(
+            AcceptedConfigSnapshot::from_config_for_test(replacement),
+        ))
         .await
         .unwrap();
         drop(tx);
@@ -1036,11 +882,19 @@ log_format = "json"
             ConfigPersistCommitOutcome::PublishedDurable
         );
 
-        // A following mutation must build from the accepted replacement,
-        // proving the warning-only history failure did not roll it back.
-        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
-            "10.0.0.3", 65003,
-        ))))
+        let observed = inspect_current(&tx).await;
+        assert!(
+            Arc::ptr_eq(&observed, &changed),
+            "the durable acknowledgement must retain the exact accepted snapshot despite the history failure"
+        );
+
+        // A following mutation builds from the actor-owned replacement rather
+        // than a snapshot assembled independently by the test.
+        let mut following = observed.config();
+        following.neighbors.push(test_neighbor("10.0.0.3", 65003));
+        tx.send(ConfigMutation::ReplaceConfig(
+            observed.derive_config(following).unwrap(),
+        ))
         .await
         .unwrap();
         drop(tx);
