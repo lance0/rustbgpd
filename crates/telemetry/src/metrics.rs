@@ -4604,6 +4604,9 @@ impl BgpMetrics {
     /// Bulk version of [`Self::record_event_outbox_committed`] for a
     /// committed batch containing `count` events in the same category.
     pub fn record_event_outbox_committed_by(&self, category: &str, count: u64) {
+        if count == 0 {
+            return;
+        }
         self.0
             .event_outbox_committed
             .with_label_values(&[category])
@@ -4823,7 +4826,7 @@ mod jemalloc_stats {
 mod tests {
     use std::net::Ipv4Addr;
 
-    use prometheus::Encoder;
+    use prometheus::{Encoder, core::Collector};
 
     use super::*;
 
@@ -4965,6 +4968,7 @@ mod tests {
     fn event_outbox_committed_single_and_bulk_paths_are_additive() {
         let metrics = BgpMetrics::new();
 
+        metrics.record_event_outbox_committed_by("session", 0);
         metrics.record_event_outbox_committed("route");
         metrics.record_event_outbox_committed_by("route", 4);
         metrics.record_event_outbox_committed_by("evpn", 3);
@@ -4984,6 +4988,18 @@ mod tests {
                 .with_label_values(&["evpn"])
                 .get(),
             3
+        );
+        assert!(
+            !metrics
+                .0
+                .event_outbox_committed
+                .collect()
+                .iter()
+                .any(|family| family
+                    .get_metric()
+                    .iter()
+                    .flat_map(prometheus::proto::Metric::get_label)
+                    .any(|label| label.value() == "session"))
         );
 
         let isolated = BgpMetrics::new();

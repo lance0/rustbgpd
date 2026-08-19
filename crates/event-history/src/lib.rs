@@ -203,6 +203,17 @@ impl Category {
         Self::Dataplane,
     ];
 
+    const fn index(self) -> usize {
+        match self {
+            Self::Route => 0,
+            Self::Evpn => 1,
+            Self::Session => 2,
+            Self::Policy => 3,
+            Self::Bfd => 4,
+            Self::Dataplane => 5,
+        }
+    }
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -467,17 +478,10 @@ fn record_append_metrics(
     if let Some(metrics) = metrics {
         let mut committed_by_category = [0_u64; Category::ALL.len()];
         for env in envelopes {
-            let index = match env.category {
-                Category::Route => 0,
-                Category::Evpn => 1,
-                Category::Session => 2,
-                Category::Policy => 3,
-                Category::Bfd => 4,
-                Category::Dataplane => 5,
-            };
-            committed_by_category[index] += 1;
+            committed_by_category[env.category.index()] += 1;
         }
-        for (category, count) in Category::ALL.into_iter().zip(committed_by_category) {
+        for category in Category::ALL {
+            let count = committed_by_category[category.index()];
             if count > 0 {
                 metrics.record_event_outbox_committed_by(category.as_str(), count);
             }
