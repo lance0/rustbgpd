@@ -19,7 +19,7 @@ use super::parse::{
 };
 use super::schema::{
     BGP_PORT, DEFAULT_CONNECT_RETRY_SECS, DEFAULT_DYNAMIC_NEIGHBOR_LIMIT, DEFAULT_HOLD_TIME,
-    OrrVantage, parse_orr_vantage,
+    OrrVantage, parse_orr_vantage, validate_orr_vantage_address,
 };
 use super::{
     AddPathConfig, BgpRoleConfig, Config, ConfigError, Neighbor, NextHopOwnershipConfig,
@@ -864,15 +864,19 @@ impl Config {
             .as_deref()
             .or_else(|| group.and_then(|g| g.orr_vantage.as_deref()))
             .map(|raw| {
-                parse_orr_vantage(raw).map(|vantage| match vantage {
+                let vantage =
+                    parse_orr_vantage(raw).map_err(|reason| ConfigError::InvalidOrrVantage {
+                        reason: format!("neighbor {}: {reason}", neighbor.address),
+                    })?;
+                let vantage = match vantage {
                     OrrVantage::PeerAddress => peer_addr,
                     OrrVantage::Address(addr) => addr,
-                })
+                };
+                validate_orr_vantage_address(vantage, &self.global.router_id, &neighbor.address)
+                    .map_err(|reason| ConfigError::InvalidOrrVantage { reason })?;
+                Ok::<IpAddr, ConfigError>(vantage)
             })
-            .transpose()
-            .map_err(|reason| ConfigError::InvalidOrrVantage {
-                reason: format!("neighbor {}: {reason}", neighbor.address),
-            })?;
+            .transpose()?;
         transport.remove_private_as = Self::resolved_remove_private_as(neighbor, group);
         // RFC 4456: thread the local cluster-id just like
         // `PeerManager::build_transport_config`. Without it a runtime-added

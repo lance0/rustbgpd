@@ -1653,6 +1653,30 @@ pub(crate) fn parse_orr_vantage(raw: &str) -> Result<OrrVantage, String> {
     }
 }
 
+/// Validate a resolved RFC 9107 ORR vantage address.
+///
+/// Both literal addresses and the per-peer selector pass through this helper
+/// so they cannot diverge on degenerate topology locations.
+pub(crate) fn validate_orr_vantage_address(
+    vantage: IpAddr,
+    local_router_id: &str,
+    subject: &str,
+) -> Result<(), String> {
+    if local_router_id.parse::<IpAddr>().ok() == Some(vantage) {
+        return Err(format!(
+            "orr_vantage {vantage} on neighbor {subject} must not equal the \
+             reflector's local router_id {local_router_id}"
+        ));
+    }
+    if vantage.is_unspecified() || vantage.is_loopback() {
+        return Err(format!(
+            "orr_vantage {vantage} on neighbor {subject} must be a real topology \
+             address, not an unspecified or loopback address"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BgpRoleConfig {

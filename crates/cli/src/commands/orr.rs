@@ -10,6 +10,8 @@ use crate::proto::{
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
 
+const NO_ACTIVE_VANTAGES: &str = "No active ORR vantages (none registered by live peers)";
+
 pub async fn status(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
     let resp = client
@@ -37,7 +39,7 @@ fn print_orr_status(resp: &ListOrrStatusResponse, json: bool) -> Result<(), CliE
     if json {
         output::print_json_pretty(&JsonOrrStatus(resp))?;
     } else if resp.vantages.is_empty() {
-        println!("No ORR vantages configured");
+        println!("{NO_ACTIVE_VANTAGES}");
         println!(
             "Topology: {} nodes, {} links",
             resp.topology_nodes, resp.topology_links
@@ -218,6 +220,10 @@ mod tests {
         )
         .unwrap();
         print_orr_status(&ListOrrStatusResponse::default(), false).unwrap();
+        assert_eq!(
+            NO_ACTIVE_VANTAGES,
+            "No active ORR vantages (none registered by live peers)"
+        );
     }
 
     // The ORR JSON output is produced by hand-rolled `Serialize` impls

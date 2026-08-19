@@ -996,6 +996,25 @@ fn orr_vantage_peer_address_resolves_for_a_static_neighbor() {
 }
 
 #[test]
+fn orr_vantage_peer_address_rejects_static_peer_equal_to_local_router_id() {
+    let toml = orr_toml(
+        "",
+        "route_reflector_client = true\norr_vantage = \"peer_address\"",
+    )
+    .replace("address = \"10.0.0.2\"", "address = \"10.0.0.1\"");
+    let config = parse(&toml).unwrap();
+    let Err(err) = config.resolved_neighbors() else {
+        panic!("a peer-derived vantage equal to the reflector router_id must fail");
+    };
+    assert!(
+        matches!(err, ConfigError::InvalidOrrVantage { .. })
+            && err.to_string().contains("10.0.0.1")
+            && err.to_string().contains("router_id"),
+        "unexpected diagnostic: {err}"
+    );
+}
+
+#[test]
 fn orr_vantage_peer_address_alias_and_bad_values_are_classified() {
     // The kebab alias loads and resolves identically.
     let toml = orr_toml(

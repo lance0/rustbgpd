@@ -100,6 +100,39 @@ fn valid_dynamic_peer_modes_resolve_cluster_and_transport() {
 }
 
 #[test]
+fn dynamic_peer_address_orr_rejects_degenerate_derived_vantages() {
+    let config = parse(&dynamic_modes_toml(
+        "route_reflector_client = true\norr_vantage = \"peer_address\"",
+        65001,
+    ))
+    .unwrap();
+    let group = &config.peer_groups["modes"];
+    for (peer, expected) in [
+        ("10.0.0.1", "router_id"),
+        ("0.0.0.0", "unspecified or loopback"),
+        ("127.0.0.1", "unspecified or loopback"),
+    ] {
+        let err = config
+            .resolve_dynamic_neighbor(
+                peer.parse().unwrap(),
+                65001,
+                "dynamic",
+                group,
+                "modes",
+                false,
+            )
+            .err()
+            .expect("a degenerate derived vantage must fail");
+        assert!(
+            matches!(err, ConfigError::InvalidOrrVantage { .. })
+                && err.to_string().contains(peer)
+                && err.to_string().contains(expected),
+            "unexpected diagnostic for {peer}: {err}"
+        );
+    }
+}
+
+#[test]
 fn dynamic_neighbor_parses() {
     let toml = r#"
 [global]
