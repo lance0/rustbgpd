@@ -3620,6 +3620,7 @@ async fn run<T>(
                 let _ = aspa_rib_tx
                     .send(RibUpdate::AspaTableUpdate {
                         table: update.table,
+                        changed_customer_asns: update.changed_customer_asns,
                     })
                     .await;
                 trigger_import_validation_refresh(

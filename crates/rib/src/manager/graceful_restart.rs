@@ -385,7 +385,20 @@ impl RibManager {
         );
     }
 
-    pub(super) fn handle_aspa_cache_update(&mut self, table: Arc<rustbgpd_rpki::AspaTable>) {
+    pub(super) fn handle_aspa_cache_update(
+        &mut self,
+        table: Arc<rustbgpd_rpki::AspaTable>,
+        delta: Option<rustc_hash::FxHashSet<u32>>,
+    ) {
+        let started = std::time::Instant::now();
+        // Delta filtering requires a previously distributed state baseline.
+        // The first update must repair every route, even if tagged incremental.
+        let delta = if self.aspa_table.is_some() {
+            delta
+        } else {
+            None
+        };
+        let mode = if delta.is_some() { "delta" } else { "full" };
         self.aspa_table = Some(table);
         let Some(table) = self.aspa_table.as_ref() else {
             return;
@@ -395,11 +408,23 @@ impl RibManager {
 
         let mut affected = HashSet::new();
         let mut routes_scanned = 0_u64;
+        let mut routes_revalidated = 0_u64;
         let mut changed_routes = 0_u64;
         let mut invalid_hops = AspaInvalidHopSummary::default();
         for rib in self.ribs.values_mut() {
             for route in rib.iter_mut() {
                 routes_scanned += 1;
+                // A table update can affect a verdict only when its customer
+                // ASN occurs in the route's AS_SEQUENCE or AS_SET. We still
+                // scan every route; the delta avoids only detailed validation.
+                if delta.as_ref().is_some_and(|changed| {
+                    route
+                        .as_path()
+                        .is_none_or(|path| path.asns().all(|asn| !changed.contains(&asn)))
+                }) {
+                    continue;
+                }
+                routes_revalidated += 1;
                 let result = validate_route_aspa_detailed(route, table);
                 if let Some(hop) = result.invalid_hop {
                     invalid_hops.observe(hop);
@@ -418,12 +443,15 @@ impl RibManager {
         }
         info!(
             records,
+            mode,
             routes_scanned,
+            routes_revalidated,
             changed_routes,
             affected_prefixes = affected.len(),
             invalid_hop_routes = invalid_hops.routes,
             suppressed_routes = invalid_hops.suppressed_routes,
             invalid_hops = %invalid_hops.render(),
+            elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "ASPA cache update re-validation complete"
         );
     }

@@ -2232,6 +2232,9 @@ pub enum RibUpdate {
     AspaTableUpdate {
         /// The new ASPA table snapshot.
         table: Arc<AspaTable>,
+        /// Customer ASNs changed by an incremental RTR update. `None` forces
+        /// a full revalidation, including the first table, full sync, and server loss.
+        changed_customer_asns: Option<rustc_hash::FxHashSet<u32>>,
     },
     /// Inject a locally-originated `FlowSpec` route.
     InjectFlowSpec {

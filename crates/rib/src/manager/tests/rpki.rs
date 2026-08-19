@@ -43,6 +43,10 @@ fn aspa_invalid_hop_summary_keeps_smallest_pairs_and_exact_suppression() {
 
 /// Red proof: deleting/splitting the event or skipping unchanged Invalid breaks exact fields.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "single-subscriber event fixture asserts the complete bounded log contract"
+)]
 fn aspa_cache_update_emits_one_bounded_completion_event() {
     use std::collections::BTreeMap;
     use std::sync::{Arc as StdArc, Mutex};
@@ -56,6 +60,9 @@ fn aspa_cache_update_emits_one_bounded_completion_event() {
     struct Fields(BTreeMap<String, String>);
     impl Visit for Fields {
         fn record_u64(&mut self, field: &Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+        fn record_str(&mut self, field: &Field, value: &str) {
             self.0.insert(field.name().to_string(), value.to_string());
         }
         fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
@@ -104,6 +111,7 @@ fn aspa_cache_update_emits_one_bounded_completion_event() {
     manager.ribs.insert(peer, rib);
 
     let captured = StdArc::new(Mutex::new(Vec::new()));
+    manager.aspa_table = Some(Arc::new(AspaTable::new(vec![])));
     let table = Arc::new(AspaTable::new(vec![
         AspaRecord {
             customer_asn: 65003,
@@ -127,11 +135,11 @@ fn aspa_cache_update_emits_one_bounded_completion_event() {
         // so the measured call cannot lose that race afterwards.
         let (_warm_tx, warm_rx) = mpsc::channel(1);
         let mut warm = RibManager::new(warm_rx, dummy_query_rx(), None, None, BgpMetrics::new());
-        warm.handle_aspa_cache_update(Arc::clone(&table));
+        warm.handle_aspa_cache_update(Arc::clone(&table), None);
         tracing::callsite::rebuild_interest_cache();
         captured.lock().unwrap().clear();
 
-        manager.handle_aspa_cache_update(table);
+        manager.handle_aspa_cache_update(table, Some(rustc_hash::FxHashSet::from_iter([65003])));
     });
 
     // Count *the* completion event, not this thread's global event volume.
@@ -149,18 +157,319 @@ fn aspa_cache_update_emits_one_bounded_completion_event() {
     let fields = &events[0].0;
     for (name, value) in [
         ("records", "2"),
+        ("mode", "delta"),
         ("routes_scanned", "2"),
+        ("routes_revalidated", "1"),
         ("changed_routes", "1"),
         ("affected_prefixes", "1"),
-        ("invalid_hop_routes", "2"),
+        ("invalid_hop_routes", "1"),
         ("suppressed_routes", "0"),
     ] {
         assert_eq!(fields.get(name).map(String::as_str), Some(value), "{name}");
     }
     assert_eq!(
         fields.get("invalid_hops").map(String::as_str),
-        Some("65003>65002:1, 65005>65004:1")
+        Some("65003>65002:1")
     );
+    assert!(fields.contains_key("elapsed_ms"));
+}
+
+#[test]
+fn aspa_delta_revalidates_only_intersecting_paths_across_segments() {
+    use rustbgpd_rpki::AspaTable;
+    use rustbgpd_wire::AspaValidation;
+
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    let paths = [
+        vec![65010, 65100],
+        vec![65101, 65010, 65102],
+        vec![65103, 65010],
+        vec![65200, 65201],
+    ];
+    let mut rib = crate::adj_rib_in::AdjRibIn::new(peer);
+    for (octet, path) in (1_u8..).zip(paths) {
+        let mut route = make_route_with_as_path(
+            Ipv4Prefix::new(Ipv4Addr::new(10, 0, octet, 0), 24),
+            Ipv4Addr::new(192, 0, 2, 1),
+            path,
+        );
+        route.aspa_state = AspaValidation::Valid;
+        rib.insert(route);
+    }
+    let mut as_set = make_route_with_as_path(
+        Ipv4Prefix::new(Ipv4Addr::new(10, 0, 5, 0), 24),
+        Ipv4Addr::new(192, 0, 2, 1),
+        vec![],
+    );
+    as_set.attributes = Arc::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSet(vec![65010, 65300])],
+        }),
+    ]);
+    as_set.aspa_state = AspaValidation::Valid;
+    rib.insert(as_set);
+    manager.ribs.insert(peer, rib);
+    manager.aspa_table = Some(Arc::new(AspaTable::new(vec![])));
+
+    manager.handle_aspa_cache_update(
+        Arc::new(AspaTable::new(vec![])),
+        Some(rustc_hash::FxHashSet::from_iter([65010])),
+    );
+
+    let states: Vec<_> = manager.ribs[&peer]
+        .iter()
+        .map(|route| route.aspa_state)
+        .collect();
+    assert_eq!(
+        states
+            .iter()
+            .filter(|state| **state == AspaValidation::Unknown)
+            .count(),
+        3
+    );
+    assert_eq!(
+        states
+            .iter()
+            .filter(|state| **state == AspaValidation::Invalid)
+            .count(),
+        1
+    );
+    assert_eq!(
+        states
+            .iter()
+            .filter(|state| **state == AspaValidation::Valid)
+            .count(),
+        1
+    );
+    assert_eq!(
+        manager.ribs[&peer]
+            .iter()
+            .find(
+                |route| route.prefix == Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 4, 0), 24))
+            )
+            .unwrap()
+            .aspa_state,
+        AspaValidation::Valid,
+        "disjoint poison proves the route was scanned but not revalidated"
+    );
+}
+
+#[test]
+fn aspa_first_delta_forces_full_rescan() {
+    use rustbgpd_rpki::AspaTable;
+    use rustbgpd_wire::AspaValidation;
+
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+    let mut route = make_route_with_as_path(
+        Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24),
+        Ipv4Addr::new(192, 0, 2, 2),
+        vec![65100, 65101],
+    );
+    route.aspa_state = AspaValidation::Valid;
+    let mut rib = crate::adj_rib_in::AdjRibIn::new(peer);
+    rib.insert(route);
+    manager.ribs.insert(peer, rib);
+
+    manager.handle_aspa_cache_update(
+        Arc::new(AspaTable::new(vec![])),
+        Some(rustc_hash::FxHashSet::from_iter([65010])),
+    );
+    assert_eq!(
+        manager.ribs[&peer].iter().next().unwrap().aspa_state,
+        AspaValidation::Unknown
+    );
+}
+
+#[test]
+fn aspa_none_forces_full_rescan() {
+    use rustbgpd_rpki::AspaTable;
+    use rustbgpd_wire::AspaValidation;
+
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 3));
+    let mut route = make_route_with_as_path(
+        Ipv4Prefix::new(Ipv4Addr::new(10, 2, 0, 0), 24),
+        Ipv4Addr::new(192, 0, 2, 3),
+        vec![65100, 65101],
+    );
+    route.aspa_state = AspaValidation::Valid;
+    let mut rib = crate::adj_rib_in::AdjRibIn::new(peer);
+    rib.insert(route);
+    manager.ribs.insert(peer, rib);
+    manager.aspa_table = Some(Arc::new(AspaTable::new(vec![])));
+
+    manager.handle_aspa_cache_update(Arc::new(AspaTable::new(vec![])), None);
+    assert_eq!(
+        manager.ribs[&peer].iter().next().unwrap().aspa_state,
+        AspaValidation::Unknown
+    );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one differential fixture keeps the 40-step state-machine oracle auditable"
+)]
+fn aspa_delta_matches_full_rescan_on_deterministic_sequences() {
+    use rustbgpd_rpki::{AspaRecord, AspaTable};
+
+    fn fixture_manager() -> RibManager {
+        let (_tx, rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        for peer_octet in [10_u8, 11] {
+            let peer = Ipv4Addr::new(192, 0, 2, peer_octet);
+            let mut routes = vec![
+                make_route_with_as_path(
+                    Ipv4Prefix::new(Ipv4Addr::new(10, 3, 1, 0), 24),
+                    peer,
+                    vec![65001, 65002],
+                ),
+                make_route_with_as_path(
+                    Ipv4Prefix::new(Ipv4Addr::new(10, 3, 2, 0), 24),
+                    peer,
+                    vec![65003, 65004, 65004],
+                ),
+                make_route_with_as_path(
+                    Ipv4Prefix::new(Ipv4Addr::new(10, 3, 3, 0), 24),
+                    peer,
+                    vec![],
+                ),
+                make_route_with_as_path(
+                    Ipv4Prefix::new(Ipv4Addr::new(10, 3, 4, 0), 24),
+                    peer,
+                    vec![],
+                ),
+                make_route_with_as_path(
+                    Ipv4Prefix::new(Ipv4Addr::new(10, 3, 5, 0), 24),
+                    peer,
+                    vec![65006, 65007],
+                ),
+                make_route_with_as_path(
+                    Ipv4Prefix::new(Ipv4Addr::new(10, 3, 6, 0), 24),
+                    peer,
+                    vec![65008, 65009, 65010],
+                ),
+            ];
+            routes[2].attributes = Arc::new(vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![
+                        AsPathSegment::AsSequence(vec![65005]),
+                        AsPathSegment::AsSet(vec![65006, 65007]),
+                    ],
+                }),
+            ]);
+            routes[3].attributes = Arc::new(vec![PathAttribute::Origin(Origin::Igp)]);
+            routes[4].origin_type = crate::route::RouteOrigin::Ibgp;
+            manager.handle_update(RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer: IpAddr::V4(peer),
+                announced: routes,
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+            });
+        }
+        manager
+    }
+
+    fn snapshot(manager: &RibManager) -> (Vec<String>, Vec<String>) {
+        let mut adj: Vec<_> = manager
+            .ribs
+            .iter()
+            .flat_map(|(peer, rib)| {
+                rib.iter().map(move |route| {
+                    format!(
+                        "{peer}|{}|{}|{:?}",
+                        route.prefix, route.path_id, route.aspa_state
+                    )
+                })
+            })
+            .collect();
+        let mut loc: Vec<_> = manager
+            .loc_rib
+            .iter()
+            .map(|route| {
+                format!(
+                    "{}|{}|{}|{:?}",
+                    route.prefix, route.peer, route.path_id, route.aspa_state
+                )
+            })
+            .collect();
+        adj.sort_unstable();
+        loc.sort_unstable();
+        (adj, loc)
+    }
+
+    fn table(records: &BTreeMap<u32, Vec<u32>>) -> Arc<AspaTable> {
+        Arc::new(AspaTable::new(
+            records
+                .iter()
+                .map(|(customer_asn, provider_asns)| AspaRecord {
+                    customer_asn: *customer_asn,
+                    provider_asns: provider_asns.clone(),
+                })
+                .collect(),
+        ))
+    }
+
+    let mut delta_manager = fixture_manager();
+    let mut full_manager = fixture_manager();
+    let mut records = BTreeMap::new();
+    records.insert(65002, vec![65001]);
+    let mut current = table(&records);
+    delta_manager.handle_aspa_cache_update(Arc::clone(&current), None);
+    full_manager.handle_aspa_cache_update(Arc::clone(&current), None);
+    assert_eq!(snapshot(&delta_manager), snapshot(&full_manager));
+
+    let mut distributed = 0;
+    let mut suppressed = 0;
+    for step in 0_u32..40 {
+        let customer = 65001 + (step % 10);
+        match step % 5 {
+            0 => {
+                records.insert(customer, vec![66000 + (step % 3)]);
+            }
+            1 => {
+                records.insert(customer, vec![66000, 66001]);
+            }
+            2 => {
+                records.remove(&customer);
+            }
+            3 => {
+                records.insert(customer, vec![66001, 66002]);
+            }
+            _ => {}
+        }
+        let next = table(&records);
+        if *next == *current {
+            suppressed += 1;
+            continue;
+        }
+        delta_manager.handle_aspa_cache_update(
+            Arc::clone(&next),
+            Some(rustc_hash::FxHashSet::from_iter([customer])),
+        );
+        full_manager.handle_aspa_cache_update(Arc::clone(&next), None);
+        current = next;
+        distributed += 1;
+        assert_eq!(
+            snapshot(&delta_manager),
+            snapshot(&full_manager),
+            "diverged at deterministic step {step}"
+        );
+    }
+    assert_eq!(distributed + suppressed, 40);
+    assert!(distributed > 0);
+    assert!(suppressed >= 4);
 }
 
 #[test]
@@ -596,9 +905,12 @@ async fn ibgp_aspa_stays_unknown_on_insert_and_cache_revalidation() {
         customer_asn: 65003,
         provider_asns: vec![65002],
     }]));
-    tx.send(RibUpdate::AspaTableUpdate { table: valid_table })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::AspaTableUpdate {
+        table: valid_table,
+        changed_customer_asns: None,
+    })
+    .await
+    .unwrap();
 
     let mut route = make_route_with_as_path(
         Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
@@ -646,6 +958,7 @@ async fn ibgp_aspa_stays_unknown_on_insert_and_cache_revalidation() {
     }]));
     tx.send(RibUpdate::AspaTableUpdate {
         table: invalid_table,
+        changed_customer_asns: None,
     })
     .await
     .unwrap();
@@ -706,7 +1019,12 @@ async fn aspa_cache_update_revalidates_with_stored_downstream_context() {
             provider_asns: vec![65001],
         },
     ]));
-    tx.send(RibUpdate::AspaTableUpdate { table }).await.unwrap();
+    tx.send(RibUpdate::AspaTableUpdate {
+        table,
+        changed_customer_asns: None,
+    })
+    .await
+    .unwrap();
 
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryReceivedRoutes {

@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use rustc_hash::FxHashSet;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
@@ -39,6 +40,9 @@ pub struct RpkiTableUpdate {
 pub struct AspaTableUpdate {
     /// The new merged ASPA table snapshot.
     pub table: Arc<AspaTable>,
+    /// Customer ASNs announced or withdrawn by an RTR incremental update.
+    /// `None` requires a full revalidation (full snapshot or server loss).
+    pub changed_customer_asns: Option<FxHashSet<u32>>,
 }
 
 /// Merges VRP and ASPA data from multiple RTR cache servers.
@@ -99,7 +103,7 @@ impl VrpManager {
     }
 
     async fn handle_update(&mut self, update: VrpUpdate) {
-        let vrp_delta = match update {
+        let (vrp_delta, changed_customer_asns) = match update {
             VrpUpdate::FullTable {
                 server,
                 entries,
@@ -124,7 +128,7 @@ impl VrpManager {
                 );
                 // A full snapshot replaces the server's whole set — there is
                 // no bounded changed-entry list, so downstream must rescan.
-                None
+                (None, None)
             }
             VrpUpdate::IncrementalUpdate {
                 server,
@@ -164,13 +168,18 @@ impl VrpManager {
                 // customer ASN; an announce replaces the customer's entire
                 // provider set.
                 let aspa_table = self.server_aspa_tables.entry(server).or_default();
+                let changed_customer_asns = aspa_announced
+                    .iter()
+                    .chain(&aspa_withdrawn)
+                    .map(|record| record.customer_asn)
+                    .collect();
                 for w in &aspa_withdrawn {
                     aspa_table.remove(&w.customer_asn);
                 }
                 for a in aspa_announced {
                     aspa_table.insert(a.customer_asn, a.provider_asns);
                 }
-                Some(delta)
+                (Some(delta), Some(changed_customer_asns))
             }
             VrpUpdate::ServerDown { server } => {
                 info!(%server, "cache server down — removing entries");
@@ -179,12 +188,13 @@ impl VrpManager {
                 // ponytail: the removed set IS the exact delta, but server
                 // loss is rare and multi-cache overlap makes it usually a
                 // no-op distribution; wire it through if it ever shows up.
-                None
+                (None, None)
             }
         };
 
         self.rebuild_and_distribute_vrp(vrp_delta).await;
-        self.rebuild_and_distribute_aspa().await;
+        self.rebuild_and_distribute_aspa(changed_customer_asns)
+            .await;
     }
 
     // Full rebuild (clone + sort of every entry) on every update, even a
@@ -226,7 +236,7 @@ impl VrpManager {
             .await;
     }
 
-    async fn rebuild_and_distribute_aspa(&mut self) {
+    async fn rebuild_and_distribute_aspa(&mut self, changed_customer_asns: Option<FxHashSet<u32>>) {
         let Some(ref aspa_tx) = self.aspa_rib_tx else {
             return;
         };
@@ -251,7 +261,12 @@ impl VrpManager {
 
         info!(records = new_table.len(), "ASPA table updated");
         self.current_aspa_table = Arc::clone(&new_table);
-        let _ = aspa_tx.send(AspaTableUpdate { table: new_table }).await;
+        let _ = aspa_tx
+            .send(AspaTableUpdate {
+                table: new_table,
+                changed_customer_asns,
+            })
+            .await;
     }
 
     /// Number of connected cache servers with data.
@@ -471,6 +486,54 @@ mod tests {
 
         let update = aspa_rx.try_recv().unwrap();
         assert_eq!(update.table.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn aspa_update_change_scope_follows_update_kind() {
+        let (_vrp_tx, vrp_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (aspa_tx, mut aspa_rx) = mpsc::channel(16);
+        let mut mgr = VrpManager::new(vrp_rx, rib_tx).with_aspa_tx(aspa_tx);
+
+        mgr.handle_update(VrpUpdate::FullTable {
+            server: server1(),
+            entries: vec![],
+            aspa_records: vec![
+                AspaRecord {
+                    customer_asn: 65001,
+                    provider_asns: vec![65101],
+                },
+                AspaRecord {
+                    customer_asn: 65002,
+                    provider_asns: vec![65102],
+                },
+            ],
+        })
+        .await;
+        assert!(aspa_rx.try_recv().unwrap().changed_customer_asns.is_none());
+
+        mgr.handle_update(VrpUpdate::IncrementalUpdate {
+            server: server1(),
+            announced: vec![],
+            withdrawn: vec![],
+            aspa_announced: vec![AspaRecord {
+                customer_asn: 65001,
+                provider_asns: vec![65111],
+            }],
+            aspa_withdrawn: vec![AspaRecord {
+                customer_asn: 65002,
+                provider_asns: vec![],
+            }],
+        })
+        .await;
+        assert_eq!(
+            aspa_rx.try_recv().unwrap().changed_customer_asns.unwrap(),
+            FxHashSet::from_iter([65001, 65002])
+        );
+
+        mgr.handle_update(VrpUpdate::ServerDown { server: server1() })
+            .await;
+        assert!(aspa_rx.try_recv().unwrap().changed_customer_asns.is_none());
     }
 
     #[tokio::test]
