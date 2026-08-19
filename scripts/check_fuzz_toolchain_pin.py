@@ -55,7 +55,7 @@ TOOLCHAIN_MARKERS = (
 # the sanctioned workflow form; `cargo "+$var"` is a pin-derived selector.
 VIOLATION_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (
-        re.compile(r"dtolnay/rust-toolchain@(?!v1(?:\b|$))\S+"),
+        re.compile(r"dtolnay/rust-toolchain@(?!v1(?:\s|$))\S+"),
         "selects a toolchain in the action ref; use "
         "dtolnay/rust-toolchain@v1 and pass the pinned value as its "
         "toolchain input",
