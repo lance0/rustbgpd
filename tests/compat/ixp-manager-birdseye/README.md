@@ -44,9 +44,10 @@ diff -u tests/compat/ixp-manager-birdseye/fixtures/birdseye-contract.json \
 
 `contract.json` deliberately keeps the unsupported runtime matrix executable.
 Complete rejected-route reasons, less-specific lookup, and atomic all-candidate
-snapshots remain blockers. Promoting any of them, weakening the explicit alias,
-enabling debug mode, skipping a case, or drifting a pin or response makes the
-gate fail.
+snapshots remain blockers. Protocol aliases are immutable after sidecar startup,
+so changing one requires a sidecar restart. Promoting any blocker, weakening the
+explicit alias, enabling debug mode, skipping a case, or drifting a pin or
+response makes the gate fail.
 
 ## Provenance and licensing
 
