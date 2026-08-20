@@ -3766,7 +3766,7 @@ mod tests {
 
     use super::*;
     use crate::config_persister::ConfigPersister;
-    use crate::peer_manager::PeerManager;
+    use crate::peer_manager::{PeerManager, TransactionConfigScope};
     use crate::test_support::{
         assert_tier_authorized_test_config, tier_authorized_uds_test_config,
     };
@@ -3977,14 +3977,13 @@ local_vtep_ip = "10.0.0.1"
 "#;
 
     #[tokio::test]
-    async fn sighup_runtime_baseline_reads_peer_manager_snapshot_after_stage() {
+    async fn sighup_runtime_baseline_reads_peer_manager_snapshot_after_typed_stage() {
         let initial = load_config_from_toml("runtime-baseline-initial", baseline_toml());
         let mut candidate = initial.clone();
         candidate.neighbors[0].hold_time = Some(45);
-        let candidate_toml = toml::to_string_pretty(&candidate).unwrap();
 
         let (tx, rx) = mpsc::channel(16);
-        let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+        let (internal_tx, internal_rx) = mpsc::unbounded_channel();
         let (rib_tx, _rib_rx) = mpsc::channel(64);
         let manager = PeerManager::new_with_config(
             rx,
@@ -4002,13 +4001,15 @@ local_vtep_ip = "10.0.0.1"
         let handle = tokio::spawn(manager.run());
 
         let (stage_tx, stage_rx) = oneshot::channel();
-        tx.send(PeerManagerCommand::StageConfigSnapshot {
-            candidate_toml,
-            reply: stage_tx,
-        })
-        .await
-        .unwrap();
-        stage_rx.await.unwrap().unwrap();
+        internal_tx
+            .send(InternalCommand::StageTransactionConfig {
+                candidate: Box::new(candidate),
+                scope: TransactionConfigScope::Full,
+                reply: stage_tx,
+            })
+            .unwrap();
+        let rollback_token = stage_rx.await.unwrap().unwrap();
+        drop(rollback_token);
 
         let snapshot = runtime_config_snapshot(&tx).await.unwrap();
         assert_eq!(snapshot.neighbors[0].hold_time, Some(45));
