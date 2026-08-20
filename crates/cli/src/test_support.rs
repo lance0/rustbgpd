@@ -840,6 +840,7 @@ impl rustbgpd_api::proto::global_service_server::GlobalService for MockGlobalSer
             listen_port: 179,
             tcp_ao_support: server_proto::TcpAoSupport::Supported as i32,
             tcp_ao_detail: String::new(),
+            policy_generation_loaded_timestamp_seconds: 1_700_000_000,
         }))
     }
 }

@@ -3943,6 +3943,15 @@ impl BgpMetrics {
             .set(unix_now_seconds());
     }
 
+    /// Read the last successfully accepted full policy generation timestamp.
+    ///
+    /// Returns zero until the first generation is accepted. Rejected loads do
+    /// not advance the underlying gauge.
+    #[must_use]
+    pub fn policy_generation_loaded_timestamp_seconds(&self) -> i64 {
+        self.0.policy_generation_loaded_timestamp.get()
+    }
+
     /// Record a successful load/swap of the named external policy
     /// dataset: stamp the current unix time. The label is bounded by
     /// the config's declared dataset names.
@@ -5593,8 +5602,10 @@ mod tests {
     #[test]
     fn policy_freshness_timestamps_stamp_and_reap() {
         let m = BgpMetrics::new();
+        assert_eq!(m.policy_generation_loaded_timestamp_seconds(), 0);
         m.record_policy_generation_loaded();
-        assert!(m.0.policy_generation_loaded_timestamp.get() > 0);
+        let generation_loaded_at = m.policy_generation_loaded_timestamp_seconds();
+        assert!(generation_loaded_at > 0);
 
         m.record_policy_dataset_loaded("customers");
         m.record_policy_dataset_refresh_error("customers");
@@ -5615,7 +5626,10 @@ mod tests {
         let text = gather_text(&m);
         assert!(!text.contains(r#"dataset="customers""#));
         // The unlabeled generation timestamp is untouched by dataset reaps.
-        assert!(m.0.policy_generation_loaded_timestamp.get() > 0);
+        assert_eq!(
+            m.policy_generation_loaded_timestamp_seconds(),
+            generation_loaded_at
+        );
     }
 
     /// Reaping a peer must invalidate the thread-local memoized counter

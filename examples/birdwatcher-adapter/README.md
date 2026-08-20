@@ -86,6 +86,9 @@ listener beyond loopback only with the mTLS controls in `docs/SECURITY.md`.
 There are no placeholder 501 responses. Route `age` is served from the
 `Route.received_at_epoch_seconds` proto field (RIB receive time) on the
 accepted view and from the rejection wall-clock time on the filtered view.
+Status `last_reconfig` is the UTC rendering of the daemon's last successfully
+accepted full policy generation (initial load, SIGHUP, or config transaction);
+it stays empty only until the daemon reports a positive timestamp.
 
 ## Filtered routes and reject reasons
 
@@ -225,7 +228,6 @@ load_on_demand = true
 
 | Field | Adapter value | Limitation |
 |---|---|---|
-| status `last_reconfig` | `""` | Reconfiguration time is not tracked. |
 | protocol `routes.preferred` | omitted | No per-peer Loc-RIB best count exists on the gRPC surface; deriving one would page the whole Loc-RIB on every poll. The field is left out rather than served as a wrong `0` — a client that defaults absent fields still reads zero, but nothing here asserts it. |
 | route `interface` | `""` | Interface identity is not exposed for these routes. |
 | route `metric` | `0` | Sentinel only; this is not an IGP metric. |

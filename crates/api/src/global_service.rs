@@ -1,6 +1,7 @@
 use tonic::{Request, Response, Status};
 
 use crate::proto;
+use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::TcpAoSupport as TransportTcpAoSupport;
 
 /// Read-only view of daemon global configuration.
@@ -12,16 +13,18 @@ pub struct GlobalService {
     router_id: String,
     listen_port: u32,
     tcp_ao_support: TransportTcpAoSupport,
+    metrics: BgpMetrics,
 }
 
 impl GlobalService {
     /// Create a new `GlobalService` with the daemon's startup configuration.
-    pub fn new(asn: u32, router_id: String, listen_port: u32) -> Self {
+    pub fn new(asn: u32, router_id: String, listen_port: u32, metrics: BgpMetrics) -> Self {
         Self::new_with_tcp_ao_support(
             asn,
             router_id,
             listen_port,
             rustbgpd_transport::probe_tcp_ao_support(),
+            metrics,
         )
     }
 
@@ -30,12 +33,14 @@ impl GlobalService {
         router_id: String,
         listen_port: u32,
         tcp_ao_support: TransportTcpAoSupport,
+        metrics: BgpMetrics,
     ) -> Self {
         Self {
             asn,
             router_id,
             listen_port,
             tcp_ao_support,
+            metrics,
         }
     }
 }
@@ -64,6 +69,9 @@ impl proto::global_service_server::GlobalService for GlobalService {
             listen_port: self.listen_port,
             tcp_ao_support: tcp_ao_support as i32,
             tcp_ao_detail,
+            policy_generation_loaded_timestamp_seconds: self
+                .metrics
+                .policy_generation_loaded_timestamp_seconds(),
         }))
     }
 }
@@ -74,23 +82,37 @@ mod tests {
     use proto::global_service_server::GlobalService as _;
 
     #[tokio::test]
-    async fn get_global_returns_config() {
+    async fn get_global_reads_live_policy_generation_timestamp() {
+        let metrics = BgpMetrics::new();
         let svc = GlobalService::new_with_tcp_ao_support(
             65001,
             "10.0.0.1".into(),
             179,
             TransportTcpAoSupport::Supported,
+            metrics.clone(),
         );
-        let resp = svc
+        let initial = svc
             .get_global(Request::new(proto::GetGlobalRequest {}))
             .await
             .unwrap()
             .into_inner();
-        assert_eq!(resp.asn, 65001);
-        assert_eq!(resp.router_id, "10.0.0.1");
-        assert_eq!(resp.listen_port, 179);
-        assert_eq!(resp.tcp_ao_support, proto::TcpAoSupport::Supported as i32);
-        assert!(resp.tcp_ao_detail.is_empty());
+        assert_eq!(initial.asn, 65001);
+        assert_eq!(initial.router_id, "10.0.0.1");
+        assert_eq!(initial.listen_port, 179);
+        assert_eq!(
+            initial.tcp_ao_support,
+            proto::TcpAoSupport::Supported as i32
+        );
+        assert!(initial.tcp_ao_detail.is_empty());
+        assert_eq!(initial.policy_generation_loaded_timestamp_seconds, 0);
+
+        metrics.record_policy_generation_loaded();
+        let updated = svc
+            .get_global(Request::new(proto::GetGlobalRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(updated.policy_generation_loaded_timestamp_seconds > 0);
     }
 
     #[tokio::test]
@@ -100,6 +122,7 @@ mod tests {
             "10.0.0.1".into(),
             179,
             TransportTcpAoSupport::ProbeFailed("setsockopt failed".into()),
+            BgpMetrics::new(),
         );
         let resp = svc
             .get_global(Request::new(proto::GetGlobalRequest {}))
