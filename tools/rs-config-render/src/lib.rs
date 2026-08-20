@@ -43,6 +43,8 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod ixp_manager;
+
 /// Top-level keys of the supported `template-context` shape, sorted.
 ///
 /// Pinned against arouteserver's builder render context (the dict the

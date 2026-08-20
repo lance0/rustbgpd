@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rs-config-render` now accepts a strict IXP Manager v7.4 Foil JSON export,
+  writes a private route-server candidate, validates it with the selected
+  `rustbgpd` binary's version and `--check --strict` modes, then writes the
+  receipt last. Applicable UI filters, BIRD skin overrides, implicit
+  no-transit policy, incomplete or ambiguous member data, and unsupported
+  router modes fail closed. Fetch, activation, reload, and rollback remain an
+  explicit operator workflow. (LAN-1105)
 - `birdwatcher-adapter` now serves IXP Manager v7.4.0's exact received and
   export route journeys for IPv4/IPv6 unicast. Every page carries the exact
   daemon-side prefix filter, all Add-Path candidates retain source alias and

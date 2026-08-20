@@ -5,6 +5,8 @@ on:
     paths:
       - "tests/compat/ixp-manager-birdseye/**"
       - "examples/birdwatcher-adapter/**"
+      - "tools/rs-config-render/**"
+      - "integrations/ixp-manager/**"
       - "tests/birdwatcher_adapter_smoke.rs"
       - ".github/workflows/ixp-compat.yml"
       - "docs/INTEROP.md"
@@ -13,6 +15,8 @@ on:
     paths:
       - "tests/compat/ixp-manager-birdseye/**"
       - "examples/birdwatcher-adapter/**"
+      - "tools/rs-config-render/**"
+      - "integrations/ixp-manager/**"
       - "tests/birdwatcher_adapter_smoke.rs"
       - ".github/workflows/ixp-compat.yml"
       - "docs/INTEROP.md"

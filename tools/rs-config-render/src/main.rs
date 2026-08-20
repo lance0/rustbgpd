@@ -6,31 +6,40 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use rs_config_render::{
     Options, RenderError, SiteLocalFile, SiteLocalInput, render, render_site_local,
 };
 
+#[derive(Clone, Copy, ValueEnum)]
+enum InputFormat {
+    Arouteserver,
+    IxpManagerV1,
+}
+
 #[derive(Parser)]
 #[command(
     name = "rs-config-render",
     version,
-    about = "Render rustbgpd route-server configuration from `arouteserver template-context` output"
+    about = "Render rustbgpd route-server configuration from supported upstream exports"
 )]
 struct Cli {
-    /// Path to `arouteserver template-context` output (YAML; JSON also parses)
+    /// Input document format
+    #[arg(long, value_enum, default_value = "arouteserver")]
+    input_format: InputFormat,
+    /// Path to the selected input document (arouteserver YAML/JSON or IXP Manager JSON)
     #[arg(long)]
     context: PathBuf,
     /// Output directory (created if missing)
     #[arg(long)]
     out_dir: PathBuf,
     /// Abort when a client's generated prefix-set has fewer members
-    #[arg(long, default_value_t = 1)]
-    min_prefixes: u32,
+    #[arg(long)]
+    min_prefixes: Option<u32>,
     /// Abort when a client's generated origin asn-set has fewer members
-    #[arg(long, default_value_t = 1)]
-    min_origins: u32,
+    #[arg(long)]
+    min_origins: Option<u32>,
     /// RTR cache endpoint (host:port) for [[rpki.cache_servers]]; repeatable.
     /// Required when the context enables RPKI origin validation.
     #[arg(long = "rtr-cache")]
@@ -44,6 +53,12 @@ struct Cli {
     /// Strict site-local hook TOML; exactly one when --extra-rpol is used
     #[arg(long = "merge-toml")]
     merge_toml: Vec<PathBuf>,
+    /// Required positive automatic restart delay for IXP Manager max-prefix
+    #[arg(long)]
+    max_prefix_restart_seconds: Option<u32>,
+    /// rustbgpd binary used for mandatory version and strict candidate checks
+    #[arg(long)]
+    check_with: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -98,6 +113,47 @@ fn stdout_exit(result: Result<(), StdoutWriteError>) -> ExitCode {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let customized = !cli.extra_rpol.is_empty() || !cli.merge_toml.is_empty();
+    if matches!(cli.input_format, InputFormat::IxpManagerV1) {
+        if customized
+            || cli.min_prefixes.is_some()
+            || cli.min_origins.is_some()
+            || !cli.rtr_cache.is_empty()
+            || cli.allow_shape_drift
+        {
+            eprintln!("rs-config-render: IXP Manager mode does not accept arouteserver options");
+            return ExitCode::from(2);
+        }
+        let (Some(restart), Some(checker)) =
+            (cli.max_prefix_restart_seconds, cli.check_with.as_deref())
+        else {
+            eprintln!(
+                "rs-config-render: IXP Manager mode requires --max-prefix-restart-seconds and --check-with"
+            );
+            return ExitCode::from(2);
+        };
+        return match rs_config_render::ixp_manager::write_checked_candidate(
+            &cli.context,
+            &cli.out_dir,
+            restart,
+            checker,
+        ) {
+            Ok(files) => stdout_exit(write_stdout(|writer| {
+                writeln!(
+                    writer,
+                    "validated {files} candidate file(s) + receipt into {}",
+                    cli.out_dir.display()
+                )
+            })),
+            Err(error) => {
+                eprintln!("rs-config-render: {error}");
+                ExitCode::from(error.exit_code())
+            }
+        };
+    }
+    if cli.max_prefix_restart_seconds.is_some() || cli.check_with.is_some() {
+        eprintln!("rs-config-render: IXP Manager options require --input-format ixp-manager-v1");
+        return ExitCode::from(2);
+    }
     if customized && (cli.extra_rpol.is_empty() || cli.merge_toml.len() != 1) {
         eprintln!(
             "rs-config-render: {}",
@@ -119,8 +175,8 @@ fn main() -> ExitCode {
         }
     };
     let opts = Options {
-        min_prefixes: cli.min_prefixes,
-        min_origins: cli.min_origins,
+        min_prefixes: cli.min_prefixes.unwrap_or(1),
+        min_origins: cli.min_origins.unwrap_or(1),
         rtr_caches: cli.rtr_cache,
         allow_shape_drift: cli.allow_shape_drift,
     };

@@ -9,6 +9,12 @@
     "prefix": "rustbgpd "
   },
   "runtime_compatibility": false,
+  "manual_config_export": {
+    "schema": "rustbgpd.ixp-manager.router-config/v1",
+    "ixp_manager_version": "7.4.0",
+    "router_handle": "b2-rs1-lan1-ipv4",
+    "strict_receipt_required": true
+  },
   "runtime_supported": [
     "exact-protocol-route",
     "exact-export-route"

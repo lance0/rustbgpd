@@ -41,6 +41,30 @@ not served. The adapter's `api.version` is rustbgpd product identity, not a
 Bird's Eye version claim, and the adapter is not described as fully IXP Manager
 / Bird's Eye compatible.
 
+### IXP Manager v7.4 manual configuration oracle
+
+The same pinned gate installs the repository's GPL-2.0-only Foil exporter into
+a temporary active IXP Manager v7.4 skin, loads upstream's own MySQL fixture,
+and invokes the real router configuration generator. Its supported
+single-session capture feeds the real `rs-config-render` binary, which must run
+the real `rustbgpd --version` and `rustbgpd --check --strict` before writing a
+receipt. The checked-in fixture is byte-identical to that live capture.
+
+This is a bounded export/render path, not full IXP Manager template or runtime
+compatibility. The renderer refuses applicable enabled production UI filters,
+active BIRD skin customizations, the implicit no-transit default, quarantine or
+non-route-server modes, protocols other than IPv4/IPv6, disabled large
+communities, IRR-disabled or empty clients, missing, malformed, or zero-port
+RPKI caches, wrong-family, duplicate or multi-address client data, unknown
+schema versions or fields, incomplete terminal markers, placeholder or overlong
+effective authentication, and symlink/public input or output paths.
+It renders only independently owned rustbgpd policy; no IXP Manager BIRD
+template or GPL source enters the binary or packaged artifacts.
+
+Fetching, activation, reload, callback, rollback, filter translation, custom
+skin migration, and multi-address next-hop parity remain outside this manual
+seam. A candidate without the final strict-check receipt is not deployable.
+
 ### CI coverage
 
 The hosted `.github/workflows/interop.yml` path gates the following

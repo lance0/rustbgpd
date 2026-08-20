@@ -1,0 +1,64 @@
+{
+    "schema": "rustbgpd.ixp-manager.router-config/v1",
+    "ixp_manager": {
+        "version": "7.4.0"
+    },
+    "router": {
+        "handle": "b2-rs1-lan1-ipv4",
+        "type": "route-server",
+        "protocol": 4,
+        "asn": 65501,
+        "router_id": "192.0.2.18",
+        "peering_ip": "192.0.2.18",
+        "vlan_id": 1,
+        "quarantine": false,
+        "bgp_lc": true,
+        "rfc1997_passthru": false,
+        "rpki": true,
+        "skip_md5": false
+    },
+    "policy": {
+        "minimum_prefix_length": 24,
+        "rtr_caches": [
+            "127.0.0.1:3323"
+        ],
+        "no_transit": {
+            "source": "IXP_NO_TRANSIT_ASNS_OVERRIDE",
+            "asns": []
+        }
+    },
+    "clients": [
+        {
+            "customer_id": 3,
+            "vlan_interface_id": 3,
+            "name": "PCH DNS",
+            "asn": 42,
+            "address": "10.1.0.36",
+            "peering_ips": [
+                "10.1.0.36"
+            ],
+            "max_prefix": 2000,
+            "auth": {
+                "type": "md5",
+                "value": "mcWsqMdzGwTKt67g"
+            },
+            "irr_filter": true,
+            "more_specifics": false,
+            "origins": [
+                42
+            ],
+            "prefixes": [
+                "31.135.128.0/19"
+            ]
+        }
+    ],
+    "unsupported": {
+        "active_ui_filters": [],
+        "route_server_skin_files": []
+    },
+    "complete": {
+        "handle": "b2-rs1-lan1-ipv4",
+        "client_count": 1,
+        "marker": "END_OF_RUSTBGPD_IXP_MANAGER_CONFIG_b2-rs1-lan1-ipv4"
+    }
+}
