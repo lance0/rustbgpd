@@ -267,6 +267,46 @@ async fn tcp_ao_generation_does_not_advance_past_inflight_old_inventory_connect(
 
 #[cfg(target_os = "linux")]
 #[test]
+fn active_open_binds_local_source_before_tcp_ao_installation() {
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let mut config = TransportConfig::new(peer_config, "127.0.0.1:179".parse().unwrap());
+    config.local_address = Some("127.0.0.2".parse().unwrap());
+    config.tcp_ao = Some(crate::TcpAoKeyring(vec![crate::TcpAoConfig {
+        key: "selected".into(),
+        send_id: 1,
+        recv_id: 2,
+        algorithm: crate::TcpAoAlgorithm::HmacSha256,
+        preferred: true,
+        deprecated: false,
+    }]));
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )
+    .unwrap();
+    let result = super::io::prepare_active_socket_for_test(
+        socket,
+        &config,
+        "127.0.0.1",
+        |socket, _, _, _, _| {
+            assert_eq!(
+                socket.local_addr()?.as_socket().unwrap().ip(),
+                config.local_address.unwrap()
+            );
+            Err(std::io::Error::other("ordering proof stop"))
+        },
+        |_, _| panic!("connect must not run after injected AO failure"),
+    );
+    let Err(error) = result else {
+        panic!("injected AO installation failure must stop active open");
+    };
+    assert!(error.to_string().contains("ordering proof stop"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn active_open_second_key_install_failure_abandons_socket_before_connect() {
     use socket2::Socket;
     use std::cell::{Cell, RefCell};

@@ -834,6 +834,41 @@ impl BgpListener {
         ))
     }
 
+    /// Bind every explicitly configured endpoint as one atomic listener.
+    /// Unlike the legacy dual-wildcard constructor, any bind failure closes
+    /// already-created sockets and fails startup.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` for an empty endpoint set, or the first socket
+    /// creation, option, bind, or listen error.
+    #[allow(
+        clippy::unused_async,
+        reason = "match the async bind API of the other listener constructors"
+    )]
+    pub async fn bind_strict_with_options(
+        addresses: Vec<SocketAddr>,
+        accept_tx: mpsc::Sender<AcceptedConnection>,
+        options: ListenerSocketOptions,
+    ) -> std::io::Result<Self> {
+        if addresses.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "strict listener requires at least one endpoint",
+            ));
+        }
+        let mut sockets = Vec::with_capacity(addresses.len());
+        for addr in addresses {
+            let socket = bind_socket2_listener(addr, &options)?;
+            log_bound_family(&socket, addr, &options);
+            sockets.push(FamilyListener {
+                is_v4: addr.is_ipv4(),
+                socket,
+            });
+        }
+        Ok(Self::from_sockets(sockets, accept_tx, options))
+    }
+
     /// Bind the daemon's dual-family listener pair: one IPv4 and one IPv6
     /// socket sharing a single accept loop, rotation state machine, and
     /// accept channel. `IPV6_V6ONLY` is always set on the IPv6 socket, so

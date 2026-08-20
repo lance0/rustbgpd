@@ -39,6 +39,9 @@ fn error_span_and_label(source: &str, error: &ConfigError) -> Option<(Range<usiz
         ConfigError::InvalidRouterId { reason, .. } => {
             lookup_value_span(source, &["global", "router_id"], reason)
         }
+        ConfigError::InvalidListenAddresses { reason } => {
+            lookup_value_span(source, &["global", "listen_addresses"], reason)
+        }
         ConfigError::InvalidNeighborAddress { value, reason } => {
             find_neighbor_field_span(source, value, "address", reason)
         }
@@ -82,17 +85,7 @@ fn error_span_and_label(source: &str, error: &ConfigError) -> Option<(Range<usiz
             &["global", "runtime_state_dir"],
             "must not be empty",
         ),
-        ConfigError::InvalidGrpcConfig { reason } => {
-            if reason.contains("grpc_tcp.address") {
-                lookup_key_span(source, &["global", "telemetry", "grpc_tcp"], reason)
-            } else if reason.contains("grpc_uds.path") {
-                lookup_value_span(source, &["global", "telemetry", "grpc_uds", "path"], reason)
-            } else if reason.contains("grpc_uds.mode") {
-                lookup_value_span(source, &["global", "telemetry", "grpc_uds", "mode"], reason)
-            } else {
-                None
-            }
-        }
+        ConfigError::InvalidGrpcConfig { reason } => grpc_error_span_and_label(source, reason),
         ConfigError::UndefinedPeerGroup { name } => find_value_anywhere(
             source,
             "peer_group",
@@ -128,6 +121,18 @@ fn error_span_and_label(source: &str, error: &ConfigError) -> Option<(Range<usiz
             "expected error, warn, info, debug, or trace",
         ),
         _ => None,
+    }
+}
+
+fn grpc_error_span_and_label(source: &str, reason: &str) -> Option<(Range<usize>, String)> {
+    if reason.contains("grpc_tcp.address") {
+        lookup_key_span(source, &["global", "telemetry", "grpc_tcp"], reason)
+    } else if reason.contains("grpc_uds.path") {
+        lookup_value_span(source, &["global", "telemetry", "grpc_uds", "path"], reason)
+    } else if reason.contains("grpc_uds.mode") {
+        lookup_value_span(source, &["global", "telemetry", "grpc_uds", "mode"], reason)
+    } else {
+        None
     }
 }
 

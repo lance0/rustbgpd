@@ -15,7 +15,6 @@ fn build_transport_config_preserves_local_ipv6_nexthop() {
         rib_tx,
         None,
     );
-
     let nh: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
     let mut config = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
     config.local_ipv6_nexthop = Some(nh);
@@ -104,7 +103,6 @@ fn build_transport_config_preserves_route_server_client() {
         rib_tx,
         None,
     );
-
     let mut config = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
     config.route_server_client = true;
 
@@ -540,7 +538,7 @@ async fn resolved_transport_config_matches_build_transport_config() {
     let cluster = Ipv4Addr::new(10, 0, 0, 99);
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
-    let mgr = PeerManager::new(
+    let mut mgr = PeerManager::new(
         rx,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
@@ -550,6 +548,8 @@ async fn resolved_transport_config_matches_build_transport_config() {
         rib_tx,
         None,
     );
+    mgr.current_config.global.listen_addresses =
+        Some(vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))]);
 
     // An iBGP route-reflector client with a few non-default knobs set, so
     // the comparison exercises more than the defaults.
@@ -568,6 +568,11 @@ async fn resolved_transport_config_matches_build_transport_config() {
 
     let pm_cfg = PeerManager::peer_manager_config_from_resolved(resolved.clone(), false);
     let rebuilt = mgr.build_transport_config(&pm_cfg);
+
+    assert_eq!(
+        rebuilt.local_address,
+        Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)))
+    );
 
     assert_eq!(
         rebuilt.cluster_id,

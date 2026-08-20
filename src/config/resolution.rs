@@ -744,6 +744,7 @@ impl Config {
                 (SocketAddr::new(peer_addr, BGP_PORT), None, None)
             };
         let mut transport = TransportConfig::new(peer, remote_addr);
+        transport.local_address = self.active_source_for(peer_addr);
         transport.peer_interface = peer_interface;
         transport.peer_scope_id = peer_scope_id;
         transport.max_prefixes = neighbor

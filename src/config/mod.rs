@@ -712,15 +712,37 @@ impl Config {
             .map(|s| s.parse().expect("validated in Config::load"))
     }
 
-    /// The daemon's dual-family listen addresses: the IPv4 and IPv6
-    /// unspecified addresses at `listen_port`. The BGP listener always
-    /// serves both families (an unavailable family degrades to a warning at
-    /// bind time); there is no listen-address knob.
+    /// The legacy dual-family wildcard addresses at `listen_port`. These are
+    /// used only when `listen_addresses` is absent; an unavailable family then
+    /// degrades to a warning while the other keeps serving.
     pub fn listen_addrs(&self) -> (SocketAddr, SocketAddr) {
         (
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.global.listen_port),
             SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), self.global.listen_port),
         )
+    }
+
+    /// Exact opt-in BGP endpoints, or `None` for the legacy tolerant dual
+    /// wildcard listener.
+    pub(crate) fn explicit_listen_endpoints(&self) -> Option<Vec<SocketAddr>> {
+        self.global.listen_addresses.as_ref().map(|addresses| {
+            addresses
+                .iter()
+                .copied()
+                .map(|address| SocketAddr::new(address, self.global.listen_port))
+                .collect()
+        })
+    }
+
+    /// Source address selected for an active open to `remote` in explicit
+    /// mode. Legacy wildcard mode leaves source selection to the kernel.
+    pub(crate) fn active_source_for(&self, remote: IpAddr) -> Option<IpAddr> {
+        self.global.listen_addresses.as_ref().and_then(|addresses| {
+            addresses
+                .iter()
+                .copied()
+                .find(|address| address.is_ipv4() == remote.is_ipv4())
+        })
     }
 
     /// Resolve the configured gRPC listeners.

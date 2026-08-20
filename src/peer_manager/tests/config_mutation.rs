@@ -1,6 +1,56 @@
 use super::*;
 
 #[tokio::test]
+async fn runtime_create_rejects_an_omitted_listen_family_before_mutation() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    mgr.current_config.global.listen_addresses =
+        Some(vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))]);
+    let before = mgr.current_config.neighbors.clone();
+    let spec = rustbgpd_api::peer_types::PresenceAwareNeighborCreate {
+        address: "2001:db8::2".parse().unwrap(),
+        interface: None,
+        remote_asn: 65002,
+        description: None,
+        peer_group: None,
+        hold_time: None,
+        min_hold_time: None,
+        send_hold_time: None,
+        max_prefixes: None,
+        max_prefix_restart_seconds: None,
+        remove_private_as: None,
+        local_role: None,
+        families: None,
+        required_families: None,
+        route_server_client: None,
+        per_client_best: None,
+        strict_role: None,
+        add_path: None,
+    };
+
+    let error = mgr.runtime_create_peer(Box::new(spec)).await.unwrap_err();
+    assert!(
+        error.to_string().contains("omitted address family"),
+        "{error}"
+    );
+    assert!(mgr.peers.is_empty(), "session must not be created");
+    assert_eq!(
+        mgr.current_config.neighbors, before,
+        "config must not mutate"
+    );
+}
+
+#[tokio::test]
 async fn add_peer_and_list() {
     let (tx, rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);

@@ -1810,6 +1810,10 @@ fn pin_unreconciled_daemon_runtime_fields(new_config: &mut Config, current: &Con
     new_config.global.listen_port = current.global.listen_port;
     new_config
         .global
+        .listen_addresses
+        .clone_from(&current.global.listen_addresses);
+    new_config
+        .global
         .cluster_id
         .clone_from(&current.global.cluster_id);
     new_config.global.worker_threads = current.global.worker_threads;
@@ -7436,6 +7440,7 @@ tcp_ao = [
 asn = 65100
 router_id = "10.0.0.9"
 listen_port = 1179
+listen_addresses = ["127.0.0.2"]
 cluster_id = "10.0.0.8"
 worker_threads = 2
 honor_graceful_shutdown = true
@@ -7539,6 +7544,30 @@ hold_time = 90
                     .unwrap()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn reload_rejects_peer_in_desired_only_listen_family_before_runtime_mutation() {
+        let initial = baseline_toml().replace(
+            "listen_port = 179",
+            "listen_port = 179\nlisten_addresses = [\"127.0.0.2\"]",
+        );
+        let desired = initial.replace(
+            "listen_addresses = [\"127.0.0.2\"]",
+            "listen_addresses = [\"127.0.0.2\", \"::1\"]",
+        ) + "\n[[neighbors]]\naddress = \"2001:db8::2\"\nremote_asn = 65003\n";
+        let (returned, tags) = drive_reloads(&initial, &desired, 2).await;
+
+        assert!(
+            returned
+                .iter()
+                .all(|outcome| matches!(outcome, SighupReloadOutcome::CleanNoEffect(_))),
+            "pinned runtime candidate omits IPv6"
+        );
+        assert!(
+            tags.is_empty(),
+            "invalid post-pin candidate must fail before actor mutation: {tags:?}"
+        );
     }
 
     #[tokio::test]

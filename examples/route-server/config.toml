@@ -25,6 +25,9 @@
 asn = 65500
 router_id = "198.51.100.1"
 listen_port = 179
+# Optional exact bind/source endpoints (at most one per family). Useful when
+# two route-server instances share a host; changing these requires restart.
+# listen_addresses = ["198.51.100.1", "2001:db8::1"]
 # RFC 8212: a member session with no explicit policy carries nothing in
 # that direction. The export chain below is deliberately permit-all, and
 # this knob is what keeps that a decision: delete the chain and members

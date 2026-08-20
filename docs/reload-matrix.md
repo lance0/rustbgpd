@@ -243,6 +243,7 @@ that are stood up once at startup. Two flags are hot-pluggable.
 | `asn` | restart-required | Identity. |
 | `router_id` | restart-required | Identity. Advertised in every OPEN. |
 | `listen_port` | restart-required | The listen socket is created at startup. |
+| `listen_addresses` | restart-required | Exact passive-bind and active-open source endpoints are selected at startup. SIGHUP preserves the desired edit but pins the running endpoint set; a peer in a newly requested family is rejected before runtime mutation. |
 | `cluster_id` | restart-required | RFC 4456 cluster identity; affects every iBGP advertisement. |
 | `honor_graceful_shutdown` | live | Hot-applied by `reload.rs`. Re-evaluates the GShut LOCAL_PREF de-preference against existing Adj-RIB-In on toggle. |
 | `honor_blackhole` | live (with FIB-discard caveat) | Hot-applied when `[global] install_blackhole_discard` is false. When the FIB-discard reconciler is configured (`install_blackhole_discard = true` and the FIB table is set up), `honor_blackhole` is **restart-required** — toggling it would change the discard-spawn-gate decision made at startup. Logged as `ERROR` during reload in that case. |

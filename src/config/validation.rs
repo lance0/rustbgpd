@@ -298,6 +298,8 @@ impl Config {
             });
         }
 
+        validate_listen_addresses(self)?;
+
         // Validate cluster_id if present
         if let Some(ref cid) = self.global.cluster_id {
             cid.parse::<Ipv4Addr>()
@@ -1444,6 +1446,101 @@ impl Config {
 
         advisories
     }
+}
+
+fn validate_listen_addresses(config: &Config) -> Result<(), ConfigError> {
+    let Some(addresses) = config.global.listen_addresses.as_ref() else {
+        return Ok(());
+    };
+    if addresses.is_empty() {
+        return Err(ConfigError::InvalidListenAddresses {
+            reason: "the explicit list must not be empty".to_string(),
+        });
+    }
+    let mut has_v4 = false;
+    let mut has_v6 = false;
+    for address in addresses {
+        let family_seen = match address {
+            IpAddr::V4(v4) => {
+                if v4.is_unspecified() || v4.is_multicast() || *v4 == Ipv4Addr::BROADCAST {
+                    return Err(ConfigError::InvalidListenAddresses {
+                        reason: format!("address {address} is not a usable unicast endpoint"),
+                    });
+                }
+                &mut has_v4
+            }
+            IpAddr::V6(v6) => {
+                if v6.is_unspecified()
+                    || v6.is_multicast()
+                    || v6.to_ipv4_mapped().is_some()
+                    || is_ipv6_link_local_addr(v6)
+                {
+                    return Err(ConfigError::InvalidListenAddresses {
+                        reason: format!("address {address} is not a usable unicast endpoint"),
+                    });
+                }
+                &mut has_v6
+            }
+        };
+        if *family_seen {
+            return Err(ConfigError::InvalidListenAddresses {
+                reason: format!(
+                    "more than one {} address is not supported",
+                    if address.is_ipv4() { "IPv4" } else { "IPv6" }
+                ),
+            });
+        }
+        *family_seen = true;
+    }
+    for neighbor in &config.neighbors {
+        let address = neighbor.address.parse::<IpAddr>().map_err(|error| {
+            ConfigError::InvalidNeighborAddress {
+                value: neighbor.address.clone(),
+                reason: error.to_string(),
+            }
+        })?;
+        if matches!(address, IpAddr::V6(v6) if is_ipv6_link_local_addr(&v6)) {
+            return Err(ConfigError::InvalidListenAddresses {
+                reason: format!(
+                    "scoped IPv6 link-local peer {} is not supported with explicit listen_addresses",
+                    neighbor.address
+                ),
+            });
+        }
+        if (address.is_ipv4() && !has_v4) || (address.is_ipv6() && !has_v6) {
+            return Err(ConfigError::InvalidListenAddresses {
+                reason: format!(
+                    "neighbor {} uses an omitted address family",
+                    neighbor.address
+                ),
+            });
+        }
+    }
+    for range in &config.dynamic_neighbors {
+        let address = range
+            .prefix
+            .split_once('/')
+            .and_then(|(address, _)| address.parse::<IpAddr>().ok());
+        if matches!(address, Some(IpAddr::V6(v6)) if is_ipv6_link_local_addr(&v6)) {
+            return Err(ConfigError::InvalidListenAddresses {
+                reason: format!(
+                    "scoped IPv6 link-local dynamic range {} is not supported with explicit listen_addresses",
+                    range.prefix
+                ),
+            });
+        }
+        if let Some(address) = address
+            && ((address.is_ipv4() && !has_v4) || (address.is_ipv6() && !has_v6))
+        {
+            return Err(ConfigError::InvalidListenAddresses {
+                reason: format!(
+                    "dynamic range {} uses an omitted address family",
+                    range.prefix
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 impl Config {

@@ -4758,11 +4758,11 @@ async fn run<T>(
         .await;
     });
 
-    // Spawn the BGP inbound TCP listener: one socket per address family
-    // (`0.0.0.0` and `[::]` at `listen_port`) behind a single accept loop.
-    // The complete both-family auth inventory is handed to the transport
-    // layer, which installs each TCP-AO MKT, MD5 key, and GTSM selector on
-    // the socket matching its peer family. Outbound active-open sockets
+    // Spawn the BGP inbound TCP listener behind one accept loop. Legacy mode
+    // uses both wildcard families; explicit mode uses only configured exact
+    // endpoints. The complete configured-family auth inventory is handed to
+    // the transport layer, which installs each TCP-AO MKT, MD5 key, and GTSM
+    // selector on the socket matching its peer family. Outbound active-open sockets
     // still install their per-neighbor key independently below.
     let listener_options =
         ListenerSocketOptions {
@@ -4793,20 +4793,28 @@ async fn run<T>(
         };
 
     let (accept_tx, mut accept_rx) = mpsc::channel::<rustbgpd_transport::AcceptedConnection>(64);
+    let explicit_endpoints = config.explicit_listen_endpoints();
     let (listen_addr_v4, listen_addr_v6) = config.listen_addrs();
-    let listener = match BgpListener::bind_dual_with_options(
-        listen_addr_v4,
-        listen_addr_v6,
-        accept_tx,
-        listener_options,
-    )
-    .await
-    {
+    let requested_endpoints = explicit_endpoints
+        .clone()
+        .unwrap_or_else(|| vec![listen_addr_v4, listen_addr_v6]);
+    let listener_result = if let Some(endpoints) = explicit_endpoints.as_ref() {
+        BgpListener::bind_strict_with_options(endpoints.clone(), accept_tx, listener_options).await
+    } else {
+        BgpListener::bind_dual_with_options(
+            listen_addr_v4,
+            listen_addr_v6,
+            accept_tx,
+            listener_options,
+        )
+        .await
+    };
+    let listener = match listener_result {
         Ok(listener) => listener,
         Err(e) => {
-            // Fatal only when NEITHER family bound (a single failed family
-            // degrades to a warning inside the transport layer and the
-            // other keeps serving). `listen_port` is mandatory, the
+            // Legacy wildcard mode degrades a single failed family to a
+            // warning; explicit mode is atomic and any failed endpoint is
+            // fatal. `listen_port` is mandatory, the
             // listener is never rebound without a restart, and
             // outbound-only operation silently drops every passive peer,
             // every dynamic-neighbor range, and every peer that wins the
@@ -4819,10 +4827,9 @@ async fn run<T>(
             // operator. On the down daemon `rbgp doctor` names the cause
             // (port in use, missing CAP_NET_BIND_SERVICE).
             error!(
-                listen_addr_v4 = %listen_addr_v4,
-                listen_addr_v6 = %listen_addr_v6,
+                requested_endpoints = ?requested_endpoints,
                 error = %e,
-                "failed to bind BGP listener on either address family; inbound BGP sessions cannot be accepted — exiting"
+                "failed to bind BGP listener on either address family (legacy mode) or every explicitly configured endpoint (explicit mode); inbound BGP sessions cannot be accepted — exiting"
             );
             process::exit(1);
         }
@@ -7330,6 +7337,7 @@ peer_group = "plain"
                 asn: 65001,
                 router_id: "10.0.0.1".to_string(),
                 listen_port: 179,
+                listen_addresses: None,
                 cluster_id: None,
                 runtime_state_dir: "/tmp".to_string(),
                 telemetry: crate::config::TelemetryConfig {

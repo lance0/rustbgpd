@@ -79,6 +79,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
     TransportConfig {
         peer: test_peer_config(),
         remote_addr: addr,
+        local_address: None,
         peer_interface: None,
         peer_scope_id: None,
         connect_timeout: Duration::from_secs(5),
@@ -112,6 +113,29 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,
         slow_peer_isolation: false,
     }
+}
+
+#[tokio::test]
+async fn active_open_uses_the_configured_local_source_address() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = transport_config(listener.local_addr().unwrap());
+    config.local_address = Some("127.0.0.2".parse().unwrap());
+    let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let handle = PeerHandle::spawn(
+        config,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    handle.start().await.unwrap();
+    let (_stream, peer) = listener.accept().await.unwrap();
+    assert_eq!(peer.ip(), "127.0.0.2".parse::<std::net::IpAddr>().unwrap());
+    handle.shutdown().await.unwrap().unwrap();
 }
 
 async fn wait_for_fsm_state(handle: &PeerHandle, expected: SessionState) {

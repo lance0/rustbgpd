@@ -831,3 +831,57 @@ async fn dual_bind_fails_when_both_families_unavailable() {
         "error must name both families: {message}"
     );
 }
+
+#[tokio::test]
+async fn strict_explicit_listener_binds_two_same_family_addresses_on_one_port() {
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let addresses = vec![
+        format!("127.0.0.2:{port}").parse().unwrap(),
+        format!("127.0.0.3:{port}").parse().unwrap(),
+    ];
+    let (tx, _rx) = mpsc::channel(1);
+    let listener = BgpListener::bind_strict_with_options(
+        addresses.clone(),
+        tx,
+        rustbgpd_transport::ListenerSocketOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(listener.local_addrs(), addresses);
+}
+
+#[tokio::test]
+async fn strict_explicit_listener_rejects_an_empty_endpoint_set() {
+    let (tx, _rx) = mpsc::channel(1);
+    let result = BgpListener::bind_strict_with_options(
+        Vec::new(),
+        tx,
+        rustbgpd_transport::ListenerSocketOptions::default(),
+    )
+    .await;
+    let Err(error) = result else {
+        panic!("empty strict endpoint set must fail");
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[tokio::test]
+async fn strict_explicit_bind_failure_releases_every_earlier_socket() {
+    let occupier = std::net::TcpListener::bind("127.0.0.3:0").unwrap();
+    let port = occupier.local_addr().unwrap().port();
+    let first: std::net::SocketAddr = format!("127.0.0.2:{port}").parse().unwrap();
+    let second = occupier.local_addr().unwrap();
+    let (tx, _rx) = mpsc::channel(1);
+    assert!(
+        BgpListener::bind_strict_with_options(
+            vec![first, second],
+            tx,
+            rustbgpd_transport::ListenerSocketOptions::default(),
+        )
+        .await
+        .is_err()
+    );
+    std::net::TcpListener::bind(first).expect("earlier successful bind must be released");
+}

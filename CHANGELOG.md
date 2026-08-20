@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Optional `[global].listen_addresses` binds one exact local address per
+  enabled family and uses it for active opens, allowing two route-server
+  instances to share a host without TCP/179 collisions. Explicit binds are
+  atomic and restart-required; omission preserves legacy dual-wildcard
+  behavior. (LAN-1107)
+
 - Retained unicast import-policy rejections now identify a named `.rpol`
   deciding term as `policy:term` in the existing bounded reason-detail field.
   Named TOML and default-action denies retain policy-only detail, anonymous

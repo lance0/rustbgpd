@@ -400,6 +400,9 @@ pub struct TransportConfig {
     pub peer: PeerConfig,
     /// TCP address of the remote peer (typically port 179).
     pub remote_addr: SocketAddr,
+    /// Exact local source for active opens. `None` leaves source selection to
+    /// the kernel for legacy wildcard-listener deployments.
+    pub local_address: Option<IpAddr>,
     /// Configured interface for IPv6 link-local / unnumbered peers.
     pub peer_interface: Option<String>,
     /// Resolved interface index for scoped IPv6 link-local peers.
@@ -544,6 +547,7 @@ impl TransportConfig {
         Self {
             peer,
             remote_addr,
+            local_address: None,
             peer_interface: None,
             peer_scope_id: None,
             connect_timeout: Self::DEFAULT_CONNECT_TIMEOUT,
