@@ -41,6 +41,8 @@ Flags (also settable via env):
 | `--grpc-addr` | `BIRDWATCHER_ADAPTER_GRPC_ADDR` | (required) | rustbgpd gRPC endpoint (`http[s]://` or `unix:///absolute/path`) |
 | `--grpc-token-file` | `BIRDWATCHER_ADAPTER_GRPC_TOKEN_FILE` | (unset) | Optional rustbgpd bearer-token file |
 | `--listen` | `BIRDWATCHER_ADAPTER_LISTEN` | `127.0.0.1:8080` | REST listen address |
+| `--protocol-alias PROTOCOL=PEER_IP@TABLE` | `BIRDWATCHER_ADAPTER_PROTOCOL_ALIASES` (semicolon-delimited) | (unset) | Repeatable immutable Bird's Eye protocol/table identity |
+| `--max-routes` | `BIRDWATCHER_ADAPTER_MAX_ROUTES` | `1000` | Maximum route-array response size; must be non-zero |
 
 The command-line token path takes precedence over the environment variable.
 The adapter reads it once at startup, trims trailing whitespace, and rejects
@@ -78,7 +80,10 @@ listener beyond loopback only with the mTLS controls in `docs/SECURITY.md`.
 |------------------------------|----------------------------------------------------------------|
 | `GET /status`                | `GlobalService.GetGlobal` + `ControlService.GetHealth`         |
 | `GET /protocols/bgp`         | `NeighborService.ListNeighbors` + `PolicyService.ListRejectedRoutes` (per-neighbor `routes.filtered` count) |
+| `GET /protocol/{id}`         | Same live neighbor object exposed by `GET /protocols/bgp`              |
+| `GET /symbols`               | Sorted live protocol identities; routing-table symbols stay empty      |
 | `GET /routes/protocol/{id}`  | `RibService.ListReceivedRoutes` (paged, all unicast families)  |
+| `GET /routes/export/{id}`    | `RibService.ListAdvertisedRoutes` (paged, all unicast families) |
 | `GET /routes/peer/{peer}`    | `RibService.ListReceivedRoutes` (paged, all unicast families)  |
 | `GET /routes/filtered/{id}`  | `PolicyService.ListRejectedRoutes` (unpaged — the store is bounded at the `[policy.reject_retention]` capacity, default 1024/peer) |
 | `GET /routes/noexport/{id}`  | `RibService.ListBestRoutes` − `RibService.ListAdvertisedRoutes` (both paged), each missing prefix explained by `RibService.ExplainAdvertisedRoute` |
@@ -89,6 +94,33 @@ accepted view and from the rejection wall-clock time on the filtered view.
 Status `last_reconfig` is the UTC rendering of the daemon's last successfully
 accepted full policy generation (initial load, SIGHUP, or config transaction);
 it stays empty only until the daemon reports a positive timestamp.
+
+## IXP Manager / Bird's Eye slice
+
+IXP Manager protocol names can be mapped without changing daemon configuration:
+
+```sh
+--protocol-alias 'pb_0001_as64496=198.51.100.1@master4'
+```
+
+Protocol and table names use letters, digits, and underscores and must start
+with a letter or underscore; the `bgp_` prefix is reserved for generated legacy
+identities. Duplicate names or peers and malformed mappings fail before the
+HTTP listener starts. Aliases apply consistently to inventory,
+protocol detail, received/exported/filtered/noexport lookups, and route
+`from_protocol`; unmapped peers retain `bgp_<address>` and table `master`, and
+bare peer-IP lookup remains accepted.
+
+Every successful response retains Alice-LG's `api.Version` and
+`api.result_from_cache` keys while also exposing Bird's Eye's lowercase
+`version`, `from_cache`, and enforced `max_routes`. A route-array request whose
+actual size exceeds that maximum returns HTTP 403 instead of truncating.
+
+This is deliberately partial IXP Manager support: status, live BGP inventory
+and detail, protocol symbols, member received routes, and member exported
+routes are available. Global table views, counts, exact/less-specific search,
+large-community wildcard search, and the complete reject-reason inventory are
+not yet implemented; the adapter does not claim full Bird's Eye compatibility.
 
 ## Filtered routes and reject reasons
 

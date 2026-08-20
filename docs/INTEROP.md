@@ -20,19 +20,21 @@ are called out explicitly.
 ### IXP looking-glass contract oracle
 
 The path-scoped `ixp-compat.yml` workflow executes the pinned Bird's Eye v2.1.0
-HTTP contract through IXP Manager v7.3.1's concrete Bird's Eye consumer. It
+HTTP contract through IXP Manager v7.4.0's concrete Bird's Eye consumer. It
 captures success shapes and exact production-mode 400/403/404/503 responses
 against a deterministic fake `birdc`; upstream source is cloned temporarily and
 installed from its lockfiles. See
 [`tests/compat/ixp-manager-birdseye/README.md`](../tests/compat/ixp-manager-birdseye/README.md)
 for the pins, fixture provenance, and local reproduction command.
 
-This oracle is intentionally **not** a runtime compatibility claim. Current
-rustbgpd gRPC surfaces do not provide a complete rejected-route reason
-inventory, less-specific lookup, or an atomic all-candidate table snapshot, and
-the example Birdwatcher adapter has no runtime protocol-alias configuration.
-Those gaps must be closed and tested before an adapter can be described as IXP
-Manager / Bird's Eye compatible.
+This oracle is intentionally **not** a runtime compatibility claim. The
+example adapter now provides immutable protocol aliases plus the current
+consumer's status, BGP inventory/detail, symbols, member received-route, and
+member export-route seam with an enforced response maximum. This remains
+partial runtime support: complete rejected-route reasons, less-specific lookup,
+and an atomic all-candidate table snapshot are still unavailable. Global table,
+count, exact-prefix, and wildcard-community endpoints are not served, so the
+adapter is not described as fully IXP Manager / Bird's Eye compatible.
 
 ### CI coverage
 

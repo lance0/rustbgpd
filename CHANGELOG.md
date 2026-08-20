@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `birdwatcher-adapter` now supports immutable IXP Manager protocol aliases,
+  Bird's Eye-shaped protocol detail and symbols, member received/export views,
+  canonical lowercase API metadata alongside preserved Alice-LG keys, and an
+  enforced configurable route-response maximum. The pinned compatibility
+  oracle now executes IXP Manager v7.4.0. Full table/search compatibility and
+  complete reject-reason coverage remain explicitly out of scope. (LAN-1106)
+
 - Retained unicast import-policy rejections now identify a named `.rpol`
   deciding term as `policy:term` in the existing bounded reason-detail field.
   Named TOML and default-action denies retain policy-only detail, anonymous
