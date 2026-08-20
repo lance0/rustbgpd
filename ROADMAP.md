@@ -2091,41 +2091,9 @@ branch is between features.
   than at PR time. `--lib` keeps the root daemon bin out of the doc target set
   (avoiding the lib/bin same-name collision); Cargo's default job parallelism is
   intentionally left enabled so rustdoc does not serialize the whole workspace.
-- [ ] **Mega-module splits.** The large `src/` modules have been split;
-  `crates/rib/src/manager/distribution.rs` (which had absorbed the BGP-LS/VPN/
-  RTC/ORR arcs) is a directory module with per-family concern submodules,
-  `src/config/mod.rs` had its resolution concern split out into
-  `src/config/resolution.rs` (#1215), and `crates/rib/src/manager/tests.rs`
-  became `manager/tests/` — shared fixtures in `mod.rs` plus per-concern
-  sibling test modules. Two later waves continued it:
-  - `crates/rib/src/manager/update_groups.rs` (10,290 lines) became a
-    2,032-line production body plus `update_groups/` — `membership.rs`,
-    `payload.rs`, `policy_transition.rs`, `staging.rs`, `views.rs`, and a
-    sibling test module (#1532, #1534, #1536, #1539).
-  - The three remaining mega test modules became per-concern siblings:
-    `src/peer_manager/tests.rs` (23,389 lines, #1548),
-    `src/config/tests.rs` (19,754 lines, #1550), and
-    `crates/transport/src/session/tests.rs` (19,048 lines, #1549).
-
-  Total line count and production body are now distinct measures, and only the
-  latter motivates a split. Production body means the lines before the
-  *trailing* `#[cfg(test)]` item — matching the first one instead is
-  misleading, because many files carry test-only imports and helpers near the
-  top, and some keep their tests in a sibling file or directory and have no
-  in-file test module at all. The current largest *production* bodies (test
-  modules excluded, 2026-08-09) are `crates/evpn-linux/src/reconcile.rs`
-  (7,774 lines of a 9,222 total), `src/config/mod.rs` (6,202 of 6,204; its
-  tests live in `src/config/tests/`),
-  `crates/rib/src/manager/distribution/mod.rs` (5,606, no in-file tests),
-  `src/main.rs` (5,503 of 7,392), and `crates/telemetry/src/metrics.rs`
-  (4,652 of 6,760). The largest *files* are a different set and are not split
-  candidates on production grounds:
-  `src/evpn_runtime_converger.rs` (12,132 total, 4,092 production),
-  `src/config_transaction_control.rs` (10,746 / 3,590), and `src/reload.rs`
-  (8,774 / 2,906) are each roughly two-thirds test module.
-  `crates/api/src/event_service.rs` is likewise not a candidate — 608
-  production lines of a 2,811-line total. Further splitting remains driven by
-  demand, conflicts, and review cost, not a commitment.
+- **Mega-module posture.** Prior concern and test-module extraction waves are
+  complete (inventory refresh: #1552). Further splits are not planned; revisit
+  only when measured conflict frequency or review cost demonstrates demand.
 - [ ] **Doc-precision + lint-policy consistency sweep (v0.41.0 review).** A
   whole-codebase review found no correctness or security defects; the residue was
   documentation/policy drift, all low-risk. The documentation and lint-policy
