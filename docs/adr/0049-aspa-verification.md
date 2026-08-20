@@ -79,8 +79,8 @@ Per draft-ietf-sidrops-aspa-verification-27:
 
 1. Compress AS_PATH: flatten segments, remove consecutive duplicates
 2. Empty AS_PATH -> Invalid (per spec step 1)
-3. The most recently added AS must match the neighbor ASN, with the
-   transparent route-server-client exception for upstream verification
+3. The most recently added AS must match the neighbor ASN, except when this
+   speaker's local Role is route-server-client
 4. AS_SET present -> Invalid (path is unverifiable)
 5. Single-hop -> Valid (no pairs to verify)
 6. Upstream verification walks from origin toward neighbor, checking each hop:
@@ -241,7 +241,7 @@ The original upstream-only scope is extended to the full draft-v25 verifier:
   upstream verification. If no role is configured, rustbgpd preserves the
   original upstream-only behavior.
 - The draft-v25 first-AS precondition is enforced for role-aware validation.
-  The upstream route-server-client exception is represented by
+  The local route-server-client Role exception is represented by
   `first_as_check_exempt`.
 - RIB cache-update revalidation now uses each route's stored ASPA context, so
   downstream routes do not silently fall back to upstream verification when a
@@ -261,9 +261,10 @@ The implementation is aligned with
 - The §5 neighbor-AS check applies to eligible eBGP unicast routes even when no
   BGP Role is configured. Roleless sessions continue to use upstream
   verification; configured roles select upstream versus downstream verification
-  and are not a prerequisite for the neighbor-AS check. Transparent sessions
-  remain exempt when identified by either the existing
-  `route_server_client = true` knob or a local `rs-client` Role.
+  and are not a prerequisite for the neighbor-AS check. A local `rs-client`
+  Role remains exempt because the remote route server does not prepend its ASN.
+  The `route_server_client = true` knob instead identifies a remote member and
+  does not exempt that member's UPDATEs.
 - A peer that did not negotiate the four-octet-AS capability is not exempt.
   rustbgpd is the RFC 6793 NEW speaker and applies the check to the effective
   AS_PATH after `AS_PATH` / `AS4_PATH` reconstruction.
@@ -276,6 +277,14 @@ The first two corrections can newly treat a roleless or RFC 6793 OLD-peer
 eBGP UPDATE with a mismatched first AS as withdraw. The iBGP correction can
 change prior ASPA-derived best-path rankings by replacing computed Valid or
 Invalid states with Unknown; no best-path algorithm or retention rule changed.
+
+### 2026-08-19 — First-AS exception direction
+
+The first-AS exception is derived only from the local BGP Role. A local
+`rs-client` receives transparent paths from a remote route server; conversely,
+`route_server_client = true` marks the remote peer as a member of this route
+server, so its leftmost ASN must match the negotiated member ASN. Mismatches use
+RFC 7606 treat-as-withdraw without resetting the session.
 
 ### 2026-08-03 — Draft-v27 mitigation is retention-gated
 

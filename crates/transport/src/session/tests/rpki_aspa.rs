@@ -1,17 +1,24 @@
 use super::*;
 
 #[test]
-fn aspa_validation_context_uses_negotiated_asn_and_local_role() {
+fn aspa_validation_context_exempts_only_local_route_server_client_role() {
     let mut session = make_test_session(65001, 65002);
-    session.config.peer.local_role = Some(rustbgpd_wire::BgpRole::RouteServerClient);
+    session.config.route_server_client = true;
+    session.config.peer.local_role = Some(BgpRole::RouteServer);
     session.negotiated = Some(Arc::new(negotiated_session(65099, false)));
     let context = session.aspa_validation_context();
     assert_eq!(context.neighbor_asn, Some(65099));
-    assert_eq!(
-        context.local_role,
-        Some(rustbgpd_wire::BgpRole::RouteServerClient)
+    assert_eq!(context.local_role, Some(BgpRole::RouteServer));
+    assert!(
+        !context.first_as_check_exempt,
+        "route_server_client identifies the remote member, not this speaker"
     );
-    assert!(context.first_as_check_exempt);
+
+    session.config.route_server_client = false;
+    session.config.peer.local_role = Some(BgpRole::RouteServerClient);
+    let client_context = session.aspa_validation_context();
+    assert_eq!(client_context.local_role, Some(BgpRole::RouteServerClient));
+    assert!(client_context.first_as_check_exempt);
 }
 
 /// Load-bearing context proof: restoring the configured-role condition makes
@@ -31,7 +38,7 @@ fn aspa_validation_context_carries_neighbor_asn_without_a_role() {
 /// known-prefix assertions in the shared exercise.
 #[tokio::test]
 async fn aspa_first_as_mismatch_enforced_without_configured_role() {
-    assert_aspa_first_as_mismatch_withdraws_replacement(true).await;
+    assert_aspa_first_as_mismatch_withdraws_replacement(true, false).await;
 }
 
 /// Load-bearing RFC 6793 OLD-peer proof: restoring the negotiated
@@ -39,18 +46,27 @@ async fn aspa_first_as_mismatch_enforced_without_configured_role() {
 /// the exact withdrawal and known-prefix assertions in the shared exercise.
 #[tokio::test]
 async fn aspa_first_as_mismatch_enforced_for_old_peer() {
-    assert_aspa_first_as_mismatch_withdraws_replacement(false).await;
+    assert_aspa_first_as_mismatch_withdraws_replacement(false, false).await;
 }
 
-/// Load-bearing transparent-IX control: removing the legacy
-/// `route_server_client` exemption (or applying the first-AS check to every
-/// eBGP session) makes this mismatched route disappear instead of being
-/// announced. This is the configuration seam used by existing route-server
-/// deployments that do not also negotiate an RFC 9234 role.
+/// Load-bearing route-server direction proof: restoring `route_server_client`
+/// to the exemption leaves the mismatched member replacement installed.
 #[tokio::test]
-async fn aspa_first_as_mismatch_exempts_legacy_route_server_client() {
+async fn aspa_first_as_mismatch_enforced_for_route_server_member() {
+    assert_aspa_first_as_mismatch_withdraws_replacement(true, true).await;
+}
+
+/// Load-bearing transparent-IX control: removing the local RS-client-role
+/// exemption (or applying the first-AS check to every eBGP session) makes this
+/// mismatched route disappear instead of being announced.
+#[tokio::test]
+async fn aspa_first_as_mismatch_exempts_local_route_server_client_role() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
-    session.config.route_server_client = true;
+    session.config.peer.local_role = Some(BgpRole::RouteServerClient);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
     install_test_negotiated_session(&mut session, negotiated_session(65002, false));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
 
@@ -70,6 +86,7 @@ async fn aspa_first_as_mismatch_exempts_legacy_route_server_client() {
     assert_eq!(announced.len(), 1);
     assert!(withdrawn.is_empty());
     assert_eq!(session.known_prefix_count(), 1);
+    assert_eq!(session.fsm.state(), SessionState::Established);
 }
 
 /// Load-bearing scope controls: removing either the eBGP or unicast-family

@@ -19,7 +19,7 @@ capacity = 16
 
 [[neighbors]]
 address = "10.94.0.2"
-remote_asn = 65094
+remote_asn = 65010
 description = "M94 OLD ExaBGP source"
 route_server_client = true
 

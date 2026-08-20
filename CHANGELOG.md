@@ -23,6 +23,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Enforce the ASPA first-AS precondition for inbound route-server members.
+  `route_server_client = true` identifies the remote member and no longer grants
+  the exemption meant for a speaker whose local BGP Role is `rs-client`;
+  mismatched replacements are treated as withdraw without resetting the
+  session. (LAN-1109)
+
 - Preserve the exact typed runtime configuration and its compiled external
   policy state across transactional staging and rollback, avoiding source
   re-reads after planning while keeping pure-FIB overlays isolated. (LAN-1053)
@@ -8957,7 +8963,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **ASPA draft v25 first-AS precondition.** Role-aware ASPA validation now
   checks that the most recently added AS in the `AS_PATH` matches the negotiated
-  neighbor ASN, with the transparent route-server-client exception from the
+  neighbor ASN, with the local route-server-client Role exception from the
   draft. Routes that previously validated despite a stripped or rewritten
   leftmost AS now evaluate `invalid` when BGP Roles provide the validation
   context, which can affect the existing ASPA best-path preference and
