@@ -97,6 +97,10 @@ message GlobalState {
   // Human-readable probe detail, populated when tcp_ao_support is
   // TCP_AO_SUPPORT_UNSUPPORTED or TCP_AO_SUPPORT_PROBE_FAILED.
   string tcp_ao_detail = 5;
+  // Unix epoch seconds of the last successfully accepted full policy
+  // generation (initial load, SIGHUP, or config transaction). Zero until
+  // the first generation is accepted; rejected loads do not advance it.
+  int64 policy_generation_loaded_timestamp_seconds = 6;
 }
 
 // ---------------------------------------------------------------------------

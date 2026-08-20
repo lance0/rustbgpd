@@ -571,9 +571,33 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         status["api"].is_object(),
         "/status must carry api: {status}"
     );
+    let current_server = status["status"]["current_server"]
+        .as_str()
+        .unwrap_or_default();
     assert!(
-        status["status"]["current_server"].is_string(),
+        !current_server.is_empty(),
         "/status must carry status.current_server: {status}"
+    );
+    let last_reconfig = status["status"]["last_reconfig"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        !last_reconfig.is_empty(),
+        "/status must carry the accepted generation timestamp: {status}"
+    );
+    let current_server_epoch = epoch_from_timestamp(current_server);
+    let last_reconfig_epoch = epoch_from_timestamp(last_reconfig);
+    assert!(
+        last_reconfig_epoch > 0,
+        "last_reconfig must be a parseable timestamp: {last_reconfig:?}"
+    );
+    assert!(
+        last_reconfig_epoch <= current_server_epoch,
+        "last_reconfig must not be later than current_server: {status}"
+    );
+    assert!(
+        current_server_epoch - last_reconfig_epoch <= 120,
+        "initial accepted generation must be recent after daemon startup: {status}"
     );
 
     // /protocols/bgp — the configured peer appears under its
