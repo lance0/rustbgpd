@@ -38,7 +38,7 @@ The supported render command is:
 
 ```console
 umask 077
-rs-config-render \
+sudo -u rustbgpd /usr/bin/rs-config-render \
   --input-format ixp-manager-v1 \
   --context /var/lib/rustbgpd/ixp-manager/router.json \
   --out-dir /var/lib/rustbgpd/ixp-manager/candidate \
@@ -48,7 +48,8 @@ rs-config-render \
 
 The input must be a regular, non-symlink mode-0600 file. The output directory
 must be absent or an empty, non-symlink mode-0700 directory; generated
-configuration and policy files are mode 0600.
+configuration and policy files are mode 0600. Keep the input, candidate, and
+activation-state parent owned by the `rustbgpd` service identity shown here.
 IXP Manager mode always runs the selected binary first as `rustbgpd --version`
 and then as `rustbgpd --check --strict <candidate>/config.toml`. Child output is
 suppressed so authentication values cannot escape through diagnostics.
@@ -61,8 +62,45 @@ candidate without that receipt is incomplete and must not be deployed.
 After reviewing a complete candidate, install `config.toml` and its `policy/`
 directory together using the existing coordinated-file procedure, then SIGHUP
 rustbgpd. A failed export, refusal, render, or check leaves the running daemon
-untouched. This mode does not fetch, install, activate, reload, poll, roll back,
-or call IXP Manager update/release callbacks.
+untouched. This render mode does not fetch or call IXP Manager update/release
+callbacks.
+
+### Atomic local activation
+
+After review, activate a complete private candidate with an exact executable
+and literal arguments (never a shell command):
+
+```console
+sudo -u rustbgpd /usr/bin/rs-config-render activate \
+  --candidate /var/lib/rustbgpd/ixp-manager/candidate \
+  --state-dir /var/lib/rustbgpd/ixp-manager/activation \
+  --check-with /usr/bin/rustbgpd --rbgp /usr/bin/rbgp \
+  --rbgp-addr unix:///var/lib/rustbgpd/grpc.sock \
+  --activation-command /usr/bin/sudo \
+  --activation-arg=-n --activation-arg /usr/bin/systemctl \
+  --activation-arg reload-or-restart --activation-arg rustbgpd
+```
+
+The service must read
+`/var/lib/rustbgpd/ixp-manager/activation/current/config.toml`. The state path
+must be absolute and its immediate parent must exist. Use `--initial` only for
+the first publication, when no current generation and no reachable daemon
+exist. Normalized comparison TOML is capped at 4,194,299 bytes so its encoded
+request, including five bytes of protobuf overhead, remains within 4 MiB. The
+helper rechecks a private immutable generation, atomically
+renames the relative `current` symlink, runs the command once, and requires both
+`rbgp health` and `rbgp config diff` to settle. Equal content is a no-op. A
+failed replacement attempts to restore the prior link and settle it again;
+exit 4 proves that link and runtime were restored.
+
+Authorize the `rustbgpd` account in sudoers for only the exact
+`/usr/bin/systemctl reload-or-restart rustbgpd` command. The private
+`activation-receipt.json` is written last; generations are retained for
+operator inspection. Exit 0 means activated or no-op, 2 refusal, 4 a proven
+rollback, and 5 means recovery or receipt durability is unproven. A receipt may
+therefore be absent or stale after exit 5. The helper does not deploy services,
+prune generations, retry indefinitely, or call IXP Manager. These examples use
+package paths; release archives install the three binaries under `/usr/local/bin`.
 
 Release tarballs (`rustbgpd-<arch>.tar.gz` on the [releases
 page](https://github.com/lance0/rustbgpd/releases)) ship the

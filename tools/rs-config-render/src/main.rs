@@ -3,8 +3,10 @@
 
 #![deny(unsafe_code)]
 
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 
@@ -16,6 +18,41 @@ use rs_config_render::{
 enum InputFormat {
     Arouteserver,
     IxpManagerV1,
+}
+
+#[derive(Parser)]
+#[command(
+    name = "rs-config-render activate",
+    about = "Atomically publish and settle a validated local candidate"
+)]
+struct ActivateArgs {
+    /// Private rendered candidate directory
+    #[arg(long)]
+    candidate: PathBuf,
+    /// Private activation state directory
+    #[arg(long)]
+    state_dir: PathBuf,
+    /// rustbgpd binary used for version and strict candidate checks
+    #[arg(long)]
+    check_with: PathBuf,
+    /// Exact rbgp executable used for health and live config comparison
+    #[arg(long)]
+    rbgp: PathBuf,
+    /// Running rustbgpd gRPC address
+    #[arg(long)]
+    rbgp_addr: String,
+    /// Maximum seconds for each activation or rollback settlement
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=120))]
+    settle_seconds: u64,
+    /// Permit publication only when no current generation or daemon exists
+    #[arg(long)]
+    initial: bool,
+    /// Exact activation executable; never evaluated by a shell
+    #[arg(long)]
+    activation_command: PathBuf,
+    /// Literal activation argument; repeatable and never shell-evaluated
+    #[arg(long, allow_hyphen_values = true)]
+    activation_arg: Vec<OsString>,
 }
 
 #[derive(Parser)]
@@ -110,7 +147,51 @@ fn stdout_exit(result: Result<(), StdoutWriteError>) -> ExitCode {
     stdout_exit_with(result, &mut stderr.lock())
 }
 
+fn parse_activation() -> Option<ActivateArgs> {
+    let mut args = std::env::args_os();
+    let binary = args.next()?;
+    (args.next().as_deref() == Some(OsStr::new("activate")))
+        .then(|| ActivateArgs::parse_from(std::iter::once(binary).chain(args)))
+}
+
 fn main() -> ExitCode {
+    if let Some(args) = parse_activation() {
+        let options = rs_config_render::activation::Options {
+            candidate: &args.candidate,
+            state_dir: &args.state_dir,
+            checker: &args.check_with,
+            rbgp: &args.rbgp,
+            rbgp_addr: &args.rbgp_addr,
+            settle: Duration::from_secs(args.settle_seconds),
+            initial: args.initial,
+            activation_command: &args.activation_command,
+            activation_args: &args.activation_arg,
+        };
+        return match rs_config_render::activation::activate(&options) {
+            Ok(status) => {
+                let status = match status {
+                    rs_config_render::activation::Status::Activated => "activated",
+                    rs_config_render::activation::Status::Noop => "noop",
+                };
+                stdout_exit(write_stdout(|writer| {
+                    writeln!(writer, "activation {status}")
+                }))
+            }
+            Err(error) => {
+                let (code, message) = match error {
+                    rs_config_render::activation::Error::Refused(reason) => (2, reason),
+                    rs_config_render::activation::Error::RolledBack => {
+                        (4, "candidate failed settlement; prior generation restored")
+                    }
+                    rs_config_render::activation::Error::RecoveryRequired => {
+                        (5, "recovery required; inspect private activation state")
+                    }
+                };
+                eprintln!("rs-config-render: activation: {message}");
+                ExitCode::from(code)
+            }
+        };
+    }
     let cli = Cli::parse();
     let customized = !cli.extra_rpol.is_empty() || !cli.merge_toml.is_empty();
     if matches!(cli.input_format, InputFormat::IxpManagerV1) {

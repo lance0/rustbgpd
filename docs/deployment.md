@@ -128,6 +128,32 @@ rs-config-render --version
 in the archive either way, so install it now rather than discovering it is
 missing from a cron refresh later.
 
+For an IXP Manager candidate, point the service at a stable activation symlink,
+then let the renderer publish and settle an immutable generation:
+
+```console
+sudo -u rustbgpd /usr/local/bin/rs-config-render activate \
+  --candidate /var/lib/rustbgpd/ixp-manager/candidate \
+  --state-dir /var/lib/rustbgpd/ixp-manager/activation \
+  --check-with /usr/local/bin/rustbgpd --rbgp /usr/local/bin/rbgp \
+  --rbgp-addr unix:///var/lib/rustbgpd/grpc.sock \
+  --activation-command /usr/bin/sudo \
+  --activation-arg=-n --activation-arg /usr/bin/systemctl \
+  --activation-arg reload-or-restart --activation-arg rustbgpd
+```
+
+Render and activate as the `rustbgpd` service identity; it must own the private
+candidate and activation-state parent. Configure `ExecStart` to read
+`.../activation/current/config.toml`, and authorize that account in sudoers for
+only `/usr/bin/systemctl reload-or-restart rustbgpd`. The state path must be
+absolute and its immediate parent must exist. Add `--initial` only when both no
+current generation and no reachable daemon exist. Normalized comparison TOML
+is limited to 4,194,299 bytes (4 MiB minus five encoded-request bytes). Exit 4
+proves the prior link and runtime were restored. Exit 5 means recovery or
+receipt durability is unproven: leave retained state
+untouched and inspect the current private receipt if present. It may be absent
+or stale when its final write or directory sync failed.
+
 ### Debian / RPM packages
 
 Tagged releases also publish native packages built with

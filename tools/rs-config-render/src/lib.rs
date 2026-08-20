@@ -43,6 +43,7 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod activation;
 pub mod ixp_manager;
 
 /// Top-level keys of the supported `template-context` shape, sorted.
