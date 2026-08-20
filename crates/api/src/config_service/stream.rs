@@ -707,7 +707,7 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
 
-    use sha2::{Digest as _, Sha256};
+    use sha2::Sha256;
     use tempfile::TempDir;
     use tokio::net::TcpListener;
     use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};

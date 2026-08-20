@@ -1494,7 +1494,10 @@ mod history_digest {
             ));
         }
         let mut digest = [0u8; 32];
-        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let (pairs, []) = value.as_bytes().as_chunks::<2>() else {
+            unreachable!("digest length was validated")
+        };
+        for (index, pair) in pairs.iter().enumerate() {
             let digit = |byte| {
                 if byte <= b'9' {
                     byte - b'0'

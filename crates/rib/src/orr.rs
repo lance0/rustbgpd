@@ -160,8 +160,11 @@ fn decode_mt_ids(protocol_id: u8, value: &[u8]) -> Result<Vec<u16>, ()> {
     if value.is_empty() || !value.len().is_multiple_of(2) {
         return Err(());
     }
-    value
-        .chunks_exact(2)
+    let (chunks, []) = value.as_chunks::<2>() else {
+        unreachable!("MT-ID length was validated")
+    };
+    chunks
+        .iter()
         .map(|raw| {
             let raw = u16::from_be_bytes([raw[0], raw[1]]);
             match protocol_id {

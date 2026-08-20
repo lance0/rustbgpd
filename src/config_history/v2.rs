@@ -808,9 +808,11 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, &'static str> {
     {
         return Err("hex must be lowercase and even-length");
     }
-    value
-        .as_bytes()
-        .chunks_exact(2)
+    let (pairs, []) = value.as_bytes().as_chunks::<2>() else {
+        unreachable!("hex length was validated")
+    };
+    pairs
+        .iter()
         .map(|pair| {
             let digit = |byte| {
                 if byte <= b'9' {
