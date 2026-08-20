@@ -26,6 +26,44 @@ the refresh loop can gate on warnings, not just on rejection.
 
 [arouteserver]: https://github.com/pierky/arouteserver
 
+## IXP Manager v7.4 manual candidate
+
+The GPL-2.0-only Foil exporter under
+[`integrations/ixp-manager`](../../integrations/ixp-manager/gpl-2.0-only/README.md)
+runs inside IXP Manager and emits the versioned JSON boundary. Fetch that JSON
+separately with authenticated `curl` into a mode-0600 file; the renderer does
+not fetch URLs or handle API keys.
+
+The supported render command is:
+
+```console
+umask 077
+rs-config-render \
+  --input-format ixp-manager-v1 \
+  --context /var/lib/rustbgpd/ixp-manager/router.json \
+  --out-dir /var/lib/rustbgpd/ixp-manager/candidate \
+  --max-prefix-restart-seconds 300 \
+  --check-with /usr/bin/rustbgpd
+```
+
+The input must be a regular, non-symlink mode-0600 file. The output directory
+must be absent or an empty, non-symlink mode-0700 directory; generated
+configuration and policy files are mode 0600.
+IXP Manager mode always runs the selected binary first as `rustbgpd --version`
+and then as `rustbgpd --check --strict <candidate>/config.toml`. Child output is
+suppressed so authentication values cannot escape through diagnostics.
+
+`render-receipt.json` is written last and only after the strict check passes.
+It records the source identity and hash, generated-file hashes and counts,
+refusal status, and the checked rustbgpd version without copying secrets. A
+candidate without that receipt is incomplete and must not be deployed.
+
+After reviewing a complete candidate, install `config.toml` and its `policy/`
+directory together using the existing coordinated-file procedure, then SIGHUP
+rustbgpd. A failed export, refusal, render, or check leaves the running daemon
+untouched. This mode does not fetch, install, activate, reload, poll, roll back,
+or call IXP Manager update/release callbacks.
+
 Release tarballs (`rustbgpd-<arch>.tar.gz` on the [releases
 page](https://github.com/lance0/rustbgpd/releases)) ship the
 `rs-config-render` binary alongside `rustbgpd` and `rbgp`; from
