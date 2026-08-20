@@ -534,31 +534,6 @@ impl std::fmt::Display for RuntimeConfigTransactionPlanError {
 
 impl std::error::Error for RuntimeConfigTransactionPlanError {}
 
-/// Error returned when the peer manager stages a candidate runtime config snapshot.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StageConfigSnapshotError {
-    /// Candidate TOML/config failed validation.
-    InvalidCandidate(String),
-    /// Serializing the previous runtime snapshot for rollback failed.
-    SerializePreviousSnapshot(String),
-}
-
-impl std::fmt::Display for StageConfigSnapshotError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidCandidate(message) => f.write_str(message),
-            Self::SerializePreviousSnapshot(message) => {
-                write!(
-                    f,
-                    "failed to serialize previous runtime config snapshot: {message}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for StageConfigSnapshotError {}
-
 /// Import-policy validation state that can change route admissibility after an
 /// external cache update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -795,14 +770,6 @@ pub enum PeerManagerCommand {
             Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError>,
         >,
     },
-    /// Stage a full validated runtime config snapshot from TOML and return the
-    /// previous normalized TOML snapshot for rollback.
-    StageConfigSnapshot {
-        /// Complete candidate TOML content.
-        candidate_toml: String,
-        /// Reply returns the previous normalized runtime snapshot on success.
-        reply: oneshot::Sender<Result<String, StageConfigSnapshotError>>,
-    },
     /// Mark the currently staged runtime config snapshot as durably committed.
     ///
     /// The transaction controller sends this after the config writer has
@@ -812,17 +779,6 @@ pub enum PeerManagerCommand {
     CommitConfigSnapshotStage {
         /// Reply is sent after the staged marker is cleared.
         reply: oneshot::Sender<()>,
-    },
-    /// Restore a full runtime config snapshot during transaction rollback.
-    ///
-    /// Unlike [`PeerManagerCommand::StageConfigSnapshot`], this is a terminal
-    /// rollback operation: it clears the staged marker and reaps dynamic peers
-    /// whose accepted range is no longer present in the restored snapshot.
-    RestoreConfigSnapshot {
-        /// Complete rollback TOML content.
-        candidate_toml: String,
-        /// Reply returns success/failure after the restored snapshot is active.
-        reply: oneshot::Sender<Result<(), StageConfigSnapshotError>>,
     },
     /// Return the current normalized runtime config snapshot as TOML.
     ///

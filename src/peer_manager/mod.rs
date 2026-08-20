@@ -1737,9 +1737,6 @@ impl PeerManager {
                             }
                             return;
                         }
-                        _ => {
-                            error!("unsupported legacy peer-manager command rejected");
-                        }
                     }
                 }
                 internal = Self::receive_internal_command(&mut self.internal_rx) => {
