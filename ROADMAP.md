@@ -609,8 +609,12 @@ refresh cadence, followed by the final semantic diff and support bundle,
 tested rollback, and a recorded feedback or explicit no-change outcome; the
 1,000-peer route-server scale receipt
 is [retained](docs/perf/route-server-1000-2026-07.md). The ARouteServer target
-ships as `tools/rs-config-render`. The current external adapter already serves
-the Birdwatcher-shaped status, peer, accepted-route, and filtered-route subset.
+ships as `tools/rs-config-render`. The external adapter now also serves the IXP
+Manager v7.4 status, live protocol inventory/detail, symbols, member received,
+and member export slice through immutable aliases with an enforced response
+maximum. Remaining Bird's Eye work is global table/count and exact/less-specific
+lookup, wildcard-community search, and the complete reject-reason inventory;
+no full compatibility claim is made.
 [ADR-0126](docs/adr/0126-shared-group-per-client-best.md) (Accepted) landed
 shared-group per-client best-path: the `per_client_best` path-hiding
 mitigation now runs inside update groups, so rendered `path_hiding = true`
