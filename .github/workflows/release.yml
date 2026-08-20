@@ -330,15 +330,15 @@ jobs:
         # Private site; default GITHUB_TOKEN cannot dispatch across
         # repos. RBGP_RS_TOKEN is a fine-grained PAT with Contents:
         # write on lance0/rbgp.rs (POST /dispatches). Actions write
-        # 403s. If unset, rbgp.rs's daily 07:07 UTC job still picks
-        # up the latest GitHub release.
+        # 403s. If unset, rbgp.rs's nightly 07:07 UTC ingest still
+        # picks up the latest GitHub release.
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.RBGP_RS_TOKEN }}
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "RBGP_RS_TOKEN unset; rbgp.rs daily check will pick up ${GITHUB_REF_NAME}"
+            echo "RBGP_RS_TOKEN unset; rbgp.rs nightly ingest will pick up ${GITHUB_REF_NAME}"
             exit 0
           fi
           gh api repos/lance0/rbgp.rs/dispatches --input - <<EOF
