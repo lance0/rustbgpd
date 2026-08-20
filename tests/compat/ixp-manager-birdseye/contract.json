@@ -4,7 +4,15 @@
   "protocol_aliases": {
     "member-v4": "pb_as64496"
   },
+  "adapter_api_version": {
+    "kind": "product-identity",
+    "prefix": "rustbgpd "
+  },
   "runtime_compatibility": false,
+  "runtime_supported": [
+    "exact-protocol-route",
+    "exact-export-route"
+  ],
   "unsupported": [
     "complete-rejected-route-reason-inventory",
     "less-specific-longest-prefix-match",

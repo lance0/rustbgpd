@@ -4,12 +4,16 @@ on:
   pull_request:
     paths:
       - "tests/compat/ixp-manager-birdseye/**"
+      - "examples/birdwatcher-adapter/**"
+      - "tests/birdwatcher_adapter_smoke.rs"
       - ".github/workflows/ixp-compat.yml"
       - "docs/INTEROP.md"
   push:
     branches: [main]
     paths:
       - "tests/compat/ixp-manager-birdseye/**"
+      - "examples/birdwatcher-adapter/**"
+      - "tests/birdwatcher_adapter_smoke.rs"
       - ".github/workflows/ixp-compat.yml"
       - "docs/INTEROP.md"
   workflow_dispatch:
@@ -23,5 +27,6 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/install-protobuf
       - name: Verify the pinned upstream contract
         run: tests/compat/ixp-manager-birdseye/run.sh

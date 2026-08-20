@@ -84,6 +84,8 @@ listener beyond loopback only with the mTLS controls in `docs/SECURITY.md`.
 | `GET /symbols`               | Sorted live protocol identities; routing-table symbols stay empty      |
 | `GET /routes/protocol/{id}`  | `RibService.ListReceivedRoutes` (paged, all unicast families)  |
 | `GET /routes/export/{id}`    | `RibService.ListAdvertisedRoutes` (paged, all unicast families) |
+| `GET /route/{prefix}/protocol/{id}` | `RibService.ListReceivedRoutes` (paged, exact IPv4/IPv6 unicast prefix) |
+| `GET /route/{prefix}/export/{id}` | `RibService.ListAdvertisedRoutes` (paged, exact IPv4/IPv6 unicast prefix) |
 | `GET /routes/peer/{peer}`    | `RibService.ListReceivedRoutes` (paged, all unicast families)  |
 | `GET /routes/filtered/{id}`  | `PolicyService.ListRejectedRoutes` (unpaged — the store is bounded at the `[policy.reject_retention]` capacity, default 1024/peer) |
 | `GET /routes/noexport/{id}`  | `RibService.ListBestRoutes` − `RibService.ListAdvertisedRoutes` (both paged), each missing prefix explained by `RibService.ExplainAdvertisedRoute` |
@@ -113,14 +115,24 @@ bare peer-IP lookup remains accepted.
 
 Every successful response retains Alice-LG's `api.Version` and
 `api.result_from_cache` keys while also exposing Bird's Eye's lowercase
-`version`, `from_cache`, and enforced `max_routes`. A route-array request whose
-actual size exceeds that maximum returns HTTP 403 instead of truncating.
+`version`, `from_cache`, and enforced `max_routes`. Both version keys contain
+`rustbgpd <package-version>` as product identity; they are not a claim to
+implement Bird's Eye API version 2.1.0. A route-array request whose actual size
+exceeds that maximum returns HTTP 403 instead of truncating.
+
+IXP Manager's `protocolRoute()` and `exportRoute()` journeys use
+`/route/<prefix>%2F<mask>/protocol/{id}` and `/route/<prefix>%2F<mask>/export/{id}`.
+These views request an exact prefix on every gRPC page, retain every Add-Path
+candidate in daemon order, and apply `--max-routes` only after exact filtering.
+Malformed prefixes return HTTP 400, unknown identities return 404, and daemon
+failures return a sanitized 502.
 
 This is deliberately partial IXP Manager support: status, live BGP inventory
 and detail, protocol symbols, member received routes, and member exported
-routes are available. Global table views, counts, exact/less-specific search,
-large-community wildcard search, and the complete reject-reason inventory are
-not yet implemented; the adapter does not claim full Bird's Eye compatibility.
+routes, including exact protocol/export lookup, are available. Global table
+views, counts, less-specific search, large-community wildcard search, and the
+complete reject-reason inventory are not yet implemented; the adapter does not
+claim full Bird's Eye compatibility.
 
 ## Filtered routes and reject reasons
 
@@ -274,10 +286,10 @@ the adapter returns `502 Bad Gateway` (the in-daemon server returned
 ## Testing
 
 - Unit tests: `cargo test -p birdwatcher-adapter`
-- End-to-end smoke test of the status/peer/accepted/filtered/noexport
+- End-to-end smoke test of the status/peer/accepted/filtered/noexport/exact
   subset: `cargo test --test birdwatcher_adapter_smoke` (root package;
   spawns a real daemon plus this adapter, announces a clean route and a
   loop-poisoned one from one live peer plus an announce-nothing receiver
   peer, and asserts the accepted, filtered, and both sides of the noexport
-  views — suppressed route present for the announcer, exported route absent
-  for the receiver).
+  views — including received/exported Add-Path multiplicity, order, source
+  alias direction, exact-filter-before-cap, and stable 400/404/502 errors).

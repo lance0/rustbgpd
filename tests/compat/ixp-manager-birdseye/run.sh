@@ -49,3 +49,5 @@ docker run --rm --user "$(id -u):$(id -g)" \
   --volume "$composer_cache:/composer-cache" \
   --volume "$capture_output:/capture-output" \
   "$image" /harness/run-in-container.sh
+
+"$root/run-adapter-consumer.sh" "$tmp/ixp-manager" "$image" >/dev/null

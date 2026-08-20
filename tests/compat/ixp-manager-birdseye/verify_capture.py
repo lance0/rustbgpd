@@ -31,6 +31,8 @@ UNSUPPORTED = {
     "atomic-all-candidate-table-snapshot",
     "runtime-protocol-alias-reconfiguration",
 }
+RUNTIME_SUPPORTED = {"exact-protocol-route", "exact-export-route"}
+ADAPTER_API_VERSION = {"kind": "product-identity", "prefix": "rustbgpd "}
 
 
 def fail(message: str) -> None:
@@ -44,6 +46,10 @@ if manifest.get("runtime_compatibility") is not False:
     fail("contract oracle must not promote a runtime compatibility claim")
 if set(manifest.get("unsupported", [])) != UNSUPPORTED:
     fail("unsupported compatibility matrix drifted")
+if set(manifest.get("runtime_supported", [])) != RUNTIME_SUPPORTED:
+    fail("supported runtime matrix drifted")
+if manifest.get("adapter_api_version") != ADAPTER_API_VERSION:
+    fail("adapter api.version must remain an honest product identity")
 if manifest.get("protocol_aliases") != {"member-v4": "pb_as64496"}:
     fail("explicit protocol alias matrix drifted")
 
