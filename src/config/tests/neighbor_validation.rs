@@ -468,6 +468,78 @@ fn listen_addrs_cover_both_families() {
 }
 
 #[test]
+fn explicit_listen_address_enables_only_its_family_and_threads_active_source() {
+    let source = valid_toml().replace(
+        "listen_port = 179",
+        "listen_port = 179\nlisten_addresses = [\"127.0.0.2\"]",
+    );
+    let config = parse(&source).unwrap();
+    assert_eq!(
+        config.explicit_listen_endpoints().unwrap(),
+        ["127.0.0.2:179".parse::<SocketAddr>().unwrap()]
+    );
+    let resolved = config.resolve_neighbor(&config.neighbors[0]).unwrap();
+    assert_eq!(
+        resolved.transport_config.local_address,
+        Some("127.0.0.2".parse().unwrap())
+    );
+}
+
+#[test]
+fn explicit_listen_addresses_reject_invalid_shape_and_omitted_families() {
+    for addresses in [
+        "[]",
+        "[\"127.0.0.2\", \"127.0.0.3\"]",
+        "[\"0.0.0.0\"]",
+        "[\"224.0.0.1\"]",
+        "[\"255.255.255.255\"]",
+        "[\"::ffff:127.0.0.1\"]",
+        "[\"fe80::1\"]",
+    ] {
+        let source = valid_toml().replace(
+            "listen_port = 179",
+            &format!("listen_port = 179\nlisten_addresses = {addresses}"),
+        );
+        assert!(
+            matches!(
+                parse(&source),
+                Err(ConfigError::InvalidListenAddresses { .. })
+            ),
+            "{addresses}"
+        );
+    }
+
+    let v6_peer = valid_toml()
+        .replace(
+            "listen_port = 179",
+            "listen_port = 179\nlisten_addresses = [\"127.0.0.2\"]",
+        )
+        .replace("address = \"10.0.0.2\"", "address = \"2001:db8::2\"");
+    assert!(matches!(
+        parse(&v6_peer),
+        Err(ConfigError::InvalidListenAddresses { .. })
+    ));
+
+    let dynamic = valid_toml().replace(
+        "listen_port = 179",
+        "listen_port = 179\nlisten_addresses = [\"127.0.0.2\"]",
+    ) + "\n[peer_groups.test-group]\n\n[[dynamic_neighbors]]\nprefix = \"2001:db8::/64\"\npeer_group = \"test-group\"\n";
+    assert!(matches!(
+        parse(&dynamic),
+        Err(ConfigError::InvalidListenAddresses { .. })
+    ));
+
+    let link_local_dynamic = valid_toml().replace(
+        "listen_port = 179",
+        "listen_port = 179\nlisten_addresses = [\"::1\"]",
+    ) + "\n[peer_groups.test-group]\n\n[[dynamic_neighbors]]\nprefix = \"fe80::/10\"\npeer_group = \"test-group\"\n";
+    assert!(matches!(
+        parse(&link_local_dynamic),
+        Err(ConfigError::InvalidListenAddresses { .. })
+    ));
+}
+
+#[test]
 fn prometheus_addr_parsed() {
     let config = parse(valid_toml()).unwrap();
     assert_eq!(

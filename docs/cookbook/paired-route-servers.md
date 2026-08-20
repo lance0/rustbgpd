@@ -24,6 +24,14 @@ make dual sessions part of member onboarding, not an option.
 - **Two instances, two hosts, zero shared runtime state.** The
   instances never talk to each other; consistency comes from feeding
   both the same policy inputs, not from synchronization.
+- **If a small deployment must share one host, bind distinct endpoints.** Set
+  `[global].listen_addresses` to one local address per enabled family on each
+  instance. The same addresses source active opens, so the instances do not
+  collide on TCP/179. Every served family needs distinct addresses on both
+  instances; do not mix wildcard and exact mode on the same port. Addresses
+  must already exist locally because there is no freebind or fallback. This is
+  a restart-required endpoint choice, not
+  per-neighbor source selection; separate hosts remain the resilient design.
 - **One policy source, two renders.** With the
   [IXP filter pipeline](ixp-filter-pipeline.md), both route servers
   render from the same arouteserver `general.yml` / `clients.yml` —

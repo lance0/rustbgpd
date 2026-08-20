@@ -483,6 +483,7 @@ impl PeerManager {
                     asn: local_asn,
                     router_id: router_id.to_string(),
                     listen_port: BGP_PORT,
+                    listen_addresses: None,
                     cluster_id: cluster_id.map(|id| id.to_string()),
                     runtime_state_dir: "/tmp/rustbgpd-tests".to_string(),
                     telemetry: crate::config::TelemetryConfig {
@@ -841,6 +842,7 @@ impl PeerManager {
             _ => SocketAddr::new(config.address, BGP_PORT),
         };
         let mut transport = TransportConfig::new(peer, remote_addr);
+        transport.local_address = self.current_config.active_source_for(config.address);
         transport.peer_interface.clone_from(&config.interface);
         transport.peer_scope_id = scope_id;
         transport.max_prefixes = config.max_prefixes;

@@ -17,6 +17,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   enforced configurable route-response maximum. The pinned compatibility
   oracle now executes IXP Manager v7.4.0. Full table/search compatibility and
   complete reject-reason coverage remain explicitly out of scope. (LAN-1106)
+- Optional `[global].listen_addresses` binds one exact local address per
+  enabled family and uses it for active opens, allowing two route-server
+  instances to share a host without TCP/179 collisions. Explicit binds are
+  atomic and restart-required; omission preserves legacy dual-wildcard
+  behavior. (LAN-1107)
 
 - Retained unicast import-policy rejections now identify a named `.rpol`
   deciding term as `policy:term` in the existing bounded reason-detail field.

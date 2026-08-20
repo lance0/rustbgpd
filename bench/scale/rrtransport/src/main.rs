@@ -141,6 +141,7 @@ fn transport_config(remote: SocketAddr) -> TransportConfig {
     TransportConfig {
         peer,
         remote_addr: remote,
+        local_address: None,
         peer_interface: None,
         peer_scope_id: None,
         connect_timeout: Duration::from_secs(2),

@@ -623,6 +623,11 @@ views at grouped-class cost, proven by the
 [grouped per-client-best receipt](docs/perf/irr-reload-grouped-per-client-best-2026-08.md)
 against the sealed
 [realistic-mix baseline](docs/perf/irr-reload-realistic-mix-2026-08.md).
+Optional global `listen_addresses` now gives each daemon one exact bind and
+active-open source per enabled family, including two route-server instances on
+one host (LAN-1107). Per-neighbor sources, multiple same-family LAN addresses,
+freebind, and fallback remain deferred; separate hosts remain the production
+redundancy recommendation.
 
 **Researched and rejected** (recorded so they aren't re-litigated):
 confederations (RFC 5065 — no demand signal in two years of issues and

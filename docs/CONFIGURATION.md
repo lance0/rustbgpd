@@ -189,7 +189,8 @@ Required. Defines the local BGP speaker identity.
 |---------------------|--------|----------|----------------------|------------------------------------|
 | `asn`               | u32    | yes      | --                   | Local autonomous system number; AS 0 is rejected at startup |
 | `router_id`         | string | yes      | --                   | Non-zero BGP Identifier in IPv4 dotted-quad form; `0.0.0.0` is rejected at startup |
-| `listen_port`       | u16    | yes      | --                   | TCP port to listen on (typically 179). The daemon listens on both address families — `0.0.0.0` and `[::]` — at this port; if one family cannot be bound (for example IPv6 disabled on the host) it is logged and skipped while the other keeps serving. Startup fails only when neither family binds |
+| `listen_port`       | u16    | yes      | --                   | TCP port to listen on (typically 179). When `listen_addresses` is absent, the daemon uses `0.0.0.0` and `[::]`; an unavailable family is skipped while the other keeps serving, and startup fails only when neither binds. Explicit endpoints instead bind atomically |
+| `listen_addresses`  | array of IP strings | no | -- | Exact local BGP endpoints and active-open source addresses. Omission preserves the tolerant dual-wildcard listener. When present, the list must be nonempty with at most one address per family; every configured peer and dynamic range must use a listed family, and every bind is atomic. **Restart-required.** |
 | `dynamic_neighbor_limit` | u32 | no     | `100`                | Maximum number of auto-accepted dynamic peers (must be > 0) |
 | `worker_threads`    | usize  | no       | `min(cores, 8)`      | Tokio runtime worker threads. Unset caps to `min(CPU parallelism, 8)` to avoid over-provisioning the async runtime (one worker + stack reservation per core) on a high-core host for this I/O-bound daemon — reduces virtual-address reservation and scheduler footprint (RSS-neutral in benchmarks). `0` means unset. `RUSTBGPD_WORKER_THREADS` overrides. **Restart-required** (runtime built once at startup). |
 | `runtime_state_dir` | string | no       | `"/var/lib/rustbgpd"` | Directory for daemon-owned runtime state (GR restart marker, optional warm checkpoint, FIB ownership receipt, and gRPC socket) |
@@ -205,12 +206,18 @@ Required. Defines the local BGP speaker identity.
 
 Startup validation rejects local AS 0 (RFC 7607 §2) and BGP Identifier zero
 (RFC 6286 §2.1) before any listener or peer session starts.
+For co-resident daemons, every instance needs distinct exact addresses for
+each family it serves. Do not mix a wildcard-mode daemon with an exact-mode
+daemon on the same TCP port. Exact addresses must already exist locally at
+startup; there is no freebind or wildcard fallback.
 
 ```toml
 [global]
 asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
+# Optional for two route-server instances sharing one host:
+# listen_addresses = ["192.0.2.10", "2001:db8::10"]
 runtime_state_dir = "/var/lib/rustbgpd"
 warm_cache_checkpoint_on_shutdown = false
 honor_graceful_shutdown = true

@@ -130,6 +130,7 @@
       {"path": "Config.inbound_admission", "classification": "alpha"},
       {"path": "Config.managed_netdevs", "classification": "alpha"},
       {"path": "Global.ebgp_requires_policy", "classification": "outside_v1"},
+      {"path": "Global.listen_addresses", "classification": "alpha"},
       {"path": "Neighbor.bfd", "classification": "outside_v1"},
       {"path": "Neighbor.interface", "classification": "outside_v1"},
       {"path": "Neighbor.tcp_ao", "classification": "outside_v1"},

@@ -194,6 +194,7 @@ fn make_dynamic_manager_config() -> Config {
             asn: 65001,
             router_id: "10.0.0.1".to_string(),
             listen_port: BGP_PORT,
+            listen_addresses: None,
             cluster_id: None,
             runtime_state_dir: "/tmp/rustbgpd-tests".to_string(),
             telemetry: crate::config::TelemetryConfig {

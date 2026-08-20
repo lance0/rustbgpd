@@ -5,7 +5,7 @@ use super::{
 };
 use crate::config::TransportConfig;
 use rustbgpd_wire::{AddressPrefixOrf, OrfAction, OrfEntries, OrfMatch, OrfType};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
@@ -969,6 +969,16 @@ where
     ) -> std::io::Result<()>,
     C: FnOnce(&socket2::Socket, &socket2::SockAddr) -> std::io::Result<()>,
 {
+    if let Some(local_address) = config.local_address {
+        if local_address.is_ipv4() != config.remote_addr.is_ipv4() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "local and remote BGP transport addresses use different families",
+            ));
+        }
+        socket.bind(&socket2::SockAddr::from(SocketAddr::new(local_address, 0)))?;
+    }
+
     if let Some(ref password) = config.md5_password {
         crate::socket_opts::set_tcp_md5sig(&socket, config.remote_addr, password.as_ref())?;
         debug!(peer = %peer_label, "TCP MD5 authentication configured");
