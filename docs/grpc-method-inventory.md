@@ -87,7 +87,7 @@ shape itself does not raise the tier.
 
 | RPC | Tier | Notes |
 |-----|------|-------|
-| `GetGlobal` | `sensitive_read` | Returns `GlobalState`: `asn`, `router_id`, `listen_port`, TCP-AO kernel-support probe. Topology disclosure. |
+| `GetGlobal` | `sensitive_read` | Returns `GlobalState`: `asn`, `router_id`, `listen_port`, TCP-AO kernel-support probe, and the Unix timestamp of the last successfully accepted full policy generation (zero until first acceptance). Topology and change-cadence disclosure. |
 
 ### ConfigService (11 RPCs)
 

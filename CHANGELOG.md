@@ -16,6 +16,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Named TOML and default-action denies retain policy-only detail, anonymous
   denies remain empty, and reason tokens, schemas, metrics, and export policy
   behavior are unchanged. (LAN-1111)
+- `GlobalService.GetGlobal` now reports the live Unix timestamp of the last
+  successfully accepted full policy generation, and `birdwatcher-adapter`
+  renders it as status `last_reconfig`; rejected loads leave the prior value
+  unchanged and pre-acceptance zero remains an empty string. (LAN-1110)
 
 ### Fixed
 

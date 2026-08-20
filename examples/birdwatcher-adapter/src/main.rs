@@ -283,9 +283,9 @@ async fn status(State(state): State<AppState>) -> Result<Json<Value>, StatusCode
             "router_id": g.router_id,
             "current_server": format_timestamp_now(),
             "last_reboot": format_secs_ago(h.uptime_seconds),
-            // Not tracked by the daemon — same empty-string fallback as
-            // the in-daemon server; Alice-LG parses it as zero time.
-            "last_reconfig": "",
+            "last_reconfig": format_optional_epoch_secs(
+                g.policy_generation_loaded_timestamp_seconds
+            ),
             "message": format!("rustbgpd AS{}", g.asn),
             "version": format!("rustbgpd {}", env!("CARGO_PKG_VERSION")),
         }
@@ -858,6 +858,15 @@ fn format_secs_ago(secs: u64) -> String {
     format_epoch_secs(now.saturating_sub(secs))
 }
 
+/// Format a daemon-supplied epoch timestamp, preserving birdwatcher's empty
+/// string for an unavailable (zero or negative) value.
+fn format_optional_epoch_secs(epoch_secs: i64) -> String {
+    u64::try_from(epoch_secs)
+        .ok()
+        .filter(|seconds| *seconds > 0)
+        .map_or_else(String::new, format_epoch_secs)
+}
+
 /// Format epoch seconds as `"YYYY-MM-DD HH:MM:SS"` (UTC, no chrono dep).
 fn format_epoch_secs(epoch_secs: u64) -> String {
     let (days, day_secs) = (epoch_secs / 86400, epoch_secs % 86400);
@@ -1012,6 +1021,16 @@ mod tests {
             let error = parse_daemon_endpoint(endpoint).unwrap_err().to_string();
             assert!(error.contains(expected), "{endpoint}: {error}");
         }
+    }
+
+    #[test]
+    fn optional_epoch_timestamp_formats_positive_and_leaves_unavailable_empty() {
+        assert_eq!(
+            format_optional_epoch_secs(1_700_000_000),
+            "2023-11-14 22:13:20"
+        );
+        assert!(format_optional_epoch_secs(0).is_empty());
+        assert!(format_optional_epoch_secs(-1).is_empty());
     }
 
     #[test]

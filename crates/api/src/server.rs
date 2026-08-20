@@ -1843,7 +1843,7 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(GlobalServiceServer::with_interceptor(
-        GlobalService::new(asn, router_id.clone(), listen_port),
+        GlobalService::new(asn, router_id.clone(), listen_port, metrics.clone()),
         interceptor.clone(),
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
@@ -2072,7 +2072,7 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(GlobalServiceServer::with_interceptor(
-        GlobalService::new(asn, router_id.clone(), listen_port),
+        GlobalService::new(asn, router_id.clone(), listen_port, metrics.clone()),
         interceptor.clone(),
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
@@ -2520,12 +2520,13 @@ mod tests {
         )
         .with_dynamic_bearer(store.clone(), 0);
         let interceptor = AuthInterceptor::new(store.clone(), 0);
+        let metrics = BgpMetrics::new();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let server = tokio::spawn(async move {
             Server::builder()
-                .layer(GrpcAuthzLayer::new(context, BgpMetrics::new()))
+                .layer(GrpcAuthzLayer::new(context, metrics.clone()))
                 .add_service(GlobalServiceServer::with_interceptor(
-                    GlobalService::new(65000, "192.0.2.1".into(), 179),
+                    GlobalService::new(65000, "192.0.2.1".into(), 179, metrics.clone()),
                     interceptor.clone(),
                 ))
                 .add_service(EventServiceServer::with_interceptor(
