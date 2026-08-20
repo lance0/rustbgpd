@@ -480,12 +480,21 @@ export_policy_chain = ["dataset-export"]
     std::fs::write(&retained_path, &fib_candidate).unwrap();
     let accepted =
         Arc::new(crate::config::AcceptedConfigSnapshot::load(&retained_path, None).unwrap());
+    let expected_rpol = accepted.config_ref().policy.rpol.clone();
+    let expected_dataset = Arc::clone(
+        accepted
+            .config_ref()
+            .policy
+            .dataset_bindings
+            .get("customers")
+            .expect("retained candidate dataset binding"),
+    );
     std::fs::remove_file(&rpol_path).unwrap();
     std::fs::remove_file(&dataset_path).unwrap();
     let task = tokio::spawn(mgr.run());
     let (reply_tx, reply_rx) = oneshot::channel();
     internal_tx
-        .send(InternalCommand::PlanAcceptedSnapshot {
+        .send(InternalCommand::PlanAcceptedTransactionConfig {
             snapshot: accepted.clone(),
             expected_runtime_snapshot_token: None,
             reply: reply_tx,
@@ -493,12 +502,52 @@ export_policy_chain = ["dataset-export"]
         .unwrap();
     let preloaded = reply_rx.await.unwrap().unwrap();
     assert_eq!(
-        preloaded.status,
+        preloaded.plan.status,
         rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Committable
     );
-    assert_eq!(preloaded.supported_sections, vec!["[[fib_tables]]"]);
-    assert_eq!(preloaded.update_group_impact.rollup.no_op, 1);
-    assert!(preloaded.committed_candidate.is_some());
+    assert_eq!(preloaded.plan.supported_sections, vec!["[[fib_tables]]"]);
+    assert_eq!(preloaded.plan.update_group_impact.rollup.no_op, 1);
+    assert!(preloaded.plan.committed_candidate.is_some());
+    let planned_dataset = preloaded
+        .candidate
+        .policy
+        .dataset_bindings
+        .get("customers")
+        .expect("planned candidate dataset binding");
+    assert_eq!(planned_dataset.status(), expected_dataset.status());
+    assert_eq!(planned_dataset.pin().data.records(), 1);
+    assert!(
+        preloaded.candidate.resolved_neighbors().unwrap()[0]
+            .export_policy
+            .as_ref()
+            .expect("retained candidate policy")
+            .references_dataset("customers")
+    );
+
+    let (stage_tx, stage_rx) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::StageTransactionConfig {
+            candidate: preloaded.candidate,
+            scope: TransactionConfigScope::Full,
+            reply: stage_tx,
+        })
+        .unwrap();
+    let rollback = stage_rx.await.unwrap().unwrap();
+    let (snapshot_tx, snapshot_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::RuntimeConfigSnapshot { reply: snapshot_tx })
+        .await
+        .unwrap();
+    let staged = snapshot_rx.await.unwrap().unwrap();
+    assert_eq!(staged.rpol, expected_rpol);
+    assert_eq!(staged.rpol_files, accepted.config_ref().policy.rpol_files);
+    let (restore_tx, restore_rx) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::RestoreTransactionConfig {
+            rollback,
+            reply: restore_tx,
+        })
+        .unwrap();
+    restore_rx.await.unwrap();
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     task.await.unwrap();
     responder.await.unwrap();
@@ -538,13 +587,14 @@ async fn transaction_fib_stage_overlays_only_tables_and_posture_and_restores_raw
     internal_tx
         .send(InternalCommand::StageTransactionConfig {
             candidate: Box::new(candidate),
+            scope: TransactionConfigScope::FibTablesOnly,
             reply: stage_tx,
         })
         .unwrap();
-    let previous = stage_rx.await.unwrap().unwrap();
-    assert_eq!(previous.config_epoch, None);
-    assert_eq!(previous.global.ebgp_requires_policy, None);
-    assert_eq!(previous.fib_tables[0].name, "edge");
+    let rollback = stage_rx.await.unwrap().unwrap();
+    assert_eq!(rollback.previous().config_epoch, None);
+    assert_eq!(rollback.previous().global.ebgp_requires_policy, None);
+    assert_eq!(rollback.previous().fib_tables[0].name, "edge");
 
     let (snapshot_tx, snapshot_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::RuntimeConfigSnapshot { reply: snapshot_tx })
@@ -560,7 +610,7 @@ async fn transaction_fib_stage_overlays_only_tables_and_posture_and_restores_raw
     let (restore_tx, restore_rx) = oneshot::channel();
     internal_tx
         .send(InternalCommand::RestoreTransactionConfig {
-            previous,
+            rollback,
             reply: restore_tx,
         })
         .unwrap();
@@ -581,7 +631,7 @@ async fn transaction_fib_stage_overlays_only_tables_and_posture_and_restores_raw
 #[tokio::test]
 async fn stage_config_snapshot_rebuilds_matcher_and_returns_previous_toml() {
     let (tx, rx) = mpsc::channel(16);
-    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (internal_tx, internal_rx) = mpsc::unbounded_channel();
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let config = make_dynamic_manager_config();
     let mut replacement = config.clone();
@@ -592,7 +642,6 @@ async fn stage_config_snapshot_rebuilds_matcher_and_returns_previous_toml() {
         description: Some("transaction range".to_string()),
         tcp_ao: None,
     }];
-    let candidate_toml = toml::to_string_pretty(&replacement).unwrap();
 
     let manager = PeerManager::new_with_config(
         rx,
@@ -610,20 +659,18 @@ async fn stage_config_snapshot_rebuilds_matcher_and_returns_previous_toml() {
     let handle = tokio::spawn(manager.run());
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::StageConfigSnapshot {
-        candidate_toml,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let previous_toml = reply_rx.await.unwrap().unwrap();
-    assert!(!previous_toml.contains("config_epoch"), "{previous_toml}");
-    assert!(
-        !previous_toml.contains("ebgp_requires_policy"),
-        "{previous_toml}"
+    internal_tx
+        .send(InternalCommand::StageTransactionConfig {
+            candidate: Box::new(replacement),
+            scope: TransactionConfigScope::Full,
+            reply: reply_tx,
+        })
+        .unwrap();
+    let rollback = reply_rx.await.unwrap().unwrap();
+    assert_eq!(
+        rollback.previous().dynamic_neighbors[0].prefix,
+        "127.0.0.0/8"
     );
-    let previous = Config::load_toml_with_diagnostics(&previous_toml, "previous snapshot").unwrap();
-    assert_eq!(previous.dynamic_neighbors[0].prefix, "127.0.0.0/8");
 
     let (list_tx, list_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::ListDynamicRanges { reply: list_tx })
@@ -646,7 +693,7 @@ async fn stage_config_snapshot_rebuilds_matcher_and_returns_previous_toml() {
 )]
 async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynamic_peer() {
     let (tx, rx) = mpsc::channel(16);
-    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (internal_tx, internal_rx) = mpsc::unbounded_channel();
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let mut initial = make_dynamic_manager_config();
     initial.dynamic_neighbors.clear();
@@ -659,7 +706,6 @@ async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynam
         description: Some("candidate-only".to_string()),
         tcp_ao: None,
     }];
-    let candidate_toml = toml::to_string_pretty(&candidate).unwrap();
 
     let manager = PeerManager::new_with_config(
         rx,
@@ -677,13 +723,14 @@ async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynam
     let handle = tokio::spawn(manager.run());
 
     let (stage_tx, stage_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::StageConfigSnapshot {
-        candidate_toml,
-        reply: stage_tx,
-    })
-    .await
-    .unwrap();
-    let previous_toml = stage_rx.await.unwrap().unwrap();
+    internal_tx
+        .send(InternalCommand::StageTransactionConfig {
+            candidate: Box::new(candidate),
+            scope: TransactionConfigScope::Full,
+            reply: stage_tx,
+        })
+        .unwrap();
+    let rollback = stage_rx.await.unwrap().unwrap();
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let listener_addr = listener.local_addr().unwrap();
@@ -739,13 +786,13 @@ async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynam
     );
 
     let (restore_tx, restore_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::RestoreConfigSnapshot {
-        candidate_toml: previous_toml,
-        reply: restore_tx,
-    })
-    .await
-    .unwrap();
-    restore_rx.await.unwrap().unwrap();
+    internal_tx
+        .send(InternalCommand::RestoreTransactionConfig {
+            rollback,
+            reply: restore_tx,
+        })
+        .unwrap();
+    restore_rx.await.unwrap();
 
     let (list_tx, list_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::ListPeers { reply: list_tx })
@@ -765,7 +812,7 @@ async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynam
 #[tokio::test]
 async fn runtime_config_snapshot_returns_current_staged_config() {
     let (tx, rx) = mpsc::channel(16);
-    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (internal_tx, internal_rx) = mpsc::unbounded_channel();
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let config = make_dynamic_manager_config();
     let mut replacement = config.clone();
@@ -776,7 +823,6 @@ async fn runtime_config_snapshot_returns_current_staged_config() {
         description: Some("transaction range".to_string()),
         tcp_ao: None,
     }];
-    let candidate_toml = toml::to_string_pretty(&replacement).unwrap();
 
     let manager = PeerManager::new_with_config(
         rx,
@@ -794,12 +840,13 @@ async fn runtime_config_snapshot_returns_current_staged_config() {
     let handle = tokio::spawn(manager.run());
 
     let (stage_tx, stage_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::StageConfigSnapshot {
-        candidate_toml,
-        reply: stage_tx,
-    })
-    .await
-    .unwrap();
+    internal_tx
+        .send(InternalCommand::StageTransactionConfig {
+            candidate: Box::new(replacement),
+            scope: TransactionConfigScope::Full,
+            reply: stage_tx,
+        })
+        .unwrap();
     stage_rx.await.unwrap().unwrap();
 
     let (reply_tx, reply_rx) = oneshot::channel();

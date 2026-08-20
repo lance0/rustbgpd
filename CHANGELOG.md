@@ -23,6 +23,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Preserve the exact typed runtime configuration and its compiled external
+  policy state across transactional staging and rollback, avoiding source
+  re-reads after planning while keeping pure-FIB overlays isolated. (LAN-1053)
+
 - Incremental ASPA cache updates now carry their exact changed customer-ASN
   set into the RIB. The manager still scans every admitted route, but avoids
   detailed ASPA verification for AS paths disjoint from that set; first,

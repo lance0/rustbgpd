@@ -2653,7 +2653,7 @@ mod tests {
             &[
                 "progress.begin_mutation();",
                 "Checkpoint::TransactionAfterBeginMutation",
-                "stage_config_snapshot(",
+                "stage_preloaded_config_snapshot(",
             ],
         );
         ordered(

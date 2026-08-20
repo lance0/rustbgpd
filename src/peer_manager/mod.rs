@@ -9,7 +9,7 @@ use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicNeighborInfo, OwnedCatalogMutation, OwnedNeighborMutation,
     OwnedNeighborMutationError, OwnedNeighborMutationOutcome, PeerKey, PeerManagerCommand,
     PeerManagerNeighborConfig, PeerManagerReadinessQuery, PolicyDatasetStatusRow, PolicyEvent,
-    SessionEvent, SessionLifecycleEvent, StageConfigSnapshotError,
+    RuntimeConfigTransactionPlanError, SessionEvent, SessionLifecycleEvent,
 };
 use rustbgpd_bmp::BmpEvent;
 use rustbgpd_fsm::PeerConfig;
@@ -25,7 +25,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info};
 
-use crate::config::Config;
+use crate::config::{Config, raw_config_document_bounded};
 use crate::policy_admin::{
     apply_config_event, global_policy_chains_from_config, named_neighbor_set_from_config,
     named_neighbor_sets_from_config, named_peer_group_from_config, named_peer_groups_from_config,
@@ -119,6 +119,35 @@ const EXPLAIN_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
 /// query still shares the caller's single absolute deadline.
 const IMPORT_POLICY_QUERY_CONCURRENCY: usize = 64;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransactionConfigScope {
+    Full,
+    FibTablesOnly,
+}
+
+/// Opaque proof of the exact live config displaced by a transaction stage.
+#[derive(Debug)]
+pub(crate) struct TransactionConfigRollbackToken {
+    previous: Box<Config>,
+    scope: TransactionConfigScope,
+}
+
+impl TransactionConfigRollbackToken {
+    pub(crate) fn capture(previous: Box<Config>, scope: TransactionConfigScope) -> Self {
+        Self { previous, scope }
+    }
+
+    pub(crate) fn previous(&self) -> &Config {
+        &self.previous
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PlannedTransactionConfig {
+    pub(crate) plan: rustbgpd_api::peer_types::RuntimeConfigTransactionPlan,
+    pub(crate) candidate: Box<Config>,
+}
+
 pub(crate) enum InternalCommand {
     ReplaceConfigSnapshot {
         config: Box<Config>,
@@ -128,27 +157,29 @@ pub(crate) enum InternalCommand {
         /// snapshot overtaken by this (stale) one on the separate channel.
         ack: Option<oneshot::Sender<()>>,
     },
-    PlanAcceptedSnapshot {
+    /// Plan a retained accepted snapshot for an apply and return the exact
+    /// typed object that was planned.
+    PlanAcceptedTransactionConfig {
         snapshot: std::sync::Arc<crate::config::AcceptedConfigSnapshot>,
         expected_runtime_snapshot_token: Option<String>,
-        reply: oneshot::Sender<
-            Result<
-                rustbgpd_api::peer_types::RuntimeConfigTransactionPlan,
-                rustbgpd_api::peer_types::RuntimeConfigTransactionPlanError,
-            >,
-        >,
+        reply: oneshot::Sender<Result<PlannedTransactionConfig, RuntimeConfigTransactionPlanError>>,
     },
-    /// Stage the FIB tables and RFC 8212 tuple from an already validated
-    /// transaction candidate. All other state stays attached to the live
-    /// snapshot, preserving the pure-FIB external-input exception.
+    /// Plan an already loaded candidate and return that exact typed object.
+    PlanTransactionConfig {
+        candidate: Box<Config>,
+        expected_runtime_snapshot_token: Option<String>,
+        reply: oneshot::Sender<Result<PlannedTransactionConfig, RuntimeConfigTransactionPlanError>>,
+    },
+    /// Stage an already planned typed candidate without reopening any source.
     StageTransactionConfig {
         candidate: Box<Config>,
-        reply: oneshot::Sender<Result<Box<Config>, String>>,
+        scope: TransactionConfigScope,
+        reply: oneshot::Sender<Result<TransactionConfigRollbackToken, String>>,
     },
-    /// Restore the exact raw/source-attached snapshot returned by
+    /// Restore the exact source-attached snapshot returned by
     /// [`InternalCommand::StageTransactionConfig`].
     RestoreTransactionConfig {
-        previous: Box<Config>,
+        rollback: TransactionConfigRollbackToken,
         reply: oneshot::Sender<()>,
     },
 }
@@ -342,7 +373,7 @@ pub struct PeerManager {
     policy_events_tx: broadcast::Sender<Arc<PolicyEvent>>,
     policy_event_history: VecDeque<Arc<PolicyEvent>>,
     current_config: Config,
-    /// True between `StageConfigSnapshot` and the transaction controller's
+    /// True between typed transaction staging and the controller's
     /// persist/rollback completion signal. Dynamic inbound accepts are refused
     /// in this window so candidate-only ranges cannot create live peers before
     /// the candidate is durable.
@@ -1189,75 +1220,12 @@ impl PeerManager {
                             };
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::StageConfigSnapshot {
-                            candidate_toml,
-                            reply,
-                        } => {
-                            let result = Config::load_toml_with_diagnostics(
-                                &candidate_toml,
-                                "candidate config transaction",
-                            )
-                            .map_err(StageConfigSnapshotError::InvalidCandidate)
-                            .and_then(|candidate| {
-                                let previous =
-                                    crate::config::raw_config_document_bounded(
-                                        &mut self.current_config,
-                                    )
-                                    .map_err(
-                                        |error| {
-                                            StageConfigSnapshotError::SerializePreviousSnapshot(
-                                                error.to_string(),
-                                            )
-                                        },
-                                    )?;
-                                self.current_config = candidate;
-                                self.dynamic_ranges =
-                                    Self::parse_dynamic_ranges(&self.current_config);
-                                self.reconcile_stale_dynamic_max_prefix_restarts();
-                                self.config_snapshot_staged = true;
-                                // ADR-0110 freshness: the staged config
-                                // transaction is live from this point.
-                                self.metrics.record_policy_generation_loaded();
-                                Ok(previous)
-                            });
-                            let _ = reply.send(result);
-                        }
                         PeerManagerCommand::CommitConfigSnapshotStage { reply } => {
                             self.config_snapshot_staged = false;
                             let _ = reply.send(());
                         }
-                        PeerManagerCommand::RestoreConfigSnapshot {
-                            candidate_toml,
-                            reply,
-                        } => {
-                            let result = Config::load_toml_with_diagnostics(
-                                &candidate_toml,
-                                "rollback config transaction",
-                            )
-                            .map_err(StageConfigSnapshotError::InvalidCandidate);
-                            match result {
-                                Ok(candidate) => {
-                                    self.current_config = candidate;
-                                    self.dynamic_ranges =
-                                        Self::parse_dynamic_ranges(&self.current_config);
-                                    self.reconcile_stale_dynamic_max_prefix_restarts();
-                                    self.config_snapshot_staged = false;
-                                    // ADR-0110 freshness: rollback re-applies
-                                    // the previous (accepted) config.
-                                    self.metrics.record_policy_generation_loaded();
-                                    self.reap_dynamic_peers_not_allowed_by_current_ranges()
-                                        .await;
-                                    let _ = reply.send(Ok(()));
-                                }
-                                Err(error) => {
-                                    let _ = reply.send(Err(error));
-                                }
-                            }
-                        }
                         PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
-                            let result = crate::config::raw_config_document_bounded(
-                                &mut self.current_config,
-                            )
+                            let result = raw_config_document_bounded(&mut self.current_config)
                                 .map_err(|error| {
                                     format!(
                                         "failed to serialize runtime config snapshot: {error}"
@@ -1794,7 +1762,7 @@ impl PeerManager {
                                 let _ = ack.send(());
                             }
                         }
-                        Some(InternalCommand::PlanAcceptedSnapshot {
+                        Some(InternalCommand::PlanAcceptedTransactionConfig {
                             snapshot,
                             expected_runtime_snapshot_token,
                             reply,
@@ -1805,22 +1773,47 @@ impl PeerManager {
                                     &mut candidate,
                                     expected_runtime_snapshot_token.as_deref(),
                                 )
-                                .await;
+                                .await
+                                .map(|plan| PlannedTransactionConfig {
+                                    plan,
+                                    candidate: Box::new(candidate),
+                                });
+                            let _ = reply.send(result);
+                        }
+                        Some(InternalCommand::PlanTransactionConfig {
+                            mut candidate,
+                            expected_runtime_snapshot_token,
+                            reply,
+                        }) => {
+                            let result = self
+                                .plan_preloaded_config_transaction(
+                                    &mut candidate,
+                                    expected_runtime_snapshot_token.as_deref(),
+                                )
+                                .await
+                                .map(|plan| PlannedTransactionConfig { plan, candidate });
                             let _ = reply.send(result);
                         }
                         Some(InternalCommand::StageTransactionConfig {
                             candidate,
+                            scope,
                             reply,
                         }) => {
-                            let mut staged = self.current_config.clone();
-                            staged.fib_tables.clone_from(&candidate.fib_tables);
-                            staged.config_epoch = candidate.config_epoch;
-                            staged.global.ebgp_requires_policy =
-                                candidate.global.ebgp_requires_policy;
-                            let result = staged
-                                .validate()
-                                .map_err(|error| error.to_string())
-                                .map(|()| {
+                            let result = match scope {
+                                TransactionConfigScope::Full => Ok(*candidate),
+                                TransactionConfigScope::FibTablesOnly => {
+                                    let mut staged = self.current_config.clone();
+                                    staged.fib_tables.clone_from(&candidate.fib_tables);
+                                    staged.config_epoch = candidate.config_epoch;
+                                    staged.global.ebgp_requires_policy =
+                                        candidate.global.ebgp_requires_policy;
+                                    staged
+                                        .validate()
+                                        .map_err(|error| error.to_string())
+                                        .map(|()| staged)
+                                }
+                            }
+                            .map(|staged| {
                                     let previous = std::mem::replace(
                                         &mut self.current_config,
                                         staged,
@@ -1830,19 +1823,26 @@ impl PeerManager {
                                     self.reconcile_stale_dynamic_max_prefix_restarts();
                                     self.config_snapshot_staged = true;
                                     self.metrics.record_policy_generation_loaded();
-                                    Box::new(previous)
+                                    TransactionConfigRollbackToken::capture(
+                                        Box::new(previous),
+                                        scope,
+                                    )
                                 });
                             let _ = reply.send(result);
                         }
                         Some(InternalCommand::RestoreTransactionConfig {
-                            previous,
+                            rollback,
                             reply,
                         }) => {
-                            self.current_config = *previous;
+                            self.current_config = *rollback.previous;
                             self.dynamic_ranges = Self::parse_dynamic_ranges(&self.current_config);
                             self.reconcile_stale_dynamic_max_prefix_restarts();
                             self.config_snapshot_staged = false;
                             self.metrics.record_policy_generation_loaded();
+                            if rollback.scope == TransactionConfigScope::Full {
+                                self.reap_dynamic_peers_not_allowed_by_current_ranges()
+                                    .await;
+                            }
                             let _ = reply.send(());
                         }
                         None => {}
