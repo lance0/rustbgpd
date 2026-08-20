@@ -2,6 +2,7 @@ target/
 **/target/
 .git/
 .claude/
+integrations/
 clab-*/
 bench/scale/matrix/artifacts-*/
 
