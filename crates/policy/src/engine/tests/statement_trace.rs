@@ -727,8 +727,8 @@ fn rpol_agreement_contexts() -> Vec<(&'static str, RouteContext<'static>)> {
 fn rpol_statement_trace_agrees_with_live_evaluation_and_recorded_hits() {
     for (chain_name, chain) in rpol_agreement_chains() {
         for (ctx_name, ctx) in rpol_agreement_contexts() {
-            let (live, evaluation) =
-                super::super::evaluate_chain_with_attribution(Some(&chain), &ctx);
+            let (live, evaluation, reject_term) =
+                super::super::evaluate_chain_with_reject_term(Some(&chain), &ctx);
             let trace = explain_chain_statements(Some(&chain), &ctx);
             assert_eq!(
                 trace.action, live.action,
@@ -739,6 +739,14 @@ fn rpol_statement_trace_agrees_with_live_evaluation_and_recorded_hits() {
                 last.policy_name.as_deref(),
                 evaluation.matched_policy.as_deref(),
                 "terminal policy diverged for chain={chain_name} ctx={ctx_name}"
+            );
+            let traced_reject_term = (live.action == PolicyAction::Deny)
+                .then_some(last.term_name.as_deref())
+                .flatten();
+            assert_eq!(
+                reject_term.as_deref(),
+                traced_reject_term,
+                "single-walk reject term diverged for chain={chain_name} ctx={ctx_name}"
             );
 
             // Matched-term parity with the counting evaluator: a term

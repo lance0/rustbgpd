@@ -117,7 +117,7 @@ arouteserver reject-reason function value), and a stable id per reason token:
 
 | Reason token         | Large community  | Meaning                                        |
 |----------------------|------------------|------------------------------------------------|
-| `policy_reject`      | `64496:65520:1`  | Denied by import policy (detail = policy name) |
+| `policy_reject`      | `64496:65520:1`  | Denied by import policy (detail = `policy:term` for named `.rpol`, else policy) |
 | `otc_route_leak`     | `64496:65520:2`  | RFC 9234 Only-to-Customer role leak            |
 | `next_hop_ownership` | `64496:65520:3`  | Route-server strict NEXT_HOP ownership         |
 | `as_path_loop`       | `64496:65520:4`  | Own AS in the received AS_PATH                 |
@@ -125,10 +125,10 @@ arouteserver reject-reason function value), and a stable id per reason token:
 | `treat_as_withdraw`  | `64496:65520:6`  | RFC 7606 treat-as-withdraw attribute handling  |
 | *(unrecognized)*     | `64496:65520:0`  | Future token this adapter build predates       |
 
-The ids are append-only. Each filtered route also carries human-readable
-`reject_reason` / `reject_reason_detail` fields (plus `rpki_validation` /
-`aspa_validation`) as extra JSON keys — visible to curl users, ignored by
-parsers that don't know them.
+The ids are append-only and term detail does not create new ids. Each filtered
+route also carries human-readable `reject_reason` / `reject_reason_detail`
+fields (plus `rpki_validation` / `aspa_validation`) as extra JSON keys —
+visible to curl users, ignored by parsers that don't know them.
 
 Alice-LG config to render the reasons:
 

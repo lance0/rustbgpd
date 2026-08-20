@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Retained unicast import-policy rejections now identify a named `.rpol`
+  deciding term as `policy:term` in the existing bounded reason-detail field.
+  Named TOML and default-action denies retain policy-only detail, anonymous
+  denies remain empty, and reason tokens, schemas, metrics, and export policy
+  behavior are unchanged. (LAN-1111)
 - `GlobalService.GetGlobal` now reports the live Unix timestamp of the last
   successfully accepted full policy generation, and `birdwatcher-adapter`
   renders it as status `last_reconfig`; rejected loads leave the prior value

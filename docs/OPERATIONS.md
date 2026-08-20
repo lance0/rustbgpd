@@ -2003,7 +2003,7 @@ and RPKI/ASPA validation states at rejection time:
 
 | Reason | Meaning / detail field |
 |---|---|
-| `policy_reject` | The import chain denied it (detail: the matched policy name; the row's RPKI/ASPA columns show whether a validation state drove the deny). Follow up with `rbgp policy explain` on the prefix for the statement-level trace. |
+| `policy_reject` | The import chain denied it (detail: `policy:term` when a named `.rpol` term decided, otherwise the matched policy name; anonymous policies remain empty). The field is bounded to 64 bytes. The row's RPKI/ASPA columns show whether validation drove the deny. Follow up with `rbgp policy explain` on the prefix for the full statement trace. |
 | `otc_route_leak` | RFC 9234 Only-to-Customer ingress drop (detail: the canonical OTC sub-reason, e.g. `ingress_from_customer_rsclient`). |
 | `next_hop_ownership` | Strict-peer next-hop ownership gate, RFC 7948 §4.8 / ADR-0107 (detail: e.g. `foreign_next_hop`; the next-hop column shows the violating value). |
 | `as_path_loop` | Our ASN in the received AS_PATH (RFC 4271 §9.1.2). |

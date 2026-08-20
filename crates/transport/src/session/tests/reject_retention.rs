@@ -1,5 +1,19 @@
 use super::*;
 
+fn named_rpol_reject_chain() -> PolicyChain {
+    let file =
+        rustbgpd_policy::rpol::RpolFile::parse("policy member-import { term deny-all { reject } }")
+            .expect("clean rpol");
+    let mut store = rustbgpd_policy::sets::SetStore::new();
+    let compiled = file
+        .compile_policy("member-import", &[], &mut store)
+        .expect("policy exists");
+    PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+        "member-import".to_string(),
+        Arc::new(compiled),
+    )])
+}
+
 /// Clean permitted UPDATEs must not construct reject-only diagnostic state
 /// or allocate the rejected-route LRU.
 /// Break-to-red: restoring eager `LruCache::new` makes the structural
@@ -34,10 +48,7 @@ async fn reject_retention_permitted_update_stays_allocation_free() {
 async fn reject_retention_shares_prototype_across_body_and_mp_policy_denies() {
     use rustbgpd_wire::{MpReachNlri, NlriEntry};
 
-    let chain = PolicyChain::new(vec![Policy {
-        entries: vec![],
-        default_action: PolicyAction::Deny,
-    }]);
+    let chain = named_rpol_reject_chain();
     let (mut session, _metrics) = retention_session_with_chain(Some(chain), |_| {});
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
@@ -85,6 +96,11 @@ async fn reject_retention_shares_prototype_across_body_and_mp_policy_denies() {
         .await;
     let entries = session.rejected_routes.snapshot();
     assert_eq!(entries.len(), 2);
+    assert!(
+        entries
+            .iter()
+            .all(|(_, entry)| { entry.detail.as_deref() == Some("member-import:deny-all") })
+    );
     assert!(entries.iter().any(|(key, _)| *key == retention_key(body)));
     assert!(entries.iter().any(|(key, _)| {
         *key == RetentionKey {

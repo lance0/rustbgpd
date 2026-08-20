@@ -105,6 +105,26 @@ fn truncate_marked(s: &mut String, max: usize) {
     *s = bounded;
 }
 
+/// Render retained import-policy attribution. A named `.rpol` term extends
+/// the existing policy detail as `policy:term`; named TOML/default denies
+/// keep the policy-only form, and anonymous policies stay absent.
+#[allow(
+    dead_code,
+    reason = "the isolated store-allocation tool omits the production inbound caller"
+)]
+pub(super) fn policy_reject_detail(policy: Option<&str>, term: Option<&str>) -> Option<String> {
+    let policy = policy?;
+    let mut detail =
+        String::with_capacity(policy.len() + term.map_or(0, |term| term.len().saturating_add(1)));
+    detail.push_str(policy);
+    if let Some(term) = term {
+        detail.push(':');
+        detail.push_str(term);
+    }
+    truncate_marked(&mut detail, MAX_RETAINED_DETAIL_BYTES);
+    Some(detail)
+}
+
 /// One retained rejection: the canonical reason token plus the compact
 /// attribute summary a looking glass renders.
 ///
@@ -116,9 +136,10 @@ fn truncate_marked(s: &mut String, max: usize) {
 pub struct RejectedRouteEntry {
     /// Canonical rejection mechanism token.
     pub reason: ImportRejectReason,
-    /// Sub-mechanism detail: the matched policy name for
-    /// `policy_reject`, the canonical sub-reason token for the OTC /
-    /// ownership / RR-loop gates, absent otherwise.
+    /// Sub-mechanism detail: `policy:term` for a named `.rpol` term that
+    /// rejected the route, the policy name for other `policy_reject`s,
+    /// the canonical sub-reason token for the OTC / ownership / RR-loop
+    /// gates, absent otherwise.
     pub detail: Option<String>,
     /// Wire next-hop the rejected announcement carried, when decoded.
     pub next_hop: Option<IpAddr>,
@@ -398,6 +419,25 @@ mod tests {
         assert!(rendered.len() <= MAX_RENDERED_REASON_DETAIL_BYTES);
         assert!(rendered.starts_with('p'));
         assert!(rendered.contains(" | aspa_not_provider customer=4294967295 provider=4294967295"));
+    }
+
+    #[test]
+    fn policy_detail_joins_term_and_preserves_bounded_fallbacks() {
+        assert_eq!(
+            policy_reject_detail(Some("member-import"), Some("bogon-guard")).as_deref(),
+            Some("member-import:bogon-guard")
+        );
+        assert_eq!(
+            policy_reject_detail(Some("toml-import"), None).as_deref(),
+            Some("toml-import")
+        );
+        assert_eq!(policy_reject_detail(None, Some("deny-all")), None);
+
+        let policy = "p".repeat(40);
+        let term = "t".repeat(40);
+        let bounded = policy_reject_detail(Some(&policy), Some(&term)).unwrap();
+        assert!(bounded.len() <= MAX_RETAINED_DETAIL_BYTES);
+        assert!(bounded.ends_with(RETENTION_TRUNCATION_MARKER));
     }
 
     #[test]

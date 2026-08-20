@@ -1589,6 +1589,8 @@ message RejectedRoute {
   // the canonical sub-reason token for the OTC / ownership / RR-loop
   // gates (e.g. ingress_peer_mismatch, foreign_next_hop,
   // cluster_list). Empty when the mechanism has no finer grain.
+  // A named .rpol deciding term extends the policy detail to
+  // policy:term; named default/TOML denies keep policy-only detail.
   string reason_detail = 6;
 
   // Wire next-hop the rejected announcement carried; empty when it
