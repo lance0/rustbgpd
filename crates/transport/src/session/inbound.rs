@@ -773,13 +773,12 @@ impl PeerSession {
                     .map_or(self.config.peer.remote_asn, |n| n.peer_asn),
             ),
             local_role,
-            first_as_check_exempt: self.config.route_server_client
-                || matches!(local_role, Some(BgpRole::RouteServerClient)),
+            first_as_check_exempt: matches!(local_role, Some(BgpRole::RouteServerClient)),
         }
     }
     /// Return the received and negotiated ASNs when an IPv4/IPv6-unicast
-    /// UPDATE from an eBGP peer fails the ASPA first-AS precondition. An
-    /// RS-client remains exempt for a transparent route server / IX.
+    /// UPDATE from an eBGP peer fails the ASPA first-AS precondition. A
+    /// session on which this speaker is the RS client remains exempt.
     pub(super) fn aspa_first_as_mismatch(
         &self,
         is_ebgp: bool,

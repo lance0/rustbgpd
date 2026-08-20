@@ -508,8 +508,12 @@ fn aspa_first_as_update(prefix: Ipv4Prefix, first_asn: u32, four_octet_as: bool)
         Ipv4UnicastMode::Body,
     )
 }
-async fn assert_aspa_first_as_mismatch_withdraws_replacement(four_octet_as: bool) {
+async fn assert_aspa_first_as_mismatch_withdraws_replacement(
+    four_octet_as: bool,
+    route_server_member: bool,
+) {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.route_server_client = route_server_member;
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;

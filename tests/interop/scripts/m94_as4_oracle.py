@@ -309,7 +309,7 @@ class SourceWireOracle:
         if message_type == 1:
             opened = parse_open(body)
             if direction == "exa":
-                assert opened["my_as"] == 65094, opened
+                assert opened["my_as"] == 65010, opened
                 assert opened["router_id"] == SOURCE_ROUTER_ID, opened
                 assert opened["advertised_as4"] is False, opened
             else:
