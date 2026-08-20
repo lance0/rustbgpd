@@ -419,8 +419,11 @@ fn parse_attributes(mut buf: &[u8]) -> Result<SnapRoute, String> {
                         value.len()
                     ));
                 }
-                route.communities = value
-                    .chunks_exact(4)
+                let (chunks, []) = value.as_chunks::<4>() else {
+                    unreachable!("COMMUNITIES length was validated")
+                };
+                route.communities = chunks
+                    .iter()
                     .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
                     .collect();
             }
@@ -431,10 +434,11 @@ fn parse_attributes(mut buf: &[u8]) -> Result<SnapRoute, String> {
                         value.len()
                     ));
                 }
-                route.extended_communities = value
-                    .chunks_exact(8)
-                    .map(|c| u64::from_be_bytes(c.try_into().expect("chunk of 8")))
-                    .collect();
+                let (chunks, []) = value.as_chunks::<8>() else {
+                    unreachable!("EXTENDED_COMMUNITIES length was validated")
+                };
+                route.extended_communities =
+                    chunks.iter().map(|c| u64::from_be_bytes(*c)).collect();
             }
             attr_type::LARGE_COMMUNITIES => {
                 if !value.len().is_multiple_of(12) {
@@ -443,8 +447,11 @@ fn parse_attributes(mut buf: &[u8]) -> Result<SnapRoute, String> {
                         value.len()
                     ));
                 }
-                route.large_communities = value
-                    .chunks_exact(12)
+                let (chunks, []) = value.as_chunks::<12>() else {
+                    unreachable!("LARGE_COMMUNITIES length was validated")
+                };
+                route.large_communities = chunks
+                    .iter()
                     .map(|c| {
                         [
                             u32::from_be_bytes([c[0], c[1], c[2], c[3]]),
@@ -476,7 +483,10 @@ fn parse_as_path(mut value: &[u8]) -> Result<Vec<u32>, String> {
         if value.len() < segment_len {
             return Err("truncated AS_PATH segment".to_string());
         }
-        for chunk in value[2..segment_len].chunks_exact(4) {
+        let (chunks, []) = value[2..segment_len].as_chunks::<4>() else {
+            unreachable!("AS_PATH segment length was validated")
+        };
+        for chunk in chunks {
             path.push(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
         value = &value[segment_len..];

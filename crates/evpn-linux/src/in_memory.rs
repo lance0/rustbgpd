@@ -1075,6 +1075,11 @@ fn take_universal_failure(state: &mut State) -> Option<DataplaneError> {
     Some(f.error.realize())
 }
 
+#[allow(unknown_lints, reason = "Clippy 1.97 predates this lint")]
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "async trait methods must defer state mutation until the returned future is polled"
+)]
 impl NexthopOps for InMemoryDataplane {
     async fn add_nexthop_member(
         &mut self,
@@ -1999,6 +2004,18 @@ mod tests {
             dst: ip("10.0.0.2"),
         };
         assert!(dp.apply(&op).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn nexthop_ops_remain_lazy_until_polled() {
+        let mut dp = InMemoryDataplane::new();
+        let h = dp.handle();
+        h.inject_failure_io(None);
+
+        let future = dp.add_nexthop_member(1, ip("192.0.2.1"));
+        assert_eq!(h.state.lock().expect("poisoned").failures.len(), 1);
+        assert!(matches!(future.await, Err(DataplaneError::Io(_))));
+        assert!(h.nexthop_ops().is_empty());
     }
 
     #[tokio::test]

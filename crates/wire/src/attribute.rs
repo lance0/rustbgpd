@@ -1257,8 +1257,11 @@ fn decode_as4_path(raw: &RawAttribute) -> Result<(AsPath, bool), DecodeError> {
                 value.len()
             )));
         }
-        let asns = value[..needed]
-            .chunks_exact(4)
+        let (chunks, []) = value[..needed].as_chunks::<4>() else {
+            unreachable!("AS4_PATH length was validated")
+        };
+        let asns = chunks
+            .iter()
             .map(|asn| u32::from_be_bytes([asn[0], asn[1], asn[2], asn[3]]))
             .collect();
         value = &value[needed..];
@@ -1513,8 +1516,11 @@ fn decode_attribute_value(
                     ),
                 });
             }
-            let communities = value
-                .chunks_exact(4)
+            let (chunks, []) = value.as_chunks::<4>() else {
+                unreachable!("COMMUNITIES length was validated")
+            };
+            let communities = chunks
+                .iter()
                 .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
                 .collect();
             Ok(PathAttribute::Communities(communities))
@@ -1531,8 +1537,11 @@ fn decode_attribute_value(
                     ),
                 });
             }
-            let communities = value
-                .chunks_exact(8)
+            let (chunks, []) = value.as_chunks::<8>() else {
+                unreachable!("EXTENDED_COMMUNITIES length was validated")
+            };
+            let communities = chunks
+                .iter()
                 .map(|c| {
                     ExtendedCommunity::new(u64::from_be_bytes([
                         c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
@@ -1560,8 +1569,11 @@ fn decode_attribute_value(
                     detail: format!("CLUSTER_LIST length {} not a multiple of 4", value.len()),
                 });
             }
-            let ids = value
-                .chunks_exact(4)
+            let (chunks, []) = value.as_chunks::<4>() else {
+                unreachable!("CLUSTER_LIST length was validated")
+            };
+            let ids = chunks
+                .iter()
                 .map(|c| Ipv4Addr::new(c[0], c[1], c[2], c[3]))
                 .collect();
             Ok(PathAttribute::ClusterList(ids))
@@ -1578,8 +1590,11 @@ fn decode_attribute_value(
                 });
             }
             let mut seen = std::collections::HashSet::with_capacity(value.len() / 12);
-            let communities = value
-                .chunks_exact(12)
+            let (chunks, []) = value.as_chunks::<12>() else {
+                unreachable!("LARGE_COMMUNITIES length was validated")
+            };
+            let communities = chunks
+                .iter()
                 .filter_map(|c| {
                     let community = LargeCommunity::new(
                         u32::from_be_bytes([c[0], c[1], c[2], c[3]]),

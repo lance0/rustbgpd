@@ -601,8 +601,8 @@ fn parse_dump_message_for_class(
             },
             NHA_GROUP => {
                 // Payload is an array of `nexthop_grp` (8 bytes each).
-                let chunks = payload.chunks_exact(8);
-                if !chunks.remainder().is_empty() {
+                let (chunks, remainder) = payload.as_chunks::<8>();
+                if !remainder.is_empty() {
                     return Err(NexthopError::Truncated);
                 }
                 let mut ids = Vec::with_capacity(payload.len() / 8);

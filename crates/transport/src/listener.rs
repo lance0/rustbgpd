@@ -813,8 +813,10 @@ impl BgpListener {
     /// # Errors
     ///
     /// Returns an error if binding or pre-listen option installation fails.
+    #[allow(unknown_lints, reason = "Clippy 1.97 predates this lint")]
     #[allow(
         clippy::unused_async,
+        clippy::unused_async_trait_impl,
         reason = "preserve the existing async public API for callers"
     )]
     pub async fn bind_with_options(
@@ -842,8 +844,10 @@ impl BgpListener {
     ///
     /// Returns `InvalidInput` for an empty endpoint set, or the first socket
     /// creation, option, bind, or listen error.
+    #[allow(unknown_lints, reason = "Clippy 1.97 predates this lint")]
     #[allow(
         clippy::unused_async,
+        clippy::unused_async_trait_impl,
         reason = "match the async bind API of the other listener constructors"
     )]
     pub async fn bind_strict_with_options(
@@ -884,8 +888,10 @@ impl BgpListener {
     ///
     /// Returns an error only when neither family can be bound, or when
     /// pre-listen option installation fails on a bindable socket.
+    #[allow(unknown_lints, reason = "Clippy 1.97 predates this lint")]
     #[allow(
         clippy::unused_async,
+        clippy::unused_async_trait_impl,
         reason = "match the async bind API of the single-family constructors"
     )]
     pub async fn bind_dual_with_options(
