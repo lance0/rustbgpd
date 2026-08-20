@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `birdwatcher-adapter` now supports immutable IXP Manager protocol aliases,
+  Bird's Eye-shaped protocol detail and symbols, member received/export views,
+  canonical lowercase API metadata alongside preserved Alice-LG keys, and an
+  enforced configurable route-response maximum. The pinned compatibility
+  oracle now executes IXP Manager v7.4.0. Full table/search compatibility and
+  complete reject-reason coverage remain explicitly out of scope. (LAN-1106)
 - Optional `[global].listen_addresses` binds one exact local address per
   enabled family and uses it for active opens, allowing two route-server
   instances to share a host without TCP/179 collisions. Explicit binds are

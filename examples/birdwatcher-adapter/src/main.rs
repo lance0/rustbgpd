@@ -10,7 +10,10 @@
 //! **Supported endpoints** (single-table mode):
 //! - `GET /status` — daemon status
 //! - `GET /protocols/bgp` — BGP neighbor list (with real filtered counts)
+//! - `GET /protocol/{id}` — one live BGP neighbor detail row
+//! - `GET /symbols` — sorted live protocol identities
 //! - `GET /routes/protocol/{id}` — received routes by neighbor address
+//! - `GET /routes/export/{id}` — routes advertised to a neighbor
 //! - `GET /routes/peer/{peer}` — received routes by peer IP
 //! - `GET /routes/filtered/{id}` — rejected routes retained by the peer's
 //!   session (`PolicyService.ListRejectedRoutes`), tagged with a synthesized
@@ -32,7 +35,7 @@
 
 #![deny(unsafe_code)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
 
@@ -69,6 +72,111 @@ struct Args {
         default_value = "127.0.0.1:8080"
     )]
     listen: SocketAddr,
+
+    /// Bird's Eye presentation alias: `PROTOCOL=PEER_IP@TABLE` (repeatable).
+    #[arg(
+        long = "protocol-alias",
+        env = "BIRDWATCHER_ADAPTER_PROTOCOL_ALIASES",
+        value_delimiter = ';'
+    )]
+    protocol_aliases: Vec<String>,
+
+    /// Maximum routes returned by any route-array endpoint.
+    #[arg(
+        long,
+        env = "BIRDWATCHER_ADAPTER_MAX_ROUTES",
+        default_value_t = 1000,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    max_routes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProtocolIdentity {
+    protocol: String,
+    peer: IpAddr,
+    table: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct IdentityResolver {
+    by_protocol: HashMap<String, ProtocolIdentity>,
+    by_peer: HashMap<IpAddr, ProtocolIdentity>,
+}
+
+impl IdentityResolver {
+    fn parse(values: &[String]) -> Result<Self, String> {
+        let mut resolver = Self::default();
+        for value in values {
+            let (protocol, target) = value.split_once('=').ok_or_else(|| {
+                format!("invalid protocol alias {value:?}: expected PROTOCOL=PEER_IP@TABLE")
+            })?;
+            let (peer, table) = target.rsplit_once('@').ok_or_else(|| {
+                format!("invalid protocol alias {value:?}: expected PROTOCOL=PEER_IP@TABLE")
+            })?;
+            if target[..target.len() - table.len() - 1].contains('@')
+                || protocol.contains('=')
+                || protocol.starts_with("bgp_")
+                || !valid_identifier(protocol)
+                || !valid_identifier(table)
+            {
+                return Err(format!(
+                    "invalid protocol alias {value:?}: unsafe identifier or separator"
+                ));
+            }
+            let peer: IpAddr = peer
+                .parse()
+                .map_err(|_| format!("invalid protocol alias {value:?}: malformed peer IP"))?;
+            let identity = ProtocolIdentity {
+                protocol: protocol.to_string(),
+                peer,
+                table: table.to_string(),
+            };
+            if resolver
+                .by_protocol
+                .insert(protocol.to_string(), identity.clone())
+                .is_some()
+            {
+                return Err(format!("duplicate protocol alias id {protocol:?}"));
+            }
+            if resolver.by_peer.insert(peer, identity).is_some() {
+                return Err(format!("duplicate protocol alias peer {peer}"));
+            }
+        }
+        Ok(resolver)
+    }
+
+    fn identity(&self, peer: IpAddr) -> ProtocolIdentity {
+        self.by_peer
+            .get(&peer)
+            .cloned()
+            .unwrap_or_else(|| ProtocolIdentity {
+                protocol: format!("bgp_{peer}").replace(':', "_"),
+                peer,
+                table: "master".to_string(),
+            })
+    }
+
+    fn resolve(&self, id: &str) -> Result<IpAddr, HttpError> {
+        if let Some(identity) = self.by_protocol.get(id) {
+            return Ok(identity.peer);
+        }
+        if let Ok(peer) = id.parse() {
+            return Ok(peer);
+        }
+        if let Some(encoded) = id.strip_prefix("bgp_")
+            && let Ok(peer) = encoded.replace('_', ":").parse()
+        {
+            return Ok(peer);
+        }
+        Err(json_error(StatusCode::NOT_FOUND, "Protocol not found"))
+    }
+}
+
+fn valid_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[derive(Clone, Debug, Default)]
@@ -196,6 +304,8 @@ fn parse_daemon_endpoint(addr: &str) -> Result<DaemonEndpoint, std::io::Error> {
 #[derive(Clone)]
 struct AppState {
     upstream: Upstream,
+    identities: IdentityResolver,
+    max_routes: u64,
 }
 
 #[tokio::main]
@@ -217,12 +327,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let channel = Endpoint::from_shared(endpoint.channel_uri())?.connect_lazy();
     let authorization = load_bearer_authorization(args.grpc_token_file.as_deref())?;
     let upstream = InterceptedService::new(channel, BearerInterceptor { authorization });
-    let state = AppState { upstream };
+    let identities = IdentityResolver::parse(&args.protocol_aliases)
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+    let state = AppState {
+        upstream,
+        identities,
+        max_routes: args.max_routes,
+    };
 
     let app = Router::new()
         .route("/status", get(status))
         .route("/protocols/bgp", get(protocols_bgp))
+        .route("/protocol/{id}", get(protocol_detail))
+        .route("/symbols", get(symbols))
         .route("/routes/protocol/{id}", get(routes_protocol))
+        .route("/routes/export/{id}", get(routes_export))
         .route("/routes/peer/{peer}", get(routes_peer))
         .route("/routes/filtered/{id}", get(routes_filtered))
         .route("/routes/noexport/{id}", get(routes_noexport))
@@ -239,9 +358,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Map a gRPC error to 502 Bad Gateway — the adapter is healthy, the
 /// upstream daemon call failed.
-fn bad_gateway(context: &str, status: &tonic::Status) -> StatusCode {
+type HttpError = (StatusCode, Json<Value>);
+
+fn json_error(status: StatusCode, message: impl Into<String>) -> HttpError {
+    (
+        status,
+        Json(serde_json::json!({ "message": message.into() })),
+    )
+}
+
+fn bad_gateway(context: &str, status: &tonic::Status) -> HttpError {
     error!(context, error = %status, "upstream gRPC call failed");
-    StatusCode::BAD_GATEWAY
+    json_error(StatusCode::BAD_GATEWAY, "Upstream daemon request failed")
+}
+
+fn enforce_max(actual: u64, max: u64) -> Result<(), HttpError> {
+    if actual > max {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            format!("Number of routes exceeds maximum allowed ({actual}/{max})"),
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -250,10 +388,14 @@ fn bad_gateway(context: &str, status: &tonic::Status) -> StatusCode {
 // ---------------------------------------------------------------------------
 
 /// Top-level `api` block included in every birdwatcher response.
-fn api_block() -> Value {
+fn api_block(max_routes: u64) -> Value {
+    let version = format!("rustbgpd {}", env!("CARGO_PKG_VERSION"));
     serde_json::json!({
-        "Version": format!("rustbgpd {}", env!("CARGO_PKG_VERSION")),
+        "Version": version,
         "result_from_cache": false,
+        "version": version,
+        "from_cache": false,
+        "max_routes": max_routes,
     })
 }
 
@@ -261,7 +403,7 @@ fn api_block() -> Value {
 // GET /status  →  GlobalService.GetGlobal + ControlService.GetHealth
 // ---------------------------------------------------------------------------
 
-async fn status(State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {
+async fn status(State(state): State<AppState>) -> Result<Json<Value>, HttpError> {
     let mut global = proto::global_service_client::GlobalServiceClient::new(state.upstream.clone());
     let g = global
         .get_global(proto::GetGlobalRequest {})
@@ -278,12 +420,13 @@ async fn status(State(state): State<AppState>) -> Result<Json<Value>, StatusCode
         .into_inner();
 
     Ok(Json(serde_json::json!({
-        "api": api_block(),
+        "api": api_block(state.max_routes),
         "status": {
             "router_id": g.router_id,
             "current_server": format_timestamp_now(),
-            "last_reboot": format_secs_ago(h.uptime_seconds),
-            "last_reconfig": format_optional_epoch_secs(
+            "server_time": format_rfc3339_secs_ago(0),
+            "last_reboot": format_rfc3339_secs_ago(h.uptime_seconds),
+            "last_reconfig": format_optional_rfc3339_epoch_secs(
                 g.policy_generation_loaded_timestamp_seconds
             ),
             "message": format!("rustbgpd AS{}", g.asn),
@@ -296,23 +439,39 @@ async fn status(State(state): State<AppState>) -> Result<Json<Value>, StatusCode
 // GET /protocols/bgp  →  NeighborService.ListNeighbors
 // ---------------------------------------------------------------------------
 
-async fn protocols_bgp(State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {
+async fn list_neighbors(state: &AppState) -> Result<Vec<proto::NeighborState>, HttpError> {
     let mut client =
         proto::neighbor_service_client::NeighborServiceClient::new(state.upstream.clone());
-    let resp = client
+    Ok(client
         .list_neighbors(proto::ListNeighborsRequest {})
         .await
         .map_err(|e| bad_gateway("ListNeighbors", &e))?
-        .into_inner();
+        .into_inner()
+        .neighbors)
+}
+
+fn parse_upstream_peer_address(address: &str) -> Result<IpAddr, HttpError> {
+    address.parse().map_err(|_| {
+        error!("upstream daemon returned an invalid neighbor address");
+        json_error(
+            StatusCode::BAD_GATEWAY,
+            "Upstream daemon returned an invalid neighbor address",
+        )
+    })
+}
+
+async fn protocol_rows(state: &AppState) -> Result<serde_json::Map<String, Value>, HttpError> {
+    let neighbors = list_neighbors(state).await?;
 
     // Birdwatcher returns protocols as a map keyed by protocol name.
     // Alice-LG iterates this map and reads fields like `neighbor_address`,
     // `neighbor_as`, `state`, `description`, `routes`, `state_changed`.
     let mut policy = proto::policy_service_client::PolicyServiceClient::new(state.upstream.clone());
     let mut protocols = serde_json::Map::new();
-    for n in &resp.neighbors {
+    for n in &neighbors {
         let cfg = n.config.clone().unwrap_or_default();
-        let protocol_id = format!("bgp_{}", cfg.address).replace(':', "_");
+        let peer = parse_upstream_peer_address(&cfg.address)?;
+        let identity = state.identities.identity(peer);
         // Real filtered count from the session's reject-retention store.
         // NOT_FOUND = no live session = no store, honestly zero. The store
         // is bounded ([policy.reject_retention] capacity, default 1024), so
@@ -327,39 +486,113 @@ async fn protocols_bgp(State(state): State<AppState>) -> Result<Json<Value>, Sta
             Err(s) if s.code() == tonic::Code::NotFound => 0,
             Err(e) => return Err(bad_gateway("ListRejectedRoutes", &e)),
         };
-        protocols.insert(
-            protocol_id,
-            serde_json::json!({
-                "bird_protocol": "BGP",
-                "state": format_bird_state(n.state),
-                "neighbor_address": cfg.address,
-                "neighbor_as": cfg.remote_asn,
-                "description": cfg.description,
-                "table": "master",
-                "state_changed": format_secs_ago(n.uptime_seconds),
-                "routes": {
-                    // Same sources the in-daemon server used: current
-                    // Adj-RIB-In count and current advertised count.
-                    //
-                    // `preferred` is deliberately absent, not zero: the
-                    // gRPC surface has no per-peer Loc-RIB best count, and
-                    // deriving one means paging the whole Loc-RIB
-                    // (`ListBestRoutes`, tallying `Route.peer_address`) on
-                    // every poll of this endpoint — a full-table walk per
-                    // refresh at IXP scale. Serve it here once the daemon
-                    // exposes the count on `NeighborState`.
-                    "imported": n.prefixes_received,
-                    "filtered": filtered,
-                    "exported": n.prefixes_sent
-                }
-            }),
-        );
+        let mut row = serde_json::json!({
+            "protocol": identity.protocol,
+            "bird_protocol": "BGP",
+            "state": format_ixp_state(n.state),
+            "bgp_state": format_bgp_state(n.state),
+            "neighbor_address": cfg.address,
+            "neighbor_as": cfg.remote_asn,
+            "description": cfg.description,
+            "table": identity.table,
+            "state_changed": format_rfc3339_secs_ago(n.uptime_seconds),
+            "routes": {
+                // Same sources the in-daemon server used: current
+                // Adj-RIB-In count and current advertised count.
+                //
+                // `preferred` is deliberately absent, not zero: the
+                // gRPC surface has no per-peer Loc-RIB best count, and
+                // deriving one means paging the whole Loc-RIB
+                // (`ListBestRoutes`, tallying `Route.peer_address`) on
+                // every poll of this endpoint — a full-table walk per
+                // refresh at IXP scale. Serve it here once the daemon
+                // exposes the count on `NeighborState`.
+                "imported": n.prefixes_received,
+                "filtered": filtered,
+                "exported": n.prefixes_sent
+            }
+        });
+        if let Some(limit) = n.effective_max_prefixes {
+            row["import_limit"] = Value::from(limit);
+            row["import_limit_action"] = Value::from(n.max_prefix_action.clone());
+        }
+        if let Some(negotiated) = &n.negotiated_session {
+            if let Some(router_id) = &negotiated.remote_router_id {
+                row["neighbor_id"] = Value::from(router_id.clone());
+            }
+            if let Some(hold_time) = negotiated.hold_time_seconds {
+                row["hold_timer"] = Value::from(hold_time);
+            }
+            let mut capabilities = Vec::new();
+            if negotiated.peer_route_refresh == Some(true) {
+                capabilities.push("refresh");
+            }
+            if negotiated.four_octet_as == Some(true) {
+                capabilities.push("AS4");
+            }
+            if !capabilities.is_empty() {
+                row["neighbor_capabilities"] = serde_json::json!(capabilities);
+            }
+        }
+        protocols.insert(identity.protocol, row);
     }
 
+    Ok(protocols)
+}
+
+async fn protocols_bgp(State(state): State<AppState>) -> Result<Json<Value>, HttpError> {
+    let protocols = protocol_rows(&state).await?;
+
     Ok(Json(serde_json::json!({
-        "api": api_block(),
+        "api": api_block(state.max_routes),
         "protocols": protocols,
     })))
+}
+
+async fn protocol_detail(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpError> {
+    let peer = state.identities.resolve(&id)?;
+    let identity = state.identities.identity(peer);
+    let protocols = protocol_rows(&state).await?;
+    let row = protocols
+        .get(&identity.protocol)
+        .cloned()
+        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "Protocol not found"))?;
+    Ok(Json(serde_json::json!({
+        "api": api_block(state.max_routes),
+        "protocol": row,
+    })))
+}
+
+async fn symbols(State(state): State<AppState>) -> Result<Json<Value>, HttpError> {
+    // Symbols need identities only. Keep this a single ListNeighbors RPC:
+    // enriching inventory rows would add one ListRejectedRoutes RPC per peer.
+    let neighbors = list_neighbors(&state).await?;
+    let identities = symbol_identities(neighbors, &state.identities)?;
+    Ok(Json(serde_json::json!({
+        "api": api_block(state.max_routes),
+        "symbols": {
+            "protocol": identities,
+            "routing table": [],
+        }
+    })))
+}
+
+fn symbol_identities(
+    neighbors: Vec<proto::NeighborState>,
+    resolver: &IdentityResolver,
+) -> Result<Vec<String>, HttpError> {
+    let mut identities = Vec::with_capacity(neighbors.len());
+    for neighbor in neighbors {
+        let cfg = neighbor.config.unwrap_or_default();
+        let peer = parse_upstream_peer_address(&cfg.address)?;
+        identities.push(resolver.identity(peer).protocol);
+    }
+    identities.sort_unstable();
+    identities.dedup();
+    Ok(identities)
 }
 
 // ---------------------------------------------------------------------------
@@ -371,22 +604,22 @@ async fn protocols_bgp(State(state): State<AppState>) -> Result<Json<Value>, Sta
 async fn routes_protocol(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Value>, StatusCode> {
-    // Protocol IDs are "bgp_<addr>" — extract the address.
-    let addr_str = id.strip_prefix("bgp_").unwrap_or(&id).replace('_', ":");
-    let peer_addr: IpAddr = addr_str.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+) -> Result<Json<Value>, HttpError> {
+    let peer_addr = state.identities.resolve(&id)?;
     serve_routes_for_peer(&state, peer_addr).await
 }
 
 async fn routes_peer(
     State(state): State<AppState>,
     Path(peer): Path<String>,
-) -> Result<Json<Value>, StatusCode> {
-    let peer_addr: IpAddr = peer.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+) -> Result<Json<Value>, HttpError> {
+    let peer_addr: IpAddr = peer
+        .parse()
+        .map_err(|_| json_error(StatusCode::BAD_REQUEST, "Invalid peer address"))?;
     serve_routes_for_peer(&state, peer_addr).await
 }
 
-async fn serve_routes_for_peer(state: &AppState, peer: IpAddr) -> Result<Json<Value>, StatusCode> {
+async fn serve_routes_for_peer(state: &AppState, peer: IpAddr) -> Result<Json<Value>, HttpError> {
     let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
     let mut routes: Vec<Value> = Vec::new();
     let mut page_token = String::new();
@@ -398,13 +631,21 @@ async fn serve_routes_for_peer(state: &AppState, peer: IpAddr) -> Result<Json<Va
                 // in-daemon server's unfiltered per-peer query.
                 afi_safi: proto::AddressFamily::Unspecified as i32,
                 page_size: 1000,
-                page_token,
+                page_token: page_token.clone(),
                 ..Default::default()
             })
             .await
             .map_err(|e| bad_gateway("ListReceivedRoutes", &e))?
             .into_inner();
-        routes.extend(resp.routes.iter().map(route_to_birdwatcher));
+        if page_token.is_empty() {
+            enforce_max(resp.total_count, state.max_routes)?;
+        }
+        routes.extend(
+            resp.routes
+                .iter()
+                .map(|route| route_to_birdwatcher(route, &state.identities)),
+        );
+        enforce_max(routes.len() as u64, state.max_routes)?;
         if resp.next_page_token.is_empty() {
             break;
         }
@@ -412,7 +653,47 @@ async fn serve_routes_for_peer(state: &AppState, peer: IpAddr) -> Result<Json<Va
     }
 
     Ok(Json(serde_json::json!({
-        "api": api_block(),
+        "api": api_block(state.max_routes),
+        "routes": routes,
+    })))
+}
+
+async fn routes_export(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpError> {
+    let peer = state.identities.resolve(&id)?;
+    let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
+    let mut routes = Vec::new();
+    let mut page_token = String::new();
+    loop {
+        let resp = client
+            .list_advertised_routes(proto::ListRoutesRequest {
+                neighbor_address: peer.to_string(),
+                afi_safi: proto::AddressFamily::Unspecified as i32,
+                page_size: 1000,
+                page_token: page_token.clone(),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| bad_gateway("ListAdvertisedRoutes", &e))?
+            .into_inner();
+        if page_token.is_empty() {
+            enforce_max(resp.total_count, state.max_routes)?;
+        }
+        routes.extend(
+            resp.routes
+                .iter()
+                .map(|route| route_to_birdwatcher(route, &state.identities)),
+        );
+        enforce_max(routes.len() as u64, state.max_routes)?;
+        if resp.next_page_token.is_empty() {
+            break;
+        }
+        page_token = resp.next_page_token;
+    }
+    Ok(Json(serde_json::json!({
+        "api": api_block(state.max_routes),
         "routes": routes,
     })))
 }
@@ -425,10 +706,8 @@ async fn serve_routes_for_peer(state: &AppState, peer: IpAddr) -> Result<Json<Va
 async fn routes_filtered(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Value>, StatusCode> {
-    // Accepts both the "bgp_<addr>" protocol id and a bare peer IP.
-    let addr_str = id.strip_prefix("bgp_").unwrap_or(&id).replace('_', ":");
-    let peer_addr: IpAddr = addr_str.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+) -> Result<Json<Value>, HttpError> {
+    let peer_addr = state.identities.resolve(&id)?;
 
     let mut client = proto::policy_service_client::PolicyServiceClient::new(state.upstream.clone());
     let resp = match client
@@ -443,19 +722,30 @@ async fn routes_filtered(
         Err(s) if s.code() == tonic::Code::NotFound => {
             info!(peer = %peer_addr, "no live session; serving empty filtered view");
             return Ok(Json(serde_json::json!({
-                "api": api_block(),
+                "api": api_block(state.max_routes),
                 "routes": [],
             })));
         }
         Err(e) => return Err(bad_gateway("ListRejectedRoutes", &e)),
     };
-    Ok(Json(filtered_routes_body(&resp, peer_addr)))
+    enforce_max(resp.routes.len() as u64, state.max_routes)?;
+    Ok(Json(filtered_routes_body(
+        &resp,
+        peer_addr,
+        &state.identities,
+        state.max_routes,
+    )))
 }
 
 /// Build the filtered-view response body from a `ListRejectedRoutes`
 /// reply. The store is bounded (`[policy.reject_retention]` capacity,
 /// default 1024) and the RPC is unpaged — one call returns everything.
-fn filtered_routes_body(resp: &proto::ListRejectedRoutesResponse, peer: IpAddr) -> Value {
+fn filtered_routes_body(
+    resp: &proto::ListRejectedRoutesResponse,
+    peer: IpAddr,
+    identities: &IdentityResolver,
+    max_routes: u64,
+) -> Value {
     if !resp.retention_enabled {
         info!(
             peer = %peer,
@@ -466,10 +756,10 @@ fn filtered_routes_body(resp: &proto::ListRejectedRoutesResponse, peer: IpAddr) 
     let routes: Vec<Value> = resp
         .routes
         .iter()
-        .map(|r| rejected_route_to_birdwatcher(r, peer))
+        .map(|r| rejected_route_to_birdwatcher(r, peer, identities))
         .collect();
     serde_json::json!({
-        "api": api_block(),
+        "api": api_block(max_routes),
         "routes": routes,
     })
 }
@@ -511,7 +801,11 @@ fn reject_reason_community(reason: &str) -> [u64; 3] {
 /// (extra keys, ignored by parsers that don't know them). Attribute
 /// fields are best-effort — the pre-policy safety gates retain what was
 /// decodable — so absent attributes render as the usual empty sentinels.
-fn rejected_route_to_birdwatcher(route: &proto::RejectedRoute, peer: IpAddr) -> Value {
+fn rejected_route_to_birdwatcher(
+    route: &proto::RejectedRoute,
+    peer: IpAddr,
+    identities: &IdentityResolver,
+) -> Value {
     let communities: Vec<Vec<u32>> = route
         .communities
         .iter()
@@ -540,7 +834,7 @@ fn rejected_route_to_birdwatcher(route: &proto::RejectedRoute, peer: IpAddr) -> 
         .filter_map(|p| p.parse().ok())
         .collect();
 
-    let from_protocol = format!("bgp_{peer}").replace(':', "_");
+    let from_protocol = identities.identity(peer).protocol;
     let age = if route.rejected_at_unix_ns > 0 {
         format_epoch_secs(u64::try_from(route.rejected_at_unix_ns).unwrap_or(0) / 1_000_000_000)
     } else {
@@ -584,10 +878,8 @@ fn rejected_route_to_birdwatcher(route: &proto::RejectedRoute, peer: IpAddr) -> 
 async fn routes_noexport(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Value>, StatusCode> {
-    // Accepts both the "bgp_<addr>" protocol id and a bare peer IP.
-    let addr_str = id.strip_prefix("bgp_").unwrap_or(&id).replace('_', ":");
-    let peer_addr: IpAddr = addr_str.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+) -> Result<Json<Value>, HttpError> {
+    let peer_addr = state.identities.resolve(&id)?;
 
     let mut rib = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
 
@@ -646,8 +938,10 @@ async fn routes_noexport(
     // from the real decision. O(suppressed prefixes) RPCs; pair with
     // Alice-LG's `[noexport] load_on_demand` (its own default) so this
     // is only computed when an operator opens the view.
+    let candidates = noexport_candidates(&best, &advertised);
+    enforce_max(candidates.len() as u64, state.max_routes)?;
     let mut routes: Vec<Value> = Vec::new();
-    for route in noexport_candidates(&best, &advertised) {
+    for route in candidates {
         let explain = match rib
             .explain_advertised_route(proto::ExplainAdvertisedRouteRequest {
                 peer_address: peer_addr.to_string(),
@@ -667,19 +961,19 @@ async fn routes_noexport(
                     "peer has no outbound export state; serving empty noexport view"
                 );
                 return Ok(Json(serde_json::json!({
-                    "api": api_block(),
+                    "api": api_block(state.max_routes),
                     "routes": [],
                 })));
             }
             Err(e) => return Err(bad_gateway("ExplainAdvertisedRoute", &e)),
         };
-        if let Some(v) = noexport_route_to_birdwatcher(route, &explain) {
+        if let Some(v) = noexport_route_to_birdwatcher(route, &explain, &state.identities) {
             routes.push(v);
         }
     }
 
     Ok(Json(serde_json::json!({
-        "api": api_block(),
+        "api": api_block(state.max_routes),
         "routes": routes,
     })))
 }
@@ -738,6 +1032,7 @@ fn noexport_reason_community(gate: &str) -> [u64; 3] {
 fn noexport_route_to_birdwatcher(
     route: &proto::Route,
     explain: &proto::ExplainAdvertisedRouteResponse,
+    identities: &IdentityResolver,
 ) -> Option<Value> {
     if explain.decision != proto::ExplainDecision::Deny as i32 {
         return None;
@@ -748,7 +1043,7 @@ fn noexport_route_to_birdwatcher(
         .find(|g| g.verdict == proto::ExportGateVerdict::Stop as i32);
     let (gate, detail) = stop.map_or(("", ""), |g| (g.gate.as_str(), g.detail.as_str()));
 
-    let mut json = route_to_birdwatcher(route);
+    let mut json = route_to_birdwatcher(route, identities);
     json["noexport_reason"] = Value::from(gate);
     json["noexport_reason_detail"] = Value::from(detail);
     json["bgp"]["large_communities"]
@@ -764,15 +1059,26 @@ fn noexport_route_to_birdwatcher(
 
 /// Format peer state as birdwatcher/BIRD protocol state string.
 /// Alice-LG lowercases this and maps "established" → "up" display.
-fn format_bird_state(state: i32) -> &'static str {
+fn format_ixp_state(state: i32) -> &'static str {
     match proto::SessionState::try_from(state) {
+        Ok(proto::SessionState::Established) => "up",
         Ok(proto::SessionState::Connect) => "start",
         Ok(proto::SessionState::Active) => "active",
         Ok(proto::SessionState::OpenSent) => "opensent",
         Ok(proto::SessionState::OpenConfirm) => "openconfirm",
-        Ok(proto::SessionState::Established) => "established",
         // Idle, Unspecified, or unknown enum value.
         _ => "down",
+    }
+}
+
+fn format_bgp_state(state: i32) -> &'static str {
+    match proto::SessionState::try_from(state) {
+        Ok(proto::SessionState::Connect) => "Connect",
+        Ok(proto::SessionState::Active) => "Active",
+        Ok(proto::SessionState::OpenSent) => "OpenSent",
+        Ok(proto::SessionState::OpenConfirm) => "OpenConfirm",
+        Ok(proto::SessionState::Established) => "Established",
+        _ => "Idle",
     }
 }
 
@@ -782,7 +1088,7 @@ fn format_bird_state(state: i32) -> &'static str {
 /// `metric`, `age`, `type`, `primary`, `learnt_from`, and `bgp` sub-object
 /// with `origin`, `as_path`, `next_hop`, `local_pref`, `med`, `communities`,
 /// `large_communities`.
-fn route_to_birdwatcher(route: &proto::Route) -> Value {
+fn route_to_birdwatcher(route: &proto::Route, identities: &IdentityResolver) -> Value {
     // Wire encoding of the ORIGIN attribute (RFC 4271): 0=IGP, 1=EGP,
     // 2=INCOMPLETE. Default IGP, matching the in-daemon server.
     let origin = match route.origin {
@@ -807,7 +1113,11 @@ fn route_to_birdwatcher(route: &proto::Route) -> Value {
         })
         .collect();
 
-    let from_protocol = format!("bgp_{}", route.peer_address).replace(':', "_");
+    let from_protocol = route
+        .peer_address
+        .parse()
+        .map(|peer| identities.identity(peer).protocol)
+        .unwrap_or_else(|_| format!("bgp_{}", route.peer_address).replace(':', "_"));
 
     // Receive wall time, same source and format as the in-daemon
     // server's `age`. 0 (unknown) renders as the empty string, which
@@ -847,6 +1157,10 @@ fn format_timestamp_now() -> String {
     format_secs_ago(0)
 }
 
+fn format_rfc3339_secs_ago(secs: u64) -> String {
+    format!("{}+00:00", format_secs_ago(secs).replace(' ', "T"))
+}
+
 /// Produce a timestamp for an event `secs` seconds in the past
 /// (`last_reboot`, `state_changed`).
 fn format_secs_ago(secs: u64) -> String {
@@ -865,6 +1179,15 @@ fn format_optional_epoch_secs(epoch_secs: i64) -> String {
         .ok()
         .filter(|seconds| *seconds > 0)
         .map_or_else(String::new, format_epoch_secs)
+}
+
+fn format_optional_rfc3339_epoch_secs(epoch_secs: i64) -> String {
+    let legacy = format_optional_epoch_secs(epoch_secs);
+    if legacy.is_empty() {
+        legacy
+    } else {
+        format!("{}+00:00", legacy.replace(' ', "T"))
+    }
 }
 
 /// Format epoch seconds as `"YYYY-MM-DD HH:MM:SS"` (UTC, no chrono dep).
@@ -1024,6 +1347,58 @@ mod tests {
     }
 
     #[test]
+    fn malformed_upstream_neighbor_address_fails_closed_without_echoing_input() {
+        let invalid = "not-an-ip\nsecret";
+        let (status, Json(body)) = parse_upstream_peer_address(invalid).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "message": "Upstream daemon returned an invalid neighbor address"
+            })
+        );
+        assert!(!body.to_string().contains(invalid));
+    }
+
+    #[test]
+    fn symbols_are_alias_resolved_sorted_and_do_not_use_enriched_inventory() {
+        let resolver = IdentityResolver::parse(&[
+            "pb_0002=192.0.2.2@master4".to_string(),
+            "pb_0001=192.0.2.1@master4".to_string(),
+        ])
+        .unwrap();
+        let neighbors = ["192.0.2.2", "192.0.2.1", "192.0.2.1"]
+            .into_iter()
+            .map(|address| proto::NeighborState {
+                config: Some(proto::NeighborConfig {
+                    address: address.to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .collect();
+        assert_eq!(
+            symbol_identities(neighbors, &resolver).unwrap(),
+            ["pb_0001", "pb_0002"]
+        );
+
+        // Load-bearing call-geometry proof: reverting /symbols to the
+        // enriched inventory path restores the per-neighbor policy RPC and
+        // makes this contract red.
+        let source = include_str!("main.rs");
+        let body = source
+            .split_once("async fn symbols(")
+            .unwrap()
+            .1
+            .split_once("fn symbol_identities(")
+            .unwrap()
+            .0;
+        assert!(body.contains("list_neighbors(&state).await?"), "{body}");
+        assert!(!body.contains("protocol_rows"), "{body}");
+        assert!(!body.contains(".list_rejected_routes("), "{body}");
+    }
+
+    #[test]
     fn optional_epoch_timestamp_formats_positive_and_leaves_unavailable_empty() {
         assert_eq!(
             format_optional_epoch_secs(1_700_000_000),
@@ -1050,7 +1425,7 @@ mod tests {
             received_at_epoch_seconds: 1_767_323_045,
             ..Default::default()
         };
-        let json = route_to_birdwatcher(&route);
+        let json = route_to_birdwatcher(&route, &IdentityResolver::default());
 
         assert_eq!(json["network"], "10.1.0.0/24");
         assert_eq!(json["gateway"], "192.0.2.1");
@@ -1083,7 +1458,7 @@ mod tests {
             peer_address: "2001:db8::1".to_string(),
             ..Default::default()
         };
-        let json = route_to_birdwatcher(&route);
+        let json = route_to_birdwatcher(&route, &IdentityResolver::default());
         assert_eq!(json["network"], "2001:db8::/32");
         // No receive timestamp → empty age (Alice-LG zero-time fallback).
         assert_eq!(json["age"], "");
@@ -1134,7 +1509,7 @@ mod tests {
             ..Default::default()
         };
         let peer: IpAddr = "192.0.2.1".parse().unwrap();
-        let json = rejected_route_to_birdwatcher(&route, peer);
+        let json = rejected_route_to_birdwatcher(&route, peer, &IdentityResolver::default());
 
         assert_eq!(json["network"], "10.66.0.0/24");
         assert_eq!(json["gateway"], "192.0.2.99");
@@ -1172,7 +1547,7 @@ mod tests {
             ..Default::default()
         };
         let peer: IpAddr = "2001:db8::1".parse().unwrap();
-        let json = rejected_route_to_birdwatcher(&route, peer);
+        let json = rejected_route_to_birdwatcher(&route, peer, &IdentityResolver::default());
         assert_eq!(json["network"], "2001:db8:bad::/48");
         assert_eq!(json["from_protocol"], "bgp_2001_db8__1");
         assert_eq!(json["age"], "");
@@ -1196,7 +1571,7 @@ mod tests {
                 capacity: 1024,
                 routes: vec![],
             };
-            let body = filtered_routes_body(&resp, peer);
+            let body = filtered_routes_body(&resp, peer, &IdentityResolver::default(), 1000);
             assert!(body["api"].is_object(), "{body}");
             assert_eq!(body["routes"], serde_json::json!([]), "{body}");
         }
@@ -1294,8 +1669,8 @@ mod tests {
             ..Default::default()
         };
 
-        let json =
-            noexport_route_to_birdwatcher(&route, &explain).expect("denied route must render");
+        let json = noexport_route_to_birdwatcher(&route, &explain, &IdentityResolver::default())
+            .expect("denied route must render");
         // Base birdwatcher route shape is preserved…
         assert_eq!(json["network"], "10.1.0.0/24");
         assert_eq!(json["gateway"], "192.0.2.9");
@@ -1332,7 +1707,8 @@ mod tests {
                 ..Default::default()
             };
             assert!(
-                noexport_route_to_birdwatcher(&route, &explain).is_none(),
+                noexport_route_to_birdwatcher(&route, &explain, &IdentityResolver::default())
+                    .is_none(),
                 "decision {decision:?} must not render as noexport"
             );
         }
@@ -1341,10 +1717,99 @@ mod tests {
     #[test]
     fn bird_state_mapping() {
         assert_eq!(
-            format_bird_state(proto::SessionState::Established as i32),
-            "established"
+            format_ixp_state(proto::SessionState::Established as i32),
+            "up"
         );
-        assert_eq!(format_bird_state(proto::SessionState::Idle as i32), "down");
-        assert_eq!(format_bird_state(999), "down");
+        assert_eq!(
+            format_bgp_state(proto::SessionState::Established as i32),
+            "Established"
+        );
+        assert_eq!(format_ixp_state(proto::SessionState::Idle as i32), "down");
+        assert_eq!(format_ixp_state(999), "down");
+    }
+
+    #[test]
+    fn aliases_validate_and_resolve_one_identity_everywhere() {
+        let resolver = IdentityResolver::parse(&[
+            "pb_0001_as64496=198.51.100.1@master4".to_string(),
+            "pb_v6_as64497=2001:db8::1@master6".to_string(),
+        ])
+        .unwrap();
+        let peer: IpAddr = "198.51.100.1".parse().unwrap();
+        assert_eq!(resolver.resolve("pb_0001_as64496").unwrap(), peer);
+        assert_eq!(resolver.resolve("198.51.100.1").unwrap(), peer);
+        assert_eq!(resolver.resolve("bgp_198.51.100.1").unwrap(), peer);
+        assert_eq!(resolver.identity(peer).protocol, "pb_0001_as64496");
+        assert_eq!(resolver.identity(peer).table, "master4");
+
+        let route = proto::Route {
+            peer_address: peer.to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            route_to_birdwatcher(&route, &resolver)["from_protocol"],
+            "pb_0001_as64496"
+        );
+    }
+
+    #[test]
+    fn aliases_reject_ambiguous_or_unsafe_startup_configuration() {
+        for aliases in [
+            vec!["1bad=198.51.100.1@master4"],
+            vec!["bgp_reserved=198.51.100.1@master4"],
+            vec!["good=not-an-ip@master4"],
+            vec!["good=2001:db8::1"],
+            vec!["good=2001:db8::1@master4@extra"],
+            vec!["same=198.51.100.1@master4", "same=198.51.100.2@master4"],
+            vec!["one=198.51.100.1@master4", "two=198.51.100.1@master4"],
+        ] {
+            let values: Vec<String> = aliases.into_iter().map(str::to_string).collect();
+            assert!(IdentityResolver::parse(&values).is_err(), "{values:?}");
+        }
+    }
+
+    #[test]
+    fn maximum_and_api_contract_are_exact() {
+        assert!(enforce_max(1000, 1000).is_ok());
+        let (status, body) = enforce_max(1001, 1000).unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body.0,
+            serde_json::json!({
+                "message": "Number of routes exceeds maximum allowed (1001/1000)"
+            })
+        );
+        let api = api_block(1000);
+        for key in [
+            "Version",
+            "result_from_cache",
+            "version",
+            "from_cache",
+            "max_routes",
+        ] {
+            assert!(api.get(key).is_some(), "missing {key}: {api}");
+        }
+        assert_eq!(api["Version"], api["version"]);
+
+        assert!(
+            Args::try_parse_from([
+                "birdwatcher-adapter",
+                "--grpc-addr",
+                "http://127.0.0.1:50051",
+                "--max-routes",
+                "0",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn ixp_timestamps_include_rfc3339_utc_offset() {
+        assert_eq!(
+            format_optional_rfc3339_epoch_secs(1_700_000_000),
+            "2023-11-14T22:13:20+00:00"
+        );
+        assert!(format_optional_rfc3339_epoch_secs(0).is_empty());
+        assert!(format_rfc3339_secs_ago(0).ends_with("+00:00"));
     }
 }

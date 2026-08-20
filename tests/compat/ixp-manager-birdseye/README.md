@@ -9,7 +9,7 @@ projects from their committed Composer lockfiles, starts the real Bird's Eye
 Lumen server with `APP_DEBUG=false`, and invokes the real IXP Manager consumer:
 
 - Bird's Eye v2.1.0: `7f8c2375e610578bcf6ea5ceec630a180f945b89`
-- IXP Manager v7.3.1: `bfbbc23533e56c56a4102178676ec7b3d0d990fa`
+- IXP Manager v7.4.0: `300b7e0ba9adb0aaac975899e45fc8bcbc0ca37d`
 
 The BIRD side is a deterministic fake `birdc` fed only RFC 5737 documentation
 addresses and RFC 5398 documentation ASNs. The capture covers status, BGP
@@ -43,10 +43,11 @@ diff -u tests/compat/ixp-manager-birdseye/fixtures/birdseye-contract.json \
 ```
 
 `contract.json` deliberately keeps the unsupported runtime matrix executable.
-Complete rejected-route reasons, less-specific lookup, atomic all-candidate
-snapshots, and runtime alias configuration remain blockers. Promoting any of
-them, weakening the explicit alias, enabling debug mode, skipping a case, or
-drifting a pin or response makes the gate fail.
+Complete rejected-route reasons, less-specific lookup, and atomic all-candidate
+snapshots remain blockers. Protocol aliases are immutable after sidecar startup,
+so changing one requires a sidecar restart. Promoting any blocker, weakening the
+explicit alias, enabling debug mode, skipping a case, or drifting a pin or
+response makes the gate fail.
 
 ## Provenance and licensing
 

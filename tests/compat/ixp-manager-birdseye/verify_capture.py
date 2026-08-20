@@ -29,7 +29,7 @@ UNSUPPORTED = {
     "complete-rejected-route-reason-inventory",
     "less-specific-longest-prefix-match",
     "atomic-all-candidate-table-snapshot",
-    "runtime-protocol-alias-configuration",
+    "runtime-protocol-alias-reconfiguration",
 }
 
 
