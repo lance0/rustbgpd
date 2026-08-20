@@ -18,6 +18,8 @@
 //! `/routes/filtered/{id}` view (reason token + synthesized reason
 //! community) and the real `routes.filtered` neighbor-summary count
 //! end-to-end.
+//! The clean prefix carries two Add-Path candidates so the exact-route
+//! views also prove multiplicity and order.
 //!
 //! A third neighbor (127.0.0.2, announce-nothing receiver) exercises the
 //! `/routes/noexport/{id}` view from both sides: the accepted route is
@@ -350,11 +352,19 @@ remote_asn = 65020
 description = "live peer"
 graceful_restart = false
 
+[neighbors.add_path]
+receive = true
+receive_max = 4
+
 [[neighbors]]
 address = "127.0.0.2"
 remote_asn = 65030
 description = "receiver peer"
 graceful_restart = false
+
+[neighbors.add_path]
+send = true
+send_max = 4
 "#,
         runtime_dir = runtime_dir.display(),
         grpc_socket = grpc_socket.display(),
@@ -411,6 +421,7 @@ fn establish_bgp_and_announce(bgp_port: u16) -> TcpStream {
     use rustbgpd_wire::message::{Message, encode_message};
     use rustbgpd_wire::open::OpenMessage;
     use rustbgpd_wire::update::UpdateMessage;
+    use rustbgpd_wire::{AddPathFamily, AddPathMode, Afi, Capability, Safi};
 
     let mut stream = TcpStream::connect(("127.0.0.1", bgp_port)).expect("connect to BGP port");
     let open = Message::Open(OpenMessage {
@@ -418,9 +429,13 @@ fn establish_bgp_and_announce(bgp_port: u16) -> TcpStream {
         my_as: 65020,
         hold_time: 90,
         bgp_identifier: "10.0.0.2".parse().unwrap(),
-        capabilities: Vec::new(),
+        capabilities: vec![Capability::AddPath(vec![AddPathFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            send_receive: AddPathMode::Send,
+        }])],
     });
-    let encode_update = |as_sequence: Vec<u32>, nlri: &'static [u8]| {
+    let encode_update = |as_sequence: Vec<u32>, nlri: &'static [u8], med: u32| {
         let mut attrs = Vec::new();
         rustbgpd_wire::attribute::encode_path_attributes(
             &[
@@ -431,6 +446,7 @@ fn establish_bgp_and_announce(bgp_port: u16) -> TcpStream {
                 // Non-loopback: the daemon's UPDATE validation rejects a
                 // loopback NEXT_HOP (subcode 8).
                 PathAttribute::NextHop("192.0.2.99".parse().unwrap()),
+                PathAttribute::Med(med),
             ],
             &mut attrs,
             false,
@@ -443,11 +459,18 @@ fn establish_bgp_and_announce(bgp_port: u16) -> TcpStream {
             nlri: bytes::Bytes::from_static(nlri),
         })
     };
-    // 10.99.0.0/24, clean path → accepted.
-    let accepted = encode_update(vec![65020], &[24, 10, 99, 0]);
+    // RFC 7911 NLRI: four-byte path id, then the ordinary prefix encoding.
+    let accepted_11 = encode_update(vec![65020], &[0, 0, 0, 11, 24, 10, 99, 0], 10);
+    let accepted_22 = encode_update(vec![65020], &[0, 0, 0, 22, 24, 10, 99, 0], 20);
     // 10.98.0.0/24, daemon's own AS 65001 in path → as_path_loop reject.
-    let looped = encode_update(vec![65020, 65001], &[24, 10, 98, 0]);
-    for msg in [&open, &Message::Keepalive, &accepted, &looped] {
+    let looped = encode_update(vec![65020, 65001], &[0, 0, 0, 30, 24, 10, 98, 0], 30);
+    for msg in [
+        &open,
+        &Message::Keepalive,
+        &accepted_11,
+        &accepted_22,
+        &looped,
+    ] {
         let encoded = encode_message(msg).expect("encode BGP message");
         stream.write_all(&encoded).expect("write BGP message");
     }
@@ -467,6 +490,7 @@ fn announce_additional_route(stream: &mut TcpStream) {
                 segments: vec![AsPathSegment::AsSequence(vec![65020])],
             }),
             PathAttribute::NextHop("192.0.2.99".parse().unwrap()),
+            PathAttribute::Med(31),
         ],
         &mut attrs,
         false,
@@ -476,7 +500,7 @@ fn announce_additional_route(stream: &mut TcpStream) {
     let update = Message::Update(UpdateMessage {
         withdrawn_routes: bytes::Bytes::new(),
         path_attributes: attrs.into(),
-        nlri: bytes::Bytes::from_static(&[24, 10, 97, 0]),
+        nlri: bytes::Bytes::from_static(&[0, 0, 0, 31, 24, 10, 97, 0]),
     });
     stream
         .write_all(&encode_message(&update).expect("encode additional route"))
@@ -502,14 +526,18 @@ fn announce_additional_rejected_route(stream: &mut TcpStream) {
         false,
     )
     .expect("encode additional rejected route attributes");
-    let update = Message::Update(UpdateMessage {
-        withdrawn_routes: bytes::Bytes::new(),
-        path_attributes: attrs.into(),
-        nlri: bytes::Bytes::from_static(&[24, 10, 96, 0]),
-    });
-    stream
-        .write_all(&encode_message(&update).expect("encode additional rejected route"))
-        .expect("announce additional rejected route");
+    for (path_id, prefix) in [(32, [10, 96, 0]), (33, [10, 95, 0])] {
+        let mut nlri = vec![0, 0, 0, path_id, 24];
+        nlri.extend_from_slice(&prefix);
+        let update = Message::Update(UpdateMessage {
+            withdrawn_routes: bytes::Bytes::new(),
+            path_attributes: attrs.clone().into(),
+            nlri: nlri.into(),
+        });
+        stream
+            .write_all(&encode_message(&update).expect("encode additional rejected route"))
+            .expect("announce additional rejected route");
+    }
 }
 
 /// Second minimal speaker: complete the handshake as AS 65030 from
@@ -521,6 +549,7 @@ fn announce_additional_rejected_route(stream: &mut TcpStream) {
 fn establish_bgp_receiver(bgp_port: u16) -> TcpStream {
     use rustbgpd_wire::message::{Message, encode_message};
     use rustbgpd_wire::open::OpenMessage;
+    use rustbgpd_wire::{AddPathFamily, AddPathMode, Afi, Capability, Safi};
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -545,7 +574,11 @@ fn establish_bgp_receiver(bgp_port: u16) -> TcpStream {
         my_as: 65030,
         hold_time: 90,
         bgp_identifier: "10.0.0.3".parse().unwrap(),
-        capabilities: Vec::new(),
+        capabilities: vec![Capability::AddPath(vec![AddPathFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            send_receive: AddPathMode::Receive,
+        }])],
     });
     let mut stream = stream;
     for msg in [&open, &Message::Keepalive] {
@@ -577,6 +610,26 @@ fn epoch_from_timestamp(s: &str) -> u64 {
 }
 
 #[test]
+fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
+    let workflow = include_str!("../.github/workflows/ixp-compat.yml");
+    for path in [
+        "examples/birdwatcher-adapter/**",
+        "tests/birdwatcher_adapter_smoke.rs",
+    ] {
+        let entry = format!("      - \"{path}\"");
+        assert_eq!(workflow.lines().filter(|line| *line == entry).count(), 2);
+    }
+    let installer = "      - uses: ./.github/actions/install-protobuf";
+    assert_eq!(workflow.matches(installer).count(), 1);
+    let checkout = workflow.find("actions/checkout@v7").unwrap();
+    let installer = workflow.find(installer).unwrap();
+    let oracle = workflow
+        .find("tests/compat/ixp-manager-birdseye/run.sh")
+        .unwrap();
+    assert!(checkout < installer && installer < oracle);
+}
+
+#[test]
 fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_subset() {
     let temp = tempfile::tempdir().expect("create temp dir");
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
@@ -605,7 +658,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
                 "--protocol-alias",
                 "pb_0002_as65030=127.0.0.2@master4",
                 "--max-routes",
-                "1",
+                "2",
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::from(
@@ -635,6 +688,12 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         },
     );
     wait_for_http_status(adapter_port, "/status", 502, &mut adapter);
+    for path in [
+        "/route/10.99.0.0%2F24/protocol/pb_0001_as65020",
+        "/route/10.99.0.0%2F24/export/pb_0002_as65030",
+    ] {
+        wait_for_exact_json_error(adapter_port, path, 502, "Upstream daemon request failed");
+    }
 
     // Now start the daemon. The adapter's lazy UDS channel must reconnect on
     // a later request; replacing the adapter would make the PID assertion red.
@@ -673,7 +732,13 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         status["api"]["Version"], status["api"]["version"],
         "{status}"
     );
-    assert_eq!(status["api"]["max_routes"], 1, "{status}");
+    assert_eq!(status["api"]["max_routes"], 2, "{status}");
+    assert!(
+        status["api"]["version"]
+            .as_str()
+            .is_some_and(|version| version.starts_with("rustbgpd ")),
+        "api.version is product identity, not a Bird's Eye compatibility claim: {status}"
+    );
     for key in ["server_time", "last_reboot", "last_reconfig"] {
         assert!(
             status["status"][key]
@@ -748,6 +813,18 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         serde_json::from_str::<serde_json::Value>(&missing_body).unwrap(),
         serde_json::json!({"message":"Protocol not found"})
     );
+    wait_for_exact_json_error(
+        adapter_port,
+        "/route/not-a-prefix/protocol/pb_0001_as65020",
+        400,
+        "Invalid route prefix",
+    );
+    for path in [
+        "/route/10.99.0.0%2F24/protocol/does_not_exist",
+        "/route/10.99.0.0%2F24/export/does_not_exist",
+    ] {
+        wait_for_exact_json_error(adapter_port, path, 404, "Protocol not found");
+    }
 
     // /routes/peer/{peer} — empty route set still returns the full
     // envelope with an empty routes array.
@@ -766,11 +843,12 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     // Establish a real session from the in-test BGP speaker and
     // announce one route; the adapter must serve it with a non-empty
     // `age` receive timestamp.
+    // Its two Add-Path candidates must both survive in path-id order.
     let mut bgp_session = establish_bgp_and_announce(bgp_port);
     let deadline = Instant::now() + Duration::from_secs(60);
     let live = loop {
         let live = get_json(adapter_port, "/routes/peer/127.0.0.1", "adapter");
-        if live["routes"].as_array().is_some_and(|r| r.len() == 1) {
+        if live["routes"].as_array().is_some_and(|r| r.len() == 2) {
             break live;
         }
         assert!(
@@ -780,18 +858,33 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         );
         thread::sleep(Duration::from_millis(200));
     };
+    for route in live["routes"].as_array().unwrap() {
+        assert_eq!(route["network"], "10.99.0.0/24", "{live}");
+        assert_eq!(route["from_protocol"], "pb_0001_as65020", "{live}");
+    }
     assert_eq!(
-        live["routes"][0]["network"], "10.99.0.0/24",
-        "announced route must be served"
-    );
-    assert_eq!(
-        live["routes"][0]["from_protocol"], "pb_0001_as65020",
-        "{live}"
+        live["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|route| route["bgp"]["med"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [10, 20],
+        "Add-Path candidates must remain in daemon order: {live}"
     );
     let aliased_live = get_json(adapter_port, "/routes/protocol/pb_0001_as65020", "adapter");
     assert_eq!(
         aliased_live, live,
         "alias and bare peer must resolve identically"
+    );
+    let exact_received = get_json(
+        adapter_port,
+        "/route/10.99.0.0%2F24/protocol/pb_0001_as65020",
+        "adapter",
+    );
+    assert_eq!(
+        exact_received, live,
+        "exact protocol route must preserve every candidate and its order"
     );
     let age = live["routes"][0]["age"].as_str().unwrap_or_default();
     assert!(!age.is_empty(), "adapter age must be populated");
@@ -893,7 +986,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         let exported = &protocols["protocols"]["pb_0002_as65030"]["routes"]["exported"];
         let receiver_noexport =
             get_json(adapter_port, "/routes/noexport/pb_0002_as65030", "adapter");
-        if exported == 1 && receiver_noexport["routes"] == serde_json::json!([]) {
+        if exported == 2 && receiver_noexport["routes"] == serde_json::json!([]) {
             break;
         }
         assert!(
@@ -903,14 +996,43 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         );
         thread::sleep(Duration::from_millis(200));
     }
-    let exported = get_json(adapter_port, "/routes/export/pb_0002_as65030", "adapter");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let exact_exported = loop {
+        let exported = get_json(
+            adapter_port,
+            "/route/10.99.0.0%2F24/export/pb_0002_as65030",
+            "adapter",
+        );
+        if exported["routes"]
+            .as_array()
+            .is_some_and(|routes| routes.len() == 2)
+        {
+            break exported;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "exact export did not retain both candidates: {exported}\ndaemon stderr:\n{}",
+            daemon.stderr()
+        );
+        thread::sleep(Duration::from_millis(200));
+    };
     assert_eq!(
-        exported["routes"][0]["network"], "10.99.0.0/24",
-        "{exported}"
+        exact_exported["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|route| route["bgp"]["med"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [10, 20],
+        "export candidates must preserve order: {exact_exported}"
     );
-    assert_eq!(
-        exported["routes"][0]["from_protocol"], "pb_0001_as65020",
-        "exported route must retain its source protocol identity: {exported}"
+    assert!(
+        exact_exported["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|route| route["from_protocol"] == "pb_0001_as65020"),
+        "export identity is the source alias, never the target id: {exact_exported}"
     );
 
     // A configured peer with no live session has no outbound export
@@ -923,7 +1045,21 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     );
 
     announce_additional_route(&mut bgp_session);
-    let over_limit = "Number of routes exceeds maximum allowed (2/1)";
+    let over_limit = "Number of routes exceeds maximum allowed (3/2)";
+    // The full route arrays now exceed the cap, but the exact result remains
+    // two candidates: nonmatching routes are filtered before limit checking.
+    let exact_received_after_nonmatch = get_json(
+        adapter_port,
+        "/route/10.99.0.0%2F24/protocol/pb_0001_as65020",
+        "adapter",
+    );
+    assert_eq!(exact_received_after_nonmatch, exact_received);
+    let exact_export_after_nonmatch = get_json(
+        adapter_port,
+        "/route/10.99.0.0%2F24/export/pb_0002_as65030",
+        "adapter",
+    );
+    assert_eq!(exact_export_after_nonmatch, exact_exported);
     wait_for_exact_json_error(
         adapter_port,
         "/routes/protocol/pb_0001_as65020",
@@ -936,13 +1072,6 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         403,
         over_limit,
     );
-    wait_for_exact_json_error(
-        adapter_port,
-        "/routes/noexport/pb_0001_as65020",
-        403,
-        over_limit,
-    );
-
     announce_additional_rejected_route(&mut bgp_session);
     wait_for_exact_json_error(
         adapter_port,

@@ -14,6 +14,8 @@
 //! - `GET /symbols` — sorted live protocol identities
 //! - `GET /routes/protocol/{id}` — received routes by neighbor address
 //! - `GET /routes/export/{id}` — routes advertised to a neighbor
+//! - `GET /route/{prefix}/protocol/{id}` — exact received-route candidates
+//! - `GET /route/{prefix}/export/{id}` — exact advertised-route candidates
 //! - `GET /routes/peer/{peer}` — received routes by peer IP
 //! - `GET /routes/filtered/{id}` — rejected routes retained by the peer's
 //!   session (`PolicyService.ListRejectedRoutes`), tagged with a synthesized
@@ -342,6 +344,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/symbols", get(symbols))
         .route("/routes/protocol/{id}", get(routes_protocol))
         .route("/routes/export/{id}", get(routes_export))
+        .route("/route/{prefix}/protocol/{id}", get(route_protocol))
+        .route("/route/{prefix}/export/{id}", get(route_export))
         .route("/routes/peer/{peer}", get(routes_peer))
         .route("/routes/filtered/{id}", get(routes_filtered))
         .route("/routes/noexport/{id}", get(routes_noexport))
@@ -695,6 +699,155 @@ async fn routes_export(
     Ok(Json(serde_json::json!({
         "api": api_block(state.max_routes),
         "routes": routes,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// GET /route/{prefix}/protocol/{id} — exact received-route candidates
+// GET /route/{prefix}/export/{id}   — exact advertised-route candidates
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExactRouteSource {
+    Received,
+    Advertised,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ExactPrefix {
+    address: IpAddr,
+    length: u32,
+}
+
+impl ExactPrefix {
+    fn parse(value: &str) -> Result<Self, HttpError> {
+        let invalid = || json_error(StatusCode::BAD_REQUEST, "Invalid route prefix");
+        let (address, length) = value.split_once('/').ok_or_else(invalid)?;
+        if address.is_empty() || length.is_empty() || length.contains('/') {
+            return Err(invalid());
+        }
+        let address: IpAddr = address.parse().map_err(|_| invalid())?;
+        let length: u32 = length.parse().map_err(|_| invalid())?;
+        let width = if address.is_ipv4() { 32 } else { 128 };
+        if length > width || !network_aligned(address, length) {
+            return Err(invalid());
+        }
+        Ok(Self { address, length })
+    }
+
+    fn matches(self, route: &proto::Route) -> bool {
+        route.prefix == self.address.to_string() && route.prefix_length == self.length
+    }
+}
+
+fn network_aligned(address: IpAddr, length: u32) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            let mask = if length == 0 {
+                0
+            } else {
+                u32::MAX << (32 - length)
+            };
+            u32::from(address) & !mask == 0
+        }
+        IpAddr::V6(address) => {
+            let mask = if length == 0 {
+                0
+            } else {
+                u128::MAX << (128 - length)
+            };
+            u128::from(address) & !mask == 0
+        }
+    }
+}
+
+#[allow(
+    clippy::match_same_arms,
+    reason = "separate arms keep each exact IXP consumer journey mutation-testable"
+)]
+fn exact_route_request(
+    peer: IpAddr,
+    prefix: ExactPrefix,
+    page_token: String,
+    source: ExactRouteSource,
+) -> proto::ListRoutesRequest {
+    let prefix_filter = match source {
+        ExactRouteSource::Received => prefix.address.to_string(),
+        ExactRouteSource::Advertised => prefix.address.to_string(),
+    };
+    proto::ListRoutesRequest {
+        neighbor_address: peer.to_string(),
+        afi_safi: proto::AddressFamily::Unspecified as i32,
+        page_size: 1000,
+        page_token,
+        prefix_filter,
+        prefix_filter_length: prefix.length,
+        longer_prefixes: false,
+        ..Default::default()
+    }
+}
+
+fn append_exact_routes(
+    routes: &mut Vec<proto::Route>,
+    page: Vec<proto::Route>,
+    prefix: ExactPrefix,
+    max_routes: u64,
+) -> Result<(), HttpError> {
+    routes.extend(page.into_iter().filter(|route| prefix.matches(route)));
+    enforce_max(routes.len() as u64, max_routes)
+}
+
+async fn route_protocol(
+    State(state): State<AppState>,
+    Path((prefix, id)): Path<(String, String)>,
+) -> Result<Json<Value>, HttpError> {
+    serve_exact_route(&state, &prefix, &id, ExactRouteSource::Received).await
+}
+
+async fn route_export(
+    State(state): State<AppState>,
+    Path((prefix, id)): Path<(String, String)>,
+) -> Result<Json<Value>, HttpError> {
+    serve_exact_route(&state, &prefix, &id, ExactRouteSource::Advertised).await
+}
+
+async fn serve_exact_route(
+    state: &AppState,
+    raw_prefix: &str,
+    id: &str,
+    source: ExactRouteSource,
+) -> Result<Json<Value>, HttpError> {
+    let prefix = ExactPrefix::parse(raw_prefix)?;
+    let peer = state.identities.resolve(id)?;
+    let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
+    let mut routes = Vec::new();
+    let mut page_token = String::new();
+    loop {
+        let request = exact_route_request(peer, prefix, page_token, source);
+        let response = match source {
+            ExactRouteSource::Received => client
+                .list_received_routes(request)
+                .await
+                .map_err(|error| bad_gateway("ListReceivedRoutes", &error))?,
+            ExactRouteSource::Advertised => client
+                .list_advertised_routes(request)
+                .await
+                .map_err(|error| bad_gateway("ListAdvertisedRoutes", &error))?,
+        }
+        .into_inner();
+        append_exact_routes(&mut routes, response.routes, prefix, state.max_routes)?;
+        if response.next_page_token.is_empty() {
+            break;
+        }
+        page_token = response.next_page_token;
+    }
+
+    Ok(Json(serde_json::json!({
+        "api": api_block(state.max_routes),
+        "routes": routes
+            .iter()
+            .map(|route| route_to_birdwatcher(route, &state.identities))
+            .collect::<Vec<_>>(),
     })))
 }
 
@@ -1790,6 +1943,7 @@ mod tests {
             assert!(api.get(key).is_some(), "missing {key}: {api}");
         }
         assert_eq!(api["Version"], api["version"]);
+        assert!(api["version"].as_str().unwrap().starts_with("rustbgpd "));
 
         assert!(
             Args::try_parse_from([
@@ -1801,6 +1955,112 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn exact_prefix_parser_accepts_networks_and_rejects_malformed_or_host_values() {
+        for (input, address, length) in [
+            ("192.0.2.0/24", "192.0.2.0", 24),
+            ("0.0.0.0/0", "0.0.0.0", 0),
+            ("2001:db8::/32", "2001:db8::", 32),
+            ("::/0", "::", 0),
+        ] {
+            let parsed = ExactPrefix::parse(input).unwrap();
+            assert_eq!(parsed.address.to_string(), address);
+            assert_eq!(parsed.length, length);
+        }
+        for input in [
+            "192.0.2.0",
+            "192.0.2.0/",
+            "192.0.2.0/24/extra",
+            "not-an-ip/24",
+            "192.0.2.0/nope",
+            "192.0.2.0/33",
+            "192.0.2.1/24",
+            "2001:db8::/129",
+            "2001:db8::1/64",
+        ] {
+            let (status, Json(body)) = ExactPrefix::parse(input).unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{input}");
+            assert_eq!(body, serde_json::json!({"message":"Invalid route prefix"}));
+            assert!(!body.to_string().contains(input));
+        }
+    }
+
+    #[test]
+    fn exact_route_requests_pin_every_filter_on_every_page_and_unknown_id_is_404() {
+        let peer: IpAddr = "192.0.2.1".parse().unwrap();
+        let prefix = ExactPrefix::parse("2001:db8::/32").unwrap();
+        for source in [ExactRouteSource::Received, ExactRouteSource::Advertised] {
+            for token in ["", "opaque-page-2"] {
+                let request = exact_route_request(peer, prefix, token.to_string(), source);
+                assert_eq!(request.neighbor_address, peer.to_string(), "{source:?}");
+                assert_eq!(request.prefix_filter, "2001:db8::", "{source:?}");
+                assert_eq!(request.prefix_filter_length, 32, "{source:?}");
+                assert!(!request.longer_prefixes, "{source:?}");
+                assert_eq!(
+                    request.afi_safi,
+                    proto::AddressFamily::Unspecified as i32,
+                    "{source:?}"
+                );
+                assert_eq!(request.page_token, token, "{source:?}");
+            }
+        }
+        let resolver = IdentityResolver::default();
+        let (status, Json(body)) = resolver.resolve("missing-alias").unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, serde_json::json!({"message":"Protocol not found"}));
+    }
+
+    #[test]
+    fn exact_route_pages_preserve_add_path_order_and_cap_only_exact_candidates() {
+        let prefix = ExactPrefix::parse("192.0.2.0/24").unwrap();
+        let route = |network: &str, path_id: u32, med: u32| proto::Route {
+            prefix: network.to_string(),
+            prefix_length: 24,
+            path_id,
+            med,
+            ..Default::default()
+        };
+        for source in [ExactRouteSource::Received, ExactRouteSource::Advertised] {
+            let mut routes = Vec::new();
+            append_exact_routes(
+                &mut routes,
+                vec![
+                    route("198.51.100.0", 1, 99),
+                    route("192.0.2.0", 11, 10),
+                    route("192.0.2.0", 22, 20),
+                ],
+                prefix,
+                2,
+            )
+            .unwrap();
+            assert_eq!(
+                routes.iter().map(|route| route.path_id).collect::<Vec<_>>(),
+                [11, 22],
+                "{source:?}"
+            );
+            let (status, Json(body)) =
+                append_exact_routes(&mut routes, vec![route("192.0.2.0", 33, 30)], prefix, 2)
+                    .unwrap_err();
+            assert_eq!(status, StatusCode::FORBIDDEN, "{source:?}");
+            assert_eq!(
+                body,
+                serde_json::json!({"message":"Number of routes exceeds maximum allowed (3/2)"})
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_error_mapping_is_stable_and_sanitized() {
+        let status = tonic::Status::internal("secret upstream detail");
+        let (http_status, Json(body)) = bad_gateway("ListReceivedRoutes", &status);
+        assert_eq!(http_status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body,
+            serde_json::json!({"message":"Upstream daemon request failed"})
+        );
+        assert!(!body.to_string().contains("secret"));
     }
 
     #[test]

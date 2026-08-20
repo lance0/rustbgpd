@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `birdwatcher-adapter` now serves IXP Manager v7.4.0's exact received and
+  export route journeys for IPv4/IPv6 unicast. Every page carries the exact
+  daemon-side prefix filter, all Add-Path candidates retain source alias and
+  order, and the route cap applies after exact filtering. The pinned oracle
+  drives both real IXP Manager consumer methods against a live adapter while
+  keeping `runtime_compatibility` false. (LAN-1118)
 - `birdwatcher-adapter` now supports immutable IXP Manager protocol aliases,
   Bird's Eye-shaped protocol detail and symbols, member received/export views,
   canonical lowercase API metadata alongside preserved Alice-LG keys, and an
