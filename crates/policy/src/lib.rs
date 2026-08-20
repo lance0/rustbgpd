@@ -18,6 +18,7 @@ pub mod sets;
 
 mod eval;
 
+pub use engine::evaluate_chain_with_reject_term;
 pub use engine::explain::{ChainStatementTrace, StatementAttribution, explain_chain_statements};
 pub use engine::{
     AsPathRegex, CommunityMatch, NamedPolicy, NeighborSetMatch, NextHopAction, Policy,

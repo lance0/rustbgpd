@@ -2,8 +2,8 @@
 //!
 //! This is an allocation receipt, not a timing benchmark. The chain is
 //! compiled and its counters are initialized before measurement; the measured
-//! window contains only repeated production
-//! `PolicyChain::evaluate_with_attribution` calls.
+//! window contains only repeated production retention-rich single-walk
+//! evaluation calls.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rustbgpd_policy::{
     NamedPolicy, Policy, PolicyAction, PolicyChain, RouteContext, RouteModifications,
+    evaluate_chain_with_reject_term,
 };
 use rustbgpd_wire::{AspaValidation, RpkiValidation};
 
@@ -134,13 +135,15 @@ fn named_permit_chain() -> PolicyChain {
 /// (for example `Arc::from(policy.name.as_deref().unwrap())`) preserves the
 /// asserted text and action but makes the allocation count non-zero.
 #[test]
-fn named_attribution_allocates_no_label_per_verdict() {
+fn retained_permit_attribution_allocates_nothing_per_verdict() {
     let chain = named_permit_chain();
     let context = route_context();
 
     // Compile the chain and initialize its hit counters before measurement.
-    let (warm_result, warm_evaluation) = chain.evaluate_with_attribution(&context);
+    let (warm_result, warm_evaluation, warm_term) =
+        evaluate_chain_with_reject_term(Some(&chain), &context);
     assert_eq!(warm_result.action, PolicyAction::Permit);
+    assert_eq!(warm_term, None);
     let expected_label = warm_evaluation
         .matched_policy
         .expect("named policy must produce attributed verdicts");
@@ -149,13 +152,14 @@ fn named_attribution_allocates_no_label_per_verdict() {
     let mut attributed_verdicts = 0;
     ALLOCATOR.begin();
     for _ in 0..VERDICTS {
-        let (result, evaluation) = chain.evaluate_with_attribution(&context);
+        let (result, evaluation, term) = evaluate_chain_with_reject_term(Some(&chain), &context);
         let label = evaluation
             .matched_policy
             .expect("measured verdict must remain attributed");
         if result.action == PolicyAction::Permit
             && evaluation.action == PolicyAction::Permit
             && evaluation.eval_error.is_none()
+            && term.is_none()
             && label.as_ref() == "customer-import"
         {
             attributed_verdicts += 1;

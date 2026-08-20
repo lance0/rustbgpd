@@ -9,6 +9,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Retained unicast import-policy rejections now identify a named `.rpol`
+  deciding term as `policy:term` in the existing bounded reason-detail field.
+  Named TOML and default-action denies retain policy-only detail, anonymous
+  denies remain empty, and reason tokens, schemas, metrics, and export policy
+  behavior are unchanged. (LAN-1111)
+
 ### Fixed
 
 - Incremental ASPA cache updates now carry their exact changed customer-ASN

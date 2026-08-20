@@ -1726,6 +1726,30 @@ pub fn evaluate_chain_with_attribution(
     }
 }
 
+/// Evaluate an optional chain once with ordinary attribution plus the named
+/// compiled term that issued a clean Deny. This is the retention-only rich
+/// path: permits and default, TOML, or evaluation-error denies carry no term.
+#[must_use]
+pub fn evaluate_chain_with_reject_term(
+    chain: Option<&PolicyChain>,
+    ctx: &RouteContext<'_>,
+) -> (PolicyResult, PolicyEvaluation, Option<String>) {
+    match chain {
+        Some(c) => c
+            .compiled()
+            .evaluate_with_attribution_counting_and_reject_term(ctx, c.hit_counters()),
+        None => (
+            PolicyResult::permit(),
+            PolicyEvaluation {
+                action: PolicyAction::Permit,
+                matched_policy: None,
+                eval_error: None,
+            },
+            None,
+        ),
+    }
+}
+
 /// Apply route modifications to a mutable attribute list.
 ///
 /// Modifications are applied in a fixed order:

@@ -1,5 +1,5 @@
 use super::import_decision_cache::{CachedDecision, CachedPolicyContext, ImportDecisionKey};
-use super::rejected_routes::RejectedRouteEntry;
+use super::rejected_routes::{RejectedRouteEntry, policy_reject_detail};
 use super::{
     Afi, AsPath, BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, BgpRole, Event, EvpnRibRoute,
     EvpnRoute, EvpnRouteKey, FlowSpecKey, FlowSpecRoute, Instant, IpAddr, Ipv4Addr,
@@ -1864,10 +1864,18 @@ impl PeerSession {
                         local_pref: policy_local_pref,
                         med: policy_med,
                     };
-                    let (result, evaluation) = rustbgpd_policy::evaluate_chain_with_attribution(
-                        self.import_policy.as_ref(),
-                        &ctx,
-                    );
+                    let (result, evaluation, reject_term) = if retention_enabled {
+                        rustbgpd_policy::evaluate_chain_with_reject_term(
+                            self.import_policy.as_ref(),
+                            &ctx,
+                        )
+                    } else {
+                        let (result, evaluation) = rustbgpd_policy::evaluate_chain_with_attribution(
+                            self.import_policy.as_ref(),
+                            &ctx,
+                        );
+                        (result, evaluation, None)
+                    };
                     record_import_policy_eval(
                         &self.metrics,
                         &self.peer_label,
@@ -1910,8 +1918,10 @@ impl PeerSession {
                                 self.build_rejected_route_prototype(reject_proto_attrs)
                             });
                             let mut reject_entry = proto.clone();
-                            reject_entry.detail =
-                                evaluation.matched_policy.as_ref().map(ToString::to_string);
+                            reject_entry.detail = policy_reject_detail(
+                                evaluation.matched_policy.as_deref(),
+                                reject_term.as_deref(),
+                            );
                             reject_entry.next_hop = Some(body_next_hop);
                             reject_entry.rpki = rpki_state;
                             reject_entry.aspa = body_aspa_state;
@@ -2477,10 +2487,19 @@ impl PeerSession {
                             local_pref: policy_local_pref,
                             med: policy_med,
                         };
-                        let (result, evaluation) = rustbgpd_policy::evaluate_chain_with_attribution(
-                            self.import_policy.as_ref(),
-                            &ctx,
-                        );
+                        let (result, evaluation, reject_term) = if retention_enabled {
+                            rustbgpd_policy::evaluate_chain_with_reject_term(
+                                self.import_policy.as_ref(),
+                                &ctx,
+                            )
+                        } else {
+                            let (result, evaluation) =
+                                rustbgpd_policy::evaluate_chain_with_attribution(
+                                    self.import_policy.as_ref(),
+                                    &ctx,
+                                );
+                            (result, evaluation, None)
+                        };
                         record_import_policy_eval(
                             &self.metrics,
                             &self.peer_label,
@@ -2555,8 +2574,10 @@ impl PeerSession {
                                     self.build_rejected_route_prototype(reject_proto_attrs)
                                 });
                                 let mut reject_entry = proto.clone();
-                                reject_entry.detail =
-                                    evaluation.matched_policy.as_ref().map(ToString::to_string);
+                                reject_entry.detail = policy_reject_detail(
+                                    evaluation.matched_policy.as_deref(),
+                                    reject_term.as_deref(),
+                                );
                                 reject_entry.next_hop = Some(mp.next_hop);
                                 reject_entry.rpki = mp_rpki_state;
                                 reject_entry.aspa = mp_aspa_state;

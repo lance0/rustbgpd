@@ -535,7 +535,9 @@ pub(crate) fn exec_community_var(
 enum PolicyDecision<'a> {
     Permit(Option<&'a RouteModifications>),
     PermitOwned(RouteModifications),
-    Deny,
+    Deny {
+        term_index: Option<usize>,
+    },
     Error {
         kind: EvalErrorKind,
         term_index: usize,
@@ -594,6 +596,20 @@ impl CompiledChain {
         self.evaluate_attributed::<true, true>(ctx, Some(hits))
     }
 
+    /// Retention-only attributed evaluation: return the named compiled
+    /// term that issued a clean Deny, when one exists. The term is carried
+    /// out of the same walk; permits and default/TOML/error denies return
+    /// `None` without cloning a term label.
+    pub(crate) fn evaluate_with_attribution_counting_and_reject_term(
+        &self,
+        ctx: &RouteContext<'_>,
+        hits: &PolicyHitCounters,
+    ) -> (PolicyResult, PolicyEvaluation, Option<String>) {
+        hits.evals.fetch_add(1, Ordering::Relaxed);
+        let mut fuel: u64 = MAX_EVAL_COST;
+        self.evaluate_fueled::<true, true, true>(ctx, Some(hits), &mut fuel)
+    }
+
     /// `COUNT` monomorphizes the walk: the non-counting instantiation
     /// compiles the counter plumbing away entirely, so the plain
     /// [`evaluate_with_attribution`](Self::evaluate_with_attribution)
@@ -613,7 +629,9 @@ impl CompiledChain {
         // so a loop-free walk never touches it again and the V1 hot
         // path keeps its exact cost profile (ADR-0103 Decision 3).
         let mut fuel: u64 = MAX_EVAL_COST;
-        self.evaluate_fueled::<COUNT, ATTR>(ctx, hits, &mut fuel)
+        let (result, evaluation, _) =
+            self.evaluate_fueled::<COUNT, ATTR, false>(ctx, hits, &mut fuel);
+        (result, evaluation)
     }
 
     /// [`evaluate_attributed`](Self::evaluate_attributed) against a
@@ -622,7 +640,7 @@ impl CompiledChain {
     #[cfg(test)]
     pub(crate) fn evaluate_measuring_fuel(&self, ctx: &RouteContext<'_>) -> (PolicyResult, u64) {
         let mut fuel: u64 = MAX_EVAL_COST;
-        let (result, _) = self.evaluate_fueled::<false, false>(ctx, None, &mut fuel);
+        let (result, _, _) = self.evaluate_fueled::<false, false, false>(ctx, None, &mut fuel);
         (result, MAX_EVAL_COST - fuel)
     }
 
@@ -642,12 +660,12 @@ impl CompiledChain {
         Some(pinned)
     }
 
-    fn evaluate_fueled<const COUNT: bool, const ATTR: bool>(
+    fn evaluate_fueled<const COUNT: bool, const ATTR: bool, const TERM: bool>(
         &self,
         ctx: &RouteContext<'_>,
         hits: Option<&PolicyHitCounters>,
         fuel: &mut u64,
-    ) -> (PolicyResult, PolicyEvaluation) {
+    ) -> (PolicyResult, PolicyEvaluation, Option<String>) {
         // LAN-305: pin dataset generations ONCE for the whole walk.
         let pinned_frame = self.pin_datasets();
         let pinned = pinned_frame.as_ref().unwrap_or(&NO_DATASETS);
@@ -665,7 +683,14 @@ impl CompiledChain {
                 None
             };
             match self.evaluate_policy::<COUNT>(policy, ctx, policy_hits, fuel, pinned) {
-                PolicyDecision::Deny => {
+                PolicyDecision::Deny { term_index } => {
+                    let matched_term = if TERM {
+                        term_index
+                            .and_then(|index| policy.terms.get(index))
+                            .and_then(|term| term.name.clone())
+                    } else {
+                        None
+                    };
                     return (
                         PolicyResult::deny(),
                         PolicyEvaluation {
@@ -673,6 +698,7 @@ impl CompiledChain {
                             matched_policy: if ATTR { policy.name.clone() } else { None },
                             eval_error: None,
                         },
+                        matched_term,
                     );
                 }
                 // The LAN-299 eval-error rail (ADR-0103 Decision 4):
@@ -709,6 +735,7 @@ impl CompiledChain {
                             matched_policy: if ATTR { policy.name.clone() } else { None },
                             eval_error: Some(error),
                         },
+                        None,
                     );
                 }
                 PolicyDecision::Permit(Some(mods)) if !mods.is_empty() => {
@@ -740,6 +767,7 @@ impl CompiledChain {
                 matched_policy,
                 eval_error: None,
             },
+            None,
         )
     }
 
@@ -1026,7 +1054,11 @@ impl CompiledChain {
                             (None, None) => PolicyDecision::Permit(Some(mods)),
                         };
                     }
-                    TermAction::Deny => return PolicyDecision::Deny,
+                    TermAction::Deny => {
+                        return PolicyDecision::Deny {
+                            term_index: Some(term_index),
+                        };
+                    }
                     TermAction::Continue(mods) => {
                         let resolved =
                             match self.resolve_computed(mods, ctx, locals_slice(locals.as_ref())) {
@@ -1076,7 +1108,11 @@ impl CompiledChain {
                                         None => PolicyDecision::PermitOwned(mods),
                                     };
                                 }
-                                LoopFlow::Deny => return PolicyDecision::Deny,
+                                LoopFlow::Deny => {
+                                    return PolicyDecision::Deny {
+                                        term_index: Some(term_index),
+                                    };
+                                }
                             },
                             Err((kind, _)) => return PolicyDecision::Error { kind, term_index },
                         }
@@ -1105,7 +1141,7 @@ impl CompiledChain {
         match (policy.default_action, continued) {
             (PolicyAction::Permit, Some(acc)) => PolicyDecision::PermitOwned(acc),
             (PolicyAction::Permit, None) => PolicyDecision::Permit(None),
-            (PolicyAction::Deny, _) => PolicyDecision::Deny,
+            (PolicyAction::Deny, _) => PolicyDecision::Deny { term_index: None },
         }
     }
 
