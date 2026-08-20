@@ -23,10 +23,6 @@ on:
     paths-ignore:
       - "**/*.md"
       - "docs/**"
-  schedule:
-    # 07:00 UTC nightly — catches dataplane regressions even if a PR was
-    # never re-run.
-    - cron: '0 7 * * *'
   workflow_dispatch:
 
 concurrency:

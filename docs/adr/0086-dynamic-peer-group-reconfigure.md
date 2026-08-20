@@ -56,7 +56,7 @@ while the honest alternative (a graceful reset) exists.
 
 ### The seams that make a dynamic-safe reset clean
 
-1. `StageConfigSnapshot` advances the peer manager's `current_config` and
+1. `StageTransactionConfig` advances the peer manager's `current_config` and
    rebuilds the dynamic accept matcher *before* persist
    (`src/peer_manager/mod.rs`), and `handle_inbound` resolves an accepted
    dynamic peer's config from `current_config` at accept time

@@ -84,7 +84,7 @@ TRIGGER_HASHES = {
     "ci.yml": "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8",
     "audit.yml": "1829597143324f5361dfdfece50ddeffd6f7d5934b72198f1837fbdf25339fd3",
     "interop.yml": "5a02c2699d26443c537ba1560fd1b16c595498e9148b2f99be975ae79b3b9492",
-    "kernel-dataplane.yml": "6a5d9f010df1a4b97bed98beb1e27a7284bdcf3c19befe71263a15a186c73b86",
+    "kernel-dataplane.yml": "9e0df830852bce65597b12ac831509f6ecd500a1bcb85417394dac2f1e3c72a9",
 }
 PERMISSION_HASHES = {
     "ci.yml": "ef1c6c32bd7afe22841015d36a48ee18816a0a8eb0e9a1a0af951ce1ff7cd183",

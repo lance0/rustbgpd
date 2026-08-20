@@ -1910,12 +1910,11 @@ branch is between features.
   `AddDynamicNeighbor` / `DeleteDynamicNeighbor` can map duplicate, not-found,
   and invalid-input failures to stable gRPC status codes without parsing error
   strings. ADR-0076 transaction planning uses a typed stale-snapshot /
-  invalid-candidate error for gRPC status mapping, and `StageConfigSnapshot`
-  now returns typed candidate-validation vs previous-snapshot-serialization
-  errors to the transaction executor. Static-peer lifecycle/admin replies and
-  policy/catalog replies (policy definitions, neighbor sets, peer groups,
-  global named chains, and per-neighbor policy/peer-group membership) now also
-  use typed errors where callers need status-class distinctions. The transport
+  invalid-candidate error for gRPC status mapping. Static-peer
+  lifecycle/admin replies and policy/catalog replies (policy definitions,
+  neighbor sets, peer groups, global named chains, and per-neighbor
+  policy/peer-group membership) now also use typed errors where callers need
+  status-class distinctions. The transport
   peer-session command ACK surface (`SendRouteRefresh`, live import/export
   policy updates, and graceful-shutdown toggles) now uses typed errors while
   preserving the existing peer-manager operator text. Remaining
