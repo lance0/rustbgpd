@@ -1624,6 +1624,16 @@ fn test_ingest_stall_override_parse_rules() {
     assert_eq!(test_ingest_stall_override(Some("1.5")), None);
 }
 
+#[test]
+fn peer_up_panic_override_accepts_only_trimmed_one() {
+    assert!(!test_panic_on_peer_up_override(None));
+    assert!(test_panic_on_peer_up_override(Some("1")));
+    assert!(test_panic_on_peer_up_override(Some(" 1 ")));
+    for value in ["", "0", "2", "true", "-1"] {
+        assert!(!test_panic_on_peer_up_override(Some(value)), "{value:?}");
+    }
+}
+
 #[tokio::test]
 async fn peer_deleted_reaps_metric_series_peer_down_does_not() {
     fn peer_series_count(metrics: &BgpMetrics, peer: &str) -> usize {

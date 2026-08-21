@@ -1418,6 +1418,22 @@ fn route_page_versions(manager: &RibManager) -> [RoutePageVersion; 3] {
     ]
 }
 
+#[test]
+fn peer_up_fault_fires_before_shared_page_generation_advances() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_panic_on_peer_up = Some(());
+    let before = route_page_versions(&manager);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = peer_up_direct(&mut manager, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
+    }));
+    assert!(
+        panic.is_err(),
+        "real PeerUp must trigger the fail-stop probe"
+    );
+    assert_eq!(route_page_versions(&manager), before);
+}
+
 fn assert_only_advertised_page_version_advanced_once(
     before: [RoutePageVersion; 3],
     after: [RoutePageVersion; 3],

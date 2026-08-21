@@ -409,11 +409,12 @@ Notes on the sandbox:
   need a restart.
 - `Restart=on-failure` is load-bearing. The daemon exits `0` only on an
   operator-initiated shutdown (SIGINT/SIGTERM, the `Shutdown` RPC) and
-  `1` on a component failure it cannot recover from in place — the BGP
-  listener failing to bind, a configured `prometheus_addr` health
-  listener failing to bind, or the gRPC server exiting unexpectedly.
-  None of these listeners is rebound without a restart, so the daemon exits
-  rather than run on deaf; the supervisor's retry is the recovery path.
+  `1` on a component failure it cannot recover from in place. Startup exits
+  immediately if legacy BGP mode binds neither family, explicit
+  `listen_addresses` cannot bind every configured endpoint, or a configured
+  `prometheus_addr` health listener cannot bind. An unexpected gRPC server or
+  RIB manager exit instead runs the coordinated peer teardown before exit 1.
+  These components are not respawned in place; the supervisor is the recovery path.
   Exit 70 is also a failure: it is the runtime-config settlement watchdog's
   fail-stop recovery request and must remain restartable. `RestartSec=5`
   retries a transient failure, while `StartLimitBurst=5` and

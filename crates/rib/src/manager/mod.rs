@@ -573,6 +573,9 @@ pub struct RibManager {
     /// re-arm) becomes deterministically observable. `None` in
     /// production — the only cost when unset is an `is_some()` check.
     test_ingest_stall: Option<std::time::Duration>,
+    /// Test-only fail-stop probe. Captured once at construction so a live
+    /// process cannot change supervision behavior by mutating its environment.
+    test_panic_on_peer_up: Option<()>,
     /// Update-group fingerprint registry (slice 1): membership (group
     /// id or ungrouped reason) per registered peer. Since slice 2 the
     /// distribution path reads it: grouped peers share the staged
@@ -782,6 +785,21 @@ fn initial_route_page_version() -> RoutePageVersion {
 /// production. Read once at RIB-manager construction; unset, empty,
 /// zero, or unparseable values disable the stall.
 const TEST_INGEST_STALL_ENV: &str = "RUSTBGPD_TEST_RIB_INGEST_STALL_MS";
+
+/// Test-only fail-stop probe used by the daemon supervision integration test.
+/// The panic occurs before any page-generation mutation for the `PeerUp`.
+const TEST_PANIC_ON_PEER_UP_ENV: &str = "RUSTBGPD_TEST_RIB_PANIC_ON_PEER_UP";
+
+fn test_panic_on_peer_up_override(env: Option<&str>) -> bool {
+    match env.map(str::trim) {
+        Some("1") => true,
+        None => false,
+        Some(_) => {
+            warn!("ignoring invalid {TEST_PANIC_ON_PEER_UP_ENV} (expected 1)");
+            false
+        }
+    }
+}
 
 /// Pure core of the [`TEST_INGEST_STALL_ENV`] override with the
 /// environment value injected, so the parse rule (positive u64
@@ -1069,6 +1087,22 @@ impl RibManager {
                  (ADR-0078 fault injection — test use only, never set in production)"
             );
         }
+        let test_panic_on_peer_up_env = match std::env::var(TEST_PANIC_ON_PEER_UP_ENV) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                warn!("ignoring non-unicode {TEST_PANIC_ON_PEER_UP_ENV}");
+                None
+            }
+        };
+        let test_panic_on_peer_up =
+            test_panic_on_peer_up_override(test_panic_on_peer_up_env.as_deref());
+        if test_panic_on_peer_up {
+            warn!(
+                "{TEST_PANIC_ON_PEER_UP_ENV} active: panicking on PeerUp \
+                 (fail-stop supervision fault injection — test use only)"
+            );
+        }
         Self {
             ribs: HashMap::new(),
             attr_intern: crate::attr_intern::AttrInternTable::new(),
@@ -1185,6 +1219,7 @@ impl RibManager {
             route_page_table_version: Some(initial_route_page_version()),
             route_page_advertised_version: Some(initial_route_page_version()),
             test_ingest_stall,
+            test_panic_on_peer_up: test_panic_on_peer_up.then_some(()),
         }
     }
 
@@ -1739,6 +1774,10 @@ impl RibManager {
         reason = "dispatcher needs one arm per RibUpdate variant"
     )]
     fn handle_update(&mut self, update: RibUpdate) {
+        assert!(
+            !(self.test_panic_on_peer_up.is_some() && matches!(&update, RibUpdate::PeerUp { .. })),
+            "{TEST_PANIC_ON_PEER_UP_ENV} triggered before route-page generation advance"
+        );
         self.advance_route_pages_for_update(&update);
         match update {
             RibUpdate::RoutesReceived {

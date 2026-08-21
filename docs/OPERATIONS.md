@@ -700,6 +700,13 @@ coordinated shutdown (NOTIFICATION to all peers, GR marker write). This is
 deliberate: losing the control plane means losing the ability to shut down
 cleanly later. See [ADR-0022](adr/0022-grpc-server-supervision.md).
 
+### RIB manager exits unexpectedly
+
+The daemon likewise treats any RIB manager return or panic as fatal. It logs
+`RIB manager exited unexpectedly`, performs the ordinary coordinated shutdown
+(including peer NOTIFICATIONs), and exits 1 for `Restart=on-failure`. The
+daemon does not claim active supervision of the PeerManager itself.
+
 ### RPKI cache unreachable
 
 Each RTR client reconnects independently after a fixed `retry_interval`
@@ -1572,6 +1579,7 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 | `received shutdown signal` | INFO | SIGTERM/SIGINT received |
 | `shutdown initiated via gRPC` | INFO | `Shutdown` RPC called |
 | `gRPC server exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
+| `RIB manager exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `config reloaded` | INFO | SIGHUP reload succeeded |
 | `config reload failed` | ERROR | SIGHUP reload failed — previous config kept |
 | `GR restart marker` | INFO | Restart marker written or read |
