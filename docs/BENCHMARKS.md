@@ -56,11 +56,24 @@ v0.4.2 snapshot. See *End-to-End System Benchmarks* below.
 
 ## Secondary measurement environment — self-hosted VPS bench runner
 
+> **Retired 2026-08-21.** This runner was deregistered and the host
+> reclaimed. Benchmarking now runs on the primary host described above,
+> which is an upgrade for measurement: bare metal instead of a
+> virtualized guest, and directly comparable to the published receipts
+> rather than needing its own baseline. `bench-nightly.yml` and
+> `bench.yml` are retained with their schedule disabled — see those
+> files to revive them against a future runner.
+>
+> This section stays because the numbers below and elsewhere in this
+> document were measured here, and a published figure keeps the
+> environment that produced it. Everything in it describes the retired
+> host, in the past tense of fact: the ~11% noise floor is a property of
+> that VPS and must not be assumed for any replacement.
+
 The `Criterion Bench Compare` workflow (`.github/workflows/bench.yml`)
-runs on a dedicated VPS registered as a `[self-hosted, rustbgpd-bench]`
-runner. Numbers from CI dispatches are produced in this environment,
-not the primary host described above. Two environments give us A/B
-deltas on PRs without coupling them to a single machine.
+ran on a dedicated VPS registered as a `[self-hosted, rustbgpd-bench]`
+runner. Numbers from CI dispatches were produced in this environment,
+not the primary host described above.
 
 | Field | Value |
 |-------|-------|
@@ -126,7 +139,9 @@ not a merge gate.
 
 ### Host coexistence: bench vs. soak
 
-The VPS bench runner is also planned to run rustbgpd's soak suite.
+Bench and soak workloads share the primary host. That coexistence is now
+the normal case rather than a plan: the 24h flagship soak receipts record
+the primary host, and benchmarking moved there when the VPS was retired.
 Both workloads acquire an exclusive `flock` on
 `${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}` before doing
 real work — the bench script via `bench/compare-criterion.sh` directly, the soak
@@ -295,9 +310,18 @@ cross-stack comparison below or the explain-cache comparison
 
 `.github/workflows/bench.yml` exposes the same comparison as a manual
 `Criterion Bench Compare` workflow. It targets a `[self-hosted,
-rustbgpd-bench]` runner and is intentionally not wired to normal pull-request
-events yet. Enable PR-triggered benchmark comments only after the replacement
-runner exists and its run-to-run noise floor is measured.
+rustbgpd-bench]` runner, and **no runner currently carries that label** — the
+VPS was retired 2026-08-21. The workflow is dispatch-only, so it cannot fire on
+its own; a manual dispatch today queues until a matching runner appears.
+
+`bench-nightly.yml` is the same harness on a schedule, and that schedule is
+disabled for the same reason — a scheduled job against an absent label queues
+indefinitely rather than failing.
+
+Both files are kept intact for revival. Enable PR-triggered benchmark comments
+only after a replacement runner exists **and its own run-to-run noise floor has
+been measured** — the ~11% figure in this document belongs to the retired VPS
+and does not transfer.
 
 ## Reading the comparison output (for PR review)
 
