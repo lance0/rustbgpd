@@ -625,8 +625,10 @@ transitions and MD5-FRR continuity. Active UI-filter translation, custom-skin
 migration, and multi-address ownership remain open. The external adapter now
 also serves the IXP Manager v7.4 status, live protocol inventory/detail,
 symbols, member received, and member export slice through immutable aliases
-with an enforced response maximum. Remaining Bird's Eye work is global
-table/count and exact/less-specific lookup, wildcard-community search, and the
+with an enforced response maximum. Its exact member filtered-prefix wildcard
+journey reads retained rejects, scrubs the daemon-owned reason namespace, and
+synthesizes only conservative reason ids. Remaining Bird's Eye work is global
+table/count, less-specific lookup, other wildcard-community searches, and the
 complete reject-reason inventory;
 no full compatibility claim is made.
 [ADR-0126](docs/adr/0126-shared-group-per-client-best.md) (Accepted) landed

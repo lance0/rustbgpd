@@ -31,8 +31,13 @@ UNSUPPORTED = {
     "atomic-all-candidate-table-snapshot",
     "runtime-protocol-alias-reconfiguration",
 }
-RUNTIME_SUPPORTED = {"exact-protocol-route", "exact-export-route"}
+RUNTIME_SUPPORTED = {
+    "exact-protocol-route",
+    "exact-export-route",
+    "filtered-prefix-wildcard",
+}
 ADAPTER_API_VERSION = {"kind": "product-identity", "prefix": "rustbgpd "}
+FILTERED_PREFIX_QUERY = {"global_admin": 65001, "function": 1101}
 
 
 def fail(message: str) -> None:
@@ -50,6 +55,8 @@ if set(manifest.get("runtime_supported", [])) != RUNTIME_SUPPORTED:
     fail("supported runtime matrix drifted")
 if manifest.get("adapter_api_version") != ADAPTER_API_VERSION:
     fail("adapter api.version must remain an honest product identity")
+if manifest.get("filtered_prefix_query") != FILTERED_PREFIX_QUERY:
+    fail("filtered-prefix namespace drifted")
 if manifest.get("protocol_aliases") != {"member-v4": "pb_as64496"}:
     fail("explicit protocol alias matrix drifted")
 

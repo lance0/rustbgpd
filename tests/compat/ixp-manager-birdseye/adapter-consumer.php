@@ -17,7 +17,12 @@ $manifest = json_decode(
 );
 $protocol = $manifest['protocol_aliases']['member-v4'] ?? null;
 $versionPrefix = $manifest['adapter_api_version']['prefix'] ?? null;
-if ($protocol !== 'pb_as64496' || $versionPrefix !== 'rustbgpd ') {
+$filtered = $manifest['filtered_prefix_query'] ?? [];
+if (
+    $protocol !== 'pb_as64496'
+    || $versionPrefix !== 'rustbgpd '
+    || $filtered !== ['global_admin' => 65001, 'function' => 1101]
+) {
     throw new RuntimeException('adapter consumer contract drifted');
 }
 
@@ -32,6 +37,11 @@ $consumer = new BirdsEye($router);
 $responses = [
     'exact-protocol-route' => $consumer->protocolRoute($protocol, '192.0.2.0', 24),
     'exact-export-route' => $consumer->exportRoute($protocol, '192.0.2.0', 24),
+    'filtered-prefix-wildcard' => $consumer->routesProtocolLargeCommunityWildXYRoutes(
+        $protocol,
+        $filtered['global_admin'],
+        $filtered['function'],
+    ),
 ];
 
 foreach ($responses as $journey => $response) {

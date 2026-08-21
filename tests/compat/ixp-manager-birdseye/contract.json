@@ -8,6 +8,10 @@
     "kind": "product-identity",
     "prefix": "rustbgpd "
   },
+  "filtered_prefix_query": {
+    "global_admin": 65001,
+    "function": 1101
+  },
   "runtime_compatibility": false,
   "manual_config_export": {
     "schema": "rustbgpd.ixp-manager.router-config/v1",
@@ -17,7 +21,8 @@
   },
   "runtime_supported": [
     "exact-protocol-route",
-    "exact-export-route"
+    "exact-export-route",
+    "filtered-prefix-wildcard"
   ],
   "unsupported": [
     "complete-rejected-route-reason-inventory",

@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `birdwatcher-adapter` now serves IXP Manager v7.4.0's exact member
+  filtered-prefix wildcard journey from retained rejects. It accepts only the
+  daemon's `{ASN}:1101:*` namespace, removes wire-supplied values there before
+  synthesizing one conservative reason, preserves unrelated communities, and
+  keeps no-session empty and route-cap 403 behavior. The pinned real consumer
+  and populated live-BGP smoke cover the slice while `runtime_compatibility`
+  remains false. (LAN-1134)
 - `rs-config-render ixp-manager-lifecycle` now drives IXP Manager v7.4's
   authenticated router lock, Foil fetch, existing strict render/atomic
   activation, and updated/release callbacks. A private synced journal precedes
