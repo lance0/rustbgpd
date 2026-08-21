@@ -1615,7 +1615,7 @@ impl PolicyChain {
                     || !mods.large_communities_add.is_empty()
                     || !mods.large_communities_remove.is_empty()
             }
-            TermAction::CommunityVar { .. } => true,
+            TermAction::CommunityVar { .. } | TermAction::RemoveLargeCommunityAdmin { .. } => true,
             TermAction::Deny
             | TermAction::Bind { .. }
             | TermAction::ForEach(_)

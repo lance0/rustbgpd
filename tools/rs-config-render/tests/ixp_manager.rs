@@ -107,6 +107,7 @@ fn supported_render_is_deterministic_and_explicit() {
         "interpret_rfc1997 = true",
         "max_prefix_restart_seconds = 300",
         "md5_password = \"mcWsqMdzGwTKt67g\"",
+        "export_chain = [\"ixp-transparent-export\", \"ixp-manager-own-as-export-scrub\"]",
     ] {
         assert!(config.contains(expected), "missing {expected}");
     }
@@ -124,6 +125,16 @@ fn supported_render_is_deterministic_and_explicit() {
     let hygiene = &rendered(&transit).unwrap().files["policy/ixp-hygiene.rpol"];
     assert!(hygiene.contains("if route.as-path matches \"_(42)_\""));
     assert!(!hygiene.contains("peer.asn in ixp-manager-no-transit"));
+    assert!(hygiene.contains("remove large-community 65501:*:*"));
+    assert_terms(
+        hygiene,
+        "ixp-manager-own-as-export-scrub",
+        &["remove-own-as-large-communities", "accept-unmatched"],
+    );
+    assert_policy_tests(
+        hygiene,
+        "test own-as-scrub-executes { route { large-communities [65501:1:2, 64496:3:4, 65501:5:6] } expect ixp-manager-own-as-export-scrub == accept }",
+    );
     let mut maximum = value();
     maximum["policy"]["minimum_prefix_length"] = 32.into();
     assert!(
@@ -292,7 +303,7 @@ fn v1_and_v2_dispatch_are_strict_and_v1_output_stays_legacy() {
     for (name, expected) in [
         (
             "config.toml",
-            "56248e088030f41ee5cf31b5cb5d034e4239c65180b1874879cb56fe932f6263",
+            "7ed88dd78d15be8b4e0949afbcc9479afa13d852db472e1d2d7b37ff71f48685",
         ),
         (
             "policy/client-3.rpol",
@@ -300,7 +311,7 @@ fn v1_and_v2_dispatch_are_strict_and_v1_output_stays_legacy() {
         ),
         (
             "policy/ixp-hygiene.rpol",
-            "9b985aa25791348137ecb047614627ba7aaa0a214b008f045bc77c1fc8b7ced5",
+            "326b2121b023329d2b4a7542a2510d01220782552fcfd4e7920de1df5f658094",
         ),
     ] {
         assert_eq!(content_digest(&v1.files[name]), expected, "{name} drifted");
@@ -350,7 +361,7 @@ fn v2_filter_policies_preserve_order_direction_and_reachability() {
     assert!(!full["policy/client-4.rpol"].contains("ui-"));
     assert!(
         full["config.toml"]
-            .contains("export_policy_chain = [\"ixp-transparent-export\", \"client-1-receive\"]")
+            .contains("export_policy_chain = [\"ixp-transparent-export\", \"client-1-receive\", \"ixp-manager-own-as-export-scrub\"]")
     );
     assert_eq!(full["config.toml"].matches("client-1-receive").count(), 1);
     assert_policy_tests(

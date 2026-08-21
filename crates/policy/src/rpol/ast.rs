@@ -520,6 +520,10 @@ impl ActionStmt {
 pub enum CommunityArg {
     /// A community literal of the action's kind.
     Lit(Spanned<CommunityLit>),
+    /// `remove large-community <global-admin>:*:*` — the one supported
+    /// wildcard form. The evaluator expands it against the arrived route
+    /// into concrete large-community removals.
+    LargeAdminWildcard(Spanned<u32>),
     /// A `let`/loop binding or policy parameter (standard communities
     /// only; parameters resolve to literals at compile time).
     Var(Spanned<String>),

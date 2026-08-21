@@ -972,6 +972,20 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
+            ActionStmt::Community {
+                add,
+                kind,
+                arg: CommunityArg::LargeAdminWildcard(global),
+                ..
+            } => {
+                if *add || *kind != CommunityKind::Large {
+                    self.diags.push(Diagnostic::new(
+                        global.span,
+                        "large-community wildcard requires `remove large-community`",
+                        "wildcards are removal-only and large-community-only",
+                    ));
+                }
+            }
             // LAN-303: `add/remove community <binding>` — bindings are
             // u32-valued, so the variable form is standard-kind only,
             // and the name must resolve to a binding or parameter.
@@ -2326,22 +2340,19 @@ fn bound_policy<'a>(
             match stmt {
                 Stmt::If(if_stmt) => {
                     let cost = guard_cost(&if_stmt.cond, pred_cost, fns);
-                    arms.push(cost);
-                    if if_stmt.else_actions.is_some() {
-                        arms.push(cost.saturating_add(1));
+                    arms.extend(
+                        (0..guarded_action_terms(&if_stmt.then_actions, fns)).map(|_| cost),
+                    );
+                    if let Some(actions) = &if_stmt.else_actions {
+                        arms.extend(
+                            (0..guarded_action_terms(actions, fns)).map(|_| cost.saturating_add(1)),
+                        );
                     }
                     for action in if_stmt
                         .then_actions
                         .iter()
                         .chain(if_stmt.else_actions.iter().flatten())
                     {
-                        // A body `let` (LAN-302) lowers to its own Bind
-                        // term that re-evaluates the branch guard (the
-                        // else side adds a negation) — charge one arm
-                        // per binding on top of its initializer cost.
-                        if matches!(action, ActionStmt::Let { .. }) {
-                            arms.push(cost.saturating_add(1));
-                        }
                         action_cost = action_cost.saturating_add(action_value_cost(action, fns));
                     }
                 }
@@ -2482,9 +2493,17 @@ fn for_costs(
                 let guard = guard_cost(&if_stmt.cond, pred_cost, fns);
                 // Upper bound per iteration: the guard (twice with an
                 // else — the negated arm) plus every body action.
-                let arms: u64 = if if_stmt.else_actions.is_some() { 2 } else { 1 };
-                nodes = nodes.saturating_add(guard.saturating_mul(arms));
-                body_steps = body_steps.saturating_add(guard.saturating_mul(arms));
+                let mut guards =
+                    guard.saturating_mul(guarded_action_terms(&if_stmt.then_actions, fns));
+                if let Some(actions) = &if_stmt.else_actions {
+                    guards = guards.saturating_add(
+                        guard
+                            .saturating_add(1)
+                            .saturating_mul(guarded_action_terms(actions, fns)),
+                    );
+                }
+                nodes = nodes.saturating_add(guards);
+                body_steps = body_steps.saturating_add(guards);
                 for action in if_stmt
                     .then_actions
                     .iter()
@@ -2524,6 +2543,23 @@ fn binding_value_cmp(rhs: &Rhs, resolved: Field, scope: &Scope<'_>) -> bool {
         if scope.is_local(&name.node) && value_field_of(resolved).is_some())
 }
 
+/// Conservative guarded-tail count: every source action plus every Bind term
+/// hoisted by an inline user call, with one arm retained for an empty branch.
+fn guarded_action_terms(actions: &[ActionStmt], fns: &HashMap<&str, FnCost>) -> u64 {
+    actions
+        .iter()
+        .map(|action| {
+            1 + match action {
+                ActionStmt::SetLocalPref(expr, _)
+                | ActionStmt::SetMed(expr, _)
+                | ActionStmt::Let { init: expr, .. } => call_slots(expr, fns),
+                _ => 0,
+            }
+        })
+        .fold(0, u64::saturating_add)
+        .max(1)
+}
+
 /// The value-expression steps an action contributes to the
 /// evaluation-cost budget (LAN-299: only the computed `set` values
 /// carry expressions; everything else is constant-time. LAN-302: a
@@ -2533,6 +2569,10 @@ fn action_value_cost(action: &ActionStmt, fns: &HashMap<&str, FnCost>) -> u64 {
     match action {
         ActionStmt::SetLocalPref(expr, _) | ActionStmt::SetMed(expr, _) => value_cost(expr, fns),
         ActionStmt::Let { init, .. } => value_cost(init, fns).saturating_add(1),
+        ActionStmt::Community {
+            arg: CommunityArg::LargeAdminWildcard(_),
+            ..
+        } => crate::eval::MAX_LARGE_COMMUNITIES_PER_ROUTE,
         _ => 0,
     }
 }

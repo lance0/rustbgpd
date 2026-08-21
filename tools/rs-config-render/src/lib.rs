@@ -1293,6 +1293,7 @@ fn unsafe_term(
     match &term.action {
         TermAction::Permit(mods) | TermAction::Continue(mods) => unsafe_mods(mods, forbidden),
         TermAction::CommunityVar { .. } => Some("community variables are refused"),
+        TermAction::RemoveLargeCommunityAdmin { .. } => Some("community removal is refused"),
         TermAction::ForEach(node) => node
             .body
             .iter()
@@ -2798,6 +2799,21 @@ mod tests {
         assert_eq!(expected_fingerprint().len(), 16);
         let again = expected_fingerprint();
         assert_eq!(expected_fingerprint(), again);
+    }
+
+    #[test]
+    fn site_local_refuses_large_community_wildcard_removal() {
+        let file = rustbgpd_policy::rpol::RpolFile::parse(
+            "policy scrub { term t { remove large-community 65501:*:*; accept } }",
+        )
+        .unwrap();
+        let chain = file
+            .compile_policy("scrub", &[], &mut rustbgpd_policy::sets::SetStore::new())
+            .unwrap();
+        assert_eq!(
+            unsafe_chain(&chain, &[]),
+            Some("community removal is refused")
+        );
     }
 
     #[test]

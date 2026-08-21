@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `.rpol` now supports the exact removal-only
+  `remove large-community <u32>:*:*` form with bounded, fail-closed arrived-route
+  evaluation. Pinned IXP Manager v7.4 candidates append a router-AS scrub last
+  to global and per-client override export chains while preserving foreign
+  administrators. (LAN-1112)
 - `NeighborState.rejected_routes_retained` now carries the exact session
   actor's bounded retained-reject count with rolling-upgrade presence.
   `birdwatcher-adapter` protocol inventory consumes it in one `ListNeighbors`

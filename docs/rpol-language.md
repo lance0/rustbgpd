@@ -981,6 +981,7 @@ Two consequences worth internalizing:
 | `set next-hop <ip>` / `set next-hop self` | override `NEXT_HOP` |
 | `add community 65001:999` / `remove community ...` | standard communities |
 | `add large-community 65000:1:2` / `remove ...` | large communities |
+| `remove large-community 65000:*:*` | every arrived large community with global administrator 65000 |
 | `add ext-community RT:65001:100` / `remove ...` | extended communities (RT/RO, or well-known: `add ext-community OV_INVALID`) |
 | `prepend as <asn> <count>` | prepend `<count>` copies of `<asn>` (count: literal 1–255) |
 | `prepend as self\|peer\|origin\|path-first <count>` | prepend a computed ASN (see below) |
@@ -997,6 +998,13 @@ when the matched term's action executes — constant expressions have
 already folded to literals at compile time, and expressions reading
 route/peer fields evaluate per route (an evaluation error denies the
 route; see "Value expressions").
+
+The large-community wildcard is deliberately removal-only and accepts exactly
+one decimal `u32` global administrator followed by `:*:*`, with no spaces or
+prefix. It scans only the arrived route, preserves foreign administrators, and
+stages concrete, first-seen deduplicated removals. An input with more than 5,461
+arrived large communities fails the route closed before scanning; the compiler
+pre-pays that same conservative wire-derived bound.
 
 ### Computed prepend operands
 

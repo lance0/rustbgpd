@@ -15,6 +15,7 @@
 //! (the `ATTR` const generic) — the plain [`CompiledChain::evaluate`]
 //! path never touches it.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,6 +55,10 @@ pub(crate) static NO_DATASETS: PinnedDatasets = [const { None }; MAX_UNIT_DATASE
 /// enforces per policy, and the runtime fuel every evaluation starts
 /// with (LAN-303). Not operator-tunable.
 pub(crate) const MAX_EVAL_COST: u64 = 1_000_000;
+
+/// Conservative upper bound derived from a 16-bit attribute-value length and
+/// 12-octet RFC 8092 values. Wildcard removal pre-pays this full scan.
+pub(crate) const MAX_LARGE_COMMUNITIES_PER_ROUTE: u64 = 5_461;
 
 /// Hard per-loop iteration cap (ADR-0103 Decision 3,
 /// `MAX_LOOP_ITERATIONS`): a loop whose source still has elements
@@ -526,6 +531,37 @@ pub(crate) fn exec_community_var(
     Ok(())
 }
 
+/// Execute the bounded `.rpol` global-admin wildcard removal. The arrived
+/// route is the sole authority: one scan produces stable, deduplicated concrete
+/// removals, which then merge through the ordinary policy-local accumulator.
+/// Input beyond the pre-paid wire bound fails closed before the scan.
+pub(crate) fn exec_remove_large_community_admin(
+    global_admin: u32,
+    ctx: &RouteContext<'_>,
+    continued: &mut Option<RouteModifications>,
+) -> bool {
+    if ctx.large_communities.len()
+        > usize::try_from(MAX_LARGE_COMMUNITIES_PER_ROUTE).expect("fixed bound fits usize")
+    {
+        return false;
+    }
+    let mut mods = RouteModifications::default();
+    let mut seen: HashSet<_> = continued.as_ref().map_or_else(HashSet::new, |current| {
+        current.large_communities_remove.iter().copied().collect()
+    });
+    for community in ctx.large_communities {
+        if community.global_admin == global_admin && seen.insert(*community) {
+            mods.large_communities_remove.push(*community);
+        }
+    }
+    if !mods.large_communities_remove.is_empty() {
+        continued
+            .get_or_insert_with(RouteModifications::default)
+            .merge_from(mods);
+    }
+    true
+}
+
 /// A policy's disposition of the route, borrowing the matched term's
 /// modifications (cloned only if merged). `PermitOwned` carries
 /// modifications accumulated from `Continue` terms merged with the
@@ -958,6 +994,16 @@ impl CompiledChain {
                                 break;
                             }
                         }
+                        TermAction::RemoveLargeCommunityAdmin { global_admin } => {
+                            if !exec_remove_large_community_admin(
+                                *global_admin,
+                                ctx,
+                                &mut continued,
+                            ) {
+                                denied = true;
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -1136,6 +1182,13 @@ impl CompiledChain {
                             return PolicyDecision::Error { kind, term_index };
                         }
                     }
+                    TermAction::RemoveLargeCommunityAdmin { global_admin } => {
+                        if !exec_remove_large_community_admin(*global_admin, ctx, &mut continued) {
+                            return PolicyDecision::Deny {
+                                term_index: Some(term_index),
+                            };
+                        }
+                    }
                 }
             }
         }
@@ -1257,6 +1310,15 @@ impl CompiledChain {
                     TermAction::CommunityVar { add, slot, .. } => {
                         exec_community_var(*add, *slot, locals.as_ref(), continued)
                             .map_err(|kind| (kind, iterations - 1))?;
+                    }
+                    TermAction::RemoveLargeCommunityAdmin { global_admin } => {
+                        if !exec_remove_large_community_admin(*global_admin, ctx, continued) {
+                            return Ok(LoopOutcome {
+                                iterations,
+                                decided_at: Some(iterations - 1),
+                                flow: LoopFlow::Deny,
+                            });
+                        }
                     }
                     // `break` exits the innermost loop: the enclosing
                     // walk continues after it.

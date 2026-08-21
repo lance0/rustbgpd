@@ -688,7 +688,9 @@ fn render_config(
             client.vlan_interface_id
         );
     }
-    out.push_str("]\nexport_chain = [\"ixp-transparent-export\"]\n");
+    out.push_str(
+        "]\nexport_chain = [\"ixp-transparent-export\", \"ixp-manager-own-as-export-scrub\"]\n",
+    );
     for client in &document.clients {
         let family = if router.protocol == 4 {
             "ipv4_unicast"
@@ -716,7 +718,7 @@ fn render_config(
         {
             let _ = writeln!(
                 out,
-                "export_policy_chain = [\"ixp-transparent-export\", \"client-{}-receive\"]",
+                "export_policy_chain = [\"ixp-transparent-export\", \"client-{}-receive\", \"ixp-manager-own-as-export-scrub\"]",
                 client.vlan_interface_id
             );
         }
@@ -779,6 +781,11 @@ fn render_hygiene(document: &Document) -> String {
             document.policy.minimum_prefix_length + 1
         );
     }
+    let _ = writeln!(
+        out,
+        "policy ixp-manager-own-as-export-scrub {{\n    term remove-own-as-large-communities {{ remove large-community {}:*:* }}\n    term accept-unmatched {{ accept }}\n}}",
+        document.router.asn
+    );
     out
 }
 

@@ -595,6 +595,17 @@ fn trace_rpol_policy(
             }
             continue;
         }
+        if let TermAction::RemoveLargeCommunityAdmin { global_admin } = &term.action {
+            if !crate::eval::exec_remove_large_community_admin(*global_admin, ctx, &mut continued) {
+                term_traces.push(format!(
+                    "term {}: large-community input exceeds the wildcard-removal bound — fail closed => reject",
+                    term.name.as_deref().unwrap_or("<unnamed>"),
+                ));
+                decided = Some((index, term));
+                break;
+            }
+            continue;
+        }
         // Loop control at policy level is a compiler bug: fail closed,
         // exactly like the live walk's StrayLoopControl rail.
         if matches!(&term.action, TermAction::Break | TermAction::ContinueLoop) {
@@ -739,6 +750,9 @@ fn render_term_action(action: &TermAction, tables: &CompiledChain) -> String {
         TermAction::ContinueLoop => return "continue (loop)".to_string(),
         TermAction::CommunityVar { add, name, .. } => {
             return format!("{} community {name}", if *add { "add" } else { "remove" });
+        }
+        TermAction::RemoveLargeCommunityAdmin { global_admin } => {
+            return format!("remove large-community {global_admin}:*:*");
         }
     };
     let mut parts = mods.map_or_else(Vec::new, render_action_stmts);

@@ -793,6 +793,13 @@ pub enum TermAction {
         /// The binding name as written, for explain surfaces.
         name: Box<str>,
     },
+    /// Scan the arrived route's large communities once and stage concrete
+    /// removals for every value whose global administrator equals this ASN.
+    /// `.rpol` `remove large-community <u32>:*:*`; route-only and internal.
+    RemoveLargeCommunityAdmin {
+        /// Exact RFC 8092 global administrator to remove.
+        global_admin: u32,
+    },
 }
 
 /// One guarded action inside a [`CompiledPolicy`] — the compiled form
