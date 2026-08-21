@@ -71,6 +71,17 @@ MANUAL_CONFIG_EXPORT = {
     "ixp_manager_version": "7.4.0",
     "router_handle": "b2-rs1-lan1-ipv4",
     "strict_receipt_required": True,
+    "no_transit": {
+        "effective_default_source": "IXP_MANAGER_EFFECTIVE_DEFAULT",
+        "explicit_override_source": "IXP_NO_TRANSIT_ASNS_OVERRIDE",
+        "legacy_implicit_source": "IXP_MANAGER_IMPLICIT_DEFAULT refused",
+        "default_asns": [
+            174, 701, 1299, 2914, 3257, 3320, 3356, 3491, 4134, 5511,
+            6453, 6461, 6762, 6830, 7018,
+        ],
+        "precedence": "default exclusions apply before explicit override replacement",
+        "version_skew": "fail-closed",
+    },
     "birdwatcher_protocol_aliases": {
         "candidate_path": "birdwatcher-protocol-aliases.conf",
         "current_path": "<runtime-state-dir>/activation/current/birdwatcher-protocol-aliases.conf",
@@ -179,6 +190,23 @@ if manifest.get("routing_tables") != ["master4"]:
 
 if len(sys.argv) == 3:
     config_capture = Path(sys.argv[2])
+    default_asns = MANUAL_CONFIG_EXPORT["no_transit"]["default_asns"]
+    no_transit_cases = {
+        "config-default.json": ("IXP_MANAGER_EFFECTIVE_DEFAULT", default_asns),
+        "config-default-excluded.json": (
+            "IXP_MANAGER_EFFECTIVE_DEFAULT", default_asns[2:],
+        ),
+        "config-default-all-excluded.json": ("IXP_MANAGER_EFFECTIVE_DEFAULT", []),
+        "config-explicit-empty.json": ("IXP_NO_TRANSIT_ASNS_OVERRIDE", []),
+        "config-explicit-nonempty.json": (
+            "IXP_NO_TRANSIT_ASNS_OVERRIDE", [64511, 64512],
+        ),
+        "config-implicit.json": ("IXP_MANAGER_IMPLICIT_DEFAULT", []),
+    }
+    for name, (source, asns) in no_transit_cases.items():
+        policy = json.loads((config_capture / name).read_text())["policy"]["no_transit"]
+        if policy != {"source": source, "asns": asns}:
+            fail(f"{name}: effective no-transit capture drifted")
     full = json.loads((config_capture / "config-ui-filter.json").read_text())
     supported = json.loads(
         (config_capture / "ixp-manager-v7.4-rustbgpd.json").read_text()

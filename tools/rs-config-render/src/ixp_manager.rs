@@ -499,8 +499,11 @@ fn validate(
     if (router.protocol == 4) != local.is_ipv4() {
         return Err(Error::Refused("invalid addressing"));
     }
-    if document.policy.no_transit.source != "IXP_NO_TRANSIT_ASNS_OVERRIDE" {
-        return Err(Error::Refused("explicit no-transit override required"));
+    if document.policy.no_transit.source != "IXP_NO_TRANSIT_ASNS_OVERRIDE"
+        && !(expected == SchemaVersion::V2
+            && document.policy.no_transit.source == "IXP_MANAGER_EFFECTIVE_DEFAULT")
+    {
+        return Err(Error::Refused("unsupported no-transit source"));
     }
     if !strictly_sorted(&document.policy.no_transit.asns)
         || document.policy.no_transit.asns.contains(&0)

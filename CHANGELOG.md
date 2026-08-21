@@ -43,6 +43,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   daemon generation at the stable `current` path; operators explicitly SIGHUP
   the adapter after activation. The renderer accepts 4096 aliases and refuses
   4097 without adding runtime orchestration or a compatibility claim. (LAN-1172)
+- The IXP Manager v7.4 exporter now preserves the stock no-transit policy
+  without an operator override: its exact pinned 15-ASN default is resolved
+  after exclusions and accepted through a v2-only source token. Explicit
+  overrides still replace the default, ignore exclusions, and may be empty;
+  legacy implicit and v1 token use remain fail-closed. Real `bird2` and
+  `bird2-2025` policy parity is executable in the pinned oracle. (LAN-1173)
 - The IXP Manager v7.4 renderer and Birdwatcher adapter now cover all ten
   reject reasons active in the pinned route-server templates, with named
   AS-path length/first-AS and separate IRRDB origin/prefix policy terms. The
@@ -78,9 +84,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `rs-config-render` now accepts a strict IXP Manager v7.4 Foil JSON export,
   writes a private route-server candidate, validates it with the selected
   `rustbgpd` binary's version and `--check --strict` modes, then writes the
-  receipt last. Applicable UI filters, BIRD skin overrides, implicit
-  no-transit policy, incomplete or ambiguous member data, and unsupported
-  router modes fail closed. The local activation command rechecks and
+  receipt last. Applicable UI filters, BIRD skin overrides, the legacy
+  `IXP_MANAGER_IMPLICIT_DEFAULT` token, incomplete or ambiguous member data,
+  and unsupported router modes fail closed. The local activation command rechecks and
   atomically publishes immutable generations, settles real health/config diff,
   no-ops on equal content, and restores the prior link without a second
   activation only when the command cannot start. Once started, failure or

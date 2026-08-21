@@ -90,6 +90,14 @@ receipt. The older `ixp-manager-v1`
 boundary remains available for legacy captures and still refuses active UI
 filters; lifecycle fetches require v2.
 
+For v2, the exporter resolves IXP Manager v7.4's pinned 15-ASN default
+no-transit policy after exclusions and labels it
+`IXP_MANAGER_EFFECTIVE_DEFAULT`. An explicit override keeps the existing
+`IXP_NO_TRANSIT_ASNS_OVERRIDE` source, replaces the default, ignores exclusions,
+and may be empty. Lists must be sorted, unique, and nonzero. The legacy empty
+`IXP_MANAGER_IMPLICIT_DEFAULT` token remains refused, and the new token is
+refused under v1, so old/new exporter-renderer version skew fails closed.
+
 After reviewing a complete candidate, install `config.toml` and its `policy/`
 directory together using the existing coordinated-file procedure, then SIGHUP
 rustbgpd. A failed export, refusal, render, or check leaves the running daemon

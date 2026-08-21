@@ -636,6 +636,9 @@ peer context or wildcard matching. Every candidate also binds its exact
 Birdwatcher member aliases into the same private receipt and immutable
 activation generation; the stable `current` path changes atomically with
 daemon configuration, while adapter SIGHUP remains an explicit operator step.
+The pinned v7.4 exporter now also resolves the stock 15-ASN no-transit default,
+exclusions, and explicit-override precedence; a v2-only token removes the
+stock-install refusal while legacy and v1 version skew still fail closed.
 Generic UI-filter semantics, custom-skin
 migration, and multi-address ownership remain open. The external adapter now
 also serves the IXP Manager v7.4 status, live protocol inventory/detail,

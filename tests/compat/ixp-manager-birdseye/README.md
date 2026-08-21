@@ -68,6 +68,13 @@ receipt digest. The executable contract records the stable activation-current
 path, v4/v6 table names, member-name format, and 4096-alias cap. Adapter SIGHUP
 remains an operator action outside this oracle.
 
+The real pinned exporter is also exercised for the stock 15-ASN no-transit
+default, selected and complete exclusions, explicit-empty, and deduplicated
+explicit-nonempty overrides. Each result is compared with both pinned `bird2`
+and `bird2-2025` policy, strict-rendered, and executed through the generated
+Rust policy. The legacy implicit token and v1 use of the effective-default token
+remain fail-closed.
+
 The strict candidates also append the router-own-AS large-community scrub last
 to the global export chain and every v2 client receive override. The manifest
 pins its exact removal-only syntax, placement, and foreign-admin preservation.

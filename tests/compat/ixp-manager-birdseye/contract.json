@@ -52,6 +52,14 @@
     "ixp_manager_version": "7.4.0",
     "router_handle": "b2-rs1-lan1-ipv4",
     "strict_receipt_required": true,
+    "no_transit": {
+      "effective_default_source": "IXP_MANAGER_EFFECTIVE_DEFAULT",
+      "explicit_override_source": "IXP_NO_TRANSIT_ASNS_OVERRIDE",
+      "legacy_implicit_source": "IXP_MANAGER_IMPLICIT_DEFAULT refused",
+      "default_asns": [174, 701, 1299, 2914, 3257, 3320, 3356, 3491, 4134, 5511, 6453, 6461, 6762, 6830, 7018],
+      "precedence": "default exclusions apply before explicit override replacement",
+      "version_skew": "fail-closed"
+    },
     "birdwatcher_protocol_aliases": {
       "candidate_path": "birdwatcher-protocol-aliases.conf",
       "current_path": "<runtime-state-dir>/activation/current/birdwatcher-protocol-aliases.conf",
