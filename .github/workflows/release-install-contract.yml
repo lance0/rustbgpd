@@ -20,6 +20,7 @@ on:
       - examples/docker-compose/docker-compose.yml
       - examples/docker-compose/README.md
       - examples/systemd/rustbgpd.service
+      - examples/systemd/rustbgpd@.service
       - examples/prometheus/rustbgpd-alerts.yml
       - examples/prometheus/rustbgpd-alerts_test.yml
       - tests/birdwatcher_adapter_smoke.rs
@@ -50,6 +51,7 @@ on:
       - examples/docker-compose/docker-compose.yml
       - examples/docker-compose/README.md
       - examples/systemd/rustbgpd.service
+      - examples/systemd/rustbgpd@.service
       - examples/prometheus/rustbgpd-alerts.yml
       - examples/prometheus/rustbgpd-alerts_test.yml
       - tests/birdwatcher_adapter_smoke.rs
@@ -123,6 +125,7 @@ jobs:
                 || { echo "missing or not executable: $tree/usr/bin/$exe" >&2; exit 1; }
             done
             for file in lib/systemd/system/rustbgpd.service \
+                        lib/systemd/system/rustbgpd@.service \
                         usr/share/man/man1/rbgp.1.gz \
                         usr/share/man/man8/rustbgpd.8.gz \
                         usr/share/doc/rustbgpd/LICENSES.md; do
@@ -136,16 +139,23 @@ jobs:
             for directive in StartLimitIntervalSec=10min StartLimitBurst=5 Restart=on-failure RestartSec=5 TimeoutStopSec=32min; do
               grep -qxF "$directive" "$unit"
             done
-          python3 - "$unit" <<'PY'
+            template="$tree/lib/systemd/system/rustbgpd@.service"
+            grep -qxF 'ExecStart=/usr/bin/rustbgpd /var/lib/rustbgpd/%i/activation/current/config.toml' "$template"
+            grep -qxF 'StateDirectory=rustbgpd/%i rustbgpd/%i/activation' "$template"
+            grep -qxF 'ReadWritePaths=/var/lib/rustbgpd/%i' "$template"
+          python3 - "$unit" "$template" <<'PY'
           import sys
           from pathlib import Path
-          from scripts.check_release_install_contract import systemd_assignments, systemd_status_is_70
+          from scripts.check_release_install_contract import check_systemd_template, systemd_assignments, systemd_status_is_70
 
           for _, key, value in systemd_assignments(Path(sys.argv[1]).read_text()):
               if key in {"SuccessExitStatus", "RestartPreventExitStatus"} and any(
                   systemd_status_is_70(token) for token in value.split()
               ):
                   raise SystemExit(f"exit 70/SOFTWARE must remain restartable: {sys.argv[1]}")
+          template_errors = []
+          check_systemd_template(template_errors, Path(sys.argv[2]).read_text(), packaged=True)
+          if template_errors: raise SystemExit("; ".join(template_errors))
           PY
           done
       - uses: docker/setup-buildx-action@v4

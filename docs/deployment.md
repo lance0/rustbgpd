@@ -55,6 +55,7 @@ share/man/man1/rbgp.1                   CLI man page
 share/man/man8/rustbgpd.8               daemon man page
 share/completions/rbgp.{bash,zsh,fish}  shell completions
 share/systemd/rustbgpd.service          hardened systemd unit
+share/systemd/rustbgpd@.service         opt-in per-handle systemd unit
 share/systemd/rustbgpd-dataplane.conf   opt-in CAP_NET_ADMIN drop-in
 share/monitoring/rustbgpd-overview.json Grafana dashboard
 share/monitoring/rustbgpd-alerts.yml    Prometheus alert rules
@@ -90,7 +91,7 @@ sudo install -m 0644 share/completions/rbgp.bash \
 sudo useradd --system --home-dir /var/lib/rustbgpd \
   --shell /usr/sbin/nologin rustbgpd 2>/dev/null || true
 sudo install -m 0644 share/systemd/rustbgpd.service \
-  /etc/systemd/system/rustbgpd.service
+  share/systemd/rustbgpd@.service /etc/systemd/system/
 sudo install -d -m 0755 /etc/rustbgpd
 rustbgpd --init-config edge | \
   sudo tee /etc/rustbgpd/config.toml >/dev/null
@@ -207,8 +208,9 @@ sudo dnf install -y \
 <!-- release-install-contract:native-package:start -->
 The package installs the four binaries (`rustbgpd`, `rbgp`,
 `rs-config-render`, and `birdwatcher-adapter`) to `/usr/bin`, the hardened
-systemd unit (see [systemd](#systemd) below — same unit, `ExecStart`
-pointed at `/usr/bin`), man pages and shell completions, and creates
+systemd singleton and opt-in per-handle template units (see
+[systemd](#systemd) below — `ExecStart` pointed at `/usr/bin`), man pages and
+shell completions, and creates
 the `rustbgpd` system user (imperatively at install time, plus a
 declarative `sysusers.d` file). A starter config lands at
 `/etc/rustbgpd/config.toml` (mode `0640 root:rustbgpd`, never
@@ -375,6 +377,25 @@ system user, the standard sandbox set (`NoNewPrivileges`,
 `RuntimeDirectory`), and a capability set of exactly
 `CAP_NET_BIND_SERVICE` (bind port 179 as non-root). That is everything
 a route-reflector / control-plane-only deployment needs.
+
+Releases also ship the opt-in
+[`rustbgpd@.service`](../examples/systemd/rustbgpd@.service) for IXP Manager.
+Literal `%i` is the exact router handle: it selects
+`/var/lib/rustbgpd/%i/activation/current/config.toml`, a private per-handle
+runtime/UDS, and no writable access to the shared lifecycle fence. Pre-create
+each exact handle and the one shared fence directory before the first lifecycle
+run; authorize and invoke only literal instances, never a wildcard sudoers rule:
+
+```sh
+handle=rs1-ipv4
+sudo install -d -m 0700 -o rustbgpd -g rustbgpd \
+  "/var/lib/rustbgpd/$handle" "/var/lib/rustbgpd/$handle/activation" \
+  /var/lib/rustbgpd/ixp-manager-host
+sudo systemctl enable "rustbgpd@$handle"
+```
+
+Use distinct runtime/activation/UDS paths for every handle and the same
+`/var/lib/rustbgpd/ixp-manager-host` for all lifecycle commands on that host.
 
 Notes on the sandbox:
 

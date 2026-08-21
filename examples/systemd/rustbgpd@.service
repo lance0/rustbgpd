@@ -1,0 +1,41 @@
+[Unit]
+Description=rustbgpd BGP daemon (%i)
+Documentation=https://github.com/lance0/rustbgpd
+After=network-online.target
+Wants=network-online.target
+# Bound repeated fail-stop recovery: five starts per ten-minute window.
+StartLimitIntervalSec=10min
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rustbgpd /var/lib/rustbgpd/%i/activation/current/config.toml
+ExecReload=/bin/kill -HUP $MAINPID
+
+User=rustbgpd
+Group=rustbgpd
+
+# Keep each IXP Manager handle's daemon and activation state private.
+StateDirectory=rustbgpd/%i rustbgpd/%i/activation
+StateDirectoryMode=0700
+RuntimeDirectory=rustbgpd/%i
+RuntimeDirectoryMode=0700
+UMask=0077
+
+# Security hardening. The shared lifecycle host fence is intentionally
+# outside this daemon's writable namespace.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/rustbgpd/%i
+PrivateTmp=yes
+
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=32min
+
+[Install]
+WantedBy=multi-user.target

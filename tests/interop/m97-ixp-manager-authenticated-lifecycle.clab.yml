@@ -1,5 +1,6 @@
 # Containerlab topology: pinned IXP Manager v7.4 lifecycle API, real MySQL,
 # rustbgpd, and the M96 MD5-authenticated FRR member.
+# M97 extends that proof to paired IPv4/IPv6 handles in the same namespace.
 #
 # Build prerequisites:
 #   docker build --target dev -t rustbgpd:dev .
@@ -20,7 +21,9 @@ topology:
       cmd: sleep infinity
       exec:
         - ip addr add 192.0.2.18/32 dev eth1
+        - ip -6 addr add 2001:db8::8/128 dev eth1
         - ip route add 10.1.0.36/32 dev eth1
+        - ip -6 route add 2001:db8:1::10/128 dev eth1
         - ip link set eth1 up
 
     ixp-manager:
@@ -53,10 +56,12 @@ topology:
       image: quay.io/frrouting/frr:10.3.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
-        - ./configs/frr-bgpd-m96-ixp-manager.conf:/etc/frr/frr.conf:ro
+        - ./configs/frr-bgpd-m97-ixp-manager-dual.conf:/etc/frr/frr.conf:ro
       exec:
         - ip addr add 10.1.0.36/32 dev eth1
+        - ip -6 addr add 2001:db8:1::10/128 dev eth1
         - ip route add 192.0.2.18/32 dev eth1
+        - ip -6 route add 2001:db8::8/128 dev eth1
         - ip link set eth1 up
 
   links:

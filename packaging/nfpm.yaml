@@ -43,6 +43,10 @@ contents:
     dst: /lib/systemd/system/rustbgpd.service
     file_info:
       mode: 0644
+  - src: ${PKGROOT}/lib/systemd/system/rustbgpd@.service
+    dst: /lib/systemd/system/rustbgpd@.service
+    file_info:
+      mode: 0644
   - src: packaging/sysusers.conf
     dst: /usr/lib/sysusers.d/rustbgpd.conf
     file_info:

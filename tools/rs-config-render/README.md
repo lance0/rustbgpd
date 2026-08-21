@@ -85,7 +85,7 @@ sudo -u rustbgpd /usr/bin/rs-config-render activate \
   --rbgp-addr unix:///var/lib/rustbgpd/rs1-ipv4/grpc.sock \
   --activation-command /usr/bin/sudo \
   --activation-arg=-n --activation-arg /usr/bin/systemctl \
-  --activation-arg reload-or-restart --activation-arg rustbgpd
+  --activation-arg reload-or-restart --activation-arg rustbgpd@rs1-ipv4
 ```
 
 The service must read
@@ -107,9 +107,11 @@ link without a second activation and verifies the unchanged prior runtime. Once
 the command starts, a nonzero exit, timeout, or unsettled runtime leaves
 `current` on the candidate and returns exit 5 for explicit operator recovery.
 
-Authorize the `rustbgpd` account in sudoers for only the exact
-`/usr/bin/systemctl reload-or-restart rustbgpd` command. The private
-`activation-receipt.json` is written last; generations are retained for
+Authorize the `rustbgpd` account in sudoers for only the exact per-handle
+`/usr/bin/systemctl reload-or-restart rustbgpd@rs1-ipv4` command. A second
+handle uses its own runtime/activation/UDS and service instance but the same
+host-state directory, which serializes lifecycle ownership across the host.
+The private `activation-receipt.json` is written last; generations are retained for
 operator inspection. Exit 0 means activated or no-op, 2 refusal, 4 proven
 pre-effect restoration, and 5 means recovery or receipt durability is
 unproven. A receipt may
@@ -139,7 +141,7 @@ sudo -u rustbgpd /usr/bin/rs-config-render ixp-manager-lifecycle run \
   --rbgp-addr unix:///var/lib/rustbgpd/rs1-ipv4/grpc.sock \
   --activation-command /usr/bin/sudo \
   --activation-arg=-n --activation-arg /usr/bin/systemctl \
-  --activation-arg reload-or-restart --activation-arg rustbgpd
+  --activation-arg reload-or-restart --activation-arg rustbgpd@rs1-ipv4
 ```
 
 Supply a new absent or empty mode-0700 candidate directory for each run. The

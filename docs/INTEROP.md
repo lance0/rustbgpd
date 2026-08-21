@@ -72,10 +72,11 @@ exact prior bytes and runtime without a second activation. Focused tests prove
 that a started command's failure retains the candidate for explicit recovery.
 M96 also covers complete symlink targets, live diff zero, route/session
 continuity, unchanged daemon PID/flaps, private modes, literal arguments, and
-secret-free receipts/output. M97 adds the authenticated IXP Manager v7.4
-lifecycle: real API-key rejection, router lock and competing-423 behavior,
-Foil fetch/render, database-visible updated/release callbacks, and the same
-MD5-FRR continuity. Ambiguous remote or activation effects remain operator
+secret-free receipts/output. M97 adds two exact IPv4/IPv6 handles in one host
+namespace: distinct PIDs, state/UDS endpoints, TCP/179 listeners, and real
+MD5-FRR sessions, plus a shared durable host fence, paired competing-423
+behavior, sequential callbacks, and cross-handle failure containment.
+Ambiguous remote or activation effects remain operator
 owned. Filter translation, custom-skin migration, and multi-address parity
 remain open.
 
@@ -122,7 +123,7 @@ dispatch always run.
 - **Core RR against incumbents** — RFC 4456 reflection + RFC 4724 GR helper-truth against BIRD 2 clients and OpenBGPD 9.1 clients, plus required-family OPEN enforcement against BIRD: **M85**, **M86**, **M93**.
 - **Live policy-presence safety** — ADR-0112 RFC 8212 import-presence transitions qualified for Route Refresh, rejected whole when one peer cannot converge, and converged on the wire when it can: **M95**.
 - **IXP Manager local activation** — pinned v7.4 Foil render, atomic publication, live settlement, and pre-effect restoration against MD5-authenticated FRR: **M96** (local).
-- **IXP Manager authenticated lifecycle** — pinned v7.4 API lock/fetch/callback state around the M96 activation seam, with database and MD5-FRR proof: **M97** (local).
+- **IXP Manager authenticated lifecycle** — pinned v7.4 API lock/fetch/callback state for two same-host IPv4/IPv6 handles, with shared-fence, database, and MD5-FRR proof: **M97** (local).
 - **Graceful Shutdown** — receiver/initiator coverage across unicast, FlowSpec, and EVPN: **M35**, **M35b**, **M35c**.
 - **BLACKHOLE FIB discard** — RFC 7999 receiver scoping plus opt-in kernel discard install / withdraw: **M41**.
 - **gRPC/gNMI + EVPN injection** — ADR-0064 mTLS tier enforcement, ADR-0070 gNMI / OpenConfig telemetry + Set, gNMI Subscribe ON_CHANGE, and EVPN Type 5 control-plane injection: **M44**, **M54**, **M56**, **M45**.
