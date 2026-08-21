@@ -164,16 +164,16 @@ jobs:
           bash tests/interop/scripts/test-test-vtep-route-oracles.sh
       - run: python3 scripts/check-v1-stable-surface.py
       - run: python3 scripts/reflow-release-notes.py --selftest
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # `bench-internals` is off by default and its bench target carries
       # `required-features`, so nothing above compiles the feature-gated
       # bench_support surface; it has silently broken before when a
       # manager API grew an argument.
-      - run: cargo check -p rustbgpd-rib --features bench-internals --benches
+      - run: cargo check --locked -p rustbgpd-rib --features bench-internals --benches
       # Transport has the same feature-gated `bench-internals` bench surface.
-      - run: cargo check -p rustbgpd-transport --features bench-internals --benches
+      - run: cargo check --locked -p rustbgpd-transport --features bench-internals --benches
       # API owns the feature-gated event-history producer bench.
-      - run: cargo check -p rustbgpd-api --features bench-internals --benches
+      - run: cargo check --locked -p rustbgpd-api --features bench-internals --benches
       # `--no-run` above proves the bench targets compile, not that they run.
       # A fixture the codec later made illegal (RFC 9774 AS_SET in the wire
       # `rich` AS_PATH) compiled clean and panicked on first iteration, so two
@@ -188,23 +188,23 @@ jobs:
       # the PR critical path while retaining the harness's path assertions.
       - name: Smoke MRT snapshot allocation benchmark modes
         run: |
-          cargo test -p rustbgpd-mrt --bench snapshot_allocation -- timing --candidate --smoke
-          cargo test -p rustbgpd-mrt --features snapshot-allocation-diagnostics --bench snapshot_allocation -- diagnostic --candidate --smoke
+          cargo test --locked -p rustbgpd-mrt --bench snapshot_allocation -- timing --candidate --smoke
+          cargo test --locked -p rustbgpd-mrt --features snapshot-allocation-diagnostics --bench snapshot_allocation -- diagnostic --candidate --smoke
       # Same class of gap for the root crate: `bench-internals` exposes
       # `pub mod config` (and its EVPN reload-diff dependencies) in the
       # lib, a surface the default `--all-targets` clippy never compiles.
       # LAN-198: `config` referenced binary-only modules, so the lib
       # failed to build under `--all-features` while the bin stayed green.
-      - run: cargo check -p rustbgpd --all-features --lib
+      - run: cargo check --locked -p rustbgpd --all-features --lib
       # The root `Config` API is exported only by `bench-internals`, so the
       # normal workspace test cannot compile this cheap allocation gate.
       - name: Gate eager policy-set sharing allocation shape
-        run: cargo test -p rustbgpd --no-default-features --features bench-internals --test policy_set_store_allocation shared_set_batch_allocations_do_not_scale_per_peer -- --exact
+        run: cargo test --locked -p rustbgpd --no-default-features --features bench-internals --test policy_set_store_allocation shared_set_batch_allocations_do_not_scale_per_peer -- --exact
       # jemalloc became the default feature; keep the stock-glibc build
       # compiling (debug/fallback builds use it) and keep the
       # deny(unsafe_code) lint posture — it is only armed when neither
       # allocator feature is on, so the default build no longer checks it.
-      - run: cargo check -p rustbgpd --no-default-features --all-targets
+      - run: cargo check --locked -p rustbgpd --no-default-features --all-targets
       - name: Verify committed RIB rebaseline receipt
         run: |
           set -euo pipefail
@@ -323,10 +323,10 @@ jobs:
             --install-archive \
             "$RUNNER_TEMP/rustbgpd-v064-artifact/rustbgpd-linux-amd64.tar.gz" \
             "$RUNNER_TEMP/rustbgpd-v064"
-      - run: cargo test --workspace
+      - run: cargo test --locked --workspace
         env:
           RUSTBGPD_V064_VALIDATOR: ${{ runner.temp }}/rustbgpd-v064/rustbgpd-v0.64.0
-      - run: cargo doc --workspace --lib --no-deps
+      - run: cargo doc --locked --workspace --lib --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
 
@@ -371,8 +371,8 @@ jobs:
             --locked --all-targets -- -D warnings
           # The IRR manifest contract exercises the production rustbgpd
           # renderer, so make that prerequisite explicit on a clean runner.
-          cargo build -p rs-config-render
-          cargo test --test reloadstall_scenario_emitted_check
+          cargo build --locked -p rs-config-render
+          cargo test --locked --test reloadstall_scenario_emitted_check
           bash -n bench/compare-criterion.sh bench/tests/test-compare-criterion-harness.sh
           shellcheck bench/compare-criterion.sh bench/tests/test-compare-criterion-harness.sh
           shellcheck bench/smoke-benches.sh
@@ -465,7 +465,7 @@ jobs:
           # Distinct cache key from the `check` job so MSRV builds don't
           # share artifacts compiled by stable rustc.
           key: msrv-1.95
-      - run: cargo check --workspace --all-targets
+      - run: cargo check --locked --workspace --all-targets
 
   evpn_bum_filter_kernel:
     # Runs the Gate 8b BUM-suppression primitive against a real

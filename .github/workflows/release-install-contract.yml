@@ -80,13 +80,13 @@ jobs:
       - name: Check repository release install contract
         run: python3 scripts/check_release_install_contract.py
       - name: Test Birdwatcher endpoint parser
-        run: cargo test -p birdwatcher-adapter
+        run: cargo test --locked -p birdwatcher-adapter
       - name: Test Birdwatcher UDS startup and recovery
-        run: cargo test --test birdwatcher_adapter_smoke
+        run: cargo test --locked --test birdwatcher_adapter_smoke
       - name: Build native package inputs
         run: |
           set -euo pipefail
-          cargo build --profile ci \
+          cargo build --locked --profile ci \
             -p rustbgpd -p rustbgpctl -p rs-config-render -p birdwatcher-adapter
           mkdir -p staging/share/man/man1 staging/share/man/man8 staging/share/completions
           cp target/ci/rustbgpd target/ci/rbgp target/ci/rs-config-render \
