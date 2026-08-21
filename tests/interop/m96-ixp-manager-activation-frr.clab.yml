@@ -1,0 +1,35 @@
+# Containerlab topology: a pinned IXP Manager v7.4 capture activated into
+# rustbgpd against a real MD5-authenticated FRR member.
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m96-ixp-manager-activation-frr.clab.yml
+#   bash tests/interop/scripts/test-m96-ixp-manager-activation-frr.sh
+#   containerlab destroy -t tests/interop/m96-ixp-manager-activation-frr.clab.yml --cleanup
+
+name: m96-ixp-manager-activation
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip addr add 192.0.2.18/32 dev eth1
+        - ip route add 10.1.0.36/32 dev eth1
+        - ip link set eth1 up
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m96-ixp-manager.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.1.0.36/32 dev eth1
+        - ip route add 192.0.2.18/32 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]

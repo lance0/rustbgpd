@@ -612,8 +612,12 @@ is [retained](docs/perf/route-server-1000-2026-07.md). The ARouteServer target
 ships as `tools/rs-config-render`. Its manual IXP Manager v7.4 seam now accepts
 an original Foil JSON export, fails closed on unsupported effective policy, and
 writes a private candidate, validates it with the selected rustbgpd binary's
-strict offline check, then writes the validated receipt last. HTTP fetching,
-activation, reload/settlement, callbacks, rollback, active UI-filter
+strict offline check, then writes the validated receipt last. Its local helper
+now rechecks, atomically publishes and settles immutable generations. Exit 4
+proves an exact prior-generation rollback; exit 5 leaves recovery or receipt
+durability unproven. M96 proves the successful rollback against an
+MD5-authenticated FRR member without a daemon restart or session flap. HTTP
+fetching, callbacks, active UI-filter
 translation, custom-skin migration, and multi-address ownership remain open
 under LAN-1105. The external adapter now also serves the IXP
 Manager v7.4 status, live protocol inventory/detail, symbols, member received,
