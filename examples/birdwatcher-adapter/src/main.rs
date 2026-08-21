@@ -20,6 +20,8 @@
 //! - `GET /routes/filtered/{id}` — rejected routes retained by the peer's
 //!   session (`PolicyService.ListRejectedRoutes`), tagged with a synthesized
 //!   reject-reason large community (see the README mapping table)
+//! - `GET /routes/lc-zwild/protocol/{id}/{x}/{y}` — the IXP Manager v7.4
+//!   filtered-prefix query for this daemon's `{asn}:1101:*` reason namespace
 //! - `GET /routes/noexport/{id}` — Loc-RIB best routes NOT advertised to the
 //!   peer (`ListBestRoutes` minus `ListAdvertisedRoutes`), each explained by
 //!   the live export gate ladder (`RibService.ExplainAdvertisedRoute`) and
@@ -348,6 +350,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/route/{prefix}/export/{id}", get(route_export))
         .route("/routes/peer/{peer}", get(routes_peer))
         .route("/routes/filtered/{id}", get(routes_filtered))
+        .route(
+            "/routes/lc-zwild/protocol/{id}/{x}/{y}",
+            get(routes_protocol_large_community_wild_xy),
+        )
         .route("/routes/noexport/{id}", get(routes_noexport))
         .with_state(state);
 
@@ -890,6 +896,66 @@ async fn routes_filtered(
     )))
 }
 
+const IXP_MANAGER_REJECT_FUNCTION: u64 = 1101;
+
+/// IXP Manager v7.4's member-facing filtered-prefix query. Only the daemon's
+/// own rejection namespace is meaningful; a different `(x, y)` is a valid
+/// query with no matches.
+async fn routes_protocol_large_community_wild_xy(
+    State(state): State<AppState>,
+    Path((id, x, y)): Path<(String, u64, u64)>,
+) -> Result<Json<Value>, HttpError> {
+    let peer = state.identities.resolve(&id)?;
+    if y != IXP_MANAGER_REJECT_FUNCTION {
+        return Ok(Json(empty_routes_body(state.max_routes)));
+    }
+    let mut global = proto::global_service_client::GlobalServiceClient::new(state.upstream.clone());
+    let daemon_asn = u64::from(
+        global
+            .get_global(proto::GetGlobalRequest {})
+            .await
+            .map_err(|error| bad_gateway("GetGlobal", &error))?
+            .into_inner()
+            .asn,
+    );
+    if !ixp_manager_reason_namespace_matches(daemon_asn, x, y) {
+        return Ok(Json(empty_routes_body(state.max_routes)));
+    }
+    let mut policy = proto::policy_service_client::PolicyServiceClient::new(state.upstream.clone());
+    let response = match policy
+        .list_rejected_routes(proto::ListRejectedRoutesRequest {
+            peer_address: peer.to_string(),
+        })
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(status) if status.code() == tonic::Code::NotFound => {
+            return Ok(Json(empty_routes_body(state.max_routes)));
+        }
+        Err(error) => return Err(bad_gateway("ListRejectedRoutes", &error)),
+    };
+    enforce_max(response.routes.len() as u64, state.max_routes)?;
+    let routes = response
+        .routes
+        .iter()
+        .map(|route| {
+            ixp_manager_rejected_route_to_birdwatcher(route, peer, &state.identities, daemon_asn)
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(serde_json::json!({
+        "api": api_block(state.max_routes),
+        "routes": routes,
+    })))
+}
+
+fn empty_routes_body(max_routes: u64) -> Value {
+    serde_json::json!({ "api": api_block(max_routes), "routes": [] })
+}
+
+fn ixp_manager_reason_namespace_matches(daemon_asn: u64, x: u64, y: u64) -> bool {
+    x == daemon_asn && y == IXP_MANAGER_REJECT_FUNCTION
+}
+
 /// Build the filtered-view response body from a `ListRejectedRoutes`
 /// reply. The store is bounded (`[policy.reject_retention]` capacity,
 /// default 1024) and the RPC is unpaged — one call returns everything.
@@ -959,23 +1025,79 @@ fn rejected_route_to_birdwatcher(
     peer: IpAddr,
     identities: &IdentityResolver,
 ) -> Value {
+    render_rejected_route(
+        route,
+        peer,
+        identities,
+        reject_reason_community(&route.reason),
+        None,
+    )
+}
+
+fn ixp_manager_rejected_route_to_birdwatcher(
+    route: &proto::RejectedRoute,
+    peer: IpAddr,
+    identities: &IdentityResolver,
+    daemon_asn: u64,
+) -> Value {
+    render_rejected_route(
+        route,
+        peer,
+        identities,
+        [
+            daemon_asn,
+            IXP_MANAGER_REJECT_FUNCTION,
+            ixp_manager_reject_reason_id(route),
+        ],
+        Some([daemon_asn, IXP_MANAGER_REJECT_FUNCTION]),
+    )
+}
+
+fn ixp_manager_reject_reason_id(route: &proto::RejectedRoute) -> u64 {
+    match (route.reason.as_str(), route.reason_detail.as_str()) {
+        ("policy_reject", detail) if detail.ends_with(":reject-too-specific") => 1,
+        ("policy_reject", detail) if detail.ends_with(":reject-non-global") => 3,
+        ("treat_as_withdraw", "aspa_first_as_mismatch") => 7,
+        ("next_hop_ownership", _) => 8,
+        ("policy_reject", detail)
+            if detail.ends_with(":reject-rpki-invalid") && route.rpki_validation == "invalid" =>
+        {
+            13
+        }
+        ("policy_reject", detail) if detail.ends_with(":reject-transit-leak") => 14,
+        _ => 0,
+    }
+}
+
+fn render_rejected_route(
+    route: &proto::RejectedRoute,
+    peer: IpAddr,
+    identities: &IdentityResolver,
+    reason_community: [u64; 3],
+    reserved_namespace: Option<[u64; 2]>,
+) -> Value {
     let communities: Vec<Vec<u32>> = route
         .communities
         .iter()
         .map(|c| vec![(*c >> 16) & 0xffff, *c & 0xffff])
         .collect();
 
-    // Wire large communities the route carried, then the synthesized
-    // reason triplet appended last.
+    // Wire large communities the route carried, then the synthesized reason
+    // triplet appended last. IXP Manager's namespace is adapter-owned: scrub
+    // every wire-supplied value in it so a peer cannot forge the displayed
+    // rejection cause.
     let mut large_communities: Vec<Vec<u64>> = route
         .large_communities
         .iter()
         .filter_map(|lc| {
             let parts: Vec<u64> = lc.split(':').filter_map(|p| p.parse().ok()).collect();
-            (parts.len() == 3).then_some(parts)
+            (parts.len() == 3
+                && reserved_namespace
+                    .is_none_or(|reserved| parts[0] != reserved[0] || parts[1] != reserved[1]))
+            .then_some(parts)
         })
         .collect();
-    large_communities.push(reject_reason_community(&route.reason).to_vec());
+    large_communities.push(reason_community.to_vec());
 
     // The retained AS_PATH is a lossless display string ("65001 {65002
     // 65003}"); birdwatcher wants an ASN array, so flatten it (AS_SET
@@ -1709,6 +1831,96 @@ mod tests {
             json["bgp"]["large_communities"],
             serde_json::json!([[64496, 65520, 6]])
         );
+    }
+
+    #[test]
+    fn ixp_manager_reason_mapping_is_conservative_and_stable() {
+        let route = |reason: &str, detail: &str, rpki: &str| proto::RejectedRoute {
+            reason: reason.to_string(),
+            reason_detail: detail.to_string(),
+            rpki_validation: rpki.to_string(),
+            ..Default::default()
+        };
+        for (entry, id) in [
+            (
+                route("policy_reject", "ixp:reject-too-specific", "valid"),
+                1,
+            ),
+            (route("policy_reject", "ixp:reject-non-global", "valid"), 3),
+            (
+                route("treat_as_withdraw", "aspa_first_as_mismatch", "not_found"),
+                7,
+            ),
+            (route("next_hop_ownership", "strict_peer", "valid"), 8),
+            (
+                route("policy_reject", "ixp:reject-rpki-invalid", "invalid"),
+                13,
+            ),
+            (
+                route("policy_reject", "ixp:reject-transit-leak", "valid"),
+                14,
+            ),
+            (
+                route("policy_reject", "ixp:reject-rpki-invalid", "valid"),
+                0,
+            ),
+            (route("otc_route_leak", "ingress_from_peer", "valid"), 0),
+            (route("rr_loop", "cluster_list", "valid"), 0),
+            (route("policy_reject", "custom:unknown", "invalid"), 0),
+        ] {
+            assert_eq!(ixp_manager_reject_reason_id(&entry), id, "{entry:?}");
+        }
+    }
+
+    #[test]
+    fn ixp_manager_reason_namespace_is_scrubbed_and_replaced_once() {
+        let route = proto::RejectedRoute {
+            reason: "next_hop_ownership".to_string(),
+            large_communities: vec![
+                "65001:1101:99".to_string(),
+                "65001:1101:8".to_string(),
+                "65001:999:7".to_string(),
+                "64496:1101:4".to_string(),
+            ],
+            ..Default::default()
+        };
+        let peer = "192.0.2.1".parse().unwrap();
+        let json = ixp_manager_rejected_route_to_birdwatcher(
+            &route,
+            peer,
+            &IdentityResolver::default(),
+            65001,
+        );
+        assert_eq!(
+            json["bgp"]["large_communities"],
+            serde_json::json!([[65001, 999, 7], [64496, 1101, 4], [65001, 1101, 8]])
+        );
+    }
+
+    #[test]
+    fn ixp_manager_filtered_handler_uses_only_retained_rejects() {
+        let source = include_str!("main.rs");
+        assert!(source.contains(".route(\n            \"/routes/lc-zwild/protocol/{id}/{x}/{y}\""));
+        let body = source
+            .split_once("async fn routes_protocol_large_community_wild_xy(")
+            .unwrap()
+            .1
+            .split_once("fn empty_routes_body(")
+            .unwrap()
+            .0;
+        assert!(body.contains(".list_rejected_routes("), "{body}");
+        assert!(!body.contains("list_received_routes"), "{body}");
+        assert!(!body.contains("list_best_routes"), "{body}");
+        assert!(!body.contains("serve_routes_for_peer"), "{body}");
+        assert!(body.contains("enforce_max(response.routes.len() as u64, state.max_routes)?"));
+        assert!(
+            body.find("if y != IXP_MANAGER_REJECT_FUNCTION").unwrap()
+                < body.find(".get_global(").unwrap(),
+            "{body}"
+        );
+        assert!(ixp_manager_reason_namespace_matches(65001, 65001, 1101));
+        assert!(!ixp_manager_reason_namespace_matches(65001, 65002, 1101));
+        assert!(!ixp_manager_reason_namespace_matches(65001, 65001, 1102));
     }
 
     /// Retention disabled and enabled-but-empty both produce the full

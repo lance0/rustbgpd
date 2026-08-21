@@ -421,7 +421,7 @@ fn establish_bgp_and_announce(bgp_port: u16) -> TcpStream {
     use rustbgpd_wire::message::{Message, encode_message};
     use rustbgpd_wire::open::OpenMessage;
     use rustbgpd_wire::update::UpdateMessage;
-    use rustbgpd_wire::{AddPathFamily, AddPathMode, Afi, Capability, Safi};
+    use rustbgpd_wire::{AddPathFamily, AddPathMode, Afi, Capability, LargeCommunity, Safi};
 
     let mut stream = TcpStream::connect(("127.0.0.1", bgp_port)).expect("connect to BGP port");
     let open = Message::Open(OpenMessage {
@@ -435,10 +435,10 @@ fn establish_bgp_and_announce(bgp_port: u16) -> TcpStream {
             send_receive: AddPathMode::Send,
         }])],
     });
-    let encode_update = |as_sequence: Vec<u32>, nlri: &'static [u8], med: u32| {
-        let mut attrs = Vec::new();
-        rustbgpd_wire::attribute::encode_path_attributes(
-            &[
+    let encode_update =
+        |as_sequence: Vec<u32>, nlri: &'static [u8], med: u32, forge_reason: bool| {
+            let mut attrs = Vec::new();
+            let mut attributes = vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(as_sequence)],
@@ -447,23 +447,26 @@ fn establish_bgp_and_announce(bgp_port: u16) -> TcpStream {
                 // loopback NEXT_HOP (subcode 8).
                 PathAttribute::NextHop("192.0.2.99".parse().unwrap()),
                 PathAttribute::Med(med),
-            ],
-            &mut attrs,
-            false,
-            false,
-        )
-        .expect("encode path attributes");
-        Message::Update(UpdateMessage {
-            withdrawn_routes: bytes::Bytes::new(),
-            path_attributes: attrs.into(),
-            nlri: bytes::Bytes::from_static(nlri),
-        })
-    };
+            ];
+            if forge_reason {
+                attributes.push(PathAttribute::LargeCommunities(vec![
+                    LargeCommunity::new(65001, 1101, 99),
+                    LargeCommunity::new(65001, 999, 7),
+                ]));
+            }
+            rustbgpd_wire::attribute::encode_path_attributes(&attributes, &mut attrs, false, false)
+                .expect("encode path attributes");
+            Message::Update(UpdateMessage {
+                withdrawn_routes: bytes::Bytes::new(),
+                path_attributes: attrs.into(),
+                nlri: bytes::Bytes::from_static(nlri),
+            })
+        };
     // RFC 7911 NLRI: four-byte path id, then the ordinary prefix encoding.
-    let accepted_11 = encode_update(vec![65020], &[0, 0, 0, 11, 24, 10, 99, 0], 10);
-    let accepted_22 = encode_update(vec![65020], &[0, 0, 0, 22, 24, 10, 99, 0], 20);
+    let accepted_11 = encode_update(vec![65020], &[0, 0, 0, 11, 24, 10, 99, 0], 10, false);
+    let accepted_22 = encode_update(vec![65020], &[0, 0, 0, 22, 24, 10, 99, 0], 20, false);
     // 10.98.0.0/24, daemon's own AS 65001 in path → as_path_loop reject.
-    let looped = encode_update(vec![65020, 65001], &[0, 0, 0, 30, 24, 10, 98, 0], 30);
+    let looped = encode_update(vec![65020, 65001], &[0, 0, 0, 30, 24, 10, 98, 0], 30, true);
     for msg in [
         &open,
         &Message::Keepalive,
@@ -920,6 +923,38 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         "filtered route must carry the synthesized as_path_loop community: {filtered}"
     );
 
+    // IXP Manager v7.4 asks for `{daemon ASN}:1101:*`. This view uses only
+    // retained rejects, strips the peer's forged value in that reserved
+    // namespace, preserves unrelated communities, and synthesizes one
+    // conservative reason (as_path_loop is deliberately generic here).
+    let ixp_filtered = get_json(
+        adapter_port,
+        "/routes/lc-zwild/protocol/pb_0001_as65020/65001/1101",
+        "adapter",
+    );
+    assert_eq!(ixp_filtered["routes"].as_array().unwrap().len(), 1);
+    assert_eq!(ixp_filtered["routes"][0]["network"], "10.98.0.0/24");
+    let ixp_communities = ixp_filtered["routes"][0]["bgp"]["large_communities"]
+        .as_array()
+        .unwrap();
+    assert!(ixp_communities.contains(&serde_json::json!([65001, 999, 7])));
+    assert_eq!(
+        ixp_communities
+            .iter()
+            .filter(|community| community[0] == 65001 && community[1] == 1101)
+            .collect::<Vec<_>>(),
+        [&serde_json::json!([65001, 1101, 0])]
+    );
+    for path in [
+        "/routes/lc-zwild/protocol/pb_0001_as65020/65002/1101",
+        "/routes/lc-zwild/protocol/pb_0001_as65020/65001/1102",
+    ] {
+        assert_eq!(
+            get_json(adapter_port, path, "adapter")["routes"],
+            serde_json::json!([])
+        );
+    }
+
     // /protocols/bgp — the neighbor summary serves the real filtered
     // count from the same retention store.
     let protocols = get_json(adapter_port, "/protocols/bgp", "adapter");
@@ -946,6 +981,12 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     // the filtered view is empty, not an error.
     let down = get_json(adapter_port, "/routes/filtered/bgp_192.0.2.10", "adapter");
     assert_eq!(down["routes"], serde_json::json!([]), "{down}");
+    let down_ixp = get_json(
+        adapter_port,
+        "/routes/lc-zwild/protocol/bgp_192.0.2.10/65001/1101",
+        "adapter",
+    );
+    assert_eq!(down_ixp["routes"], serde_json::json!([]), "{down_ixp}");
 
     // /routes/noexport/{id} — the accepted route is Loc-RIB best, but
     // split horizon suppresses it toward its own announcer: the
@@ -1076,6 +1117,12 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     wait_for_exact_json_error(
         adapter_port,
         "/routes/filtered/pb_0001_as65020",
+        403,
+        over_limit,
+    );
+    wait_for_exact_json_error(
+        adapter_port,
+        "/routes/lc-zwild/protocol/pb_0001_as65020/65001/1101",
         403,
         over_limit,
     );

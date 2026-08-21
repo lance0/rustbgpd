@@ -8,8 +8,8 @@ The gate clones and verifies these exact upstream commits, installs both
 projects from their committed Composer lockfiles, starts the real Bird's Eye
 Lumen server with `APP_DEBUG=false`, and invokes the real IXP Manager consumer.
 It then starts a real rustbgpd plus `birdwatcher-adapter` and points that same
-pinned consumer's `protocolRoute()` and `exportRoute()` journeys at the live
-adapter:
+pinned consumer's `protocolRoute()`, `exportRoute()`, and
+`routesProtocolLargeCommunityWildXYRoutes()` journeys at the live adapter:
 
 - Bird's Eye v2.1.0: `7f8c2375e610578bcf6ea5ceec630a180f945b89`
 - IXP Manager v7.4.0: `300b7e0ba9adb0aaac975899e45fc8bcbc0ca37d`
@@ -30,9 +30,11 @@ the harness permits only IXP Manager's pinned deprecated `GPL-2.0` identifier
 warning and rejects any additional warning.
 
 The live-adapter leg intentionally uses a configured, down peer, so the exact
-lookups return honest empty route arrays. The live BGP smoke test separately
-pins populated Add-Path candidate multiplicity, ordering, filtering, and source
-alias direction. `api.version` remains `rustbgpd <package-version>` product
+lookups and filtered-prefix query return honest empty route arrays. The live
+BGP smoke test separately pins populated Add-Path candidate multiplicity,
+ordering, retained-reject sourcing, reserved-community scrubbing, reason
+fallback, filtering, and source alias direction. `api.version` remains
+`rustbgpd <package-version>` product
 identity, not Bird's Eye semantic-version compatibility. No full compatibility
 claim is made and `runtime_compatibility` remains false.
 
@@ -53,8 +55,9 @@ diff -u tests/compat/ixp-manager-birdseye/fixtures/birdseye-contract.json \
 ```
 
 `contract.json` deliberately keeps the unsupported runtime matrix executable.
-Only exact protocol-route and exact export-route journeys are runtime-supported.
-Complete rejected-route reasons, less-specific lookup, and atomic all-candidate
+Only exact protocol-route, exact export-route, and the filtered-prefix wildcard
+journeys are runtime-supported. Complete rejected-route reasons,
+less-specific lookup, and atomic all-candidate
 snapshots remain blockers. Protocol aliases are immutable after sidecar startup,
 so changing one requires a sidecar restart. Promoting any blocker, weakening the
 explicit alias or product-version posture, enabling debug mode, skipping a case,

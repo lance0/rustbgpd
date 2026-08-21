@@ -88,6 +88,7 @@ listener beyond loopback only with the mTLS controls in `docs/SECURITY.md`.
 | `GET /route/{prefix}/export/{id}` | `RibService.ListAdvertisedRoutes` (paged, exact IPv4/IPv6 unicast prefix) |
 | `GET /routes/peer/{peer}`    | `RibService.ListReceivedRoutes` (paged, all unicast families)  |
 | `GET /routes/filtered/{id}`  | `PolicyService.ListRejectedRoutes` (unpaged — the store is bounded at the `[policy.reject_retention]` capacity, default 1024/peer) |
+| `GET /routes/lc-zwild/protocol/{id}/{x}/{y}` | `GlobalService.GetGlobal` + `PolicyService.ListRejectedRoutes` for IXP Manager's `{daemon ASN}:1101:*` filtered-prefix query |
 | `GET /routes/noexport/{id}`  | `RibService.ListBestRoutes` − `RibService.ListAdvertisedRoutes` (both paged), each missing prefix explained by `RibService.ExplainAdvertisedRoute` |
 
 There are no placeholder 501 responses. Route `age` is served from the
@@ -129,10 +130,34 @@ failures return a sanitized 502.
 
 This is deliberately partial IXP Manager support: status, live BGP inventory
 and detail, protocol symbols, member received routes, and member exported
-routes, including exact protocol/export lookup, are available. Global table
-views, counts, less-specific search, large-community wildcard search, and the
-complete reject-reason inventory are not yet implemented; the adapter does not
-claim full Bird's Eye compatibility.
+routes, including exact protocol/export lookup, are available. The exact
+filtered-prefix wildcard journey described below is also available. Global
+table views, counts, less-specific search, other large-community wildcard
+queries, and the complete reject-reason inventory are not implemented; the
+adapter does not claim full Bird's Eye compatibility.
+
+IXP Manager v7.4 queries member-filtered prefixes through
+`/routes/lc-zwild/protocol/{id}/{daemon ASN}/1101`. The adapter answers only
+that exact daemon-owned namespace and returns an empty route array for other
+`x` or `y` values. It never scans accepted routes: the response comes only from
+the selected session's retained rejects, preserves the usual no-session empty
+answer, and returns HTTP 403 when the retained set exceeds `--max-routes`.
+
+Each returned route carries exactly one synthesized `{daemon ASN}:1101:<id>`
+reason. Before adding it, the adapter removes every wire-supplied community in
+that reserved namespace, preventing a member from forging the displayed
+reason while preserving unrelated large communities. Mapping is deliberately
+conservative:
+
+| Retained cause | IXP Manager reason id |
+|---|---:|
+| `.rpol` term `reject-too-specific` | 1 |
+| `.rpol` term `reject-non-global` | 3 |
+| first-AS mismatch | 7 |
+| strict next-hop ownership | 8 |
+| `.rpol` term `reject-rpki-invalid` with invalid RPKI state | 13 |
+| `.rpol` term `reject-transit-leak` | 14 |
+| any other or ambiguous cause | 0 |
 
 ## Filtered routes and reject reasons
 
