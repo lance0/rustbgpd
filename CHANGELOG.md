@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `birdwatcher-adapter` now serves IXP Manager's full table view by atomically
+  joining global Received candidates with installed Best winners under one
+  shared page generation. Output is deterministic, winner-first, capped
+  without truncation, and fail-closed on torn or malformed upstream walks;
+  full-table counts and full runtime compatibility remain out of scope.
+  (LAN-1201)
 - Established neighbor state now carries the cached local IP address and
   negotiated keepalive cadence with rolling-upgrade presence. CLI JSON/text,
   TUI, and Birdwatcher protocol detail preserve zero and absence exactly;

@@ -578,7 +578,10 @@ proof on the activated cell in hosted CI.
   The birdwatcher adapter's Alice-LG contract is complete
   (status/peer/accepted/filtered/noexport views; reject reasons via
   `PolicyService.ListRejectedRoutes`, noexport via the export-explain
-  surface). The [1,000-peer route-server receipt](docs/perf/route-server-1000-2026-07.md)
+  surface), and its pinned IXP Manager slice includes an atomic, capped global
+  table view reconstructed from one Received/Best generation. Full-table
+  counts and a general compatibility claim remain excluded. The
+  [1,000-peer route-server receipt](docs/perf/route-server-1000-2026-07.md)
   now retains real-daemon 400k-route/reload/readiness evidence. The
   shadow-pilot cookbook (#1331) is shipped; remaining demand-shaped work is
   the ADR-0125 E1 external pilot: two weekly checkpoints, a final semantic

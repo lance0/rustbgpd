@@ -28,7 +28,7 @@ EXPECTED = {
 UNSUPPORTED = {
     "defined-only-rejected-route-reason-emission",
     "full-ixp-manager-ui-filter-policy-engine",
-    "full-table-snapshot",
+    "full-table-count",
     "direct-runtime-protocol-alias-reconfiguration",
     "live-hold-keepalive-countdowns",
 }
@@ -37,6 +37,7 @@ RUNTIME_SUPPORTED = {
     "exact-export-route",
     "filtered-prefix-wildcard",
     "less-specific-longest-prefix-match",
+    "atomic-full-table-snapshot",
     "atomic-all-candidate-prefix-snapshot",
     "file-backed-runtime-protocol-alias-reconfiguration",
     "active-rejected-route-reason-inventory",

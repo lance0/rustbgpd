@@ -1332,9 +1332,9 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 response (empty = listing complete), and only reuse it with the same RPC,
 neighbor, route scope, and semantically equivalent route filters. Changing a
 scope or filter returns gRPC `INVALID_ARGUMENT`; changing only `page_size` is
-safe. Tokens are process-local and mutation-fenced by one conservative
-generation for the Received, Best, or Advertised scope class. Any mutation in
-that class makes the next request fail with gRPC `ABORTED`; a peer-specific
+safe. Tokens are process-local and mutation-fenced: Received and Best share one
+conservative table generation, while Advertised has an independent generation.
+Any mutation in that class makes the next request fail with gRPC `ABORTED`; a peer-specific
 listing can therefore restart after an unrelated peer in the same class
 changes. The server retains no route snapshot or cursor registry. `page_size`
 is capped server-side at 1000 rows per page (0 = default of 100).
@@ -1342,8 +1342,8 @@ is capped server-side at 1000 rows per page (0 = default of 100).
 Every `ListRoutesResponse`, including an empty or terminal page, carries a
 `page_version` message with an `epoch` and `generation`. The pair exposes the
 same process-local consistency fence used by continuation tokens. A client may
-compare the complete pair for equality across the pages and peer walks of one
-logical capture; a changed value means the capture must be discarded. The
+compare the complete pair across Received and Best pages in one logical
+capture; a changed value means the entire capture must be discarded. The
 values are opaque, may repeat after daemon restart, and are not a RIB snapshot
 generation. In particular, `page_version.generation` must never be compared
 with or substituted for a producer-local `rbgp-ribsnap/1` header generation.

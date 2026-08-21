@@ -147,6 +147,7 @@ $responses = [
     'exact-protocol-route' => $consumer->protocolRoute($protocol, '192.0.2.0', 24),
     'exact-export-route' => $consumer->exportRoute($protocol, '192.0.2.0', 24),
     'lpm-table-search' => $consumer->protocolTable($table, '192.0.2.128', 25),
+    'atomic-full-table' => $consumer->routesForTable($table),
     'filtered-prefix-wildcard' => $consumer->routesProtocolLargeCommunityWildXYRoutes(
         $protocol,
         $filtered['global_admin'],

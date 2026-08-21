@@ -85,6 +85,7 @@ listener beyond loopback only with the mTLS controls in `docs/SECURITY.md`.
 | `GET /symbols`               | Sorted live protocol and routing-table identities from `NeighborService.ListNeighbors` |
 | `GET /routes/protocol/{id}`  | `RibService.ListReceivedRoutes` (paged, all unicast families)  |
 | `GET /routes/export/{id}`    | `RibService.ListAdvertisedRoutes` (paged, all unicast families) |
+| `GET /routes/table/{table}`  | One `NeighborService.ListNeighbors` snapshot, then global `RibService.ListReceivedRoutes` + `ListBestRoutes` paged under one generation |
 | `GET /route/{prefix}/protocol/{id}` | `RibService.ListReceivedRoutes` (paged, exact IPv4/IPv6 unicast prefix) |
 | `GET /route/{prefix}/export/{id}` | `RibService.ListAdvertisedRoutes` (paged, exact IPv4/IPv6 unicast prefix) |
 | `GET /route/{prefix}/table/{table}` | `RibService.LookupBestPath` (bounded longest-prefix match with one matched-prefix candidate set) |
@@ -99,6 +100,12 @@ accepted view and from the rejection wall-clock time on the filtered view.
 Status `last_reconfig` is the UTC rendering of the daemon's last successfully
 accepted full policy generation (initial load, SIGHUP, or config transaction);
 it stays empty only until the daemon reports a positive timestamp.
+
+The full-table response unions canonical `(prefix, peer, path_id)` identities,
+marks the installed winner `primary`, and sorts each prefix winner-first. It
+returns 403 before truncation and sanitized 502 on missing/changing versions,
+duplicates, conflicts, or any incomplete walk. Table names and IPv4/IPv6
+family are inferred from one live alias snapshot; this is not VRF discovery.
 
 Protocol inventory never fans out rejected-route queries. It fails HTTP 502
 when a stale or older daemon omits the retained count instead of presenting a

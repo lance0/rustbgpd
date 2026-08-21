@@ -1931,7 +1931,7 @@ message ListRoutesRequest {
   uint32 page_size = 3;
   // Opaque, process-local continuation returned by next_page_token. The token
   // is bound to this RPC's exact route scope, canonical filter semantics, and
-  // conservative Received/Best/Advertised scope-class generation. A changed
+  // shared Received/Best table or independent Advertised generation. A changed
   // scope or filter returns INVALID_ARGUMENT; any mutation in the same class
   // returns ABORTED, including an unrelated peer change. Restart with an empty
   // token. Never parse or synthesize a token. page_size may change between
@@ -1963,8 +1963,9 @@ message ListRoutesRequest {
 
 // Process-local consistency fence for one route-page response. Both values
 // are opaque to clients: compare the pair only for equality across one
-// logical capture, and never treat generation as a producer or RIB snapshot
-// generation. Either value may repeat after a daemon restart.
+// logical capture. Received and Best share one table-mutation generation;
+// Advertised is independent. Never treat this as a producer snapshot version.
+// Either value may repeat after a daemon restart.
 message RoutePageVersion {
   uint64 epoch = 1;
   uint64 generation = 2;

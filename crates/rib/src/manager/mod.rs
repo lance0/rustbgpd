@@ -562,8 +562,7 @@ pub struct RibManager {
     /// Process-local mutation versions bound into opaque route-page tokens.
     /// A successful continuation must match the requested scope's current
     /// version; no server-side snapshots are retained.
-    route_page_received_version: Option<RoutePageVersion>,
-    route_page_best_version: Option<RoutePageVersion>,
+    route_page_table_version: Option<RoutePageVersion>,
     route_page_advertised_version: Option<RoutePageVersion>,
     /// Test-only ingest stall (ADR-0078 fault injection). When set via
     /// [`TEST_INGEST_STALL_ENV`], the run loop sleeps this long before
@@ -1183,8 +1182,7 @@ impl RibManager {
             pending_exact_export_withdrawals: HashSet::new(),
             pending_distribute_changed: HashSet::new(),
             pending_distribute_affected: HashSet::new(),
-            route_page_received_version: Some(initial_route_page_version()),
-            route_page_best_version: Some(initial_route_page_version()),
+            route_page_table_version: Some(initial_route_page_version()),
             route_page_advertised_version: Some(initial_route_page_version()),
             test_ingest_stall,
         }
@@ -1386,12 +1384,8 @@ impl RibManager {
         }
     }
 
-    fn advance_received_pages(&mut self) {
-        Self::advance_route_page_version(&mut self.route_page_received_version);
-    }
-
-    fn advance_best_pages(&mut self) {
-        Self::advance_route_page_version(&mut self.route_page_best_version);
+    fn advance_table_pages(&mut self) {
+        Self::advance_route_page_version(&mut self.route_page_table_version);
     }
 
     pub(super) fn advance_advertised_pages(&mut self) {
@@ -1399,32 +1393,27 @@ impl RibManager {
     }
 
     fn advance_all_route_pages(&mut self) {
-        self.advance_received_pages();
-        self.advance_best_pages();
+        self.advance_table_pages();
         self.advance_advertised_pages();
     }
 
-    fn route_page_versions_snapshot(&self) -> [Option<RoutePageVersion>; 3] {
+    fn route_page_versions_snapshot(&self) -> [Option<RoutePageVersion>; 2] {
         [
-            self.route_page_received_version,
-            self.route_page_best_version,
+            self.route_page_table_version,
             self.route_page_advertised_version,
         ]
     }
 
-    fn ensure_advertised_pages_advanced(&mut self, snapshot: [Option<RoutePageVersion>; 3]) {
+    fn ensure_advertised_pages_advanced(&mut self, snapshot: [Option<RoutePageVersion>; 2]) {
         // Cover untouched scopes; synchronous internal distribution passes remain uncoalesced.
-        if self.route_page_advertised_version == snapshot[2] {
+        if self.route_page_advertised_version == snapshot[1] {
             self.advance_advertised_pages();
         }
     }
 
-    fn ensure_all_route_pages_advanced(&mut self, snapshot: [Option<RoutePageVersion>; 3]) {
-        if self.route_page_received_version == snapshot[0] {
-            self.advance_received_pages();
-        }
-        if self.route_page_best_version == snapshot[1] {
-            self.advance_best_pages();
+    fn ensure_all_route_pages_advanced(&mut self, snapshot: [Option<RoutePageVersion>; 2]) {
+        if self.route_page_table_version == snapshot[0] {
+            self.advance_table_pages();
         }
         self.ensure_advertised_pages_advanced(snapshot);
     }
@@ -1434,8 +1423,9 @@ impl RibManager {
         scope: RouteQueryScope,
     ) -> Result<RoutePageVersion, RoutePageError> {
         let version = match scope {
-            RouteQueryScope::Received { .. } => self.route_page_received_version,
-            RouteQueryScope::Best => self.route_page_best_version,
+            RouteQueryScope::Received { .. } | RouteQueryScope::Best => {
+                self.route_page_table_version
+            }
             RouteQueryScope::Advertised { .. } => self.route_page_advertised_version,
         };
         version.ok_or(RoutePageError::GenerationExhausted)

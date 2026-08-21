@@ -32,7 +32,7 @@
 //! (no VPN/EVPN views), the noexport view is prefix-granular and covers
 //! every export-ladder suppression (split horizon, RR reflection, family,
 //! LLGR, ORF, RT membership, export policy) — not only NO_EXPORT-community
-//! routes — and multi-table endpoints beyond `/routes/peer` are absent.
+//! routes — and table names are presentation aliases over one global RIB.
 //!
 //! Response shapes use Birdwatcher field names so Alice-LG can parse this
 //! subset without adapter code. Fields that have no rustbgpd equivalent are
@@ -40,7 +40,8 @@
 
 #![deny(unsafe_code)]
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, Read};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
@@ -479,6 +480,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/symbols", get(symbols))
         .route("/routes/protocol/{id}", get(routes_protocol))
         .route("/routes/export/{id}", get(routes_export))
+        .route("/routes/table/{table}", get(routes_table))
         .route("/route/{prefix}/protocol/{id}", get(route_protocol))
         .route("/route/{prefix}/export/{id}", get(route_export))
         .route("/route/{prefix}/table/{table}", get(route_table))
@@ -826,6 +828,180 @@ async fn serve_routes_for_peer(state: &AppState, peer: IpAddr) -> Result<Json<Va
     })))
 }
 
+type TableRouteKey = (ExactPrefix, IpAddr, u32);
+
+#[derive(Default)]
+struct TableRouteSet {
+    version: Option<(u64, u64)>,
+    routes: BTreeMap<TableRouteKey, (proto::Route, bool)>,
+    seen: HashSet<(bool, TableRouteKey)>,
+    installed: HashSet<ExactPrefix>,
+}
+
+impl TableRouteSet {
+    fn check_version(
+        &mut self,
+        version: Option<&proto::RoutePageVersion>,
+    ) -> Result<(), HttpError> {
+        let version = version
+            .map(|version| (version.epoch, version.generation))
+            .ok_or_else(invalid_table_snapshot)?;
+        if self.version.is_some_and(|expected| expected != version) {
+            return Err(invalid_table_snapshot());
+        }
+        self.version = Some(version);
+        Ok(())
+    }
+
+    fn insert(
+        &mut self,
+        route: proto::Route,
+        best: bool,
+        family: i32,
+        max_routes: u64,
+    ) -> Result<(), HttpError> {
+        let prefix = ExactPrefix::from_route(&route.prefix, route.prefix_length)
+            .ok_or_else(invalid_table_snapshot)?;
+        if (family == proto::AddressFamily::Ipv4Unicast as i32 && !prefix.address.is_ipv4())
+            || (family == proto::AddressFamily::Ipv6Unicast as i32 && !prefix.address.is_ipv6())
+        {
+            return Err(invalid_table_snapshot());
+        }
+        let key = (
+            prefix,
+            route
+                .peer_address
+                .parse()
+                .map_err(|_| invalid_table_snapshot())?,
+            route.path_id,
+        );
+        if !self.seen.insert((best, key)) || (best && !self.installed.insert(prefix)) {
+            return Err(invalid_table_snapshot());
+        }
+        if let Some((existing, installed)) = self.routes.get_mut(&key) {
+            let mut actual = route;
+            actual.best = false;
+            let mut expected = existing.clone();
+            expected.best = false;
+            if actual != expected {
+                return Err(invalid_table_snapshot());
+            }
+            *installed |= best;
+        } else {
+            enforce_max(self.routes.len() as u64 + 1, max_routes)?;
+            self.routes.insert(key, (route, best));
+        }
+        Ok(())
+    }
+
+    fn body(self, identities: &IdentityResolver, max_routes: u64) -> Value {
+        let mut routes: Vec<_> = self.routes.into_iter().collect();
+        routes.sort_by_key(|(key, (_, primary))| (key.0, Reverse(*primary), key.1, key.2));
+        serde_json::json!({
+            "api": api_block(max_routes),
+            "routes": routes.into_iter().map(|(_, (route, primary))|
+                route_to_birdwatcher_with_primary(&route, identities, primary)
+            ).collect::<Vec<_>>(),
+        })
+    }
+}
+
+fn invalid_table_snapshot() -> HttpError {
+    json_error(
+        StatusCode::BAD_GATEWAY,
+        "Upstream daemon returned an invalid route response",
+    )
+}
+
+fn table_address_family(
+    neighbors: Vec<proto::NeighborState>,
+    identities: &IdentityResolver,
+    table: &str,
+) -> Result<i32, HttpError> {
+    let mut families = 0_u8;
+    for neighbor in neighbors {
+        let config = neighbor.config.unwrap_or_default();
+        let peer = parse_upstream_peer_address(&config.address)?;
+        if identities.identity(peer).table == table {
+            families |= if peer.is_ipv4() { 1 } else { 2 };
+        }
+    }
+    match families {
+        0 => Err(json_error(StatusCode::NOT_FOUND, "Table not found")),
+        1 => Ok(proto::AddressFamily::Ipv4Unicast as i32),
+        2 => Ok(proto::AddressFamily::Ipv6Unicast as i32),
+        _ => Ok(proto::AddressFamily::Unspecified as i32),
+    }
+}
+
+async fn routes_table(
+    State(state): State<AppState>,
+    Path(table): Path<String>,
+) -> Result<Json<Value>, HttpError> {
+    let family = table_address_family(list_neighbors(&state).await?, &state.identities, &table)?;
+    let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
+    let mut routes = TableRouteSet::default();
+    for best in [false, true] {
+        let mut page_token = String::new();
+        let mut seen_tokens = HashSet::new();
+        let mut expected_total = None;
+        let mut rows_seen = 0_u64;
+        loop {
+            let request = proto::ListRoutesRequest {
+                neighbor_address: String::new(),
+                afi_safi: family,
+                page_size: 1000,
+                page_token: page_token.clone(),
+                ..Default::default()
+            };
+            let response = if best {
+                client.list_best_routes(request).await
+            } else {
+                client.list_received_routes(request).await
+            }
+            .map_err(|error| {
+                bad_gateway(
+                    if best {
+                        "ListBestRoutes"
+                    } else {
+                        "ListReceivedRoutes"
+                    },
+                    &error,
+                )
+            })?
+            .into_inner();
+            routes.check_version(response.page_version.as_ref())?;
+            if expected_total.is_some_and(|total| total != response.total_count) {
+                return Err(invalid_table_snapshot());
+            }
+            if expected_total.is_none() {
+                enforce_max(response.total_count, state.max_routes)?;
+                expected_total = Some(response.total_count);
+            }
+            rows_seen += response.routes.len() as u64;
+            if rows_seen > response.total_count {
+                return Err(invalid_table_snapshot());
+            }
+            for route in response.routes {
+                routes.insert(route, best, family, state.max_routes)?;
+            }
+            if response.next_page_token.is_empty() {
+                if rows_seen != response.total_count {
+                    return Err(invalid_table_snapshot());
+                }
+                break;
+            }
+            if rows_seen == response.total_count
+                || !seen_tokens.insert(response.next_page_token.clone())
+            {
+                return Err(invalid_table_snapshot());
+            }
+            page_token = response.next_page_token;
+        }
+    }
+    Ok(Json(routes.body(&state.identities, state.max_routes)))
+}
+
 async fn routes_export(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -877,7 +1053,7 @@ enum ExactRouteSource {
     Advertised,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct ExactPrefix {
     address: IpAddr,
     length: u32,
@@ -1119,7 +1295,8 @@ fn table_lookup_body(
         "api": api_block(max_routes),
         "routes": routes
             .into_iter()
-            .map(|route| route_to_birdwatcher(route, identities))
+            .enumerate()
+            .map(|(index, route)| route_to_birdwatcher_with_primary(route, identities, index == 0))
             .collect::<Vec<_>>(),
     }))
 }
@@ -1689,6 +1866,14 @@ fn format_connection(state: i32) -> &'static str {
 /// with `origin`, `as_path`, `next_hop`, `local_pref`, `med`, `communities`,
 /// `large_communities`.
 fn route_to_birdwatcher(route: &proto::Route, identities: &IdentityResolver) -> Value {
+    route_to_birdwatcher_with_primary(route, identities, false)
+}
+
+fn route_to_birdwatcher_with_primary(
+    route: &proto::Route,
+    identities: &IdentityResolver,
+    primary: bool,
+) -> Value {
     // Wire encoding of the ORIGIN attribute (RFC 4271): 0=IGP, 1=EGP,
     // 2=INCOMPLETE. Default IGP, matching the in-daemon server.
     let origin = match route.origin {
@@ -1736,7 +1921,7 @@ fn route_to_birdwatcher(route: &proto::Route, identities: &IdentityResolver) -> 
         "metric": 0,
         "age": age,
         "type": ["BGP", "unicast", "univ"],
-        "primary": false,
+        "primary": primary,
         "learnt_from": route.peer_address,
         "bgp": {
             "origin": origin,
@@ -2871,6 +3056,51 @@ mod tests {
             .candidates
             .push(repeated_alternative.candidates[0].clone());
         rejects(&repeated_alternative, query, 3);
+
+        let family = proto::AddressFamily::Ipv4Unicast as i32;
+        let insert =
+            |set: &mut TableRouteSet, route, best, max| set.insert(route, best, family, max);
+        let winner = response.best_route.clone().unwrap();
+        let mut inactive = response.candidates[0].route.clone().unwrap();
+        inactive.peer_address = "198.51.100.0".to_string();
+        let mut best_only = winner.clone();
+        best_only.prefix = "203.0.113.0".to_string();
+        best_only.peer_address = "198.51.100.3".to_string();
+        let version = proto::RoutePageVersion {
+            epoch: 7,
+            generation: 9,
+        };
+        let mut set = TableRouteSet::default();
+        assert!(set.check_version(None).is_err());
+        set.check_version(Some(&version)).unwrap();
+        let mut changed = version;
+        changed.generation += 1;
+        assert!(set.check_version(Some(&changed)).is_err());
+        insert(&mut set, inactive.clone(), false, 3).unwrap();
+        insert(&mut set, winner.clone(), false, 3).unwrap();
+        insert(&mut set, winner.clone(), true, 3).unwrap();
+        assert!(insert(&mut set, inactive.clone(), true, 3).is_err());
+        insert(&mut set, best_only, true, 3).unwrap();
+        let rows = set.body(&IdentityResolver::default(), 3)["routes"].clone();
+        assert_eq!(
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["primary"].as_bool().unwrap())
+                .collect::<Vec<_>>(),
+            [true, false, true]
+        );
+        assert_eq!(rows[1]["learnt_from"], "198.51.100.0");
+        let mut bad = TableRouteSet::default();
+        insert(&mut bad, winner.clone(), false, 1).unwrap();
+        assert!(insert(&mut bad, winner.clone(), false, 1).is_err());
+        let mut conflict = winner;
+        conflict.med += 1;
+        assert!(insert(&mut bad, conflict, true, 1).is_err());
+        assert_eq!(
+            insert(&mut bad, inactive, false, 1).unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
 
         let source = include_str!("main.rs");
         let handler = source
