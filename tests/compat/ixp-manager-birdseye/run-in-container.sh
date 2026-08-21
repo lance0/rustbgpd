@@ -88,6 +88,7 @@ IXP_MANAGER_ROOT="$ixp_manager" php "$root/config-consumer.php"
 for config_capture in config-implicit.json config-ui-filter.json config-skin.json ixp-manager-v7.4-rustbgpd.json; do
   [ -s "${CAPTURE_OUTPUT}/$config_capture" ] || { echo "IXP Manager config capture failed: $config_capture" >&2; exit 1; }
 done
+python3 "$root/verify_capture.py" "$capture" "$CAPTURE_OUTPUT"
 IXP_MANAGER_ROOT="$ixp_manager" BIRDSEYE_API=http://127.0.0.1:18080/api \
   php "$root/consumer.php" >"$capture/ixp-manager-consumer.json"
 consumer_fixture="$root/fixtures/ixp-manager-consumer.json"

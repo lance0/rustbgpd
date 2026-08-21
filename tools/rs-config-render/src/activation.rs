@@ -172,7 +172,13 @@ mod unix {
             || !exact_keys(&receipt["counts"], COUNT_KEYS)
             || !exact_keys(&receipt["refusals"], REFUSAL_KEYS)
             || !exact_keys(&receipt["strict_check"], &["binary_version", "passed"])
-            || receipt["input"]["schema"] != "rustbgpd.ixp-manager.router-config/v1"
+            || !matches!(
+                receipt["input"]["schema"].as_str(),
+                Some(
+                    "rustbgpd.ixp-manager.router-config/v1"
+                        | "rustbgpd.ixp-manager.router-config/v2"
+                )
+            )
             || receipt["input"]["ixp_manager_version"] != "7.4.0"
             || receipt["input"]["router_handle"]
                 .as_str()

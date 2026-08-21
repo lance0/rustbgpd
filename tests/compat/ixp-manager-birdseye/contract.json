@@ -40,10 +40,30 @@
   },
   "runtime_compatibility": false,
   "manual_config_export": {
-    "schema": "rustbgpd.ixp-manager.router-config/v1",
+    "schema": "rustbgpd.ixp-manager.router-config/v2",
     "ixp_manager_version": "7.4.0",
     "router_handle": "b2-rs1-lan1-ipv4",
-    "strict_receipt_required": true
+    "strict_receipt_required": true,
+    "ui_filters": {
+      "advertise_actions": [
+        "AS_IS",
+        "NO_ADVERTISE",
+        "PREPEND_ONCE",
+        "PREPEND_TWICE",
+        "PREPEND_THRICE"
+      ],
+      "receive_actions": [
+        "AS_IS",
+        "NO_ADVERTISE",
+        "PREPEND_ONCE",
+        "PREPEND_TWICE",
+        "PREPEND_THRICE"
+      ],
+      "receive_prepend_requires_peer": true,
+      "overlapping_receive_prepend": false,
+      "per_client_cap": 256,
+      "total_cap": 4096
+    }
   },
   "runtime_supported": [
     "exact-protocol-route",
@@ -56,6 +76,7 @@
   ],
   "unsupported": [
     "defined-only-rejected-route-reason-emission",
+    "full-ixp-manager-ui-filter-policy-engine",
     "full-table-snapshot",
     "direct-runtime-protocol-alias-reconfiguration"
   ]

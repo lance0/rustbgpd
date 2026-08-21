@@ -7,7 +7,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::process::Command;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -20,9 +20,27 @@ use std::io::Write as _;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
-const SCHEMA: &str = "rustbgpd.ixp-manager.router-config/v1";
+const SCHEMA_V1: &str = "rustbgpd.ixp-manager.router-config/v1";
+const SCHEMA_V2: &str = "rustbgpd.ixp-manager.router-config/v2";
 const IXP_VERSION: &str = "7.4.0";
+const MAX_FILTERS_PER_CLIENT: usize = 256;
+const MAX_FILTERS_TOTAL: usize = 4096;
 const BASE_HYGIENE: &str = include_str!("../../../examples/route-server/hygiene.rpol");
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchemaVersion {
+    V1,
+    V2,
+}
+
+impl SchemaVersion {
+    const fn schema(self) -> &'static str {
+        match self {
+            Self::V1 => SCHEMA_V1,
+            Self::V2 => SCHEMA_V2,
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
@@ -65,6 +83,8 @@ struct Document {
     router: Router,
     policy: Policy,
     clients: Vec<Client>,
+    #[serde(default)]
+    ui_filters: Option<Vec<UiFilter>>,
     unsupported: Unsupported,
     complete: Complete,
 }
@@ -146,11 +166,81 @@ struct ActiveFilter {
     filter_ids: Vec<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum FilterAction {
+    AsIs,
+    NoAdvertise,
+    PrependOnce,
+    PrependTwice,
+    PrependThrice,
+}
+
+impl FilterAction {
+    const fn prepend_count(self) -> Option<u8> {
+        match self {
+            Self::PrependOnce => Some(1),
+            Self::PrependTwice => Some(2),
+            Self::PrependThrice => Some(3),
+            Self::AsIs | Self::NoAdvertise => None,
+        }
+    }
+
+    const fn advertise_function(self) -> Option<u32> {
+        match self {
+            Self::AsIs => None,
+            Self::NoAdvertise => Some(0),
+            Self::PrependOnce => Some(101),
+            Self::PrependTwice => Some(102),
+            Self::PrependThrice => Some(103),
+        }
+    }
+
+    const fn terminates_receive(self) -> bool {
+        matches!(self, Self::AsIs | Self::NoAdvertise)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FilterPeer {
+    customer_id: u64,
+    asn: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UiFilter {
+    id: u64,
+    customer_id: u64,
+    #[serde(deserialize_with = "required_nullable")]
+    peer: Option<FilterPeer>,
+    #[serde(deserialize_with = "required_nullable")]
+    received_prefix: Option<String>,
+    #[serde(deserialize_with = "required_nullable")]
+    advertised_prefix: Option<String>,
+    #[serde(deserialize_with = "required_nullable")]
+    protocol: Option<u8>,
+    action_advertise: FilterAction,
+    action_receive: FilterAction,
+    order_by: u32,
+}
+
+fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Complete {
     handle: String,
     client_count: usize,
+    #[serde(default)]
+    ui_filter_count: Option<usize>,
     marker: String,
 }
 
@@ -201,6 +291,53 @@ fn prefix_key(raw: &str, family: u8) -> Option<(u128, u8)> {
     (bits & host_mask == 0).then_some((bits, length))
 }
 
+fn canonical_filter_prefix(raw: &str, family: u8) -> bool {
+    let Some((address, raw_length)) = raw.split_once('/') else {
+        return false;
+    };
+    let Ok(address) = address.parse::<IpAddr>() else {
+        return false;
+    };
+    let Ok(length) = raw_length.parse::<u8>() else {
+        return false;
+    };
+    prefix_key(raw, family).is_some() && raw == format!("{address}/{length}")
+}
+
+#[derive(Clone, Copy)]
+struct FilterScope<'a> {
+    peer: Option<u32>,
+    prefix: Option<&'a str>,
+}
+
+fn intersect_axis<T: Copy + Eq>(left: Option<T>, right: Option<T>) -> Option<Option<T>> {
+    match (left, right) {
+        (Some(left), Some(right)) if left != right => None,
+        (Some(value), _) | (_, Some(value)) => Some(Some(value)),
+        (None, None) => Some(None),
+    }
+}
+
+fn scope(filter: &UiFilter) -> FilterScope<'_> {
+    FilterScope {
+        peer: filter.peer.as_ref().and_then(|peer| peer.asn),
+        prefix: filter.received_prefix.as_deref(),
+    }
+}
+
+fn intersection<'a>(left: &'a UiFilter, right: &'a UiFilter) -> Option<FilterScope<'a>> {
+    Some(FilterScope {
+        peer: intersect_axis(scope(left).peer, scope(right).peer)?,
+        prefix: intersect_axis(scope(left).prefix, scope(right).prefix)?,
+    })
+}
+
+fn scope_covers(filter: &UiFilter, covered: FilterScope<'_>) -> bool {
+    let candidate = scope(filter);
+    (candidate.peer.is_none() || candidate.peer == covered.peer)
+        && (candidate.prefix.is_none() || candidate.prefix == covered.prefix)
+}
+
 fn valid_handle(handle: &str) -> bool {
     !handle.is_empty()
         && handle.len() <= 128
@@ -209,9 +346,29 @@ fn valid_handle(handle: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 }
 
-fn validate(document: &Document) -> Result<Vec<Vec<String>>, Error> {
-    if document.schema != SCHEMA || document.ixp_manager.version != IXP_VERSION {
+fn validate(
+    document: &Document,
+    expected: SchemaVersion,
+    ui_filters_present: bool,
+    ui_filter_count_present: bool,
+) -> Result<Vec<Vec<String>>, Error> {
+    if document.schema != expected.schema() || document.ixp_manager.version != IXP_VERSION {
         return Err(Error::Refused("unsupported schema or IXP Manager version"));
+    }
+    match expected {
+        SchemaVersion::V1 if ui_filters_present || ui_filter_count_present => {
+            return Err(Error::Refused("router-config/v2 fields require v2"));
+        }
+        SchemaVersion::V2
+            if !ui_filters_present
+                || !ui_filter_count_present
+                || document.ui_filters.is_none()
+                || document.complete.ui_filter_count
+                    != document.ui_filters.as_ref().map(Vec::len) =>
+        {
+            return Err(Error::Refused("incomplete UI-filter export"));
+        }
+        SchemaVersion::V1 | SchemaVersion::V2 => {}
     }
     let router = &document.router;
     if !valid_handle(&router.handle)
@@ -275,7 +432,7 @@ fn validate(document: &Document) -> Result<Vec<Vec<String>>, Error> {
     {
         return Err(Error::Refused("incomplete export marker"));
     }
-    let mut customers = BTreeSet::new();
+    let mut customers = BTreeMap::new();
     let mut vlis = BTreeSet::new();
     let mut asns = BTreeSet::new();
     let mut addresses = BTreeSet::new();
@@ -290,7 +447,7 @@ fn validate(document: &Document) -> Result<Vec<Vec<String>>, Error> {
             || client.asn == 0
             || client.max_prefix == 0
             || (router.protocol == 4) != address.is_ipv4()
-            || !customers.insert(client.customer_id)
+            || customers.insert(client.customer_id, client.asn).is_some()
             || !vlis.insert(client.vlan_interface_id)
             || !asns.insert(client.asn)
             || !addresses.insert(address)
@@ -349,7 +506,84 @@ fn validate(document: &Document) -> Result<Vec<Vec<String>>, Error> {
         }
         effective.push(prefixes);
     }
+    validate_ui_filters(document, expected, &customers)?;
     Ok(effective)
+}
+
+fn validate_ui_filters(
+    document: &Document,
+    expected: SchemaVersion,
+    customers: &BTreeMap<u64, u32>,
+) -> Result<(), Error> {
+    let Some(filters) = document.ui_filters.as_deref() else {
+        return Ok(());
+    };
+    if expected != SchemaVersion::V2 || filters.len() > MAX_FILTERS_TOTAL {
+        return Err(Error::Refused("UI-filter schema or total cap exceeded"));
+    }
+    let mut ids = BTreeSet::new();
+    let mut per_customer = BTreeMap::<u64, usize>::new();
+    let mut previous = None;
+    for filter in filters {
+        let order_key = (filter.customer_id, filter.order_by);
+        let count = per_customer.entry(filter.customer_id).or_default();
+        *count += 1;
+        if filter.id == 0
+            || filter.order_by == 0
+            || !ids.insert(filter.id)
+            || previous.is_some_and(|previous| previous >= order_key)
+            || *count > MAX_FILTERS_PER_CLIENT
+            || !customers.contains_key(&filter.customer_id)
+            || filter
+                .protocol
+                .is_some_and(|value| value != document.router.protocol)
+            || filter
+                .advertised_prefix
+                .as_deref()
+                .is_some_and(|prefix| !canonical_filter_prefix(prefix, document.router.protocol))
+            || filter
+                .received_prefix
+                .as_deref()
+                .is_some_and(|prefix| !canonical_filter_prefix(prefix, document.router.protocol))
+        {
+            return Err(Error::Refused(
+                "invalid UI-filter identity, order, prefix, or cap",
+            ));
+        }
+        if let Some(peer) = &filter.peer
+            && (peer.customer_id == 0 || peer.asn.is_none_or(|asn| asn == 0))
+        {
+            return Err(Error::Refused("UI-filter peer identity is missing"));
+        }
+        if filter.action_receive.prepend_count().is_some() && filter.peer.is_none() {
+            return Err(Error::Refused("global receive PREPEND is unsupported"));
+        }
+        previous = Some(order_key);
+    }
+    for (right_index, right) in filters.iter().enumerate() {
+        if right.action_receive.prepend_count().is_none() {
+            continue;
+        }
+        for left in &filters[..right_index] {
+            if left.customer_id != right.customer_id
+                || left.action_receive.prepend_count().is_none()
+            {
+                continue;
+            }
+            let Some(overlap) = intersection(left, right) else {
+                continue;
+            };
+            let stopped = filters[..right_index].iter().rev().any(|filter| {
+                filter.customer_id == right.customer_id
+                    && filter.action_receive.terminates_receive()
+                    && scope_covers(filter, overlap)
+            });
+            if !stopped {
+                return Err(Error::Refused("overlapping receive PREPEND is unsupported"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn is_placeholder(secret: &str) -> bool {
@@ -363,6 +597,7 @@ pub fn render_document(
     input: &[u8],
     restart_seconds: u32,
     binding: &RenderBinding,
+    expected: SchemaVersion,
 ) -> Result<Candidate, Error> {
     if !binding.valid() {
         return Err(Error::Refused("invalid router host binding"));
@@ -370,8 +605,21 @@ pub fn render_document(
     if restart_seconds == 0 {
         return Err(Error::Refused("max-prefix restart must be positive"));
     }
-    let document: Document = serde_json::from_slice(input).map_err(|_| Error::Input)?;
-    let effective = validate(&document)?;
+    let input_value: Value = serde_json::from_slice(input).map_err(|_| Error::Input)?;
+    let ui_filters_present = input_value
+        .as_object()
+        .is_some_and(|object| object.contains_key("ui_filters"));
+    let ui_filter_count_present = input_value
+        .get("complete")
+        .and_then(Value::as_object)
+        .is_some_and(|object| object.contains_key("ui_filter_count"));
+    let document: Document = serde_json::from_value(input_value).map_err(|_| Error::Input)?;
+    let effective = validate(
+        &document,
+        expected,
+        ui_filters_present,
+        ui_filter_count_present,
+    )?;
     if document.router.handle != binding.router_handle {
         return Err(Error::Refused("router handle does not match host binding"));
     }
@@ -380,19 +628,28 @@ pub fn render_document(
         .to_str()
         .ok_or(Error::Refused("runtime state directory must be UTF-8"))?;
     let mut files = BTreeMap::new();
+    let mut filters = BTreeMap::<u64, Vec<&UiFilter>>::new();
+    for filter in document.ui_filters.as_deref().unwrap_or_default() {
+        filters.entry(filter.customer_id).or_default().push(filter);
+    }
     files.insert("policy/ixp-hygiene.rpol".into(), render_hygiene(&document));
     for (client, prefixes) in document.clients.iter().zip(&effective) {
         files.insert(
             format!("policy/client-{}.rpol", client.vlan_interface_id),
-            render_client(client, prefixes),
+            render_client(
+                client,
+                prefixes,
+                filters.get(&client.customer_id).map_or(&[], Vec::as_slice),
+                document.router.asn,
+            ),
         );
     }
     files.insert(
         "config.toml".into(),
-        render_config(&document, restart_seconds, runtime),
+        render_config(&document, restart_seconds, runtime, expected),
     );
     let metadata = json!({
-        "input": {"schema": SCHEMA, "ixp_manager_version": IXP_VERSION,
+        "input": {"schema": expected.schema(), "ixp_manager_version": IXP_VERSION,
             "router_handle": document.router.handle, "sha256": sha256(input)},
         "counts": {"clients": document.clients.len(),
             "prefixes": effective.iter().map(Vec::len).sum::<usize>(),
@@ -404,7 +661,12 @@ pub fn render_document(
     Ok(Candidate { files, metadata })
 }
 
-fn render_config(document: &Document, restart_seconds: u32, runtime: &str) -> String {
+fn render_config(
+    document: &Document,
+    restart_seconds: u32,
+    runtime: &str,
+    expected: SchemaVersion,
+) -> String {
     let router = &document.router;
     let mut out = format!(
         "# GENERATED candidate from IXP Manager {}.\n[global]\nasn = {}\nrouter_id = {}\nruntime_state_dir = {}\nlisten_port = 179\nlisten_addresses = [{}]\nebgp_requires_policy = true\n\n[global.telemetry]\nlog_format = \"json\"\n\n[global.telemetry.grpc_uds]\npath = {}\nmode = 0o600\n",
@@ -449,6 +711,18 @@ fn render_config(document: &Document, restart_seconds: u32, runtime: &str) -> St
             restart_seconds,
             client.vlan_interface_id
         );
+        if expected == SchemaVersion::V2
+            && document
+                .ui_filters
+                .as_ref()
+                .is_some_and(|filters| filters.iter().any(|f| f.customer_id == client.customer_id))
+        {
+            let _ = writeln!(
+                out,
+                "export_policy_chain = [\"ixp-transparent-export\", \"client-{}-receive\"]",
+                client.vlan_interface_id
+            );
+        }
         if let Auth::Md5 { value } = &client.auth {
             let _ = writeln!(out, "md5_password = {}", quoted(value));
         }
@@ -511,7 +785,24 @@ fn render_hygiene(document: &Document) -> String {
     out
 }
 
-fn render_client(client: &Client, prefixes: &[String]) -> String {
+fn write_filter_term(out: &mut String, name: &str, guards: &[String], action: &str) {
+    if guards.is_empty() {
+        let _ = writeln!(out, "    term {name} {{ {action} }}");
+    } else {
+        let _ = writeln!(
+            out,
+            "    term {name} {{ if {} {{ {action} }} }}",
+            guards.join(" && ")
+        );
+    }
+}
+
+fn render_client(
+    client: &Client,
+    prefixes: &[String],
+    filters: &[&UiFilter],
+    router_asn: u32,
+) -> String {
     let slug = client.vlan_interface_id;
     let origins = client
         .origins
@@ -527,9 +818,68 @@ fn render_client(client: &Client, prefixes: &[String]) -> String {
     }
     let _ = write!(
         out,
-        "}}\npolicy client-{slug} {{\n    term reject-first-as-not-peer-as {{ if route.as-path.len >= 1 && !(route.as-path matches \"^{}_\") {{ reject }} }}\n    term reject-irrdb-origin-as-filtered {{ if !(route.origin-as in client-{slug}-origins) {{ reject }} }}\n    term reject-irrdb-prefix-filtered {{ if !(route.prefix in client-{slug}-prefixes) {{ reject }} }}\n    term accept-authorized {{ accept }}\n}}\n",
+        "}}\npolicy client-{slug} {{\n    term reject-first-as-not-peer-as {{ if route.as-path.len >= 1 && !(route.as-path matches \"^{}_\") {{ reject }} }}\n    term reject-irrdb-origin-as-filtered {{ if !(route.origin-as in client-{slug}-origins) {{ reject }} }}\n    term reject-irrdb-prefix-filtered {{ if !(route.prefix in client-{slug}-prefixes) {{ reject }} }}\n",
         client.asn
     );
+    for filter in filters {
+        let Some(function) = filter.action_advertise.advertise_function() else {
+            continue;
+        };
+        let target = filter.peer.as_ref().and_then(|peer| peer.asn).unwrap_or(0);
+        let guards = filter
+            .advertised_prefix
+            .as_ref()
+            .map(|prefix| vec![format!("route.prefix == {prefix}")])
+            .unwrap_or_default();
+        write_filter_term(
+            &mut out,
+            &format!("ui-advertise-{}", filter.id),
+            &guards,
+            &format!("add large-community {router_asn}:{function}:{target}"),
+        );
+    }
+    out.push_str("    term accept-authorized { accept }\n}\n");
+    if filters.is_empty() {
+        return out;
+    }
+    let _ = writeln!(out, "policy client-{slug}-receive {{");
+    for (index, filter) in filters.iter().enumerate() {
+        if filters[..index].iter().any(|earlier| {
+            earlier.action_receive.terminates_receive() && scope_covers(earlier, scope(filter))
+        }) {
+            continue;
+        }
+        let mut guards = Vec::new();
+        if let Some(peer) = &filter.peer {
+            guards.push(format!(
+                "route.as-path matches \"^{}_\"",
+                peer.asn.expect("validated peer ASN")
+            ));
+        }
+        if let Some(prefix) = &filter.received_prefix {
+            guards.push(format!("route.prefix == {prefix}"));
+        }
+        let action = match filter.action_receive {
+            FilterAction::AsIs => "accept".to_owned(),
+            FilterAction::NoAdvertise => "reject".to_owned(),
+            action => format!(
+                "prepend as {} {}",
+                filter
+                    .peer
+                    .as_ref()
+                    .and_then(|peer| peer.asn)
+                    .expect("validated PREPEND peer"),
+                action.prepend_count().expect("PREPEND action")
+            ),
+        };
+        write_filter_term(
+            &mut out,
+            &format!("ui-receive-{}", filter.id),
+            &guards,
+            &action,
+        );
+    }
+    out.push_str("    term accept-unmatched { accept }\n}\n");
     out
 }
 
@@ -625,12 +975,13 @@ pub fn write_checked_candidate(
     restart_seconds: u32,
     checker: &Path,
     binding: &RenderBinding,
+    expected: SchemaVersion,
 ) -> Result<usize, Error> {
     if !private_file(context, 0o600) {
         return Err(Error::Refused("input capture must be mode 0600"));
     }
     let input = fs::read(context).map_err(|_| Error::Input)?;
-    write_checked_candidate_bytes(&input, out, restart_seconds, checker, binding)
+    write_checked_candidate_for(&input, out, restart_seconds, checker, binding, expected)
 }
 
 /// Render and strictly validate a private in-memory IXP Manager capture.
@@ -644,7 +995,25 @@ pub fn write_checked_candidate_bytes(
     checker: &Path,
     binding: &RenderBinding,
 ) -> Result<usize, Error> {
-    let candidate = render_document(input, restart_seconds, binding)?;
+    write_checked_candidate_for(
+        input,
+        out,
+        restart_seconds,
+        checker,
+        binding,
+        SchemaVersion::V2,
+    )
+}
+
+fn write_checked_candidate_for(
+    input: &[u8],
+    out: &Path,
+    restart_seconds: u32,
+    checker: &Path,
+    binding: &RenderBinding,
+    expected: SchemaVersion,
+) -> Result<usize, Error> {
+    let candidate = render_document(input, restart_seconds, binding, expected)?;
     prepare_output(out)?;
     for (relative, contents) in &candidate.files {
         let path = out.join(relative);

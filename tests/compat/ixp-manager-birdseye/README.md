@@ -48,6 +48,15 @@ The real pinned IXP Manager PHP extension also translates every defined
 the active route-server-template partition `1,3,5,6,7,8,9,10,13,14`, keeps
 `2,4,11,12,15` defined-only, and proves fallback `0` remains untranslated.
 
+The same pinned v7.4 Foil/MySQL journey captures complete ordered UI-filter
+rows 31, 33, and 35, then disables row 31 and proves rows 33 and 35 remain in
+order. Both strict v2 captures render and pass `rustbgpd --check --strict`; the
+oracle executes the generated advertise and receive policies with `rbgp policy
+check`. Exact row objects, raw repeated-render bytes, v2 completion counts,
+receipt-last publication, and v3 refusal are load-bearing. This proves only the
+bounded manual export subset; it does not make the adapter runtime-compatible
+or claim a generic IXP Manager policy engine.
+
 Run the gate from the repository root:
 
 ```console
@@ -68,8 +77,8 @@ diff -u tests/compat/ixp-manager-birdseye/fixtures/birdseye-contract.json \
 Exact protocol-route, exact export-route, filtered-prefix wildcard, and bounded
 less-specific table lookup journeys are runtime-supported. The table lookup
 returns one matched prefix atomically with its installed winner first and every
-same-prefix Add-Path alternative; it is not a full table snapshot. Complete
-All ten reject reasons emitted by the pinned route-server templates are
+same-prefix Add-Path alternative; it is not a full table snapshot. All ten
+reject reasons emitted by the pinned route-server templates are
 runtime-supported; emitting the five defined-only display reasons and
 full-table snapshots remain blockers. Protocol
 aliases supplied directly remain immutable after startup; bounded file-backed
@@ -78,10 +87,15 @@ blocker, weakening the explicit alias or product-version
 posture, enabling debug mode, skipping a case, or drifting a pin or response
 makes the gate fail.
 
+The manual-export matrix separately records the 256-per-client and 4096-total
+UI-filter caps and keeps the full IXP Manager UI-filter policy engine
+unsupported.
+
 ## Provenance and licensing
 
 Upstream source stays in a temporary directory and is never vendored. IXP
-Manager is GPL-2.0; the gate executes its installed consumer but copies no PHP
-source or templates into this repository. Bird's Eye is MIT-licensed. The two
+Manager is GPL-2.0; the gate executes its installed consumer while this
+repository keeps its original GPL-2.0-only Foil exporter in the segregated
+integration subtree. Bird's Eye is MIT-licensed. The two
 JSON fixtures are captured outputs from that pinned server using the synthetic
 inputs above; they contain no production routing data.
