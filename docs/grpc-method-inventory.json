@@ -6,10 +6,10 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 104,
+  "method_count": 105,
   "tier_counts": {
     "read": 0,
-    "sensitive_read": 60,
+    "sensitive_read": 61,
     "mutating": 20,
     "operator_only": 24
   },
@@ -75,6 +75,7 @@
     { "service": "rustbgpd.v1.RibService", "method": "ListAdvertisedRoutes", "path": "/rustbgpd.v1.RibService/ListAdvertisedRoutes", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ExplainAdvertisedRoute", "path": "/rustbgpd.v1.RibService/ExplainAdvertisedRoute", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ExplainBestPath", "path": "/rustbgpd.v1.RibService/ExplainBestPath", "tier": "sensitive_read" },
+    { "service": "rustbgpd.v1.RibService", "method": "LookupBestPath", "path": "/rustbgpd.v1.RibService/LookupBestPath", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ListBlackholeDiscards", "path": "/rustbgpd.v1.RibService/ListBlackholeDiscards", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ListFibRoutes", "path": "/rustbgpd.v1.RibService/ListFibRoutes", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "SetFibTable", "path": "/rustbgpd.v1.RibService/SetFibTable", "tier": "mutating" },

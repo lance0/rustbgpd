@@ -26,23 +26,25 @@ against a deterministic fake `birdc`; upstream source is cloned temporarily and
 installed from its lockfiles. See
 [`tests/compat/ixp-manager-birdseye/README.md`](../tests/compat/ixp-manager-birdseye/README.md)
 for the pins, fixture provenance, and local reproduction command.
-The same gate also runs IXP Manager's exact protocol/export and member
-filtered-prefix consumer methods against a live `birdwatcher-adapter` backed
-by a real rustbgpd process.
+The same gate also runs IXP Manager's exact protocol/export, less-specific
+table-search, and member filtered-prefix consumer methods against a live
+`birdwatcher-adapter` backed by a real rustbgpd process.
 
 This oracle is intentionally **not** a runtime compatibility claim. The
 example adapter now provides immutable protocol aliases plus the current
 consumer's status, BGP inventory/detail, symbols, member received-route, and
 member export-route seam with an enforced response maximum. Exact protocol and
 export prefix lookups are supported and preserve all Add-Path candidates in
-daemon order. The exact `{daemon ASN}:1101:*` filtered-prefix query reads only
-retained rejects, scrubs that reserved namespace, and adds one conservative
-reason. This remains partial runtime support: complete rejected-route reasons,
-less-specific lookup, and an atomic all-candidate table snapshot are still
-unavailable. Global table, count, and other wildcard-community endpoints are
-not served. The adapter's `api.version` is rustbgpd product identity, not a
-Bird's Eye version claim, and the adapter is not described as fully IXP Manager
-/ Bird's Eye compatible.
+daemon order. Bounded longest-prefix table search atomically returns the
+installed winner first and every alternative for that one matched prefix. The
+exact `{daemon ASN}:1101:*` filtered-prefix query reads only retained rejects,
+scrubs that reserved namespace, and adds one conservative reason. This remains
+partial runtime support: complete rejected-route reasons and full table
+snapshots are still unavailable. Global table lists, counts, and other
+wildcard-community endpoints are not served. The adapter's table identity is a
+validated view over one global Loc-RIB, and `api.version` is rustbgpd product
+identity, not a Bird's Eye version claim; the adapter is not described as fully
+IXP Manager / Bird's Eye compatible.
 
 ### IXP Manager v7.4 manual configuration oracle
 

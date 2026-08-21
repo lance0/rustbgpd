@@ -24,6 +24,14 @@ use crate::update::{RouteQueryKey, route_query_key};
 /// a short journal always beats a rebuild, so don't thrash the rebuild flag.
 const ORDERED_JOURNAL_MIN_CAP: usize = 64;
 
+fn ancestor_probe_lengths(query: &Prefix) -> impl Iterator<Item = u8> {
+    let family_max = match query {
+        Prefix::V4(_) => 32,
+        Prefix::V6(_) => 128,
+    };
+    (0..=query.prefix_len().min(family_max)).rev()
+}
+
 /// The local RIB storing the best route per prefix.
 pub struct LocRib {
     /// Best route per prefix, paired with its wall-clock install time —
@@ -264,6 +272,26 @@ impl LocRib {
     #[must_use]
     pub fn get(&self, prefix: &Prefix) -> Option<&Route> {
         self.routes.get(prefix).map(|(route, _)| route)
+    }
+
+    /// Return the closest installed ancestor of `query` and its selected route.
+    ///
+    /// The lookup-hot Loc-RIB deliberately stays hash-backed, so a point LPM
+    /// query walks canonical ancestors from most to least specific. This is
+    /// bounded to 33 probes for IPv4 and 129 for IPv6 and adds no hot-path
+    /// index maintenance.
+    #[must_use]
+    pub fn longest_match(&self, query: &Prefix) -> Option<(Prefix, &Route)> {
+        match query {
+            Prefix::V4(query) => ancestor_probe_lengths(&Prefix::V4(*query)).find_map(|len| {
+                let prefix = Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(query.addr, len));
+                self.get(&prefix).map(|route| (prefix, route))
+            }),
+            Prefix::V6(query) => ancestor_probe_lengths(&Prefix::V6(*query)).find_map(|len| {
+                let prefix = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(query.addr, len));
+                self.get(&prefix).map(|route| (prefix, route))
+            }),
+        }
     }
 
     /// Look up the best route for a prefix together with its
@@ -1435,8 +1463,8 @@ mod tests {
 
     use rustbgpd_wire::{
         Afi, AsPath, AsPathSegment, ExtendedCommunity, FlowSpecComponent, FlowSpecRule, Ipv4Prefix,
-        LabeledNlri, MplsLabelEntry, NumericMatch, Origin, PathAttribute, RouteDistinguisher,
-        RtcNlri, VpnNlri, VpnPrefix,
+        Ipv6Prefix, LabeledNlri, MplsLabelEntry, NumericMatch, Origin, PathAttribute,
+        RouteDistinguisher, RtcNlri, VpnNlri, VpnPrefix,
     };
 
     use super::*;
@@ -1472,6 +1500,84 @@ mod tests {
             Ipv4Addr::new(10, 0, 0, peer_oct),
             local_pref,
         )
+    }
+
+    #[test]
+    fn longest_match_is_family_bounded_and_prefers_the_closest_installed_ancestor() {
+        let mut loc = LocRib::new();
+        let default = Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0);
+        let covering = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+        let closest = Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 16);
+        let more_specific = Ipv4Prefix::new(Ipv4Addr::new(10, 1, 2, 0), 24);
+        let default_route = make_route(1, default, 100);
+        let covering_route = make_route(2, covering, 100);
+        let closest_route = make_route(3, closest, 100);
+        let more_specific_route = make_route(4, more_specific, 100);
+        for (prefix, route) in [
+            (default, &default_route),
+            (covering, &covering_route),
+            (closest, &closest_route),
+            (more_specific, &more_specific_route),
+        ] {
+            assert!(loc.recompute(Prefix::V4(prefix), std::iter::once(route)));
+        }
+
+        let query = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 3, 0), 24));
+        let (matched, winner) = loc.longest_match(&query).expect("IPv4 ancestor");
+        assert_eq!(matched, Prefix::V4(closest));
+        assert_eq!(winner.peer, closest_route.peer);
+        assert_eq!(
+            loc.longest_match(&Prefix::V4(closest)).unwrap().0,
+            Prefix::V4(closest)
+        );
+        assert_eq!(
+            loc.longest_match(&Prefix::V4(Ipv4Prefix::new(
+                Ipv4Addr::new(192, 0, 2, 0),
+                24,
+            )))
+            .unwrap()
+            .0,
+            Prefix::V4(default),
+            "default must match only after every more-specific probe misses"
+        );
+
+        let v6 = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
+        let mut v6_route = make_route(5, default, 100);
+        v6_route.prefix = Prefix::V6(v6);
+        assert!(loc.recompute(Prefix::V6(v6), std::iter::once(&v6_route)));
+        assert_eq!(
+            loc.longest_match(&Prefix::V6(Ipv6Prefix::new(
+                "2001:db8:1::".parse().unwrap(),
+                48,
+            )))
+            .unwrap()
+            .0,
+            Prefix::V6(v6)
+        );
+        assert!(
+            loc.longest_match(&Prefix::V6(Ipv6Prefix::new(
+                "2001:db9::".parse().unwrap(),
+                32,
+            )))
+            .is_none(),
+            "IPv4 state and more-specific prefixes must never satisfy an unrelated IPv6 query"
+        );
+    }
+
+    #[test]
+    fn longest_match_clamps_forged_public_lengths_to_the_absolute_probe_ceiling() {
+        let forged_v4 = Prefix::V4(Ipv4Prefix {
+            addr: Ipv4Addr::LOCALHOST,
+            len: u8::MAX,
+        });
+        let forged_v6 = Prefix::V6(Ipv6Prefix {
+            addr: "2001:db8::1".parse().unwrap(),
+            len: u8::MAX,
+        });
+        assert_eq!(ancestor_probe_lengths(&forged_v4).count(), 33);
+        assert_eq!(ancestor_probe_lengths(&forged_v6).count(), 129);
+        assert!(LocRib::new().longest_match(&forged_v4).is_none());
+        assert!(LocRib::new().longest_match(&forged_v6).is_none());
     }
 
     fn bgpls_nlri(payload_suffix: u8) -> rustbgpd_wire::bgpls::BgpLsNlri {

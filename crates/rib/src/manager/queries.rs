@@ -1643,6 +1643,69 @@ impl RibManager {
             warn!("query caller dropped before receiving best-path explanation");
         }
     }
+
+    /// Resolve one global LPM query and snapshot the matched winner plus every
+    /// exact-prefix alternative within this single actor turn.
+    pub(super) fn handle_lookup_best_path(
+        &mut self,
+        query: Prefix,
+        reply: tokio::sync::oneshot::Sender<Option<ExplainBestPath>>,
+    ) {
+        use crate::best_path::{
+            best_path_cmp, best_path_cmp_with_reason, best_path_reason_detail,
+            multipath_eligibility,
+        };
+
+        let Some((prefix, best)) = self.loc_rib.longest_match(&query) else {
+            let _ = reply.send(None);
+            return;
+        };
+        let best = best.clone();
+        let candidates: Vec<BestPathCandidate> = self
+            .ribs
+            .values()
+            .flat_map(|rib| rib.iter_prefix(&prefix).cloned())
+            .filter(|route| !(route.peer == best.peer && route.path_id == best.path_id))
+            .map(|route| {
+                let (vs_best_ordering, vs_best_reason) = best_path_cmp_with_reason(&route, &best);
+                BestPathCandidate {
+                    vs_best_detail: best_path_reason_detail(vs_best_reason, &route, &best),
+                    multipath: multipath_eligibility(&best, &route),
+                    route,
+                    vs_best_reason,
+                    vs_best_ordering,
+                    advertised_path_id: 0,
+                }
+            })
+            .collect();
+        let (best_reason, best_reason_detail) = candidates
+            .iter()
+            .map(|candidate| &candidate.route)
+            .min_by(|a, b| best_path_cmp(a, b))
+            .map_or_else(
+                || (None, String::new()),
+                |runner_up| {
+                    let (_, reason) = best_path_cmp_with_reason(&best, runner_up);
+                    (
+                        Some(reason),
+                        best_path_reason_detail(reason, &best, runner_up),
+                    )
+                },
+            );
+        let explanation = ExplainBestPath {
+            prefix,
+            best: Some(best),
+            candidates,
+            peer: None,
+            orr_vantage: None,
+            add_path_send_max: 0,
+            best_reason,
+            best_reason_detail,
+        };
+        if reply.send(Some(explanation)).is_err() {
+            warn!("query caller dropped before receiving best-path lookup");
+        }
+    }
     pub(super) fn handle_subscribe_route_events(
         &mut self,
         reply: tokio::sync::oneshot::Sender<broadcast::Receiver<Arc<RouteEvent>>>,

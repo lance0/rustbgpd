@@ -1719,6 +1719,13 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         }))
     }
 
+    async fn lookup_best_path(
+        &self,
+        _request: Request<server_proto::LookupBestPathRequest>,
+    ) -> Result<Response<server_proto::ExplainBestPathResponse>, Status> {
+        Err(Status::unimplemented("not used in CLI tests"))
+    }
+
     async fn explain_advertised_route(
         &self,
         request: Request<server_proto::ExplainAdvertisedRouteRequest>,

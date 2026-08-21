@@ -2108,6 +2108,9 @@ impl RibManager {
             } => {
                 self.handle_explain_best_path(prefix, peer, reply);
             }
+            RibUpdate::LookupBestPath { prefix, reply } => {
+                self.handle_lookup_best_path(prefix, reply);
+            }
             RibUpdate::ExplainAdvertisedRoute {
                 peer,
                 prefix,

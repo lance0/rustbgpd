@@ -300,6 +300,17 @@ impl RibService {
         })
         .await
     }
+
+    async fn query_lookup_best_path(
+        &self,
+        prefix: Prefix,
+    ) -> Result<Option<ExplainBestPath>, Status> {
+        rib_manager_read(&self.rib_tx, |reply| RibUpdate::LookupBestPath {
+            prefix,
+            reply,
+        })
+        .await
+    }
 }
 
 /// Hand a non-unicast listing predicate to the RIB task, or `None` when the
@@ -1552,6 +1563,21 @@ impl proto::rib_service_server::RibService for RibService {
         Ok(Response::new(explain_best_path_to_proto(explain)))
     }
 
+    async fn lookup_best_path(
+        &self,
+        request: Request<proto::LookupBestPathRequest>,
+    ) -> Result<Response<proto::ExplainBestPathResponse>, Status> {
+        let req = request.into_inner();
+        let prefix = parse_prefix_request(&req.prefix, req.prefix_length)?;
+        let explain = self.query_lookup_best_path(prefix).await?.ok_or_else(|| {
+            Status::not_found(format!(
+                "no Loc-RIB ancestor for {}/{}",
+                req.prefix, req.prefix_length
+            ))
+        })?;
+        Ok(Response::new(explain_best_path_to_proto(explain)))
+    }
+
     async fn list_blackhole_discards(
         &self,
         _request: Request<proto::ListBlackholeDiscardsRequest>,
@@ -2759,6 +2785,7 @@ mod tests {
         ListAdvertisedRoutes,
         ExplainAdvertisedRoute,
         ExplainBestPath,
+        LookupBestPath,
         ListRouteEvents,
         ListFlowSpecRoutes,
         ListEvpnRoutes,
@@ -2771,12 +2798,13 @@ mod tests {
         ListOrrStatus,
     }
 
-    const UNARY_RIB_READS: [UnaryRibRead; 15] = [
+    const UNARY_RIB_READS: [UnaryRibRead; 16] = [
         UnaryRibRead::ListReceivedRoutes,
         UnaryRibRead::ListBestRoutes,
         UnaryRibRead::ListAdvertisedRoutes,
         UnaryRibRead::ExplainAdvertisedRoute,
         UnaryRibRead::ExplainBestPath,
+        UnaryRibRead::LookupBestPath,
         UnaryRibRead::ListRouteEvents,
         UnaryRibRead::ListFlowSpecRoutes,
         UnaryRibRead::ListEvpnRoutes,
@@ -2849,6 +2877,10 @@ mod tests {
                 .map(|_| ()),
             UnaryRibRead::ExplainBestPath => svc
                 .explain_best_path(Request::new(explain_best_path_request()))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::LookupBestPath => svc
+                .lookup_best_path(Request::new(lookup_best_path_request()))
                 .await
                 .map(|_| ()),
             UnaryRibRead::ListRouteEvents => svc
@@ -3773,6 +3805,60 @@ mod tests {
             prefix_length: 24,
             peer_address: String::new(),
         }
+    }
+
+    fn lookup_best_path_request() -> proto::LookupBestPathRequest {
+        proto::LookupBestPathRequest {
+            prefix: "10.0.0.128".to_string(),
+            prefix_length: 25,
+        }
+    }
+
+    fn make_lookup_best_path_service(
+        explanation: Option<rustbgpd_rib::ExplainBestPath>,
+    ) -> RibService {
+        let (tx, mut rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let update = rx.recv().await.expect("lookup command");
+            let RibUpdate::LookupBestPath { reply, .. } = update else {
+                panic!("LookupBestPath RPC must use only the distinct LPM actor command");
+            };
+            let _ = reply.send(explanation);
+        });
+        RibService::new(tx)
+    }
+
+    #[tokio::test]
+    async fn lookup_best_path_uses_distinct_command_and_returns_matched_prefix() {
+        let matched = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+        let explanation = rustbgpd_rib::ExplainBestPath {
+            prefix: matched,
+            best: Some(test_route(matched, vec![PathAttribute::LocalPref(100)])),
+            candidates: vec![],
+            peer: None,
+            orr_vantage: None,
+            add_path_send_max: 0,
+            best_reason: None,
+            best_reason_detail: String::new(),
+        };
+        let response = make_lookup_best_path_service(Some(explanation))
+            .lookup_best_path(Request::new(lookup_best_path_request()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.prefix, "10.0.0.0");
+        assert_eq!(response.prefix_length, 24);
+        assert!(response.best_route.is_some());
+    }
+
+    #[tokio::test]
+    async fn lookup_best_path_no_ancestor_is_not_found() {
+        let status = make_lookup_best_path_service(None)
+            .lookup_best_path(Request::new(lookup_best_path_request()))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        assert!(status.message().contains("10.0.0.128/25"));
     }
 
     #[tokio::test]

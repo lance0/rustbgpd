@@ -629,9 +629,11 @@ also serves the IXP Manager v7.4 status, live protocol inventory/detail,
 symbols, member received, and member export slice through immutable aliases
 with an enforced response maximum. Its exact member filtered-prefix wildcard
 journey reads retained rejects, scrubs the daemon-owned reason namespace, and
-synthesizes only conservative reason ids. Remaining Bird's Eye work is global
-table/count, less-specific lookup, other wildcard-community searches, and the
-complete reject-reason inventory;
+synthesizes only conservative reason ids. Its bounded table search now returns
+the installed winner first plus every alternative for one longest matched
+prefix in a single actor turn. Remaining Bird's Eye work is full table
+snapshots/counts, other wildcard-community searches, and the complete
+reject-reason inventory;
 no full compatibility claim is made.
 [ADR-0126](docs/adr/0126-shared-group-per-client-best.md) (Accepted) landed
 shared-group per-client best-path: the `per_client_best` path-hiding

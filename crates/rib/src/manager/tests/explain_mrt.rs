@@ -412,6 +412,116 @@ async fn explain_best_path_returns_candidates_without_winner() {
 }
 
 #[tokio::test]
+async fn lookup_best_path_is_atomic_and_falls_back_after_withdrawal() {
+    let (tx, rx) = mpsc::channel(64);
+    let handle =
+        tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new()).run());
+    let default = Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0);
+    let farther = Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 16);
+    let closer = Ipv4Prefix::new(Ipv4Addr::new(10, 1, 2, 0), 24);
+    let query = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 2, 128), 25));
+    let [default_peer, winner_peer, alternative_peer, closer_peer] =
+        [1, 2, 3, 4].map(|last| Ipv4Addr::new(192, 0, 2, last));
+
+    for (peer, route) in [
+        (default_peer, make_route_with_lp(default, default_peer, 100)),
+        (winner_peer, make_route_with_lp(farther, winner_peer, 200)),
+        (
+            alternative_peer,
+            make_route_with_lp(farther, alternative_peer, 100),
+        ),
+        (closer_peer, make_route_with_lp(closer, closer_peer, 150)),
+    ] {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(peer),
+            announced: vec![route],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    let exact = query_lookup_best_path(&tx, Prefix::V4(closer))
+        .await
+        .unwrap();
+    assert_eq!(exact.prefix, Prefix::V4(closer));
+    assert_eq!(exact.best.as_ref().unwrap().peer, IpAddr::V4(closer_peer));
+
+    let closest = query_lookup_best_path(&tx, query).await.unwrap();
+    assert_eq!(closest.prefix, Prefix::V4(closer));
+    assert!(
+        closest.candidates.is_empty(),
+        "farther-prefix candidates must not leak into the matched prefix"
+    );
+
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(closer_peer),
+        announced: vec![],
+        withdrawn: vec![(Prefix::V4(closer), 0)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let fallback = query_lookup_best_path(&tx, query).await.unwrap();
+    assert_eq!(fallback.prefix, Prefix::V4(farther));
+    assert_eq!(
+        fallback.best.as_ref().unwrap().peer,
+        IpAddr::V4(winner_peer)
+    );
+    assert_eq!(fallback.candidates.len(), 1);
+    assert_eq!(
+        fallback.candidates[0].route.peer,
+        IpAddr::V4(alternative_peer)
+    );
+    assert!(fallback.peer.is_none());
+    assert_eq!(fallback.add_path_send_max, 0);
+
+    for peer in [winner_peer, alternative_peer] {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(peer),
+            announced: vec![],
+            withdrawn: vec![(Prefix::V4(farther), 0)],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        query_lookup_best_path(&tx, query).await.unwrap().prefix,
+        Prefix::V4(default)
+    );
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(default_peer),
+        announced: vec![],
+        withdrawn: vec![(Prefix::V4(default), 0)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    assert!(query_lookup_best_path(&tx, query).await.is_none());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn explain_best_path_no_candidates() {
     let (tx, rx) = mpsc::channel(64);
     let metrics = BgpMetrics::new();

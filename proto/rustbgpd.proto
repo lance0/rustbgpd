@@ -1802,6 +1802,10 @@ service RibService {
   rpc ListAdvertisedRoutes(ListRoutesRequest) returns (ListRoutesResponse);
   rpc ExplainAdvertisedRoute(ExplainAdvertisedRouteRequest) returns (ExplainAdvertisedRouteResponse);
   rpc ExplainBestPath(ExplainBestPathRequest) returns (ExplainBestPathResponse);
+  // Outside-v1 global point lookup. Unlike ExplainBestPath's exact query,
+  // this finds the closest installed Loc-RIB ancestor and fails loudly as
+  // UNIMPLEMENTED on older daemons.
+  rpc LookupBestPath(LookupBestPathRequest) returns (ExplainBestPathResponse);
   rpc ListBlackholeDiscards(ListBlackholeDiscardsRequest) returns (ListBlackholeDiscardsResponse);
   rpc ListFibRoutes(ListFibRoutesRequest) returns (ListFibRoutesResponse);
   // Runtime CRUD for `[[fib_tables]]` (ADR-0061). Hot-applies through the FIB
@@ -2141,6 +2145,13 @@ message ExplainBestPathRequest {
   // to match the convention used elsewhere in this file (see
   // e.g. `ExplainAdvertisedRouteRequest.peer_address`).
   string peer_address = 3;
+}
+
+message LookupBestPathRequest {
+  // Prefix whose canonical ancestors are searched from most to least
+  // specific. No installed ancestor returns NOT_FOUND.
+  string prefix = 1;
+  uint32 prefix_length = 2;
 }
 
 message BestPathCandidate {

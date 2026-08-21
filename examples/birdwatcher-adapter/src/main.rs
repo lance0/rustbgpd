@@ -16,6 +16,7 @@
 //! - `GET /routes/export/{id}` — routes advertised to a neighbor
 //! - `GET /route/{prefix}/protocol/{id}` — exact received-route candidates
 //! - `GET /route/{prefix}/export/{id}` — exact advertised-route candidates
+//! - `GET /route/{prefix}/table/{table}` — global Loc-RIB LPM winner and alternatives
 //! - `GET /routes/peer/{peer}` — received routes by peer IP
 //! - `GET /routes/filtered/{id}` — rejected routes retained by the peer's
 //!   session (`PolicyService.ListRejectedRoutes`), tagged with a synthesized
@@ -348,6 +349,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/routes/export/{id}", get(routes_export))
         .route("/route/{prefix}/protocol/{id}", get(route_protocol))
         .route("/route/{prefix}/export/{id}", get(route_export))
+        .route("/route/{prefix}/table/{table}", get(route_table))
         .route("/routes/peer/{peer}", get(routes_peer))
         .route("/routes/filtered/{id}", get(routes_filtered))
         .route(
@@ -580,29 +582,34 @@ async fn symbols(State(state): State<AppState>) -> Result<Json<Value>, HttpError
     // Symbols need identities only. Keep this a single ListNeighbors RPC:
     // enriching inventory rows would add one ListRejectedRoutes RPC per peer.
     let neighbors = list_neighbors(&state).await?;
-    let identities = symbol_identities(neighbors, &state.identities)?;
+    let (identities, tables) = symbol_names(neighbors, &state.identities)?;
     Ok(Json(serde_json::json!({
         "api": api_block(state.max_routes),
         "symbols": {
             "protocol": identities,
-            "routing table": [],
+            "routing table": tables,
         }
     })))
 }
 
-fn symbol_identities(
+fn symbol_names(
     neighbors: Vec<proto::NeighborState>,
     resolver: &IdentityResolver,
-) -> Result<Vec<String>, HttpError> {
+) -> Result<(Vec<String>, Vec<String>), HttpError> {
     let mut identities = Vec::with_capacity(neighbors.len());
+    let mut tables = Vec::with_capacity(neighbors.len());
     for neighbor in neighbors {
         let cfg = neighbor.config.unwrap_or_default();
         let peer = parse_upstream_peer_address(&cfg.address)?;
-        identities.push(resolver.identity(peer).protocol);
+        let identity = resolver.identity(peer);
+        identities.push(identity.protocol);
+        tables.push(identity.table);
     }
     identities.sort_unstable();
     identities.dedup();
-    Ok(identities)
+    tables.sort_unstable();
+    tables.dedup();
+    Ok((identities, tables))
 }
 
 // ---------------------------------------------------------------------------
@@ -741,6 +748,31 @@ impl ExactPrefix {
         Ok(Self { address, length })
     }
 
+    fn from_route(address: &str, length: u32) -> Option<Self> {
+        let address: IpAddr = address.parse().ok()?;
+        let width = if address.is_ipv4() { 32 } else { 128 };
+        (length <= width && network_aligned(address, length)).then_some(Self { address, length })
+    }
+
+    fn covers(self, query: Self) -> bool {
+        if self.length > query.length {
+            return false;
+        }
+        match (self.address, query.address) {
+            (IpAddr::V4(prefix), IpAddr::V4(address)) => {
+                let shift = 32 - self.length;
+                u32::from(prefix).checked_shr(shift).unwrap_or(0)
+                    == u32::from(address).checked_shr(shift).unwrap_or(0)
+            }
+            (IpAddr::V6(prefix), IpAddr::V6(address)) => {
+                let shift = 128 - self.length;
+                u128::from(prefix).checked_shr(shift).unwrap_or(0)
+                    == u128::from(address).checked_shr(shift).unwrap_or(0)
+            }
+            _ => false,
+        }
+    }
+
     fn matches(self, route: &proto::Route) -> bool {
         route.prefix == self.address.to_string() && route.prefix_length == self.length
     }
@@ -855,6 +887,90 @@ async fn serve_exact_route(
             .map(|route| route_to_birdwatcher(route, &state.identities))
             .collect::<Vec<_>>(),
     })))
+}
+
+// ---------------------------------------------------------------------------
+// GET /route/{prefix}/table/{table} — IXP Manager global LPM table search
+//                                  → RibService.LookupBestPath
+// ---------------------------------------------------------------------------
+
+async fn route_table(
+    State(state): State<AppState>,
+    Path((prefix, table)): Path<(String, String)>,
+) -> Result<Json<Value>, HttpError> {
+    let prefix = ExactPrefix::parse(&prefix)?;
+    let (_, tables) = symbol_names(list_neighbors(&state).await?, &state.identities)?;
+    if tables.binary_search(&table).is_err() {
+        return Err(json_error(StatusCode::NOT_FOUND, "Table not found"));
+    }
+
+    let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
+    let response = match client
+        .lookup_best_path(proto::LookupBestPathRequest {
+            prefix: prefix.address.to_string(),
+            prefix_length: prefix.length,
+        })
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(status) if status.code() == tonic::Code::NotFound => {
+            return Ok(Json(empty_routes_body(state.max_routes)));
+        }
+        Err(status) => return Err(bad_gateway("LookupBestPath", &status)),
+    };
+    Ok(Json(table_lookup_body(
+        &response,
+        prefix,
+        &state.identities,
+        state.max_routes,
+    )?))
+}
+
+fn table_lookup_body(
+    response: &proto::ExplainBestPathResponse,
+    query: ExactPrefix,
+    identities: &IdentityResolver,
+    max_routes: u64,
+) -> Result<Value, HttpError> {
+    let malformed = || {
+        error!("LookupBestPath returned an incomplete or inconsistent route set");
+        json_error(
+            StatusCode::BAD_GATEWAY,
+            "Upstream daemon returned an invalid route response",
+        )
+    };
+    let matched =
+        ExactPrefix::from_route(&response.prefix, response.prefix_length).ok_or_else(malformed)?;
+    if !matched.covers(query) {
+        return Err(malformed());
+    }
+    let best = response.best_route.as_ref().ok_or_else(malformed)?;
+    let mut identities_seen = HashSet::new();
+    let mut routes = Vec::with_capacity(response.candidates.len() + 1);
+    let valid_route = |route: &proto::Route| {
+        ExactPrefix::from_route(&route.prefix, route.prefix_length) == Some(matched)
+    };
+    if !valid_route(best) || !identities_seen.insert((best.peer_address.as_str(), best.path_id)) {
+        return Err(malformed());
+    }
+    routes.push(best);
+    for candidate in &response.candidates {
+        let route = candidate.route.as_ref().ok_or_else(malformed)?;
+        if !valid_route(route)
+            || !identities_seen.insert((route.peer_address.as_str(), route.path_id))
+        {
+            return Err(malformed());
+        }
+        routes.push(route);
+    }
+    enforce_max(routes.len() as u64, max_routes)?;
+    Ok(serde_json::json!({
+        "api": api_block(max_routes),
+        "routes": routes
+            .into_iter()
+            .map(|route| route_to_birdwatcher(route, identities))
+            .collect::<Vec<_>>(),
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1652,10 +1768,9 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        assert_eq!(
-            symbol_identities(neighbors, &resolver).unwrap(),
-            ["pb_0001", "pb_0002"]
-        );
+        let (protocols, tables) = symbol_names(neighbors, &resolver).unwrap();
+        assert_eq!(protocols, ["pb_0001", "pb_0002"]);
+        assert_eq!(tables, ["master4"]);
 
         // Load-bearing call-geometry proof: reverting /symbols to the
         // enriched inventory path restores the per-neighbor policy RPC and
@@ -1665,7 +1780,7 @@ mod tests {
             .split_once("async fn symbols(")
             .unwrap()
             .1
-            .split_once("fn symbol_identities(")
+            .split_once("fn symbol_names(")
             .unwrap()
             .0;
         assert!(body.contains("list_neighbors(&state).await?"), "{body}");
@@ -2261,6 +2376,95 @@ mod tests {
                 serde_json::json!({"message":"Number of routes exceeds maximum allowed (3/2)"})
             );
         }
+    }
+
+    #[test]
+    fn table_lookup_is_selected_first_all_path_capped_and_fail_closed() {
+        let route = |peer: &str, med: u32| proto::Route {
+            prefix: "192.0.2.0".to_string(),
+            prefix_length: 24,
+            peer_address: peer.to_string(),
+            med,
+            ..Default::default()
+        };
+        let response = proto::ExplainBestPathResponse {
+            prefix: "192.0.2.0".to_string(),
+            prefix_length: 24,
+            best_route: Some(route("198.51.100.1", 10)),
+            candidates: vec![proto::BestPathCandidate {
+                route: Some(route("198.51.100.2", 20)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let query = ExactPrefix::parse("192.0.2.128/25").unwrap();
+        let body = table_lookup_body(&response, query, &IdentityResolver::default(), 2).unwrap();
+        assert_eq!(body["routes"][0]["bgp"]["med"], 10);
+        assert_eq!(body["routes"][1]["bgp"]["med"], 20);
+
+        let (status, _) = table_lookup_body(&response, query, &IdentityResolver::default(), 1)
+            .expect_err("winner plus alternative exceeds cap");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let rejects = |response: &proto::ExplainBestPathResponse, query, max_routes| {
+            let (status, Json(body)) =
+                table_lookup_body(response, query, &IdentityResolver::default(), max_routes)
+                    .unwrap_err();
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert_eq!(
+                body["message"],
+                "Upstream daemon returned an invalid route response"
+            );
+        };
+        let mut invalid = response.clone();
+        invalid.prefix = "not-an-ip".to_string();
+        rejects(&invalid, query, 2);
+        let mut unrelated = response.clone();
+        unrelated.prefix = "198.51.100.0".to_string();
+        unrelated
+            .best_route
+            .as_mut()
+            .unwrap()
+            .prefix
+            .clone_from(&unrelated.prefix);
+        unrelated.candidates[0]
+            .route
+            .as_mut()
+            .unwrap()
+            .prefix
+            .clone_from(&unrelated.prefix);
+        rejects(&unrelated, query, 2);
+        rejects(&response, ExactPrefix::parse("192.0.2.0/23").unwrap(), 2);
+        let mut missing = response.clone();
+        missing.best_route = None;
+        rejects(&missing, query, 2);
+        let mut malformed_over_cap = response.clone();
+        malformed_over_cap.candidates[0].route = None;
+        rejects(&malformed_over_cap, query, 1);
+        let mut duplicate = response.clone();
+        duplicate.candidates[0].route.as_mut().unwrap().peer_address = "198.51.100.1".to_string();
+        rejects(&duplicate, query, 2);
+        let mut repeated_alternative = response.clone();
+        repeated_alternative
+            .candidates
+            .push(repeated_alternative.candidates[0].clone());
+        rejects(&repeated_alternative, query, 3);
+
+        let source = include_str!("main.rs");
+        let handler = source
+            .split_once("async fn route_table(")
+            .unwrap()
+            .1
+            .split_once("fn table_lookup_body(")
+            .unwrap()
+            .0;
+        assert!(handler.contains(".lookup_best_path("), "{handler}");
+        assert!(handler.contains("tonic::Code::NotFound"), "{handler}");
+        assert!(
+            handler.contains("bad_gateway(\"LookupBestPath\""),
+            "{handler}"
+        );
+        assert!(!handler.contains("Unimplemented"), "{handler}");
+        assert!(!handler.contains("explain_best_path"), "{handler}");
     }
 
     #[test]

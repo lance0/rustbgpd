@@ -1813,6 +1813,14 @@ pub enum RibUpdate {
         /// not registered with this RIB).
         reply: oneshot::Sender<Option<ExplainBestPath>>,
     },
+    /// Query: find the closest installed global Loc-RIB ancestor and return
+    /// its selected route plus every alternative for that matched prefix.
+    LookupBestPath {
+        /// Prefix whose canonical ancestors are probed.
+        prefix: Prefix,
+        /// Response channel. `None` means no installed ancestor exists.
+        reply: oneshot::Sender<Option<ExplainBestPath>>,
+    },
     /// Query: explain whether the current best route for a prefix would be advertised to a peer.
     ExplainAdvertisedRoute {
         /// The target peer.

@@ -81,11 +81,12 @@ listener beyond loopback only with the mTLS controls in `docs/SECURITY.md`.
 | `GET /status`                | `GlobalService.GetGlobal` + `ControlService.GetHealth`         |
 | `GET /protocols/bgp`         | `NeighborService.ListNeighbors` + `PolicyService.ListRejectedRoutes` (per-neighbor `routes.filtered` count) |
 | `GET /protocol/{id}`         | Same live neighbor object exposed by `GET /protocols/bgp`              |
-| `GET /symbols`               | Sorted live protocol identities; routing-table symbols stay empty      |
+| `GET /symbols`               | Sorted live protocol and routing-table identities from `NeighborService.ListNeighbors` |
 | `GET /routes/protocol/{id}`  | `RibService.ListReceivedRoutes` (paged, all unicast families)  |
 | `GET /routes/export/{id}`    | `RibService.ListAdvertisedRoutes` (paged, all unicast families) |
 | `GET /route/{prefix}/protocol/{id}` | `RibService.ListReceivedRoutes` (paged, exact IPv4/IPv6 unicast prefix) |
 | `GET /route/{prefix}/export/{id}` | `RibService.ListAdvertisedRoutes` (paged, exact IPv4/IPv6 unicast prefix) |
+| `GET /route/{prefix}/table/{table}` | `RibService.LookupBestPath` (bounded longest-prefix match with one matched-prefix candidate set) |
 | `GET /routes/peer/{peer}`    | `RibService.ListReceivedRoutes` (paged, all unicast families)  |
 | `GET /routes/filtered/{id}`  | `PolicyService.ListRejectedRoutes` (unpaged — the store is bounded at the `[policy.reject_retention]` capacity, default 1024/peer) |
 | `GET /routes/lc-zwild/protocol/{id}/{x}/{y}` | `GlobalService.GetGlobal` + `PolicyService.ListRejectedRoutes` for IXP Manager's `{daemon ASN}:1101:*` filtered-prefix query |
@@ -121,20 +122,27 @@ Every successful response retains Alice-LG's `api.Version` and
 implement Bird's Eye API version 2.1.0. A route-array request whose actual size
 exceeds that maximum returns HTTP 403 instead of truncating.
 
-IXP Manager's `protocolRoute()` and `exportRoute()` journeys use
-`/route/<prefix>%2F<mask>/protocol/{id}` and `/route/<prefix>%2F<mask>/export/{id}`.
-These views request an exact prefix on every gRPC page, retain every Add-Path
-candidate in daemon order, and apply `--max-routes` only after exact filtering.
-Malformed prefixes return HTTP 400, unknown identities return 404, and daemon
-failures return a sanitized 502.
+IXP Manager's `protocolRoute()`, `exportRoute()`, and `protocolTable()` journeys
+use `/route/<prefix>%2F<mask>/protocol/{id}`,
+`/route/<prefix>%2F<mask>/export/{id}`, and
+`/route/<prefix>%2F<mask>/table/{table}`.
+The protocol and export views request an exact prefix on every gRPC page,
+retain every Add-Path candidate in daemon order, and apply `--max-routes` only
+after exact filtering.
+The table view instead performs one bounded longest-prefix lookup and atomically
+returns the installed winner first followed by every same-prefix alternative;
+it applies `--max-routes` before rendering. Malformed prefixes return HTTP 400,
+unknown identities return 404, and daemon failures return a sanitized 502.
 
 This is deliberately partial IXP Manager support: status, live BGP inventory
 and detail, protocol symbols, member received routes, and member exported
 routes, including exact protocol/export lookup, are available. The exact
-filtered-prefix wildcard journey described below is also available. Global
-table views, counts, less-specific search, other large-community wildcard
-queries, and the complete reject-reason inventory are not implemented; the
-adapter does not claim full Bird's Eye compatibility.
+filtered-prefix wildcard journey described below and a single-prefix
+less-specific table search are also available. The table name validates the
+live routing-table identity over rustbgpd's one global Loc-RIB; it is not an
+independent table selector. Full table snapshots, counts, other
+large-community wildcard queries, and the complete reject-reason inventory are
+not implemented; the adapter does not claim full Bird's Eye compatibility.
 
 IXP Manager v7.4 queries member-filtered prefixes through
 `/routes/lc-zwild/protocol/{id}/{daemon ASN}/1101`. The adapter answers only

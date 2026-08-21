@@ -480,6 +480,12 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.RibService",
+        "LookupBestPath",
+        "/rustbgpd.v1.RibService/LookupBestPath",
+        AuthTier::SensitiveRead,
+    ),
+    method(
+        "rustbgpd.v1.RibService",
         "ListBlackholeDiscards",
         "/rustbgpd.v1.RibService/ListBlackholeDiscards",
         AuthTier::SensitiveRead,
@@ -777,7 +783,7 @@ mod tests {
     const INVENTORY_JSON: &str = include_str!("../../../docs/grpc-method-inventory.json");
     const INVENTORY_MD: &str = include_str!("../../../docs/grpc-method-inventory.md");
     const READ_TOTAL: &str = "| `read` | 0 | 0.0% |";
-    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 60 | 57.7% |";
+    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 61 | 58.1% |";
     const AUTHZ_SOURCE_PATH: &str = "crates/api/src/authz.rs";
     const PRIMARY_PROTO_PATH: &str = "proto/rustbgpd.proto";
     const ADDITIONAL_PROTO_PATHS: &[&str] =
@@ -1009,7 +1015,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 104);
+        assert_eq!(METHODS.len(), 105);
     }
 
     #[test]
@@ -1050,7 +1056,7 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 60);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 61);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 20);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 24);
     }
@@ -1132,7 +1138,7 @@ mod tests {
 
     #[test]
     fn markdown_totals_rejects_stale_percentage() {
-        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 60 | 57.6% |");
+        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 61 | 58.0% |");
         assert_eq!(
             verify_markdown_totals(&stale, &fixture_totals(), METHODS.len()),
             Err("percentage mismatch")
@@ -1182,7 +1188,7 @@ mod tests {
 
     #[test]
     fn markdown_totals_preserves_count_fence() {
-        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 59 | 57.7% |");
+        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 60 | 58.1% |");
         assert_eq!(
             verify_markdown_totals(&stale, &fixture_totals(), METHODS.len()),
             Err("counts mismatch")
