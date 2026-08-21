@@ -158,12 +158,24 @@ exit 0
     }
 
     fn candidate(&self, name: &str, max_prefix: u64) -> PathBuf {
-        self.candidate_for(name, max_prefix, &self.state)
+        self.candidate_with_alias(name, max_prefix, 3, 42, "10.1.0.36")
     }
 
-    fn candidate_for(&self, name: &str, max_prefix: u64, _state: &Path) -> PathBuf {
+    fn candidate_with_alias(
+        &self,
+        name: &str,
+        max_prefix: u64,
+        vli: u64,
+        asn: u64,
+        address: &str,
+    ) -> PathBuf {
         let mut input: serde_json::Value = serde_json::from_slice(FIXTURE).unwrap();
         input["clients"][0]["max_prefix"] = max_prefix.into();
+        input["clients"][0]["vlan_interface_id"] = vli.into();
+        input["clients"][0]["asn"] = asn.into();
+        input["clients"][0]["address"] = address.into();
+        input["clients"][0]["peering_ips"] = serde_json::json!([address]);
+        input["clients"][0]["origins"] = serde_json::json!([asn]);
         let context = self.root.join(format!("{name}.json"));
         fs::write(&context, serde_json::to_vec(&input).unwrap()).unwrap();
         mode(&context, 0o600);
@@ -214,6 +226,10 @@ exit 0
             .into_owned()
     }
 
+    fn current_alias(&self) -> String {
+        fs::read_to_string(self.state.join("current/birdwatcher-protocol-aliases.conf")).unwrap()
+    }
+
     fn set(&self, name: &str, value: &str) {
         fs::write(self.root.join(name), value).unwrap();
     }
@@ -257,6 +273,12 @@ fn initial_activation_and_noop_are_private_exact_and_secret_free() {
     assert!(!serde_json::to_string(&receipt).unwrap().contains(SECRET));
     assert_mode(&rig.state, 0o700);
     assert_mode(&rig.state.join("activation.lock"), 0o600);
+    let aliases = rig.state.join("current/birdwatcher-protocol-aliases.conf");
+    assert_eq!(
+        fs::read_to_string(&aliases).unwrap(),
+        "pb_0003_as42=10.1.0.36@master4\n"
+    );
+    assert_mode(&aliases, 0o600);
     let check_log = fs::read_to_string(rig.root.join("checker.log")).unwrap();
     assert!(
         check_log
@@ -368,11 +390,15 @@ fn receipt_and_toml_runtime_bindings_are_independently_enforced() {
 #[test]
 fn changed_candidate_rolls_back_exactly_and_refuses_mutable_aliases() {
     let rig = Rig::new();
-    let first = rig.candidate("candidate-a", 100);
+    let first = rig.candidate_with_alias("candidate-a", 100, 3, 42, "10.1.0.36");
     rig.run(&first, true, &rig.activation).unwrap();
-    let second = rig.candidate("candidate-b", 101);
+    let first_generation = rig.current();
+    let second = rig.candidate_with_alias("candidate-b", 101, 4, 43, "10.1.0.37");
     rig.run(&second, false, &rig.activation).unwrap();
     let prior = rig.current();
+    assert_ne!(prior, first_generation);
+    let prior_alias = "pb_0004_as43=10.1.0.37@master4\n";
+    assert_eq!(rig.current_alias(), prior_alias);
 
     let stop = Arc::new(AtomicBool::new(false));
     let observed_bad = Arc::new(AtomicBool::new(false));
@@ -388,15 +414,21 @@ fn changed_candidate_rolls_back_exactly_and_refuses_mutable_aliases() {
             }
         })
     };
-    let tampered = rig.candidate("candidate-c", 102);
-    fs::write(tampered.join("config.toml"), "tampered").unwrap();
+    let tampered = rig.candidate_with_alias("candidate-c", 102, 5, 44, "10.1.0.38");
+    fs::write(
+        tampered.join("birdwatcher-protocol-aliases.conf"),
+        "tampered\n",
+    )
+    .unwrap();
     assert_refused(rig.run(&tampered, false, &rig.activation));
-    let linked = rig.candidate("candidate-linked", 103);
-    let policy = linked.join("policy/client-3.rpol");
-    fs::hard_link(&policy, rig.root.join("mutable-alias.rpol")).unwrap();
+    assert_eq!(rig.current_alias(), prior_alias);
+    let linked = rig.candidate_with_alias("candidate-linked", 103, 6, 45, "10.1.0.39");
+    let aliases = linked.join("birdwatcher-protocol-aliases.conf");
+    fs::hard_link(&aliases, rig.root.join("mutable-alias.conf")).unwrap();
     assert_refused(rig.run(&linked, false, &rig.activation));
+    assert_eq!(rig.current_alias(), prior_alias);
 
-    let third = rig.candidate("candidate-d", 104);
+    let third = rig.candidate_with_alias("candidate-d", 104, 7, 46, "10.1.0.40");
     let activations = fs::read_to_string(rig.root.join("activation.log")).unwrap();
     assert_eq!(
         rig.run(&third, false, &rig.root.join("missing-command")),
@@ -406,6 +438,7 @@ fn changed_candidate_rolls_back_exactly_and_refuses_mutable_aliases() {
     watcher.join().unwrap();
     assert!(!observed_bad.load(Ordering::Relaxed));
     assert_eq!(rig.current(), prior);
+    assert_eq!(rig.current_alias(), prior_alias);
     assert_eq!(
         fs::read_to_string(rig.root.join("runtime")).unwrap().trim(),
         prior

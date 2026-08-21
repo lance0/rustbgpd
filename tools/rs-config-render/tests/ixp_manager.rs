@@ -117,7 +117,11 @@ fn supported_render_is_deterministic_and_explicit() {
             .unwrap()
             .files
     );
-    assert_eq!(first.files.len(), 3);
+    assert_eq!(first.files.len(), 4);
+    let aliases = &first.files["birdwatcher-protocol-aliases.conf"];
+    assert_eq!(aliases, "pb_0003_as42=10.1.0.36@master4\n");
+    assert!(!aliases.contains("PCH DNS"));
+    assert!(!aliases.contains(SECRET));
     let config = &first.files["config.toml"];
     for expected in [
         "listen_addresses = [\"192.0.2.18\"]",
@@ -355,11 +359,63 @@ fn v1_and_v2_dispatch_are_strict_and_v1_output_stays_legacy() {
 }
 
 #[test]
+fn protocol_aliases_are_sorted_family_exact_and_bounded() {
+    let mut v2 = v2_value(V2_SUPPORTED);
+    v2["clients"].as_array_mut().unwrap().reverse();
+    assert_eq!(
+        rendered_v2(&v2).unwrap().files["birdwatcher-protocol-aliases.conf"],
+        "pb_0001_as1213=10.1.0.10@master4\npb_0004_as112=10.1.0.6@master4\n"
+    );
+
+    let mut v6 = value();
+    v6["router"]["protocol"] = 6.into();
+    v6["router"]["peering_ip"] = "2001:db8::1".into();
+    v6["clients"][0]["vlan_interface_id"] = 12345.into();
+    v6["clients"][0]["address"] = "2001:db8::2".into();
+    v6["clients"][0]["peering_ips"] = serde_json::json!(["2001:db8::2"]);
+    v6["clients"][0]["prefixes"] = serde_json::json!(["2001:db8:1::/48"]);
+    assert_eq!(
+        rendered(&v6).unwrap().files["birdwatcher-protocol-aliases.conf"],
+        "pb_12345_as42=2001:db8::2@master6\n"
+    );
+
+    let mut capped = value();
+    let template = capped["clients"][0].clone();
+    let mut clients = (0..4097_u64)
+        .map(|index| {
+            let mut client = template.clone();
+            let asn = 64_000 + index;
+            let address = format!("10.{}.{}.1", index / 256, index % 256);
+            client["customer_id"] = (index + 1).into();
+            client["vlan_interface_id"] = (index + 1).into();
+            client["asn"] = asn.into();
+            client["address"] = address.clone().into();
+            client["peering_ips"] = serde_json::json!([address]);
+            client["origins"] = serde_json::json!([asn]);
+            client
+        })
+        .collect::<Vec<_>>();
+    let extra = clients.pop().unwrap();
+    capped["clients"] = clients.into();
+    capped["complete"]["client_count"] = 4096.into();
+    let aliases = &rendered(&capped).unwrap().files["birdwatcher-protocol-aliases.conf"];
+    assert_eq!(aliases.lines().count(), 4096);
+    assert!(aliases.starts_with("pb_0001_as64000=10.0.0.1@master4\n"));
+    assert!(aliases.ends_with("pb_4096_as68095=10.15.255.1@master4\n"));
+    capped["clients"].as_array_mut().unwrap().push(extra);
+    capped["complete"]["client_count"] = 4097.into();
+    assert_eq!(
+        rendered(&capped).err(),
+        Some(Error::Refused("Birdwatcher protocol alias cap exceeded"))
+    );
+}
+
+#[test]
 fn v2_filter_policies_preserve_order_direction_and_reachability() {
     let full = rendered_v2(&v2_value(V2_FILTERS)).unwrap().files;
     assert_eq!(
         content_digest(&full.values().map(String::as_str).collect::<String>()),
-        "dfb2e0206b79de2c0b53f0e8e6a501550ba7b92c706f9e3183d349328efc31d6"
+        "4b860dad0edf95be0af40c2e873338994aa464d3342187d72a74fae60049f391"
     );
     let import = &full["policy/client-1.rpol"];
     assert_terms(
@@ -1059,6 +1115,7 @@ fn cli_enforces_private_checker_order_receipt_last_and_redaction() {
     assert_eq!(mode(&out), 0o700);
     assert_eq!(mode(&out.join("policy")), 0o700);
     for path in [
+        "birdwatcher-protocol-aliases.conf",
         "config.toml",
         "policy/ixp-hygiene.rpol",
         "policy/client-3.rpol",

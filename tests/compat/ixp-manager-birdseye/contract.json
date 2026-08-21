@@ -52,6 +52,13 @@
     "ixp_manager_version": "7.4.0",
     "router_handle": "b2-rs1-lan1-ipv4",
     "strict_receipt_required": true,
+    "birdwatcher_protocol_aliases": {
+      "candidate_path": "birdwatcher-protocol-aliases.conf",
+      "current_path": "<runtime-state-dir>/activation/current/birdwatcher-protocol-aliases.conf",
+      "line": "pb_{vlan_interface_id:04}_as{asn}={peer_address}@master{protocol}",
+      "tables": {"4": "master4", "6": "master6"},
+      "cap": 4096
+    },
     "own_as_large_community_scrub": {
       "syntax": "remove large-community <router-asn>:*:*",
       "global_export_chain_position": "last",

@@ -63,6 +63,15 @@ directory without copying secrets. The generated config fixes the gRPC UDS at
 `<runtime-state-dir>/grpc.sock`. A
 candidate without that receipt is incomplete and must not be deployed.
 
+Each v1/v2 candidate includes `birdwatcher-protocol-aliases.conf`, ordered by
+numeric VLAN-interface ID with lines such as
+`pb_0003_as42=10.1.0.36@master4`. The file is mode 0600 and participates in the
+same generated-file hashes and immutable activation generation as
+`config.toml`; at most 4096 aliases are accepted. Configure the adapter with
+`--protocol-alias-file <runtime-state-dir>/activation/current/birdwatcher-protocol-aliases.conf`
+and send it `SIGHUP` after successful activation. The renderer and activation
+helper deliberately do not discover or signal adapter processes.
+
 `ixp-manager-v2` preserves ordered UI-filter rows. Advertise AS_IS is a no-op;
 deny and prepend actions add the exact IXP Manager route-server control large
 community and matching rules accumulate after hygiene and IRR checks. Receive

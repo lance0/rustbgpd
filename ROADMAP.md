@@ -632,7 +632,11 @@ and global cells use the typed first path ASN. Exact 255/256 prepend and
 output are exercised against the real Foil and MySQL seed. Global and
 per-client override export chains now end with a
 router-own-AS large-community scrub, matching the pinned templates without
-peer context or wildcard matching. Generic UI-filter semantics, custom-skin
+peer context or wildcard matching. Every candidate also binds its exact
+Birdwatcher member aliases into the same private receipt and immutable
+activation generation; the stable `current` path changes atomically with
+daemon configuration, while adapter SIGHUP remains an explicit operator step.
+Generic UI-filter semantics, custom-skin
 migration, and multi-address ownership remain open. The external adapter now
 also serves the IXP Manager v7.4 status, live protocol inventory/detail,
 symbols, member received, and member export slice through startup-only direct
