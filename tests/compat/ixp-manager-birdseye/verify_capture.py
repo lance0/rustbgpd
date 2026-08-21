@@ -63,6 +63,12 @@ MANUAL_CONFIG_EXPORT = {
     "ixp_manager_version": "7.4.0",
     "router_handle": "b2-rs1-lan1-ipv4",
     "strict_receipt_required": True,
+    "own_as_large_community_scrub": {
+        "syntax": "remove large-community <router-asn>:*:*",
+        "global_export_chain_position": "last",
+        "client_override_export_chain_position": "last",
+        "foreign_global_admins": "preserved",
+    },
     "ui_filters": {
         "advertise_actions": [
             "AS_IS", "NO_ADVERTISE", "PREPEND_ONCE", "PREPEND_TWICE",

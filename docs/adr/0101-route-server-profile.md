@@ -103,6 +103,9 @@ Add-Path send, so mitigation (b) existed; the gap was (a).
    identical to an enabled one's, and tagged-route divergence is
    evaluated per member. `rs_control_communities` defaults on for
    rs-clients again on the strength of this.
+   The pinned IXP Manager renderer also appends a router-AS wildcard scrub as
+   the final global or per-client export policy, so received own-AS control
+   communities do not escape while foreign administrators remain untouched.
 
 4. **RPKI/ASPA enforcement stays in policy — no hard-coded RS gate.**
    Validation state is computed at import; enforcement is rpol/TOML

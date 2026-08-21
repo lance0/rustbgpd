@@ -926,6 +926,19 @@ impl Parser<'_> {
                 // is purely additive (a non-well-known identifier was a
                 // parse error before).
                 let arg = match self.peek() {
+                    Some(wildcard) if wildcard.kind == Tok::LargeCommunityWildcard => {
+                        self.bump();
+                        let global = self
+                            .text(wildcard)
+                            .split(':')
+                            .next()
+                            .expect("token shape")
+                            .to_owned();
+                        CommunityArg::LargeAdminWildcard(Spanned::new(
+                            self.parse_u32_text(&global, wildcard.span)?,
+                            wildcard.span,
+                        ))
+                    }
                     Some(ident)
                         if ident.kind == Tok::Ident && !self.is_well_known_community(ident) =>
                     {
@@ -936,6 +949,7 @@ impl Parser<'_> {
                 };
                 let end = match &arg {
                     CommunityArg::Lit(lit) => lit.span,
+                    CommunityArg::LargeAdminWildcard(global) => global.span,
                     CommunityArg::Var(name) => name.span,
                 };
                 let span = token.span.to(end);

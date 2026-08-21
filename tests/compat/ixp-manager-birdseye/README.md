@@ -60,6 +60,10 @@ receipt-last publication, and v3 refusal are load-bearing. This proves only the
 bounded manual export subset; it does not make the adapter runtime-compatible
 or claim a generic IXP Manager policy engine.
 
+The strict candidates also append the router-own-AS large-community scrub last
+to the global export chain and every v2 client receive override. The manifest
+pins its exact removal-only syntax, placement, and foreign-admin preservation.
+
 Run the gate from the repository root:
 
 ```console

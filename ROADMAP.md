@@ -629,8 +629,10 @@ non-overlapping peer-scoped or global PREPEND receive actions. Global PREPEND
 uses the typed first path ASN, matching a pinned BIRD baseline-delta proof;
 optional prefix guards, continuation/termination, 256-per-client and 4096-total
 caps, and overlapping-PREPEND refusal are exercised against the real Foil and
-MySQL seed. Generic UI-filter semantics, custom-skin migration, and
-multi-address ownership remain open. The external adapter now
+MySQL seed. Global and per-client override export chains now end with a
+router-own-AS large-community scrub, matching the pinned templates without
+peer context or wildcard matching. Generic UI-filter semantics, custom-skin
+migration, and multi-address ownership remain open. The external adapter now
 also serves the IXP Manager v7.4 status, live protocol inventory/detail,
 symbols, member received, and member export slice through startup-only direct
 aliases or a bounded file-backed resolver that swaps atomically on Unix SIGHUP

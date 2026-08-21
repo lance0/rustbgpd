@@ -291,6 +291,112 @@ fn else_lowers_to_negated_guard() {
 }
 
 #[test]
+fn large_community_admin_wildcard_is_route_only_and_concrete_end_to_end() {
+    use crate::engine::{PolicyChain, apply_modifications, explain::explain_chain_statements};
+    use rustbgpd_wire::{LargeCommunity, PathAttribute};
+
+    let own_a = LargeCommunity::new(65_501, 1, 2);
+    let foreign = LargeCommunity::new(64_496, 3, 4);
+    let own_b = LargeCommunity::new(65_501, 5, 6);
+    let staged = LargeCommunity::new(65_501, 9, 9);
+    let communities = Box::leak(vec![own_a, foreign, own_a, own_b].into_boxed_slice());
+    let ctx = RouteContext {
+        large_communities: communities,
+        ..route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound)
+    };
+    let mut compiled = compile_ok(
+        "policy scrub { term stage { add large-community 65501:9:9 } term remove-own { remove large-community 65501:*:*; remove large-community 65501:*:* } term allow { accept } }",
+    );
+    let live = compiled.evaluate(&ctx);
+    assert_eq!(
+        live.modifications.large_communities_remove,
+        vec![own_a, own_b]
+    );
+    assert_eq!(live.modifications.large_communities_add, vec![staged]);
+    let mut hits = compiled.zero_term_hits();
+    assert_eq!(compiled.evaluate_recording_hits(&ctx, &mut hits), live);
+    let oversized = vec![own_a; 5_462];
+    let oversized_ctx = RouteContext {
+        large_communities: &oversized,
+        ..ctx
+    };
+    let dry = compiled.evaluate_recording_hits(&oversized_ctx, &mut hits);
+    assert_eq!(dry, crate::PolicyResult::deny());
+    let mut attrs = vec![PathAttribute::LargeCommunities(communities.to_vec())];
+    apply_modifications(&mut attrs, &live.modifications);
+    let expected = vec![PathAttribute::LargeCommunities(vec![foreign, staged])];
+    assert_eq!(attrs, expected);
+
+    compiled.policies[0].terms.remove(0);
+    assert!(!compiled.requires_peer_context());
+    let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "scrub".to_string(),
+        Arc::new(compiled),
+    )]);
+    assert!(chain.modifies_source_control_communities());
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    let traced_removals = trace.steps[0]
+        .modifications
+        .iter()
+        .filter(|line| line.starts_with("large_community - 65501:"))
+        .count();
+    assert_eq!(traced_removals, 2);
+    assert_eq!(chain.evaluate(&oversized_ctx), crate::PolicyResult::deny());
+    let oversized_trace = explain_chain_statements(Some(&chain), &oversized_ctx);
+    assert_eq!(oversized_trace.action, PolicyAction::Deny);
+}
+
+#[test]
+fn large_community_wildcard_syntax_is_exact_and_removal_only() {
+    for bad in [
+        "add large-community 65501:*:*",
+        "remove community 65501:*:*",
+        "remove large-community *:*:*",
+        "remove large-community 65501:*:1",
+        "remove large-community 65501:1:*",
+        "remove large-community router-asn:*:*",
+        "remove large-community LC:65501:*:*",
+        "remove large-community 65501 :*:*",
+        "remove large-community 65501:*: *",
+        "remove large-community 4294967296:*:*",
+        "if route.large-communities has 65501:*:* { accept }",
+    ] {
+        let rendered = diagnostics_of(&format!("policy p {{ term t {{ {bad} }} }}")).1;
+        assert!(!rendered.is_empty(), "unsupported shape compiled: {bad}");
+    }
+}
+
+#[test]
+fn large_community_wildcard_prepays_the_full_wire_scan() {
+    let wildcard = "remove large-community 65501:*:*;";
+    let source = |n| format!("policy p {{ term t {{ {} accept }} }}", wildcard.repeat(n));
+    compile_ok(&source(183));
+    let (_, rendered) = diagnostics_of(&source(184));
+    assert!(rendered.contains("exceeds the worst-case evaluation budget"));
+
+    let guarded = "set med 2; set local-pref 100; set med 3; remove large-community 65501:*:*;";
+    let conditional = |n| {
+        format!(
+            "policy p {{ term t {{ if route.med == 1 && route.local-pref == 100 {{ {} accept }} reject }} }}",
+            guarded.repeat(n)
+        )
+    };
+    compile_ok(&conditional(181));
+    let (_, rendered) = diagnostics_of(&conditional(182));
+    assert!(rendered.contains("exceeds the worst-case evaluation budget"));
+
+    let nested = |n| {
+        format!(
+            "asn-set one {{ 1 }} fn bump(x: u32) -> u32 {{ x }} policy p {{ term t {{ for c in one {{ if route.med == 1 && route.local-pref == 100 {{ remove community c; add community c; set med bump(2); {} accept }} }} reject }} }}",
+            guarded.repeat(n)
+        )
+    };
+    compile_ok(&nested(180));
+    let (_, rendered) = diagnostics_of(&nested(181));
+    assert!(rendered.contains("exceeds the worst-case evaluation budget"));
+}
+
+#[test]
 fn apply_inlines_the_target_decision() {
     let chain = compile_ok(
         "policy inner {

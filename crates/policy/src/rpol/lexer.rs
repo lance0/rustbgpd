@@ -33,6 +33,9 @@ pub enum Tok {
     /// `RT:65001:100`, `RO:192.0.2.1:5` — extended-community literal.
     #[regex(r"(RT|RO):([0-9]+|[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):[0-9]+")]
     ExtCommunityLit,
+    /// `65000:*:*` — exact global-admin large-community removal wildcard.
+    #[regex(r"[0-9]+:\*:\*")]
+    LargeCommunityWildcard,
     /// `65000:1:2` or `LC:65000:1:2` — large-community literal.
     #[regex(r"(LC:)?[0-9]+:[0-9]+:[0-9]+")]
     LargeCommunityLit,
@@ -241,6 +244,7 @@ impl Tok {
     pub fn describe(self) -> &'static str {
         match self {
             Tok::ExtCommunityLit => "extended-community literal",
+            Tok::LargeCommunityWildcard => "large-community global-admin wildcard",
             Tok::LargeCommunityLit => "large-community literal",
             Tok::StdCommunityLit => "community literal",
             Tok::PrefixLit => "prefix literal",
@@ -363,6 +367,7 @@ mod tests {
         assert_eq!(kinds("2001:db8::1"), vec![Tok::Ipv6Lit]);
         assert_eq!(kinds("65000:100"), vec![Tok::StdCommunityLit]);
         assert_eq!(kinds("65000:1:2"), vec![Tok::LargeCommunityLit]);
+        assert_eq!(kinds("65000:*:*"), vec![Tok::LargeCommunityWildcard]);
         assert_eq!(kinds("LC:65000:1:2"), vec![Tok::LargeCommunityLit]);
         assert_eq!(kinds("RT:65001:100"), vec![Tok::ExtCommunityLit]);
         assert_eq!(kinds("RO:192.0.2.1:5"), vec![Tok::ExtCommunityLit]);

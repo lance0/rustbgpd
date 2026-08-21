@@ -638,6 +638,18 @@ impl<'a> Lowerer<'a> {
                 // staged modifications first preserves execution
                 // order). Parameter references are compile-time
                 // constants and stage as literals in `apply_action`.
+                Stmt::Action(ActionStmt::Community {
+                    arg: CommunityArg::LargeAdminWildcard(global),
+                    ..
+                }) => {
+                    flush_pending(&mut out, &mut pending);
+                    out.push((
+                        MatchExpr::True,
+                        TermAction::RemoveLargeCommunityAdmin {
+                            global_admin: global.node,
+                        },
+                    ));
+                }
                 Stmt::Action(
                     action @ ActionStmt::Community {
                         add,
@@ -1227,6 +1239,15 @@ impl Lowerer<'_> {
                 // term, in execution order relative to staged
                 // modifications.
                 ActionStmt::Community {
+                    arg: CommunityArg::LargeAdminWildcard(global),
+                    ..
+                } => {
+                    flush(&mut tail, &mut mods);
+                    tail.push(TermAction::RemoveLargeCommunityAdmin {
+                        global_admin: global.node,
+                    });
+                }
+                ActionStmt::Community {
                     add,
                     arg: CommunityArg::Var(name),
                     ..
@@ -1298,6 +1319,10 @@ impl Lowerer<'_> {
             // writing the value. (Binding-valued references are emitted as
             // their own CommunityVar terms by the statement/body lowerers
             // and never reach here.)
+            ActionStmt::Community {
+                arg: CommunityArg::LargeAdminWildcard(_),
+                ..
+            } => unreachable!("route-dependent wildcard action handled by callers"),
             ActionStmt::Community {
                 add,
                 arg: CommunityArg::Var(name),
@@ -1637,7 +1662,7 @@ fn accept_predicate(policy: &CompiledPolicy) -> MatchExpr {
     let mut arms: Vec<MatchExpr> = Vec::new();
     for term in &policy.terms {
         match term.action {
-            TermAction::Continue(_) => {}
+            TermAction::Continue(_) | TermAction::RemoveLargeCommunityAdmin { .. } => {}
             // LAN-302/LAN-303: the typechecker rejects `apply` of a
             // policy that declares bindings or contains loops, so an
             // inlined predicate never contains these terms.
