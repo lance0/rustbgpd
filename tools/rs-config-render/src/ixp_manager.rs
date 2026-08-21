@@ -555,9 +555,6 @@ fn validate_ui_filters(
         {
             return Err(Error::Refused("UI-filter peer identity is missing"));
         }
-        if filter.action_receive.prepend_count().is_some() && filter.peer.is_none() {
-            return Err(Error::Refused("global receive PREPEND is unsupported"));
-        }
         previous = Some(order_key);
     }
     for (right_index, right) in filters.iter().enumerate() {
@@ -868,7 +865,7 @@ fn render_client(
                     .peer
                     .as_ref()
                     .and_then(|peer| peer.asn)
-                    .expect("validated PREPEND peer"),
+                    .map_or_else(|| "path-first".to_owned(), |asn| asn.to_string()),
                 action.prepend_count().expect("PREPEND action")
             ),
         };

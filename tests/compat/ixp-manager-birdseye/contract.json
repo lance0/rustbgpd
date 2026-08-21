@@ -59,7 +59,8 @@
         "PREPEND_TWICE",
         "PREPEND_THRICE"
       ],
-      "receive_prepend_requires_peer": true,
+      "global_receive_prepend": "path-first-with-optional-received-prefix",
+      "peer_receive_prepend": "literal-peer-asn",
       "overlapping_receive_prepend": false,
       "per_client_cap": 256,
       "total_cap": 4096

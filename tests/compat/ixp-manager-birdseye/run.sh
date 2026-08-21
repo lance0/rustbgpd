@@ -109,6 +109,10 @@ candidate_full="$tmp/candidate-full"
 candidate_supported="$tmp/candidate-supported"
 render_v2 "$capture_output/config-ui-filter.json" "$candidate_full"
 render_v2 "$supported" "$candidate_supported"
+[ "$(grep -Fxc '    term ui-receive-32 { if route.prefix == 203.0.113.0/24 { prepend as path-first 1 } }' \
+  "$candidate_supported/policy/client-1.rpol")" -eq 1 ]
+[ "$(grep -Fxc '    term ui-receive-33 { if route.as-path matches "^112_" && route.prefix == 192.175.48.0/24 { prepend as 112 2 } }' \
+  "$candidate_supported/policy/client-1.rpol")" -eq 1 ]
 
 legacy="$tmp/candidate-v1"
 legacy_input="$tmp/ixp-manager-v1-supported.json"
@@ -167,6 +171,14 @@ test supported-advertise-prefix-direction {
 test supported-receive-prepend-then-accept {
     route { prefix 192.175.48.0/24; as-path "112" }
     expect client-1-receive == accept with prepend as 112 2
+}
+test supported-global-prepend-uses-first-not-origin {
+    route { prefix 203.0.113.0/24; as-path "64501 64500" }
+    expect client-1-receive == accept with prepend as 64501 1
+}
+test supported-global-prepend-prefix-miss {
+    route { prefix 203.0.114.0/24; as-path "64501 64500" }
+    expect client-1-receive == accept
 }'
 
 "$root/run-adapter-consumer.sh" "$tmp/ixp-manager" "$image" >/dev/null

@@ -212,6 +212,7 @@ impl fmt::Display for EvalErrorKind {
                     PrependAs::LocalAs => write!(f, "the chain carries no local ASN")?,
                     PrependAs::PeerAs => write!(f, "the peer ASN is unknown")?,
                     PrependAs::OriginAs => write!(f, "the route has no origin AS")?,
+                    PrependAs::PathFirst => write!(f, "the route has no usable first path ASN")?,
                 }
                 write!(f, ")")
             }

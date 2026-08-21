@@ -77,6 +77,17 @@
     ],
     "ui_filters": [
         {
+            "id": 32,
+            "customer_id": 2,
+            "peer": null,
+            "received_prefix": "203.0.113.0/24",
+            "advertised_prefix": null,
+            "protocol": 4,
+            "action_advertise": "AS_IS",
+            "action_receive": "PREPEND_ONCE",
+            "order_by": 3
+        },
+        {
             "id": 33,
             "customer_id": 2,
             "peer": {
@@ -109,7 +120,7 @@
     "complete": {
         "handle": "b2-rs1-lan1-ipv4",
         "client_count": 2,
-        "ui_filter_count": 2,
+        "ui_filter_count": 3,
         "marker": "END_OF_RUSTBGPD_IXP_MANAGER_CONFIG_b2-rs1-lan1-ipv4"
     }
 }

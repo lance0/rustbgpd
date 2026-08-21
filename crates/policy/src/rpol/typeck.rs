@@ -1016,7 +1016,7 @@ impl<'a> Checker<'a> {
                 }
             }
             ActionStmt::Prepend { asn, count, .. } => {
-                // A computed operand (`self`/`peer`, or an `origin`
+                // A computed operand (`self`/`peer`, or an `origin`/`path-first`
                 // identifier that is not a declared parameter —
                 // LAN-296) needs no parameter check; the operand
                 // decision itself is shared with lowering via

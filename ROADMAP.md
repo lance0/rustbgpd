@@ -625,10 +625,11 @@ and delivers explicit updated/release callbacks. The packaged opt-in
 namespace with shared-fence serialization and independent MD5-BGP continuity.
 Its strict router-config/v2 boundary now preserves the pinned v7.4 UI-filter
 rows and translates all advertise actions plus ordered AS_IS/deny and
-non-overlapping peer-scoped PREPEND receive actions. Exact prefix direction,
-first-AS guards, continuation/termination, 256-per-client and 4096-total caps,
-and fail-closed global/overlapping PREPEND are exercised against the real Foil
-and MySQL seed. Generic UI-filter semantics, custom-skin migration, and
+non-overlapping peer-scoped or global PREPEND receive actions. Global PREPEND
+uses the typed first path ASN, matching a pinned BIRD baseline-delta proof;
+optional prefix guards, continuation/termination, 256-per-client and 4096-total
+caps, and overlapping-PREPEND refusal are exercised against the real Foil and
+MySQL seed. Generic UI-filter semantics, custom-skin migration, and
 multi-address ownership remain open. The external adapter now
 also serves the IXP Manager v7.4 status, live protocol inventory/detail,
 symbols, member received, and member export slice through startup-only direct

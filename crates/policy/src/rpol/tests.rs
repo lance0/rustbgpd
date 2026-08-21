@@ -2118,6 +2118,7 @@ fn computed_prepend_operands_lower_to_computed_slot() {
         ("self", PrependAs::LocalAs),
         ("peer", PrependAs::PeerAs),
         ("origin", PrependAs::OriginAs),
+        ("path-first", PrependAs::PathFirst),
     ] {
         let chain = compile_ok(&format!(
             "policy p {{ term t {{ prepend as {source_operand} 3; accept }} }}"
@@ -2142,20 +2143,75 @@ fn fixed_prepend_forms_unchanged() {
     assert_eq!(mods.as_path_prepend, Some((65001, 3)));
     assert_eq!(mods.as_path_prepend_computed, None);
 
-    let mut store = SetStore::new();
-    let set =
-        super::RpolFile::parse("policy p(origin: u32) { term t { prepend as origin 2; accept } }")
-            .expect("compiles");
-    let chain = set
-        .compile_policy("p", &[64999], &mut store)
-        .expect("policy exists");
-    let mods = first_term_mods(&chain);
+    for name in ["origin", "path-first"] {
+        let mut store = SetStore::new();
+        let set = super::RpolFile::parse(&format!(
+            "policy p({name}: u32) {{ term t {{ prepend as {name} 2; accept }} }}"
+        ))
+        .expect("compiles");
+        let chain = set
+            .compile_policy("p", &[64999], &mut store)
+            .expect("policy exists");
+        assert_eq!(first_term_mods(&chain).as_path_prepend, Some((64999, 2)));
+        assert_eq!(first_term_mods(&chain).as_path_prepend_computed, None);
+    }
+}
+
+fn path_first_ctx(segments: Vec<rustbgpd_wire::AsPathSegment>) -> RouteContext<'static> {
+    let path = Box::leak(Box::new(rustbgpd_wire::AsPath { segments }));
+    RouteContext {
+        as_path: Some(path),
+        ..prepend_ctx(None, None)
+    }
+}
+
+#[test]
+fn prepend_path_first_uses_only_a_valid_leading_sequence() {
+    use rustbgpd_wire::AsPathSegment::{AsSequence, AsSet};
+    let chain = compile_ok("policy p { term t { prepend as path-first 2; accept } }");
+    for (segments, expected) in [
+        (vec![AsSequence(vec![64500])], Some(64500)),
+        (vec![AsSequence(vec![64501, 64500])], Some(64501)),
+        (vec![], None),
+        (vec![AsSequence(vec![]), AsSequence(vec![64500])], None),
+        (vec![AsSet(vec![64501]), AsSequence(vec![64500])], None),
+        (vec![AsSequence(vec![0, 64500])], None),
+    ] {
+        let result = chain.evaluate(&path_first_ctx(segments));
+        assert_eq!(
+            result.action,
+            expected.map_or(PolicyAction::Deny, |_| PolicyAction::Permit)
+        );
+        assert_eq!(
+            result.modifications.as_path_prepend,
+            expected.map(|asn| (asn, 2))
+        );
+    }
     assert_eq!(
-        mods.as_path_prepend,
-        Some((64999, 2)),
-        "a parameter named `origin` must stay a parameter"
+        chain.evaluate(&prepend_ctx(None, None)).action,
+        PolicyAction::Deny
     );
-    assert_eq!(mods.as_path_prepend_computed, None);
+    assert!(chain.requires_as_path_asns());
+    assert!(!chain.requires_peer_context());
+}
+
+#[test]
+fn path_first_failure_discards_earlier_staged_modifications() {
+    use rustbgpd_wire::AsPathSegment::AsSet;
+    let chain = compile_ok(
+        "policy p {
+            term staged { set local-pref 200 }
+            term path { prepend as path-first 1; accept }
+        }",
+    );
+    for ctx in [
+        prepend_ctx(None, None),
+        path_first_ctx(vec![AsSet(vec![64500])]),
+    ] {
+        let result = chain.evaluate(&ctx);
+        assert_eq!(result.action, PolicyAction::Deny);
+        assert!(result.modifications.is_empty());
+    }
 }
 
 #[test]
@@ -2239,7 +2295,7 @@ fn computed_prepend_peer_context_flags() {
     assert!(peer_chain.requires_peer_context());
     assert!(peer_chain.peer_prepend_action().is_some());
 
-    for operand in ["self", "origin"] {
+    for operand in ["self", "origin", "path-first"] {
         let chain = compile_ok(&format!(
             "policy p {{ term t {{ prepend as {operand} 3; accept }} }}"
         ));
@@ -2341,6 +2397,24 @@ fn computed_prepend_explain_renders_operand_and_agrees() {
         step.term_traces
     );
     assert!(step.modifications.is_empty(), "a deny contributes no mods");
+
+    let compiled = compile_ok("policy p { term t { prepend as path-first 2; accept } }");
+    let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "p".to_string(),
+        std::sync::Arc::new(compiled),
+    )]);
+    let trace = explain_chain_statements(
+        Some(&chain),
+        &path_first_ctx(vec![rustbgpd_wire::AsPathSegment::AsSequence(vec![
+            64501, 64500,
+        ])]),
+    );
+    assert!(
+        trace.steps[0]
+            .term_traces
+            .iter()
+            .any(|line| { line.contains("prepend as path-first 2") })
+    );
 }
 
 /// In-language `test` fixtures cover all three operands: `peer { asn }`

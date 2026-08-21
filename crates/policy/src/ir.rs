@@ -1022,7 +1022,8 @@ impl CompiledChain {
 
     /// Whether evaluating this chain needs the typed `AS_PATH` on the
     /// route context — true iff some term (loop bodies included)
-    /// iterates `route.as-path` (LAN-303, [`LoopSource::AsPath`]).
+    /// iterates `route.as-path` (LAN-303, [`LoopSource::AsPath`]) or
+    /// resolves `prepend as path-first`.
     /// Construction sites that leave [`crate::engine::RouteContext::as_path`]
     /// `None` make such loops iterate zero times, so callers with a
     /// typed path in hand should always pass it.
@@ -1032,6 +1033,11 @@ impl CompiledChain {
             matches!(
                 &term.action,
                 TermAction::ForEach(node) if node.source == LoopSource::AsPath
+            )
+        }) || self.any_action_mods(&|mods| {
+            matches!(
+                mods.as_path_prepend_computed,
+                Some((crate::engine::PrependAs::PathFirst, _))
             )
         })
     }
