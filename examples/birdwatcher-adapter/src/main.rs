@@ -642,6 +642,7 @@ fn protocol_row(state: &AppState, n: &proto::NeighborState) -> Result<(String, V
         "bird_protocol": "BGP",
         "state": format_ixp_state(n.state),
         "bgp_state": format_bgp_state(n.state),
+        "connection": format_connection(n.state),
         "neighbor_address": cfg.address,
         "neighbor_as": cfg.remote_asn,
         "description": cfg.description,
@@ -669,6 +670,12 @@ fn protocol_row(state: &AppState, n: &proto::NeighborState) -> Result<(String, V
         row["limit_action"] = Value::from(n.max_prefix_action.clone());
     }
     if let Some(negotiated) = &n.negotiated_session {
+        if let Some(address) = &negotiated.local_address {
+            row["source_address"] = Value::from(address.clone());
+        }
+        if let Some(seconds) = negotiated.keepalive_interval_seconds {
+            row["keepalive"] = Value::from(seconds);
+        }
         if let Some(router_id) = &negotiated.remote_router_id {
             row["neighbor_id"] = Value::from(router_id.clone());
         }
@@ -684,6 +691,13 @@ fn protocol_row(state: &AppState, n: &proto::NeighborState) -> Result<(String, V
         }
         if !capabilities.is_empty() {
             row["neighbor_capabilities"] = serde_json::json!(capabilities);
+        }
+        if cfg.route_server_client {
+            let mut session = vec!["external", "route-server"];
+            if negotiated.four_octet_as == Some(true) {
+                session.push("AS4");
+            }
+            row["bgp_session"] = serde_json::json!(session);
         }
     }
     Ok((protocol, row))
@@ -1657,6 +1671,17 @@ fn format_bgp_state(state: i32) -> &'static str {
     }
 }
 
+fn format_connection(state: i32) -> &'static str {
+    match proto::SessionState::try_from(state) {
+        Ok(proto::SessionState::Connect) => " Connect",
+        Ok(proto::SessionState::Active) => " Active",
+        Ok(proto::SessionState::OpenSent) => " OpenSent",
+        Ok(proto::SessionState::OpenConfirm) => " OpenConfirm",
+        Ok(proto::SessionState::Established) => " Established",
+        _ => "",
+    }
+}
+
 /// Convert a gRPC `Route` to the birdwatcher route JSON shape.
 ///
 /// Alice-LG reads: `network`, `gateway`, `from_protocol`, `interface`,
@@ -1951,6 +1976,60 @@ mod tests {
         neighbor.stale = false;
         neighbor.rejected_routes_retained = Some(9);
         assert_eq!(retained_reject_count(&neighbor).unwrap(), 9);
+    }
+
+    #[tokio::test]
+    async fn protocol_detail_preserves_old_daemon_and_non_session_absence() {
+        let store = Arc::new(ResolverStore::new(IdentityResolver::default()));
+        let state = AppState {
+            upstream: InterceptedService::new(
+                Endpoint::from_static("http://127.0.0.1:50051").connect_lazy(),
+                BearerInterceptor::default(),
+            ),
+            identities: store.snapshot(),
+            identity_store: store,
+            max_routes: 1,
+        };
+        let mut neighbor = proto::NeighborState {
+            config: Some(proto::NeighborConfig {
+                address: "192.0.2.1".to_string(),
+                remote_asn: 64_496,
+                route_server_client: true,
+                ..Default::default()
+            }),
+            state: proto::SessionState::Established as i32,
+            rejected_routes_retained: Some(0),
+            negotiated_session: Some(proto::NegotiatedSessionState::default()),
+            ..Default::default()
+        };
+        let (_, older) = protocol_row(&state, &neighbor).unwrap();
+        assert_eq!(
+            older["bgp_session"],
+            serde_json::json!(["external", "route-server"])
+        );
+        for field in ["source_address", "keepalive"] {
+            assert!(older.get(field).is_none(), "{field}");
+        }
+        neighbor
+            .negotiated_session
+            .as_mut()
+            .unwrap()
+            .keepalive_interval_seconds = Some(0);
+        assert_eq!(protocol_row(&state, &neighbor).unwrap().1["keepalive"], 0);
+        neighbor.config.as_mut().unwrap().route_server_client = false;
+        assert!(
+            protocol_row(&state, &neighbor)
+                .unwrap()
+                .1
+                .get("bgp_session")
+                .is_none()
+        );
+        neighbor.negotiated_session = None;
+        neighbor.state = proto::SessionState::Idle as i32;
+        let (_, down) = protocol_row(&state, &neighbor).unwrap();
+        for field in ["source_address", "keepalive", "bgp_session"] {
+            assert!(down.get(field).is_none(), "{field}");
+        }
     }
 
     #[test]
@@ -2464,6 +2543,17 @@ mod tests {
         );
         assert_eq!(format_ixp_state(proto::SessionState::Idle as i32), "down");
         assert_eq!(format_ixp_state(999), "down");
+        for (state, expected) in [
+            (proto::SessionState::Idle, ""),
+            (proto::SessionState::Connect, " Connect"),
+            (proto::SessionState::Active, " Active"),
+            (proto::SessionState::OpenSent, " OpenSent"),
+            (proto::SessionState::OpenConfirm, " OpenConfirm"),
+            (proto::SessionState::Established, " Established"),
+        ] {
+            assert_eq!(format_connection(state as i32), expected);
+        }
+        assert_eq!(format_connection(999), "");
     }
 
     #[test]

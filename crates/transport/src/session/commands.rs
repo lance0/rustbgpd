@@ -1172,7 +1172,9 @@ impl PeerSession {
                             }
                         });
                         Some(crate::NegotiatedSessionState {
+                            local_address: self.export_encoder.snapshot().local_addr(),
                             hold_time: negotiated.hold_time,
+                            keepalive_interval: negotiated.keepalive_interval,
                             remote_router_id: negotiated.peer_router_id,
                             four_octet_as: negotiated.four_octet_as,
                             families,

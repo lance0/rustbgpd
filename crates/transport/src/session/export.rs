@@ -255,6 +255,10 @@ impl SessionExportProfile {
         self.scoped_link_local_peer
     }
 
+    pub(super) const fn local_addr(&self) -> Option<IpAddr> {
+        self.local_addr
+    }
+
     pub(super) fn local_ipv4(&self) -> Ipv4Addr {
         self.local_addr
             .and_then(|addr| match addr {

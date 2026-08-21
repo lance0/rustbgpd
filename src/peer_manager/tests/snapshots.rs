@@ -528,7 +528,9 @@ async fn negotiated_snapshot_uses_only_fresh_established_actor_state() {
     state.four_octet_as = Some(true);
     state.remote_router_id = Some(Ipv4Addr::new(198, 51, 100, 1));
     state.negotiated_session = Some(rustbgpd_transport::NegotiatedSessionState {
+        local_address: Some("192.0.2.44".parse().unwrap()),
         hold_time: 33,
+        keepalive_interval: 11,
         remote_router_id: Ipv4Addr::new(192, 0, 2, 7),
         four_octet_as: false,
         families: vec![(Afi::Ipv6, Safi::Unicast)],

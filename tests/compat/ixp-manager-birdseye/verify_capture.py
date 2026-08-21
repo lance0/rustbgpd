@@ -30,6 +30,7 @@ UNSUPPORTED = {
     "full-ixp-manager-ui-filter-policy-engine",
     "full-table-snapshot",
     "direct-runtime-protocol-alias-reconfiguration",
+    "live-hold-keepalive-countdowns",
 }
 RUNTIME_SUPPORTED = {
     "exact-protocol-route",
@@ -39,9 +40,17 @@ RUNTIME_SUPPORTED = {
     "atomic-all-candidate-prefix-snapshot",
     "file-backed-runtime-protocol-alias-reconfiguration",
     "active-rejected-route-reason-inventory",
+    "live-session-transport-detail",
 }
 ADAPTER_API_VERSION = {"kind": "product-identity", "prefix": "rustbgpd "}
 FILTERED_PREFIX_QUERY = {"global_admin": 65001, "function": 1101}
+LIVE_SESSION_DETAIL = {
+    "fields": ["source_address", "keepalive", "connection", "bgp_session"],
+    "connection": "empty-or-leading-space-fsm",
+    "route_server_session": ["external", "route-server", "AS4-if-negotiated"],
+    "inventory_rpc": "ListNeighbors",
+    "unsupported_countdowns": ["hold_timer_now", "keepalive_now"],
+}
 FILTERED_RETENTION_METADATA = {
     "fields": ["enabled", "capacity", "evictions_since_reset", "may_be_incomplete"],
     "unknown_evictions": None,
@@ -162,6 +171,8 @@ if manifest.get("adapter_api_version") != ADAPTER_API_VERSION:
     fail("adapter api.version must remain an honest product identity")
 if manifest.get("filtered_prefix_query") != FILTERED_PREFIX_QUERY:
     fail("filtered-prefix namespace drifted")
+if manifest.get("live_session_detail") != LIVE_SESSION_DETAIL:
+    fail("live session-detail contract drifted")
 if manifest.get("filtered_retention_metadata") != FILTERED_RETENTION_METADATA:
     fail("filtered retention completeness contract drifted")
 if manifest.get("reject_reasons") != REJECT_REASONS:

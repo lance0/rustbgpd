@@ -654,6 +654,12 @@ the installed winner first plus every alternative for one longest matched
 prefix in a single actor turn. Remaining Bird's Eye work is full table
 snapshots/counts and other wildcard-community searches;
 no full compatibility claim is made.
+Protocol detail now projects the established session's cached local source,
+negotiated keepalive cadence (including zero), exact leading-space connection
+label, and route-server/negotiated-AS4 tags from that same one-call inventory
+snapshot. Down rows omit unavailable transport and session values; old-daemon
+rows omit the two additive transport fields. Live timer countdowns remain
+outside the supported slice.
 [ADR-0126](docs/adr/0126-shared-group-per-client-best.md) (Accepted) landed
 shared-group per-client best-path: the `per_client_best` path-hiding
 mitigation now runs inside update groups, so rendered `path_hiding = true`

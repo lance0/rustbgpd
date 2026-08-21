@@ -385,6 +385,19 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
         || negotiation.to_string(),
         |session| optional_seconds_label(session.hold_time_seconds),
     );
+    let local_address = neighbor.negotiated_session.as_ref().map_or_else(
+        || negotiation.to_string(),
+        |session| {
+            session
+                .local_address
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string())
+        },
+    );
+    let keepalive = neighbor.negotiated_session.as_ref().map_or_else(
+        || negotiation.to_string(),
+        |session| optional_seconds_label(session.keepalive_interval_seconds),
+    );
     let negotiated_families = neighbor.negotiated_session.as_ref().map_or_else(
         || negotiation.to_string(),
         |session| negotiated_families_label(&session.families),
@@ -477,7 +490,9 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
         row("Uptime:", format_duration(neighbor.uptime_seconds), text),
         row("Configured Hold Time:", configured_hold, text),
         row("Negotiation:", negotiation.to_string(), text),
+        row("Local Address:", local_address, text),
         row("Negotiated Hold Time:", negotiated_hold, text),
+        row("Keepalive Interval:", keepalive, text),
         row("Configured Families:", configured_families, text),
         row("Negotiated Families:", negotiated_families, text),
         Line::from(""),
@@ -1230,7 +1245,9 @@ mod tests {
             update_group: "group:7".into(),
             negotiation_available: Some(true),
             negotiated_session: Some(crate::proto::NegotiatedSessionState {
+                local_address: Some("127.0.0.1".into()),
                 hold_time_seconds: Some(30),
+                keepalive_interval_seconds: Some(10),
                 families: vec!["ipv4_unicast".into()],
                 ..Default::default()
             }),
@@ -1303,7 +1320,9 @@ mod tests {
 
         for (label, expected) in [
             ("Configured Hold Time:", "90s"),
+            ("Local Address:", "127.0.0.1"),
             ("Negotiated Hold Time:", "30s"),
+            ("Keepalive Interval:", "10s"),
             ("Configured Families:", "ipv4_unicast, ipv6_unicast"),
             ("Negotiated Families:", "ipv4_unicast"),
             ("Source:", "dynamic (192.0.2.0/24, group edge-clients)"),
@@ -1352,7 +1371,12 @@ mod tests {
         let rendered = rendered_detail(&mut old, 130, 50);
         assert_detail_row(&rendered, "Configured Hold Time:", "default (no override)");
         assert_detail_row(&rendered, "Configured Families:", "ipv4_unicast (default)");
-        for label in ["Negotiated Hold Time:", "Negotiated Families:"] {
+        for label in [
+            "Local Address:",
+            "Negotiated Hold Time:",
+            "Keepalive Interval:",
+            "Negotiated Families:",
+        ] {
             assert_detail_row(&rendered, label, "unknown (not exposed by daemon)");
         }
         assert_detail_row(

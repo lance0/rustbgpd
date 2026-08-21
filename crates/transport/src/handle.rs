@@ -609,8 +609,14 @@ pub struct NegotiatedGracefulRestartState {
     reason = "query DTO mirrors independent peer capability results"
 )]
 pub struct NegotiatedSessionState {
+    /// Cached local IP address for the current connection. Absent when
+    /// the established export profile could not read it.
+    pub local_address: Option<IpAddr>,
     /// Negotiated Hold Time in seconds.
     pub hold_time: u16,
+    /// Negotiated KEEPALIVE cadence in seconds, including zero when the
+    /// negotiated Hold Time disables both timers.
+    pub keepalive_interval: u16,
     /// Remote BGP Identifier.
     pub remote_router_id: Ipv4Addr,
     /// Whether both speakers negotiated four-octet AS support.

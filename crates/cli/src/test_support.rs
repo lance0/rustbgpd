@@ -1072,7 +1072,9 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             max_prefix_headroom_ipv6: None,
             negotiation_available: Some(true),
             negotiated_session: Some(server_proto::NegotiatedSessionState {
+                local_address: Some("127.0.0.1".to_string()),
                 hold_time_seconds: Some(87),
+                keepalive_interval_seconds: Some(29),
                 remote_router_id: Some("192.0.2.7".to_string()),
                 four_octet_as: Some(true),
                 families: vec!["ipv4_unicast".to_string()],
