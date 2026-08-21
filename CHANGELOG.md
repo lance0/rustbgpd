@@ -90,6 +90,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Route-server prepend control now gives every target-specific
+  `RS:101|102|103:PEER` tag precedence over global `RS:10x:0` tags, matching
+  pinned IXP Manager behavior while leaving other targets on the global count.
+  Suppression, control-community scrubbing, and untagged-route sharing are
+  unchanged. (LAN-1155)
+
 - Enforce the ASPA first-AS precondition for inbound route-server members.
   `route_server_client = true` identifies the remote member and no longer grants
   the exemption meant for a speaker whose local BGP Role is `rs-client`;
