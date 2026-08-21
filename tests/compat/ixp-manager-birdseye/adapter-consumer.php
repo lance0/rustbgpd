@@ -15,12 +15,16 @@ $manifest = json_decode(
     512,
     JSON_THROW_ON_ERROR,
 );
-$protocol = $manifest['protocol_aliases']['member-v4'] ?? null;
+$protocol = getenv('EXPECTED_PROTOCOL');
+if (!is_string($protocol) || $protocol === '') {
+    throw new RuntimeException('EXPECTED_PROTOCOL is required');
+}
+$knownProtocols = array_values($manifest['protocol_aliases'] ?? []);
 $table = $manifest['routing_tables'][0] ?? null;
 $versionPrefix = $manifest['adapter_api_version']['prefix'] ?? null;
 $filtered = $manifest['filtered_prefix_query'] ?? [];
 if (
-    $protocol !== 'pb_as64496'
+    !in_array($protocol, $knownProtocols, true)
     || $table !== 'master4'
     || $versionPrefix !== 'rustbgpd '
     || $filtered !== ['global_admin' => 65001, 'function' => 1101]

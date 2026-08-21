@@ -28,10 +28,12 @@ installed from its lockfiles. See
 for the pins, fixture provenance, and local reproduction command.
 The same gate also runs IXP Manager's exact protocol/export, less-specific
 table-search, and member filtered-prefix consumer methods against a live
-`birdwatcher-adapter` backed by a real rustbgpd process.
+`birdwatcher-adapter` before and after a file-backed alias `SIGHUP`, then after
+a malformed reload retains the last-good resolver, all at one PID.
 
 This oracle is intentionally **not** a runtime compatibility claim. The
-example adapter now provides immutable protocol aliases plus the current
+example adapter now provides startup-only direct aliases and atomic Unix
+`SIGHUP` replacement of a bounded file-backed alias resolver plus the current
 consumer's status, BGP inventory/detail, symbols, member received-route, and
 member export-route seam with an enforced response maximum. Exact protocol and
 export prefix lookups are supported and preserve all Add-Path candidates in

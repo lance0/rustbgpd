@@ -41,8 +41,10 @@
 #![deny(unsafe_code)]
 
 use std::collections::{HashMap, HashSet};
+use std::io::{self, Read};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
+use std::sync::{Arc, RwLock};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -86,6 +88,14 @@ struct Args {
     )]
     protocol_aliases: Vec<String>,
 
+    /// Alias file: one `PROTOCOL=PEER_IP@TABLE` per line; reloads on Unix SIGHUP.
+    #[arg(
+        long,
+        env = "BIRDWATCHER_ADAPTER_PROTOCOL_ALIAS_FILE",
+        conflicts_with = "protocol_aliases"
+    )]
+    protocol_alias_file: Option<PathBuf>,
+
     /// Maximum routes returned by any route-array endpoint.
     #[arg(
         long,
@@ -103,10 +113,112 @@ struct ProtocolIdentity {
     table: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct IdentityResolver {
     by_protocol: HashMap<String, ProtocolIdentity>,
     by_peer: HashMap<IpAddr, ProtocolIdentity>,
+}
+
+const MAX_ALIAS_FILE_BYTES: usize = 1024 * 1024;
+const MAX_ALIAS_FILE_ENTRIES: usize = 4096;
+
+fn load_alias_file(path: &FsPath) -> io::Result<IdentityResolver> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take((MAX_ALIAS_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_ALIAS_FILE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "protocol alias file exceeds 1 MiB",
+        ));
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid alias file"))?;
+    let values: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    if values.len() > MAX_ALIAS_FILE_ENTRIES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "protocol alias file exceeds 4096 entries",
+        ));
+    }
+    IdentityResolver::parse(&values)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid alias file"))
+}
+
+#[derive(Debug)]
+struct ResolverGeneration {
+    number: u64,
+    resolver: Arc<IdentityResolver>,
+}
+
+#[derive(Debug)]
+struct ResolverStore(RwLock<ResolverGeneration>);
+
+impl ResolverStore {
+    fn new(resolver: IdentityResolver) -> Self {
+        Self(RwLock::new(ResolverGeneration {
+            number: 1,
+            resolver: Arc::new(resolver),
+        }))
+    }
+
+    fn snapshot(&self) -> Arc<IdentityResolver> {
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .resolver
+            .clone()
+    }
+
+    fn replace(&self, resolver: IdentityResolver) -> Result<(u64, bool), String> {
+        let mut current = self.0.write().unwrap_or_else(|e| e.into_inner());
+        if *current.resolver == resolver {
+            return Ok((current.number, false));
+        }
+        let number = current
+            .number
+            .checked_add(1)
+            .ok_or_else(|| "protocol alias generation exhausted".to_string())?;
+        *current = ResolverGeneration {
+            number,
+            resolver: Arc::new(resolver),
+        };
+        Ok((number, true))
+    }
+}
+
+#[cfg(unix)]
+fn spawn_alias_reloader(path: PathBuf, store: Arc<ResolverStore>) -> io::Result<()> {
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    tokio::spawn(async move {
+        while sighup.recv().await.is_some() {
+            match load_alias_file(&path)
+                .and_then(|resolver| store.replace(resolver).map_err(io::Error::other))
+            {
+                Ok((generation, true)) => {
+                    info!(generation, path = %path.display(), "reloaded protocol aliases")
+                }
+                Ok((generation, false)) => {
+                    info!(generation, path = %path.display(), "protocol aliases unchanged")
+                }
+                Err(error) => {
+                    error!(%error, path = %path.display(), "protocol alias reload rejected; retaining prior generation")
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn spawn_alias_reloader(_path: PathBuf, _store: Arc<ResolverStore>) -> io::Result<()> {
+    Ok(())
 }
 
 impl IdentityResolver {
@@ -306,11 +418,22 @@ fn parse_daemon_endpoint(addr: &str) -> Result<DaemonEndpoint, std::io::Error> {
 
 /// Shared state: one multiplexed, optionally authenticated gRPC service;
 /// per-request clients are cheap clones of it.
-#[derive(Clone)]
 struct AppState {
     upstream: Upstream,
-    identities: IdentityResolver,
+    identities: Arc<IdentityResolver>,
+    identity_store: Arc<ResolverStore>,
     max_routes: u64,
+}
+
+impl Clone for AppState {
+    fn clone(&self) -> Self {
+        Self {
+            upstream: self.upstream.clone(),
+            identities: self.identity_store.snapshot(),
+            identity_store: Arc::clone(&self.identity_store),
+            max_routes: self.max_routes,
+        }
+    }
 }
 
 #[tokio::main]
@@ -332,11 +455,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let channel = Endpoint::from_shared(endpoint.channel_uri())?.connect_lazy();
     let authorization = load_bearer_authorization(args.grpc_token_file.as_deref())?;
     let upstream = InterceptedService::new(channel, BearerInterceptor { authorization });
-    let identities = IdentityResolver::parse(&args.protocol_aliases)
-        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+    let identities = if let Some(path) = args.protocol_alias_file.as_deref() {
+        load_alias_file(path)?
+    } else {
+        IdentityResolver::parse(&args.protocol_aliases)
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?
+    };
+    let identity_store = Arc::new(ResolverStore::new(identities));
+    if let Some(path) = args.protocol_alias_file {
+        spawn_alias_reloader(path, Arc::clone(&identity_store))?;
+    }
     let state = AppState {
         upstream,
-        identities,
+        identities: identity_store.snapshot(),
+        identity_store,
         max_routes: args.max_routes,
     };
 
@@ -2246,6 +2378,81 @@ mod tests {
             let values: Vec<String> = aliases.into_iter().map(str::to_string).collect();
             assert!(IdentityResolver::parse(&values).is_err(), "{values:?}");
         }
+    }
+
+    #[test]
+    fn alias_file_is_bounded_utf8_and_reuses_exact_alias_grammar() {
+        let path = std::env::temp_dir().join(format!("birdwatcher-aliases-{}", std::process::id()));
+        let load = |bytes: &[u8]| {
+            std::fs::write(&path, bytes).unwrap();
+            load_alias_file(&path)
+        };
+        let resolver = load(b"# comment\n pb_a=192.0.2.1@master4\n\n").unwrap();
+        assert_eq!(
+            resolver.resolve("pb_a").unwrap(),
+            "192.0.2.1".parse::<IpAddr>().unwrap()
+        );
+        for invalid in [
+            b"pb_a=192.0.2.1@master4 # member\n".as_slice(),
+            b"secret_member=192.0.2.1@master4@secret_peer\n".as_slice(),
+            b"a=192.0.2.1@master4\na=192.0.2.2@master4\n",
+            b"a=192.0.2.1@master4\nb=192.0.2.1@master4\n",
+            b"a=192.0.2.1@master4\n\xff",
+        ] {
+            assert_eq!(load(invalid).unwrap_err().to_string(), "invalid alias file");
+        }
+        assert!(load(&vec![b'#'; MAX_ALIAS_FILE_BYTES]).is_ok());
+        assert!(load(&vec![b'#'; MAX_ALIAS_FILE_BYTES + 1]).is_err());
+        let aliases = (0..=MAX_ALIAS_FILE_ENTRIES)
+            .map(|i| format!("p{i}=2001:db8::{i:x}@master6\n"))
+            .collect::<String>();
+        assert!(load(aliases.trim_end().rsplit_once('\n').unwrap().0.as_bytes()).is_ok());
+        assert!(load(aliases.as_bytes()).is_err());
+        std::fs::remove_file(path).unwrap();
+
+        assert!(
+            Args::try_parse_from([
+                "birdwatcher-adapter",
+                "--grpc-addr",
+                "http://127.0.0.1:50051",
+                "--protocol-alias",
+                "a=192.0.2.1@master4",
+                "--protocol-alias-file",
+                "/tmp/aliases",
+            ])
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_swap_is_atomic_noop_stable_and_request_snapshotted() {
+        let parse =
+            |name: &str| IdentityResolver::parse(&[format!("{name}=192.0.2.1@master4")]).unwrap();
+        let store = Arc::new(ResolverStore::new(parse("old")));
+        let upstream = InterceptedService::new(
+            Endpoint::from_static("http://127.0.0.1:50051").connect_lazy(),
+            BearerInterceptor::default(),
+        );
+        let state = AppState {
+            upstream,
+            identities: store.snapshot(),
+            identity_store: Arc::clone(&store),
+            max_routes: 1,
+        };
+        let request_a = state.clone();
+        assert_eq!(store.replace(parse("old")).unwrap(), (1, false));
+        assert!(IdentityResolver::parse(&["malformed".to_string()]).is_err());
+        assert_eq!(
+            store.snapshot().resolve("old").unwrap(),
+            "192.0.2.1".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(store.replace(parse("new")).unwrap(), (2, true));
+        let request_b = state.clone();
+        assert!(request_a.identities.resolve("old").is_ok());
+        assert!(request_a.identities.resolve("new").is_err());
+        assert!(request_b.identities.resolve("new").is_ok());
+        assert!(request_b.identities.resolve("old").is_err());
+        assert_eq!(store.replace(parse("new")).unwrap(), (2, false));
     }
 
     #[test]

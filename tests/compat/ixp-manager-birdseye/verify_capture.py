@@ -28,7 +28,7 @@ EXPECTED = {
 UNSUPPORTED = {
     "complete-rejected-route-reason-inventory",
     "full-table-snapshot",
-    "runtime-protocol-alias-reconfiguration",
+    "direct-runtime-protocol-alias-reconfiguration",
 }
 RUNTIME_SUPPORTED = {
     "exact-protocol-route",
@@ -36,6 +36,7 @@ RUNTIME_SUPPORTED = {
     "filtered-prefix-wildcard",
     "less-specific-longest-prefix-match",
     "atomic-all-candidate-prefix-snapshot",
+    "file-backed-runtime-protocol-alias-reconfiguration",
 }
 ADAPTER_API_VERSION = {"kind": "product-identity", "prefix": "rustbgpd "}
 FILTERED_PREFIX_QUERY = {"global_admin": 65001, "function": 1101}
@@ -58,7 +59,10 @@ if manifest.get("adapter_api_version") != ADAPTER_API_VERSION:
     fail("adapter api.version must remain an honest product identity")
 if manifest.get("filtered_prefix_query") != FILTERED_PREFIX_QUERY:
     fail("filtered-prefix namespace drifted")
-if manifest.get("protocol_aliases") != {"member-v4": "pb_as64496"}:
+if manifest.get("protocol_aliases") != {
+    "member-v4": "pb_as64496",
+    "member-v4-reloaded": "pb_reloaded_as64496",
+}:
     fail("explicit protocol alias matrix drifted")
 if manifest.get("routing_tables") != ["master4"]:
     fail("live routing-table identity drifted")

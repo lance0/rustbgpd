@@ -18,7 +18,9 @@ trap cleanup EXIT INT TERM
 cargo build --quiet --locked --manifest-path "$repo/Cargo.toml" --bin rustbgpd
 cargo build --quiet --locked --manifest-path "$repo/Cargo.toml" -p birdwatcher-adapter
 socket=$tmp/rustbgpd.sock
+aliases=$tmp/protocol-aliases
 mkdir -p "$tmp/runtime"
+printf '%s\n' 'pb_as64496=192.0.2.1@master4' >"$aliases"
 cat >"$tmp/rustbgpd.toml" <<EOF
 [global]
 asn = 65001
@@ -50,7 +52,7 @@ done
 
 NO_COLOR=1 "$repo/target/debug/birdwatcher-adapter" \
   --grpc-addr "unix://$socket" --listen 127.0.0.1:0 \
-  --protocol-alias pb_as64496=192.0.2.1@master4 --max-routes 2 \
+  --protocol-alias-file "$aliases" --max-routes 2 \
   >"$tmp/adapter.out" 2>"$tmp/adapter.log" &
 adapter_pid=$!
 port=
@@ -62,9 +64,45 @@ for _ in $(seq 1 120); do
 done
 [ -n "$port" ] || { cat "$tmp/adapter.log" >&2; exit 1; }
 curl --silent --fail "http://127.0.0.1:$port/route/192.0.2.0%2F24/protocol/pb_as64496" >/dev/null
-docker run --rm --network host --user "$(id -u):$(id -g)" \
-  --env IXP_MANAGER_ROOT=/upstreams/ixp-manager \
-  --env BIRDSEYE_API="http://127.0.0.1:$port" \
-  --volume "$root:/harness:ro" \
-  --volume "$ixp_manager:/upstreams/ixp-manager:ro" \
-  "$image" php /harness/adapter-consumer.php
+run_consumer() {
+  protocol=$1
+  docker run --rm --network host --user "$(id -u):$(id -g)" \
+    --env IXP_MANAGER_ROOT=/upstreams/ixp-manager \
+    --env BIRDSEYE_API="http://127.0.0.1:$port" \
+    --env EXPECTED_PROTOCOL="$protocol" \
+    --volume "$root:/harness:ro" \
+    --volume "$ixp_manager:/upstreams/ixp-manager:ro" \
+    "$image" php /harness/adapter-consumer.php
+}
+http_status() {
+  curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:$port/protocol/$1"
+}
+run_consumer pb_as64496
+
+printf '%s\n' 'pb_reloaded_as64496=192.0.2.1@master4' >"$aliases.next"
+mv "$aliases.next" "$aliases"
+kill -HUP "$adapter_pid"
+for _ in $(seq 1 120); do
+  [ "$(http_status pb_as64496)" = 404 ] && [ "$(http_status pb_reloaded_as64496)" = 200 ] && break
+  kill -0 "$adapter_pid" 2>/dev/null || { cat "$tmp/adapter.log" >&2; exit 1; }
+  sleep 0.1
+done
+[ "$(http_status pb_as64496)" = 404 ] && [ "$(http_status pb_reloaded_as64496)" = 200 ] || exit 1
+run_consumer pb_reloaded_as64496
+
+rejected_before=$(grep -c 'reload rejected' "$tmp/adapter.log" || true)
+printf '%s\n' 'secret_member=192.0.2.1@master4@secret_peer' >"$aliases.next"
+mv "$aliases.next" "$aliases"
+kill -HUP "$adapter_pid"
+for _ in $(seq 1 120); do
+  rejected_after=$(grep -c 'reload rejected' "$tmp/adapter.log" || true)
+  [ "$rejected_after" -gt "$rejected_before" ] && break
+  kill -0 "$adapter_pid" 2>/dev/null || { cat "$tmp/adapter.log" >&2; exit 1; }
+  sleep 0.1
+done
+[ "$rejected_after" -gt "$rejected_before" ] || { cat "$tmp/adapter.log" >&2; exit 1; }
+[ "$(http_status pb_as64496)" = 404 ] && [ "$(http_status pb_reloaded_as64496)" = 200 ] || exit 1
+if grep -q 'secret_member\|secret_peer' "$tmp/adapter.log"; then
+  exit 1
+fi
+run_consumer pb_reloaded_as64496

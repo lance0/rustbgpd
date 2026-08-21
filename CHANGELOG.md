@@ -56,7 +56,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   order, and the route cap applies after exact filtering. The pinned oracle
   drives both real IXP Manager consumer methods against a live adapter while
   keeping `runtime_compatibility` false. (LAN-1118)
-- `birdwatcher-adapter` now supports immutable IXP Manager protocol aliases,
+- `birdwatcher-adapter` can atomically reload a bounded file-backed IXP Manager
+  protocol-alias resolver on Unix `SIGHUP`. Every request snapshots one whole
+  generation; invalid or unreadable reloads retain the exact prior resolver
+  without a restart. Direct aliases remain startup-only. (LAN-1153)
+- `birdwatcher-adapter` now supports startup-time IXP Manager protocol aliases,
   Bird's Eye-shaped protocol detail and symbols, member received/export views,
   canonical lowercase API metadata alongside preserved Alice-LG keys, and an
   enforced configurable route-response maximum. The pinned compatibility
