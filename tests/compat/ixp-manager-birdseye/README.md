@@ -49,12 +49,13 @@ the active route-server-template partition `1,3,5,6,7,8,9,10,13,14`, keeps
 `2,4,11,12,15` defined-only, and proves fallback `0` remains untranslated.
 
 The same pinned v7.4 Foil/MySQL journey captures complete ordered UI-filter
-rows 31, 33, and 35, then proves a supported row 32 global PREPEND beside the
-distinct peer-scoped row 33. A baseline-delta check binds row 32 to BIRD's
-`bgp_path.first` behavior without retaining raw config. Both strict v2 captures
-render and pass `rustbgpd --check --strict`; the
-oracle executes the generated advertise and receive policies with `rbgp policy
-check`, distinguishing path-first from origin and target-peer ASNs. Exact row
+rows 31, 33, and 35, then proves unscoped row 32 PREPEND_ONCE overlaps
+peer-and-prefix row 33 PREPEND_TWICE before row 35 AS_IS. An in-memory
+baseline-delta proves pinned BIRD emits both matching actions sequentially
+without retaining raw config. Both strict v2 captures render and pass
+`rustbgpd --check --strict`; the oracle executes the disjoint-cell result with
+`rbgp policy check`, including target, peer-miss, prefix-miss, path-first, and
+unusable-path cases. Exact row
 objects, raw repeated-render bytes, v2 completion counts,
 receipt-last publication, and v3 refusal are load-bearing. This proves only the
 bounded manual export subset; it does not make the adapter runtime-compatible
@@ -94,9 +95,9 @@ blocker, weakening the explicit alias or product-version
 posture, enabling debug mode, skipping a case, or drifting a pin or response
 makes the gate fail.
 
-The manual-export matrix separately records the 256-per-client and 4096-total
-UI-filter caps and keeps the full IXP Manager UI-filter policy engine
-unsupported.
+The manual-export matrix separately records the 256-per-client, 4096-total-row,
+and 4096 compiled receive-cell caps. Bounded pinned-v7.4 overlap is supported;
+the full IXP Manager UI-filter policy engine remains unsupported.
 
 ## Provenance and licensing
 

@@ -624,12 +624,13 @@ and delivers explicit updated/release callbacks. The packaged opt-in
 `rustbgpd@.service` and M97 prove two exact IPv4/IPv6 handles in one host
 namespace with shared-fence serialization and independent MD5-BGP continuity.
 Its strict router-config/v2 boundary now preserves the pinned v7.4 UI-filter
-rows and translates all advertise actions plus ordered AS_IS/deny and
-non-overlapping peer-scoped or global PREPEND receive actions. Global PREPEND
-uses the typed first path ASN, matching a pinned BIRD baseline-delta proof;
-optional prefix guards, continuation/termination, 256-per-client and 4096-total
-caps, and overlapping-PREPEND refusal are exercised against the real Foil and
-MySQL seed. Global and per-client override export chains now end with a
+rows and translates all advertise actions plus ordered AS_IS/deny and PREPEND
+receive actions. Reachable overlap compiles to at most 4096 disjoint first-AS
+and exact-prefix cells; prepends accumulate in row order, AS_IS/deny terminate,
+and global cells use the typed first path ASN. Exact 255/256 prepend and
+4096-cell synthesis boundaries, non-overlap bytes, and sequential pinned BIRD
+output are exercised against the real Foil and MySQL seed. Global and
+per-client override export chains now end with a
 router-own-AS large-community scrub, matching the pinned templates without
 peer context or wildcard matching. Generic UI-filter semantics, custom-skin
 migration, and multi-address ownership remain open. The external adapter now

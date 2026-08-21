@@ -109,9 +109,9 @@ candidate_full="$tmp/candidate-full"
 candidate_supported="$tmp/candidate-supported"
 render_v2 "$capture_output/config-ui-filter.json" "$candidate_full"
 render_v2 "$supported" "$candidate_supported"
-[ "$(grep -Fxc '    term ui-receive-32 { if route.prefix == 203.0.113.0/24 { prepend as path-first 1 } }' \
+[ "$(grep -Fxc '    term ui-receive-cell-0000 { if route.as-path matches "^112_" && route.prefix == 192.175.48.0/24 { prepend as 112 3; accept } }' \
   "$candidate_supported/policy/client-1.rpol")" -eq 1 ]
-[ "$(grep -Fxc '    term ui-receive-33 { if route.as-path matches "^112_" && route.prefix == 192.175.48.0/24 { prepend as 112 2 } }' \
+[ "$(grep -Fxc '    term ui-receive-cell-0003 { if !(route.as-path matches "^(112)_") && !(route.prefix in client-1-ui-receive-prefixes) { prepend as path-first 1; accept } }' \
   "$candidate_supported/policy/client-1.rpol")" -eq 1 ]
 
 legacy="$tmp/candidate-v1"
@@ -168,17 +168,30 @@ test supported-advertise-prefix-direction {
     route { prefix 77.72.72.0/21; as-path "1213" }
     expect client-1 == accept with large-community 65501:102:112
 }
-test supported-receive-prepend-then-accept {
+test supported-overlap-accumulates-then-accepts {
     route { prefix 192.175.48.0/24; as-path "112" }
-    expect client-1-receive == accept with prepend as 112 2
+    expect client-1-receive == accept with prepend as 112 3
 }
-test supported-global-prepend-uses-first-not-origin {
-    route { prefix 203.0.113.0/24; as-path "64501 64500" }
+test supported-peer-miss-keeps-global-prepend {
+    route { prefix 192.175.48.0/24; as-path "64501 64500" }
     expect client-1-receive == accept with prepend as 64501 1
 }
-test supported-global-prepend-prefix-miss {
-    route { prefix 203.0.114.0/24; as-path "64501 64500" }
-    expect client-1-receive == accept
+test supported-prefix-miss-keeps-global-prepend {
+    route { prefix 203.0.113.0/24; as-path "112" }
+    expect client-1-receive == accept with prepend as 112 1
+}
+test supported-other-cell-uses-path-first {
+    route { prefix 203.0.113.0/24; as-path "64501 64500" }
+    peer { asn 65010 }
+    expect client-1-receive == accept with prepend as 64501 1
+}
+test supported-empty-path-fails-closed {
+    route { prefix 203.0.113.0/24; as-path "" }
+    expect client-1-receive == error absent-prepend-operand
+}
+test supported-leading-set-fails-closed {
+    route { prefix 203.0.113.0/24; as-path "{64500 64501}" }
+    expect client-1-receive == error absent-prepend-operand
 }'
 
 "$root/run-adapter-consumer.sh" "$tmp/ixp-manager" "$image" >/dev/null

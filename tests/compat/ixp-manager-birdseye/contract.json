@@ -75,7 +75,8 @@
       ],
       "global_receive_prepend": "path-first-with-optional-received-prefix",
       "peer_receive_prepend": "literal-peer-asn",
-      "overlapping_receive_prepend": false,
+      "overlapping_receive_prepend": true,
+      "compiled_receive_cell_cap": 4096,
       "per_client_cap": 256,
       "total_cap": 4096
     }

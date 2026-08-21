@@ -66,6 +66,28 @@ fn rendered_v2(
     )
 }
 
+fn receive_filter(
+    id: u64,
+    order: u64,
+    peer: Option<u32>,
+    prefix: Option<String>,
+    action: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": id, "customer_id": 2,
+        "peer": peer.map(|asn| serde_json::json!({"customer_id": 4, "asn": asn})),
+        "received_prefix": prefix, "advertised_prefix": null, "protocol": 4,
+        "action_advertise": "AS_IS", "action_receive": action, "order_by": order
+    })
+}
+
+fn with_receive_filters(filters: Vec<serde_json::Value>) -> serde_json::Value {
+    let mut input = v2_value(V2_SUPPORTED);
+    input["complete"]["ui_filter_count"] = filters.len().into();
+    input["ui_filters"] = filters.into();
+    input
+}
+
 fn assert_terms(source: &str, policy: &str, expected: &[&str]) {
     let file = RpolFile::parse(source).unwrap();
     let compiled = file
@@ -335,6 +357,10 @@ fn v1_and_v2_dispatch_are_strict_and_v1_output_stays_legacy() {
 #[test]
 fn v2_filter_policies_preserve_order_direction_and_reachability() {
     let full = rendered_v2(&v2_value(V2_FILTERS)).unwrap().files;
+    assert_eq!(
+        content_digest(&full.values().map(String::as_str).collect::<String>()),
+        "dfb2e0206b79de2c0b53f0e8e6a501550ba7b92c706f9e3183d349328efc31d6"
+    );
     let import = &full["policy/client-1.rpol"];
     assert_terms(
         import,
@@ -393,39 +419,40 @@ test full-first-rule-denies-receive {
         client,
         "client-1-receive",
         &[
-            "ui-receive-32",
-            "ui-receive-33",
-            "ui-receive-35",
+            "ui-receive-cell-0000",
+            "ui-receive-cell-0001",
+            "ui-receive-cell-0002",
+            "ui-receive-cell-0003",
             "accept-unmatched",
         ],
     );
     assert!(client.contains(
-        "route.as-path matches \"^112_\" && route.prefix == 192.175.48.0/24 { prepend as 112 2 }"
+        "route.as-path matches \"^112_\" && route.prefix == 192.175.48.0/24 { prepend as 112 3; accept }"
     ));
-    assert!(client.contains("route.prefix == 203.0.113.0/24 { prepend as path-first 1 }"));
+    assert!(client.contains("prepend as path-first 1; accept"));
     assert!(!client.contains("ui-receive-31"));
     assert_policy_tests(
         client,
         r#"
 test prepend-continues-to-as-is {
     route { prefix 192.175.48.0/24; as-path "112" }
-    expect client-1-receive == accept with prepend as 112 2
+    expect client-1-receive == accept with prepend as 112 3
 }
-test wrong-received-prefix-does-not-prepend {
+test wrong-received-prefix-keeps-global-prepend {
     route { prefix 198.51.100.0/24; as-path "112" }
-    expect client-1-receive == accept
+    expect client-1-receive == accept with prepend as 112 1
 }
-test wrong-first-as-does-not-prepend {
+test wrong-first-as-keeps-global-prepend {
     route { prefix 192.175.48.0/24; as-path "113" }
-    expect client-1-receive == accept
+    expect client-1-receive == accept with prepend as 113 1
 }
 test global-prepend-uses-path-first-not-origin {
     route { prefix 203.0.113.0/24; as-path "64501 64500" }
     expect client-1-receive == accept with prepend as 64501 1
 }
-test global-prepend-has-exact-prefix-guard {
+test global-prepend-is-unscoped {
     route { prefix 203.0.114.0/24; as-path "64501 64500" }
-    expect client-1-receive == accept
+    expect client-1-receive == accept with prepend as 64501 1
 }
 "#,
     );
@@ -557,6 +584,19 @@ test receive-as-is-terminates {
 }
 "#,
     );
+
+    let scoped =
+        |id, action| receive_filter(id, id, Some(112), Some("192.175.48.0/24".into()), action);
+    let scoped = with_receive_filters(vec![
+        scoped(1, "PREPEND_ONCE"),
+        scoped(2, "PREPEND_TWICE"),
+        scoped(3, "AS_IS"),
+    ]);
+    let source = &rendered_v2(&scoped).unwrap().files["policy/client-1.rpol"];
+    assert_policy_tests(
+        source,
+        "test scoped-miss-accepts-unchanged { route { prefix 198.51.100.0/24; as-path \"64501\" } expect client-1-receive == accept }",
+    );
 }
 
 #[test]
@@ -569,6 +609,7 @@ fn v2_receive_terminal_pruning_is_scope_aware_and_off_router_peers_are_valid() {
     assert!(source.contains("ui-receive-35"));
 
     let mut terminal = v2_value(V2_SUPPORTED);
+    terminal["ui_filters"][0]["received_prefix"] = "203.0.113.0/24".into();
     terminal["ui_filters"]
         .as_array_mut()
         .unwrap()
@@ -595,6 +636,7 @@ test prepend-is-discarded-by-later-deny {
     );
 
     let mut nonoverlap = v2_value(V2_SUPPORTED);
+    nonoverlap["ui_filters"][0]["received_prefix"] = "203.0.113.0/24".into();
     nonoverlap["ui_filters"].as_array_mut().unwrap().insert(
         0,
         serde_json::json!({
@@ -629,6 +671,165 @@ test second-nonoverlapping-prepend {
 }
 "#,
     );
+}
+
+#[test]
+fn v2_overlapping_receive_cells_preserve_order_scope_and_path_first() {
+    let mut input = v2_value(V2_SUPPORTED);
+    input["ui_filters"]
+        .as_array_mut()
+        .unwrap()
+        .push(receive_filter(37, 7, None, None, "NO_ADVERTISE"));
+    input["complete"]["ui_filter_count"] = 4.into();
+    let source = &rendered_v2(&input).unwrap().files["policy/client-1.rpol"];
+    assert_terms(
+        source,
+        "client-1-receive",
+        &[
+            "ui-receive-cell-0000",
+            "ui-receive-cell-0001",
+            "ui-receive-cell-0002",
+            "ui-receive-cell-0003",
+            "accept-unmatched",
+        ],
+    );
+    assert!(source.contains("prefix-set client-1-ui-receive-prefixes"));
+    assert!(source.contains("route.as-path matches \"^112_\" && route.prefix == 192.175.48.0/24 { prepend as 112 3; accept }"));
+    assert!(source.contains("prepend as path-first 1; accept"));
+    assert!(!source.contains("prepend as origin"));
+    assert!(!source.contains("prepend as peer"));
+    assert_policy_tests(
+        source,
+        r#"
+test overlap-accumulates-in-order {
+    route { prefix 192.175.48.0/24; as-path "112 64500" }
+    expect client-1-receive == accept with prepend as 112 3
+}
+test peer-miss-keeps-global-prepend {
+    route { prefix 192.175.48.0/24; as-path "113 64500" }
+    expect client-1-receive == accept with prepend as 113 1
+}
+test prefix-miss-keeps-global-prepend {
+    route { prefix 198.51.100.0/24; as-path "112 64500" }
+    expect client-1-receive == accept with prepend as 112 1
+}
+test other-cell-uses-path-first-not-origin-or-peer {
+    route { prefix 198.51.100.0/24; as-path "64501 64500" }
+    peer { asn 65010 }
+    expect client-1-receive == accept with prepend as 64501 1
+}
+test empty-global-path-fails-closed {
+    route { prefix 198.51.100.0/24; as-path "" }
+    expect client-1-receive == error absent-prepend-operand
+}
+test leading-set-global-path-fails-closed {
+    route { prefix 198.51.100.0/24; as-path "{64500 64501}" }
+    expect client-1-receive == error absent-prepend-operand
+}
+"#,
+    );
+
+    let mut deny = v2_value(V2_SUPPORTED);
+    deny["ui_filters"].as_array_mut().unwrap().insert(
+        2,
+        receive_filter(
+            34,
+            5,
+            Some(112),
+            Some("192.175.48.0/24".into()),
+            "NO_ADVERTISE",
+        ),
+    );
+    deny["complete"]["ui_filter_count"] = 4.into();
+    let source = &rendered_v2(&deny).unwrap().files["policy/client-1.rpol"];
+    assert_policy_tests(
+        source,
+        r#"
+test no-advertise-terminates-before-later-as-is {
+    route { prefix 192.175.48.0/24; as-path "112" }
+    expect client-1-receive == reject
+}
+"#,
+    );
+}
+
+#[test]
+fn v2_overlapping_receive_prepend_and_cell_bounds_are_exact() {
+    let mut filters = (1..=85)
+        .map(|id| receive_filter(id, id, None, None, "PREPEND_THRICE"))
+        .collect::<Vec<_>>();
+    filters.push(receive_filter(86, 86, None, None, "AS_IS"));
+    let source = &rendered_v2(&with_receive_filters(filters.clone()))
+        .unwrap()
+        .files["policy/client-1.rpol"];
+    assert!(source.contains("prepend as path-first 255; accept"));
+    assert_policy_tests(
+        source,
+        r#"
+test accumulated-255-executes {
+    route { prefix 198.51.100.0/24; as-path "64501" }
+    expect client-1-receive == accept with prepend as 64501 255
+}
+"#,
+    );
+    filters.insert(85, receive_filter(87, 86, None, None, "PREPEND_ONCE"));
+    filters[86]["order_by"] = 87.into();
+    assert_eq!(
+        rendered_v2(&with_receive_filters(filters)).unwrap_err(),
+        Error::Refused("receive prepend accumulation exceeds 255")
+    );
+
+    let cells = |peer_count: u64| {
+        let mut filters = vec![receive_filter(1, 1, None, None, "PREPEND_ONCE")];
+        for index in 0..peer_count {
+            let id = index + 2;
+            filters.push(receive_filter(
+                id,
+                id,
+                Some(64_000 + index as u32),
+                None,
+                "PREPEND_ONCE",
+            ));
+        }
+        for index in 0..63_u64 {
+            let id = peer_count + index + 2;
+            filters.push(receive_filter(
+                id,
+                id,
+                None,
+                Some(format!("198.18.0.{}/32", index + 1)),
+                "PREPEND_ONCE",
+            ));
+        }
+        let id = filters.len() as u64 + 1;
+        filters.push(receive_filter(id, id, None, None, "AS_IS"));
+        with_receive_filters(filters)
+    };
+    let at_cap = rendered_v2(&cells(63)).unwrap();
+    let source = &at_cap.files["policy/client-1.rpol"];
+    assert_eq!(source.matches("term ui-receive-cell-").count(), 4096);
+    let compiled = RpolFile::parse(source)
+        .unwrap()
+        .compile_policy("client-1-receive", &[], &mut SetStore::new())
+        .unwrap();
+    assert_eq!(compiled.policies[0].terms.len(), 4097);
+    assert_eq!(
+        rendered_v2(&cells(64)).unwrap_err(),
+        Error::Refused("receive UI-filter cell cap exceeded")
+    );
+
+    let mut dead_axes = cells(64);
+    let rows = dead_axes["ui_filters"].as_array_mut().unwrap();
+    let terminal = rows.pop().unwrap();
+    rows.insert(1, receive_filter(130, 2, None, None, "PREPEND_ONCE"));
+    rows.insert(2, terminal);
+    for (index, row) in rows.iter_mut().enumerate() {
+        row["order_by"] = ((index + 1) as u64).into();
+    }
+    dead_axes["complete"]["ui_filter_count"] = rows.len().into();
+    let source = &rendered_v2(&dead_axes).unwrap().files["policy/client-1.rpol"];
+    assert_eq!(source.matches("term ui-receive-cell-").count(), 1);
+    assert!(source.contains("prepend as path-first 2; accept"));
 }
 
 #[test]
@@ -673,11 +874,6 @@ fn v2_refuses_malformed_unrepresentable_and_capped_filter_sets() {
         "/ui_filters/1/action_receive",
         "UNKNOWN".into(),
     );
-    refuses(
-        v2_value(V2_SUPPORTED),
-        "/ui_filters/0/received_prefix",
-        serde_json::Value::Null,
-    );
     for field in ["peer", "received_prefix", "advertised_prefix", "protocol"] {
         let mut missing = v2_value(V2_SUPPORTED);
         missing["ui_filters"][0]
@@ -711,18 +907,6 @@ fn v2_refuses_malformed_unrepresentable_and_capped_filter_sets() {
     v6["ui_filters"][0]["protocol"] = 6.into();
     v6["ui_filters"][0]["received_prefix"] = "2001:db8:3::/064".into();
     assert!(rendered_v2(&v6).is_err());
-
-    let mut overlap = v2_value(V2_SUPPORTED);
-    overlap["ui_filters"].as_array_mut().unwrap().insert(
-        0,
-        serde_json::json!({
-            "id": 34, "customer_id": 2, "peer": {"customer_id": 4, "asn": 112},
-            "received_prefix": null, "advertised_prefix": null, "protocol": 4,
-            "action_advertise": "AS_IS", "action_receive": "PREPEND_ONCE", "order_by": 2
-        }),
-    );
-    overlap["complete"]["ui_filter_count"] = 4.into();
-    assert!(rendered_v2(&overlap).is_err());
 
     let template = serde_json::json!({
         "id": 1, "customer_id": 2, "peer": null,

@@ -25,6 +25,7 @@ const SCHEMA_V2: &str = "rustbgpd.ixp-manager.router-config/v2";
 const IXP_VERSION: &str = "7.4.0";
 const MAX_FILTERS_PER_CLIENT: usize = 256;
 const MAX_FILTERS_TOTAL: usize = 4096;
+const MAX_COMPILED_RECEIVE_CELLS: usize = 4096;
 const BASE_HYGIENE: &str = include_str!("../../../examples/route-server/hygiene.rpol");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -338,6 +339,113 @@ fn scope_covers(filter: &UiFilter, covered: FilterScope<'_>) -> bool {
         && (candidate.prefix.is_none() || candidate.prefix == covered.prefix)
 }
 
+#[derive(Debug)]
+struct ReceiveCell {
+    peer: Option<u32>,
+    prefix: Option<String>,
+    prepend: u8,
+    reject: bool,
+}
+
+struct CompiledReceive {
+    cells: Vec<ReceiveCell>,
+    peers: Vec<u32>,
+    prefixes: Vec<String>,
+}
+
+fn reachable_receive_overlap(filters: &[&UiFilter]) -> bool {
+    filters.iter().enumerate().any(|(right_index, right)| {
+        right.action_receive.prepend_count().is_some()
+            && filters[..right_index].iter().any(|left| {
+                left.action_receive.prepend_count().is_some()
+                    && intersection(left, right).is_some_and(|overlap| {
+                        !filters[..right_index].iter().rev().any(|filter| {
+                            filter.action_receive.terminates_receive()
+                                && scope_covers(filter, overlap)
+                        })
+                    })
+            })
+    })
+}
+
+fn reachable_receive_filters<'a>(filters: &[&'a UiFilter]) -> Vec<&'a UiFilter> {
+    filters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, filter)| {
+            (!filters[..index].iter().any(|earlier| {
+                earlier.action_receive.terminates_receive() && scope_covers(earlier, scope(filter))
+            }))
+            .then_some(*filter)
+        })
+        .collect()
+}
+
+fn compile_receive_cells(filters: &[&UiFilter]) -> Result<CompiledReceive, Error> {
+    let peers = filters
+        .iter()
+        .filter_map(|filter| scope(filter).peer)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let prefixes = filters
+        .iter()
+        .filter_map(|filter| filter.received_prefix.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let count = (peers.len() + 1)
+        .checked_mul(prefixes.len() + 1)
+        .filter(|count| *count <= MAX_COMPILED_RECEIVE_CELLS)
+        .ok_or(Error::Refused("receive UI-filter cell cap exceeded"))?;
+    let mut cells = Vec::with_capacity(count);
+    for peer in peers.iter().copied().map(Some).chain(std::iter::once(None)) {
+        for prefix in prefixes
+            .iter()
+            .cloned()
+            .map(Some)
+            .chain(std::iter::once(None))
+        {
+            let mut prepend = 0_u8;
+            let mut reject = false;
+            for filter in filters {
+                let candidate = scope(filter);
+                if candidate.peer.is_some() && candidate.peer != peer
+                    || candidate.prefix.is_some() && candidate.prefix != prefix.as_deref()
+                {
+                    continue;
+                }
+                match filter.action_receive {
+                    FilterAction::AsIs => {
+                        reject = false;
+                        break;
+                    }
+                    FilterAction::NoAdvertise => {
+                        reject = true;
+                        break;
+                    }
+                    action => {
+                        prepend = prepend
+                            .checked_add(action.prepend_count().expect("PREPEND action"))
+                            .ok_or(Error::Refused("receive prepend accumulation exceeds 255"))?;
+                    }
+                }
+            }
+            cells.push(ReceiveCell {
+                peer,
+                prefix,
+                prepend,
+                reject,
+            });
+        }
+    }
+    Ok(CompiledReceive {
+        cells,
+        peers,
+        prefixes,
+    })
+}
+
 fn valid_handle(handle: &str) -> bool {
     !handle.is_empty()
         && handle.len() <= 128
@@ -557,29 +665,6 @@ fn validate_ui_filters(
         }
         previous = Some(order_key);
     }
-    for (right_index, right) in filters.iter().enumerate() {
-        if right.action_receive.prepend_count().is_none() {
-            continue;
-        }
-        for left in &filters[..right_index] {
-            if left.customer_id != right.customer_id
-                || left.action_receive.prepend_count().is_none()
-            {
-                continue;
-            }
-            let Some(overlap) = intersection(left, right) else {
-                continue;
-            };
-            let stopped = filters[..right_index].iter().rev().any(|filter| {
-                filter.customer_id == right.customer_id
-                    && filter.action_receive.terminates_receive()
-                    && scope_covers(filter, overlap)
-            });
-            if !stopped {
-                return Err(Error::Refused("overlapping receive PREPEND is unsupported"));
-            }
-        }
-    }
     Ok(())
 }
 
@@ -638,7 +723,7 @@ pub fn render_document(
                 prefixes,
                 filters.get(&client.customer_id).map_or(&[], Vec::as_slice),
                 document.router.asn,
-            ),
+            )?,
         );
     }
     files.insert(
@@ -806,8 +891,12 @@ fn render_client(
     prefixes: &[String],
     filters: &[&UiFilter],
     router_asn: u32,
-) -> String {
+) -> Result<String, Error> {
     let slug = client.vlan_interface_id;
+    let reachable_receive = reachable_receive_filters(filters);
+    let compiled_receive = reachable_receive_overlap(&reachable_receive)
+        .then(|| compile_receive_cells(&reachable_receive))
+        .transpose()?;
     let origins = client
         .origins
         .iter()
@@ -820,9 +909,19 @@ fn render_client(
     for prefix in prefixes {
         let _ = writeln!(out, "    {prefix},");
     }
+    out.push_str("}\n");
+    if let Some(compiled) = &compiled_receive
+        && !compiled.prefixes.is_empty()
+    {
+        let _ = writeln!(out, "prefix-set client-{slug}-ui-receive-prefixes {{");
+        for prefix in &compiled.prefixes {
+            let _ = writeln!(out, "    {prefix},");
+        }
+        out.push_str("}\n");
+    }
     let _ = write!(
         out,
-        "}}\npolicy client-{slug} {{\n    term reject-first-as-not-peer-as {{ if route.as-path.len >= 1 && !(route.as-path matches \"^{}_\") {{ reject }} }}\n    term reject-irrdb-origin-as-filtered {{ if !(route.origin-as in client-{slug}-origins) {{ reject }} }}\n    term reject-irrdb-prefix-filtered {{ if !(route.prefix in client-{slug}-prefixes) {{ reject }} }}\n",
+        "policy client-{slug} {{\n    term reject-first-as-not-peer-as {{ if route.as-path.len >= 1 && !(route.as-path matches \"^{}_\") {{ reject }} }}\n    term reject-irrdb-origin-as-filtered {{ if !(route.origin-as in client-{slug}-origins) {{ reject }} }}\n    term reject-irrdb-prefix-filtered {{ if !(route.prefix in client-{slug}-prefixes) {{ reject }} }}\n",
         client.asn
     );
     for filter in filters {
@@ -844,47 +943,93 @@ fn render_client(
     }
     out.push_str("    term accept-authorized { accept }\n}\n");
     if filters.is_empty() {
-        return out;
+        return Ok(out);
     }
     let _ = writeln!(out, "policy client-{slug}-receive {{");
-    for (index, filter) in filters.iter().enumerate() {
-        if filters[..index].iter().any(|earlier| {
-            earlier.action_receive.terminates_receive() && scope_covers(earlier, scope(filter))
-        }) {
-            continue;
+    if let Some(compiled) = compiled_receive {
+        let other_peers = (!compiled.peers.is_empty()).then(|| {
+            format!(
+                "!(route.as-path matches \"^({})_\")",
+                compiled
+                    .peers
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            )
+        });
+        for (index, cell) in compiled.cells.iter().enumerate() {
+            let mut guards = Vec::new();
+            match cell.peer {
+                Some(peer) => guards.push(format!("route.as-path matches \"^{peer}_\"")),
+                None => guards.extend(other_peers.iter().cloned()),
+            }
+            match &cell.prefix {
+                Some(prefix) => guards.push(format!("route.prefix == {prefix}")),
+                None if !compiled.prefixes.is_empty() => guards.push(format!(
+                    "!(route.prefix in client-{slug}-ui-receive-prefixes)"
+                )),
+                None => {}
+            }
+            let action = if cell.reject {
+                "reject".to_owned()
+            } else if cell.prepend == 0 {
+                "accept".to_owned()
+            } else {
+                format!(
+                    "prepend as {} {}; accept",
+                    cell.peer
+                        .map_or_else(|| "path-first".to_owned(), |peer| peer.to_string()),
+                    cell.prepend
+                )
+            };
+            write_filter_term(
+                &mut out,
+                &format!("ui-receive-cell-{index:04}"),
+                &guards,
+                &action,
+            );
         }
-        let mut guards = Vec::new();
-        if let Some(peer) = &filter.peer {
-            guards.push(format!(
-                "route.as-path matches \"^{}_\"",
-                peer.asn.expect("validated peer ASN")
-            ));
+    } else {
+        for (index, filter) in filters.iter().enumerate() {
+            if filters[..index].iter().any(|earlier| {
+                earlier.action_receive.terminates_receive() && scope_covers(earlier, scope(filter))
+            }) {
+                continue;
+            }
+            let mut guards = Vec::new();
+            if let Some(peer) = &filter.peer {
+                guards.push(format!(
+                    "route.as-path matches \"^{}_\"",
+                    peer.asn.expect("validated peer ASN")
+                ));
+            }
+            if let Some(prefix) = &filter.received_prefix {
+                guards.push(format!("route.prefix == {prefix}"));
+            }
+            let action = match filter.action_receive {
+                FilterAction::AsIs => "accept".to_owned(),
+                FilterAction::NoAdvertise => "reject".to_owned(),
+                action => format!(
+                    "prepend as {} {}",
+                    filter
+                        .peer
+                        .as_ref()
+                        .and_then(|peer| peer.asn)
+                        .map_or_else(|| "path-first".to_owned(), |asn| asn.to_string()),
+                    action.prepend_count().expect("PREPEND action")
+                ),
+            };
+            write_filter_term(
+                &mut out,
+                &format!("ui-receive-{}", filter.id),
+                &guards,
+                &action,
+            );
         }
-        if let Some(prefix) = &filter.received_prefix {
-            guards.push(format!("route.prefix == {prefix}"));
-        }
-        let action = match filter.action_receive {
-            FilterAction::AsIs => "accept".to_owned(),
-            FilterAction::NoAdvertise => "reject".to_owned(),
-            action => format!(
-                "prepend as {} {}",
-                filter
-                    .peer
-                    .as_ref()
-                    .and_then(|peer| peer.asn)
-                    .map_or_else(|| "path-first".to_owned(), |asn| asn.to_string()),
-                action.prepend_count().expect("PREPEND action")
-            ),
-        };
-        write_filter_term(
-            &mut out,
-            &format!("ui-receive-{}", filter.id),
-            &guards,
-            &action,
-        );
     }
     out.push_str("    term accept-unmatched { accept }\n}\n");
-    out
+    Ok(out)
 }
 
 #[cfg(unix)]

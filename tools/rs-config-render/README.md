@@ -69,12 +69,15 @@ community and matching rules accumulate after hygiene and IRR checks. Receive
 PREPEND with a peer uses its literal ASN and an exact first-AS guard; global
 PREPEND uses the typed route's first path ASN. An optional received-prefix guard
 is exact, and PREPEND continues; receive AS_IS or deny terminates in order.
+Reachable overlapping PREPEND is compiled into disjoint explicit/other first-AS
+and exact-prefix cells. Counts accumulate in original order; 255 succeeds, 256
+refuses, and more than 4096 compiled cells are refused without truncation.
 Every v1 global export chain and v2 per-client receive override ends with
 `ixp-manager-own-as-export-scrub`, which removes concrete large communities
 under the router ASN while preserving communities owned by other administrators.
-Reachable overlapping receive PREPEND, malformed peers, noncanonical or wrong-family
-prefixes, malformed order/actions, more than 256 rows per client, or more than
-4096 rows total are refused before a receipt. The older `ixp-manager-v1`
+Malformed peers, noncanonical or wrong-family prefixes, malformed order/actions,
+more than 256 rows per client, or more than 4096 rows total are refused before a
+receipt. The older `ixp-manager-v1`
 boundary remains available for legacy captures and still refuses active UI
 filters; lifecycle fetches require v2.
 

@@ -88,7 +88,8 @@ MANUAL_CONFIG_EXPORT = {
         ],
         "global_receive_prepend": "path-first-with-optional-received-prefix",
         "peer_receive_prepend": "literal-peer-asn",
-        "overlapping_receive_prepend": False,
+        "overlapping_receive_prepend": True,
+        "compiled_receive_cell_cap": 4096,
         "per_client_cap": 256,
         "total_cap": 4096,
     },
@@ -117,7 +118,7 @@ FULL_UI_FILTERS = [
 SUPPORTED_UI_FILTERS = [
     {
         "id": 32, "customer_id": 2, "peer": None,
-        "received_prefix": "203.0.113.0/24", "advertised_prefix": None,
+        "received_prefix": None, "advertised_prefix": None,
         "protocol": 4, "action_advertise": "AS_IS",
         "action_receive": "PREPEND_ONCE", "order_by": 3,
     },
@@ -152,11 +153,12 @@ if manifest.get("manual_config_export") != MANUAL_CONFIG_EXPORT:
 consumer_source = (root / "config-consumer.php").read_text()
 for required in [
     "$router->template = 'api/v4/router/server/bird2/standard';",
-    "substr_count($birdCandidate, $prepend) - substr_count($birdBaseline, $prepend) !== 1",
-    "substr_count($birdCandidate, $peerGuard) - substr_count($birdBaseline, $peerGuard) !== 0",
-    "str_contains($birdBaseline, $fragment)",
-    "substr_count($birdCandidate, $fragment) !== 1",
-    "unset($birdBaseline, $birdCandidate, $fragment, $prepend, $peerGuard);",
+    "whereIn('id', [32, 33])->update(['enabled' => 1]);",
+    "substr_count($birdCandidate, $prepend) - substr_count($birdBaseline, $prepend) !== 3",
+    "substr_count($birdCandidate, $peerGuard) - substr_count($birdBaseline, $peerGuard) !== 1",
+    "$globalPosition >= $specificPosition",
+    "$birdBaseline,",
+    "$birdCandidate,",
 ]:
     if required not in consumer_source:
         fail(f"pinned in-memory BIRD path-first proof drifted: {required}")

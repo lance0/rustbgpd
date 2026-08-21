@@ -80,7 +80,7 @@
             "id": 32,
             "customer_id": 2,
             "peer": null,
-            "received_prefix": "203.0.113.0/24",
+            "received_prefix": null,
             "advertised_prefix": null,
             "protocol": 4,
             "action_advertise": "AS_IS",
