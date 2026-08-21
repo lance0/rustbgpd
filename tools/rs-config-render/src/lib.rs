@@ -45,6 +45,7 @@ use sha2::{Digest, Sha256};
 
 pub mod activation;
 pub mod ixp_manager;
+pub mod ixp_manager_host;
 pub mod ixp_manager_lifecycle;
 
 /// Top-level keys of the supported `template-context` shape, sorted.

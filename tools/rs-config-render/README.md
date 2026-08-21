@@ -42,6 +42,8 @@ sudo -u rustbgpd /usr/bin/rs-config-render \
   --input-format ixp-manager-v1 \
   --context /var/lib/rustbgpd/ixp-manager/router.json \
   --out-dir /var/lib/rustbgpd/ixp-manager/candidate \
+  --router-handle rs1-ipv4 \
+  --runtime-state-dir /var/lib/rustbgpd/rs1-ipv4 \
   --max-prefix-restart-seconds 300 \
   --check-with /usr/bin/rustbgpd
 ```
@@ -56,7 +58,9 @@ suppressed so authentication values cannot escape through diagnostics.
 
 `render-receipt.json` is written last and only after the strict check passes.
 It records the source identity and hash, generated-file hashes and counts,
-refusal status, and the checked rustbgpd version without copying secrets. A
+refusal status, checked rustbgpd version, router handle, and exact runtime-state
+directory without copying secrets. The generated config fixes the gRPC UDS at
+`<runtime-state-dir>/grpc.sock`. A
 candidate without that receipt is incomplete and must not be deployed.
 
 After reviewing a complete candidate, install `config.toml` and its `policy/`
@@ -72,17 +76,22 @@ and literal arguments (never a shell command):
 
 ```console
 sudo -u rustbgpd /usr/bin/rs-config-render activate \
+  --router-handle rs1-ipv4 \
   --candidate /var/lib/rustbgpd/ixp-manager/candidate \
-  --state-dir /var/lib/rustbgpd/ixp-manager/activation \
+  --runtime-state-dir /var/lib/rustbgpd/rs1-ipv4 \
+  --state-dir /var/lib/rustbgpd/rs1-ipv4/activation \
+  --host-state-dir /var/lib/rustbgpd/ixp-manager-host \
   --check-with /usr/bin/rustbgpd --rbgp /usr/bin/rbgp \
-  --rbgp-addr unix:///var/lib/rustbgpd/grpc.sock \
+  --rbgp-addr unix:///var/lib/rustbgpd/rs1-ipv4/grpc.sock \
   --activation-command /usr/bin/sudo \
   --activation-arg=-n --activation-arg /usr/bin/systemctl \
   --activation-arg reload-or-restart --activation-arg rustbgpd
 ```
 
 The service must read
-`/var/lib/rustbgpd/ixp-manager/activation/current/config.toml`. The state path
+`/var/lib/rustbgpd/rs1-ipv4/activation/current/config.toml`. The runtime path
+basename must equal the router handle, and the activation path must be exactly
+`<runtime-state-dir>/activation`. The state path
 must be absolute, pre-created as a non-symlink mode-0700 directory, and owned by
 the `rustbgpd` account. Keep the candidate and state exclusively writable by
 that identity; do not run another publisher or reloader concurrently. Use
@@ -122,17 +131,20 @@ sudo -u rustbgpd /usr/bin/rs-config-render ixp-manager-lifecycle run \
   --router-handle rs1-ipv4 \
   --api-key-file /var/lib/rustbgpd/ixp-manager/api-key \
   --candidate-dir /var/lib/rustbgpd/ixp-manager/candidate-1 \
-  --state-dir /var/lib/rustbgpd/ixp-manager/lifecycle \
+  --runtime-state-dir /var/lib/rustbgpd/rs1-ipv4 \
+  --state-dir /var/lib/rustbgpd/rs1-ipv4/activation \
+  --host-state-dir /var/lib/rustbgpd/ixp-manager-host \
   --max-prefix-restart-seconds 300 \
   --check-with /usr/bin/rustbgpd --rbgp /usr/bin/rbgp \
-  --rbgp-addr unix:///var/lib/rustbgpd/grpc.sock \
+  --rbgp-addr unix:///var/lib/rustbgpd/rs1-ipv4/grpc.sock \
   --activation-command /usr/bin/sudo \
   --activation-arg=-n --activation-arg /usr/bin/systemctl \
   --activation-arg reload-or-restart --activation-arg rustbgpd
 ```
 
 Supply a new absent or empty mode-0700 candidate directory for each run. The
-absolute state directory must already exist at mode 0700 and remain owned by
+absolute runtime, activation, and shared host-state directories must already
+exist at mode 0700 and remain owned by
 the `rustbgpd` identity. The API-key path must be absolute, regular,
 non-symlink, mode 0600, and at most 4 KiB. The value appears only in the
 `X-IXP-Manager-API-Key` request header: it is not accepted in argv or the
@@ -151,14 +163,25 @@ means `updated` was delivered. Exit 2 means no lock was acquired or a definite
 pre-activation refusal was released. Exit 4 means the activation command never
 started, exact prior runtime was proven, and release was delivered. Exit 5
 does not issue a callback because lock acquisition or an activation effect is
-uncertain. Exit 6 leaves one durable `updated` or release callback pending;
-retry only that callback with the same identity:
+uncertain. Exit 6 leaves one durable `updated` or release callback pending.
+
+Every activation or lifecycle command also takes one advisory lock in the
+shared host-state directory. A synced owner fence remains after process death,
+ambiguous lock acquisition, activation recovery, or a pending callback. A new
+run returns exit 5 while any fence exists; only `resume` with the exact same
+handle, runtime, activation, host-state, and UDS binding may continue. A proven
+terminal journal cleanup is synced before that matching fence is removed.
+
+Retry only the pending callback with the same identity:
 
 ```console
 sudo -u rustbgpd /usr/bin/rs-config-render ixp-manager-lifecycle resume \
   --ixp-origin https://ixp.example.net --router-handle rs1-ipv4 \
   --api-key-file /var/lib/rustbgpd/ixp-manager/api-key \
-  --state-dir /var/lib/rustbgpd/ixp-manager/lifecycle
+  --runtime-state-dir /var/lib/rustbgpd/rs1-ipv4 \
+  --state-dir /var/lib/rustbgpd/rs1-ipv4/activation \
+  --host-state-dir /var/lib/rustbgpd/ixp-manager-host \
+  --rbgp-addr unix:///var/lib/rustbgpd/rs1-ipv4/grpc.sock
 ```
 
 Callback delivery is at-least-once because IXP Manager v7.4 supplies no lease

@@ -26,21 +26,17 @@ enum InputFormat {
     about = "Atomically publish and settle a validated local candidate"
 )]
 struct ActivateArgs {
+    #[command(flatten)]
+    host: HostBindingArgs,
     /// Private rendered candidate directory
     #[arg(long)]
     candidate: PathBuf,
-    /// Private activation state directory
-    #[arg(long)]
-    state_dir: PathBuf,
     /// rustbgpd binary used for version and strict candidate checks
     #[arg(long)]
     check_with: PathBuf,
     /// Exact rbgp executable used for health and live config comparison
     #[arg(long)]
     rbgp: PathBuf,
-    /// Running rustbgpd gRPC address
-    #[arg(long)]
-    rbgp_addr: String,
     /// Maximum seconds for each activation or rollback settlement
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=120))]
     settle_seconds: u64,
@@ -53,6 +49,32 @@ struct ActivateArgs {
     /// Literal activation argument; repeatable and never shell-evaluated
     #[arg(long, allow_hyphen_values = true)]
     activation_arg: Vec<OsString>,
+}
+
+#[derive(clap::Args)]
+struct HostBindingArgs {
+    #[arg(long)]
+    router_handle: String,
+    #[arg(long)]
+    runtime_state_dir: PathBuf,
+    #[arg(long)]
+    state_dir: PathBuf,
+    #[arg(long)]
+    host_state_dir: PathBuf,
+    #[arg(long)]
+    rbgp_addr: String,
+}
+
+impl HostBindingArgs {
+    fn binding(&self) -> Result<rs_config_render::ixp_manager_host::Binding, &'static str> {
+        rs_config_render::ixp_manager_host::Binding::new(
+            &self.router_handle,
+            &self.runtime_state_dir,
+            &self.state_dir,
+            &self.host_state_dir,
+            &self.rbgp_addr,
+        )
+    }
 }
 
 #[derive(Parser)]
@@ -75,18 +97,14 @@ enum LifecycleCommand {
 
 #[derive(clap::Args)]
 struct LifecycleConnectionArgs {
+    #[command(flatten)]
+    host: HostBindingArgs,
     /// IXP Manager root origin; HTTPS is required by default
     #[arg(long)]
     ixp_origin: String,
-    /// Exact IXP Manager router handle
-    #[arg(long)]
-    router_handle: String,
     /// Absolute mode-0600 file containing the API key
     #[arg(long)]
     api_key_file: PathBuf,
-    /// Pre-created absolute mode-0700 lifecycle/activation state directory
-    #[arg(long)]
-    state_dir: PathBuf,
     /// Whole-request deadline in seconds
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=300))]
     request_timeout_seconds: u64,
@@ -111,9 +129,6 @@ struct LifecycleRunArgs {
     /// Exact rbgp executable used for health and live config comparison
     #[arg(long)]
     rbgp: PathBuf,
-    /// Running rustbgpd gRPC address
-    #[arg(long)]
-    rbgp_addr: String,
     /// Maximum seconds for activation settlement
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=120))]
     settle_seconds: u64,
@@ -175,6 +190,10 @@ struct Cli {
     /// rustbgpd binary used for mandatory version and strict candidate checks
     #[arg(long)]
     check_with: Option<PathBuf>,
+    #[arg(long)]
+    router_handle: Option<String>,
+    #[arg(long)]
+    runtime_state_dir: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -269,52 +288,76 @@ fn main() -> ExitCode {
         return match args.command {
             LifecycleCommand::Run(args) => {
                 let connection = args.connection;
+                let binding = match connection.host.binding() {
+                    Ok(binding) => binding,
+                    Err(reason) => {
+                        eprintln!("rs-config-render: IXP Manager lifecycle: {reason}");
+                        return ExitCode::from(2);
+                    }
+                };
                 lifecycle_exit(rs_config_render::ixp_manager_lifecycle::run(
                     &rs_config_render::ixp_manager_lifecycle::Options {
                         ixp_origin: &connection.ixp_origin,
-                        router_handle: &connection.router_handle,
+                        router_handle: &connection.host.router_handle,
                         api_key_file: &connection.api_key_file,
                         candidate_dir: &args.candidate_dir,
-                        state_dir: &connection.state_dir,
+                        state_dir: &connection.host.state_dir,
                         checker: &args.check_with,
                         max_prefix_restart_seconds: args.max_prefix_restart_seconds,
                         rbgp: &args.rbgp,
-                        rbgp_addr: &args.rbgp_addr,
+                        rbgp_addr: &connection.host.rbgp_addr,
                         activation_command: &args.activation_command,
                         activation_args: &args.activation_arg,
                         settle: Duration::from_secs(args.settle_seconds),
                         timeout: Duration::from_secs(connection.request_timeout_seconds),
                         initial: args.initial,
                         allow_http_loopback: connection.allow_http_loopback,
+                        binding: &binding,
                     },
                 ))
             }
             LifecycleCommand::Resume(args) => {
                 let connection = args.connection;
+                let binding = match connection.host.binding() {
+                    Ok(binding) => binding,
+                    Err(reason) => {
+                        eprintln!("rs-config-render: IXP Manager lifecycle: {reason}");
+                        return ExitCode::from(2);
+                    }
+                };
                 lifecycle_exit(rs_config_render::ixp_manager_lifecycle::resume(
                     &rs_config_render::ixp_manager_lifecycle::ResumeOptions {
                         ixp_origin: &connection.ixp_origin,
-                        router_handle: &connection.router_handle,
+                        router_handle: &connection.host.router_handle,
                         api_key_file: &connection.api_key_file,
-                        state_dir: &connection.state_dir,
+                        state_dir: &connection.host.state_dir,
                         timeout: Duration::from_secs(connection.request_timeout_seconds),
                         allow_http_loopback: connection.allow_http_loopback,
+                        binding: &binding,
                     },
                 ))
             }
         };
     }
     if let Some(args) = parse_activation() {
+        let binding = match args.host.binding() {
+            Ok(binding) => binding,
+            Err(reason) => {
+                eprintln!("rs-config-render: activation: {reason}");
+                return ExitCode::from(2);
+            }
+        };
         let options = rs_config_render::activation::Options {
             candidate: &args.candidate,
-            state_dir: &args.state_dir,
+            state_dir: &args.host.state_dir,
             checker: &args.check_with,
             rbgp: &args.rbgp,
-            rbgp_addr: &args.rbgp_addr,
+            rbgp_addr: &args.host.rbgp_addr,
             settle: Duration::from_secs(args.settle_seconds),
             initial: args.initial,
             activation_command: &args.activation_command,
             activation_args: &args.activation_arg,
+            binding: &binding,
         };
         return match rs_config_render::activation::activate(&options) {
             Ok(status) => {
@@ -362,11 +405,29 @@ fn main() -> ExitCode {
             );
             return ExitCode::from(2);
         };
+        let (Some(handle), Some(runtime)) = (
+            cli.router_handle.as_deref(),
+            cli.runtime_state_dir.as_deref(),
+        ) else {
+            eprintln!(
+                "rs-config-render: IXP Manager mode requires --router-handle and --runtime-state-dir"
+            );
+            return ExitCode::from(2);
+        };
+        let binding = match rs_config_render::ixp_manager_host::RenderBinding::new(handle, runtime)
+        {
+            Ok(binding) => binding,
+            Err(reason) => {
+                eprintln!("rs-config-render: {reason}");
+                return ExitCode::from(2);
+            }
+        };
         return match rs_config_render::ixp_manager::write_checked_candidate(
             &cli.context,
             &cli.out_dir,
             restart,
             checker,
+            &binding,
         ) {
             Ok(files) => stdout_exit(write_stdout(|writer| {
                 writeln!(
@@ -381,7 +442,11 @@ fn main() -> ExitCode {
             }
         };
     }
-    if cli.max_prefix_restart_seconds.is_some() || cli.check_with.is_some() {
+    if cli.max_prefix_restart_seconds.is_some()
+        || cli.check_with.is_some()
+        || cli.router_handle.is_some()
+        || cli.runtime_state_dir.is_some()
+    {
         eprintln!("rs-config-render: IXP Manager options require --input-format ixp-manager-v1");
         return ExitCode::from(2);
     }

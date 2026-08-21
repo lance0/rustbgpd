@@ -4,6 +4,8 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::ixp_manager_host::Binding;
+
 #[derive(Debug)]
 pub struct Options<'a> {
     pub ixp_origin: &'a str,
@@ -21,6 +23,7 @@ pub struct Options<'a> {
     pub timeout: Duration,
     pub initial: bool,
     pub allow_http_loopback: bool,
+    pub binding: &'a Binding,
 }
 
 #[derive(Debug)]
@@ -31,6 +34,7 @@ pub struct ResumeOptions<'a> {
     pub state_dir: &'a Path,
     pub timeout: Duration,
     pub allow_http_loopback: bool,
+    pub binding: &'a Binding,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -91,6 +95,7 @@ pub fn resume(_: &ResumeOptions<'_>) -> Result<Status, Error> {
 #[cfg(unix)]
 mod unix {
     use super::{Error, Options, ResumeOptions, Status};
+    use crate::ixp_manager_host::{self, Binding, Guard};
     use crate::{activation, ixp_manager};
     use serde::{Deserialize, Serialize};
     use serde_json::Value;
@@ -144,6 +149,7 @@ mod unix {
         ixp_manager_version: String,
         origin: String,
         router_handle: String,
+        host: Binding,
         phase: Phase,
         callback: Option<Callback>,
         callback_attempts: u32,
@@ -541,12 +547,13 @@ mod unix {
         sync_dir(state)
     }
 
-    fn new_journal(origin: &str, handle: &str) -> Journal {
+    fn new_journal(origin: &str, handle: &str, binding: &Binding) -> Journal {
         Journal {
             schema: JOURNAL_SCHEMA.to_owned(),
             ixp_manager_version: "7.4.0".to_owned(),
             origin: origin.to_owned(),
             router_handle: handle.to_owned(),
+            host: binding.clone(),
             phase: Phase::LockRequestPending,
             callback: None,
             callback_attempts: 0,
@@ -574,6 +581,7 @@ mod unix {
         client: &Client,
         journal: &mut Journal,
         callback: Callback,
+        guard: &Guard,
     ) -> Result<()> {
         journal.phase = match callback {
             Callback::Updated => Phase::UpdatedPending,
@@ -584,13 +592,39 @@ mod unix {
         journal.callback_attempts = journal.callback_attempts.saturating_add(1);
         write_journal(state, journal)?;
         match client.callback(callback) {
-            Ok(()) => remove_journal(state),
+            Ok(()) => {
+                remove_journal(state)?;
+                guard.clear().map_err(host_error)
+            }
             Err(_) => Err(Error::CallbackPending),
         }
     }
 
+    fn host_error(error: ixp_manager_host::Error) -> Error {
+        match error {
+            ixp_manager_host::Error::Refused(reason) => Error::Refused(reason),
+            ixp_manager_host::Error::RecoveryRequired => Error::ManualRecovery,
+        }
+    }
+
     pub fn run(options: &Options<'_>) -> Result<Status> {
+        if options.router_handle != options.binding.router_handle
+            || options.state_dir != options.binding.activation_state_dir
+            || options.rbgp_addr != options.binding.rbgp_addr
+        {
+            return Err(Error::Refused(
+                "lifecycle options do not match host binding",
+            ));
+        }
+        let client = Client::new(
+            options.ixp_origin,
+            options.router_handle,
+            options.api_key_file,
+            options.timeout,
+            options.allow_http_loopback,
+        )?;
         let _lock = state_lock(options.state_dir)?;
+        let guard = Guard::claim_new(options.binding).map_err(host_error)?;
         let path = journal_path(options.state_dir);
         match fs::symlink_metadata(&path) {
             Ok(_) if private(&path, false, 0o600) => {
@@ -600,14 +634,10 @@ mod unix {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(_) => return Err(Error::ManualRecovery),
         }
-        let client = Client::new(
-            options.ixp_origin,
-            options.router_handle,
-            options.api_key_file,
-            options.timeout,
-            options.allow_http_loopback,
-        )?;
-        let mut journal = new_journal(&client.origin, &client.handle);
+        let mut journal = new_journal(&client.origin, &client.handle, options.binding);
+        let finish = |journal: &mut Journal, callback| {
+            callback_pending(options.state_dir, &client, journal, callback, &guard)
+        };
         write_journal(options.state_dir, &journal)?;
         match client.acquire() {
             LockResult::Acquired => {
@@ -616,6 +646,7 @@ mod unix {
             }
             LockResult::NotAcquired => {
                 remove_journal(options.state_dir)?;
+                guard.clear().map_err(host_error)?;
                 return Err(Error::Refused("IXP Manager update lock was not acquired"));
             }
             LockResult::Ambiguous(class) => {
@@ -630,21 +661,23 @@ mod unix {
             Err(_) => {
                 journal.activation_outcome = Some("refused".to_owned());
                 journal.error_class = Some("configuration_fetch".to_owned());
-                callback_pending(options.state_dir, &client, &mut journal, Callback::Release)?;
+                finish(&mut journal, Callback::Release)?;
                 return Err(Error::Refused("IXP Manager configuration fetch failed"));
             }
         };
+        let render_binding = options.binding.render_binding();
         if ixp_manager::write_checked_candidate_bytes(
             &input,
             options.candidate_dir,
             options.max_prefix_restart_seconds,
             options.checker,
+            &render_binding,
         )
         .is_err()
         {
             journal.activation_outcome = Some("refused".to_owned());
             journal.error_class = Some("candidate_render".to_owned());
-            callback_pending(options.state_dir, &client, &mut journal, Callback::Release)?;
+            finish(&mut journal, Callback::Release)?;
             return Err(Error::Refused("IXP Manager candidate was refused"));
         }
         journal.candidate_sha256 = candidate_digest(options.candidate_dir);
@@ -660,8 +693,9 @@ mod unix {
             initial: options.initial,
             activation_command: options.activation_command,
             activation_args: options.activation_args,
+            binding: options.binding,
         };
-        match activation::activate(&activation_args) {
+        match activation::activate_guarded(&activation_args, &guard) {
             Ok(status) => {
                 journal.activation_outcome = Some(
                     match status {
@@ -670,7 +704,7 @@ mod unix {
                     }
                     .to_owned(),
                 );
-                callback_pending(options.state_dir, &client, &mut journal, Callback::Updated)?;
+                finish(&mut journal, Callback::Updated)?;
                 Ok(match status {
                     activation::Status::Activated => Status::Activated,
                     activation::Status::Noop => Status::Noop,
@@ -678,12 +712,12 @@ mod unix {
             }
             Err(activation::Error::Refused(_)) => {
                 journal.activation_outcome = Some("refused".to_owned());
-                callback_pending(options.state_dir, &client, &mut journal, Callback::Release)?;
+                finish(&mut journal, Callback::Release)?;
                 Err(Error::Refused("candidate activation was refused"))
             }
             Err(activation::Error::RolledBack) => {
                 journal.activation_outcome = Some("rolled_back".to_owned());
-                callback_pending(options.state_dir, &client, &mut journal, Callback::Release)?;
+                finish(&mut journal, Callback::Release)?;
                 Err(Error::RolledBack)
             }
             Err(activation::Error::RecoveryRequired) => {
@@ -697,6 +731,14 @@ mod unix {
     }
 
     pub fn resume(options: &ResumeOptions<'_>) -> Result<Status> {
+        if options.router_handle != options.binding.router_handle
+            || options.state_dir != options.binding.activation_state_dir
+        {
+            return Err(Error::Refused(
+                "lifecycle options do not match host binding",
+            ));
+        }
+        let guard = Guard::claim_existing(options.binding).map_err(host_error)?;
         let _lock = state_lock(options.state_dir)?;
         let client = Client::new(
             options.ixp_origin,
@@ -706,9 +748,15 @@ mod unix {
             options.allow_http_loopback,
         )?;
         let mut journal = read_journal(options.state_dir)?;
-        if journal.origin != client.origin || journal.router_handle != client.handle {
+        if journal.origin != client.origin
+            || journal.router_handle != client.handle
+            || journal.host != *options.binding
+        {
             return Err(Error::Refused("lifecycle journal identity does not match"));
         }
+        let finish = |journal: &mut Journal, callback| {
+            callback_pending(options.state_dir, &client, journal, callback, &guard)
+        };
         match journal.phase {
             Phase::UpdatedPending
                 if journal.callback == Some(Callback::Updated)
@@ -717,7 +765,7 @@ mod unix {
                         Some("activated" | "noop")
                     ) =>
             {
-                callback_pending(options.state_dir, &client, &mut journal, Callback::Updated)?;
+                finish(&mut journal, Callback::Updated)?;
                 Ok(Status::Updated)
             }
             Phase::ReleasePending
@@ -728,7 +776,7 @@ mod unix {
                     ) =>
             {
                 let rolled_back = journal.activation_outcome.as_deref() == Some("rolled_back");
-                callback_pending(options.state_dir, &client, &mut journal, Callback::Release)?;
+                finish(&mut journal, Callback::Release)?;
                 if rolled_back {
                     Err(Error::RolledBack)
                 } else {
@@ -736,7 +784,7 @@ mod unix {
                 }
             }
             Phase::Locked if journal.callback.is_none() && journal.activation_outcome.is_none() => {
-                callback_pending(options.state_dir, &client, &mut journal, Callback::Release)?;
+                finish(&mut journal, Callback::Release)?;
                 Err(Error::Refused("lock released before activation"))
             }
             Phase::LockRequestPending | Phase::ActivationStarted | Phase::ManualRecovery => {

@@ -11,6 +11,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::ixp_manager_host::RenderBinding;
+
 #[cfg(unix)]
 use std::fs::OpenOptions;
 #[cfg(unix)]
@@ -357,12 +359,26 @@ fn is_placeholder(secret: &str) -> bool {
     )
 }
 
-pub fn render_document(input: &[u8], restart_seconds: u32) -> Result<Candidate, Error> {
+pub fn render_document(
+    input: &[u8],
+    restart_seconds: u32,
+    binding: &RenderBinding,
+) -> Result<Candidate, Error> {
+    if !binding.valid() {
+        return Err(Error::Refused("invalid router host binding"));
+    }
     if restart_seconds == 0 {
         return Err(Error::Refused("max-prefix restart must be positive"));
     }
     let document: Document = serde_json::from_slice(input).map_err(|_| Error::Input)?;
     let effective = validate(&document)?;
+    if document.router.handle != binding.router_handle {
+        return Err(Error::Refused("router handle does not match host binding"));
+    }
+    let runtime = binding
+        .runtime_state_dir
+        .to_str()
+        .ok_or(Error::Refused("runtime state directory must be UTF-8"))?;
     let mut files = BTreeMap::new();
     files.insert("policy/ixp-hygiene.rpol".into(), render_hygiene(&document));
     for (client, prefixes) in document.clients.iter().zip(&effective) {
@@ -373,7 +389,7 @@ pub fn render_document(input: &[u8], restart_seconds: u32) -> Result<Candidate, 
     }
     files.insert(
         "config.toml".into(),
-        render_config(&document, restart_seconds),
+        render_config(&document, restart_seconds, runtime),
     );
     let metadata = json!({
         "input": {"schema": SCHEMA, "ixp_manager_version": IXP_VERSION,
@@ -382,19 +398,22 @@ pub fn render_document(input: &[u8], restart_seconds: u32) -> Result<Candidate, 
             "prefixes": effective.iter().map(Vec::len).sum::<usize>(),
             "origins": document.clients.iter().map(|c| c.origins.len()).sum::<usize>()},
         "refusals": {"status": "passed", "active_ui_filters": 0,
-            "route_server_skin_files": 0, "multi_address_clients": 0}
+            "route_server_skin_files": 0, "multi_address_clients": 0},
+        "host": binding
     });
     Ok(Candidate { files, metadata })
 }
 
-fn render_config(document: &Document, restart_seconds: u32) -> String {
+fn render_config(document: &Document, restart_seconds: u32, runtime: &str) -> String {
     let router = &document.router;
     let mut out = format!(
-        "# GENERATED candidate from IXP Manager {}.\n[global]\nasn = {}\nrouter_id = {}\nlisten_port = 179\nlisten_addresses = [{}]\nebgp_requires_policy = true\n\n[global.telemetry]\nlog_format = \"json\"\n",
+        "# GENERATED candidate from IXP Manager {}.\n[global]\nasn = {}\nrouter_id = {}\nruntime_state_dir = {}\nlisten_port = 179\nlisten_addresses = [{}]\nebgp_requires_policy = true\n\n[global.telemetry]\nlog_format = \"json\"\n\n[global.telemetry.grpc_uds]\npath = {}\nmode = 0o600\n",
         document.ixp_manager.version,
         router.asn,
         quoted(&router.router_id),
-        quoted(&router.peering_ip)
+        quoted(runtime),
+        quoted(&router.peering_ip),
+        quoted(&format!("{runtime}/grpc.sock"))
     );
     if router.rpki {
         out.push_str("\n[rpki]\n");
@@ -602,12 +621,13 @@ pub fn write_checked_candidate(
     out: &Path,
     restart_seconds: u32,
     checker: &Path,
+    binding: &RenderBinding,
 ) -> Result<usize, Error> {
     if !private_file(context, 0o600) {
         return Err(Error::Refused("input capture must be mode 0600"));
     }
     let input = fs::read(context).map_err(|_| Error::Input)?;
-    write_checked_candidate_bytes(&input, out, restart_seconds, checker)
+    write_checked_candidate_bytes(&input, out, restart_seconds, checker, binding)
 }
 
 /// Render and strictly validate a private in-memory IXP Manager capture.
@@ -619,8 +639,9 @@ pub fn write_checked_candidate_bytes(
     out: &Path,
     restart_seconds: u32,
     checker: &Path,
+    binding: &RenderBinding,
 ) -> Result<usize, Error> {
-    let candidate = render_document(input, restart_seconds)?;
+    let candidate = render_document(input, restart_seconds, binding)?;
     prepare_output(out)?;
     for (relative, contents) in &candidate.files {
         let path = out.join(relative);
