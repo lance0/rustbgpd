@@ -242,8 +242,7 @@ fn spawn_daemon_listening(dir: &Path, grpc_socket: &Path, token_path: &Path) -> 
         stderr_path: daemon_stderr,
     };
     // The daemon logs JSON to stdout: `bound_addr` on the gRPC TCP
-    // listener, and `addr` on each bound BGP listener family (the test
-    // speaks IPv4, so take the `0.0.0.0` one).
+    // listener, and `addr` on the exact loopback BGP listener used below.
     let grpc_port = wait_for_logged(
         &mut daemon,
         &daemon_stdout,
@@ -254,14 +253,19 @@ fn spawn_daemon_listening(dir: &Path, grpc_socket: &Path, token_path: &Path) -> 
         &mut daemon,
         &daemon_stdout,
         "a bound IPv4 BGP listener",
-        |logs| logged_port(logs, "addr", "0.0.0.0:"),
+        |logs| logged_port(logs, "addr", "127.0.0.1:"),
     );
     let metrics_port = wait_for_logged(
         &mut daemon,
         &daemon_stdout,
         "a bound metrics listener",
-        |logs| logged_port(logs, "addr", "127.0.0.1:"),
+        |logs| {
+            logs.lines()
+                .find(|line| line.contains(r#""message":"metrics server listening""#))
+                .and_then(|line| logged_port(line, "addr", "127.0.0.1:"))
+        },
     );
+    assert_ne!(bgp_port, metrics_port, "BGP and metrics ports must differ");
     wait_for_tcp(grpc_port, &mut daemon);
     (daemon, grpc_port, bgp_port, metrics_port)
 }
@@ -333,6 +337,7 @@ enforcement = "tier"
 asn = 65001
 router_id = "10.0.0.1"
 listen_port = {bgp_port}
+listen_addresses = ["127.0.0.1"]
 runtime_state_dir = "{runtime_dir}"
 
 [global.telemetry]
@@ -364,6 +369,7 @@ remote_asn = 65020
 description = "live peer"
 graceful_restart = false
 max_prefixes = 5
+route_server_client = true
 
 [neighbors.add_path]
 receive = true
@@ -442,11 +448,14 @@ fn establish_bgp_and_announce(bgp_port: u16) -> TcpStream {
         my_as: 65020,
         hold_time: 90,
         bgp_identifier: "10.0.0.2".parse().unwrap(),
-        capabilities: vec![Capability::AddPath(vec![AddPathFamily {
-            afi: Afi::Ipv4,
-            safi: Safi::Unicast,
-            send_receive: AddPathMode::Send,
-        }])],
+        capabilities: vec![
+            Capability::FourOctetAs { asn: 65020 },
+            Capability::AddPath(vec![AddPathFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                send_receive: AddPathMode::Send,
+            }]),
+        ],
     });
     let encode_update =
         |as_sequence: Vec<u32>, nlri: &'static [u8], med: u32, forge_reason: bool| {
@@ -467,7 +476,7 @@ fn establish_bgp_and_announce(bgp_port: u16) -> TcpStream {
                     LargeCommunity::new(65001, 999, 7),
                 ]));
             }
-            rustbgpd_wire::attribute::encode_path_attributes(&attributes, &mut attrs, false, false)
+            rustbgpd_wire::attribute::encode_path_attributes(&attributes, &mut attrs, true, false)
                 .expect("encode path attributes");
             Message::Update(UpdateMessage {
                 withdrawn_routes: bytes::Bytes::new(),
@@ -509,7 +518,7 @@ fn announce_additional_route(stream: &mut TcpStream) {
             PathAttribute::Med(31),
         ],
         &mut attrs,
-        false,
+        true,
         false,
     )
     .expect("encode additional route attributes");
@@ -539,7 +548,7 @@ fn announce_third_candidate(stream: &mut TcpStream) {
             PathAttribute::Med(30),
         ],
         &mut attrs,
-        false,
+        true,
         false,
     )
     .expect("encode third candidate attributes");
@@ -568,7 +577,7 @@ fn announce_additional_rejected_route(stream: &mut TcpStream) {
             PathAttribute::NextHop("192.0.2.99".parse().unwrap()),
         ],
         &mut attrs,
-        false,
+        true,
         false,
     )
     .expect("encode additional rejected route attributes");
@@ -691,6 +700,7 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
         .unwrap()
         .0;
     assert_eq!(inventory.matches("list_neighbors(state).await?").count(), 1);
+    assert_eq!(inventory.matches(".await?").count(), 1);
     assert!(!inventory.contains("PolicyServiceClient"), "{inventory}");
     assert!(!inventory.contains("ListRejectedRoutes"), "{inventory}");
     assert!(!inventory.contains("list_rejected_routes"), "{inventory}");
@@ -855,6 +865,10 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     );
     assert_eq!(peer["neighbor_address"], "192.0.2.10", "{protocols}");
     assert_eq!(peer["neighbor_as"], 65010, "{protocols}");
+    assert_eq!(peer["connection"], " Active", "{protocols}");
+    for field in ["source_address", "keepalive", "bgp_session"] {
+        assert!(peer.get(field).is_none(), "{field}: {protocols}");
+    }
 
     let alias_peer = &protocols["protocols"]["pb_0001_as65020"];
     assert_eq!(alias_peer["protocol"], "pb_0001_as65020", "{protocols}");
@@ -1078,6 +1092,14 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     assert_eq!(live_protocol["route_limit_at"], 1, "{protocols}");
     assert_eq!(live_protocol["import_limit"], 5, "{protocols}");
     assert_eq!(live_protocol["limit_action"], "shutdown", "{protocols}");
+    assert_eq!(live_protocol["source_address"], "127.0.0.1", "{protocols}");
+    assert_eq!(live_protocol["keepalive"], 30, "{protocols}");
+    assert_eq!(live_protocol["connection"], " Established", "{protocols}");
+    assert_eq!(
+        live_protocol["bgp_session"],
+        serde_json::json!(["external", "route-server", "AS4"]),
+        "{protocols}"
+    );
     assert!(
         live_protocol.get("import_limit_action").is_none(),
         "{protocols}"

@@ -106,6 +106,16 @@ false zero. Each row carries `route_limit_at` from the same accepted-prefix
 count as `routes.imported`; finite limits add canonical `import_limit` and
 `limit_action` fields.
 
+The same one-`ListNeighbors` snapshot supplies protocol-detail transport
+state. Established rows expose `source_address` only from the daemon's cached
+local IP address and `keepalive` only from its negotiated cadence,
+including zero. `connection` is empty for Idle or unknown state and otherwise
+uses Bird's Eye's leading-space FSM spelling, such as ` Established`. A
+validated route-server client adds `bgp_session` values `external` and
+`route-server`, plus `AS4` only when negotiated. Down, stale, and old-daemon
+rows do not fabricate the optional transport or session fields. Live
+`hold_timer_now` and `keepalive_now` countdowns remain unsupported.
+
 ## IXP Manager / Bird's Eye slice
 
 IXP Manager protocol names can be mapped without changing daemon configuration:

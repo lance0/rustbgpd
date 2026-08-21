@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Established neighbor state now carries the cached local IP address and
+  negotiated keepalive cadence with rolling-upgrade presence. CLI JSON/text,
+  TUI, and Birdwatcher protocol detail preserve zero and absence exactly;
+  route-server clients gain Bird's Eye's session tags only from validated
+  configuration and negotiated AS4. The live and pinned IXP Manager v7.4
+  proofs keep countdown timers and full runtime compatibility out of scope.
+  (LAN-1177)
 - Rejected-route retention now counts genuine per-session LRU displacement,
   exports a canonical-peer counter and bounded warnings, and exposes an
   optional API count that distinguishes exact zero from older-daemon absence.

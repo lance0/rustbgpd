@@ -900,7 +900,9 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         info.negotiated_session
             .as_ref()
             .map(|negotiated| proto::NegotiatedSessionState {
+                local_address: negotiated.local_address.map(|address| address.to_string()),
                 hold_time_seconds: Some(u32::from(negotiated.hold_time)),
+                keepalive_interval_seconds: Some(u32::from(negotiated.keepalive_interval)),
                 remote_router_id: Some(negotiated.remote_router_id.to_string()),
                 four_octet_as: Some(negotiated.four_octet_as),
                 families: negotiated
@@ -3687,7 +3689,9 @@ mod tests {
     fn peer_info_to_proto_preserves_negotiated_session_presence_and_values() {
         let mut info = peer_info("10.0.0.2".parse().unwrap());
         info.negotiated_session = Some(rustbgpd_transport::NegotiatedSessionState {
+            local_address: Some("127.0.0.1".parse().unwrap()),
             hold_time: 0,
+            keepalive_interval: 0,
             remote_router_id: "192.0.2.7".parse().unwrap(),
             four_octet_as: false,
             families: vec![(Afi::Ipv6, Safi::Unicast)],
@@ -3705,7 +3709,9 @@ mod tests {
         let state = peer_info_to_proto(&info);
         assert_eq!(state.negotiation_available, Some(true));
         let negotiated = state.negotiated_session.unwrap();
+        assert_eq!(negotiated.local_address.as_deref(), Some("127.0.0.1"));
         assert_eq!(negotiated.hold_time_seconds, Some(0));
+        assert_eq!(negotiated.keepalive_interval_seconds, Some(0));
         assert_eq!(negotiated.remote_router_id.as_deref(), Some("192.0.2.7"));
         assert_eq!(negotiated.four_octet_as, Some(false));
         assert_eq!(negotiated.families, vec!["ipv6_unicast"]);

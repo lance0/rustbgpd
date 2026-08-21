@@ -383,7 +383,12 @@ async fn query_state_projects_established_negotiation_and_capped_gr_runtime() {
         .unwrap()
         .negotiated_session
         .expect("Established session exposes negotiated values");
+    assert_eq!(
+        negotiated.local_address,
+        Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+    );
     assert_eq!(negotiated.hold_time, 87);
+    assert_eq!(negotiated.keepalive_interval, 29);
     assert_eq!(negotiated.remote_router_id, Ipv4Addr::new(192, 0, 2, 7));
     assert!(negotiated.four_octet_as);
     assert_eq!(negotiated.families, vec![(Afi::Ipv4, Safi::Unicast)]);
@@ -438,6 +443,7 @@ async fn query_state_with_local_gr_helper_disabled_omits_effective_retention() {
             ],
         }))
         .await;
+    session.read_half = None;
     session.drive_fsm(Event::KeepaliveReceived).await;
 
     let (reply, state) = oneshot::channel();
@@ -445,7 +451,9 @@ async fn query_state_with_local_gr_helper_disabled_omits_effective_retention() {
         .handle_command(PeerCommand::QueryState { reply })
         .await;
     let negotiated = state.await.unwrap().negotiated_session.unwrap();
+    assert_eq!(negotiated.local_address, None);
     assert_eq!(negotiated.hold_time, 0);
+    assert_eq!(negotiated.keepalive_interval, 0);
     assert!(!negotiated.four_octet_as);
     assert!(!negotiated.peer_route_refresh);
     assert!(!negotiated.peer_enhanced_route_refresh);

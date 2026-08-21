@@ -765,6 +765,10 @@ message NegotiatedSessionState {
   // Directional send-side limit: the peer's Extended Messages capability
   // governs whether rustbgpd may send 4096 or 65535-byte BGP messages.
   optional uint32 outbound_max_message_bytes = 9;
+  // Cached local IP address for the current Established connection.
+  optional string local_address = 10;
+  // Negotiated KEEPALIVE cadence, including present zero when Hold Time is 0.
+  optional uint32 keepalive_interval_seconds = 11;
 }
 
 message NegotiatedGracefulRestartState {

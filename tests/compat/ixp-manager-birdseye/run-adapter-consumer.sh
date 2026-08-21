@@ -16,6 +16,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 cargo build --quiet --locked --manifest-path "$repo/Cargo.toml" --bin rustbgpd
+cargo build --quiet --locked --manifest-path "$repo/Cargo.toml" -p rustbgpctl --bin rbgp
 cargo build --quiet --locked --manifest-path "$repo/Cargo.toml" -p birdwatcher-adapter
 socket=$tmp/rustbgpd.sock
 aliases=$tmp/protocol-aliases
@@ -39,6 +40,7 @@ mode = 0o600
 address = "192.0.2.1"
 remote_asn = 64496
 graceful_restart = false
+route_server_client = true
 EOF
 
 "$repo/target/debug/rustbgpd" "$tmp/rustbgpd.toml" >"$tmp/daemon.log" 2>&1 &
@@ -49,6 +51,8 @@ for _ in $(seq 1 120); do
   sleep 0.1
 done
 [ -S "$socket" ] || { cat "$tmp/daemon.log" >&2; exit 1; }
+"$repo/target/debug/rbgp" --addr "unix://$socket" neighbor 192.0.2.1 disable \
+  --reason "pinned down-session contract" >/dev/null
 
 NO_COLOR=1 "$repo/target/debug/birdwatcher-adapter" \
   --grpc-addr "unix://$socket" --listen 127.0.0.1:0 \

@@ -31,7 +31,11 @@ warning and rejects any additional warning.
 
 The live-adapter leg intentionally uses a configured, down peer, so the exact
 lookups, table longest-prefix match, and filtered-prefix query return honest
-empty route arrays. It drives the same real IXP Manager methods before and
+empty route arrays. The pinned protocol-detail consumer also proves its
+unconditional `connection` field is the empty string while `source_address`,
+`keepalive`, `bgp_session`, `hold_timer_now`, and `keepalive_now` remain absent;
+the configured route-server-client flag alone cannot fabricate negotiated
+session tags. It drives the same real IXP Manager methods before and
 after an atomic alias-file rename plus `SIGHUP`, then repeats them after a
 malformed reload is rejected, all against one adapter PID. The live BGP smoke
 test separately pins a populated

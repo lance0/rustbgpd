@@ -1209,7 +1209,9 @@ fn peer_identity_gauge(
 /// incoherent stub would let a test pass against a peer no real session could be.
 fn test_negotiated_session(route_refresh: bool) -> rustbgpd_transport::NegotiatedSessionState {
     rustbgpd_transport::NegotiatedSessionState {
+        local_address: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
         hold_time: 90,
+        keepalive_interval: 30,
         remote_router_id: Ipv4Addr::new(192, 0, 2, 1),
         four_octet_as: true,
         families: vec![(Afi::Ipv4, Safi::Unicast)],

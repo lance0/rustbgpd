@@ -16,6 +16,13 @@
     "global_admin": 65001,
     "function": 1101
   },
+  "live_session_detail": {
+    "fields": ["source_address", "keepalive", "connection", "bgp_session"],
+    "connection": "empty-or-leading-space-fsm",
+    "route_server_session": ["external", "route-server", "AS4-if-negotiated"],
+    "inventory_rpc": "ListNeighbors",
+    "unsupported_countdowns": ["hold_timer_now", "keepalive_now"]
+  },
   "filtered_retention_metadata": {
     "fields": ["enabled", "capacity", "evictions_since_reset", "may_be_incomplete"],
     "unknown_evictions": null,
@@ -103,12 +110,14 @@
     "less-specific-longest-prefix-match",
     "atomic-all-candidate-prefix-snapshot",
     "file-backed-runtime-protocol-alias-reconfiguration",
-    "active-rejected-route-reason-inventory"
+    "active-rejected-route-reason-inventory",
+    "live-session-transport-detail"
   ],
   "unsupported": [
     "defined-only-rejected-route-reason-emission",
     "full-ixp-manager-ui-filter-policy-engine",
     "full-table-snapshot",
-    "direct-runtime-protocol-alias-reconfiguration"
+    "direct-runtime-protocol-alias-reconfiguration",
+    "live-hold-keepalive-countdowns"
   ]
 }

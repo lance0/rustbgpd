@@ -15,6 +15,7 @@ $app->make(Kernel::class)->bootstrap();
 
 $output = rtrim((string)getenv('CAPTURE_OUTPUT'), '/');
 $router = Router::whereHandle('b2-rs1-lan1-ipv4')->firstOrFail();
+DB::table('vlaninterface')->whereNotIn('id', [1, 4])->update(['rsclient' => 0]);
 $router->template = 'api/v4/router/server/rustbgpd/json';
 $fail = static function (string $message): never {
     fwrite(STDERR, $message . "\n");
@@ -150,7 +151,6 @@ unset(
     $peerGuard,
 );
 $router->template = 'api/v4/router/server/rustbgpd/json';
-DB::table('vlaninterface')->whereNotIn('id', [1, 4])->update(['rsclient' => 0]);
 DB::table('irrdb_asn')->where('customer_id', 2)->where('protocol', 4)
     ->where('asn', '<>', 1213)->delete();
 DB::table('irrdb_prefix')->where('customer_id', 2)->where('protocol', 4)

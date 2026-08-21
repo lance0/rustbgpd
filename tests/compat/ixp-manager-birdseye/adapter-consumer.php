@@ -116,6 +116,25 @@ $container->instance('config', new Repository([
 $router = new Router();
 $router->api = getenv('BIRDSEYE_API');
 $consumer = new BirdsEye($router);
+$view = @file_get_contents(
+    getenv('IXP_MANAGER_ROOT') . '/resources/views/services/lg/bgp-summary.foil.php'
+);
+$diagnostic = @file_get_contents(
+    getenv('IXP_MANAGER_ROOT') . '/app/Services/Diagnostics/Suites/RouterBgpSessionsDiagnosticSuite.php'
+);
+if (!is_string($view) || !is_string($diagnostic)) {
+    throw new RuntimeException('pinned session-detail consumers are required');
+}
+foreach (['p.connection', 'p.bgp_session', 'p.source_address', 'p.keepalive'] as $use) {
+    if (!str_contains($view, $use)) {
+        throw new RuntimeException("pinned session-detail view use drifted: $use");
+    }
+}
+foreach (['{$bgpsum->connection}', 'isset( $bgpsum->keepalive )'] as $use) {
+    if (!str_contains($diagnostic, $use)) {
+        throw new RuntimeException("pinned session diagnostic use drifted: $use");
+    }
+}
 $symbols = $consumer->symbols();
 if (!is_string($symbols)) {
     throw new RuntimeException('symbols did not return adapter JSON');
@@ -134,8 +153,26 @@ $responses = [
         $filtered['function'],
     ),
 ];
+$session = $consumer->bgpNeighbourSummary($protocol);
+if (!is_string($session)) {
+    throw new RuntimeException('session detail did not return adapter JSON');
+}
+$decodedSession = json_decode($session, true, 512, JSON_THROW_ON_ERROR);
+$detail = $decodedSession['protocol'] ?? [];
+if (($detail['connection'] ?? null) !== '') {
+    throw new RuntimeException('down session connection must be present and empty');
+}
+foreach (['source_address', 'keepalive', 'bgp_session', 'hold_timer_now', 'keepalive_now'] as $field) {
+    if (array_key_exists($field, $detail)) {
+        throw new RuntimeException("down session fabricated $field");
+    }
+}
+$responses['session-detail'] = $session;
 
 foreach ($responses as $journey => $response) {
+    if ($journey === 'session-detail') {
+        continue;
+    }
     if (!is_string($response)) {
         throw new RuntimeException("$journey did not return adapter JSON");
     }

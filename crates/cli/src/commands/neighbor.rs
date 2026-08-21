@@ -251,16 +251,33 @@ fn take_neighbor_show_capture() -> Vec<u8> {
     NEIGHBOR_SHOW_CAPTURE.with(|slot| slot.replace(None).expect("neighbor show capture is active"))
 }
 
-fn emit_neighbor_detail_json(value: &JsonNeighborDetail) -> Result<(), CliError> {
+fn emit_neighbor_detail_json(
+    value: &JsonNeighborDetail,
+    negotiated: Option<&crate::proto::NegotiatedSessionState>,
+) -> Result<(), CliError> {
+    let mut value = serde_json::to_value(value)?;
+    if let (Some(transport), Some(session)) = (
+        negotiated,
+        value
+            .get_mut("negotiated_session")
+            .and_then(serde_json::Value::as_object_mut),
+    ) {
+        if let Some(address) = &transport.local_address {
+            session.insert("local_address".to_string(), address.clone().into());
+        }
+        if let Some(seconds) = transport.keepalive_interval_seconds {
+            session.insert("keepalive_interval_seconds".to_string(), seconds.into());
+        }
+    }
     #[cfg(test)]
     if let Some(result) = NEIGHBOR_SHOW_CAPTURE.with(|slot| {
         slot.borrow_mut()
             .as_mut()
-            .map(|bytes| output::write_json_pretty(bytes, value))
+            .map(|bytes| output::write_json_pretty(bytes, &value))
     }) {
         return result;
     }
-    output::print_json_pretty(value)
+    output::print_json_pretty(&value)
 }
 
 fn emit_effective_posture_human(value: &str) -> Result<(), CliError> {
@@ -449,7 +466,7 @@ pub async fn show(
                 })
                 .collect(),
         };
-        emit_neighbor_detail_json(&out)?;
+        emit_neighbor_detail_json(&out, n.negotiated_session.as_ref())?;
     } else {
         println!(
             "Neighbor:              {}",
@@ -498,10 +515,7 @@ pub async fn show(
         }
         println!("Negotiation:           {}", negotiation_status_label(&n));
         if let Some(negotiated) = n.negotiated_session.as_ref() {
-            println!(
-                "Negotiated Hold Time: {}",
-                optional_seconds_label(negotiated.hold_time_seconds)
-            );
+            print!("{}", render_negotiated_transport_details(negotiated));
             println!(
                 "Remote Router ID:     {}",
                 negotiated.remote_router_id.as_deref().unwrap_or("unknown")
@@ -828,6 +842,15 @@ fn render_negotiated_capability_details(
         negotiated
             .outbound_max_message_bytes
             .map_or_else(|| "unknown".to_string(), |bytes| format!("{bytes} bytes"))
+    )
+}
+
+fn render_negotiated_transport_details(session: &crate::proto::NegotiatedSessionState) -> String {
+    format!(
+        "Local Address:        {}\nNegotiated Hold Time: {}\nKeepalive Interval:   {}\n",
+        session.local_address.as_deref().unwrap_or("unknown"),
+        optional_seconds_label(session.hold_time_seconds),
+        optional_seconds_label(session.keepalive_interval_seconds)
     )
 }
 
@@ -1571,6 +1594,8 @@ mod tests {
         assert_eq!(json["is_dynamic"], true);
         assert_eq!(json["accepted_dynamic_range"]["prefix"], "10.0.0.0/24");
         assert_eq!(json["accepted_dynamic_range"]["peer_group"], "ix-members");
+        assert_eq!(json["negotiated_session"]["local_address"], "127.0.0.1");
+        assert_eq!(json["negotiated_session"]["keepalive_interval_seconds"], 29);
 
         begin_neighbor_show_capture();
         show(
@@ -1668,7 +1693,9 @@ mod tests {
 
         state.negotiation_available = Some(true);
         state.negotiated_session = Some(crate::proto::NegotiatedSessionState {
+            local_address: Some("127.0.0.1".to_string()),
             hold_time_seconds: Some(0),
+            keepalive_interval_seconds: Some(0),
             remote_router_id: Some("192.0.2.7".to_string()),
             four_octet_as: Some(false),
             families: vec!["ipv4_unicast".to_string()],
@@ -1686,6 +1713,17 @@ mod tests {
         );
         assert_eq!(optional_seconds_label(negotiated.hold_time_seconds), "0s");
         assert_eq!(optional_bool_label(negotiated.four_octet_as), "false");
+        assert_eq!(
+            render_negotiated_transport_details(negotiated),
+            "Local Address:        127.0.0.1\nNegotiated Hold Time: 0s\nKeepalive Interval:   0s\n"
+        );
+        let mut older = negotiated.clone();
+        older.local_address = None;
+        older.keepalive_interval_seconds = None;
+        assert_eq!(
+            render_negotiated_transport_details(&older),
+            "Local Address:        unknown\nNegotiated Hold Time: 0s\nKeepalive Interval:   unknown\n"
+        );
         let (available, json) = negotiated_session_json(&state);
         assert_eq!(available, Some(true));
         let json = json.unwrap();

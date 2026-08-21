@@ -386,7 +386,8 @@ request without scanning routes or issuing `ListRejectedRoutes` per peer.
 
 `NeighborState.negotiation_available` and `negotiated_session` expose the
 actor-authoritative capability outcome of the current Established session:
-hold time, remote router ID, four-octet AS, negotiated families,
+hold time, cached local IP address, negotiated keepalive cadence, remote
+router ID, four-octet AS, negotiated families,
 graceful-restart coverage, the peer's Route Refresh / Enhanced Route
 Refresh / Extended Message capabilities, and the resulting outbound
 message-size ceiling. Presence of `negotiation_available` distinguishes an
@@ -395,7 +396,13 @@ reporting no Established session; `negotiated_session` is absent while the
 session is down, during OpenConfirm, or when the actor query is stale. The
 scalars inside it are optional so genuinely negotiated false/zero values
 stay distinct from fields an older daemon never sent during a rolling
-upgrade.
+upgrade. `local_address` is copied from the Established session's cached
+export profile; it is never substituted with the remote peer address or
+queried from the socket during an API request. `keepalive_interval_seconds`
+is the negotiated send cadence and remains present as zero when negotiated
+hold time is zero. Both fields and the enclosing negotiated state are absent
+for down or stale responses; older daemons may send the enclosing state while
+omitting these two additive fields. Neither field is a live countdown.
 
 `NeighborState.rfc8212_import_policy` and `rfc8212_export_policy` report
 the RFC 8212 explicit-policy status of each direction (ADR-0112); a
