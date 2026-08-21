@@ -2,6 +2,19 @@ name: Criterion Bench Nightly
 
 # Nightly perf TRIPWIRE — not a source of published benchmark truth.
 #
+# DORMANT since 2026-08-21: the `[self-hosted, rustbgpd-bench]` VPS was
+# deregistered and reclaimed. The schedule trigger is removed so nothing
+# queues against a label with no runner behind it; a scheduled run would
+# otherwise sit pending forever instead of failing. Everything else is
+# retained deliberately.
+#
+# TO REVIVE: register a runner carrying the `rustbgpd-bench` label, then
+# restore the schedule below. Re-measure the new host's same-SHA noise
+# floor before trusting any comparison — the ~11% figure in this file and
+# in docs/BENCHMARKS.md is specific to the retired VPS and does not carry
+# over. Re-check the nightly ladder for a free slot (fuzz 04:00,
+# audit 06:00) rather than assuming 05:00 is still unclaimed.
+#
 # Runs the same pinned A/B harness as `bench.yml` (bench/compare-criterion.sh)
 # on the dedicated self-hosted runner, comparing the current default-branch tip
 # against the **latest release tag**. A release-anchored baseline is the right
@@ -30,8 +43,9 @@ name: Criterion Bench Nightly
 # run summary. workflow_dispatch runs keep single-run verdicts.
 
 on:
-  schedule:
-    - cron: "0 5 * * *" # nightly at 05:00 UTC (between fuzz@04:00 and audit@06:00)
+  # schedule:
+  #   - cron: "0 5 * * *" # nightly at 05:00 UTC (between fuzz@04:00 and audit@06:00)
+  #   ^ restore together with a runner carrying the `rustbgpd-bench` label.
   workflow_dispatch:
     inputs:
       base_ref:
