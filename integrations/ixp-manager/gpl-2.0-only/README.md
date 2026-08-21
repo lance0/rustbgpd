@@ -14,10 +14,11 @@ or translate the upstream BIRD templates.
 The exporter preserves every applicable UI filter as one ordered row,
 including peer identity, distinct received and advertised prefixes, protocol,
 and both actions. The Rust renderer translates the bounded pinned-v7.4 subset
-exactly: advertise control actions, receive AS_IS/deny, and non-overlapping
-peer-scoped receive PREPEND. Missing peers, global or reachable overlapping
-receive PREPEND, malformed order or prefixes, and more than 256 rows per client
-or 4096 total are refused.
+exactly: advertise control actions and ordered receive AS_IS, deny, and
+PREPEND. Reachable overlap is bounded into disjoint peer and exact-prefix
+cells; counts above 255 or more than 4096 compiled cells refuse. Missing peers,
+malformed order or prefixes, and more than 256 rows per client or 4096 total
+are also refused.
 
 Fetch that document separately through the authenticated IXP Manager API into
 a regular, non-symlink mode-0600 local file. Keep API keys in the fetcher's

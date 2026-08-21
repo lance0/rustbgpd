@@ -34,28 +34,43 @@ config(['ixp.no_transit_asns.override' => false]);
 $render('config-implicit.json');
 config(['ixp.no_transit_asns.override' => []]);
 DB::table('route_server_filters_prod')->where('id', 32)->update([
-    'peer_id' => null, 'vlan_id' => 1, 'received_prefix' => '203.0.113.0/24',
+    'peer_id' => null, 'vlan_id' => 1, 'received_prefix' => null,
     'advertised_prefix' => null, 'protocol' => 4, 'action_advertise' => 'AS_IS',
     'action_receive' => 'PREPEND_ONCE', 'order_by' => 3,
 ]);
 DB::table('route_server_filters_prod')->update(['enabled' => 0]);
 $router->template = 'api/v4/router/server/bird2/standard';
 $birdBaseline = (new ConfigurationGenerator($router))->render()->render();
-DB::table('route_server_filters_prod')->where('id', 32)->update(['enabled' => 1]);
+DB::table('route_server_filters_prod')->whereIn('id', [32, 33])->update(['enabled' => 1]);
 $birdCandidate = (new ConfigurationGenerator($router))->render()->render();
 $prepend = 'bgp_path.prepend( bgp_path.first );';
 $peerGuard = 'if ( bgp_path.first =';
-$fragment = "    if ( net = 203.0.113.0/24 ) then {\n"
-    . "        # PREPEND_ONCE\n"
-    . "        bgp_path.prepend( bgp_path.first );\n"
-    . "    }\n";
-if (substr_count($birdCandidate, $prepend) - substr_count($birdBaseline, $prepend) !== 1
-    || substr_count($birdCandidate, $peerGuard) - substr_count($birdBaseline, $peerGuard) !== 0
-    || str_contains($birdBaseline, $fragment)
-    || substr_count($birdCandidate, $fragment) !== 1) {
-    $fail('isolated pinned BIRD global PREPEND drifted');
+$global = "    # PREPEND_ONCE\n    bgp_path.prepend( bgp_path.first );\n";
+$specific = "    if ( bgp_path.first = 112 ) then {\n"
+    . "        if ( net = 192.175.48.0/24 ) then {\n"
+    . "            # PREPEND_TWICE\n"
+    . "            bgp_path.prepend( bgp_path.first );\n"
+    . "            bgp_path.prepend( bgp_path.first );\n"
+    . "        }\n    }\n";
+$globalPosition = strpos($birdCandidate, $global);
+$specificPosition = strpos($birdCandidate, $specific);
+if (substr_count($birdCandidate, $prepend) - substr_count($birdBaseline, $prepend) !== 3
+    || substr_count($birdCandidate, $peerGuard) - substr_count($birdBaseline, $peerGuard) !== 1
+    || str_contains($birdBaseline, $global) || str_contains($birdBaseline, $specific)
+    || $globalPosition === false || $specificPosition === false
+    || $globalPosition >= $specificPosition) {
+    $fail('pinned BIRD overlapping PREPEND order drifted');
 }
-unset($birdBaseline, $birdCandidate, $fragment, $prepend, $peerGuard);
+unset(
+    $birdBaseline,
+    $birdCandidate,
+    $global,
+    $specific,
+    $globalPosition,
+    $specificPosition,
+    $prepend,
+    $peerGuard,
+);
 $router->template = 'api/v4/router/server/rustbgpd/json';
 DB::table('vlaninterface')->whereNotIn('id', [1, 4])->update(['rsclient' => 0]);
 DB::table('irrdb_asn')->where('customer_id', 2)->where('protocol', 4)
@@ -84,7 +99,7 @@ if (array_column($supported['ui_filters'], 'id') !== [32, 33, 35]
     || array_column($supported['ui_filters'], 'action_receive')
         !== ['PREPEND_ONCE', 'PREPEND_TWICE', 'AS_IS']
     || $supported['ui_filters'][0]['peer'] !== null
-    || $supported['ui_filters'][0]['received_prefix'] !== '203.0.113.0/24') {
+    || $supported['ui_filters'][0]['received_prefix'] !== null) {
     $fail('row-31-disabled ordered UI-filter export drifted');
 }
 $second = (new ConfigurationGenerator($router))->render()->render();
