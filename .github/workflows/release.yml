@@ -141,7 +141,7 @@ jobs:
           # install under /usr/share):
           #   rustbgpd, rbgp, rs-config-render        binaries
           #   birdwatcher-adapter                     Alice-LG birdwatcher shim
-          #   LICENSE-MIT, LICENSE-APACHE             licenses
+          #   LICENSE-MIT, LICENSE-APACHE, LICENSES.md licenses
           #   rustbgpd.schema.json                    config JSON Schema
           #   share/man/man1/rbgp.1                   CLI man page
           #   share/man/man8/rustbgpd.8               daemon man page
@@ -167,7 +167,7 @@ jobs:
           cp target/${{ matrix.target }}/release/rbgp staging/
           cp target/${{ matrix.target }}/release/rs-config-render staging/
           cp target/${{ matrix.target }}/release/birdwatcher-adapter staging/
-          cp LICENSE-MIT LICENSE-APACHE staging/
+          cp LICENSE-MIT LICENSE-APACHE LICENSES.md staging/
           cp docs/rustbgpd.schema.json staging/
           cp examples/systemd/rustbgpd.service \
             examples/systemd/rustbgpd-dataplane.conf staging/share/systemd/
@@ -190,7 +190,7 @@ jobs:
           done
           tar -C staging -czf dist/rustbgpd-${SUFFIX}.tar.gz \
             rustbgpd rbgp rs-config-render birdwatcher-adapter \
-            LICENSE-MIT LICENSE-APACHE rustbgpd.schema.json share
+            LICENSE-MIT LICENSE-APACHE LICENSES.md rustbgpd.schema.json share
           # Also publish the config JSON Schema as a standalone asset so
           # editors can reference the stable
           # `releases/latest/download/rustbgpd.schema.json` URL. Both
@@ -209,7 +209,7 @@ jobs:
           # present entry (LICENSE-MIT) even though it is there.
           entries="$(tar -tzf "dist/rustbgpd-${SUFFIX}.tar.gz")"
           for f in rustbgpd rbgp rs-config-render birdwatcher-adapter \
-                   LICENSE-MIT LICENSE-APACHE \
+                   LICENSE-MIT LICENSE-APACHE LICENSES.md \
                    share/man/man1/rbgp.1 share/man/man8/rustbgpd.8 \
                    share/completions/rbgp.bash share/completions/rbgp.zsh \
                    share/completions/rbgp.fish \

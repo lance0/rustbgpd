@@ -42,6 +42,13 @@ allow = [
     "Unlicense",
 ]
 confidence-threshold = 0.8
+exceptions = [
+    # ureq 3.4.0's Rustls platform-verifier path carries the Mozilla root
+    # data under CDLA-Permissive-2.0. Keep this approval version-scoped;
+    # LICENSES.md accompanies the data in release archives.
+    { crate = "webpki-root-certs@1.0.9", allow = ["CDLA-Permissive-2.0"] },
+    { crate = "webpki-roots@1.0.9", allow = ["CDLA-Permissive-2.0"] },
+]
 
 [bans]
 # Duplicate-version entries are expected churn in a tree this size

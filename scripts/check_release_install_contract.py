@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 BINARIES = ("rustbgpd", "rbgp", "rs-config-render", "birdwatcher-adapter")
+LICENSES = ("LICENSE-MIT", "LICENSE-APACHE", "LICENSES.md")
 SYSTEMD = (
     "share/systemd/rustbgpd.service",
     "share/systemd/rustbgpd-dataplane.conf",
@@ -32,6 +33,7 @@ MONITORING = (
 )
 SYSTEMD_UNIT = "examples/systemd/rustbgpd.service"
 COMPOSE_FILE = "examples/docker-compose/docker-compose.yml"
+LICENSE_MAP = "LICENSES.md"
 SYSTEMD_DIRECTIVES = {
     ("Unit", "StartLimitIntervalSec"): "10min",
     ("Unit", "StartLimitBurst"): "5",
@@ -218,16 +220,25 @@ def check(root: Path) -> list[str]:
     try:
         check_systemd_unit(errors, read(SYSTEMD_UNIT))
         check_compose(errors, read(COMPOSE_FILE))
+        license_map = read(LICENSE_MAP)
+        for clause in (
+            "# Community Data License Agreement - Permissive - Version 2.0",
+            "## 2. Conditions for Sharing Data",
+            '5.4. "Results" means any outcome obtained by computational analysis',
+        ):
+            if clause not in license_map:
+                errors.append(f"license map: missing CDLA clause {clause!r}")
         release = read(".github/workflows/release.yml")
         package_tar = (
             "tar -C staging -czf dist/rustbgpd-${SUFFIX}.tar.gz rustbgpd rbgp "
-            "rs-config-render birdwatcher-adapter LICENSE-MIT LICENSE-APACHE rustbgpd.schema.json share"
+            "rs-config-render birdwatcher-adapter LICENSE-MIT LICENSE-APACHE LICENSES.md rustbgpd.schema.json share"
         )
         package = select_script(release, "tarball package commands", package_tar)
         package_patterns = tuple(
             rf"^cp target/\$\{{\{{ matrix\.target \}}\}}/release/{binary} staging/$"
             for binary in BINARIES
         ) + (
+            r"^cp LICENSE-MIT LICENSE-APACHE LICENSES\.md staging/$",
             r"^cp examples/systemd/rustbgpd\.service examples/systemd/rustbgpd-dataplane\.conf staging/share/systemd/$",
             r"^cp docs/grafana/rustbgpd-overview\.json staging/share/monitoring/$",
             r"^cp examples/prometheus/rustbgpd-alerts\.yml examples/prometheus/rustbgpd-alerts_test\.yml staging/share/monitoring/$",
@@ -240,7 +251,7 @@ def check(root: Path) -> list[str]:
             "tarball payload assertions",
             'entries="$(tar -tzf "dist/rustbgpd-${SUFFIX}.tar.gz")"',
         )
-        payloads = BINARIES + SYSTEMD + tuple(tar for _, tar, _ in MONITORING)
+        payloads = BINARIES + LICENSES + SYSTEMD + tuple(tar for _, tar, _ in MONITORING)
         inventory = re.search(r"(?m)^for f in (.+); do$", assertion)
         asserted = set(inventory.group(1).split()) if inventory else set()
         missing_payloads = set(payloads) - asserted
@@ -276,6 +287,9 @@ def check(root: Path) -> list[str]:
         for source, _, _ in MONITORING:
             if not (root / source).is_file() or (root / source).stat().st_size == 0:
                 errors.append(f"monitoring source missing or empty: {source}")
+        license_mapping = (LICENSE_MAP, "/usr/share/doc/rustbgpd/LICENSES.md")
+        if license_mapping not in mappings:
+            errors.append(f"native license mapping missing {license_mapping!r}")
 
         contract = read(".github/workflows/release-install-contract.yml")
         native = select_script(
@@ -296,6 +310,8 @@ def check(root: Path) -> list[str]:
                 r"^for tree in extracted/deb extracted/rpm; do$",
                 r"^for exe in rustbgpd rbgp rs-config-render birdwatcher-adapter; do$",
                 r'^test -x "\$tree/usr/bin/\$exe" ',
+                r"^for file in lib/systemd/system/rustbgpd\.service usr/share/man/man1/rbgp\.1\.gz usr/share/man/man8/rustbgpd\.8\.gz usr/share/doc/rustbgpd/LICENSES\.md; do$",
+                r'^test -s "\$tree/\$file" ',
                 r'^"\$tree/usr/bin/rustbgpd" --check "\$tree/etc/rustbgpd/config\.toml"$',
                 r'^unit="\$tree/lib/systemd/system/rustbgpd\.service"$',
                 r"^for directive in StartLimitIntervalSec=10min StartLimitBurst=5 Restart=on-failure RestartSec=5 TimeoutStopSec=32min; do$",

@@ -1,0 +1,63 @@
+# Containerlab topology: pinned IXP Manager v7.4 lifecycle API, real MySQL,
+# rustbgpd, and the M96 MD5-authenticated FRR member.
+#
+# Build prerequisites:
+#   docker build --target dev -t rustbgpd:dev .
+#   docker build -t rustbgpd-ixp-manager-v7.4:300b7e0 \
+#     tests/compat/ixp-manager-birdseye
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m97-ixp-manager-authenticated-lifecycle.clab.yml
+#   bash tests/interop/scripts/test-m97-ixp-manager-authenticated-lifecycle.sh
+
+name: m97-ixp-manager-lifecycle
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip addr add 192.0.2.18/32 dev eth1
+        - ip route add 10.1.0.36/32 dev eth1
+        - ip link set eth1 up
+
+    ixp-manager:
+      kind: linux
+      image: rustbgpd-ixp-manager-v7.4:300b7e0
+      network-mode: container:clab-m97-ixp-manager-lifecycle-rustbgpd
+      cmd: sleep infinity
+      env:
+        APP_DEBUG: "false"
+        DB_HOST: clab-m97-ixp-manager-lifecycle-mysql
+        DB_PORT: "3306"
+        DB_DATABASE: ixp_ci
+        DB_USERNAME: root
+        DB_PASSWORD: ""
+        VIEW_SKIN: rustbgpd-lifecycle
+        IXP_NO_TRANSIT_ASNS_OVERRIDE: ""
+        IXP_RPKI_RTR1_HOST: 127.0.0.1
+        IXP_RPKI_RTR1_PORT: "3323"
+        IXP_RPKI_RTR2_HOST: ""
+
+    mysql:
+      kind: linux
+      image: mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+      env:
+        MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+        MYSQL_DATABASE: ixp_ci
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m96-ixp-manager.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.1.0.36/32 dev eth1
+        - ip route add 192.0.2.18/32 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]

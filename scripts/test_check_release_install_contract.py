@@ -31,8 +31,21 @@ INPUTS = (
     "examples/prometheus/rustbgpd-alerts_test.yml",
     contract.SYSTEMD_UNIT,
     contract.COMPOSE_FILE,
+    contract.LICENSE_MAP,
 )
 MUTATIONS = (
+    (
+        contract.LICENSE_MAP,
+        '5.4. "Results" means any outcome obtained by computational analysis',
+        '5.4. "Results" means an omitted agreement clause',
+        "license map",
+    ),
+    (
+        "packaging/nfpm.yaml",
+        "  - src: LICENSES.md\n    dst: /usr/share/doc/rustbgpd/LICENSES.md",
+        "  - src: omitted-license-map\n    dst: /usr/share/doc/rustbgpd/omitted",
+        "native license mapping",
+    ),
     (
         RELEASE,
         "                   share/monitoring/rustbgpd-alerts_test.yml; do",

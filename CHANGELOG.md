@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rs-config-render ixp-manager-lifecycle` now drives IXP Manager v7.4's
+  authenticated router lock, Foil fetch, existing strict render/atomic
+  activation, and updated/release callbacks. A private synced journal precedes
+  every remote effect, callback-only resume is at-least-once, and no uncertain
+  acquisition or activation is released or acknowledged automatically.
+  HTTPS platform trust, disabled redirects/proxies, bounded bodies, header-only
+  credentials, and M97's real v7.4/MySQL/MD5-FRR receipt close the operational
+  loop without expanding the daemon API. (LAN-1126)
 - `rs-config-render` now accepts a strict IXP Manager v7.4 Foil JSON export,
   writes a private route-server candidate, validates it with the selected
   `rustbgpd` binary's version and `--check --strict` modes, then writes the
@@ -23,8 +31,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unsettled state retains the candidate. Exit 4 proves pre-effect restoration;
   exit 5 reports that recovery or receipt durability is unproven. M96 proves the
   pre-effect path against MD5-authenticated FRR; focused tests prove the started
-  failure boundary. Authenticated fetch and IXP Manager callbacks
-  remain external. (LAN-1105)
+  failure boundary. (LAN-1105)
 - `birdwatcher-adapter` now serves IXP Manager v7.4.0's exact received and
   export route journeys for IPv4/IPv6 unicast. Every page carries the exact
   daemon-side prefix filter, all Add-Path candidates retain source alias and

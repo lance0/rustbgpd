@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use rs_config_render::{
     Options, RenderError, SiteLocalFile, SiteLocalInput, render, render_site_local,
@@ -53,6 +53,85 @@ struct ActivateArgs {
     /// Literal activation argument; repeatable and never shell-evaluated
     #[arg(long, allow_hyphen_values = true)]
     activation_arg: Vec<OsString>,
+}
+
+#[derive(Parser)]
+#[command(
+    name = "rs-config-render ixp-manager-lifecycle",
+    about = "Run the authenticated IXP Manager v7.4 router lifecycle"
+)]
+struct LifecycleArgs {
+    #[command(subcommand)]
+    command: LifecycleCommand,
+}
+
+#[derive(Subcommand)]
+enum LifecycleCommand {
+    /// Lock, fetch, render, activate, and acknowledge one router configuration
+    Run(LifecycleRunArgs),
+    /// Replay one durable pending callback without fetching or activating
+    Resume(LifecycleResumeArgs),
+}
+
+#[derive(clap::Args)]
+struct LifecycleConnectionArgs {
+    /// IXP Manager root origin; HTTPS is required by default
+    #[arg(long)]
+    ixp_origin: String,
+    /// Exact IXP Manager router handle
+    #[arg(long)]
+    router_handle: String,
+    /// Absolute mode-0600 file containing the API key
+    #[arg(long)]
+    api_key_file: PathBuf,
+    /// Pre-created absolute mode-0700 lifecycle/activation state directory
+    #[arg(long)]
+    state_dir: PathBuf,
+    /// Whole-request deadline in seconds
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=300))]
+    request_timeout_seconds: u64,
+    /// Permit plaintext HTTP only to a numeric loopback origin
+    #[arg(long)]
+    allow_http_loopback: bool,
+}
+
+#[derive(clap::Args)]
+struct LifecycleRunArgs {
+    #[command(flatten)]
+    connection: LifecycleConnectionArgs,
+    /// Empty private directory for the fetched, rendered candidate
+    #[arg(long)]
+    candidate_dir: PathBuf,
+    /// rustbgpd binary used for mandatory strict candidate checks
+    #[arg(long)]
+    check_with: PathBuf,
+    /// Positive automatic restart delay for IXP Manager max-prefix
+    #[arg(long)]
+    max_prefix_restart_seconds: u32,
+    /// Exact rbgp executable used for health and live config comparison
+    #[arg(long)]
+    rbgp: PathBuf,
+    /// Running rustbgpd gRPC address
+    #[arg(long)]
+    rbgp_addr: String,
+    /// Maximum seconds for activation settlement
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=120))]
+    settle_seconds: u64,
+    /// Permit initial publication only when no current generation or daemon exists
+    #[arg(long)]
+    initial: bool,
+    /// Exact activation executable; never evaluated by a shell
+    #[arg(long)]
+    activation_command: PathBuf,
+    /// Literal activation argument; repeatable and never shell-evaluated
+    #[arg(long, allow_hyphen_values = true)]
+    activation_arg: Vec<OsString>,
+}
+
+#[derive(clap::Args)]
+struct LifecycleResumeArgs {
+    #[command(flatten)]
+    connection: LifecycleConnectionArgs,
 }
 
 #[derive(Parser)]
@@ -154,7 +233,77 @@ fn parse_activation() -> Option<ActivateArgs> {
         .then(|| ActivateArgs::parse_from(std::iter::once(binary).chain(args)))
 }
 
+fn parse_lifecycle() -> Option<LifecycleArgs> {
+    let mut args = std::env::args_os();
+    let binary = args.next()?;
+    (args.next().as_deref() == Some(OsStr::new("ixp-manager-lifecycle")))
+        .then(|| LifecycleArgs::parse_from(std::iter::once(binary).chain(args)))
+}
+
+fn lifecycle_exit(
+    result: Result<
+        rs_config_render::ixp_manager_lifecycle::Status,
+        rs_config_render::ixp_manager_lifecycle::Error,
+    >,
+) -> ExitCode {
+    match result {
+        Ok(status) => {
+            let status = match status {
+                rs_config_render::ixp_manager_lifecycle::Status::Activated => "activated",
+                rs_config_render::ixp_manager_lifecycle::Status::Noop => "noop",
+                rs_config_render::ixp_manager_lifecycle::Status::Updated => "updated",
+            };
+            stdout_exit(write_stdout(|writer| {
+                writeln!(writer, "IXP Manager lifecycle {status}")
+            }))
+        }
+        Err(error) => {
+            eprintln!("rs-config-render: IXP Manager lifecycle: {error}");
+            ExitCode::from(error.exit_code())
+        }
+    }
+}
+
 fn main() -> ExitCode {
+    if let Some(args) = parse_lifecycle() {
+        return match args.command {
+            LifecycleCommand::Run(args) => {
+                let connection = args.connection;
+                lifecycle_exit(rs_config_render::ixp_manager_lifecycle::run(
+                    &rs_config_render::ixp_manager_lifecycle::Options {
+                        ixp_origin: &connection.ixp_origin,
+                        router_handle: &connection.router_handle,
+                        api_key_file: &connection.api_key_file,
+                        candidate_dir: &args.candidate_dir,
+                        state_dir: &connection.state_dir,
+                        checker: &args.check_with,
+                        max_prefix_restart_seconds: args.max_prefix_restart_seconds,
+                        rbgp: &args.rbgp,
+                        rbgp_addr: &args.rbgp_addr,
+                        activation_command: &args.activation_command,
+                        activation_args: &args.activation_arg,
+                        settle: Duration::from_secs(args.settle_seconds),
+                        timeout: Duration::from_secs(connection.request_timeout_seconds),
+                        initial: args.initial,
+                        allow_http_loopback: connection.allow_http_loopback,
+                    },
+                ))
+            }
+            LifecycleCommand::Resume(args) => {
+                let connection = args.connection;
+                lifecycle_exit(rs_config_render::ixp_manager_lifecycle::resume(
+                    &rs_config_render::ixp_manager_lifecycle::ResumeOptions {
+                        ixp_origin: &connection.ixp_origin,
+                        router_handle: &connection.router_handle,
+                        api_key_file: &connection.api_key_file,
+                        state_dir: &connection.state_dir,
+                        timeout: Duration::from_secs(connection.request_timeout_seconds),
+                        allow_http_loopback: connection.allow_http_loopback,
+                    },
+                ))
+            }
+        };
+    }
     if let Some(args) = parse_activation() {
         let options = rs_config_render::activation::Options {
             candidate: &args.candidate,
