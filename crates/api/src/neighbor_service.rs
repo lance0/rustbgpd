@@ -963,6 +963,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         state: state.into(),
         uptime_seconds: info.uptime_secs,
         prefixes_received: info.prefix_count as u64,
+        rejected_routes_retained: info.rejected_routes_retained.map(|count| count as u64),
         prefixes_sent: 0,
         updates_received: info.updates_received,
         updates_sent: info.updates_sent,
@@ -3653,6 +3654,7 @@ mod tests {
     fn peer_info_to_proto_preserves_max_prefix_observability() {
         let mut info = peer_info("10.0.0.2".parse().unwrap());
         info.prefix_count = 11;
+        info.rejected_routes_retained = Some(6);
         info.prefix_count_ipv4 = 7;
         info.prefix_count_ipv6 = 3;
         info.max_prefixes_effective = Some(20);
@@ -3664,6 +3666,7 @@ mod tests {
 
         let state = peer_info_to_proto(&info);
         assert_eq!(state.prefixes_received, 11);
+        assert_eq!(state.rejected_routes_retained, Some(6));
         assert_eq!(state.prefixes_received_ipv4, 7);
         assert_eq!(state.prefixes_received_ipv6, 3);
         assert_eq!(state.effective_max_prefixes, Some(20));
@@ -3672,6 +3675,8 @@ mod tests {
         assert_eq!(state.max_prefix_headroom, Some(9));
         assert_eq!(state.max_prefix_headroom_ipv4, Some(3));
         assert_eq!(state.max_prefix_headroom_ipv6, None);
+        info.rejected_routes_retained = None;
+        assert_eq!(peer_info_to_proto(&info).rejected_routes_retained, None);
     }
 
     /// Load-bearing proof: replacing the actor snapshot with defaults, losing

@@ -1017,6 +1017,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             state: server_proto::SessionState::Established as i32,
             uptime_seconds: 30,
             prefixes_received: 1,
+            rejected_routes_retained: None,
             prefixes_sent: 1,
             updates_received: 0,
             updates_sent: 0,

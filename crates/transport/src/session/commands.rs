@@ -1189,6 +1189,7 @@ impl PeerSession {
                     peer_ip: self.peer_ip,
                     peer_asn: neg.map(|n| n.peer_asn),
                     prefix_count,
+                    rejected_routes_retained: self.rejected_routes.len(),
                     max_prefix: MaxPrefixState {
                         prefix_count_ipv4,
                         prefix_count_ipv6,

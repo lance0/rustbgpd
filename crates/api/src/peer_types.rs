@@ -2305,6 +2305,8 @@ pub struct PeerInfo {
     pub graceful_shutdown_advertise_intent: bool,
     /// Number of accepted prefixes from this peer.
     pub prefix_count: usize,
+    /// Actor-authoritative retained-reject count, absent when the snapshot is stale.
+    pub rejected_routes_retained: Option<usize>,
     /// Number of accepted unique IPv4-unicast prefixes from this peer.
     pub prefix_count_ipv4: usize,
     /// Number of accepted unique IPv6-unicast prefixes from this peer.

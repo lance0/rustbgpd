@@ -80,7 +80,7 @@ listener beyond loopback only with the mTLS controls in `docs/SECURITY.md`.
 | REST endpoint (birdwatcher)  | Backing gRPC RPC(s)                                            |
 |------------------------------|----------------------------------------------------------------|
 | `GET /status`                | `GlobalService.GetGlobal` + `ControlService.GetHealth`         |
-| `GET /protocols/bgp`         | `NeighborService.ListNeighbors` + `PolicyService.ListRejectedRoutes` (per-neighbor `routes.filtered` count) |
+| `GET /protocols/bgp`         | One `NeighborService.ListNeighbors` request, including actor-authoritative per-neighbor `routes.filtered` counts |
 | `GET /protocol/{id}`         | Same live neighbor object exposed by `GET /protocols/bgp`              |
 | `GET /symbols`               | Sorted live protocol and routing-table identities from `NeighborService.ListNeighbors` |
 | `GET /routes/protocol/{id}`  | `RibService.ListReceivedRoutes` (paged, all unicast families)  |
@@ -99,6 +99,12 @@ accepted view and from the rejection wall-clock time on the filtered view.
 Status `last_reconfig` is the UTC rendering of the daemon's last successfully
 accepted full policy generation (initial load, SIGHUP, or config transaction);
 it stays empty only until the daemon reports a positive timestamp.
+
+Protocol inventory never fans out rejected-route queries. It fails HTTP 502
+when a stale or older daemon omits the retained count instead of presenting a
+false zero. Each row carries `route_limit_at` from the same accepted-prefix
+count as `routes.imported`; finite limits add canonical `import_limit` and
+`limit_action` fields.
 
 ## IXP Manager / Bird's Eye slice
 

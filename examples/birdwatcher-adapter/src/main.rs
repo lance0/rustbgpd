@@ -610,78 +610,83 @@ async fn protocol_rows(state: &AppState) -> Result<serde_json::Map<String, Value
     // Birdwatcher returns protocols as a map keyed by protocol name.
     // Alice-LG iterates this map and reads fields like `neighbor_address`,
     // `neighbor_as`, `state`, `description`, `routes`, `state_changed`.
-    let mut policy = proto::policy_service_client::PolicyServiceClient::new(state.upstream.clone());
     let mut protocols = serde_json::Map::new();
     for n in &neighbors {
-        let cfg = n.config.clone().unwrap_or_default();
-        let peer = parse_upstream_peer_address(&cfg.address)?;
-        let identity = state.identities.identity(peer);
-        // Real filtered count from the session's reject-retention store.
-        // NOT_FOUND = no live session = no store, honestly zero. The store
-        // is bounded ([policy.reject_retention] capacity, default 1024), so
-        // one unpaged call returns everything.
-        let filtered = match policy
-            .list_rejected_routes(proto::ListRejectedRoutesRequest {
-                peer_address: cfg.address.clone(),
-            })
-            .await
-        {
-            Ok(r) => r.into_inner().routes.len(),
-            Err(s) if s.code() == tonic::Code::NotFound => 0,
-            Err(e) => return Err(bad_gateway("ListRejectedRoutes", &e)),
-        };
-        let mut row = serde_json::json!({
-            "protocol": identity.protocol,
-            "bird_protocol": "BGP",
-            "state": format_ixp_state(n.state),
-            "bgp_state": format_bgp_state(n.state),
-            "neighbor_address": cfg.address,
-            "neighbor_as": cfg.remote_asn,
-            "description": cfg.description,
-            "table": identity.table,
-            "state_changed": format_rfc3339_secs_ago(n.uptime_seconds),
-            "routes": {
-                // Same sources the in-daemon server used: current
-                // Adj-RIB-In count and current advertised count.
-                //
-                // `preferred` is deliberately absent, not zero: the
-                // gRPC surface has no per-peer Loc-RIB best count, and
-                // deriving one means paging the whole Loc-RIB
-                // (`ListBestRoutes`, tallying `Route.peer_address`) on
-                // every poll of this endpoint — a full-table walk per
-                // refresh at IXP scale. Serve it here once the daemon
-                // exposes the count on `NeighborState`.
-                "imported": n.prefixes_received,
-                "filtered": filtered,
-                "exported": n.prefixes_sent
-            }
-        });
-        if let Some(limit) = n.effective_max_prefixes {
-            row["import_limit"] = Value::from(limit);
-            row["import_limit_action"] = Value::from(n.max_prefix_action.clone());
-        }
-        if let Some(negotiated) = &n.negotiated_session {
-            if let Some(router_id) = &negotiated.remote_router_id {
-                row["neighbor_id"] = Value::from(router_id.clone());
-            }
-            if let Some(hold_time) = negotiated.hold_time_seconds {
-                row["hold_timer"] = Value::from(hold_time);
-            }
-            let mut capabilities = Vec::new();
-            if negotiated.peer_route_refresh == Some(true) {
-                capabilities.push("refresh");
-            }
-            if negotiated.four_octet_as == Some(true) {
-                capabilities.push("AS4");
-            }
-            if !capabilities.is_empty() {
-                row["neighbor_capabilities"] = serde_json::json!(capabilities);
-            }
-        }
-        protocols.insert(identity.protocol, row);
+        let (protocol, row) = protocol_row(state, n)?;
+        protocols.insert(protocol, row);
     }
 
     Ok(protocols)
+}
+
+fn retained_reject_count(n: &proto::NeighborState) -> Result<u64, HttpError> {
+    n.rejected_routes_retained
+        .filter(|_| !n.stale)
+        .ok_or_else(|| {
+            error!("upstream daemon did not report an authoritative retained-reject count");
+            json_error(
+                StatusCode::BAD_GATEWAY,
+                "Upstream daemon returned incomplete neighbor state",
+            )
+        })
+}
+
+fn protocol_row(state: &AppState, n: &proto::NeighborState) -> Result<(String, Value), HttpError> {
+    let cfg = n.config.clone().unwrap_or_default();
+    let peer = parse_upstream_peer_address(&cfg.address)?;
+    let identity = state.identities.identity(peer);
+    let filtered = retained_reject_count(n)?;
+    let protocol = identity.protocol;
+    let mut row = serde_json::json!({
+        "protocol": protocol,
+        "bird_protocol": "BGP",
+        "state": format_ixp_state(n.state),
+        "bgp_state": format_bgp_state(n.state),
+        "neighbor_address": cfg.address,
+        "neighbor_as": cfg.remote_asn,
+        "description": cfg.description,
+        "table": identity.table,
+        "state_changed": format_rfc3339_secs_ago(n.uptime_seconds),
+        "routes": {
+            // Same sources the in-daemon server used: current
+            // Adj-RIB-In count and current advertised count.
+            //
+            // `preferred` is deliberately absent, not zero: the
+            // gRPC surface has no per-peer Loc-RIB best count, and
+            // deriving one means paging the whole Loc-RIB
+            // (`ListBestRoutes`, tallying `Route.peer_address`) on
+            // every poll of this endpoint — a full-table walk per
+            // refresh at IXP scale. Serve it here once the daemon
+            // exposes the count on `NeighborState`.
+            "imported": n.prefixes_received,
+            "filtered": filtered,
+            "exported": n.prefixes_sent
+        },
+        "route_limit_at": n.prefixes_received
+    });
+    if let Some(limit) = n.effective_max_prefixes {
+        row["import_limit"] = Value::from(limit);
+        row["limit_action"] = Value::from(n.max_prefix_action.clone());
+    }
+    if let Some(negotiated) = &n.negotiated_session {
+        if let Some(router_id) = &negotiated.remote_router_id {
+            row["neighbor_id"] = Value::from(router_id.clone());
+        }
+        if let Some(hold_time) = negotiated.hold_time_seconds {
+            row["hold_timer"] = Value::from(hold_time);
+        }
+        let mut capabilities = Vec::new();
+        if negotiated.peer_route_refresh == Some(true) {
+            capabilities.push("refresh");
+        }
+        if negotiated.four_octet_as == Some(true) {
+            capabilities.push("AS4");
+        }
+        if !capabilities.is_empty() {
+            row["neighbor_capabilities"] = serde_json::json!(capabilities);
+        }
+    }
+    Ok((protocol, row))
 }
 
 async fn protocols_bgp(State(state): State<AppState>) -> Result<Json<Value>, HttpError> {
@@ -1908,6 +1913,24 @@ mod tests {
             })
         );
         assert!(!body.to_string().contains(invalid));
+    }
+
+    #[test]
+    fn protocol_inventory_refuses_absent_or_stale_retained_count() {
+        let mut neighbor = proto::NeighborState::default();
+        for (count, stale) in [(None, false), (Some(0), true)] {
+            neighbor.rejected_routes_retained = count;
+            neighbor.stale = stale;
+            let (status, Json(body)) = retained_reject_count(&neighbor).unwrap_err();
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert_eq!(
+                body["message"],
+                "Upstream daemon returned incomplete neighbor state"
+            );
+        }
+        neighbor.stale = false;
+        neighbor.rejected_routes_retained = Some(9);
+        assert_eq!(retained_reject_count(&neighbor).unwrap(), 9);
     }
 
     #[test]

@@ -106,6 +106,7 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
                             peer_ip: addr,
                             peer_asn: None,
                             prefix_count: 0,
+                            rejected_routes_retained: 0,
                             max_prefix: MaxPrefixState::default(),
                             negotiated_hold_time: Some(90),
                             four_octet_as: Some(true),

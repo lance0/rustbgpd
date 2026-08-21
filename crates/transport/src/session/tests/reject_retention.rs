@@ -174,6 +174,11 @@ async fn reject_retention_records_policy_deny_and_clears_on_withdraw() {
     assert_eq!(entry.next_hop, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
     assert_eq!(entry.as_path, "65002");
     assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 1);
+    let (reply, count) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::QueryState { reply })
+        .await;
+    assert_eq!(count.await.unwrap().rejected_routes_retained, 1);
 
     // Explicit withdrawal clears the retained reject — the question
     // "why isn't my route accepted?" is moot once the peer stops
@@ -186,6 +191,11 @@ async fn reject_retention_records_policy_deny_and_clears_on_withdraw() {
         "withdrawal clears the retained reject"
     );
     assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 0);
+    let (reply, count) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::QueryState { reply })
+        .await;
+    assert_eq!(count.await.unwrap().rejected_routes_retained, 0);
 }
 
 /// LAN-472 pin: when a previously rejected identity is later accepted

@@ -27,6 +27,19 @@ fn accepted_dynamic_range_snapshot(managed: &ManagedPeer) -> Option<DynamicRange
         })
 }
 
+fn authentication_snapshot(
+    managed: &ManagedPeer,
+    session_state: Option<&PeerSessionState>,
+) -> &'static str {
+    if session_state.map_or(managed.tcp_ao_protected, |state| state.tcp_ao_protected) {
+        "tcp_ao"
+    } else if managed.transport_config.md5_password.is_some() {
+        "md5"
+    } else {
+        "plaintext"
+    }
+}
+
 /// Build a `PeerInfo` snapshot from config + an optional fresh
 /// `PeerSessionState`. `session_state = None` means the bounded
 /// `query_state` either timed out (peer parked on TCP write) or its task
@@ -52,6 +65,7 @@ pub(super) fn build_peer_info(
         enabled: managed.enabled,
         graceful_shutdown_advertise_intent: managed.advertise_graceful_shutdown,
         prefix_count: session_state.map_or(0, |s| s.prefix_count),
+        rejected_routes_retained: session_state.map(|s| s.rejected_routes_retained),
         prefix_count_ipv4: session_state.map_or(0, |s| s.max_prefix.prefix_count_ipv4),
         prefix_count_ipv6: session_state.map_or(0, |s| s.max_prefix.prefix_count_ipv6),
         max_prefixes_effective: session_state
@@ -119,16 +133,7 @@ pub(super) fn build_peer_info(
         flap_count: session_state.map_or(0, |s| s.flap_count),
         uptime_secs: session_state.map_or(0, |s| s.uptime_secs),
         last_error: session_state.map_or_else(String::new, |s| s.last_error.clone()),
-        authentication: if session_state
-            .map_or(managed.tcp_ao_protected, |state| state.tcp_ao_protected)
-        {
-            "tcp_ao"
-        } else if managed.transport_config.md5_password.is_some() {
-            "md5"
-        } else {
-            "plaintext"
-        }
-        .to_string(),
+        authentication: authentication_snapshot(managed, session_state).to_string(),
         tcp_ao_info: session_state.and_then(|s| s.tcp_ao_info.as_deref().cloned()),
         tcp_ao_rotation: managed.tcp_ao_rotation.clone(),
         is_dynamic: managed.is_dynamic,
