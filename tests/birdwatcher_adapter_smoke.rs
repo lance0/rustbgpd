@@ -684,7 +684,11 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
     assert!(checkout < installer && installer < oracle);
 
     let consumer = include_str!("compat/ixp-manager-birdseye/adapter-consumer.php");
-    for journey in ["$consumer->symbols()", "$consumer->protocolTable("] {
+    for journey in [
+        "$consumer->symbols()",
+        "$consumer->protocolTable(",
+        "$consumer->routesForTable(",
+    ] {
         assert_eq!(
             consumer.matches(journey).count(),
             1,
@@ -704,6 +708,35 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
     assert!(!inventory.contains("PolicyServiceClient"), "{inventory}");
     assert!(!inventory.contains("ListRejectedRoutes"), "{inventory}");
     assert!(!inventory.contains("list_rejected_routes"), "{inventory}");
+    let table = adapter
+        .split_once("async fn routes_table(")
+        .unwrap()
+        .1
+        .split_once("async fn routes_export(")
+        .unwrap()
+        .0;
+    assert_eq!(
+        adapter.matches(".route(\"/routes/table/{table}\"").count(),
+        1
+    );
+    assert_eq!(table.matches("list_neighbors(&state).await?").count(), 1);
+    assert_eq!(
+        table.matches("list_received_routes(request).await").count(),
+        1
+    );
+    assert_eq!(table.matches("list_best_routes(request).await").count(), 1);
+    assert!(table.contains("neighbor_address: String::new()"), "{table}");
+    assert!(!table.contains("for neighbor"), "{table}");
+    let inference = adapter
+        .split_once("fn table_address_family(")
+        .unwrap()
+        .1
+        .split_once("async fn routes_table(")
+        .unwrap()
+        .0;
+    for family in ["Ipv4Unicast", "Ipv6Unicast", "Unspecified"] {
+        assert!(inference.contains(family), "missing {family}: {inference}");
+    }
 }
 
 #[test]
@@ -770,6 +803,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         "/route/10.99.0.0%2F24/protocol/pb_0001_as65020",
         "/route/10.99.0.0%2F24/export/pb_0002_as65030",
         "/route/10.99.0.128%2F25/table/master4",
+        "/routes/table/master4",
     ] {
         wait_for_exact_json_error(adapter_port, path, 502, "Upstream daemon request failed");
     }
@@ -914,6 +948,12 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         404,
         "Table not found",
     );
+    wait_for_exact_json_error(
+        adapter_port,
+        "/routes/table/does_not_exist",
+        404,
+        "Table not found",
+    );
     assert_eq!(
         get_json(
             adapter_port,
@@ -922,6 +962,11 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         )["routes"],
         serde_json::json!([]),
         "an installed-ancestor miss is an empty successful table search"
+    );
+    assert_eq!(
+        get_json(adapter_port, "/routes/table/master4", "adapter")["routes"],
+        serde_json::json!([]),
+        "a live empty table is a successful atomic response"
     );
     for path in [
         "/route/10.99.0.0%2F24/protocol/does_not_exist",
@@ -965,6 +1010,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     for route in live["routes"].as_array().unwrap() {
         assert_eq!(route["network"], "10.99.0.0/24", "{live}");
         assert_eq!(route["from_protocol"], "pb_0001_as65020", "{live}");
+        assert_eq!(route["primary"], false, "received views stay non-primary");
     }
     assert_eq!(
         live["routes"]
@@ -1013,6 +1059,29 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
             .collect::<Vec<_>>(),
         [10, 20],
         "installed winner must render first, followed by every alternative: {table_lookup}"
+    );
+    assert_eq!(
+        table_lookup["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|route| route["primary"].as_bool().unwrap())
+            .collect::<Vec<_>>(),
+        [true, false]
+    );
+    let full_table = get_json(adapter_port, "/routes/table/master4", "adapter");
+    assert_eq!(
+        full_table["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|route| (
+                route["bgp"]["med"].as_u64().unwrap(),
+                route["primary"].as_bool().unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        [(10, true), (20, false)],
+        "the atomic table keeps the installed winner before the inactive Add-Path candidate"
     );
     let age = live["routes"][0]["age"].as_str().unwrap_or_default();
     assert!(!age.is_empty(), "adapter age must be populated");

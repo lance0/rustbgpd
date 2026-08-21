@@ -100,13 +100,14 @@ diff -u tests/compat/ixp-manager-birdseye/fixtures/birdseye-contract.json \
 ```
 
 `contract.json` deliberately keeps the unsupported runtime matrix executable.
-Exact protocol-route, exact export-route, filtered-prefix wildcard, and bounded
-less-specific table lookup journeys are runtime-supported. The table lookup
+Exact protocol-route, exact export-route, filtered-prefix wildcard, bounded
+less-specific lookup, and atomic full-table journeys are runtime-supported. The LPM lookup
 returns one matched prefix atomically with its installed winner first and every
-same-prefix Add-Path alternative; it is not a full table snapshot. All ten
+same-prefix Add-Path alternative. The full-table view joins Received and Best
+under one generation, caps before truncation, and does not add counts. All ten
 reject reasons emitted by the pinned route-server templates are
 runtime-supported; emitting the five defined-only display reasons and
-full-table snapshots remain blockers. Protocol
+full-table counts remain blockers. Protocol
 aliases supplied directly remain immutable after startup; bounded file-backed
 aliases reload as one whole resolver generation on Unix `SIGHUP`. Promoting any
 blocker, weakening the explicit alias or product-version

@@ -27,7 +27,7 @@ installed from its lockfiles. See
 [`tests/compat/ixp-manager-birdseye/README.md`](../tests/compat/ixp-manager-birdseye/README.md)
 for the pins, fixture provenance, and local reproduction command.
 The same gate also runs IXP Manager's exact protocol/export, less-specific
-table-search, and member filtered-prefix consumer methods against a live
+table-search, atomic full-table, and member filtered-prefix methods against a live
 `birdwatcher-adapter` before and after a file-backed alias `SIGHUP`, then after
 a malformed reload retains the last-good resolver, all at one PID.
 
@@ -39,12 +39,14 @@ member export-route seam with an enforced response maximum. Exact protocol and
 export prefix lookups are supported and preserve all Add-Path candidates in
 daemon order. Bounded longest-prefix table search atomically returns the
 installed winner first and every alternative for that one matched prefix. The
+full-table view joins accepted candidates with installed winners under one
+shared Received/Best generation and refuses rather than truncates. The
 exact `{daemon ASN}:1101:*` filtered-prefix query reads only retained rejects,
 scrubs that reserved namespace, and adds one conservative reason. This remains
 partial runtime support: the ten reasons active in the pinned v7.4 route-server
 templates are mapped, while IDs 2, 4, 11, 12, and 15 are display-only and
-remain fallback 0 rather than gaining invented semantics. Full table snapshots,
-global table lists, counts, and other
+remain fallback 0 rather than gaining invented semantics. Global table lists,
+full-table counts, and other
 wildcard-community endpoints are not served. The adapter's table identity is a
 validated view over one global Loc-RIB, and `api.version` is rustbgpd product
 identity, not a Bird's Eye version claim; the adapter is not described as fully

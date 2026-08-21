@@ -465,6 +465,12 @@ async fn filtered_page_unions_match_authoritative_snapshots_for_every_scope() {
 async fn empty_scopes_return_a_terminal_zero_total_page() {
     let (tx, _target, _out_rx, handle) = seeded_manager().await;
     let missing = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 250));
+    let received = query_page(&tx, RouteQueryScope::Received { peer: None }, None, None, 1).await;
+    let best = query_page(&tx, RouteQueryScope::Best, None, None, 1).await;
+    assert_eq!(
+        received.version, best.version,
+        "Received and Best share one table generation"
+    );
 
     for scope in [
         RouteQueryScope::Received {
@@ -1028,8 +1034,7 @@ fn benchmark_write_controls_drive_production_chunk_invalidation() {
     let route = make_route(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32), source);
     let versions = |manager: &RibManager| {
         (
-            manager.route_page_received_version,
-            manager.route_page_best_version,
+            manager.route_page_table_version,
             manager.route_page_advertised_version,
         )
     };
@@ -1259,25 +1264,25 @@ fn route_page_generation_rollover_reseeds_then_fails_closed_at_full_exhaustion()
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
 
-    manager.route_page_received_version = Some(RoutePageVersion {
+    manager.route_page_table_version = Some(RoutePageVersion {
         epoch: 7,
         generation: u64::MAX,
     });
-    manager.advance_received_pages();
+    manager.advance_table_pages();
     assert_eq!(
-        manager.route_page_received_version,
+        manager.route_page_table_version,
         Some(RoutePageVersion {
             epoch: 8,
             generation: 0,
         })
     );
 
-    manager.route_page_received_version = Some(RoutePageVersion {
+    manager.route_page_table_version = Some(RoutePageVersion {
         epoch: u64::MAX,
         generation: u64::MAX,
     });
-    manager.advance_received_pages();
-    assert_eq!(manager.route_page_received_version, None);
+    manager.advance_table_pages();
+    assert_eq!(manager.route_page_table_version, None);
     assert_eq!(
         direct_page_at(
             &mut manager,
@@ -1369,8 +1374,7 @@ fn every_direct_timer_mutation_seam_advances_route_page_versions() {
     let family = (Afi::Ipv4, Safi::Unicast);
     let versions = |manager: &RibManager| {
         (
-            manager.route_page_received_version,
-            manager.route_page_best_version,
+            manager.route_page_table_version,
             manager.route_page_advertised_version,
         )
     };
@@ -1402,13 +1406,12 @@ fn refresh_test_manager() -> (RibManager, IpAddr) {
 }
 
 fn route_page_versions(manager: &RibManager) -> [RoutePageVersion; 3] {
+    let table = manager
+        .route_page_table_version
+        .expect("table page generation remains available");
     [
-        manager
-            .route_page_received_version
-            .expect("received page generation remains available"),
-        manager
-            .route_page_best_version
-            .expect("best page generation remains available"),
+        table,
+        table,
         manager
             .route_page_advertised_version
             .expect("advertised page generation remains available"),
