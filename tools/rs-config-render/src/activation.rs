@@ -2,6 +2,8 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::ixp_manager_host::Binding;
+
 #[derive(Debug)]
 pub struct Options<'a> {
     pub candidate: &'a Path,
@@ -13,6 +15,7 @@ pub struct Options<'a> {
     pub initial: bool,
     pub activation_command: &'a Path,
     pub activation_args: &'a [OsString],
+    pub binding: &'a Binding,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -36,6 +39,7 @@ pub fn activate(_: &Options<'_>) -> Result<Status, Error> {
 #[cfg(unix)]
 mod unix {
     use super::{Error, Options, Status};
+    use crate::ixp_manager_host::{self, Binding, Guard, RenderBinding};
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use std::collections::{BTreeMap, BTreeSet};
@@ -51,7 +55,14 @@ mod unix {
     const RECEIPT: &str = "render-receipt.json";
     const ACTIVATION_RECEIPT: &str = "activation-receipt.json";
     const GENERATED: &str = "generated_files";
-    const ROOT_KEYS: &[&str] = &["input", "counts", "refusals", GENERATED, "strict_check"];
+    const ROOT_KEYS: &[&str] = &[
+        "input",
+        "counts",
+        "refusals",
+        "host",
+        GENERATED,
+        "strict_check",
+    ];
     const COUNT_KEYS: &[&str] = &["clients", "prefixes", "origins"];
     const SKINS: &str = "route_server_skin_files";
     const MULTI: &str = "multi_address_clients";
@@ -140,7 +151,7 @@ mod unix {
         Ok(())
     }
 
-    fn verify_candidate(root: &Path) -> AResult<Verified> {
+    fn verify_candidate(root: &Path, binding: &Binding) -> AResult<Verified> {
         if !private(root, true, 0o700) || !private(&root.join(RECEIPT), false, 0o600) {
             return Err(Error::Refused(
                 "candidate and receipt must be private regular paths",
@@ -184,6 +195,13 @@ mod unix {
                 .is_some_and(|value| value.starts_with("rustbgpd "))
         {
             return Err(Error::Refused("render receipt contract does not match"));
+        }
+        let receipt_binding: RenderBinding = serde_json::from_value(receipt["host"].clone())
+            .map_err(|_| Error::Refused("render receipt host binding is invalid"))?;
+        if receipt_binding != binding.render_binding()
+            || receipt["input"]["router_handle"] != binding.router_handle
+        {
+            return Err(Error::Refused("render receipt host binding does not match"));
         }
         let generated = receipt["generated_files"]
             .as_object()
@@ -233,6 +251,28 @@ mod unix {
             if name == "config.toml" {
                 config = bytes;
             }
+        }
+        let config_text = std::str::from_utf8(&config)
+            .map_err(|_| Error::Refused("candidate config is not UTF-8"))?;
+        let parsed: toml::Value = toml::from_str(config_text)
+            .map_err(|_| Error::Refused("candidate config is invalid TOML"))?;
+        let global = parsed.get("global").and_then(toml::Value::as_table);
+        let runtime = global
+            .and_then(|global| global.get("runtime_state_dir"))
+            .and_then(toml::Value::as_str);
+        let uds = global
+            .and_then(|global| global.get("telemetry"))
+            .and_then(toml::Value::as_table)
+            .and_then(|telemetry| telemetry.get("grpc_uds"))
+            .and_then(toml::Value::as_table)
+            .and_then(|uds| uds.get("path"))
+            .and_then(toml::Value::as_str);
+        if runtime != binding.runtime_state_dir.to_str()
+            || uds != binding.runtime_state_dir.join("grpc.sock").to_str()
+        {
+            return Err(Error::Refused(
+                "candidate runtime binding does not match receipt",
+            ));
         }
         let mut directories = actual_dirs.into_iter().collect::<Vec<_>>();
         directories.sort_by_key(|path| std::cmp::Reverse(Path::new(path).components().count()));
@@ -328,12 +368,17 @@ mod unix {
         }
     }
 
-    fn copy_generation(candidate: &Path, state: &Path, verified: &Verified) -> AResult<PathBuf> {
+    fn copy_generation(
+        candidate: &Path,
+        state: &Path,
+        verified: &Verified,
+        binding: &Binding,
+    ) -> AResult<PathBuf> {
         let generations = state.join("generations");
         create_private_dir(&generations)?;
         let final_path = generations.join(&verified.digest);
         if final_path.exists() {
-            let existing = verify_candidate(&final_path)?;
+            let existing = verify_candidate(&final_path, binding)?;
             if existing.digest != verified.digest {
                 return Err(Error::Refused("immutable generation content mismatch"));
             }
@@ -377,7 +422,7 @@ mod unix {
                 .map_err(|_| Error::Refused("cannot sync generation"))?;
         }
         sync_dir(&temporary).map_err(|_| Error::Refused("cannot sync generation"))?;
-        let staged = verify_candidate(&temporary)?;
+        let staged = verify_candidate(&temporary, binding)?;
         if staged.digest != verified.digest {
             return Err(Error::Refused("staged generation changed during copy"));
         }
@@ -388,7 +433,7 @@ mod unix {
         Ok(final_path)
     }
 
-    fn current_target(state: &Path) -> AResult<Option<String>> {
+    fn current_target(state: &Path, binding: &Binding) -> AResult<Option<String>> {
         let current = state.join("current");
         let metadata = match fs::symlink_metadata(&current) {
             Ok(metadata) => metadata,
@@ -417,7 +462,7 @@ mod unix {
         let hash = text
             .strip_prefix("generations/")
             .ok_or(Error::Refused("current generation target is invalid"))?;
-        if !valid_digest(hash) || verify_candidate(&state.join(&target))?.digest != hash {
+        if !valid_digest(hash) || verify_candidate(&state.join(&target), binding)?.digest != hash {
             return Err(Error::Refused(
                 "current generation is not immutable content",
             ));
@@ -637,6 +682,7 @@ mod unix {
         previous: Option<&str>,
         phases: Phases,
         checker_version: &str,
+        binding: &Binding,
     ) -> AResult<()> {
         let receipt = json!({
             "schema": "rustbgpd.ixp-manager.activation/v1",
@@ -646,6 +692,7 @@ mod unix {
             "initial": phases.initial,
             "activation_runs": u8::from(phases.candidate.ran) + u8::from(phases.rollback.ran),
             "strict_check": {"passed": true, "binary_version": checker_version},
+            "host": binding,
             "phases": {
                 "candidate_link": {"published": phases.candidate_publication.is_some(), "durable": phases.candidate_publication == Some(Publication::Durable)},
                 "candidate_activation_ran": phases.candidate.ran,
@@ -683,13 +730,14 @@ mod unix {
         !candidate.starts_with(&state) && !state.starts_with(candidate)
     }
 
-    pub fn activate(options: &Options<'_>) -> AResult<Status> {
+    fn activate_inner(options: &Options<'_>) -> AResult<Status> {
         if options.settle < Duration::from_secs(1)
             || options.settle > Duration::from_secs(120)
-            || options.rbgp_addr.is_empty()
+            || options.rbgp_addr != options.binding.rbgp_addr
+            || options.state_dir != options.binding.activation_state_dir
         {
             return Err(Error::Refused(
-                "settlement must be 1..=120 seconds and address nonempty",
+                "activation state and rbgp address must match host binding",
             ));
         }
         if !options.state_dir.is_absolute() || !private(options.state_dir, true, 0o700) {
@@ -697,7 +745,7 @@ mod unix {
                 "state directory must be a pre-created absolute mode-0700 directory",
             ));
         }
-        let candidate = verify_candidate(options.candidate)?;
+        let candidate = verify_candidate(options.candidate, options.binding)?;
         if !disjoint(options.candidate, options.state_dir) {
             return Err(Error::Refused(
                 "candidate and state directory must not overlap",
@@ -737,7 +785,7 @@ mod unix {
         if checker_version != candidate.checker_version {
             return Err(Error::Refused("strict checker version changed"));
         }
-        let previous = current_target(options.state_dir)?;
+        let previous = current_target(options.state_dir, options.binding)?;
         if options.initial == previous.is_some() {
             return Err(Error::Refused(
                 "--initial requires exactly an empty current state",
@@ -752,7 +800,7 @@ mod unix {
         let prior_runtime = previous
             .as_deref()
             .map(|target| {
-                verify_candidate(&options.state_dir.join(target))
+                verify_candidate(&options.state_dir.join(target), options.binding)
                     .and_then(|verified| normalized_toml(&verified.config, options.state_dir))
             })
             .transpose()?;
@@ -760,7 +808,12 @@ mod unix {
             initial: options.initial,
             ..Phases::default()
         };
-        let generation = copy_generation(options.candidate, options.state_dir, &candidate)?;
+        let generation = copy_generation(
+            options.candidate,
+            options.state_dir,
+            &candidate,
+            options.binding,
+        )?;
         let check_child = Command::new(options.checker)
             .args(["--check", "--strict"])
             .arg(generation.join("config.toml"))
@@ -784,6 +837,7 @@ mod unix {
                 previous.as_deref(),
                 phases,
                 &checker_version,
+                options.binding,
             )
         };
         if let Some(previous_target) = previous.as_deref() {
@@ -866,7 +920,33 @@ mod unix {
         finish("recovery_required", phases)?;
         Err(Error::RecoveryRequired)
     }
+
+    fn host_error(error: ixp_manager_host::Error) -> Error {
+        match error {
+            ixp_manager_host::Error::Refused(reason) => Error::Refused(reason),
+            ixp_manager_host::Error::RecoveryRequired => Error::RecoveryRequired,
+        }
+    }
+
+    pub(crate) fn activate_guarded(options: &Options<'_>, guard: &Guard) -> AResult<Status> {
+        if !guard.owns(options.binding) {
+            return Err(Error::Refused("host guard does not own activation binding"));
+        }
+        activate_inner(options)
+    }
+
+    pub fn activate(options: &Options<'_>) -> AResult<Status> {
+        let guard = Guard::claim_new(options.binding).map_err(host_error)?;
+        let result = activate_guarded(options, &guard);
+        if result == Err(Error::RecoveryRequired) {
+            return result;
+        }
+        guard.clear().map_err(host_error)?;
+        result
+    }
 }
 
 #[cfg(unix)]
 pub use unix::activate;
+#[cfg(unix)]
+pub(crate) use unix::activate_guarded;

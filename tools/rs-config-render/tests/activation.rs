@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use rs_config_render::activation::{Error, Options, Status, activate};
+use rs_config_render::ixp_manager_host::Binding;
 use sha2::{Digest, Sha256};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/ixp-manager-v1-supported.json");
@@ -38,6 +39,8 @@ struct Rig {
     _temp: tempfile::TempDir,
     root: PathBuf,
     state: PathBuf,
+    runtime: PathBuf,
+    host: PathBuf,
     checker: PathBuf,
     rbgp: PathBuf,
     activation: PathBuf,
@@ -104,7 +107,7 @@ case "$*" in
 esac
 for arg do candidate=$arg; done
 target=$(cat "$root/runtime")
-current=$(CDPATH= cd -- "$root/state" && pwd -P)/current
+current=$(CDPATH= cd -- "$root/b2-rs1-lan1-ipv4/activation" && pwd -P)/current
 grep -F "\"$current/policy/ixp-hygiene.rpol\"" "$candidate" >/dev/null || exit 8
 printf 'ABSOLUTE_CURRENT_OK\n' >> "$root/rbgp.log"
 if [ -f "$root/reject" ] && [ "$target" = "$(cat "$root/reject")" ]; then exit 2; fi
@@ -117,7 +120,7 @@ exit 0
             &format!(
                 r#"#!/bin/sh
 root=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-target=$(readlink "$root/state/current") || exit 7
+target=$(readlink "$root/b2-rs1-lan1-ipv4/activation/current") || exit 7
 printf '%s\n' "$target" >> "$root/activation.log"
 printf '%s\n' "$target" > "$root/runtime"
 case "$(cat "$root/activation-mode")" in
@@ -133,13 +136,21 @@ exit 0
 "#
             ),
         );
-        let state = root.join("state");
-        fs::create_dir(&state).unwrap();
-        mode(&state, 0o700);
+        let runtime = root.join("b2-rs1-lan1-ipv4");
+        fs::create_dir(&runtime).unwrap();
+        mode(&runtime, 0o700);
+        let state = runtime.join("activation");
+        let host = root.join("host-state");
+        for path in [&state, &host] {
+            fs::create_dir(path).unwrap();
+            mode(path, 0o700);
+        }
         Self {
             _temp: temp,
             root,
             state,
+            runtime,
+            host,
             checker,
             rbgp,
             activation,
@@ -147,15 +158,36 @@ exit 0
     }
 
     fn candidate(&self, name: &str, max_prefix: u64) -> PathBuf {
+        self.candidate_for(name, max_prefix, &self.state)
+    }
+
+    fn candidate_for(&self, name: &str, max_prefix: u64, _state: &Path) -> PathBuf {
         let mut input: serde_json::Value = serde_json::from_slice(FIXTURE).unwrap();
         input["clients"][0]["max_prefix"] = max_prefix.into();
         let context = self.root.join(format!("{name}.json"));
         fs::write(&context, serde_json::to_vec(&input).unwrap()).unwrap();
         mode(&context, 0o600);
         let out = self.root.join(name);
-        rs_config_render::ixp_manager::write_checked_candidate(&context, &out, 300, &self.checker)
-            .unwrap();
+        rs_config_render::ixp_manager::write_checked_candidate(
+            &context,
+            &out,
+            300,
+            &self.checker,
+            &self.binding(&self.state).render_binding(),
+        )
+        .unwrap();
         out
+    }
+
+    fn binding(&self, state: &Path) -> Binding {
+        Binding::new(
+            "b2-rs1-lan1-ipv4",
+            &self.runtime,
+            state,
+            &self.host,
+            &format!("unix://{}", self.runtime.join("grpc.sock").display()),
+        )
+        .unwrap()
     }
 
     fn run(&self, candidate: &Path, initial: bool, command: &Path) -> Result<Status, Error> {
@@ -165,16 +197,17 @@ exit 0
             state_dir: &self.state,
             checker: &self.checker,
             rbgp: &self.rbgp,
-            rbgp_addr: "test:50051",
+            rbgp_addr: self.binding(&self.state).rbgp_addr(),
             settle: Duration::from_secs(1),
             initial,
             activation_command: command,
             activation_args: &args,
+            binding: &self.binding(&self.state),
         })
     }
 
     fn current(&self) -> String {
-        fs::read_link(self.root.join("state/current"))
+        fs::read_link(self.state.join("current"))
             .unwrap()
             .to_string_lossy()
             .into_owned()
@@ -185,7 +218,7 @@ exit 0
     }
 
     fn receipt(&self) -> serde_json::Value {
-        serde_json::from_slice(&fs::read(self.root.join("state/activation-receipt.json")).unwrap())
+        serde_json::from_slice(&fs::read(self.state.join("activation-receipt.json")).unwrap())
             .unwrap()
     }
 }
@@ -216,16 +249,20 @@ fn initial_activation_and_noop_are_private_exact_and_secret_free() {
     assert_eq!(receipt["strict_check"]["binary_version"], "rustbgpd 0.65.0");
     assert_eq!(receipt["phases"]["initial_unreachable_checked"], true);
     assert_eq!(receipt["phases"]["runtime_equal"], true);
+    assert_eq!(
+        receipt["host"],
+        serde_json::to_value(rig.binding(&rig.state)).unwrap()
+    );
     assert!(!serde_json::to_string(&receipt).unwrap().contains(SECRET));
-    assert_mode(&rig.root.join("state"), 0o700);
-    assert_mode(&rig.root.join("state/activation.lock"), 0o600);
+    assert_mode(&rig.state, 0o700);
+    assert_mode(&rig.state.join("activation.lock"), 0o600);
     let check_log = fs::read_to_string(rig.root.join("checker.log")).unwrap();
     assert!(
         check_log
             .lines()
             .last()
             .unwrap()
-            .contains("state/generations/")
+            .contains("activation/generations/")
     );
 
     let activations = fs::read_to_string(rig.root.join("activation.log")).unwrap();
@@ -239,23 +276,32 @@ fn initial_activation_and_noop_are_private_exact_and_secret_free() {
     );
     assert_eq!(rig.receipt()["status"], "noop");
 
+    let limited_rig = Rig::new();
+    let limited_candidate = limited_rig.candidate("candidate-limited", 100);
     let limited = Command::new("/bin/sh")
         .args(["-c", "trap '' XFSZ; ulimit -f 0; exec \"$@\"", "sh"])
         .arg(env!("CARGO_BIN_EXE_rs-config-render"))
         .args(["activate", "--candidate"])
-        .arg(&candidate)
+        .arg(&limited_candidate)
         .arg("--state-dir")
-        .arg(&rig.state)
+        .arg(&limited_rig.state)
+        .args(["--router-handle", "b2-rs1-lan1-ipv4"])
+        .arg("--runtime-state-dir")
+        .arg(&limited_rig.runtime)
+        .arg("--host-state-dir")
+        .arg(&limited_rig.host)
         .arg("--check-with")
-        .arg(&rig.checker)
+        .arg(&limited_rig.checker)
         .arg("--rbgp")
-        .arg(&rig.rbgp)
-        .args(["--rbgp-addr", "test:50051", "--activation-command"])
+        .arg(&limited_rig.rbgp)
+        .arg("--rbgp-addr")
+        .arg(limited_rig.binding(&limited_rig.state).rbgp_addr())
+        .arg("--activation-command")
         .arg("/bin/false")
         .output()
         .unwrap();
-    assert_eq!(limited.status.code(), Some(2));
-    assert!(fs::read_dir(&rig.state).unwrap().all(|entry| {
+    assert_eq!(limited.status.code(), Some(5));
+    assert!(fs::read_dir(&limited_rig.state).unwrap().all(|entry| {
         !entry
             .unwrap()
             .file_name()
@@ -276,14 +322,46 @@ fn initial_activation_and_noop_are_private_exact_and_secret_free() {
         state_dir: &second_state,
         checker: &rig.checker,
         rbgp: &rig.rbgp,
-        rbgp_addr: "test:50051",
+        rbgp_addr: rig.binding(&rig.state).rbgp_addr(),
         settle: Duration::from_secs(1),
         initial: true,
         activation_command: &rig.activation,
         activation_args: &args,
+        binding: &rig.binding(&rig.state),
     });
     assert_refused(result);
     assert!(!second_state.join("current").exists());
+}
+
+#[test]
+fn receipt_and_toml_runtime_bindings_are_independently_enforced() {
+    let rig = Rig::new();
+    let receipt_mismatch = rig.candidate("candidate-receipt-mismatch", 120);
+    let receipt_path = receipt_mismatch.join("render-receipt.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["host"]["runtime_state_dir"] = "/tmp/foreign".into();
+    fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+    assert_refused(rig.run(&receipt_mismatch, true, &rig.activation));
+    assert!(!rig.host.join("ixp-manager-host-fence.json").exists());
+
+    let toml_mismatch = rig.candidate("candidate-toml-mismatch", 121);
+    let config_path = toml_mismatch.join("config.toml");
+    let config = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace(rig.runtime.to_str().unwrap(), "/tmp/b2-rs1-lan1-ipv4");
+    fs::write(&config_path, &config).unwrap();
+    let receipt_path = toml_mismatch.join("render-receipt.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["generated_files"]["config.toml"] = Sha256::digest(config.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+        .into();
+    fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+    assert_refused(rig.run(&toml_mismatch, true, &rig.activation));
+    assert!(!rig.state.join("current").exists());
 }
 
 #[test]
@@ -297,7 +375,7 @@ fn changed_candidate_rolls_back_exactly_and_refuses_mutable_aliases() {
 
     let stop = Arc::new(AtomicBool::new(false));
     let observed_bad = Arc::new(AtomicBool::new(false));
-    let state = rig.root.join("state");
+    let state = rig.state.clone();
     let watcher = {
         let stop = Arc::clone(&stop);
         let observed_bad = Arc::clone(&observed_bad);
@@ -389,11 +467,18 @@ fn initial_failed_command_exits_five_with_last_recovery_receipt() {
         .arg(&candidate)
         .arg("--state-dir")
         .arg(&rig.state)
+        .args(["--router-handle", "b2-rs1-lan1-ipv4"])
+        .arg("--runtime-state-dir")
+        .arg(&rig.runtime)
+        .arg("--host-state-dir")
+        .arg(&rig.host)
         .arg("--check-with")
         .arg(&rig.checker)
         .arg("--rbgp")
         .arg(&rig.rbgp)
-        .args(["--rbgp-addr", "test:50051", "--initial"])
+        .arg("--rbgp-addr")
+        .arg(rig.binding(&rig.state).rbgp_addr())
+        .arg("--initial")
         .arg("--activation-command")
         .arg(&rig.activation)
         .output()
@@ -408,6 +493,7 @@ fn initial_failed_command_exits_five_with_last_recovery_receipt() {
     assert!(rig.current().ends_with(candidate_hash));
     assert_eq!(receipt["phases"]["runtime_equal"], false);
     assert!(!serde_json::to_string(&receipt).unwrap().contains(SECRET));
+    assert!(rig.host.join("ixp-manager-host-fence.json").exists());
 }
 
 #[test]
@@ -437,16 +523,19 @@ fn recovery_boundaries_refuse_before_publication_and_clean_partial_staging() {
     let candidate = rig.candidate("candidate-boundaries", 106);
     let args = Vec::new();
     let run = |state: &Path, settle| {
+        let binding = rig.binding(&rig.state);
+        let address = binding.rbgp_addr();
         activate(&Options {
             candidate: &candidate,
             state_dir: state,
             checker: &rig.checker,
             rbgp: &rig.rbgp,
-            rbgp_addr: "test:50051",
+            rbgp_addr: address,
             settle,
             initial: true,
             activation_command: &rig.activation,
             activation_args: &args,
+            binding: &binding,
         })
     };
     let subsecond = rig.root.join("subsecond-state");
@@ -470,6 +559,7 @@ fn recovery_boundaries_refuse_before_publication_and_clean_partial_staging() {
     mode(&wrong_mode, 0o755);
     assert_refused(run(&wrong_mode, Duration::from_secs(1)));
 
+    let candidate = rig.candidate("candidate-oversized", 106);
     let config = format!("[oversized]\nvalue = \"{}\"\n", "x".repeat(4_194_300));
     fs::write(candidate.join("config.toml"), &config).unwrap();
     let mut receipt: serde_json::Value =
@@ -484,13 +574,10 @@ fn recovery_boundaries_refuse_before_publication_and_clean_partial_staging() {
         serde_json::to_vec_pretty(&receipt).unwrap(),
     )
     .unwrap();
-    let oversized = rig.root.join("oversized-state");
-    fs::create_dir(&oversized).unwrap();
-    mode(&oversized, 0o700);
-    assert_refused(run(&oversized, Duration::from_secs(1)));
-    assert!(!oversized.join("generations").exists());
-    assert!(!oversized.join("current").exists());
-    assert!(oversized.join("activation.lock").is_file());
+    assert_refused(rig.run(&candidate, true, &rig.activation));
+    assert!(!rig.state.join("generations").exists());
+    assert!(!rig.state.join("current").exists());
+    assert!(!rig.state.join("activation.lock").exists());
 
     let partial = rig.candidate("candidate-partial", 107);
     let delayed = rig.root.join("delayed-checker.sh");
@@ -498,11 +585,10 @@ fn recovery_boundaries_refuse_before_publication_and_clean_partial_staging() {
         &delayed,
         "#!/bin/sh\nroot=$(CDPATH= cd -- \"$(dirname \"$0\")\" && pwd)\n[ \"$1\" = --version ] && { touch \"$root/version-started\"; sleep 1; }\nexec \"$root/checker.sh\" \"$@\"\n",
     );
-    let state = rig.root.join("partial-state");
-    fs::create_dir(&state).unwrap();
-    mode(&state, 0o700);
+    let state = rig.state.clone();
     let rbgp = rig.rbgp.clone();
     let activation = rig.activation.clone();
+    let binding = rig.binding(&state);
     let paths = [partial.clone(), state.clone(), delayed, rbgp, activation];
     let worker = std::thread::spawn(move || {
         let args = Vec::new();
@@ -511,11 +597,12 @@ fn recovery_boundaries_refuse_before_publication_and_clean_partial_staging() {
             state_dir: &paths[1],
             checker: &paths[2],
             rbgp: &paths[3],
-            rbgp_addr: "test:50051",
+            rbgp_addr: binding.rbgp_addr(),
             settle: Duration::from_secs(2),
             initial: true,
             activation_command: &paths[4],
             activation_args: &args,
+            binding: &binding,
         })
     });
     let deadline = Instant::now() + Duration::from_secs(2);

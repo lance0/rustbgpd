@@ -1,6 +1,7 @@
 use std::fs;
 
 use rs_config_render::ixp_manager::{Error, render_document};
+use rs_config_render::ixp_manager_host::RenderBinding;
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/ixp-manager-v1-supported.json");
 const SECRET: &str = "mcWsqMdzGwTKt67g";
@@ -19,18 +20,31 @@ fn value() -> serde_json::Value {
     serde_json::from_slice(FIXTURE).unwrap()
 }
 
+fn binding() -> RenderBinding {
+    RenderBinding::new(
+        "b2-rs1-lan1-ipv4",
+        std::path::Path::new("/var/lib/rustbgpd/b2-rs1-lan1-ipv4"),
+    )
+    .unwrap()
+}
+
 fn rendered(input: &serde_json::Value) -> Result<rs_config_render::ixp_manager::Candidate, Error> {
-    render_document(&serde_json::to_vec(input).unwrap(), 300)
+    render_document(&serde_json::to_vec(input).unwrap(), 300, &binding())
 }
 
 #[test]
 fn supported_render_is_deterministic_and_explicit() {
-    let first = render_document(FIXTURE, 300).unwrap();
-    assert_eq!(first.files, render_document(FIXTURE, 300).unwrap().files);
+    let first = render_document(FIXTURE, 300, &binding()).unwrap();
+    assert_eq!(
+        first.files,
+        render_document(FIXTURE, 300, &binding()).unwrap().files
+    );
     assert_eq!(first.files.len(), 3);
     let config = &first.files["config.toml"];
     for expected in [
         "listen_addresses = [\"192.0.2.18\"]",
+        "runtime_state_dir = \"/var/lib/rustbgpd/b2-rs1-lan1-ipv4\"",
+        "path = \"/var/lib/rustbgpd/b2-rs1-lan1-ipv4/grpc.sock\"",
         "next_hop_ownership = \"strict_peer\"",
         "per_client_best = true",
         "rs_control_communities = true",
@@ -64,6 +78,15 @@ fn supported_render_is_deterministic_and_explicit() {
 
 #[test]
 fn strict_schema_completion_and_refusal_matrix_fail_closed() {
+    let forged: RenderBinding = serde_json::from_value(serde_json::json!({
+        "router_handle": "b2-rs1-lan1-ipv4",
+        "runtime_state_dir": "/var/lib/rustbgpd/foreign"
+    }))
+    .unwrap();
+    assert!(matches!(
+        render_document(FIXTURE, 300, &forged),
+        Err(Error::Refused("invalid router host binding"))
+    ));
     let refuses = |pointer: &str, replacement: serde_json::Value| {
         let mut input = value();
         *input.pointer_mut(pointer).unwrap() = replacement;
@@ -153,6 +176,7 @@ fn run_cli(
     let checker = temp.path().join("checker.sh");
     fs::write(&checker, "#!/bin/sh\n[ ! -e \"$OUT/render-receipt.json\" ] || exit 90\nprintf '%s\\n' \"$*\" >> \"$LOG\"\nif [ \"$1\" = --version ]; then echo \"rustbgpd 0.65.0 $SECRET\"; echo \"$SECRET\" >&2; exit 0; fi\n[ \"$FAIL\" = 0 ] || exit 91\n").unwrap();
     set_mode(&checker, 0o700);
+    let runtime = temp.path().join("b2-rs1-lan1-ipv4");
     Command::new(env!("CARGO_BIN_EXE_rs-config-render"))
         .args(["--input-format", "ixp-manager-v1", "--context"])
         .arg(&input)
@@ -160,6 +184,9 @@ fn run_cli(
         .arg(out)
         .args(["--max-prefix-restart-seconds", "300", "--check-with"])
         .arg(&checker)
+        .args(["--router-handle", "b2-rs1-lan1-ipv4"])
+        .arg("--runtime-state-dir")
+        .arg(&runtime)
         .env("OUT", out)
         .env("LOG", log)
         .env("SECRET", SECRET)
@@ -193,6 +220,13 @@ fn cli_enforces_private_checker_order_receipt_last_and_redaction() {
     assert_eq!(receipt["counts"]["clients"], 1);
     assert_eq!(receipt["counts"]["prefixes"], 1);
     assert_eq!(receipt["counts"]["origins"], 1);
+    assert_eq!(
+        receipt["host"],
+        serde_json::to_value(
+            RenderBinding::new("b2-rs1-lan1-ipv4", &temp.path().join("b2-rs1-lan1-ipv4")).unwrap()
+        )
+        .unwrap()
+    );
     assert_eq!(
         receipt["input"]["sha256"],
         digest(&temp.path().join("input.json"))

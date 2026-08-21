@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use rs_config_render::activation;
 use rs_config_render::ixp_manager;
+use rs_config_render::ixp_manager_host::{Binding, Guard, RenderBinding};
 use rs_config_render::ixp_manager_lifecycle::{self as lifecycle, Error, Status};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/ixp-manager-v1-supported.json");
@@ -39,6 +40,7 @@ struct Response {
     location: Option<String>,
     expected_state: Option<(PathBuf, &'static str)>,
     delay: Option<Duration>,
+    chmod_before_reply: Option<(PathBuf, u32)>,
 }
 
 impl Response {
@@ -50,6 +52,7 @@ impl Response {
             location: None,
             expected_state: None,
             delay: None,
+            chmod_before_reply: None,
         }
     }
 
@@ -61,6 +64,7 @@ impl Response {
             location: None,
             expected_state: None,
             delay: None,
+            chmod_before_reply: None,
         }
     }
 
@@ -71,6 +75,11 @@ impl Response {
 
     fn after_delay(mut self, delay: Duration) -> Self {
         self.delay = Some(delay);
+        self
+    }
+
+    fn after_chmod(mut self, path: PathBuf, permissions: u32) -> Self {
+        self.chmod_before_reply = Some((path, permissions));
         self
     }
 }
@@ -114,6 +123,9 @@ impl Server {
                         state.contains(expected),
                         "request arrived before durable state {expected}: {state}"
                     );
+                }
+                if let Some((path, permissions)) = &response.chmod_before_reply {
+                    mode(path, *permissions);
                 }
                 writers.push(thread::spawn(move || {
                     let mut stream = stream;
@@ -168,11 +180,14 @@ struct Rig {
     _temp: tempfile::TempDir,
     root: PathBuf,
     state: PathBuf,
+    runtime: PathBuf,
+    host: PathBuf,
     candidate: PathBuf,
     key: PathBuf,
     checker: PathBuf,
     rbgp: PathBuf,
     activation: PathBuf,
+    binding: Binding,
 }
 
 impl Rig {
@@ -183,10 +198,14 @@ impl Rig {
             .tempdir_in(current)
             .unwrap();
         let root = temp.path().to_path_buf();
-        let state = root.join("state");
+        let runtime = root.join("b2-rs1-lan1-ipv4");
+        let state = runtime.join("activation");
         let candidate = root.join("candidate");
+        let host = root.join("host-state");
+        private_dir(&runtime);
         private_dir(&state);
         private_dir(&candidate);
+        private_dir(&host);
         let key = root.join("api-key");
         fs::write(&key, format!("{API_KEY}\n")).unwrap();
         mode(&key, 0o600);
@@ -205,15 +224,26 @@ impl Rig {
         );
         let activation = root.join("activate");
         executable(&activation, "#!/bin/sh\nexit 0\n");
+        let binding = Binding::new(
+            "b2-rs1-lan1-ipv4",
+            &runtime,
+            &state,
+            &host,
+            &format!("unix://{}", runtime.join("grpc.sock").display()),
+        )
+        .unwrap();
         let rig = Self {
             _temp: temp,
             root,
             state,
+            runtime,
+            host,
             candidate,
             key,
             checker,
             rbgp,
             activation,
+            binding,
         };
         rig.bootstrap();
         rig
@@ -222,61 +252,109 @@ impl Rig {
     fn bootstrap(&self) {
         let candidate = self.root.join("bootstrap");
         private_dir(&candidate);
-        ixp_manager::write_checked_candidate_bytes(FIXTURE, &candidate, 300, &self.checker)
-            .unwrap();
+        let binding = self.binding();
+        let render_binding = binding.render_binding();
+        ixp_manager::write_checked_candidate_bytes(
+            FIXTURE,
+            &candidate,
+            300,
+            &self.checker,
+            &render_binding,
+        )
+        .unwrap();
         assert_eq!(
             activation::activate(&activation::Options {
                 candidate: &candidate,
                 state_dir: &self.state,
                 checker: &self.checker,
                 rbgp: &self.rbgp,
-                rbgp_addr: "test",
+                rbgp_addr: binding.rbgp_addr(),
                 settle: Duration::from_secs(2),
                 initial: true,
                 activation_command: &self.activation,
                 activation_args: &[],
+                binding,
             }),
             Ok(activation::Status::Activated)
         );
     }
 
+    fn binding(&self) -> &Binding {
+        &self.binding
+    }
+
     fn options<'a>(&'a self, origin: &'a str) -> lifecycle::Options<'a> {
         lifecycle::Options {
             ixp_origin: origin,
-            router_handle: "rs1-ipv4",
+            router_handle: "b2-rs1-lan1-ipv4",
             api_key_file: &self.key,
             candidate_dir: &self.candidate,
             state_dir: &self.state,
             checker: &self.checker,
             max_prefix_restart_seconds: 300,
             rbgp: &self.rbgp,
-            rbgp_addr: "test",
+            rbgp_addr: self.binding.rbgp_addr(),
             activation_command: &self.activation,
             activation_args: &[],
             settle: Duration::from_secs(2),
             timeout: Duration::from_secs(2),
             initial: false,
             allow_http_loopback: true,
+            binding: &self.binding,
         }
     }
 
     fn resume_options<'a>(&'a self, origin: &'a str) -> lifecycle::ResumeOptions<'a> {
         lifecycle::ResumeOptions {
             ixp_origin: origin,
-            router_handle: "rs1-ipv4",
+            router_handle: "b2-rs1-lan1-ipv4",
             api_key_file: &self.key,
             state_dir: &self.state,
             timeout: Duration::from_secs(2),
             allow_http_loopback: true,
+            binding: &self.binding,
         }
     }
+}
+
+fn run_cli(rig: &Rig, origin: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rs-config-render"));
+    command
+        .args([
+            "ixp-manager-lifecycle",
+            "run",
+            "--ixp-origin",
+            origin,
+            "--router-handle",
+            "b2-rs1-lan1-ipv4",
+            "--api-key-file",
+        ])
+        .arg(&rig.key)
+        .arg("--state-dir")
+        .arg(&rig.state)
+        .arg("--runtime-state-dir")
+        .arg(&rig.runtime)
+        .arg("--host-state-dir")
+        .arg(&rig.host)
+        .arg("--rbgp-addr")
+        .arg(rig.binding.rbgp_addr())
+        .arg("--candidate-dir")
+        .arg(&rig.candidate)
+        .arg("--check-with")
+        .arg(&rig.checker)
+        .args(["--max-prefix-restart-seconds", "300", "--rbgp"])
+        .arg(&rig.rbgp)
+        .args(["--settle-seconds", "2", "--activation-command"])
+        .arg(&rig.activation)
+        .args(["--request-timeout-seconds", "30", "--allow-http-loopback"]);
+    command
 }
 
 fn assert_request(request: &str, method: &str, action: &str) {
     let lower = request.to_ascii_lowercase();
     assert!(
         request.starts_with(&format!(
-            "{method} /admin/api/v4/router/{action}/rs1-ipv4 HTTP/1.1\r\n"
+            "{method} /admin/api/v4/router/{action}/b2-rs1-lan1-ipv4 HTTP/1.1\r\n"
         )),
         "unexpected request: {request}"
     );
@@ -321,6 +399,7 @@ fn noop_lifecycle_uses_exact_authenticated_order_and_acknowledges() {
     assert_request(&requests[1], "GET", "gen-config");
     assert_request(&requests[2], "POST", "updated");
     assert!(!rig.state.join("ixp-manager-lifecycle.json").exists());
+    assert!(!rig.host.join("ixp-manager-host-fence.json").exists());
     assert_no_key(&rig.state);
     assert_no_key(&rig.candidate);
 }
@@ -337,6 +416,7 @@ fn definite_lock_and_render_failures_have_bounded_release_semantics() {
     assert_eq!(requests.len(), 1);
     assert_request(&requests[0], "POST", "get-update-lock");
     assert!(!rig.state.join("ixp-manager-lifecycle.json").exists());
+    assert!(!rig.host.join("ixp-manager-host-fence.json").exists());
 
     let rejected = Server::start(vec![
         Response::json(200),
@@ -375,6 +455,7 @@ fn failed_callback_is_durable_and_resume_never_refetches_or_activates() {
     );
     let journal = fs::read_to_string(rig.state.join("ixp-manager-lifecycle.json")).unwrap();
     assert!(journal.contains("updated_pending"));
+    assert!(rig.host.join("ixp-manager-host-fence.json").exists());
     assert!(!journal.contains(API_KEY));
     assert_eq!(
         lifecycle::resume(&rig.resume_options(&server.origin)),
@@ -385,6 +466,7 @@ fn failed_callback_is_durable_and_resume_never_refetches_or_activates() {
     assert_request(&requests[2], "POST", "updated");
     assert_request(&requests[3], "POST", "updated");
     assert!(!rig.state.join("ixp-manager-lifecycle.json").exists());
+    assert!(!rig.host.join("ixp-manager-host-fence.json").exists());
 }
 
 #[test]
@@ -401,6 +483,7 @@ fn started_activation_uncertainty_retains_remote_lock_for_manual_recovery() {
     let journal = fs::read_to_string(rig.state.join("ixp-manager-lifecycle.json")).unwrap();
     assert!(journal.contains("manual_recovery"));
     assert!(journal.contains("recovery_required"));
+    assert!(rig.host.join("ixp-manager-host-fence.json").exists());
     assert_eq!(
         lifecycle::resume(&rig.resume_options(&origin)),
         Err(Error::ManualRecovery)
@@ -439,6 +522,7 @@ fn redirects_and_unsafe_origins_or_key_files_are_refused_without_key_forwarding(
         location: Some(format!("http://{}/stolen", sink.local_addr().unwrap())),
         expected_state: None,
         delay: None,
+        chmod_before_reply: None,
     }]);
     assert_eq!(
         lifecycle::run(&rig.options(&redirected.origin)),
@@ -506,6 +590,7 @@ fn control_and_configuration_body_caps_fail_closed() {
         location: None,
         expected_state: None,
         delay: None,
+        chmod_before_reply: None,
     }]);
     assert_eq!(
         lifecycle::run(&rig.options(&control.origin)),
@@ -521,6 +606,7 @@ fn control_and_configuration_body_caps_fail_closed() {
         location: None,
         expected_state: None,
         delay: None,
+        chmod_before_reply: None,
     }]);
     assert_eq!(
         lifecycle::run(&rig.options(&malformed.origin)),
@@ -559,9 +645,11 @@ fn in_memory_renderer_is_byte_identical_to_private_file_entry_point() {
         &checker,
         "#!/bin/sh\n[ \"$1\" = --version ] && echo 'rustbgpd 0.65.0'\nexit 0\n",
     );
+    let binding =
+        RenderBinding::new("b2-rs1-lan1-ipv4", &temp.path().join("b2-rs1-lan1-ipv4")).unwrap();
     assert_eq!(
-        ixp_manager::write_checked_candidate(&input, &from_file, 300, &checker),
-        ixp_manager::write_checked_candidate_bytes(FIXTURE, &from_memory, 300, &checker)
+        ixp_manager::write_checked_candidate(&input, &from_file, 300, &checker, &binding),
+        ixp_manager::write_checked_candidate_bytes(FIXTURE, &from_memory, 300, &checker, &binding,)
     );
     for relative in [
         "config.toml",
@@ -578,13 +666,9 @@ fn in_memory_renderer_is_byte_identical_to_private_file_entry_point() {
 }
 
 #[test]
-fn lifecycle_state_lock_is_exclusive_before_any_network_request() {
+fn host_lock_is_exclusive_before_any_network_request() {
     let rig = Rig::new();
-    let lock = rig.state.join("ixp-manager-lifecycle.lock");
-    fs::write(&lock, []).unwrap();
-    mode(&lock, 0o600);
-    let held = File::options().read(true).write(true).open(lock).unwrap();
-    held.try_lock().unwrap();
+    let _held = Guard::claim_new(rig.binding()).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_rs-config-render"))
         .args([
             "ixp-manager-lifecycle",
@@ -592,12 +676,18 @@ fn lifecycle_state_lock_is_exclusive_before_any_network_request() {
             "--ixp-origin",
             "http://127.0.0.1:9",
             "--router-handle",
-            "rs1-ipv4",
+            "b2-rs1-lan1-ipv4",
             "--api-key-file",
         ])
         .arg(&rig.key)
         .arg("--state-dir")
         .arg(&rig.state)
+        .arg("--runtime-state-dir")
+        .arg(&rig.runtime)
+        .arg("--host-state-dir")
+        .arg(&rig.host)
+        .arg("--rbgp-addr")
+        .arg(rig.binding.rbgp_addr())
         .args(["--request-timeout-seconds", "1", "--allow-http-loopback"])
         .output()
         .unwrap();
@@ -605,8 +695,176 @@ fn lifecycle_state_lock_is_exclusive_before_any_network_request() {
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
-            .contains("another lifecycle command is active")
+            .contains("another host command is active")
     );
+}
+
+#[test]
+fn guard_clear_is_bound_to_the_claimed_host() {
+    let first = Rig::new();
+    let second = Rig::new();
+    let first_guard = Guard::claim_new(first.binding()).unwrap();
+    let second_guard = Guard::claim_new(second.binding()).unwrap();
+    first_guard.clear().unwrap();
+    assert!(!first.host.join("ixp-manager-host-fence.json").exists());
+    assert!(second.host.join("ixp-manager-host-fence.json").exists());
+    second_guard.clear().unwrap();
+}
+
+#[test]
+fn per_handle_state_lock_refuses_before_publishing_host_fence() {
+    let rig = Rig::new();
+    let lock = rig.state.join("ixp-manager-lifecycle.lock");
+    fs::write(&lock, []).unwrap();
+    mode(&lock, 0o600);
+    let held = File::options().read(true).write(true).open(lock).unwrap();
+    held.try_lock().unwrap();
+    assert_eq!(
+        lifecycle::run(&rig.options("http://127.0.0.1:9")),
+        Err(Error::Refused("another lifecycle command is active"))
+    );
+    assert!(!rig.host.join("ixp-manager-host-fence.json").exists());
+}
+
+#[test]
+fn topology_mismatches_are_refused_before_network_effects() {
+    let rig = Rig::new();
+    let forged: Binding = serde_json::from_value(serde_json::json!({
+        "router_handle": "foreign",
+        "runtime_state_dir": rig.runtime,
+        "activation_state_dir": rig.state,
+        "host_state_dir": rig.host,
+        "rbgp_addr": rig.binding.rbgp_addr()
+    }))
+    .unwrap();
+    assert!(matches!(
+        Guard::claim_new(&forged),
+        Err(rs_config_render::ixp_manager_host::Error::Refused(_))
+    ));
+    let wrong_runtime = rig.root.join("wrong-basename");
+    assert!(
+        Binding::new(
+            "b2-rs1-lan1-ipv4",
+            &wrong_runtime,
+            &wrong_runtime.join("activation"),
+            &rig.host,
+            &format!("unix://{}/grpc.sock", wrong_runtime.display()),
+        )
+        .is_err()
+    );
+    assert!(
+        Binding::new(
+            "b2-rs1-lan1-ipv4",
+            &rig.runtime,
+            &rig.root.join("other-state"),
+            &rig.host,
+            rig.binding.rbgp_addr(),
+        )
+        .is_err()
+    );
+    assert!(
+        Binding::new(
+            "b2-rs1-lan1-ipv4",
+            &rig.runtime,
+            &rig.state,
+            &rig.host,
+            "unix:///wrong/grpc.sock",
+        )
+        .is_err()
+    );
+
+    let wrong_state = rig.root.join("other-state");
+    private_dir(&wrong_state);
+    let mut options = rig.options("http://127.0.0.1:9");
+    options.state_dir = &wrong_state;
+    assert!(matches!(lifecycle::run(&options), Err(Error::Refused(_))));
+    let mut options = rig.options("http://127.0.0.1:9");
+    options.rbgp_addr = "unix:///wrong/grpc.sock";
+    assert!(matches!(lifecycle::run(&options), Err(Error::Refused(_))));
+}
+
+#[test]
+fn killed_run_retains_owner_fence_and_foreign_resume_cannot_bypass_it() {
+    let rig = Rig::new();
+    let server = Server::start(vec![
+        Response::json(200).after_delay(Duration::from_secs(30)),
+    ]);
+    let mut child = run_cli(&rig, &server.origin)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while server.requests.lock().unwrap().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "lock request was not observed"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(rig.host.join("ixp-manager-host-fence.json").exists());
+    assert!(rig.state.join("ixp-manager-lifecycle.json").exists());
+
+    let foreign_runtime = rig.root.join("foreign-ipv4");
+    private_dir(&foreign_runtime);
+    let foreign_state = foreign_runtime.join("activation");
+    private_dir(&foreign_state);
+    let foreign = Binding::new(
+        "foreign-ipv4",
+        &foreign_runtime,
+        &foreign_state,
+        &rig.host,
+        &format!("unix://{}/grpc.sock", foreign_runtime.display()),
+    )
+    .unwrap();
+    let foreign_resume = lifecycle::ResumeOptions {
+        ixp_origin: &server.origin,
+        router_handle: "foreign-ipv4",
+        api_key_file: &rig.key,
+        state_dir: &foreign_state,
+        timeout: Duration::from_secs(1),
+        allow_http_loopback: true,
+        binding: &foreign,
+    };
+    assert_eq!(
+        lifecycle::resume(&foreign_resume),
+        Err(Error::Refused("foreign host fence"))
+    );
+    assert_eq!(
+        lifecycle::run(&rig.options(&server.origin)),
+        Err(Error::ManualRecovery)
+    );
+    assert_eq!(
+        lifecycle::resume(&rig.resume_options(&server.origin)),
+        Err(Error::ManualRecovery)
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn callback_cleanup_failure_retains_fence_until_matching_resume() {
+    let rig = Rig::new();
+    let server = Server::start(vec![
+        Response::json(200),
+        Response::config(FIXTURE),
+        Response::json(200).after_chmod(rig.state.clone(), 0o500),
+        Response::json(200),
+    ]);
+    assert_eq!(
+        lifecycle::run(&rig.options(&server.origin)),
+        Err(Error::ManualRecovery)
+    );
+    assert!(rig.state.join("ixp-manager-lifecycle.json").exists());
+    assert!(rig.host.join("ixp-manager-host-fence.json").exists());
+    mode(&rig.state, 0o700);
+    assert_eq!(
+        lifecycle::resume(&rig.resume_options(&server.origin)),
+        Ok(Status::Updated)
+    );
+    server.finish();
+    assert!(!rig.state.join("ixp-manager-lifecycle.json").exists());
+    assert!(!rig.host.join("ixp-manager-host-fence.json").exists());
 }
 
 #[test]
@@ -630,11 +888,14 @@ fn additive_cli_help_pins_run_and_callback_only_resume() {
         "--router-handle",
         "--api-key-file",
         "--state-dir",
+        "--runtime-state-dir",
+        "--host-state-dir",
+        "--rbgp-addr",
         "--request-timeout-seconds",
     ] {
         assert!(resume.contains(flag), "missing {flag}: {resume}");
     }
-    for forbidden in ["--candidate-dir", "--rbgp", "--activation-command"] {
+    for forbidden in ["--candidate-dir", "--rbgp <", "--activation-command"] {
         assert!(!resume.contains(forbidden), "resume exposed {forbidden}");
     }
 }
@@ -657,12 +918,16 @@ fn poisoned_proxy_is_ignored_and_cli_reports_the_exact_terminal_status() {
             "--ixp-origin",
             &server.origin,
             "--router-handle",
-            "rs1-ipv4",
+            "b2-rs1-lan1-ipv4",
             "--api-key-file",
         ])
         .arg(&rig.key)
         .arg("--state-dir")
         .arg(&rig.state)
+        .arg("--runtime-state-dir")
+        .arg(&rig.runtime)
+        .arg("--host-state-dir")
+        .arg(&rig.host)
         .arg("--candidate-dir")
         .arg(&rig.candidate)
         .arg("--check-with")
@@ -671,7 +936,7 @@ fn poisoned_proxy_is_ignored_and_cli_reports_the_exact_terminal_status() {
         .arg(&rig.rbgp)
         .args([
             "--rbgp-addr",
-            "test",
+            rig.binding.rbgp_addr(),
             "--settle-seconds",
             "2",
             "--request-timeout-seconds",
@@ -700,8 +965,8 @@ fn poisoned_proxy_is_ignored_and_cli_reports_the_exact_terminal_status() {
 
 #[test]
 fn only_the_pinned_definite_lock_statuses_clear_the_intent() {
-    let rig = Rig::new();
     for status in [401, 403, 404, 405, 422, 423] {
+        let rig = Rig::new();
         let server = Server::start(vec![Response::json(status)]);
         assert!(matches!(
             lifecycle::run(&rig.options(&server.origin)),
@@ -711,6 +976,7 @@ fn only_the_pinned_definite_lock_statuses_clear_the_intent() {
         assert!(!rig.state.join("ixp-manager-lifecycle.json").exists());
     }
     for status in [302, 400, 429, 500] {
+        let rig = Rig::new();
         let server = Server::start(vec![Response::json(status)]);
         assert_eq!(
             lifecycle::run(&rig.options(&server.origin)),
@@ -718,7 +984,7 @@ fn only_the_pinned_definite_lock_statuses_clear_the_intent() {
         );
         server.finish();
         assert!(rig.state.join("ixp-manager-lifecycle.json").exists());
-        fs::remove_file(rig.state.join("ixp-manager-lifecycle.json")).unwrap();
+        assert!(rig.host.join("ixp-manager-host-fence.json").exists());
     }
 }
 
