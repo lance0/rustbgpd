@@ -643,6 +643,8 @@ pub struct PeerSessionState {
     pub peer_asn: Option<u32>,
     /// Number of accepted prefixes from this peer.
     pub prefix_count: usize,
+    /// Number of rejected routes retained by this peer session's bounded store.
+    pub rejected_routes_retained: usize,
     /// Family-local counts, effective finite limits, and remaining capacity.
     pub max_prefix: MaxPrefixState,
     /// Negotiated hold time (seconds), if session reached `OpenConfirm`.

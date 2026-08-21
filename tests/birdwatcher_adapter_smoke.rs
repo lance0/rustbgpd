@@ -351,6 +351,7 @@ address = "127.0.0.1"
 remote_asn = 65020
 description = "live peer"
 graceful_restart = false
+max_prefixes = 5
 
 [neighbors.add_path]
 receive = true
@@ -669,6 +670,18 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
             "pinned live consumer journey drifted: {journey}"
         );
     }
+    let adapter = include_str!("../examples/birdwatcher-adapter/src/main.rs");
+    let inventory = adapter
+        .split_once("async fn protocol_rows(")
+        .unwrap()
+        .1
+        .split_once("async fn protocols_bgp(")
+        .unwrap()
+        .0;
+    assert_eq!(inventory.matches("list_neighbors(state).await?").count(), 1);
+    assert!(!inventory.contains("PolicyServiceClient"), "{inventory}");
+    assert!(!inventory.contains("ListRejectedRoutes"), "{inventory}");
+    assert!(!inventory.contains("list_rejected_routes"), "{inventory}");
 }
 
 #[test]
@@ -1046,6 +1059,15 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     let protocols = get_json(adapter_port, "/protocols/bgp", "adapter");
     assert_eq!(
         protocols["protocols"]["pb_0001_as65020"]["routes"]["filtered"], 1,
+        "{protocols}"
+    );
+    let live_protocol = &protocols["protocols"]["pb_0001_as65020"];
+    assert_eq!(live_protocol["routes"]["imported"], 1, "{protocols}");
+    assert_eq!(live_protocol["route_limit_at"], 1, "{protocols}");
+    assert_eq!(live_protocol["import_limit"], 5, "{protocols}");
+    assert_eq!(live_protocol["limit_action"], "shutdown", "{protocols}");
+    assert!(
+        live_protocol.get("import_limit_action").is_none(),
         "{protocols}"
     );
     assert_eq!(

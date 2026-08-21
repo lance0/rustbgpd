@@ -377,6 +377,13 @@ config). It clears when the queue drains and on session teardown, and
 mirrors the `bgp_peer_slow{peer}` gauge. See the "Slow peers" section
 in `OPERATIONS.md` for interpretation.
 
+`NeighborState.rejected_routes_retained` is the actor-authoritative size of
+that exact peer session's bounded retained-reject store. Presence distinguishes
+a current fresh snapshot, including an explicit zero, from an older daemon or a
+stale peer-session query; clients must not turn absence into zero. Inventory
+consumers can therefore obtain every peer's count in one `ListNeighbors`
+request without scanning routes or issuing `ListRejectedRoutes` per peer.
+
 `NeighborState.negotiation_available` and `negotiated_session` expose the
 actor-authoritative capability outcome of the current Established session:
 hold time, remote router ID, four-octet AS, negotiated families,

@@ -24,6 +24,62 @@ fn warm_checkpoint_peer_handle(response: Option<WarmCheckpointSessionState>) -> 
     PeerHandle::from_parts(session_tx, task)
 }
 
+fn retained_count_peer_handle(peer: IpAddr, count: usize) -> PeerHandle {
+    let (commands, mut receiver) = mpsc::channel(4);
+    let task = tokio::spawn(async move {
+        while let Some(command) = receiver.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let mut state = policy_test_peer_state(peer, SessionState::Established);
+                    state.rejected_routes_retained = count;
+                    let _ = reply.send(state);
+                }
+                PeerCommand::Shutdown | PeerCommand::Stop { .. } => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(commands, task)
+}
+
+#[tokio::test]
+async fn retained_reject_counts_remain_scoped_to_each_peer_key() {
+    let mut mgr = test_peer_manager();
+    let peer = "fe80::2".parse().unwrap();
+    for (interface, scope_id, session_id, count) in [("eth1", 3, 11, 7), ("eth0", 2, 12, 2)] {
+        insert_test_scoped_managed_peer(
+            &mut mgr,
+            peer,
+            interface,
+            scope_id,
+            session_id,
+            retained_count_peer_handle(peer, count),
+        );
+    }
+
+    let peers = mgr.list_peers().await;
+    let mut scoped = peers
+        .iter()
+        .map(|info| {
+            (
+                info.address,
+                info.interface.as_deref(),
+                info.rejected_routes_retained,
+            )
+        })
+        .collect::<Vec<_>>();
+    scoped.sort_by(|left, right| left.1.cmp(&right.1));
+    assert_eq!(
+        scoped,
+        [(peer, Some("eth0"), Some(2)), (peer, Some("eth1"), Some(7)),]
+    );
+
+    for (_, managed) in mgr.peers.drain() {
+        managed.handle.shutdown().await.unwrap().unwrap();
+    }
+}
+
 #[tokio::test]
 async fn warm_checkpoint_capture_uses_live_actor_config_identity() {
     let mut mgr = test_peer_manager();
@@ -405,6 +461,7 @@ async fn max_prefix_snapshot_uses_live_accounting_and_withholds_stale_headroom()
 
     let mut state = policy_test_peer_state(addr, SessionState::Established);
     state.prefix_count = 11;
+    state.rejected_routes_retained = 4;
     state.max_prefix.prefix_count_ipv4 = 7;
     state.max_prefix.prefix_count_ipv6 = 3;
     state.max_prefix.max_prefixes = Some(25);
@@ -428,11 +485,13 @@ async fn max_prefix_snapshot_uses_live_accounting_and_withholds_stale_headroom()
     assert_eq!(live.max_prefix_headroom, Some(14));
     assert_eq!(live.max_prefix_headroom_ipv4, Some(8));
     assert_eq!(live.max_prefix_headroom_ipv6, None);
+    assert_eq!(live.rejected_routes_retained, Some(4));
 
     let stale_info = super::snapshot::build_peer_info(&peer_key, managed, None, false);
     assert_eq!(stale_info.max_prefixes_effective, Some(30));
     assert_eq!(stale_info.max_prefixes_ipv4_effective, Some(20));
     assert_eq!(stale_info.max_prefixes_ipv6_effective, Some(10));
+    assert_eq!(stale_info.rejected_routes_retained, None);
     assert_eq!(
         (
             stale_info.max_prefix_headroom,

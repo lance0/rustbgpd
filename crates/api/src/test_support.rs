@@ -38,6 +38,7 @@ pub(crate) fn peer_info(address: IpAddr) -> PeerInfo {
         enabled: true,
         graceful_shutdown_advertise_intent: false,
         prefix_count: 0,
+        rejected_routes_retained: Some(0),
         prefix_count_ipv4: 0,
         prefix_count_ipv6: 0,
         max_prefixes_effective: None,

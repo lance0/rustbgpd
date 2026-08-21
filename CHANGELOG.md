@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `NeighborState.rejected_routes_retained` now carries the exact session
+  actor's bounded retained-reject count with rolling-upgrade presence.
+  `birdwatcher-adapter` protocol inventory consumes it in one `ListNeighbors`
+  request, fails closed on stale/older-daemon absence, and emits Bird's Eye's
+  canonical max-prefix keys without per-peer reject-route fanout. (LAN-1157)
 - The pinned IXP Manager v7.4 Foil exporter now emits strict
   `router-config/v2` ordered UI-filter rows. `rs-config-render` translates all
   advertise actions and exact ordered receive AS_IS/deny plus non-overlapping

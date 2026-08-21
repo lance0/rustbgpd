@@ -29,6 +29,7 @@ fn persistence_probe_handle(peer_addr: IpAddr) -> PeerHandle {
                         peer_ip: peer_addr,
                         peer_asn: Some(65002),
                         prefix_count: 17,
+                        rejected_routes_retained: 0,
                         max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
