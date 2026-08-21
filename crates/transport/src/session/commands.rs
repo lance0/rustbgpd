@@ -1388,6 +1388,7 @@ impl PeerSession {
                 let _ = reply.send(super::rejected_routes::RejectedRoutesReply {
                     enabled: self.reject_retention_enabled,
                     capacity: self.rejected_routes.capacity(),
+                    evictions_since_reset: self.rejected_routes.evictions_since_reset(),
                     entries: self.rejected_routes.snapshot(),
                 });
                 ControlFlow::Continue(())

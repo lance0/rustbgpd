@@ -41,6 +41,7 @@ struct Proc {
     name: &'static str,
     stderr_path: PathBuf,
 }
+type DaemonPorts = (Proc, u16, u16, u16);
 
 impl Proc {
     fn stderr(&self) -> String {
@@ -105,7 +106,7 @@ fn logged_port(logs: &str, field: &str, prefix: &str) -> Option<u16> {
     logs.split(&format!("\"{field}\":\""))
         .skip(1)
         .filter_map(|rest| rest.split('"').next())
-        .find(|addr| addr.starts_with(prefix))
+        .find(|addr| addr.starts_with(prefix) && !addr.ends_with(":0"))
         .and_then(|addr| addr.rsplit(':').next()?.parse().ok())
 }
 
@@ -210,14 +211,15 @@ fn wait_for_tcp(port: u16, proc_: &mut Proc) {
 
 /// Spawn the daemon on ports it chooses itself and wait for its gRPC TCP
 /// listener. Returns the daemon plus the TCP gRPC and IPv4 BGP ports it
-/// reports binding, which the rest of the test needs; the adapter still
+/// reports binding, plus metrics, which the rest needs; the adapter still
 /// talks to `grpc_socket`.
-fn spawn_daemon_listening(dir: &Path, grpc_socket: &Path, token_path: &Path) -> (Proc, u16, u16) {
+fn spawn_daemon_listening(dir: &Path, grpc_socket: &Path, token_path: &Path) -> DaemonPorts {
     if grpc_socket.exists() {
         std::fs::remove_file(grpc_socket).expect("remove stale test gRPC socket");
     }
     let config_path = write_config(
         dir,
+        PROCESS_CHOOSES,
         PROCESS_CHOOSES,
         PROCESS_CHOOSES,
         grpc_socket,
@@ -254,8 +256,14 @@ fn spawn_daemon_listening(dir: &Path, grpc_socket: &Path, token_path: &Path) -> 
         "a bound IPv4 BGP listener",
         |logs| logged_port(logs, "addr", "0.0.0.0:"),
     );
+    let metrics_port = wait_for_logged(
+        &mut daemon,
+        &daemon_stdout,
+        "a bound metrics listener",
+        |logs| logged_port(logs, "addr", "127.0.0.1:"),
+    );
     wait_for_tcp(grpc_port, &mut daemon);
-    (daemon, grpc_port, bgp_port)
+    (daemon, grpc_port, bgp_port, metrics_port)
 }
 
 /// Mutation proof: dropping Tier enforcement, the bearer credential, or the
@@ -306,6 +314,7 @@ fn write_config(
     dir: &Path,
     grpc_port: u16,
     bgp_port: u16,
+    metrics_port: u16,
     grpc_socket: &Path,
     token_path: &Path,
 ) -> PathBuf {
@@ -328,7 +337,10 @@ runtime_state_dir = "{runtime_dir}"
 
 [global.telemetry]
 log_format = "json"
+prometheus_addr = "127.0.0.1:{metrics_port}"
 
+[policy.reject_retention]
+capacity = 2
 [global.telemetry.grpc_tcp]
 address = "127.0.0.1:{grpc_port}"
 token_file = "{token_path}"
@@ -369,7 +381,7 @@ send_max = 4
 "#,
         runtime_dir = runtime_dir.display(),
         grpc_socket = grpc_socket.display(),
-        token_path = token_path.display()
+        token_path = token_path.display(),
     );
     let parsed: toml::Value = toml::from_str(&config).expect("test config must parse");
     let graceful_restart = parsed["neighbors"]
@@ -756,7 +768,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     // a later request; replacing the adapter would make the PID assertion red.
     // A parallel TCP listener retains the smoke's explicit unauthenticated
     // rejection probe while the adapter itself uses only the UDS.
-    let (mut daemon, grpc_port, bgp_port) =
+    let (mut daemon, grpc_port, bgp_port, metrics_port) =
         spawn_daemon_listening(temp.path(), &grpc_socket, &token_path);
     wait_for_unauthenticated_get_global(grpc_port, &mut daemon);
     wait_for_http(adapter_port, "/status", &mut adapter);
@@ -1222,17 +1234,56 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         over_limit,
     );
     announce_additional_rejected_route(&mut bgp_session);
-    wait_for_exact_json_error(
-        adapter_port,
-        "/routes/filtered/pb_0001_as65020",
-        403,
-        over_limit,
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let overflow = loop {
+        let body = get_json(adapter_port, "/routes/filtered/pb_0001_as65020", "adapter");
+        if body["retention"]["evictions_since_reset"].as_u64() >= Some(1) {
+            break body;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "retention overflow did not settle: {body}"
+        );
+        thread::sleep(Duration::from_millis(200));
+    };
+    let routes = overflow["routes"].as_array().unwrap();
+    assert_eq!(routes.len(), 2, "{overflow}");
+    assert_eq!(routes[0]["network"], "10.95.0.0/24", "{overflow}");
+    assert_eq!(routes[1]["network"], "10.96.0.0/24", "{overflow}");
+    assert_eq!(overflow["api"]["max_routes"], 2, "{overflow}");
+    assert_eq!(
+        overflow["retention"]["evictions_since_reset"], 1,
+        "{overflow}"
     );
-    wait_for_exact_json_error(
+    assert_eq!(
+        overflow["retention"]["may_be_incomplete"], true,
+        "{overflow}"
+    );
+    let ixp_overflow = get_json(
         adapter_port,
         "/routes/lc-zwild/protocol/pb_0001_as65020/65001/1101",
-        403,
-        over_limit,
+        "adapter",
+    );
+    assert_eq!(
+        ixp_overflow["routes"].as_array().unwrap().len(),
+        2,
+        "{ixp_overflow}"
+    );
+    assert_eq!(ixp_overflow["retention"], overflow["retention"]);
+    let metrics = http_get(metrics_port, "/metrics")
+        .expect("scrape daemon metrics")
+        .1;
+    assert!(
+        metrics.contains("bgp_rejected_route_retention_evictions_total{peer=\"127.0.0.1\"} 1"),
+        "live eviction counter missing"
+    );
+    let daemon_log = std::fs::read_to_string(temp.path().join("rustbgpd.stdout.log")).unwrap();
+    assert_eq!(
+        daemon_log
+            .matches("rejected-route retention evicted an older entry")
+            .count(),
+        1,
+        "the first eviction emits exactly one bounded warning"
     );
     announce_third_candidate(&mut bgp_session);
     wait_for_exact_json_error(

@@ -96,7 +96,7 @@ struct Args {
     )]
     protocol_alias_file: Option<PathBuf>,
 
-    /// Maximum routes returned by any route-array endpoint.
+    /// Maximum routes returned by RIB-derived route-array endpoints.
     #[arg(
         long,
         env = "BIRDWATCHER_ADAPTER_MAX_ROUTES",
@@ -1136,16 +1136,15 @@ async fn routes_filtered(
             return Ok(Json(serde_json::json!({
                 "api": api_block(state.max_routes),
                 "routes": [],
+                "retention": retention_metadata(None),
             })));
         }
         Err(e) => return Err(bad_gateway("ListRejectedRoutes", &e)),
     };
-    enforce_max(resp.routes.len() as u64, state.max_routes)?;
     Ok(Json(filtered_routes_body(
         &resp,
         peer_addr,
         &state.identities,
-        state.max_routes,
     )))
 }
 
@@ -1160,7 +1159,7 @@ async fn routes_protocol_large_community_wild_xy(
 ) -> Result<Json<Value>, HttpError> {
     let peer = state.identities.resolve(&id)?;
     if y != IXP_MANAGER_REJECT_FUNCTION {
-        return Ok(Json(empty_routes_body(state.max_routes)));
+        return Ok(Json(empty_filtered_routes_body(state.max_routes)));
     }
     let mut global = proto::global_service_client::GlobalServiceClient::new(state.upstream.clone());
     let daemon_asn = u64::from(
@@ -1172,7 +1171,7 @@ async fn routes_protocol_large_community_wild_xy(
             .asn,
     );
     if !ixp_manager_reason_namespace_matches(daemon_asn, x, y) {
-        return Ok(Json(empty_routes_body(state.max_routes)));
+        return Ok(Json(empty_filtered_routes_body(state.max_routes)));
     }
     let mut policy = proto::policy_service_client::PolicyServiceClient::new(state.upstream.clone());
     let response = match policy
@@ -1183,11 +1182,10 @@ async fn routes_protocol_large_community_wild_xy(
     {
         Ok(response) => response.into_inner(),
         Err(status) if status.code() == tonic::Code::NotFound => {
-            return Ok(Json(empty_routes_body(state.max_routes)));
+            return Ok(Json(empty_filtered_routes_body(state.max_routes)));
         }
         Err(error) => return Err(bad_gateway("ListRejectedRoutes", &error)),
     };
-    enforce_max(response.routes.len() as u64, state.max_routes)?;
     let routes = response
         .routes
         .iter()
@@ -1196,13 +1194,32 @@ async fn routes_protocol_large_community_wild_xy(
         })
         .collect::<Vec<_>>();
     Ok(Json(serde_json::json!({
-        "api": api_block(state.max_routes),
+        "api": api_block(u64::from(response.capacity)),
         "routes": routes,
+        "retention": retention_metadata(Some(&response)),
     })))
 }
 
 fn empty_routes_body(max_routes: u64) -> Value {
     serde_json::json!({ "api": api_block(max_routes), "routes": [] })
+}
+
+fn empty_filtered_routes_body(max_routes: u64) -> Value {
+    serde_json::json!({
+        "api": api_block(max_routes),
+        "routes": [],
+        "retention": retention_metadata(None),
+    })
+}
+
+fn retention_metadata(resp: Option<&proto::ListRejectedRoutesResponse>) -> Value {
+    let evictions = resp.and_then(|response| response.evictions_since_reset);
+    serde_json::json!({
+        "enabled": resp.map(|response| response.retention_enabled),
+        "capacity": resp.map(|response| response.capacity),
+        "evictions_since_reset": evictions,
+        "may_be_incomplete": evictions.map(|count| count > 0),
+    })
 }
 
 fn ixp_manager_reason_namespace_matches(daemon_asn: u64, x: u64, y: u64) -> bool {
@@ -1216,7 +1233,6 @@ fn filtered_routes_body(
     resp: &proto::ListRejectedRoutesResponse,
     peer: IpAddr,
     identities: &IdentityResolver,
-    max_routes: u64,
 ) -> Value {
     if !resp.retention_enabled {
         info!(
@@ -1225,14 +1241,18 @@ fn filtered_routes_body(
              serving empty filtered view"
         );
     }
-    let routes: Vec<Value> = resp
-        .routes
-        .iter()
-        .map(|r| rejected_route_to_birdwatcher(r, peer, identities))
-        .collect();
+    let routes: Vec<Value> = if resp.retention_enabled {
+        resp.routes
+            .iter()
+            .map(|r| rejected_route_to_birdwatcher(r, peer, identities))
+            .collect()
+    } else {
+        Vec::new()
+    };
     serde_json::json!({
-        "api": api_block(max_routes),
+        "api": api_block(u64::from(resp.capacity)),
         "routes": routes,
+        "retention": retention_metadata(Some(resp)),
     })
 }
 
@@ -2224,7 +2244,19 @@ mod tests {
         assert!(!body.contains("list_received_routes"), "{body}");
         assert!(!body.contains("list_best_routes"), "{body}");
         assert!(!body.contains("serve_routes_for_peer"), "{body}");
-        assert!(body.contains("enforce_max(response.routes.len() as u64, state.max_routes)?"));
+        assert!(!body.contains("enforce_max("), "{body}");
+        assert!(
+            body.contains("api_block(u64::from(response.capacity))"),
+            "{body}"
+        );
+        let ordinary = source
+            .split_once("async fn routes_filtered(")
+            .unwrap()
+            .1
+            .split_once("const IXP_MANAGER_REJECT_FUNCTION")
+            .unwrap()
+            .0;
+        assert!(!ordinary.contains("enforce_max("), "{ordinary}");
         assert!(
             body.find("if y != IXP_MANAGER_REJECT_FUNCTION").unwrap()
                 < body.find(".get_global(").unwrap(),
@@ -2246,12 +2278,41 @@ mod tests {
                 peer_address: peer.to_string(),
                 retention_enabled: enabled,
                 capacity: 1024,
-                routes: vec![],
+                routes: if !enabled {
+                    vec![Default::default()]
+                } else {
+                    Default::default()
+                },
+                evictions_since_reset: Some(0),
             };
-            let body = filtered_routes_body(&resp, peer, &IdentityResolver::default(), 1000);
+            let body = filtered_routes_body(&resp, peer, &IdentityResolver::default());
             assert!(body["api"].is_object(), "{body}");
+            assert_eq!(body["api"]["max_routes"], 1024, "{body}");
             assert_eq!(body["routes"], serde_json::json!([]), "{body}");
+            assert_eq!(body["retention"]["enabled"], enabled, "{body}");
+            assert_eq!(body["retention"]["may_be_incomplete"], false, "{body}");
         }
+        let mut response = proto::ListRejectedRoutesResponse {
+            retention_enabled: true,
+            capacity: 1024,
+            evictions_since_reset: None,
+            ..Default::default()
+        };
+        let unknown = retention_metadata(Some(&response));
+        assert_eq!(unknown["evictions_since_reset"], Value::Null);
+        assert_eq!(unknown["may_be_incomplete"], Value::Null);
+        response.evictions_since_reset = Some(2);
+        assert_eq!(
+            retention_metadata(Some(&response))["may_be_incomplete"],
+            true
+        );
+        assert!(
+            retention_metadata(None)
+                .as_object()
+                .unwrap()
+                .values()
+                .all(Value::is_null)
+        );
     }
 
     /// The set diff behind the noexport view: a route suppressed for the

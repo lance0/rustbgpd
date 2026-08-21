@@ -16,6 +16,14 @@
     "global_admin": 65001,
     "function": 1101
   },
+  "filtered_retention_metadata": {
+    "fields": ["enabled", "capacity", "evictions_since_reset", "may_be_incomplete"],
+    "unknown_evictions": null,
+    "bounded_store_exempts_generic_max": true,
+    "api_max_routes": "retention_capacity",
+    "store_eviction_status": 200,
+    "store_eviction_retained_rows_preserved": true
+  },
   "reject_reasons": {
     "display": {
       "1": "PREFIX LENGTH TOO LONG",

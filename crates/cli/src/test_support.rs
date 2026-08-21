@@ -2361,6 +2361,7 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
             retention_enabled: true,
             capacity: 1024,
             routes: Vec::new(),
+            evictions_since_reset: None,
         }))
     }
 
