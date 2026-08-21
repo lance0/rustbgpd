@@ -4265,6 +4265,7 @@ async fn run<T>(
         metrics.clone(),
         blackhole_status_tx,
         blackhole_shutdown.clone(),
+        runtime_state_directory.clone(),
     );
 
     // ADR-0061 general unicast FIB reconciler. Completely opt-in:

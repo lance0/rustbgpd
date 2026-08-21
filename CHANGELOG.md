@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- BLACKHOLE kernel ownership now survives crashes through a private,
+  descriptor-relative `blackhole-owned.json` exact-prefix receipt. Adoption
+  and deletion require both receipt authority and the kernel marker; install
+  and removal ordering fail closed, and M62 pins an unreceipted `proto bgp`
+  operator row that remains untouched. (LAN-1195)
 - The daemon now fail-stops if its RIB manager returns or panics: it runs the
   existing coordinated peer teardown and exits 1 so `Restart=on-failure` can
   recover it. A real-session fault-injection proof pins the failure before

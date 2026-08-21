@@ -107,7 +107,7 @@ proved with kernel evidence (routes, FDB rows, nexthop groups, netdev state).
 | M51 | ADR-0067 single-hop BFD + RFC 5882 BGP coupling | FRR 10.3.1 |
 | M53 | ADR-0069 BGP unnumbered / IPv6 link-local peering + scoped FIB | FRR 10.3.1 ×2 |
 | M58 | ADR-0061 runtime `[[fib_tables]]` CRUD over gRPC/CLI | FRR 10.3.1 |
-| M60 / M61 / M62 | ADR-0079 adoption sweeps: kill-and-restart reaping/re-adoption for FDB, EVPN L3, and BLACKHOLE state | FRR 10.3.1 |
+| M60 / M61 / M62 | Kill-and-restart reaping/re-adoption for FDB and EVPN L3 marker sweeps; M62 additionally pins exact durable BLACKHOLE receipt authority and preservation of an unreceipted marker row | FRR 10.3.1 |
 | M65 | ADR-0083 single-active failover blackout measurement | GoBGP 3.x ×2 |
 | M66 / M67 | ADR-0084/0085 Ethernet Segment drain: operator handover and link-driven failover | rustbgpd ×3 |
 | M68 | ADR-0087 native GW-IP overlay-index Type 5, FRR consume-side recursion | FRR 10.3.1 |

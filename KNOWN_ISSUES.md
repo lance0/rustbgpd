@@ -271,10 +271,12 @@ byte counts.
   `[global] install_blackhole_discard = true` now installs Linux kernel
   blackhole routes for accepted EBGP best routes carrying `BLACKHOLE`,
   but the authorization model is intentionally narrow: EBGP + import
-  policy acceptance + host-prefix-only by default. Per-peer allow-lists,
-  active blackhole limits, rate limits, and startup stale-route adoption
-  remain follow-ups. M41 covers FRR-originated install/remove behavior
-  in CI. See ADR-0060.
+  policy acceptance + host-prefix-only by default. V1 declines a second FIB
+  allow-list in favor of accepted import and peer-group policy. Active limits
+  and rate limits remain follow-ups. Crash recovery is receipt-backed, with
+  identical marker replacement at a receipted prefix the value-identity limit.
+  M41 covers install/remove; M62 covers crash recovery and the unreceipted
+  proto-bgp negative. See ADR-0060/0079.
 
 - **ADR-0061 general FIB crash recovery is exact-match only.**
   `[[fib_tables]]` route installs use `RTPROT_BGP`, but that marker is not

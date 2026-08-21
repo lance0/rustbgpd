@@ -193,7 +193,7 @@ Required. Defines the local BGP speaker identity.
 | `listen_addresses`  | array of IP strings | no | -- | Exact local BGP endpoints and active-open source addresses. Omission preserves the tolerant dual-wildcard listener. When present, the list must be nonempty with at most one address per family; every configured peer and dynamic range must use a listed family, and every bind is atomic. **Restart-required.** |
 | `dynamic_neighbor_limit` | u32 | no     | `100`                | Maximum number of auto-accepted dynamic peers (must be > 0) |
 | `worker_threads`    | usize  | no       | `min(cores, 8)`      | Tokio runtime worker threads. Unset caps to `min(CPU parallelism, 8)` to avoid over-provisioning the async runtime (one worker + stack reservation per core) on a high-core host for this I/O-bound daemon — reduces virtual-address reservation and scheduler footprint (RSS-neutral in benchmarks). `0` means unset. `RUSTBGPD_WORKER_THREADS` overrides. **Restart-required** (runtime built once at startup). |
-| `runtime_state_dir` | string | no       | `"/var/lib/rustbgpd"` | Directory for daemon-owned runtime state (GR restart marker, optional warm checkpoint, FIB ownership receipt, and gRPC socket) |
+| `runtime_state_dir` | string | no       | `"/var/lib/rustbgpd"` | Directory for daemon-owned runtime state (GR restart marker, optional warm checkpoint, FIB and BLACKHOLE ownership receipts, and gRPC socket) |
 | `warm_cache_checkpoint_on_shutdown` | bool | no | `false`             | Publish a bounded daemon-private routing checkpoint during coordinated shutdown. **Restart-required.** Publication only; startup does not restore routes. |
 | `cluster_id`        | string | no       | --                    | Route reflector cluster ID (must be valid IPv4; enables RR mode) |
 | `honor_graceful_shutdown` | bool | no  | `false`              | Enable RFC 8326 §4 receiver behavior on EBGP imports — see below |
@@ -269,8 +269,8 @@ directory manually if the cached routing data must not persist.
 
 Every concurrently running rustbgpd daemon must use a distinct
 `runtime_state_dir`. Sharing one runtime-state directory between live daemon
-processes is unsupported because the restart marker, warm checkpoint, FIB
-ownership receipt, and Unix socket are all single-writer state.
+processes is unsupported because the restart marker, warm checkpoint, FIB and
+BLACKHOLE ownership receipts, and Unix socket are all single-writer state.
 
 This option does **not** make startup restore routes: no cached route is loaded,
 selected, installed, or advertised. A successful checkpoint only causes the GR
@@ -407,25 +407,23 @@ from EBGP, and only installs IPv4 `/32` or IPv6 `/128` host routes unless
 routes for the same prefix are treated as install failures rather than
 overwritten, so operator/static or other-daemon routes are preserved.
 
-Rows that carry rustbgpd's own ownership marker (`proto bgp` + blackhole
-type in the main table) are the exception: after an unclean restart the
-first reconcile pass **adopts** them (ADR-0079), so a crash leftover keeps
-discarding attack traffic instead of blocking re-installation as foreign. A
-still-desired prefix re-claims its adopted row silently (status `adopted`);
-rows no BGP route re-claims stay visible as `adopted_pending_reap` and are
-removed after a 500 s deferral, which makes reaping while BGP is still
-reconverging unlikely (the deferral is a time proxy for convergence, not a
-convergence signal).
-Note this marker is a userspace convention: an operator's manual
-`ip route add blackhole ... proto bgp` is indistinguishable from daemon
-state and will be adopted, and co-residency with another proto-bgp daemon
-(e.g. FRR zebra, which claims the same marker) is unsupported.
+Each successful install records its canonical prefix in private
+`<runtime_state_dir>/blackhole-owned.json`. Restart adopts only receipt∩marker;
+unreceipted marker-identical rows remain foreign. Unclaimed receipt rows stay
+`adopted_pending_reap` until the 500 s deferral expires. Receipt release is
+durable before deletion; a failed delete attempts restoration, and any
+publication ambiguity fail-stops later mutations as `ownership_state_unavailable`.
+
+Live daemons require distinct runtime-state directories. Stopped receipt
+deletion and pre-receipt upgrade preserve surviving markers as foreign. Do not
+downgrade to marker-only adoption without draining. Exact receipted-prefix
+replacement by an identical marker remains the value-identity limit.
 
 `rbgp rib blackholes` shows the current discard status for every
 BLACKHOLE-marked best route the daemon has observed: `installed`
 (`installed` / `owned` / `adopted` / `adopted_pending_reap`), `rejected`
 (`broad_prefix` / `not_ebgp`), or `failed` (`foreign_route_exists`,
-`dump_failed`, `remove_failed`, `reap_failed`, or the kernel install
+`dump_failed`, `remove_failed`, `reap_failed`, `ownership_state_unavailable`, or the kernel install
 error). The same surface is available as JSON with
 `rbgp -j rib blackholes`. Adoption and reaping are counted by
 `bgp_blackhole_discard_adopted_total` and

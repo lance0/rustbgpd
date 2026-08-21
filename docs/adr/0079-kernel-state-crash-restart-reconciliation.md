@@ -9,10 +9,9 @@ rustbgpd programs four kinds of Linux kernel state: unicast FIB routes
 (ADR-0061/0066), RFC 7999 blackhole discard routes, EVPN L2 state
 (single-dst FDB entries and ADR-0059 nexthop-group/FDB rows), and EVPN
 symmetric-IRB L3 state (VRF routes, permanent neighbors, L3VXLAN FDB).
-Only the unicast FIB survives an **unclean** restart correctly: it
-persists an owned-state JSON file and re-adopts/reaps on startup.
-Everything else tracks ownership in memory only, so after a SIGKILL or
-crash:
+The unicast FIB and BLACKHOLE reconciler now survive an **unclean** restart
+through private exact-value receipts. The remaining EVPN slices use kernel
+markers and startup sweeps. Before these implementations, a crash could leave:
 
 - a blackhole route installed for a since-ended attack keeps discarding
   the victim's traffic forever, invisible to every status surface, and
@@ -42,8 +41,8 @@ update-complete signal. FRR extended exactly this pattern to EVPN
 FDB/neigh in January 2026 (PR #19778), keyed on
 `NTF_EXT_LEARNED + NDA_PROTOCOL`. BIRD's kernel protocol scans and
 prunes own-proto (`RTPROT_BIRD`) routes, and gates the first prune on
-initial-feed completion (`p->ready`) — convergence-gated reaping. Our
-unicast JSON file is the outlier among surveyed implementations, and a
+initial-feed completion (`p->ready`) — convergence-gated reaping. Our unicast
+FIB and BLACKHOLE JSON receipts are outliers; a
 file has a structural blind spot a sweep does not: it can only describe
 what the daemon last knew, so it drifts when the kernel itself mutates
 (carrier-down neigh flush) and it quarantine-freezes on any signature
@@ -51,23 +50,24 @@ mismatch.
 
 ## Decision
 
-**New crash-restart reconciliation uses startup adoption sweeps keyed on
-kernel-preserved ownership markers, with reaping deferred until the
-owning subsystem has reconverged.** No new persisted owned-state files.
+**Crash-restart reconciliation uses the narrowest available ownership proof.**
+EVPN uses startup marker sweeps with deferred reaping. BLACKHOLE rows require
+both the kernel marker and the private `blackhole-owned.json` exact-prefix
+receipt; marker identity alone is not authority.
 
 Per subsystem, the ownership discriminator (all already written by our
 install paths today):
 
 | State | Marker | Status |
 |---|---|---|
-| Blackhole discard routes | `RTPROT_BGP` + `RTN_BLACKHOLE` (table main) | Implemented |
+| Blackhole discard routes | Receipt prefix + `RTPROT_BGP` + `RTN_BLACKHOLE` (table main) | Implemented |
 | EVPN L3 VRF routes | `RTPROT_BGP` + onlink, in a configured `[[evpn_ip_vrfs]]` `table_id` | Implemented |
 | EVPN L3 neighbors | `NUD_PERMANENT` + `NTF_EXT_LEARNED` on managed L3VXLAN devices | Implemented |
 | EVPN FDB (single-dst + L3VXLAN) | `extern_learn` on managed VXLAN devices (non-NHG; NHG-tagged rows already have the ADR-0059 drift sweep) | Implemented |
 
 Sweep semantics, shared across subsystems:
 
-1. **Adopt at startup**: dump kernel state, recognize own markers, treat
+1. **Adopt at startup**: dump kernel state, recognize authorized markers, treat
    matching objects as owned — they keep forwarding and they no longer
    block re-installation as "foreign".
 2. **Re-claim is implicit**: the daemon re-installing the same identity
@@ -80,9 +80,9 @@ Sweep semantics, shared across subsystems:
    first committed intent publication), with a bounded deadline as
    backstop. Reaping at startup before BGP reconverges is the known
    traffic-gap failure mode and is explicitly not the default.
-4. **Idempotent under repeated crash**: a second crash inside the
-   deferral window re-adopts harmlessly; sweeps never depend on state
-   from the previous process.
+4. **Idempotent under repeated crash**: a second crash inside the deferral
+   window re-adopts harmlessly. BLACKHOLE pending authority remains in its
+   receipt until successful durable release and kernel removal.
 5. **Handle missing as well as stale**: reconciliation must also
    re-install owned objects the kernel lost while the daemon was down
    (carrier-down neigh flush) — which the level-triggered reconcilers
@@ -116,8 +116,9 @@ the sweep model is left as a future simplification, not a requirement.
 - **`RTPROT_BGP` is contested.** FRR zebra's `is_selfroute()` claims
   proto 186 as its own: a co-resident zebra will adopt and sweep
   rustbgpd's routes (immediately, in zebra's default mode). Likewise an
-  operator's `ip route add ... proto bgp` is indistinguishable from
-  daemon state. Our configured-table+metric discipline scopes unicast
+  operator's `ip route add ... proto bgp` is not BLACKHOLE authority without
+  the private receipt. Replacing an exact receipted prefix with the same marker
+  remains indistinguishable. Our configured-table+metric discipline scopes unicast
   FIB ownership; configured VRF table/device/onlink shape scopes EVPN L3
   ownership. Co-residency with another proto-186 daemon is unsupported
   and now documented as such.
@@ -173,9 +174,9 @@ the sweep model is left as a future simplification, not a requirement.
   the M41 topology, one withdrawn while the daemon is down — the
   surviving discard held continuously, the unclaimed row surfaced as
   `adopted_pending_reap` then reaped after the deferral (shortened
-  via `RUSTBGPD_BLACKHOLE_ADOPTION_REAP_DEFERRAL_SECS`), a foreign
-  `proto static` blackhole row untouched, both
-  `bgp_blackhole_discard_*` adoption counters asserted.
+  via `RUSTBGPD_BLACKHOLE_ADOPTION_REAP_DEFERRAL_SECS`). Receipt A+B, both
+  unreceipted `proto bgp` and `proto static` negatives, exact adopted/reaped
+  counters 2/1, and final receipt A are asserted.
 - The per-table set-based unicast signature ends the
   quarantine-freeze-on-edit class without weakening the value-match
   adoption rule.
