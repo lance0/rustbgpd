@@ -16,7 +16,8 @@ RPM_EXTRACT = "cpio --quiet -id --no-absolute-filenames --directory=extracted/rp
 EXE_LOOP = "for exe in rustbgpd rbgp rs-config-render birdwatcher-adapter; do"
 IMAGE_RUN = "run: docker run --rm --entrypoint birdwatcher-adapter"
 UNIT_ASSERT = 'grep -qxF "$directive" "$unit"'
-STATUS_GUARD = "from scripts.check_release_install_contract import systemd_assignments, systemd_status_is_70"
+TEMPLATE_EXEC_ASSERT = "grep -qxF 'ExecStart=/usr/bin/rustbgpd /var/lib/rustbgpd/%i/activation/current/config.toml' \"$template\""
+STATUS_GUARD = "from scripts.check_release_install_contract import check_systemd_template, systemd_assignments, systemd_status_is_70"
 MONITORING_MAPPING = "native monitoring mappings"
 GREP_ASSERT = 'if ! grep -qxF "$f" <<<"$entries"; then'
 TAR_SIZE_ASSERT = (
@@ -26,14 +27,82 @@ INPUTS = (
     WORKFLOW,
     RELEASE,
     "packaging/nfpm.yaml",
+    "scripts/build-packages.sh",
     "docs/grafana/rustbgpd-overview.json",
     "examples/prometheus/rustbgpd-alerts.yml",
     "examples/prometheus/rustbgpd-alerts_test.yml",
     contract.SYSTEMD_UNIT,
+    contract.SYSTEMD_TEMPLATE,
     contract.COMPOSE_FILE,
     contract.LICENSE_MAP,
 )
 MUTATIONS = (
+    (
+        "scripts/build-packages.sh",
+        "for unit in rustbgpd.service 'rustbgpd@.service'; do",
+        "for unit in rustbgpd.service; do",
+        "native systemd staging",
+    ),
+    (
+        "scripts/build-packages.sh",
+        "sed 's|^ExecStart=/usr/local/bin/rustbgpd |ExecStart=/usr/bin/rustbgpd |' \\",
+        "sed 's|/usr/local/bin|/usr/bin|g' \\",
+        "native systemd staging",
+    ),
+    (
+        contract.SYSTEMD_TEMPLATE,
+        "/var/lib/rustbgpd/%i/activation/current/config.toml",
+        "/etc/rustbgpd/%i/config.toml",
+        "systemd template",
+    ),
+    (
+        contract.SYSTEMD_TEMPLATE,
+        "StateDirectory=rustbgpd/%i rustbgpd/%i/activation",
+        "StateDirectory=rustbgpd/%i",
+        "systemd template",
+    ),
+    (
+        contract.SYSTEMD_TEMPLATE,
+        "ReadWritePaths=/var/lib/rustbgpd/%i",
+        "ReadWritePaths=/var/lib/rustbgpd/%i /var/lib/rustbgpd/ixp-manager-host",
+        "systemd template",
+    ),
+    (
+        contract.SYSTEMD_TEMPLATE,
+        "%i",
+        "%I",
+        "systemd template",
+    ),
+    (
+        "packaging/nfpm.yaml",
+        "  - src: ${PKGROOT}/lib/systemd/system/rustbgpd@.service\n    dst: /lib/systemd/system/rustbgpd@.service",
+        "  - src: omitted-template\n    dst: /lib/systemd/system/omitted-template",
+        "native systemd template mapping",
+    ),
+    (
+        RELEASE,
+        " examples/systemd/rustbgpd@.service",
+        " examples/systemd/omitted-template.service",
+        "tarball package commands",
+    ),
+    (
+        RELEASE,
+        "                   share/systemd/rustbgpd@.service \\\n",
+        "",
+        "tarball payload assertions",
+    ),
+    (
+        WORKFLOW,
+        "                        lib/systemd/system/rustbgpd@.service \\\n",
+        "",
+        "real native package assertions",
+    ),
+    (
+        WORKFLOW,
+        TEMPLATE_EXEC_ASSERT,
+        "true # " + TEMPLATE_EXEC_ASSERT,
+        "real native package assertions",
+    ),
     (
         contract.LICENSE_MAP,
         '5.4. "Results" means any outcome obtained by computational analysis',

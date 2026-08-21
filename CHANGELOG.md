@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Release tarballs, Debian packages, and RPMs now ship an opt-in
+  `rustbgpd@.service` with exact per-handle IXP Manager state and UDS binding.
+  M97 proves two pinned IPv4/IPv6 handles share one host namespace and host
+  fence while retaining distinct PIDs, TCP/179 listeners, state, sessions, and
+  failure domains. (LAN-1144)
 - `birdwatcher-adapter` now serves IXP Manager v7.4.0's exact member
   filtered-prefix wildcard journey from retained rejects. It accepts only the
   daemon's `{ASN}:1101:*` namespace, removes wire-supplied values there before

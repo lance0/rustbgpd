@@ -146,7 +146,7 @@ jobs:
           #   share/man/man1/rbgp.1                   CLI man page
           #   share/man/man8/rustbgpd.8               daemon man page
           #   share/completions/rbgp.{bash,zsh,fish}  shell completions
-          #   share/systemd/rustbgpd.service          hardened systemd unit
+          #   share/systemd/rustbgpd{,@}.service      hardened systemd units
           #   share/systemd/rustbgpd-dataplane.conf   opt-in CAP_NET_ADMIN drop-in
           #   share/monitoring/rustbgpd-overview.json Grafana dashboard
           #   share/monitoring/rustbgpd-alerts.yml    Prometheus alert rules
@@ -169,7 +169,7 @@ jobs:
           cp target/${{ matrix.target }}/release/birdwatcher-adapter staging/
           cp LICENSE-MIT LICENSE-APACHE LICENSES.md staging/
           cp docs/rustbgpd.schema.json staging/
-          cp examples/systemd/rustbgpd.service \
+          cp examples/systemd/rustbgpd.service examples/systemd/rustbgpd@.service \
             examples/systemd/rustbgpd-dataplane.conf staging/share/systemd/
           cp docs/grafana/rustbgpd-overview.json staging/share/monitoring/
           cp examples/prometheus/rustbgpd-alerts.yml \
@@ -214,6 +214,7 @@ jobs:
                    share/completions/rbgp.bash share/completions/rbgp.zsh \
                    share/completions/rbgp.fish \
                    share/systemd/rustbgpd.service \
+                   share/systemd/rustbgpd@.service \
                    share/systemd/rustbgpd-dataplane.conf \
                    share/monitoring/rustbgpd-overview.json \
                    share/monitoring/rustbgpd-alerts.yml \

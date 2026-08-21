@@ -12,6 +12,7 @@ BINARIES = ("rustbgpd", "rbgp", "rs-config-render", "birdwatcher-adapter")
 LICENSES = ("LICENSE-MIT", "LICENSE-APACHE", "LICENSES.md")
 SYSTEMD = (
     "share/systemd/rustbgpd.service",
+    "share/systemd/rustbgpd@.service",
     "share/systemd/rustbgpd-dataplane.conf",
 )
 MONITORING = (
@@ -32,6 +33,7 @@ MONITORING = (
     ),
 )
 SYSTEMD_UNIT = "examples/systemd/rustbgpd.service"
+SYSTEMD_TEMPLATE = "examples/systemd/rustbgpd@.service"
 COMPOSE_FILE = "examples/docker-compose/docker-compose.yml"
 LICENSE_MAP = "LICENSES.md"
 SYSTEMD_DIRECTIVES = {
@@ -40,6 +42,21 @@ SYSTEMD_DIRECTIVES = {
     ("Service", "Restart"): "on-failure",
     ("Service", "RestartSec"): "5",
     ("Service", "TimeoutStopSec"): "32min",
+}
+TEMPLATE_DIRECTIVES = {
+    ("Service", "ExecStart"): "/usr/local/bin/rustbgpd /var/lib/rustbgpd/%i/activation/current/config.toml",
+    ("Service", "StateDirectory"): "rustbgpd/%i rustbgpd/%i/activation",
+    ("Service", "StateDirectoryMode"): "0700",
+    ("Service", "RuntimeDirectory"): "rustbgpd/%i",
+    ("Service", "RuntimeDirectoryMode"): "0700",
+    ("Service", "UMask"): "0077",
+    ("Service", "NoNewPrivileges"): "yes",
+    ("Service", "ProtectSystem"): "strict",
+    ("Service", "ProtectHome"): "yes",
+    ("Service", "ReadWritePaths"): "/var/lib/rustbgpd/%i",
+    ("Service", "PrivateTmp"): "yes",
+    ("Service", "AmbientCapabilities"): "CAP_NET_BIND_SERVICE",
+    ("Service", "CapabilityBoundingSet"): "CAP_NET_BIND_SERVICE",
 }
 
 
@@ -177,6 +194,32 @@ def check_systemd_unit(errors: list[str], text: str) -> None:
             )
 
 
+def check_systemd_template(
+    errors: list[str], text: str, *, packaged: bool = False
+) -> None:
+    assignments = systemd_assignments(text)
+    expected_directives = TEMPLATE_DIRECTIVES | {
+        ("Service", "ExecStart"): (
+            "/usr/bin/rustbgpd /var/lib/rustbgpd/%i/activation/current/config.toml"
+            if packaged
+            else TEMPLATE_DIRECTIVES[("Service", "ExecStart")]
+        )
+    }
+    for (section, key), expected in expected_directives.items():
+        actual = [
+            value
+            for found_section, found_key, value in assignments
+            if found_section == section and found_key == key
+        ]
+        if actual != [expected]:
+            errors.append(
+                f"systemd template: [{section}] {key} must occur once with value {expected!r}, got {actual!r}"
+            )
+    if "%I" in text:
+        errors.append("systemd template: unescaped %I must not replace the exact router handle")
+    check_systemd_unit(errors, text)
+
+
 def compose_service(text: str, name: str) -> tuple[str, ...]:
     lines = text.splitlines()
     marker = f"  {name}:"
@@ -219,6 +262,7 @@ def check(root: Path) -> list[str]:
     read = lambda path: (root / path).read_text(encoding="utf-8")
     try:
         check_systemd_unit(errors, read(SYSTEMD_UNIT))
+        check_systemd_template(errors, read(SYSTEMD_TEMPLATE))
         check_compose(errors, read(COMPOSE_FILE))
         license_map = read(LICENSE_MAP)
         for clause in (
@@ -229,6 +273,17 @@ def check(root: Path) -> list[str]:
             if clause not in license_map:
                 errors.append(f"license map: missing CDLA clause {clause!r}")
         release = read(".github/workflows/release.yml")
+        build_packages = read("scripts/build-packages.sh")
+        require_patterns(
+            errors,
+            "native systemd staging",
+            build_packages,
+            (
+                exact("for unit in rustbgpd.service 'rustbgpd@.service'; do"),
+                r"^\s+sed 's\|\^ExecStart=/usr/local/bin/rustbgpd \|ExecStart=/usr/bin/rustbgpd \|' \\$",
+                r"^grep -qxF 'ExecStart=/usr/bin/rustbgpd /var/lib/rustbgpd/%i/activation/current/config\.toml' \\$",
+            ),
+        )
         package_tar = (
             "tar -C staging -czf dist/rustbgpd-${SUFFIX}.tar.gz rustbgpd rbgp "
             "rs-config-render birdwatcher-adapter LICENSE-MIT LICENSE-APACHE LICENSES.md rustbgpd.schema.json share"
@@ -239,7 +294,7 @@ def check(root: Path) -> list[str]:
             for binary in BINARIES
         ) + (
             r"^cp LICENSE-MIT LICENSE-APACHE LICENSES\.md staging/$",
-            r"^cp examples/systemd/rustbgpd\.service examples/systemd/rustbgpd-dataplane\.conf staging/share/systemd/$",
+            r"^cp examples/systemd/rustbgpd\.service examples/systemd/rustbgpd@\.service examples/systemd/rustbgpd-dataplane\.conf staging/share/systemd/$",
             r"^cp docs/grafana/rustbgpd-overview\.json staging/share/monitoring/$",
             r"^cp examples/prometheus/rustbgpd-alerts\.yml examples/prometheus/rustbgpd-alerts_test\.yml staging/share/monitoring/$",
             exact(package_tar),
@@ -290,6 +345,12 @@ def check(root: Path) -> list[str]:
         license_mapping = (LICENSE_MAP, "/usr/share/doc/rustbgpd/LICENSES.md")
         if license_mapping not in mappings:
             errors.append(f"native license mapping missing {license_mapping!r}")
+        template_mapping = (
+            "${PKGROOT}/lib/systemd/system/rustbgpd@.service",
+            "/lib/systemd/system/rustbgpd@.service",
+        )
+        if template_mapping not in mappings:
+            errors.append(f"native systemd template mapping missing {template_mapping!r}")
 
         contract = read(".github/workflows/release-install-contract.yml")
         native = select_script(
@@ -310,16 +371,23 @@ def check(root: Path) -> list[str]:
                 r"^for tree in extracted/deb extracted/rpm; do$",
                 r"^for exe in rustbgpd rbgp rs-config-render birdwatcher-adapter; do$",
                 r'^test -x "\$tree/usr/bin/\$exe" ',
-                r"^for file in lib/systemd/system/rustbgpd\.service usr/share/man/man1/rbgp\.1\.gz usr/share/man/man8/rustbgpd\.8\.gz usr/share/doc/rustbgpd/LICENSES\.md; do$",
+                r"^for file in lib/systemd/system/rustbgpd\.service lib/systemd/system/rustbgpd@\.service usr/share/man/man1/rbgp\.1\.gz usr/share/man/man8/rustbgpd\.8\.gz usr/share/doc/rustbgpd/LICENSES\.md; do$",
                 r'^test -s "\$tree/\$file" ',
                 r'^"\$tree/usr/bin/rustbgpd" --check "\$tree/etc/rustbgpd/config\.toml"$',
                 r'^unit="\$tree/lib/systemd/system/rustbgpd\.service"$',
                 r"^for directive in StartLimitIntervalSec=10min StartLimitBurst=5 Restart=on-failure RestartSec=5 TimeoutStopSec=32min; do$",
                 r'^grep -qxF "\$directive" "\$unit"$',
-                r"^from scripts\.check_release_install_contract import systemd_assignments, systemd_status_is_70$",
+                r'^template="\$tree/lib/systemd/system/rustbgpd@\.service"$',
+                exact("grep -qxF 'ExecStart=/usr/bin/rustbgpd /var/lib/rustbgpd/%i/activation/current/config.toml' \"$template\""),
+                exact("grep -qxF 'StateDirectory=rustbgpd/%i rustbgpd/%i/activation' \"$template\""),
+                exact("grep -qxF 'ReadWritePaths=/var/lib/rustbgpd/%i' \"$template\""),
+                r"^from scripts\.check_release_install_contract import check_systemd_template, systemd_assignments, systemd_status_is_70$",
                 r"^for _, key, value in systemd_assignments\(Path\(sys\.argv\[1\]\)\.read_text\(\)\):$",
                 r'^if key in \{"SuccessExitStatus", "RestartPreventExitStatus"\} and any\($',
                 r"^systemd_status_is_70\(token\) for token in value\.split\(\)$",
+                r'^template_errors = \[\]$',
+                r'^check_systemd_template\(template_errors, Path\(sys\.argv\[2\]\)\.read_text\(\), packaged=True\)$',
+                r'^if template_errors: raise SystemExit\("; "\.join\(template_errors\)\)$',
             ),
         )
         if "--to-stdout" in native:

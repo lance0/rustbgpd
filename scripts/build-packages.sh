@@ -56,15 +56,23 @@ install -D -m 0755 "$staging/rbgp" "$pkgroot/usr/bin/rbgp"
 install -D -m 0755 "$staging/rs-config-render" "$pkgroot/usr/bin/rs-config-render"
 install -D -m 0755 "$staging/birdwatcher-adapter" "$pkgroot/usr/bin/birdwatcher-adapter"
 
-# systemd unit: packages install binaries to /usr/bin, the example unit
-# points at /usr/local/bin (the tarball install path).
-grep -q '^ExecStart=/usr/local/bin/rustbgpd ' examples/systemd/rustbgpd.service || {
-    echo "error: examples/systemd/rustbgpd.service ExecStart no longer matches the expected /usr/local/bin path; update this script" >&2
+# systemd units: packages install binaries to /usr/bin; the examples point at
+# /usr/local/bin (the tarball install path). Rewrite only that binary path.
+mkdir -p "$pkgroot/lib/systemd/system"
+for unit in rustbgpd.service 'rustbgpd@.service'; do
+    source="examples/systemd/$unit"
+    grep -q '^ExecStart=/usr/local/bin/rustbgpd ' "$source" || {
+        echo "error: $source ExecStart no longer matches the expected /usr/local/bin path; update this script" >&2
+        exit 1
+    }
+    sed 's|^ExecStart=/usr/local/bin/rustbgpd |ExecStart=/usr/bin/rustbgpd |' \
+        "$source" > "$pkgroot/lib/systemd/system/$unit"
+done
+grep -qxF 'ExecStart=/usr/bin/rustbgpd /var/lib/rustbgpd/%i/activation/current/config.toml' \
+    "$pkgroot/lib/systemd/system/rustbgpd@.service" || {
+    echo "error: packaged template changed the per-handle activation config path" >&2
     exit 1
 }
-mkdir -p "$pkgroot/lib/systemd/system"
-sed 's|^ExecStart=/usr/local/bin/rustbgpd |ExecStart=/usr/bin/rustbgpd |' \
-    examples/systemd/rustbgpd.service > "$pkgroot/lib/systemd/system/rustbgpd.service"
 
 # Config skeleton: the minimal example with its dev-friendly /tmp state
 # dir rewritten to the production path the systemd unit provides.

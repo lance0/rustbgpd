@@ -620,9 +620,11 @@ not settle leaves the candidate current; exit 5 requires explicit recovery.
 M96 proves the pre-effect restoration against an MD5-authenticated FRR member
 without a daemon restart or session flap. The authenticated v7.4 lifecycle now
 journals lock intent, fetches the real Foil boundary, drives that activation,
-and delivers explicit updated/release callbacks; M97 proves the real database
-transitions and MD5-FRR continuity. Active UI-filter translation, custom-skin
-migration, and multi-address ownership remain open. The external adapter now
+and delivers explicit updated/release callbacks. The packaged opt-in
+`rustbgpd@.service` and M97 prove two exact IPv4/IPv6 handles in one host
+namespace with shared-fence serialization and independent MD5-BGP continuity.
+Active UI-filter translation, custom-skin migration, and multi-address
+ownership remain open. The external adapter now
 also serves the IXP Manager v7.4 status, live protocol inventory/detail,
 symbols, member received, and member export slice through immutable aliases
 with an enforced response maximum. Its exact member filtered-prefix wildcard
