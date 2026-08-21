@@ -614,9 +614,11 @@ an original Foil JSON export, fails closed on unsupported effective policy, and
 writes a private candidate, validates it with the selected rustbgpd binary's
 strict offline check, then writes the validated receipt last. Its local helper
 now rechecks, atomically publishes and settles immutable generations. Exit 4
-proves an exact prior-generation rollback; exit 5 leaves recovery or receipt
-durability unproven. M96 proves the successful rollback against an
-MD5-authenticated FRR member without a daemon restart or session flap. HTTP
+is limited to a command that could not start and proves exact prior-link/runtime
+restoration without a second activation. A started command that fails or does
+not settle leaves the candidate current; exit 5 requires explicit recovery.
+M96 proves the pre-effect restoration against an MD5-authenticated FRR member
+without a daemon restart or session flap. HTTP
 fetching, callbacks, active UI-filter
 translation, custom-skin migration, and multi-address ownership remain open
 under LAN-1105. The external adapter now also serves the IXP

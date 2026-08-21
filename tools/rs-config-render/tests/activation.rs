@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -67,8 +67,12 @@ impl Rig {
 root=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 printf '%s\n' "$*" >> "$root/checker.log"
 if [ "$1" = --version ]; then
-  printf 'rustbgpd %s {SECRET}\n' "$(cat "$root/version")"
-  printf '{SECRET}\n' >&2
+  if [ -f "$root/version-stderr" ]; then
+    printf 'rustbgpd %s\n' "$(cat "$root/version")" >&2
+  else
+    printf 'rustbgpd %s {SECRET}\n' "$(cat "$root/version")"
+    printf '{SECRET}\n' >&2
+  fi
   exit 0
 fi
 [ "$(cat "$root/checker-mode")" = ok ] || exit 9
@@ -130,6 +134,8 @@ exit 0
             ),
         );
         let state = root.join("state");
+        fs::create_dir(&state).unwrap();
+        mode(&state, 0o700);
         Self {
             _temp: temp,
             root,
@@ -188,6 +194,7 @@ exit 0
 fn initial_activation_and_noop_are_private_exact_and_secret_free() {
     let rig = Rig::new();
     let candidate = rig.candidate("candidate-a", 100);
+    fs::write(rig.root.join("version-stderr"), "").unwrap();
     assert_eq!(
         rig.run(&candidate, true, &rig.activation),
         Ok(Status::Activated)
@@ -232,10 +239,36 @@ fn initial_activation_and_noop_are_private_exact_and_secret_free() {
     );
     assert_eq!(rig.receipt()["status"], "noop");
 
+    let limited = Command::new("/bin/sh")
+        .args(["-c", "trap '' XFSZ; ulimit -f 0; exec \"$@\"", "sh"])
+        .arg(env!("CARGO_BIN_EXE_rs-config-render"))
+        .args(["activate", "--candidate"])
+        .arg(&candidate)
+        .arg("--state-dir")
+        .arg(&rig.state)
+        .arg("--check-with")
+        .arg(&rig.checker)
+        .arg("--rbgp")
+        .arg(&rig.rbgp)
+        .args(["--rbgp-addr", "test:50051", "--activation-command"])
+        .arg("/bin/false")
+        .output()
+        .unwrap();
+    assert_eq!(limited.status.code(), Some(2));
+    assert!(fs::read_dir(&rig.state).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".compare-")
+    }));
+
     rig.set("version", "0.66.0");
     assert_refused(rig.run(&candidate, false, &rig.activation));
     rig.set("version", "0.65.0");
     let second_state = rig.root.join("state-2");
+    fs::create_dir(&second_state).unwrap();
+    mode(&second_state, 0o700);
     rig.set("health-mode", "malformed");
     let args = Vec::new();
     let result = activate(&Options {
@@ -276,10 +309,18 @@ fn changed_candidate_rolls_back_exactly_and_refuses_mutable_aliases() {
             }
         })
     };
-    let third = rig.candidate("candidate-c", 102);
-    rig.set("activation-mode", "reject-current");
+    let tampered = rig.candidate("candidate-c", 102);
+    fs::write(tampered.join("config.toml"), "tampered").unwrap();
+    assert_refused(rig.run(&tampered, false, &rig.activation));
+    let linked = rig.candidate("candidate-linked", 103);
+    let policy = linked.join("policy/client-3.rpol");
+    fs::hard_link(&policy, rig.root.join("mutable-alias.rpol")).unwrap();
+    assert_refused(rig.run(&linked, false, &rig.activation));
+
+    let third = rig.candidate("candidate-d", 104);
+    let activations = fs::read_to_string(rig.root.join("activation.log")).unwrap();
     assert_eq!(
-        rig.run(&third, false, &rig.activation),
+        rig.run(&third, false, &rig.root.join("missing-command")),
         Err(Error::RolledBack)
     );
     stop.store(true, Ordering::Relaxed);
@@ -292,24 +333,49 @@ fn changed_candidate_rolls_back_exactly_and_refuses_mutable_aliases() {
     );
     let receipt = rig.receipt();
     assert_eq!(receipt["status"], "rolled_back");
-    assert_eq!(receipt["activation_runs"], 2);
-    assert_eq!(receipt["phases"]["rollback_activation_ran"], true);
+    assert_eq!(receipt["activation_runs"], 0);
+    assert_eq!(receipt["phases"]["candidate_activation_ran"], false);
+    assert_eq!(receipt["phases"]["rollback_activation_ran"], false);
     assert_eq!(receipt["phases"]["runtime_equal"], true);
-
-    fs::write(third.join("config.toml"), "tampered").unwrap();
-    assert_refused(rig.run(&third, false, &rig.activation));
-    let linked = rig.candidate("candidate-linked", 103);
-    let policy = linked.join("policy/client-3.rpol");
-    fs::hard_link(&policy, rig.root.join("mutable-alias.rpol")).unwrap();
-    assert_refused(rig.run(&linked, false, &rig.activation));
-
-    let hanging = rig.candidate("candidate-hang", 104);
-    rig.set("activation-mode", "hang-once");
-    let started = Instant::now();
     assert_eq!(
-        rig.run(&hanging, false, &rig.activation),
-        Err(Error::RolledBack)
+        fs::read_to_string(rig.root.join("activation.log")).unwrap(),
+        activations
     );
+}
+
+#[test]
+fn started_failure_timeout_and_unsettled_retain_candidate_without_rollback() {
+    let started = Instant::now();
+    for mode_name in ["fail-once", "hang-once", "reject-current"] {
+        let rig = Rig::new();
+        let first = rig.candidate("candidate-a", 110);
+        rig.run(&first, true, &rig.activation).unwrap();
+        let candidate = rig.candidate("candidate-ambiguous", 111);
+        let prior = rig.current();
+        let activations = fs::read_to_string(rig.root.join("activation.log")).unwrap();
+        rig.set("activation-mode", mode_name);
+        assert_eq!(
+            rig.run(&candidate, false, &rig.activation),
+            Err(Error::RecoveryRequired)
+        );
+        let receipt = rig.receipt();
+        assert_ne!(rig.current(), prior);
+        assert!(
+            rig.current()
+                .ends_with(receipt["candidate_sha256"].as_str().unwrap())
+        );
+        assert_eq!(receipt["status"], "recovery_required");
+        assert_eq!(receipt["activation_runs"], 1);
+        assert_eq!(receipt["phases"]["rollback_link"]["published"], false);
+        assert_eq!(receipt["phases"]["rollback_activation_ran"], false);
+        assert_eq!(
+            fs::read_to_string(rig.root.join("activation.log"))
+                .unwrap()
+                .lines()
+                .count(),
+            activations.lines().count() + 1
+        );
+    }
     assert!(started.elapsed() < Duration::from_secs(4));
 }
 
@@ -384,10 +450,25 @@ fn recovery_boundaries_refuse_before_publication_and_clean_partial_staging() {
         })
     };
     let subsecond = rig.root.join("subsecond-state");
+    fs::create_dir(&subsecond).unwrap();
+    mode(&subsecond, 0o700);
     assert_refused(run(&subsecond, Duration::from_millis(999)));
-    assert!(!subsecond.exists());
-    assert_refused(run(Path::new("relative-state"), Duration::from_secs(1)));
-    assert_refused(run(&rig.root.join("missing/state"), Duration::from_secs(1)));
+    assert_eq!(fs::read_dir(&subsecond).unwrap().count(), 0);
+    let relative = rig
+        .state
+        .strip_prefix(std::env::current_dir().unwrap())
+        .unwrap();
+    assert_refused(run(relative, Duration::from_secs(1)));
+    let absent = rig.root.join("absent-state");
+    assert_refused(run(&absent, Duration::from_secs(1)));
+    assert!(!absent.exists());
+    let linked_state = rig.root.join("linked-state");
+    symlink(&rig.state, &linked_state).unwrap();
+    assert_refused(run(&linked_state, Duration::from_secs(1)));
+    let wrong_mode = rig.root.join("wrong-mode-state");
+    fs::create_dir(&wrong_mode).unwrap();
+    mode(&wrong_mode, 0o755);
+    assert_refused(run(&wrong_mode, Duration::from_secs(1)));
 
     let config = format!("[oversized]\nvalue = \"{}\"\n", "x".repeat(4_194_300));
     fs::write(candidate.join("config.toml"), &config).unwrap();
@@ -404,10 +485,12 @@ fn recovery_boundaries_refuse_before_publication_and_clean_partial_staging() {
     )
     .unwrap();
     let oversized = rig.root.join("oversized-state");
+    fs::create_dir(&oversized).unwrap();
+    mode(&oversized, 0o700);
     assert_refused(run(&oversized, Duration::from_secs(1)));
     assert!(!oversized.join("generations").exists());
     assert!(!oversized.join("current").exists());
-    assert!(!rig.root.join("activation.log").exists());
+    assert!(oversized.join("activation.lock").is_file());
 
     let partial = rig.candidate("candidate-partial", 107);
     let delayed = rig.root.join("delayed-checker.sh");
@@ -416,6 +499,8 @@ fn recovery_boundaries_refuse_before_publication_and_clean_partial_staging() {
         "#!/bin/sh\nroot=$(CDPATH= cd -- \"$(dirname \"$0\")\" && pwd)\n[ \"$1\" = --version ] && { touch \"$root/version-started\"; sleep 1; }\nexec \"$root/checker.sh\" \"$@\"\n",
     );
     let state = rig.root.join("partial-state");
+    fs::create_dir(&state).unwrap();
+    mode(&state, 0o700);
     let rbgp = rig.rbgp.clone();
     let activation = rig.activation.clone();
     let paths = [partial.clone(), state.clone(), delayed, rbgp, activation];

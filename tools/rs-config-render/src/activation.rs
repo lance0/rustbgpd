@@ -314,6 +314,20 @@ mod unix {
         }
     }
 
+    struct Comparison(PathBuf);
+
+    impl AsRef<Path> for Comparison {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Comparison {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
     fn copy_generation(candidate: &Path, state: &Path, verified: &Verified) -> AResult<PathBuf> {
         let generations = state.join("generations");
         create_private_dir(&generations)?;
@@ -484,7 +498,7 @@ mod unix {
         Ok(bytes)
     }
 
-    fn comparison_file(bytes: &[u8], state: &Path, label: &str) -> AResult<PathBuf> {
+    fn comparison_file(bytes: &[u8], state: &Path, label: &str) -> AResult<Comparison> {
         let path = state.join(unique_name(&format!(".compare-{label}")));
         let mut file = OpenOptions::new()
             .write(true)
@@ -492,10 +506,11 @@ mod unix {
             .mode(0o600)
             .open(&path)
             .map_err(|_| Error::Refused("cannot stage runtime comparison"))?;
+        let comparison = Comparison(path);
         file.write_all(bytes)
             .and_then(|_| file.sync_all())
             .map_err(|_| Error::Refused("cannot stage runtime comparison"))?;
-        Ok(path)
+        Ok(comparison)
     }
 
     fn wait_output(mut child: Child, deadline: Instant) -> Option<Output> {
@@ -662,21 +677,10 @@ mod unix {
         let Ok(candidate) = fs::canonicalize(candidate) else {
             return false;
         };
-        let state = if state.exists() {
-            fs::canonicalize(state).ok()
-        } else {
-            state
-                .parent()
-                .and_then(|parent| fs::canonicalize(parent).ok())
-                .and_then(|parent| state.file_name().map(|name| parent.join(name)))
+        let Ok(state) = fs::canonicalize(state) else {
+            return false;
         };
-        state.is_some_and(|state| !candidate.starts_with(&state) && !state.starts_with(candidate))
-    }
-
-    fn cleanup(paths: &[&Path]) {
-        for path in paths {
-            let _ = fs::remove_file(path);
-        }
+        !candidate.starts_with(&state) && !state.starts_with(candidate)
     }
 
     pub fn activate(options: &Options<'_>) -> AResult<Status> {
@@ -688,16 +692,9 @@ mod unix {
                 "settlement must be 1..=120 seconds and address nonempty",
             ));
         }
-        if !options.state_dir.is_absolute()
-            || (!options.state_dir.exists()
-                && options
-                    .state_dir
-                    .parent()
-                    .and_then(|parent| fs::canonicalize(parent).ok())
-                    .is_none())
-        {
+        if !options.state_dir.is_absolute() || !private(options.state_dir, true, 0o700) {
             return Err(Error::Refused(
-                "state directory must be absolute with an existing immediate parent",
+                "state directory must be a pre-created absolute mode-0700 directory",
             ));
         }
         let candidate = verify_candidate(options.candidate)?;
@@ -706,18 +703,19 @@ mod unix {
                 "candidate and state directory must not overlap",
             ));
         }
-        create_private_dir(options.state_dir)?;
         let _lock = state_lock(options.state_dir)?;
         let checker_deadline = Instant::now() + options.settle;
         let version_child = Command::new(options.checker)
             .arg("--version")
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|_| Error::Refused("strict checker could not run"))?;
         let version_output = wait_output(version_child, checker_deadline)
             .ok_or(Error::Refused("strict checker timed out"))?;
-        let version_text = std::str::from_utf8(&version_output.stdout)
+        let mut version_bytes = version_output.stdout;
+        version_bytes.extend(version_output.stderr);
+        let version_text = std::str::from_utf8(&version_bytes)
             .map_err(|_| Error::Refused("strict checker version is invalid"))?;
         let mut version_words = version_text
             .lines()
@@ -778,8 +776,7 @@ mod unix {
         let candidate_target = format!("generations/{}", candidate.digest);
         let candidate_comparison =
             comparison_file(&candidate_runtime, options.state_dir, "candidate")?;
-        let finish = |status: &str, phases: Phases, paths: &[&Path]| {
-            cleanup(paths);
+        let finish = |status: &str, phases: Phases| {
             write_receipt(
                 options.state_dir,
                 status,
@@ -799,75 +796,74 @@ mod unix {
             )?;
             let known_good_deadline = Instant::now() + options.settle;
             if health_probe(options, known_good_deadline) != Health::Reachable(true)
-                || !equal_runtime(options, &prior_comparison, known_good_deadline)
+                || !equal_runtime(options, prior_comparison.as_ref(), known_good_deadline)
             {
-                cleanup(&[&candidate_comparison, &prior_comparison]);
                 return Err(Error::Refused("current runtime is not known-good"));
             }
             if previous_target == candidate_target {
                 phases.runtime_equal = true;
-                finish("noop", phases, &[&candidate_comparison, &prior_comparison])?;
+                drop(prior_comparison);
+                drop(candidate_comparison);
+                finish("noop", phases)?;
                 return Ok(Status::Noop);
             }
             let publication = publish_current(options.state_dir, &candidate_target);
             if publication == Publication::UnchangedError {
-                cleanup(&[&candidate_comparison, &prior_comparison]);
                 return Err(Error::Refused(
                     "atomic current publication failed before rename",
                 ));
             }
             phases.candidate_publication = Some(publication);
             if publication == Publication::Durable {
-                phases.candidate = activate_and_settle(options, &candidate_comparison);
+                phases.candidate = activate_and_settle(options, candidate_comparison.as_ref());
                 if phases.candidate.settled {
                     phases.runtime_equal = true;
-                    finish(
-                        "activated",
-                        phases,
-                        &[&candidate_comparison, &prior_comparison],
-                    )?;
+                    drop(prior_comparison);
+                    drop(candidate_comparison);
+                    finish("activated", phases)?;
                     return Ok(Status::Activated);
                 }
-            }
-            let rollback_publication = publish_current(options.state_dir, previous_target);
-            if rollback_publication != Publication::UnchangedError {
-                phases.rollback_publication = Some(rollback_publication);
-                phases.rollback = activate_and_settle(options, &prior_comparison);
-                phases.runtime_equal |= phases.rollback.settled;
-                if rollback_publication == Publication::Durable && phases.rollback.settled {
-                    phases.runtime_equal = true;
-                    finish(
-                        "rolled_back",
-                        phases,
-                        &[&candidate_comparison, &prior_comparison],
-                    )?;
-                    return Err(Error::RolledBack);
+                if !phases.candidate.ran {
+                    let rollback = publish_current(options.state_dir, previous_target);
+                    if rollback != Publication::UnchangedError {
+                        phases.rollback_publication = Some(rollback);
+                    }
+                    let deadline = Instant::now() + options.settle;
+                    if rollback == Publication::Durable
+                        && health_probe(options, deadline) == Health::Reachable(true)
+                        && equal_runtime(options, prior_comparison.as_ref(), deadline)
+                    {
+                        phases.runtime_equal = true;
+                        drop(prior_comparison);
+                        drop(candidate_comparison);
+                        finish("rolled_back", phases)?;
+                        return Err(Error::RolledBack);
+                    }
                 }
             }
-            finish(
-                "recovery_required",
-                phases,
-                &[&candidate_comparison, &prior_comparison],
-            )?;
+            drop(prior_comparison);
+            drop(candidate_comparison);
+            finish("recovery_required", phases)?;
             return Err(Error::RecoveryRequired);
         }
         let publication = publish_current(options.state_dir, &candidate_target);
         if publication == Publication::UnchangedError {
-            cleanup(&[&candidate_comparison]);
             return Err(Error::Refused(
                 "atomic current publication failed before rename",
             ));
         }
         phases.candidate_publication = Some(publication);
         if publication == Publication::Durable {
-            phases.candidate = activate_and_settle(options, &candidate_comparison);
+            phases.candidate = activate_and_settle(options, candidate_comparison.as_ref());
             phases.runtime_equal = phases.candidate.settled;
             if phases.candidate.settled {
-                finish("activated", phases, &[&candidate_comparison])?;
+                drop(candidate_comparison);
+                finish("activated", phases)?;
                 return Ok(Status::Activated);
             }
         }
-        finish("recovery_required", phases, &[&candidate_comparison])?;
+        drop(candidate_comparison);
+        finish("recovery_required", phases)?;
         Err(Error::RecoveryRequired)
     }
 }

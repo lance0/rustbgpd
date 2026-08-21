@@ -145,14 +145,19 @@ sudo -u rustbgpd /usr/local/bin/rs-config-render activate \
 Render and activate as the `rustbgpd` service identity; it must own the private
 candidate and activation-state parent. Configure `ExecStart` to read
 `.../activation/current/config.toml`, and authorize that account in sudoers for
-only `/usr/bin/systemctl reload-or-restart rustbgpd`. The state path must be
-absolute and its immediate parent must exist. Add `--initial` only when both no
-current generation and no reachable daemon exist. Normalized comparison TOML
-is limited to 4,194,299 bytes (4 MiB minus five encoded-request bytes). Exit 4
-proves the prior link and runtime were restored. Exit 5 means recovery or
-receipt durability is unproven: leave retained state
-untouched and inspect the current private receipt if present. It may be absent
-or stale when its final write or directory sync failed.
+only `/usr/bin/systemctl reload-or-restart rustbgpd`. Pre-create the absolute
+state directory as a non-symlink mode-0700 directory owned by `rustbgpd`; do not
+let another process publish or reload during the call. Add `--initial` only when
+both no current generation and no reachable daemon exist. Normalized comparison
+TOML is limited to 4,194,299 bytes (4 MiB minus five encoded-request bytes).
+
+The activation executable must be synchronous. Exit 4 occurs only when it could
+not start: the prior link is restored without another activation and the prior
+runtime is verified unchanged. Once it starts, a nonzero exit, timeout, or
+unsettled result leaves `current` on the candidate and returns exit 5. Leave
+retained state untouched and inspect the current private receipt if present;
+recovery or receipt durability is unproven, and the receipt may be absent or
+stale when its final write or directory sync failed.
 
 ### Debian / RPM packages
 
