@@ -495,6 +495,8 @@ fn render_hygiene(document: &Document) -> String {
             "    term reject-too-specific {{ if route.prefix in ixp-manager-too-specific {{ reject }} }}"
         );
     }
+    out.push_str("    term reject-as-path-too-short { if route.as-path.len == 0 { reject } }\n");
+    out.push_str("    term reject-as-path-too-long { if route.as-path.len >= 65 { reject } }\n");
     if document.router.rpki {
         out.push_str("    term reject-rpki-invalid { if route.rpki == invalid { reject } }\n");
     }
@@ -525,7 +527,8 @@ fn render_client(client: &Client, prefixes: &[String]) -> String {
     }
     let _ = write!(
         out,
-        "}}\npolicy client-{slug} {{\n    term accept-authorized {{ if route.origin-as in client-{slug}-origins && route.prefix in client-{slug}-prefixes {{ accept }} }}\n    term rest {{ reject }}\n}}\n"
+        "}}\npolicy client-{slug} {{\n    term reject-first-as-not-peer-as {{ if route.as-path.len >= 1 && !(route.as-path matches \"^{}_\") {{ reject }} }}\n    term reject-irrdb-origin-as-filtered {{ if !(route.origin-as in client-{slug}-origins) {{ reject }} }}\n    term reject-irrdb-prefix-filtered {{ if !(route.prefix in client-{slug}-prefixes) {{ reject }} }}\n    term accept-authorized {{ accept }}\n}}\n",
+        client.asn
     );
     out
 }

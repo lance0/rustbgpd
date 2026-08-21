@@ -43,6 +43,11 @@ direction. `api.version` remains
 identity, not Bird's Eye semantic-version compatibility. No full compatibility
 claim is made and `runtime_compatibility` remains false.
 
+The real pinned IXP Manager PHP extension also translates every defined
+`:1101:<id>` display entry from 1 through 15. The executable contract records
+the active route-server-template partition `1,3,5,6,7,8,9,10,13,14`, keeps
+`2,4,11,12,15` defined-only, and proves fallback `0` remains untranslated.
+
 Run the gate from the repository root:
 
 ```console
@@ -64,7 +69,9 @@ Exact protocol-route, exact export-route, filtered-prefix wildcard, and bounded
 less-specific table lookup journeys are runtime-supported. The table lookup
 returns one matched prefix atomically with its installed winner first and every
 same-prefix Add-Path alternative; it is not a full table snapshot. Complete
-rejected-route reasons and full-table snapshots remain blockers. Protocol
+All ten reject reasons emitted by the pinned route-server templates are
+runtime-supported; emitting the five defined-only display reasons and
+full-table snapshots remain blockers. Protocol
 aliases supplied directly remain immutable after startup; bounded file-backed
 aliases reload as one whole resolver generation on Unix `SIGHUP`. Promoting any
 blocker, weakening the explicit alias or product-version

@@ -1303,18 +1303,45 @@ fn ixp_manager_rejected_route_to_birdwatcher(
 
 fn ixp_manager_reject_reason_id(route: &proto::RejectedRoute) -> u64 {
     match (route.reason.as_str(), route.reason_detail.as_str()) {
-        ("policy_reject", detail) if detail.ends_with(":reject-too-specific") => 1,
-        ("policy_reject", detail) if detail.ends_with(":reject-non-global") => 3,
+        ("policy_reject", "ixp-manager-hygiene:reject-too-specific") => 1,
+        ("policy_reject", "reject-special-purpose:reject-non-global") => 3,
+        ("policy_reject", "ixp-manager-hygiene:reject-as-path-too-long") => 5,
+        ("policy_reject", "ixp-manager-hygiene:reject-as-path-too-short") => 6,
+        ("treat_as_withdraw", "aspa_first_as_mismatch") if route.as_path.is_empty() => 6,
         ("treat_as_withdraw", "aspa_first_as_mismatch") => 7,
+        ("policy_reject", detail)
+            if ixp_manager_client_term(detail, "reject-first-as-not-peer-as") =>
+        {
+            7
+        }
         ("next_hop_ownership", _) => 8,
         ("policy_reject", detail)
-            if detail.ends_with(":reject-rpki-invalid") && route.rpki_validation == "invalid" =>
+            if ixp_manager_client_term(detail, "reject-irrdb-prefix-filtered") =>
+        {
+            9
+        }
+        ("policy_reject", detail)
+            if ixp_manager_client_term(detail, "reject-irrdb-origin-as-filtered") =>
+        {
+            10
+        }
+        ("policy_reject", "ixp-manager-hygiene:reject-rpki-invalid")
+            if route.rpki_validation == "invalid" =>
         {
             13
         }
-        ("policy_reject", detail) if detail.ends_with(":reject-transit-leak") => 14,
+        ("policy_reject", "ixp-manager-hygiene:reject-transit-leak") => 14,
         _ => 0,
     }
+}
+
+fn ixp_manager_client_term(detail: &str, expected: &str) -> bool {
+    detail.rsplit_once(':').is_some_and(|(policy, term)| {
+        term == expected
+            && policy
+                .strip_prefix("client-")
+                .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+    })
 }
 
 fn render_rejected_route(
@@ -2082,39 +2109,54 @@ mod tests {
 
     #[test]
     fn ixp_manager_reason_mapping_is_conservative_and_stable() {
+        const TOO_SPECIFIC: &str = "ixp-manager-hygiene:reject-too-specific";
+        const NON_GLOBAL: &str = "reject-special-purpose:reject-non-global";
+        const PATH_LONG: &str = "ixp-manager-hygiene:reject-as-path-too-long";
+        const PATH_SHORT: &str = "ixp-manager-hygiene:reject-as-path-too-short";
+        const FIRST_AS: &str = "client-3:reject-first-as-not-peer-as";
+        const IRR_PREFIX: &str = "client-3:reject-irrdb-prefix-filtered";
+        const IRR_ORIGIN: &str = "client-3:reject-irrdb-origin-as-filtered";
+        const RPKI: &str = "ixp-manager-hygiene:reject-rpki-invalid";
+        const TRANSIT: &str = "ixp-manager-hygiene:reject-transit-leak";
         let route = |reason: &str, detail: &str, rpki: &str| proto::RejectedRoute {
             reason: reason.to_string(),
             reason_detail: detail.to_string(),
             rpki_validation: rpki.to_string(),
             ..Default::default()
         };
-        for (entry, id) in [
+        let mut core_first_as = route("treat_as_withdraw", "aspa_first_as_mismatch", "not_found");
+        assert_eq!(ixp_manager_reject_reason_id(&core_first_as), 6);
+        core_first_as.as_path = "43 42".to_string();
+        assert_eq!(ixp_manager_reject_reason_id(&core_first_as), 7);
+        for (reason, detail, rpki, id) in [
+            ("policy_reject", TOO_SPECIFIC, "valid", 1),
+            ("policy_reject", NON_GLOBAL, "valid", 3),
+            ("policy_reject", PATH_LONG, "valid", 5),
+            ("policy_reject", PATH_SHORT, "valid", 6),
+            ("policy_reject", FIRST_AS, "valid", 7),
+            ("next_hop_ownership", "strict_peer", "valid", 8),
+            ("policy_reject", IRR_PREFIX, "valid", 9),
+            ("policy_reject", IRR_ORIGIN, "valid", 10),
+            ("policy_reject", RPKI, "invalid", 13),
+            ("policy_reject", TRANSIT, "valid", 14),
+            ("policy_reject", RPKI, "valid", 0),
             (
-                route("policy_reject", "ixp:reject-too-specific", "valid"),
-                1,
-            ),
-            (route("policy_reject", "ixp:reject-non-global", "valid"), 3),
-            (
-                route("treat_as_withdraw", "aspa_first_as_mismatch", "not_found"),
-                7,
-            ),
-            (route("next_hop_ownership", "strict_peer", "valid"), 8),
-            (
-                route("policy_reject", "ixp:reject-rpki-invalid", "invalid"),
-                13,
-            ),
-            (
-                route("policy_reject", "ixp:reject-transit-leak", "valid"),
-                14,
-            ),
-            (
-                route("policy_reject", "ixp:reject-rpki-invalid", "valid"),
+                "policy_reject",
+                "custom:reject-as-path-too-long",
+                "valid",
                 0,
             ),
-            (route("otc_route_leak", "ingress_from_peer", "valid"), 0),
-            (route("rr_loop", "cluster_list", "valid"), 0),
-            (route("policy_reject", "custom:unknown", "invalid"), 0),
+            (
+                "policy_reject",
+                "client-x:reject-irrdb-prefix-filtered",
+                "valid",
+                0,
+            ),
+            ("otc_route_leak", "ingress_from_peer", "valid", 0),
+            ("rr_loop", "cluster_list", "valid", 0),
+            ("policy_reject", "custom:unknown", "invalid", 0),
         ] {
+            let entry = route(reason, detail, rpki);
             assert_eq!(ixp_manager_reject_reason_id(&entry), id, "{entry:?}");
         }
     }
