@@ -37,6 +37,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   oracle captures and executes the overlap while non-overlap and v1 bytes stay
   unchanged. This remains a bounded subset, not a generic IXP Manager policy
   engine. (LAN-1156, LAN-1158, LAN-1160)
+- Every v1/v2 IXP Manager candidate now carries a private, receipt-hashed
+  `birdwatcher-protocol-aliases.conf` with deterministic VLAN-interface member
+  names and exact IPv4/IPv6 table identities. Activation publishes it with the
+  daemon generation at the stable `current` path; operators explicitly SIGHUP
+  the adapter after activation. The renderer accepts 4096 aliases and refuses
+  4097 without adding runtime orchestration or a compatibility claim. (LAN-1172)
 - The IXP Manager v7.4 renderer and Birdwatcher adapter now cover all ten
   reject reasons active in the pinned route-server templates, with named
   AS-path length/first-AS and separate IRRDB origin/prefix policy terms. The

@@ -676,6 +676,7 @@ fn in_memory_renderer_is_byte_identical_to_private_file_entry_point() {
         ixp_manager::write_checked_candidate_bytes(FIXTURE, &from_memory, 300, &checker, &binding,)
     );
     for relative in [
+        "birdwatcher-protocol-aliases.conf",
         "config.toml",
         "policy/ixp-hygiene.rpol",
         "policy/client-1.rpol",

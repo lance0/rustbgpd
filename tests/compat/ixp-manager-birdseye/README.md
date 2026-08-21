@@ -61,6 +61,13 @@ receipt-last publication, and v3 refusal are load-bearing. This proves only the
 bounded manual export subset; it does not make the adapter runtime-compatible
 or claim a generic IXP Manager policy engine.
 
+Both real v2 candidates also contain exact numeric-order Birdwatcher aliases
+at `birdwatcher-protocol-aliases.conf`; the v1 candidate pins its own exact
+member line. The gate checks newline-terminated bytes, mode 0600, and the
+receipt digest. The executable contract records the stable activation-current
+path, v4/v6 table names, member-name format, and 4096-alias cap. Adapter SIGHUP
+remains an operator action outside this oracle.
+
 The strict candidates also append the router-own-AS large-community scrub last
 to the global export chain and every v2 client receive override. The manifest
 pins its exact removal-only syntax, placement, and foreign-admin preservation.

@@ -26,6 +26,7 @@ const IXP_VERSION: &str = "7.4.0";
 const MAX_FILTERS_PER_CLIENT: usize = 256;
 const MAX_FILTERS_TOTAL: usize = 4096;
 const MAX_COMPILED_RECEIVE_CELLS: usize = 4096;
+const MAX_PROTOCOL_ALIASES: usize = 4096;
 const BASE_HYGIENE: &str = include_str!("../../../examples/route-server/hygiene.rpol");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -540,6 +541,9 @@ fn validate(
     {
         return Err(Error::Refused("incomplete export marker"));
     }
+    if document.clients.len() > MAX_PROTOCOL_ALIASES {
+        return Err(Error::Refused("Birdwatcher protocol alias cap exceeded"));
+    }
     let mut customers = BTreeMap::new();
     let mut vlis = BTreeSet::new();
     let mut asns = BTreeSet::new();
@@ -727,6 +731,10 @@ pub fn render_document(
         );
     }
     files.insert(
+        "birdwatcher-protocol-aliases.conf".into(),
+        render_protocol_aliases(&document),
+    );
+    files.insert(
         "config.toml".into(),
         render_config(&document, restart_seconds, runtime, expected),
     );
@@ -741,6 +749,20 @@ pub fn render_document(
         "host": binding
     });
     Ok(Candidate { files, metadata })
+}
+
+fn render_protocol_aliases(document: &Document) -> String {
+    let mut clients = document.clients.iter().collect::<Vec<_>>();
+    clients.sort_unstable_by_key(|client| client.vlan_interface_id);
+    clients.into_iter().fold(String::new(), |mut out, client| {
+        writeln!(
+            out,
+            "pb_{:04}_as{}={}@master{}",
+            client.vlan_interface_id, client.asn, client.address, document.router.protocol
+        )
+        .expect("String writes cannot fail");
+        out
+    })
 }
 
 fn render_config(

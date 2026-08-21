@@ -109,6 +109,17 @@ candidate_full="$tmp/candidate-full"
 candidate_supported="$tmp/candidate-supported"
 render_v2 "$capture_output/config-ui-filter.json" "$candidate_full"
 render_v2 "$supported" "$candidate_supported"
+expected_v2_aliases="$tmp/expected-v2-aliases"
+printf '%s\n' \
+  'pb_0001_as1213=10.1.0.10@master4' \
+  'pb_0004_as112=10.1.0.6@master4' >"$expected_v2_aliases"
+for candidate in "$candidate_full" "$candidate_supported"; do
+  aliases="$candidate/birdwatcher-protocol-aliases.conf"
+  cmp "$expected_v2_aliases" "$aliases"
+  [ "$(stat -c %a "$aliases")" = 600 ]
+  [ "$(jq -r '.generated_files["birdwatcher-protocol-aliases.conf"]' \
+    "$candidate/render-receipt.json")" = "$(sha256sum "$aliases" | awk '{print $1}')" ]
+done
 [ "$(grep -Fxc '    term ui-receive-cell-0000 { if route.as-path matches "^112_" && route.prefix == 192.175.48.0/24 { prepend as 112 3; accept } }' \
   "$candidate_supported/policy/client-1.rpol")" -eq 1 ]
 [ "$(grep -Fxc '    term ui-receive-cell-0003 { if !(route.as-path matches "^(112)_") && !(route.prefix in client-1-ui-receive-prefixes) { prepend as path-first 1; accept } }' \
@@ -125,6 +136,8 @@ chmod 600 "$legacy_input"
   --runtime-state-dir /var/lib/rustbgpd/b2-rs1-lan1-ipv4 \
   --max-prefix-restart-seconds 300 --check-with "$repo/target/debug/rustbgpd" >/dev/null
 [ -f "$legacy/render-receipt.json" ]
+printf '%s\n' 'pb_0003_as42=10.1.0.36@master4' >"$tmp/expected-v1-aliases"
+cmp "$tmp/expected-v1-aliases" "$legacy/birdwatcher-protocol-aliases.conf"
 
 v3="$tmp/router-config-v3.json"
 sed 's#router-config/v2#router-config/v3#' "$supported" >"$v3"
