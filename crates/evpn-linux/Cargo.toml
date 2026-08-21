@@ -24,7 +24,7 @@ tracing.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = "0.22"
 netlink-packet-route = "0.32.1"
-netlink-packet-core = "0.8"
+netlink-packet-core = "0.9"
 netlink-packet-utils = "0.6"
 netlink-sys = { version = "0.8", features = ["tokio_socket"] }
 futures = "0.3"
