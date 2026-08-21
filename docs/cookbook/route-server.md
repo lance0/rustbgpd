@@ -189,9 +189,10 @@ Evaluation follows the deny-specific ladder: a target-specific "do not
 announce" always suppresses; otherwise "announce to no one" suppresses
 unless a target-specific "announce to" overrides it; otherwise the
 route is announced. Prepending inserts the *announcing member's* own
-leftmost ASN (the RS stays transparent and never inserts its own), and
-the largest matching count wins. Acted-on control communities are
-scrubbed from the outbound announcement: standard communities
+leftmost ASN (the RS stays transparent and never inserts its own). The
+largest target-specific count wins; only when no target-specific prepend
+exists does the largest global target-zero count apply. Acted-on control
+communities are scrubbed from the outbound announcement: standard communities
 administered by `0` or `RS` (the `0xFFFF____` well-known space is
 never touched) and large communities `RS:{0,1,101,102,103}:*`.
 Informational large communities under the RS ASN with other function

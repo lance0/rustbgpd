@@ -32,8 +32,8 @@
 //! "announce to" overrides it; otherwise the route is announced.
 //! Prepending applies only to announced routes and prepends the
 //! path's leftmost ASN (the announcing client — the transparent RS
-//! never inserts its own ASN), with the largest matching count
-//! winning.
+//! never inserts its own ASN). The largest target-specific count wins;
+//! only when none exists may a global target-zero count apply.
 //!
 //! Control communities are acted on by the RS and scrubbed from the
 //! outbound announcement toward enabled targets: standard communities
@@ -87,14 +87,15 @@ pub(super) fn rs_control_export_suppressed(
 }
 
 /// Prepend count toward `peer_asn`: the largest matching
-/// `RS:101|102|103:PEER` (target-specific) or `RS:10x:0` (every
-/// target) large community, `0` when none match.
+/// `RS:101|102|103:PEER` (target-specific), otherwise the largest
+/// `RS:10x:0` (every target) large community, `0` when none match.
 pub(in crate::manager) fn rs_control_prepend_count(
     large_communities: &[LargeCommunity],
     rs_asn: u32,
     peer_asn: u32,
 ) -> u8 {
-    let mut count = 0u8;
+    let mut target_count = 0u8;
+    let mut global_count = 0u8;
     for lc in large_communities {
         if lc.global_admin != rs_asn || (lc.local_data2 != peer_asn && lc.local_data2 != 0) {
             continue;
@@ -103,10 +104,18 @@ pub(in crate::manager) fn rs_control_prepend_count(
             .iter()
             .find(|&&(f, _)| f == lc.local_data1)
         {
-            count = count.max(n);
+            if lc.local_data2 == peer_asn {
+                target_count = target_count.max(n);
+            } else if lc.local_data2 == 0 {
+                global_count = global_count.max(n);
+            }
         }
     }
-    count
+    if target_count > 0 {
+        target_count
+    } else {
+        global_count
+    }
 }
 
 /// A standard community in the control space: administered by `0` or
@@ -343,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn prepend_counts_target_specific_wildcard_and_max_wins() {
+    fn prepend_prefers_target_specific_count_before_global_count() {
         let lc = [large(RS, 102, PEER_A)];
         assert_eq!(rs_control_prepend_count(&lc, RS, PEER_A), 2);
         assert_eq!(rs_control_prepend_count(&lc, RS, PEER_B), 0);
@@ -351,7 +360,15 @@ mod tests {
         let lc = [large(RS, 101, 0)];
         assert_eq!(rs_control_prepend_count(&lc, RS, PEER_A), 1);
         assert_eq!(rs_control_prepend_count(&lc, RS, PEER_B), 1);
-        // Largest matching count wins.
+        // A target-specific count wins even when the global count is larger.
+        let lc = [
+            large(RS, 101, PEER_A),
+            large(RS, 103, 0),
+            large(64999, 103, PEER_A),
+        ];
+        assert_eq!(rs_control_prepend_count(&lc, RS, PEER_A), 1);
+        assert_eq!(rs_control_prepend_count(&lc, RS, PEER_B), 3);
+        // The largest target-specific count wins before a smaller global count.
         let lc = [large(RS, 101, 0), large(RS, 103, PEER_A)];
         assert_eq!(rs_control_prepend_count(&lc, RS, PEER_A), 3);
         assert_eq!(rs_control_prepend_count(&lc, RS, PEER_B), 1);
