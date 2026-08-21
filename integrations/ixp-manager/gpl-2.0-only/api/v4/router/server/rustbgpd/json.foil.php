@@ -4,6 +4,7 @@
 // Original rustbgpd integration code. No upstream router template is copied.
 
 use IXP\Models\Aggregators\IrrdbAggregator;
+use IXP\Models\Customer;
 use IXP\Models\RouteServerFilterProd;
 use IXP\Models\Router;
 
@@ -60,7 +61,7 @@ $noTransit = $override === false ? [] : array_map( 'intval', $override );
 sort( $noTransit, SORT_NUMERIC );
 
 $clients = [];
-$activeFilters = [];
+$filterRows = [];
 foreach( $t->ints as $int ) {
     if( (int)$int['autsys'] === (int)$router->asn ) {
         continue;
@@ -75,10 +76,8 @@ foreach( $t->ints as $int ) {
             $query->whereNull( 'protocol' )->orWhere( 'protocol', $router->protocol );
         } )
         ->orderBy( 'order_by' )->get();
-    if( $filters->isNotEmpty() ) {
-        $ids = array_map( 'intval', $filters->pluck( 'id' )->all() );
-        sort( $ids, SORT_NUMERIC );
-        $activeFilters[] = [ 'customer_id' => $customer, 'filter_ids' => $ids ];
+    foreach( $filters as $filter ) {
+        $filterRows[] = $filter;
     }
 
     $origins = array_map( 'intval', IrrdbAggregator::asnsForRouterConfiguration(
@@ -111,8 +110,36 @@ foreach( $t->ints as $int ) {
         'prefixes' => $prefixes,
     ];
 }
+$peerIds = array_values( array_unique( array_map(
+    'intval',
+    array_filter( array_map( static fn( $filter ) => $filter->peer_id, $filterRows ) )
+) ) );
+$peers = Customer::whereIn( 'id', $peerIds )->get()->keyBy( 'id' );
+$uiFilters = array_map( static function( $filter ) use ( $peers ): array {
+    $peerId = $filter->peer_id === null ? null : (int)$filter->peer_id;
+    $peer = $peerId === null ? null : $peers->get( $peerId );
+    return [
+        'id' => (int)$filter->id,
+        'customer_id' => (int)$filter->customer_id,
+        'peer' => $peerId === null ? null : [
+            'customer_id' => $peerId,
+            'asn' => $peer === null ? null : (int)$peer->autsys,
+        ],
+        'received_prefix' => $filter->received_prefix === null
+            ? null : (string)$filter->received_prefix,
+        'advertised_prefix' => $filter->advertised_prefix === null
+            ? null : (string)$filter->advertised_prefix,
+        'protocol' => $filter->protocol === null ? null : (int)$filter->protocol,
+        'action_advertise' => (string)$filter->action_advertise,
+        'action_receive' => (string)$filter->action_receive,
+        'order_by' => (int)$filter->order_by,
+    ];
+}, $filterRows );
 usort( $clients, static fn( $a, $b ) => $a['vlan_interface_id'] <=> $b['vlan_interface_id'] );
-usort( $activeFilters, static fn( $a, $b ) => $a['customer_id'] <=> $b['customer_id'] );
+usort( $uiFilters, static fn( $a, $b ) =>
+    [ $a['customer_id'], $a['order_by'], $a['id'] ]
+        <=> [ $b['customer_id'], $b['order_by'], $b['id'] ]
+);
 
 $types = [
     Router::TYPE_ROUTE_SERVER => 'route-server',
@@ -120,7 +147,7 @@ $types = [
     Router::TYPE_AS112 => 'as112',
 ];
 $document = [
-    'schema' => 'rustbgpd.ixp-manager.router-config/v1',
+    'schema' => 'rustbgpd.ixp-manager.router-config/v2',
     'ixp_manager' => [ 'version' => APPLICATION_VERSION ],
     'router' => [
         'handle' => (string)$router->handle,
@@ -144,13 +171,15 @@ $document = [
         'no_transit' => [ 'source' => $noTransitSource, 'asns' => $noTransit ],
     ],
     'clients' => $clients,
+    'ui_filters' => $uiFilters,
     'unsupported' => [
-        'active_ui_filters' => $activeFilters,
+        'active_ui_filters' => [],
         'route_server_skin_files' => $skinFiles,
     ],
     'complete' => [
         'handle' => (string)$router->handle,
         'client_count' => count( $clients ),
+        'ui_filter_count' => count( $uiFilters ),
         'marker' => 'END_OF_RUSTBGPD_IXP_MANAGER_CONFIG_' . $router->handle,
     ],
 ];

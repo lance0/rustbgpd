@@ -174,6 +174,7 @@ exit 0
             300,
             &self.checker,
             &self.binding(&self.state).render_binding(),
+            rs_config_render::ixp_manager::SchemaVersion::V1,
         )
         .unwrap();
         out

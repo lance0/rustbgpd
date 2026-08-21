@@ -18,6 +18,7 @@ use rs_config_render::{
 enum InputFormat {
     Arouteserver,
     IxpManagerV1,
+    IxpManagerV2,
 }
 
 #[derive(Parser)]
@@ -387,7 +388,12 @@ fn main() -> ExitCode {
     }
     let cli = Cli::parse();
     let customized = !cli.extra_rpol.is_empty() || !cli.merge_toml.is_empty();
-    if matches!(cli.input_format, InputFormat::IxpManagerV1) {
+    let ixp_schema = match cli.input_format {
+        InputFormat::IxpManagerV1 => Some(rs_config_render::ixp_manager::SchemaVersion::V1),
+        InputFormat::IxpManagerV2 => Some(rs_config_render::ixp_manager::SchemaVersion::V2),
+        InputFormat::Arouteserver => None,
+    };
+    if let Some(schema) = ixp_schema {
         if customized
             || cli.min_prefixes.is_some()
             || cli.min_origins.is_some()
@@ -428,6 +434,7 @@ fn main() -> ExitCode {
             restart,
             checker,
             &binding,
+            schema,
         ) {
             Ok(files) => stdout_exit(write_stdout(|writer| {
                 writeln!(
@@ -447,7 +454,9 @@ fn main() -> ExitCode {
         || cli.router_handle.is_some()
         || cli.runtime_state_dir.is_some()
     {
-        eprintln!("rs-config-render: IXP Manager options require --input-format ixp-manager-v1");
+        eprintln!(
+            "rs-config-render: IXP Manager options require --input-format ixp-manager-v1 or ixp-manager-v2"
+        );
         return ExitCode::from(2);
     }
     if customized && (cli.extra_rpol.is_empty() || cli.merge_toml.len() != 1) {

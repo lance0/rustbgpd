@@ -33,10 +33,36 @@ $render = static function (string $name) use ($router, $output): string {
 config(['ixp.no_transit_asns.override' => false]);
 $render('config-implicit.json');
 config(['ixp.no_transit_asns.override' => []]);
+DB::table('vlaninterface')->whereNotIn('id', [1, 4])->update(['rsclient' => 0]);
+DB::table('irrdb_asn')->where('customer_id', 2)->where('protocol', 4)
+    ->where('asn', '<>', 1213)->delete();
+DB::table('irrdb_prefix')->where('customer_id', 2)->where('protocol', 4)
+    ->where('prefix', '<>', '77.72.72.0/21')->delete();
+DB::table('route_server_filters_prod')->whereNotIn('id', [31, 33, 35])
+    ->update(['enabled' => 0]);
+DB::table('route_server_filters_prod')->whereIn('id', [31, 33, 35])
+    ->update(['enabled' => 1]);
 $ui = json_decode($render('config-ui-filter.json'), true, 512, JSON_THROW_ON_ERROR);
-$filters = $ui['unsupported']['active_ui_filters'];
-if ($filters !== [['customer_id' => 2, 'filter_ids' => [31, 33, 35]]]) {
-    $fail('seeded applicable UI filters were not surfaced exactly');
+$filters = $ui['ui_filters'];
+if (array_column($filters, 'id') !== [31, 33, 35]
+    || array_column($filters, 'order_by') !== [2, 4, 6]
+    || $filters[1]['peer'] !== ['customer_id' => 4, 'asn' => 112]
+    || $filters[1]['received_prefix'] !== '192.175.48.0/24'
+    || $filters[1]['advertised_prefix'] !== '77.72.72.0/21') {
+    $fail('seeded ordered UI-filter rows were not exported exactly');
+}
+
+DB::table('route_server_filters_prod')->where('id', 31)->update(['enabled' => 0]);
+$supportedRaw = $render('ixp-manager-v7.4-rustbgpd.json');
+$supported = json_decode($supportedRaw, true, 512, JSON_THROW_ON_ERROR);
+if (array_column($supported['ui_filters'], 'id') !== [33, 35]
+    || array_column($supported['ui_filters'], 'action_receive')
+        !== ['PREPEND_TWICE', 'AS_IS']) {
+    $fail('row-31-disabled ordered UI-filter export drifted');
+}
+$second = (new ConfigurationGenerator($router))->render()->render();
+if ($supportedRaw !== $second) {
+    $fail('supported exporter output is nondeterministic');
 }
 
 DB::table('route_server_filters_prod')->update(['enabled' => 0]);
@@ -52,15 +78,4 @@ if ($skinned['unsupported']['route_server_skin_files'] !== [
     'api/v4/router/server/bird2/contract.foil.php',
 ]) {
     $fail('active BIRD skin file was not surfaced');
-}
-
-DB::table('vlaninterface')->where('id', '<>', 3)->update(['rsclient' => 0]);
-DB::table('irrdb_asn')->where('customer_id', 3)->where('protocol', 4)
-    ->where('asn', '<>', 42)->delete();
-DB::table('irrdb_prefix')->where('customer_id', 3)->where('protocol', 4)
-    ->where('prefix', '<>', '31.135.128.0/19')->delete();
-$first = $render('ixp-manager-v7.4-rustbgpd.json');
-$second = (new ConfigurationGenerator($router))->render()->render();
-if ($first !== $second) {
-    $fail('supported exporter output is nondeterministic');
 }

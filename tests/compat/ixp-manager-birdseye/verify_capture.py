@@ -27,6 +27,7 @@ EXPECTED = {
 }
 UNSUPPORTED = {
     "defined-only-rejected-route-reason-emission",
+    "full-ixp-manager-ui-filter-policy-engine",
     "full-table-snapshot",
     "direct-runtime-protocol-alias-reconfiguration",
 }
@@ -57,6 +58,47 @@ REJECT_REASONS = {
     "defined_only_ids": [2, 4, 11, 12, 15],
     "fallback_id": 0,
 }
+MANUAL_CONFIG_EXPORT = {
+    "schema": "rustbgpd.ixp-manager.router-config/v2",
+    "ixp_manager_version": "7.4.0",
+    "router_handle": "b2-rs1-lan1-ipv4",
+    "strict_receipt_required": True,
+    "ui_filters": {
+        "advertise_actions": [
+            "AS_IS", "NO_ADVERTISE", "PREPEND_ONCE", "PREPEND_TWICE",
+            "PREPEND_THRICE",
+        ],
+        "receive_actions": [
+            "AS_IS", "NO_ADVERTISE", "PREPEND_ONCE", "PREPEND_TWICE",
+            "PREPEND_THRICE",
+        ],
+        "receive_prepend_requires_peer": True,
+        "overlapping_receive_prepend": False,
+        "per_client_cap": 256,
+        "total_cap": 4096,
+    },
+}
+FULL_UI_FILTERS = [
+    {
+        "id": 31, "customer_id": 2, "peer": None,
+        "received_prefix": None, "advertised_prefix": None, "protocol": 4,
+        "action_advertise": "NO_ADVERTISE", "action_receive": "NO_ADVERTISE",
+        "order_by": 2,
+    },
+    {
+        "id": 33, "customer_id": 2,
+        "peer": {"customer_id": 4, "asn": 112},
+        "received_prefix": "192.175.48.0/24",
+        "advertised_prefix": "77.72.72.0/21", "protocol": 4,
+        "action_advertise": "PREPEND_TWICE",
+        "action_receive": "PREPEND_TWICE", "order_by": 4,
+    },
+    {
+        "id": 35, "customer_id": 2, "peer": None,
+        "received_prefix": None, "advertised_prefix": None, "protocol": None,
+        "action_advertise": "AS_IS", "action_receive": "AS_IS", "order_by": 6,
+    },
+]
 
 
 def fail(message: str) -> None:
@@ -78,6 +120,8 @@ if manifest.get("filtered_prefix_query") != FILTERED_PREFIX_QUERY:
     fail("filtered-prefix namespace drifted")
 if manifest.get("reject_reasons") != REJECT_REASONS:
     fail("pinned reject-reason display or active partition drifted")
+if manifest.get("manual_config_export") != MANUAL_CONFIG_EXPORT:
+    fail("strict manual v2 export contract drifted")
 if manifest.get("protocol_aliases") != {
     "member-v4": "pb_as64496",
     "member-v4-reloaded": "pb_reloaded_as64496",
@@ -85,6 +129,25 @@ if manifest.get("protocol_aliases") != {
     fail("explicit protocol alias matrix drifted")
 if manifest.get("routing_tables") != ["master4"]:
     fail("live routing-table identity drifted")
+
+if len(sys.argv) == 3:
+    config_capture = Path(sys.argv[2])
+    full = json.loads((config_capture / "config-ui-filter.json").read_text())
+    supported = json.loads(
+        (config_capture / "ixp-manager-v7.4-rustbgpd.json").read_text()
+    )
+    for name, document, filters in [
+        ("full", full, FULL_UI_FILTERS),
+        ("row-31-disabled", supported, FULL_UI_FILTERS[1:]),
+    ]:
+        if document.get("schema") != MANUAL_CONFIG_EXPORT["schema"]:
+            fail(f"{name} UI-filter capture schema drifted")
+        if document.get("ui_filters") != filters:
+            fail(f"{name} UI-filter capture row objects drifted")
+        if document.get("complete", {}).get("ui_filter_count") != len(filters):
+            fail(f"{name} UI-filter capture completion count drifted")
+        if document.get("unsupported", {}).get("active_ui_filters") != []:
+            fail(f"{name} UI-filter capture retained a v1 refusal marker")
 
 responses = {}
 for name, expected_status in EXPECTED.items():

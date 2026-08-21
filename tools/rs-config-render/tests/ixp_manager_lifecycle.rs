@@ -15,7 +15,8 @@ use rs_config_render::ixp_manager;
 use rs_config_render::ixp_manager_host::{Binding, Guard, RenderBinding};
 use rs_config_render::ixp_manager_lifecycle::{self as lifecycle, Error, Status};
 
-const FIXTURE: &[u8] = include_bytes!("fixtures/ixp-manager-v1-supported.json");
+const FIXTURE: &[u8] = include_bytes!("fixtures/ixp-manager-v2-supported.json");
+const V1_FIXTURE: &[u8] = include_bytes!("fixtures/ixp-manager-v1-supported.json");
 const API_KEY: &str = "lifecycle-api-key-must-not-leak";
 
 fn mode(path: &Path, mode: u32) {
@@ -435,6 +436,22 @@ fn definite_lock_and_render_failures_have_bounded_release_semantics() {
     assert_request(&requests[1], "GET", "gen-config");
     assert_request(&requests[2], "POST", "release-update-lock");
     assert!(!rig.state.join("ixp-manager-lifecycle.json").exists());
+
+    let rig = Rig::new();
+    let v1 = Server::start(vec![
+        Response::json(200),
+        Response::config(V1_FIXTURE),
+        Response::json(200),
+    ]);
+    assert!(matches!(
+        lifecycle::run(&rig.options(&v1.origin)),
+        Err(Error::Refused(_))
+    ));
+    let requests = v1.finish();
+    assert_request(&requests[0], "POST", "get-update-lock");
+    assert_request(&requests[1], "GET", "gen-config");
+    assert_request(&requests[2], "POST", "release-update-lock");
+    assert!(!rig.candidate.join("render-receipt.json").exists());
 }
 
 #[test]
@@ -648,13 +665,21 @@ fn in_memory_renderer_is_byte_identical_to_private_file_entry_point() {
     let binding =
         RenderBinding::new("b2-rs1-lan1-ipv4", &temp.path().join("b2-rs1-lan1-ipv4")).unwrap();
     assert_eq!(
-        ixp_manager::write_checked_candidate(&input, &from_file, 300, &checker, &binding),
+        ixp_manager::write_checked_candidate(
+            &input,
+            &from_file,
+            300,
+            &checker,
+            &binding,
+            ixp_manager::SchemaVersion::V2,
+        ),
         ixp_manager::write_checked_candidate_bytes(FIXTURE, &from_memory, 300, &checker, &binding,)
     );
     for relative in [
         "config.toml",
         "policy/ixp-hygiene.rpol",
-        "policy/client-3.rpol",
+        "policy/client-1.rpol",
+        "policy/client-4.rpol",
         "render-receipt.json",
     ] {
         assert_eq!(
