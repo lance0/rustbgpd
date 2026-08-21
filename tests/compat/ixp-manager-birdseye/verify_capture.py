@@ -42,6 +42,14 @@ RUNTIME_SUPPORTED = {
 }
 ADAPTER_API_VERSION = {"kind": "product-identity", "prefix": "rustbgpd "}
 FILTERED_PREFIX_QUERY = {"global_admin": 65001, "function": 1101}
+FILTERED_RETENTION_METADATA = {
+    "fields": ["enabled", "capacity", "evictions_since_reset", "may_be_incomplete"],
+    "unknown_evictions": None,
+    "bounded_store_exempts_generic_max": True,
+    "api_max_routes": "retention_capacity",
+    "store_eviction_status": 200,
+    "store_eviction_retained_rows_preserved": True,
+}
 REJECT_REASONS = {
     "display": {
         str(reason_id): meaning
@@ -135,6 +143,8 @@ if manifest.get("adapter_api_version") != ADAPTER_API_VERSION:
     fail("adapter api.version must remain an honest product identity")
 if manifest.get("filtered_prefix_query") != FILTERED_PREFIX_QUERY:
     fail("filtered-prefix namespace drifted")
+if manifest.get("filtered_retention_metadata") != FILTERED_RETENTION_METADATA:
+    fail("filtered retention completeness contract drifted")
 if manifest.get("reject_reasons") != REJECT_REASONS:
     fail("pinned reject-reason display or active partition drifted")
 if manifest.get("manual_config_export") != MANUAL_CONFIG_EXPORT:

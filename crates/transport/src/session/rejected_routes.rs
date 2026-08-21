@@ -238,6 +238,10 @@ pub struct RejectedRoutesReply {
     /// The session's retention cap, so the caller can render "showing
     /// the most recent N" honestly when the store is full.
     pub capacity: usize,
+    /// Number of retained rejections displaced by this session's LRU
+    /// since its last reset. Zero is authoritative, not inferred from
+    /// the current store length.
+    pub evictions_since_reset: u64,
     /// Every retained rejection, sorted by key for stable output.
     pub entries: Vec<(ImportDecisionKey, RejectedRouteEntry)>,
 }
@@ -253,6 +257,7 @@ pub struct RejectedRouteStore {
     /// charge every peer even when the peer has no rejected routes.
     entries: Option<LruCache<ImportDecisionKey, RejectedRouteEntry>>,
     capacity: usize,
+    evictions_since_reset: u64,
 }
 
 impl RejectedRouteStore {
@@ -264,6 +269,7 @@ impl RejectedRouteStore {
         Self {
             entries: None,
             capacity: cap,
+            evictions_since_reset: 0,
         }
     }
 
@@ -286,12 +292,20 @@ impl RejectedRouteStore {
     /// right now?" query wants. The entry's byte bound is enforced here
     /// ([`RejectedRouteEntry::enforce_bounds`]), so nothing retained
     /// can exceed the documented per-entry budget.
-    pub fn insert(&mut self, key: ImportDecisionKey, mut entry: RejectedRouteEntry) {
+    pub fn insert(&mut self, key: ImportDecisionKey, mut entry: RejectedRouteEntry) -> Option<u64> {
         entry.enforce_bounds();
         let capacity = self.capacity;
-        let entries = self.storage();
-        entries.push(key, entry);
+        let displaced = {
+            let entries = self.storage();
+            let refresh = entries.contains(&key);
+            entries.push(key, entry).is_some() && !refresh
+        };
+        if displaced {
+            self.evictions_since_reset = self.evictions_since_reset.saturating_add(1);
+        }
+        let entries = self.entries.as_ref().expect("insert initialized storage");
         debug_assert!(entries.len() <= capacity);
+        displaced.then_some(self.evictions_since_reset)
     }
 
     /// Remove the entry for an identity that was subsequently accepted
@@ -306,6 +320,7 @@ impl RejectedRouteStore {
     /// [`super::import_decision_cache::ImportDecisionCache::clear`].
     pub fn clear(&mut self) {
         self.entries = None;
+        self.evictions_since_reset = 0;
     }
 
     /// Number of retained rejections (the gauge value).
@@ -323,6 +338,12 @@ impl RejectedRouteStore {
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Retained rejections displaced since the session's last reset.
+    #[must_use]
+    pub fn evictions_since_reset(&self) -> u64 {
+        self.evictions_since_reset
     }
 
     /// Clone out every retained rejection, sorted by
@@ -445,7 +466,10 @@ mod tests {
         let mut store = RejectedRouteStore::with_capacity(2);
         store.insert(key(1), entry(ImportRejectReason::PolicyReject));
         store.insert(key(2), entry(ImportRejectReason::OtcRouteLeak));
-        store.insert(key(3), entry(ImportRejectReason::AsPathLoop));
+        assert_eq!(
+            store.insert(key(3), entry(ImportRejectReason::AsPathLoop)),
+            Some(1)
+        );
         assert_eq!(store.len(), 2, "bounded at capacity");
         let keys: Vec<_> = store.snapshot().into_iter().map(|(k, _)| k).collect();
         assert!(!keys.contains(&key(1)), "oldest reject evicted");
@@ -459,6 +483,7 @@ mod tests {
         store.insert(key(2), entry(ImportRejectReason::PolicyReject));
         // Refresh key(1); key(2) becomes the LRU victim.
         store.insert(key(1), entry(ImportRejectReason::RrLoop));
+        assert_eq!(store.evictions_since_reset(), 0, "refresh is not loss");
         store.insert(key(3), entry(ImportRejectReason::PolicyReject));
         let keys: Vec<_> = store.snapshot().into_iter().map(|(k, _)| k).collect();
         assert!(keys.contains(&key(1)), "refreshed entry survives");
@@ -477,9 +502,21 @@ mod tests {
         store.remove(&key(9)); // absent → no-op
         store.clear();
         assert!(store.is_empty());
+        assert_eq!(store.evictions_since_reset(), 0);
         assert!(
             store.is_unallocated(),
             "session reset must release the backing LRU allocation"
+        );
+    }
+
+    #[test]
+    fn eviction_count_saturates() {
+        let mut store = RejectedRouteStore::with_capacity(1);
+        store.insert(key(1), entry(ImportRejectReason::PolicyReject));
+        store.evictions_since_reset = u64::MAX;
+        assert_eq!(
+            store.insert(key(2), entry(ImportRejectReason::PolicyReject)),
+            Some(u64::MAX)
         );
     }
 

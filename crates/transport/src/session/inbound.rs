@@ -68,6 +68,10 @@ enum OtcIngressAction {
     Add(u32),
     DropUnicastAnnouncements(OtcBlockReason),
 }
+
+fn should_warn_rejected_route_eviction(count: u64) -> bool {
+    count == 1 || count.is_power_of_two()
+}
 fn otc_state(attrs: &[PathAttribute]) -> OtcState {
     let mut found = OtcState::Absent;
     for attr in attrs {
@@ -601,7 +605,7 @@ impl PeerSession {
             Prefix::V4(_) => Afi::Ipv4,
             Prefix::V6(_) => Afi::Ipv6,
         };
-        self.rejected_routes.insert(
+        let eviction = self.rejected_routes.insert(
             ImportDecisionKey {
                 afi,
                 safi: Safi::Unicast,
@@ -610,6 +614,18 @@ impl PeerSession {
             },
             entry,
         );
+        if let Some(evictions_since_reset) = eviction {
+            self.metrics
+                .record_rejected_route_eviction(&self.peer_label);
+            if should_warn_rejected_route_eviction(evictions_since_reset) {
+                warn!(
+                    peer = %self.peer_label,
+                    evictions_since_reset,
+                    capacity = self.rejected_routes.capacity(),
+                    "rejected-route retention evicted an older entry"
+                );
+            }
+        }
     }
 
     /// Build a retention entry for a pre-policy gate rejection from the
@@ -3146,7 +3162,10 @@ mod route_attr_bundle_tests {
 }
 #[cfg(test)]
 mod next_hop_ownership_tests {
-    use super::{NextHopOwnershipBlockReason, strict_peer_next_hop_violation};
+    use super::{
+        NextHopOwnershipBlockReason, should_warn_rejected_route_eviction,
+        strict_peer_next_hop_violation,
+    };
     use std::net::{IpAddr, Ipv6Addr};
 
     const V4_PEER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 10));
@@ -3221,5 +3240,14 @@ mod next_hop_ownership_tests {
             strict_peer_next_hop_violation(V4_PEER, false, LL_PEER, None),
             Some(NextHopOwnershipBlockReason::UnscopedLinkLocal)
         );
+    }
+
+    #[test]
+    fn rejected_route_eviction_warnings_are_exponentially_bounded() {
+        let warned: Vec<_> = (1..=9)
+            .filter(|count| should_warn_rejected_route_eviction(*count))
+            .collect();
+        assert_eq!(warned, [1, 2, 4, 8]);
+        assert!(!should_warn_rejected_route_eviction(0));
     }
 }

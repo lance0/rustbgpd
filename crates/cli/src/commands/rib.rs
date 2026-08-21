@@ -1895,6 +1895,7 @@ struct JsonRejectedRoutes<'a> {
     peer_address: &'a str,
     retention_enabled: bool,
     capacity: u32,
+    evictions_since_reset: Option<u64>,
     rejected_routes: Vec<JsonRejectedRoute<'a>>,
 }
 
@@ -1929,6 +1930,19 @@ fn write_rejected_routes_table(
     writer.flush()
 }
 
+fn rejected_routes_completeness_notice(resp: &ListRejectedRoutesResponse) -> Option<String> {
+    match resp.evictions_since_reset {
+        Some(0) => None,
+        Some(count) => Some(format!(
+            "WARNING: {count} older rejected route(s) were evicted since session reset; this listing may be incomplete"
+        )),
+        None => Some(
+            "WARNING: rejected-route eviction count is unavailable from this daemon; listing completeness is unknown"
+                .to_string(),
+        ),
+    }
+}
+
 fn print_rejected_routes(resp: &ListRejectedRoutesResponse, json: bool) -> Result<(), CliError> {
     if json {
         let rejected_routes = resp
@@ -1954,6 +1968,7 @@ fn print_rejected_routes(resp: &ListRejectedRoutesResponse, json: bool) -> Resul
             peer_address: &resp.peer_address,
             retention_enabled: resp.retention_enabled,
             capacity: resp.capacity,
+            evictions_since_reset: resp.evictions_since_reset,
             rejected_routes,
         });
     }
@@ -1966,16 +1981,11 @@ fn print_rejected_routes(resp: &ListRejectedRoutesResponse, json: bool) -> Resul
     }
     if resp.routes.is_empty() {
         println!("No rejected routes retained for {}", resp.peer_address);
-        return Ok(());
+    } else {
+        write_rejected_routes_table(&mut std::io::stdout().lock(), resp)?;
     }
-    write_rejected_routes_table(&mut std::io::stdout().lock(), resp)?;
-    let shown = resp.routes.len();
-    if u32::try_from(shown).unwrap_or(u32::MAX) >= resp.capacity {
-        println!(
-            "(store at capacity {} — showing the most recent rejections; \
-             raise [policy.reject_retention] capacity for full coverage)",
-            resp.capacity
-        );
+    if let Some(notice) = rejected_routes_completeness_notice(resp) {
+        println!("{notice}");
     }
     Ok(())
 }
@@ -2285,6 +2295,29 @@ mod tests {
         let unavailable = lines.next().unwrap();
         assert_eq!(unavailable[99..109].trim(), "-");
         assert_eq!(unavailable[110..120].trim(), "-");
+    }
+
+    #[test]
+    fn rejected_route_completeness_uses_only_the_optional_eviction_count() {
+        let mut response = ListRejectedRoutesResponse {
+            capacity: 2,
+            routes: vec![Default::default(), Default::default()],
+            evictions_since_reset: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(rejected_routes_completeness_notice(&response), None);
+        response.evictions_since_reset = Some(3);
+        assert!(
+            rejected_routes_completeness_notice(&response)
+                .unwrap()
+                .contains("3 older rejected route(s)")
+        );
+        response.evictions_since_reset = None;
+        assert!(
+            rejected_routes_completeness_notice(&response)
+                .unwrap()
+                .contains("completeness is unknown")
+        );
     }
 
     #[tokio::test]

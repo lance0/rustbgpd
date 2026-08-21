@@ -213,6 +213,7 @@ struct BgpMetricsInner {
     peer_outbound_queue_depth: IntGaugeVec,
     peer_slow: IntGaugeVec,
     rejected_routes_retained: IntGaugeVec,
+    rejected_route_retention_evictions: IntCounterVec,
     rfc8212_missing_import_policy: IntGaugeVec,
     rfc8212_missing_export_policy: IntGaugeVec,
 
@@ -667,6 +668,15 @@ impl BgpMetrics {
                  looking-glass filtered-route surface (LAN-472), per peer. \
                  Bounded by [policy.reject_retention] capacity; refreshed on \
                  every retention mutation and reset on session reset.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let rejected_route_retention_evictions = IntCounterVec::new(
+            Opts::new(
+                "bgp_rejected_route_retention_evictions_total",
+                "Rejected inbound routes displaced from the bounded retention store, per peer.",
             ),
             &["peer"],
         )
@@ -2017,6 +2027,9 @@ impl BgpMetrics {
             .register(Box::new(rejected_routes_retained.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rejected_route_retention_evictions.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rfc8212_missing_import_policy.clone()))
             .expect("metric not already registered");
         registry
@@ -2474,6 +2487,7 @@ impl BgpMetrics {
             peer_outbound_queue_depth,
             peer_slow,
             rejected_routes_retained,
+            rejected_route_retention_evictions,
             rfc8212_missing_import_policy,
             rfc8212_missing_export_policy,
             rib_prefixes,
@@ -2691,6 +2705,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.peer_outbound_queue_depth, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_slow, peer);
         Self::reap_peer_series_from_vec(&self.0.rejected_routes_retained, peer);
+        Self::reap_peer_series_from_vec(&self.0.rejected_route_retention_evictions, peer);
         Self::reap_peer_series_from_vec(&self.0.rfc8212_missing_import_policy, peer);
         Self::reap_peer_series_from_vec(&self.0.rfc8212_missing_export_policy, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_update_group, peer);
@@ -3017,6 +3032,23 @@ impl BgpMetrics {
     pub fn rejected_routes_retained(&self, peer: &str) -> i64 {
         self.0
             .rejected_routes_retained
+            .with_label_values(&[peer])
+            .get()
+    }
+
+    /// Record one genuine displacement from a peer's retained-reject LRU.
+    pub fn record_rejected_route_eviction(&self, peer: &str) {
+        self.0
+            .rejected_route_retention_evictions
+            .with_label_values(&[peer])
+            .inc();
+    }
+
+    /// Read a peer's cumulative retained-reject eviction counter.
+    #[must_use]
+    pub fn rejected_route_retention_evictions(&self, peer: &str) -> u64 {
+        self.0
+            .rejected_route_retention_evictions
             .with_label_values(&[peer])
             .get()
     }
@@ -6783,6 +6815,7 @@ mod tests {
         m.set_peer_outbound_queue_depth(peer, 3);
         m.set_peer_slow(peer, true);
         m.set_rejected_routes_retained(peer, 4);
+        m.record_rejected_route_eviction(peer);
         m.set_rfc8212_missing_policy(peer, true, true);
         m.set_peer_update_group(peer, 1);
         m.set_max_prefix_capacity(peer, "aggregate", 80, Some(100));
@@ -6852,8 +6885,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 52 peer-labeled series; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 52);
+        // 53 peer-labeled series; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 53);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -6863,7 +6896,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 52);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 53);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -7107,7 +7140,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 51] = [
+    const PEER_LABELED_FAMILIES: [&str; 52] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -7140,6 +7173,7 @@ mod tests {
         "bgp_peer_slow",
         "bgp_peer_update_group",
         "bgp_policy_routes_total",
+        "bgp_rejected_route_retention_evictions_total",
         "bgp_rejected_routes_retained",
         "bgp_rfc8212_missing_export_policy",
         "bgp_rfc8212_missing_import_policy",

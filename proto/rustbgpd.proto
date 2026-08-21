@@ -1643,6 +1643,12 @@ message ListRejectedRoutesResponse {
 
   // Every retained rejection, sorted by (afi, safi, prefix, path_id).
   repeated RejectedRoute routes = 4;
+
+  // Exact number of older retained rejections displaced by this
+  // session's bounded store since its last reset. Presence is additive:
+  // absent means the serving daemon predates this field, while present
+  // zero proves no retention loss.
+  optional uint64 evictions_since_reset = 5;
 }
 
 message TestPolicyRequest {

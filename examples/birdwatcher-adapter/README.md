@@ -43,7 +43,7 @@ Flags (also settable via env):
 | `--listen` | `BIRDWATCHER_ADAPTER_LISTEN` | `127.0.0.1:8080` | REST listen address |
 | `--protocol-alias PROTOCOL=PEER_IP@TABLE` | `BIRDWATCHER_ADAPTER_PROTOCOL_ALIASES` (semicolon-delimited) | (unset) | Repeatable startup-only Bird's Eye protocol/table identity |
 | `--protocol-alias-file PATH` | `BIRDWATCHER_ADAPTER_PROTOCOL_ALIAS_FILE` | (unset) | File-backed aliases; mutually exclusive with `--protocol-alias` |
-| `--max-routes` | `BIRDWATCHER_ADAPTER_MAX_ROUTES` | `1000` | Maximum route-array response size; must be non-zero |
+| `--max-routes` | `BIRDWATCHER_ADAPTER_MAX_ROUTES` | `1000` | Maximum RIB-derived route-array response size; must be non-zero |
 
 The command-line token path takes precedence over the environment variable.
 The adapter reads it once at startup, trims trailing whitespace, and rejects
@@ -137,8 +137,8 @@ Every successful response retains Alice-LG's `api.Version` and
 `api.result_from_cache` keys while also exposing Bird's Eye's lowercase
 `version`, `from_cache`, and enforced `max_routes`. Both version keys contain
 `rustbgpd <package-version>` as product identity; they are not a claim to
-implement Bird's Eye API version 2.1.0. A route-array request whose actual size
-exceeds that maximum returns HTTP 403 instead of truncating.
+implement Bird's Eye API version 2.1.0. A RIB-derived route-array request whose
+actual size exceeds that maximum returns HTTP 403 instead of truncating.
 
 IXP Manager's `protocolRoute()`, `exportRoute()`, and `protocolTable()` journeys
 use `/route/<prefix>%2F<mask>/protocol/{id}`,
@@ -166,8 +166,12 @@ IXP Manager v7.4 queries member-filtered prefixes through
 `/routes/lc-zwild/protocol/{id}/{daemon ASN}/1101`. The adapter answers only
 that exact daemon-owned namespace and returns an empty route array for other
 `x` or `y` values. It never scans accepted routes: the response comes only from
-the selected session's retained rejects, preserves the usual no-session empty
-answer, and returns HTTP 403 when the retained set exceeds `--max-routes`.
+the selected session's retained rejects and preserves the usual no-session
+empty answer. Successful filtered replies use the daemon-reported retention
+capacity as `api.max_routes` and are exempt from the generic RIB-derived cap.
+Both add `retention.enabled`, `capacity`, `evictions_since_reset`, and
+`may_be_incomplete`; the last two are `null` against an older daemon, while a
+positive eviction count marks retained loss without hiding retained rows.
 
 Each returned route carries exactly one synthesized `{daemon ASN}:1101:<id>`
 reason. Before adding it, the adapter removes every wire-supplied community in

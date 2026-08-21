@@ -2013,16 +2013,19 @@ and RPKI/ASPA validation states at rejection time:
 Retention is per-session and self-maintaining: an identity that is
 later **accepted** or **explicitly withdrawn** drops out (the listing
 never claims a live route is filtered), and the store resets on session
-flap. It is bounded per peer (`[policy.reject_retention] capacity`,
-default 1024, LRU on rejection recency) — when the listing reports the
-store at capacity, it shows the most recent rejections and the CLI says
-so. Max-prefix violations don't appear here: exceeding the limit tears
+flap. It is bounded per peer (`[policy.reject_retention] capacity`, default
+1024, LRU on rejection recency). `evictions_since_reset = 0` proves the
+retained listing is complete for this session; a positive value makes the CLI
+warn that older rejects were lost. Absence means an older daemon cannot answer,
+not zero. Max-prefix violations don't appear here: exceeding the limit tears
 the session down (Cease/1), which is its own, louder signal.
 
 `bgp_rejected_routes_retained{peer}` gauges the store per peer — a
 sustained high value on a member session is the "their filters are
 rejecting a lot" signal worth proactive outreach before the support
-call. `[policy.reject_retention] enabled = false` disables retention
+call. `bgp_rejected_route_retention_evictions_total{peer}` counts genuine LRU
+displacements; warnings fire only on the first and power-of-two evictions per
+session. `[policy.reject_retention] enabled = false` disables retention
 entirely (the CLI then reports the disabled state, never an empty
 answer); both knobs are restart-required per peer.
 

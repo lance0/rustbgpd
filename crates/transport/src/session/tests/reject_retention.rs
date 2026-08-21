@@ -364,6 +364,18 @@ async fn reject_retention_cap_evicts_oldest_reject() {
         "oldest reject evicted under the cap"
     );
     assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 2);
+    assert_eq!(session.rejected_routes.evictions_since_reset(), 1);
+    assert_eq!(metrics.rejected_route_retention_evictions("10.0.0.2"), 1);
+
+    session
+        .process_update(retention_update(&[third], &[]))
+        .await;
+    assert_eq!(
+        session.rejected_routes.evictions_since_reset(),
+        1,
+        "refresh is not loss"
+    );
+    assert_eq!(metrics.rejected_route_retention_evictions("10.0.0.2"), 1);
 }
 
 /// LAN-472 pin: `[policy.reject_retention] enabled = false` records
@@ -493,16 +505,20 @@ async fn reject_retention_records_otc_ingress_drop_with_detail() {
 #[tokio::test]
 async fn session_down_flushes_reject_retention_and_gauge() {
     let denied = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let displaced = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let chain = PolicyChain::new(vec![Policy {
         entries: vec![],
         default_action: PolicyAction::Deny,
     }]);
-    let (mut session, metrics) = retention_session_with_chain(Some(chain), |_| {});
+    let (mut session, metrics) = retention_session_with_chain(Some(chain), |config| {
+        config.reject_retention_capacity = 1;
+    });
     session
-        .process_update(retention_update(&[denied], &[]))
+        .process_update(retention_update(&[denied, displaced], &[]))
         .await;
     assert_eq!(session.rejected_routes.len(), 1);
     assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 1);
+    assert_eq!(session.rejected_routes.evictions_since_reset(), 1);
 
     session.execute_actions(vec![Action::SessionDown]).await;
     assert!(
@@ -514,6 +530,7 @@ async fn session_down_flushes_reject_retention_and_gauge() {
         0,
         "the gauge follows the flush"
     );
+    assert_eq!(session.rejected_routes.evictions_since_reset(), 0);
 }
 
 /// LAN-472 pin: the `ListRejectedRoutes` session command returns the
@@ -542,6 +559,7 @@ async fn list_rejected_routes_command_returns_sorted_snapshot() {
         reply.capacity,
         super::rejected_routes::DEFAULT_REJECT_RETENTION_CAPACITY
     );
+    assert_eq!(reply.evictions_since_reset, 0);
     let keys: Vec<RetentionKey> = reply.entries.iter().map(|(k, _)| k.clone()).collect();
     assert_eq!(
         keys,

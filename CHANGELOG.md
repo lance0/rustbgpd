@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Rejected-route retention now counts genuine per-session LRU displacement,
+  exports a canonical-peer counter and bounded warnings, and exposes an
+  optional API count that distinguishes exact zero from older-daemon absence.
+  The CLI and both Birdwatcher filtered views report possible incompleteness
+  without hiding the daemon-bounded retained rows; filtered replies advertise
+  the retention capacity as their effective route cap. (LAN-1108)
 - `.rpol` now supports the exact removal-only
   `remove large-community <u32>:*:*` form with bounded, fail-closed arrived-route
   evaluation. Pinned IXP Manager v7.4 candidates append a router-AS scrub last

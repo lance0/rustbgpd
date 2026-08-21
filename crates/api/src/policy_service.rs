@@ -1177,6 +1177,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             retention_enabled: reply.enabled,
             capacity: u32::try_from(reply.capacity).unwrap_or(u32::MAX),
             routes,
+            evictions_since_reset: Some(reply.evictions_since_reset),
         }))
     }
 
@@ -2244,6 +2245,19 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::NotFound);
     }
 
+    #[tokio::test]
+    async fn list_rejected_routes_zero_evictions_is_present() {
+        let response = list_rejected_routes_response(Some(RejectedRoutesReply {
+            enabled: true,
+            capacity: 2,
+            evictions_since_reset: 0,
+            entries: vec![],
+        }))
+        .await
+        .expect("listing succeeds");
+        assert_eq!(response.evictions_since_reset, Some(0));
+    }
+
     /// LAN-661 red proof: mapping a stalled live session back onto either
     /// absence branch changes these statuses to `success/NO_SESSION` and
     /// `NOT_FOUND`, respectively.
@@ -2316,12 +2330,14 @@ mod tests {
         let resp = list_rejected_routes_response(Some(RejectedRoutesReply {
             enabled: true,
             capacity: 1024,
+            evictions_since_reset: 3,
             entries: vec![(key, entry)],
         }))
         .await
         .expect("listing succeeds");
         assert!(resp.retention_enabled);
         assert_eq!(resp.capacity, 1024);
+        assert_eq!(resp.evictions_since_reset, Some(3));
         assert_eq!(resp.routes.len(), 1);
         let r = &resp.routes[0];
         assert_eq!(r.prefix, "198.51.100.0");
