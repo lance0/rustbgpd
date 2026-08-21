@@ -86,6 +86,8 @@ for refused in config-implicit.json config-ui-filter.json config-skin.json; do
   out="$tmp/refused-${refused%.json}"
   if "$repo/target/debug/rs-config-render" --input-format ixp-manager-v1 \
     --context "$capture_output/$refused" --out-dir "$out" \
+    --router-handle b2-rs1-lan1-ipv4 \
+    --runtime-state-dir /var/lib/rustbgpd/b2-rs1-lan1-ipv4 \
     --max-prefix-restart-seconds 300 --check-with "$repo/target/debug/rustbgpd"; then
     echo "unsupported real IXP Manager capture rendered: $refused" >&2
     exit 1
@@ -95,6 +97,8 @@ done
 candidate="$tmp/candidate"
 "$repo/target/debug/rs-config-render" --input-format ixp-manager-v1 \
   --context "$supported" --out-dir "$candidate" \
+  --router-handle b2-rs1-lan1-ipv4 \
+  --runtime-state-dir /var/lib/rustbgpd/b2-rs1-lan1-ipv4 \
   --max-prefix-restart-seconds 300 --check-with "$repo/target/debug/rustbgpd" >/dev/null
 [ -f "$candidate/render-receipt.json" ]
 fixture="$root/fixtures/ixp-manager-v7.4-rustbgpd.json"

@@ -4,6 +4,9 @@
   "protocol_aliases": {
     "member-v4": "pb_as64496"
   },
+  "routing_tables": [
+    "master4"
+  ],
   "adapter_api_version": {
     "kind": "product-identity",
     "prefix": "rustbgpd "
@@ -22,12 +25,13 @@
   "runtime_supported": [
     "exact-protocol-route",
     "exact-export-route",
-    "filtered-prefix-wildcard"
+    "filtered-prefix-wildcard",
+    "less-specific-longest-prefix-match",
+    "atomic-all-candidate-prefix-snapshot"
   ],
   "unsupported": [
     "complete-rejected-route-reason-inventory",
-    "less-specific-longest-prefix-match",
-    "atomic-all-candidate-table-snapshot",
+    "full-table-snapshot",
     "runtime-protocol-alias-reconfiguration"
   ]
 }

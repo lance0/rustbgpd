@@ -510,6 +510,36 @@ fn announce_additional_route(stream: &mut TcpStream) {
         .expect("announce additional route");
 }
 
+fn announce_third_candidate(stream: &mut TcpStream) {
+    use rustbgpd_wire::attribute::{AsPath, AsPathSegment, Origin, PathAttribute};
+    use rustbgpd_wire::message::{Message, encode_message};
+    use rustbgpd_wire::update::UpdateMessage;
+
+    let mut attrs = Vec::new();
+    rustbgpd_wire::attribute::encode_path_attributes(
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65020])],
+            }),
+            PathAttribute::NextHop("192.0.2.99".parse().unwrap()),
+            PathAttribute::Med(30),
+        ],
+        &mut attrs,
+        false,
+        false,
+    )
+    .expect("encode third candidate attributes");
+    let update = Message::Update(UpdateMessage {
+        withdrawn_routes: bytes::Bytes::new(),
+        path_attributes: attrs.into(),
+        nlri: bytes::Bytes::from_static(&[0, 0, 0, 33, 24, 10, 99, 0]),
+    });
+    stream
+        .write_all(&encode_message(&update).expect("encode third candidate"))
+        .expect("announce third candidate");
+}
+
 fn announce_additional_rejected_route(stream: &mut TcpStream) {
     use rustbgpd_wire::attribute::{AsPath, AsPathSegment, Origin, PathAttribute};
     use rustbgpd_wire::message::{Message, encode_message};
@@ -630,6 +660,15 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
         .find("tests/compat/ixp-manager-birdseye/run.sh")
         .unwrap();
     assert!(checkout < installer && installer < oracle);
+
+    let consumer = include_str!("compat/ixp-manager-birdseye/adapter-consumer.php");
+    for journey in ["$consumer->symbols()", "$consumer->protocolTable("] {
+        assert_eq!(
+            consumer.matches(journey).count(),
+            1,
+            "pinned live consumer journey drifted: {journey}"
+        );
+    }
 }
 
 #[test]
@@ -694,6 +733,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     for path in [
         "/route/10.99.0.0%2F24/protocol/pb_0001_as65020",
         "/route/10.99.0.0%2F24/export/pb_0002_as65030",
+        "/route/10.99.0.128%2F25/table/master4",
     ] {
         wait_for_exact_json_error(adapter_port, path, 502, "Upstream daemon request failed");
     }
@@ -806,7 +846,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     );
     assert_eq!(
         symbols["symbols"]["routing table"],
-        serde_json::json!([]),
+        serde_json::json!(["master", "master4"]),
         "{symbols}"
     );
     let (missing_status, missing_body) =
@@ -821,6 +861,27 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         "/route/not-a-prefix/protocol/pb_0001_as65020",
         400,
         "Invalid route prefix",
+    );
+    wait_for_exact_json_error(
+        adapter_port,
+        "/route/not-a-prefix/table/master4",
+        400,
+        "Invalid route prefix",
+    );
+    wait_for_exact_json_error(
+        adapter_port,
+        "/route/10.99.0.0%2F24/table/does_not_exist",
+        404,
+        "Table not found",
+    );
+    assert_eq!(
+        get_json(
+            adapter_port,
+            "/route/203.0.113.0%2F24/table/master4",
+            "adapter",
+        )["routes"],
+        serde_json::json!([]),
+        "an installed-ancestor miss is an empty successful table search"
     );
     for path in [
         "/route/10.99.0.0%2F24/protocol/does_not_exist",
@@ -888,6 +949,30 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     assert_eq!(
         exact_received, live,
         "exact protocol route must preserve every candidate and its order"
+    );
+    let table_lookup = get_json(
+        adapter_port,
+        "/route/10.99.0.128%2F25/table/master4",
+        "adapter",
+    );
+    assert_eq!(table_lookup["routes"].as_array().unwrap().len(), 2);
+    assert!(
+        table_lookup["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|route| route["network"] == "10.99.0.0/24"),
+        "LPM must return only paths from the matched /24: {table_lookup}"
+    );
+    assert_eq!(
+        table_lookup["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|route| route["bgp"]["med"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [10, 20],
+        "installed winner must render first, followed by every alternative: {table_lookup}"
     );
     let age = live["routes"][0]["age"].as_str().unwrap_or_default();
     assert!(!age.is_empty(), "adapter age must be populated");
@@ -1123,6 +1208,13 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     wait_for_exact_json_error(
         adapter_port,
         "/routes/lc-zwild/protocol/pb_0001_as65020/65001/1101",
+        403,
+        over_limit,
+    );
+    announce_third_candidate(&mut bgp_session);
+    wait_for_exact_json_error(
+        adapter_port,
+        "/route/10.99.0.128%2F25/table/master4",
         403,
         over_limit,
     );

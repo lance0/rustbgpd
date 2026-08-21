@@ -87,7 +87,7 @@ and mirrors internal architecture.
 
 ```protobuf
 // Abridged — proto/rustbgpd.proto is authoritative; NeighborService has
-// 12 RPCs and RibService 22, only representative subsets are shown here.
+// 12 RPCs and RibService 23, only representative subsets are shown here.
 
 // Global daemon configuration and identity
 service GlobalService {
@@ -113,6 +113,7 @@ service RibService {
   rpc ListAdvertisedRoutes(ListRoutesRequest) returns (ListRoutesResponse);
   rpc ExplainAdvertisedRoute(ExplainAdvertisedRouteRequest) returns (ExplainAdvertisedRouteResponse);
   rpc ExplainBestPath(ExplainBestPathRequest) returns (ExplainBestPathResponse);
+  rpc LookupBestPath(LookupBestPathRequest) returns (ExplainBestPathResponse); // outside v1
   rpc ListRouteEvents(ListRouteEventsRequest) returns (ListRouteEventsResponse);
   rpc WatchRoutes(WatchRoutesRequest)         returns (stream RouteEvent);
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);

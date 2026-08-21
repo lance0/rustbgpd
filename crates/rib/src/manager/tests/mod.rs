@@ -548,6 +548,20 @@ async fn query_explain_best_path(
         .expect("global-view explain never returns None")
 }
 
+async fn query_lookup_best_path(
+    tx: &mpsc::Sender<RibUpdate>,
+    prefix: Prefix,
+) -> Option<crate::update::ExplainBestPath> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::LookupBestPath {
+        prefix,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx.await.unwrap()
+}
+
 /// Peer-scoped explain helper for the Add-Path explain tests.
 /// `Some` = scoped to that peer; `None` = unknown-peer error path.
 async fn query_explain_best_path_for_peer(

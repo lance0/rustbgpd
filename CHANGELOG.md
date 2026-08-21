@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `RibService.LookupBestPath` now provides an outside-v1, bounded IPv4/IPv6
+  longest-prefix lookup that returns the installed winner and every alternative
+  for the matched prefix in one actor turn. `birdwatcher-adapter` exposes that
+  result through IXP Manager v7.4.0's table-search journey, with live table
+  validation, winner-first ordering, pre-render caps, and pinned real-consumer
+  coverage while `runtime_compatibility` remains false. (LAN-1142)
 - Release tarballs, Debian packages, and RPMs now ship an opt-in
   `rustbgpd@.service` with exact per-handle IXP Manager state and UDS binding.
   M97 proves two pinned IPv4/IPv6 handles share one host namespace and host

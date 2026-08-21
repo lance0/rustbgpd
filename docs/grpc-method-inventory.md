@@ -160,7 +160,7 @@ shape itself does not raise the tier.
 | `SetNeighborPeerGroup` | `mutating` | Single-neighbor reassignment. |
 | `ClearNeighborPeerGroup` | `mutating` | Single-neighbor. |
 
-### RibService (22 RPCs)
+### RibService (23 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -169,6 +169,7 @@ shape itself does not raise the tier.
 | `ListAdvertisedRoutes` | `sensitive_read` | Per-peer advertised RIB. |
 | `ExplainAdvertisedRoute` | `sensitive_read` | Per-route policy evaluation trace; exposes policy decision logic. |
 | `ExplainBestPath` | `sensitive_read` | Per-route best-path tie-break trace. |
+| `LookupBestPath` | `sensitive_read` | Outside-v1 global-only LPM query. Returns the closest installed Loc-RIB ancestor, its winner, and all alternatives for that one matched prefix from one actor turn. No full-table or peer-scoped view. |
 | `ListBlackholeDiscards` | `sensitive_read` | Per-discard reasons; exposes RFC 7999 BLACKHOLE community installations. |
 | `ListFibRoutes` | `sensitive_read` | ADR-0061 FIB status snapshot — exposes which routes are installed in the kernel. |
 | `SetFibTable` | `mutating` | Create-or-replace a `[[fib_tables]]` entry by name; hot-applies via the reconciler and persists. Programs kernel route tables. |
@@ -252,13 +253,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 60 | 57.7% |
-| `mutating` | 20 | 19.2% |
-| `operator_only` | 24 | 23.1% |
-| **Total** | **104** | **100%** |
+| `sensitive_read` | 61 | 58.1% |
+| `mutating` | 20 | 19.0% |
+| `operator_only` | 24 | 22.9% |
+| **Total** | **105** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 104
-total is 100 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 105
+total is 101 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 
@@ -337,7 +338,7 @@ specific method if the model warrants it.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 104-method classification
+`crates/api/src/authz.rs` contains the same 105-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added
