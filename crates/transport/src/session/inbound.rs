@@ -719,8 +719,8 @@ impl PeerSession {
     /// peer's hold timer stays fed by the writer-owned KEEPALIVE
     /// cadence while parked.
     ///
-    /// `Err` means the RIB manager is gone (daemon shutdown) — the
-    /// caller should abandon the rest of its turn.
+    /// `Err` means the RIB actor is unavailable — the caller should
+    /// abandon the rest of its turn.
     pub(super) async fn deliver_routes_to_rib(&self, update: RibUpdate) -> Result<(), ()> {
         match self.rib_tx.try_send(update) {
             Ok(()) => Ok(()),

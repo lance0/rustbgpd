@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The daemon now fail-stops if its RIB manager returns or panics: it runs the
+  existing coordinated peer teardown and exits 1 so `Restart=on-failure` can
+  recover it. A real-session fault-injection proof pins the failure before
+  shared route-page generation advances; PeerManager supervision remains out
+  of scope. (LAN-1187)
 - `birdwatcher-adapter` now serves IXP Manager's full table view by atomically
   joining global Received candidates with installed Best winners under one
   shared page generation. Output is deterministic, winner-first, capped

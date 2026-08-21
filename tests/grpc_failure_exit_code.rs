@@ -7,12 +7,19 @@
 //! daemon needs: the gRPC server exiting unexpectedly, the BGP listener
 //! failing to bind, and the metrics/readiness listener failing to bind.
 
+use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use bytes::Bytes;
+use rustbgpd_wire::constants::{HEADER_LEN, MAX_MESSAGE_LEN};
+use rustbgpd_wire::message::{Message, decode_message, encode_message};
+use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
+use rustbgpd_wire::open::OpenMessage;
 
 fn private_tempdir() -> tempfile::TempDir {
     let temp = tempfile::tempdir().expect("create temp dir");
@@ -112,11 +119,19 @@ fn write_config(dir: &Path, grpc_port: u16, bgp_port: u16) -> PathBuf {
 }
 
 fn spawn_daemon(dir: &Path, config_path: &Path) -> Daemon {
+    spawn_daemon_with_env(dir, config_path, None)
+}
+
+fn spawn_daemon_with_env(dir: &Path, config_path: &Path, env: Option<(&str, &str)>) -> Daemon {
     let stdout_path = dir.join("rustbgpd.stdout.log");
     let stderr_path = dir.join("rustbgpd.stderr.log");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rustbgpd"));
+    command.arg(config_path);
+    if let Some((key, value)) = env {
+        command.env(key, value);
+    }
     Daemon {
-        child: Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
-            .arg(config_path)
+        child: command
             .stdout(Stdio::from(
                 std::fs::File::create(&stdout_path).expect("daemon stdout log"),
             ))
@@ -128,6 +143,24 @@ fn spawn_daemon(dir: &Path, config_path: &Path) -> Daemon {
         stdout_path,
         stderr_path,
     }
+}
+
+fn write_rib_fault_config(dir: &Path) -> PathBuf {
+    let config_path = write_config(dir, DAEMON_CHOOSES, DAEMON_CHOOSES);
+    let config = std::fs::read_to_string(&config_path)
+        .expect("read test config")
+        .replace(
+            "listen_port = 0",
+            "listen_port = 0\nlisten_addresses = [\"127.0.0.1\"]",
+        );
+    std::fs::write(
+        &config_path,
+        format!(
+            "{config}\n[[neighbors]]\naddress = \"127.0.0.1\"\nremote_asn = 65020\ngraceful_restart = false\n"
+        ),
+    )
+    .expect("write RIB fault config");
+    config_path
 }
 
 /// Port the config asks for when the test does not care about the value.
@@ -164,6 +197,76 @@ fn wait_for_bound_grpc_port(daemon: &mut Daemon) -> u16 {
     );
 }
 
+fn wait_for_bound_bgp_port(daemon: &mut Daemon) -> u16 {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        let logs = daemon.logs();
+        if let Some(port) = logs
+            .split(r#""addr":"127.0.0.1:"#)
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next()?.parse().ok())
+            .find(|port| *port != 0)
+        {
+            return port;
+        }
+        if let Ok(Some(status)) = daemon.child.try_wait() {
+            panic!("rustbgpd exited before binding BGP: {status}\n{logs}");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "rustbgpd never logged a bound BGP listener\n{}",
+        daemon.logs()
+    );
+}
+
+fn read_bgp_message(stream: &mut TcpStream) -> Message {
+    let mut frame = vec![0; HEADER_LEN];
+    stream.read_exact(&mut frame).expect("read BGP header");
+    let total = usize::from(u16::from_be_bytes([frame[16], frame[17]]));
+    assert!((HEADER_LEN..=usize::from(MAX_MESSAGE_LEN)).contains(&total));
+    frame.resize(total, 0);
+    stream
+        .read_exact(&mut frame[HEADER_LEN..])
+        .expect("read BGP body");
+    decode_message(&mut Bytes::from(frame), MAX_MESSAGE_LEN).expect("decode daemon BGP frame")
+}
+
+fn establish_bgp_and_observe_shutdown(port: u16) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect BGP peer");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let open = Message::Open(OpenMessage {
+        version: 4,
+        my_as: 65020,
+        hold_time: 90,
+        bgp_identifier: "10.0.0.2".parse().unwrap(),
+        capabilities: vec![],
+    });
+    stream
+        .write_all(&encode_message(&open).expect("encode OPEN"))
+        .expect("write OPEN");
+    assert!(matches!(read_bgp_message(&mut stream), Message::Open(_)));
+    stream
+        .write_all(&encode_message(&Message::Keepalive).unwrap())
+        .expect("write KEEPALIVE");
+
+    let mut established = false;
+    loop {
+        match read_bgp_message(&mut stream) {
+            Message::Keepalive => established = true,
+            Message::Notification(notification) => {
+                assert!(established, "shutdown followed an established session");
+                assert_eq!(notification.code, NotificationCode::Cease);
+                assert_eq!(notification.subcode, cease_subcode::ADMINISTRATIVE_SHUTDOWN);
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
 #[test]
 fn grpc_bind_failure_exits_nonzero() {
     let temp = private_tempdir();
@@ -182,6 +285,77 @@ fn grpc_bind_failure_exits_nonzero() {
         "gRPC server failure must exit 1, got {status}\n{}",
         daemon.logs()
     );
+}
+
+#[test]
+fn rib_manager_panic_drains_established_peer_and_exits_nonzero() {
+    let temp = private_tempdir();
+    let config_path = write_rib_fault_config(temp.path());
+    let mut daemon = spawn_daemon_with_env(
+        temp.path(),
+        &config_path,
+        Some(("RUSTBGPD_TEST_RIB_PANIC_ON_PEER_UP", "1")),
+    );
+    establish_bgp_and_observe_shutdown(wait_for_bound_bgp_port(&mut daemon));
+
+    let status = daemon.wait_within(Duration::from_secs(30));
+    let logs = daemon.logs();
+    assert_eq!(status.code(), Some(1), "RIB failure must exit 1\n{logs}");
+    assert!(logs.contains("RIB manager exited unexpectedly"), "{logs}");
+    assert!(
+        logs.contains("initiating shutdown due to RIB manager failure"),
+        "{logs}"
+    );
+    assert!(logs.contains("shutdown requested"), "{logs}");
+
+    let reports = std::fs::read_dir(temp.path().join("runtime/crash"))
+        .expect("panic report directory")
+        .flatten()
+        .map(|entry| std::fs::read_to_string(entry.path()).expect("read panic report"))
+        .collect::<Vec<_>>();
+    assert_eq!(reports.len(), 1, "one durable panic report: {reports:?}");
+    assert!(reports[0].contains("triggered before route-page generation advance"));
+}
+
+#[test]
+fn rib_supervision_is_fail_stop_and_uses_common_peer_teardown() {
+    let source = include_str!("../src/main.rs");
+    let retained = source
+        .find("let mut rib_handle = tokio::spawn(rib_manager.run());")
+        .expect("RIB JoinHandle must be retained");
+    let arm = source
+        .find("result = &mut rib_handle => {")
+        .expect("shutdown select must supervise the RIB task");
+    let exact_arm = &source[arm..source[arm..].find("            }").unwrap() + arm];
+    assert!(exact_arm.contains("RIB manager exited unexpectedly"));
+    assert!(exact_arm.contains("component_failed = true;"));
+    assert!(exact_arm.contains("break;"));
+    assert!(
+        !exact_arm.contains("Ok(") && !exact_arm.contains("is_ok") && !exact_arm.contains("is_err")
+    );
+    let teardown = source
+        .find("send(PeerManagerCommand::Shutdown)")
+        .expect("component failure must retain coordinated peer shutdown");
+    assert!(retained < arm && arm < teardown);
+}
+
+#[test]
+fn help_and_man_distinguish_bgp_bind_modes_and_supervised_exits() {
+    let output = |flag| {
+        let output = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
+            .arg(flag)
+            .output()
+            .expect("run rustbgpd display mode");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).expect("display output is UTF-8")
+    };
+    let help = output("--help");
+    assert!(help.contains("legacy BGP mode bound neither family; an explicit listen_addresses"));
+    assert!(help.contains("endpoint failed to bind; configured metrics/readiness bind failure;"));
+    assert!(help.contains("or unexpected RIB manager or gRPC server exit"));
+    let man = output("--man");
+    assert!(man.contains("legacy BGP listen mode could bind\nneither family; explicit\n.B listen_addresses\nmode could not bind every configured endpoint"));
+    assert!(man.contains("configured metrics/readiness\nlistener failed to bind; or the RIB manager or gRPC server exited unexpectedly"));
 }
 
 #[test]

@@ -2372,8 +2372,12 @@ The config was rejected, or
 reported at least one warning. For
 .BR \-\-diff ,
 1 means the diff carries actionable changes. A running daemon also exits
-1 when a component failure ends it (the BGP listener failed to bind, or
-the gRPC server exited unexpectedly), so that a supervisor configured
+1 when a component failure ends it (legacy BGP listen mode could bind
+neither family; explicit
+.B listen_addresses
+mode could not bind every configured endpoint; a configured metrics/readiness
+listener failed to bind; or the RIB manager or gRPC server exited unexpectedly),
+so that a supervisor configured
 with
 .B Restart=on\-failure
 restarts it. An operator\-initiated shutdown exits 0.
@@ -2453,7 +2457,9 @@ fn main() -> ExitCode {
                   includes a valid config that was warned about\n  \
                1  The config was rejected, or --check --strict found warnings.\n     \
                   A running daemon exits 1 on a component failure that ends it\n     \
-                  (BGP or metrics/readiness listener bind, unexpected gRPC server exit)\n  \
+                  (legacy BGP mode bound neither family; an explicit listen_addresses\n     \
+                  endpoint failed to bind; configured metrics/readiness bind failure;\n     \
+                  or unexpected RIB manager or gRPC server exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument)\n  \
                70 Internal error",
                     env!("CARGO_PKG_VERSION")
@@ -2788,14 +2794,14 @@ fn main() -> ExitCode {
         .enable_all()
         .build()
         .unwrap_or_else(|e| fatal_startup_error("failed to create tokio runtime", e));
-    let grpc_server_failed = rt.block_on(run(
+    let component_failed = rt.block_on(run(
         accepted,
         boot_revert_notice,
         launch_identity.expect("daemon boot resolved launch config identity"),
         profiler,
     ));
     shutdown_daemon_runtime(rt);
-    if grpc_server_failed {
+    if component_failed {
         // The coordinated teardown already ran (NOTIFICATIONs, GR marker,
         // checkpoints); the non-zero code tells supervisors (e.g. systemd
         // Restart=on-failure) this was a component failure, not a clean stop.
@@ -3006,8 +3012,8 @@ fn resolve_rib_channel_capacity_from(env: Option<&str>) -> usize {
     clippy::too_many_lines,
     reason = "runtime startup keeps listener, API, and shutdown wiring in one owner"
 )]
-/// Returns `true` when shutdown was caused by the gRPC server exiting
-/// unexpectedly (a component failure — the process must exit non-zero),
+/// Returns `true` when shutdown was caused by an unexpected component exit
+/// (a failure — the process must exit non-zero),
 /// `false` for operator-initiated shutdowns (signals, Shutdown RPC).
 async fn run<T>(
     accepted: Arc<AcceptedConfigSnapshot>,
@@ -3557,7 +3563,7 @@ async fn run<T>(
     } else {
         None
     };
-    tokio::spawn(rib_manager.run());
+    let mut rib_handle = tokio::spawn(rib_manager.run());
 
     // Validation snapshot channel: broadcast VRP + ASPA tables to transport
     // sessions for import-time route validation.  Starts empty — sessions fall
@@ -5014,7 +5020,8 @@ async fn run<T>(
         Err(reason) => error!(error = %reason, "invalid [gnmi_dialout] section; dial-out disabled"),
     }
 
-    // Wait for shutdown signal: SIGINT, SIGTERM, Shutdown RPC, unexpected gRPC exit, or SIGHUP
+    // Wait for shutdown signal, Shutdown RPC, SIGHUP, or an unexpected
+    // gRPC/RIB component exit.
     //
     // SIGHUP runs `reload_config` on a dedicated tokio task so the
     // signal-arm dispatch returns immediately. Without this, the SIGHUP
@@ -5033,7 +5040,7 @@ async fn run<T>(
     let mut reload_in_flight: Option<
         tokio::task::JoinHandle<Result<SighupAuthority, SighupReloadError>>,
     > = None;
-    let mut grpc_server_failed = false;
+    let mut component_failed = false;
     loop {
         tokio::select! {
             _ = sigint.recv() => {
@@ -5054,7 +5061,13 @@ async fn run<T>(
             result = &mut grpc_handle => {
                 error!(?result, "gRPC server exited unexpectedly");
                 info!("initiating shutdown due to gRPC server failure");
-                grpc_server_failed = true;
+                component_failed = true;
+                break;
+            }
+            result = &mut rib_handle => {
+                error!(?result, "RIB manager exited unexpectedly");
+                info!("initiating shutdown due to RIB manager failure");
+                component_failed = true;
                 break;
             }
             _ = sighup.recv() => {
@@ -5598,7 +5611,7 @@ async fn run<T>(
     }
 
     info!("rustbgpd exiting");
-    grpc_server_failed
+    component_failed
 }
 
 #[cfg(test)]
@@ -6135,6 +6148,8 @@ mod tests {
             man.contains(".SH EXIT STATUS"),
             "man page missing the EXIT STATUS section"
         );
+        assert!(man.contains("legacy BGP listen mode could bind\nneither family"));
+        assert!(man.contains("mode could not bind every configured endpoint"));
     }
 
     fn tcp_ao_neighbor_toml(address: &str) -> String {
