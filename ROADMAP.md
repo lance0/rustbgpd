@@ -626,7 +626,8 @@ namespace with shared-fence serialization and independent MD5-BGP continuity.
 Active UI-filter translation, custom-skin migration, and multi-address
 ownership remain open. The external adapter now
 also serves the IXP Manager v7.4 status, live protocol inventory/detail,
-symbols, member received, and member export slice through immutable aliases
+symbols, member received, and member export slice through startup-only direct
+aliases or a bounded file-backed resolver that swaps atomically on Unix SIGHUP
 with an enforced response maximum. Its exact member filtered-prefix wildcard
 journey reads retained rejects, scrubs the daemon-owned reason namespace, and
 synthesizes only conservative reason ids. Its bounded table search now returns

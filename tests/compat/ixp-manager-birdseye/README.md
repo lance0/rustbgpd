@@ -31,7 +31,10 @@ warning and rejects any additional warning.
 
 The live-adapter leg intentionally uses a configured, down peer, so the exact
 lookups, table longest-prefix match, and filtered-prefix query return honest
-empty route arrays. The live BGP smoke test separately pins a populated
+empty route arrays. It drives the same real IXP Manager methods before and
+after an atomic alias-file rename plus `SIGHUP`, then repeats them after a
+malformed reload is rejected, all against one adapter PID. The live BGP smoke
+test separately pins a populated
 less-specific lookup with its installed winner first and every same-prefix
 Add-Path alternative in the same response, plus retained-reject sourcing,
 reserved-community scrubbing, reason fallback, filtering, and source alias
@@ -62,8 +65,9 @@ less-specific table lookup journeys are runtime-supported. The table lookup
 returns one matched prefix atomically with its installed winner first and every
 same-prefix Add-Path alternative; it is not a full table snapshot. Complete
 rejected-route reasons and full-table snapshots remain blockers. Protocol
-aliases are immutable after sidecar startup, so changing one requires a sidecar
-restart. Promoting any blocker, weakening the explicit alias or product-version
+aliases supplied directly remain immutable after startup; bounded file-backed
+aliases reload as one whole resolver generation on Unix `SIGHUP`. Promoting any
+blocker, weakening the explicit alias or product-version
 posture, enabling debug mode, skipping a case, or drifting a pin or response
 makes the gate fail.
 

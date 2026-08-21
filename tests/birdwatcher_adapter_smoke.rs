@@ -678,7 +678,13 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         .expect("make temp dir private");
     let grpc_socket = temp.path().join("rustbgpd.grpc.sock");
     let token_path = temp.path().join("grpc-token");
+    let aliases_path = temp.path().join("protocol-aliases");
     std::fs::write(&token_path, "birdwatcher-smoke-token\n").expect("write test token");
+    std::fs::write(
+        &aliases_path,
+        "pb_0001_as65020=127.0.0.1@master4\npb_0002_as65030=127.0.0.2@master4\n",
+    )
+    .expect("write initial aliases");
 
     // Spawn the adapter before its Unix socket exists. Built via
     // `cargo run` (same fallback pattern the rbgp test helper uses) —
@@ -686,7 +692,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let adapter_stderr = temp.path().join("adapter.stderr.log");
     let mut adapter = Proc {
-        child: Command::new(cargo)
+        child: Command::new(&cargo)
             .args(["run", "--quiet", "-p", "birdwatcher-adapter", "--"])
             .arg("--grpc-addr")
             .arg(format!("unix://{}", grpc_socket.display()))
@@ -694,14 +700,9 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
             .arg(&token_path)
             .arg("--listen")
             .arg(format!("127.0.0.1:{PROCESS_CHOOSES}"))
-            .args([
-                "--protocol-alias",
-                "pb_0001_as65020=127.0.0.1@master4",
-                "--protocol-alias",
-                "pb_0002_as65030=127.0.0.2@master4",
-                "--max-routes",
-                "2",
-            ])
+            .arg("--protocol-alias-file")
+            .arg(&aliases_path)
+            .args(["--max-routes", "2"])
             .stdout(Stdio::null())
             .stderr(Stdio::from(
                 std::fs::File::create(&adapter_stderr).expect("adapter stderr log"),
@@ -1217,5 +1218,129 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         "/route/10.99.0.128%2F25/table/master4",
         403,
         over_limit,
+    );
+
+    // A file-backed alias generation swaps in place. The prior name must
+    // disappear, and a malformed later generation must retain the exact
+    // last-good resolver without replacing the process.
+    let next_aliases = temp.path().join("protocol-aliases.next");
+    std::fs::write(
+        &next_aliases,
+        "pb_reloaded_as65020=127.0.0.1@master4\npb_0002_as65030=127.0.0.2@master4\n",
+    )
+    .expect("stage reloaded aliases");
+    std::fs::rename(&next_aliases, &aliases_path).expect("atomically publish aliases");
+    assert!(
+        Command::new("kill")
+            .args(["-HUP", &adapter_pid.to_string()])
+            .status()
+            .expect("signal adapter")
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (old_status, _) = http_get(adapter_port, "/protocol/pb_0001_as65020").unwrap();
+        let (new_status, _) = http_get(adapter_port, "/protocol/pb_reloaded_as65020").unwrap();
+        if old_status == 404 && new_status == 200 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "alias generation did not swap");
+        thread::sleep(Duration::from_millis(50));
+    }
+    let rejected_before = adapter.stderr().matches("reload rejected").count();
+    std::fs::write(&next_aliases, "malformed alias\n").expect("stage malformed aliases");
+    std::fs::rename(&next_aliases, &aliases_path).expect("publish malformed aliases");
+    assert!(
+        Command::new("kill")
+            .args(["-HUP", &adapter_pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while adapter.stderr().matches("reload rejected").count() == rejected_before {
+        assert!(
+            Instant::now() < deadline,
+            "malformed reload was not observed"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        http_get(adapter_port, "/protocol/pb_0001_as65020")
+            .unwrap()
+            .0,
+        404
+    );
+    assert_eq!(
+        http_get(adapter_port, "/protocol/pb_reloaded_as65020")
+            .unwrap()
+            .0,
+        200
+    );
+    assert_eq!(
+        adapter.child.id(),
+        adapter_pid,
+        "alias reload must retain one PID"
+    );
+
+    // Direct aliases remain a separate startup-only compatibility path.
+    // Exercise the real branch so file mode cannot accidentally replace it.
+    let direct_stderr = temp.path().join("direct-adapter.stderr.log");
+    let mut direct_adapter = Proc {
+        child: Command::new(&cargo)
+            .args(["run", "--quiet", "-p", "birdwatcher-adapter", "--"])
+            .arg("--grpc-addr")
+            .arg(format!("unix://{}", grpc_socket.display()))
+            .arg("--grpc-token-file")
+            .arg(&token_path)
+            .args([
+                "--listen",
+                "127.0.0.1:0",
+                "--protocol-alias",
+                "pb_direct_as65020=127.0.0.1@master4",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(std::fs::File::create(&direct_stderr).unwrap()))
+            .spawn()
+            .expect("spawn direct-alias adapter"),
+        name: "direct-alias adapter",
+        stderr_path: direct_stderr.clone(),
+    };
+    let direct_port = wait_for_logged(
+        &mut direct_adapter,
+        &direct_stderr,
+        "direct listener",
+        |logs| {
+            logs.split("127.0.0.1:")
+                .nth(1)?
+                .split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse()
+                .ok()
+        },
+    );
+    assert_eq!(
+        get_json(direct_port, "/protocol/pb_direct_as65020", "direct adapter")["protocol"]["protocol"],
+        "pb_direct_as65020"
+    );
+    let invalid_direct = Command::new(&cargo)
+        .args(["run", "--quiet", "-p", "birdwatcher-adapter", "--"])
+        .env("NO_COLOR", "1")
+        .arg("--grpc-addr")
+        .arg(format!("unix://{}", grpc_socket.display()))
+        .args([
+            "--listen",
+            "127.0.0.1:0",
+            "--protocol-alias",
+            "direct_bad=not-an-ip@master4",
+        ])
+        .output()
+        .expect("run invalid direct alias");
+    let invalid_direct = String::from_utf8(invalid_direct.stderr).unwrap();
+    assert!(
+        invalid_direct.contains("invalid protocol alias")
+            && invalid_direct.contains("direct_bad=not-an-ip@master4")
+            && invalid_direct.contains("malformed peer IP"),
+        "direct startup diagnostics must remain detailed: {invalid_direct}"
     );
 }

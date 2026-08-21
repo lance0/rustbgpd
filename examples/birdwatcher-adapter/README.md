@@ -41,7 +41,8 @@ Flags (also settable via env):
 | `--grpc-addr` | `BIRDWATCHER_ADAPTER_GRPC_ADDR` | (required) | rustbgpd gRPC endpoint (`http[s]://` or `unix:///absolute/path`) |
 | `--grpc-token-file` | `BIRDWATCHER_ADAPTER_GRPC_TOKEN_FILE` | (unset) | Optional rustbgpd bearer-token file |
 | `--listen` | `BIRDWATCHER_ADAPTER_LISTEN` | `127.0.0.1:8080` | REST listen address |
-| `--protocol-alias PROTOCOL=PEER_IP@TABLE` | `BIRDWATCHER_ADAPTER_PROTOCOL_ALIASES` (semicolon-delimited) | (unset) | Repeatable immutable Bird's Eye protocol/table identity |
+| `--protocol-alias PROTOCOL=PEER_IP@TABLE` | `BIRDWATCHER_ADAPTER_PROTOCOL_ALIASES` (semicolon-delimited) | (unset) | Repeatable startup-only Bird's Eye protocol/table identity |
+| `--protocol-alias-file PATH` | `BIRDWATCHER_ADAPTER_PROTOCOL_ALIAS_FILE` | (unset) | File-backed aliases; mutually exclusive with `--protocol-alias` |
 | `--max-routes` | `BIRDWATCHER_ADAPTER_MAX_ROUTES` | `1000` | Maximum route-array response size; must be non-zero |
 
 The command-line token path takes precedence over the environment variable.
@@ -114,6 +115,17 @@ HTTP listener starts. Aliases apply consistently to inventory,
 protocol detail, received/exported/filtered/noexport lookups, and route
 `from_protocol`; unmapped peers retain `bgp_<address>` and table `master`, and
 bare peer-IP lookup remains accepted.
+
+For live member changes on Unix, put one mapping per line in
+`--protocol-alias-file`; blank lines and `#` comments are ignored. The file is
+limited to 1 MiB and 4,096 mappings and must be UTF-8. Publish a complete file
+with an atomic rename, then send the adapter `SIGHUP`. A valid changed file
+replaces the whole resolver in one generation without changing the PID;
+unchanged content is a no-op. Unreadable, oversized, malformed, duplicate, or
+non-UTF-8 input is rejected with a sanitized log message and the exact prior
+generation remains active. Each HTTP request snapshots one generation before
+dispatch, so no response can mix old and new identities. Direct
+`--protocol-alias` values remain startup-only and do not reload.
 
 Every successful response retains Alice-LG's `api.Version` and
 `api.result_from_cache` keys while also exposing Bird's Eye's lowercase

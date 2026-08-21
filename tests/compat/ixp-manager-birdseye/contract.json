@@ -2,7 +2,8 @@
   "birdseye_commit": "7f8c2375e610578bcf6ea5ceec630a180f945b89",
   "ixp_manager_commit": "300b7e0ba9adb0aaac975899e45fc8bcbc0ca37d",
   "protocol_aliases": {
-    "member-v4": "pb_as64496"
+    "member-v4": "pb_as64496",
+    "member-v4-reloaded": "pb_reloaded_as64496"
   },
   "routing_tables": [
     "master4"
@@ -27,11 +28,12 @@
     "exact-export-route",
     "filtered-prefix-wildcard",
     "less-specific-longest-prefix-match",
-    "atomic-all-candidate-prefix-snapshot"
+    "atomic-all-candidate-prefix-snapshot",
+    "file-backed-runtime-protocol-alias-reconfiguration"
   ],
   "unsupported": [
     "complete-rejected-route-reason-inventory",
     "full-table-snapshot",
-    "runtime-protocol-alias-reconfiguration"
+    "direct-runtime-protocol-alias-reconfiguration"
   ]
 }
