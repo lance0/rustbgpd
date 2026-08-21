@@ -76,7 +76,10 @@ docker run --rm --user "$(id -u):$(id -g)" \
   "$image" /harness/run-in-container.sh
 
 supported="$capture_output/ixp-manager-v7.4-rustbgpd.json"
-for capture in config-implicit.json config-ui-filter.json config-skin.json "$supported"; do
+for capture in config-default.json config-default-excluded.json \
+  config-default-all-excluded.json config-explicit-empty.json \
+  config-explicit-nonempty.json config-implicit.json config-ui-filter.json \
+  config-skin.json "$supported"; do
   [ -f "$capture_output/$(basename "$capture")" ] || { echo "missing real IXP Manager capture: $capture" >&2; exit 1; }
   chmod 600 "$capture_output/$(basename "$capture")"
 done
@@ -109,11 +112,23 @@ candidate_full="$tmp/candidate-full"
 candidate_supported="$tmp/candidate-supported"
 render_v2 "$capture_output/config-ui-filter.json" "$candidate_full"
 render_v2 "$supported" "$candidate_supported"
+candidate_default="$tmp/candidate-default"
+candidate_excluded="$tmp/candidate-default-excluded"
+candidate_all_excluded="$tmp/candidate-default-all-excluded"
+candidate_explicit_empty="$tmp/candidate-explicit-empty"
+candidate_explicit_nonempty="$tmp/candidate-explicit-nonempty"
+render_v2 "$capture_output/config-default.json" "$candidate_default"
+render_v2 "$capture_output/config-default-excluded.json" "$candidate_excluded"
+render_v2 "$capture_output/config-default-all-excluded.json" "$candidate_all_excluded"
+render_v2 "$capture_output/config-explicit-empty.json" "$candidate_explicit_empty"
+render_v2 "$capture_output/config-explicit-nonempty.json" "$candidate_explicit_nonempty"
 expected_v2_aliases="$tmp/expected-v2-aliases"
 printf '%s\n' \
   'pb_0001_as1213=10.1.0.10@master4' \
   'pb_0004_as112=10.1.0.6@master4' >"$expected_v2_aliases"
-for candidate in "$candidate_full" "$candidate_supported"; do
+for candidate in "$candidate_full" "$candidate_supported" "$candidate_default" \
+  "$candidate_excluded" "$candidate_all_excluded" "$candidate_explicit_empty" \
+  "$candidate_explicit_nonempty"; do
   aliases="$candidate/birdwatcher-protocol-aliases.conf"
   cmp "$expected_v2_aliases" "$aliases"
   [ "$(stat -c %a "$aliases")" = 600 ]
@@ -167,6 +182,24 @@ check_policy() {
   printf '\n%s\n' "$tests" >>"$proof"
   "$repo/target/debug/rbgp" policy check "$proof" >/dev/null
 }
+check_policy "$candidate_default/policy/ixp-hygiene.rpol" "$tmp/default-hygiene.rpol" '
+test default-listed-rejects { route { prefix 77.72.72.0/21; as-path "174"; rpki valid } expect ixp-manager-hygiene == reject }
+test default-unlisted-accepts { route { prefix 77.72.72.0/21; as-path "64512"; rpki valid } expect ixp-manager-hygiene == accept }
+'
+check_policy "$candidate_excluded/policy/ixp-hygiene.rpol" "$tmp/excluded-hygiene.rpol" '
+test excluded-accepts { route { prefix 77.72.72.0/21; as-path "174"; rpki valid } expect ixp-manager-hygiene == accept }
+test remaining-default-rejects { route { prefix 77.72.72.0/21; as-path "1299"; rpki valid } expect ixp-manager-hygiene == reject }
+'
+check_policy "$candidate_all_excluded/policy/ixp-hygiene.rpol" "$tmp/all-excluded-hygiene.rpol" '
+test all-excluded-accepts { route { prefix 77.72.72.0/21; as-path "174"; rpki valid } expect ixp-manager-hygiene == accept }
+'
+check_policy "$candidate_explicit_empty/policy/ixp-hygiene.rpol" "$tmp/explicit-empty-hygiene.rpol" '
+test explicit-empty-accepts { route { prefix 77.72.72.0/21; as-path "174"; rpki valid } expect ixp-manager-hygiene == accept }
+'
+check_policy "$candidate_explicit_nonempty/policy/ixp-hygiene.rpol" "$tmp/explicit-hygiene.rpol" '
+test override-rejects { route { prefix 77.72.72.0/21; as-path "64511"; rpki valid } expect ixp-manager-hygiene == reject }
+test former-default-accepts { route { prefix 77.72.72.0/21; as-path "174"; rpki valid } expect ixp-manager-hygiene == accept }
+'
 check_policy "$candidate_full/policy/client-1.rpol" "$tmp/full-client-1.rpol" '
 test full-advertise-accumulates {
     route { prefix 77.72.72.0/21; as-path "1213" }

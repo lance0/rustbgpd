@@ -9,7 +9,8 @@ the active IXP Manager `VIEW_SKIN`. IXP Manager v7.4 then renders the strict
 `rustbgpd.ixp-manager.router-config/v2` JSON document through its normal router
 configuration generator. The exporter reads IXP Manager's sanitized session,
 IRR, max-prefix, authentication, RPKI, and route-filter state; it does not copy
-or translate the upstream BIRD templates.
+or translate the upstream BIRD templates. It does re-express the exact pinned
+v7.4 15-ASN default no-transit list inside this segregated GPL subtree.
 
 The exporter preserves every applicable UI filter as one ordered row,
 including peer identity, distinct received and advertised prefixes, protocol,
@@ -27,8 +28,10 @@ candidate, or receipt. The Rust renderer has no HTTP client and does not handle
 IXP Manager credentials.
 
 The exporter deliberately reports active BIRD skin overrides so the Rust
-renderer can refuse instead of silently losing policy. It also distinguishes
-an unset no-transit override from an explicitly empty override. This is not a
-generic IXP Manager policy engine or a custom-skin translator. See
+renderer can refuse instead of silently losing policy. An unset no-transit
+override emits the pinned default after exclusions; an explicit override
+replaces that set, ignores exclusions, and may intentionally be empty. Both
+paths are sorted and deduplicated. This is not a generic IXP Manager policy
+engine or a custom-skin translator. See
 `tools/rs-config-render/README.md` for the bounded manual render and
 strict-check workflow.

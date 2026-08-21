@@ -9,6 +9,9 @@ const FIXTURE: &[u8] = include_bytes!("fixtures/ixp-manager-v1-supported.json");
 const V2_FILTERS: &[u8] = include_bytes!("fixtures/ixp-manager-v2-ui-filters.json");
 const V2_SUPPORTED: &[u8] = include_bytes!("fixtures/ixp-manager-v2-supported.json");
 const SECRET: &str = "mcWsqMdzGwTKt67g";
+const DEFAULT_TRANSIT: [u32; 15] = [
+    174, 701, 1299, 2914, 3257, 3320, 3356, 3491, 4134, 5511, 6453, 6461, 6762, 6830, 7018,
+];
 
 fn digest(path: &std::path::Path) -> String {
     use sha2::{Digest, Sha256};
@@ -167,6 +170,61 @@ fn supported_render_is_deterministic_and_explicit() {
         !rendered(&maximum).unwrap().files["policy/ixp-hygiene.rpol"]
             .contains("ixp-manager-too-specific")
     );
+}
+
+#[test]
+fn effective_default_no_transit_is_v2_only_exact_and_executable() {
+    let mut default = v2_value(V2_SUPPORTED);
+    default["policy"]["no_transit"]["source"] = "IXP_MANAGER_EFFECTIVE_DEFAULT".into();
+    default["policy"]["no_transit"]["asns"] = serde_json::to_value(DEFAULT_TRANSIT).unwrap();
+    let files = rendered_v2(&default).unwrap().files;
+    assert_eq!(
+        files["birdwatcher-protocol-aliases.conf"],
+        "pb_0001_as1213=10.1.0.10@master4\npb_0004_as112=10.1.0.6@master4\n"
+    );
+    let hygiene = &files["policy/ixp-hygiene.rpol"];
+    assert!(hygiene.contains(
+        "asn-set ixp-manager-no-transit-asns { 174, 701, 1299, 2914, 3257, 3320, 3356, 3491, 4134, 5511, 6453, 6461, 6762, 6830, 7018 }"
+    ));
+    assert!(hygiene.contains(
+        "term reject-transit-leak { if route.as-path matches \"_(174|701|1299|2914|3257|3320|3356|3491|4134|5511|6453|6461|6762|6830|7018)_\" { reject } }"
+    ));
+    assert_policy_tests(
+        hygiene,
+        r#"
+test pinned-default-rejects { route { prefix 77.72.72.0/21; as-path "174"; rpki valid } expect ixp-manager-hygiene == reject }
+test unlisted-accepts { route { prefix 77.72.72.0/21; as-path "64512"; rpki valid } expect ixp-manager-hygiene == accept }
+"#,
+    );
+
+    let mut empty = default.clone();
+    empty["policy"]["no_transit"]["asns"] = serde_json::json!([]);
+    assert!(
+        !rendered_v2(&empty).unwrap().files["policy/ixp-hygiene.rpol"]
+            .contains("reject-transit-leak")
+    );
+    for invalid in [
+        serde_json::json!([0]),
+        serde_json::json!([701, 174]),
+        serde_json::json!([174, 174]),
+    ] {
+        let mut input = default.clone();
+        input["policy"]["no_transit"]["asns"] = invalid;
+        assert_eq!(
+            rendered_v2(&input).unwrap_err(),
+            Error::Refused("invalid no-transit data")
+        );
+    }
+    let mut implicit = empty;
+    implicit["policy"]["no_transit"]["source"] = "IXP_MANAGER_IMPLICIT_DEFAULT".into();
+    assert_eq!(
+        rendered_v2(&implicit).unwrap_err(),
+        Error::Refused("unsupported no-transit source")
+    );
+    let mut v1 = value();
+    v1["policy"]["no_transit"]["source"] = "IXP_MANAGER_EFFECTIVE_DEFAULT".into();
+    v1["policy"]["no_transit"]["asns"] = serde_json::to_value(DEFAULT_TRANSIT).unwrap();
+    assert!(rendered(&v1).is_err());
 }
 
 #[test]

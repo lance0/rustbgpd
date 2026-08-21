@@ -54,10 +54,24 @@ if( (bool)$router->rpki ) {
 }
 sort( $caches, SORT_STRING );
 
+$defaultNoTransit = [
+    174, 701, 1299, 2914, 3257, 3320, 3356, 3491, 4134, 5511, 6453, 6461,
+    6762, 6830, 7018,
+];
 $override = config( 'ixp.no_transit_asns.override' );
-$noTransitSource = $override === false
-    ? 'IXP_MANAGER_IMPLICIT_DEFAULT' : 'IXP_NO_TRANSIT_ASNS_OVERRIDE';
-$noTransit = $override === false ? [] : array_map( 'intval', $override );
+if( $override === false ) {
+    $excluded = array_fill_keys( array_map(
+        'intval', (array)config( 'ixp.no_transit_asns.exclude' )
+    ), true );
+    $noTransit = array_values( array_filter(
+        $defaultNoTransit, static fn( $asn ) => !isset( $excluded[$asn] )
+    ) );
+    $noTransitSource = 'IXP_MANAGER_EFFECTIVE_DEFAULT';
+} else {
+    $noTransit = array_map( 'intval', $override );
+    $noTransitSource = 'IXP_NO_TRANSIT_ASNS_OVERRIDE';
+}
+$noTransit = array_values( array_unique( $noTransit, SORT_NUMERIC ) );
 sort( $noTransit, SORT_NUMERIC );
 
 $clients = [];
