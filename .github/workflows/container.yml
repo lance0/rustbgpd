@@ -45,7 +45,7 @@ jobs:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      - run: cargo test --locked --workspace
 
   build-and-push:
     needs: [verify-tag-version, test]

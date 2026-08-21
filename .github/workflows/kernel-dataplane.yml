@@ -529,14 +529,14 @@ jobs:
           set -euo pipefail
           receipt='listener::tests::overlapping_tcp_ao_owned_union_kernel_receipt'
           test_count="$({
-            cargo test -p rustbgpd-transport --lib -- --list
+            cargo test --locked -p rustbgpd-transport --lib -- --list
           } | awk -v target="${receipt}:" \
             '$1 == target && $2 == "test" { count++ } END { print count + 0 }')"
           if [ "$test_count" -ne 1 ]; then
             echo "error: expected exactly one kernel receipt named $receipt; found $test_count" >&2
             exit 1
           fi
-          cargo test -p rustbgpd-transport --lib "$receipt" -- \
+          cargo test --locked -p rustbgpd-transport --lib "$receipt" -- \
             --ignored --exact --nocapture
 
       - name: Run queued-child TCP-AO successor reconciliation receipt
@@ -545,14 +545,14 @@ jobs:
           set -euo pipefail
           receipt='listener::tests::queued_tcp_ao_child_reconciles_immediate_listener_successor'
           test_count="$({
-            cargo test -p rustbgpd-transport --lib -- --list
+            cargo test --locked -p rustbgpd-transport --lib -- --list
           } | awk -v target="${receipt}:" \
             '$1 == target && $2 == "test" { count++ } END { print count + 0 }')"
           if [ "$test_count" -ne 1 ]; then
             echo "error: expected exactly one kernel receipt named $receipt; found $test_count" >&2
             exit 1
           fi
-          cargo test -p rustbgpd-transport --lib "$receipt" -- \
+          cargo test --locked -p rustbgpd-transport --lib "$receipt" -- \
             --ignored --exact --nocapture
 
       - name: Run TCP-AO deletion and listener-queue boundary receipt
@@ -561,14 +561,14 @@ jobs:
           set -euo pipefail
           receipt='socket_opts::tests::tcp_ao_delete_kernel_receipt_preserves_covering_owners_and_queue_boundary'
           test_count="$({
-            cargo test -p rustbgpd-transport --lib -- --list
+            cargo test --locked -p rustbgpd-transport --lib -- --list
           } | awk -v target="${receipt}:" \
             '$1 == target && $2 == "test" { count++ } END { print count + 0 }')"
           if [ "$test_count" -ne 1 ]; then
             echo "error: expected exactly one kernel receipt named $receipt; found $test_count" >&2
             exit 1
           fi
-          cargo test -p rustbgpd-transport --lib "$receipt" -- \
+          cargo test --locked -p rustbgpd-transport --lib "$receipt" -- \
             --ignored --exact --nocapture
 
       # The staged verified archive (LAN-1024) composes with the buildx GHA

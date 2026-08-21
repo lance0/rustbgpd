@@ -32,7 +32,7 @@ jobs:
         run: |
           set -euo pipefail
           test_name='manager::tests::update_groups_fault_corpus::deterministic_fault_corpus_extended'
-          listing="$(cargo test -p rustbgpd-rib --lib "$test_name" -- --ignored --exact --list)"
+          listing="$(cargo test --locked -p rustbgpd-rib --lib "$test_name" -- --ignored --exact --list)"
           printf '%s\n' "$listing"
           if ! grep -Fqx "$test_name: test" <<<"$listing"; then
             echo "exact ignored test missing: $test_name" >&2
@@ -52,7 +52,7 @@ jobs:
           : >"$log"
 
           set +e
-          cargo test -p rustbgpd-rib --lib "$test_name" -- \
+          cargo test --locked -p rustbgpd-rib --lib "$test_name" -- \
             --ignored --exact --nocapture 2>&1 | tee -a "$log"
           pipeline_status=("${PIPESTATUS[@]}")
           corpus_status=${pipeline_status[0]}
@@ -73,7 +73,7 @@ jobs:
               RUSTBGPD_UPDATE_GROUP_SEED_COUNT=1 \
               RUSTBGPD_UPDATE_GROUP_SCENARIO="$scenario" \
               RUSTBGPD_UPDATE_GROUP_MINIMIZE=1 \
-                cargo test -p rustbgpd-rib --lib "$test_name" -- \
+                cargo test --locked -p rustbgpd-rib --lib "$test_name" -- \
                   --ignored --exact --nocapture 2>&1 | tee -a "$log"
               pipeline_status=("${PIPESTATUS[@]}")
               minimize_status=${pipeline_status[0]}

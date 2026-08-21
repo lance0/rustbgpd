@@ -55,7 +55,7 @@ jobs:
               "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
               CARGO_TARGET_DIR=target/privileged-ci \
               EVPN_LINUX_NETNS=1 \
-              cargo test -p rustbgpd-evpn-linux --test "$1" -- --nocapture
+              cargo test --locked -p rustbgpd-evpn-linux --test "$1" -- --nocapture
           }
           run_privileged_cargo_test netns_dataplane
           run_privileged_cargo_test netns_fdb_nhg

@@ -60,7 +60,7 @@ jobs:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      - run: cargo test --locked --workspace
 
   build:
     needs: verify-tag-version
@@ -123,7 +123,7 @@ jobs:
         # aarch64-linux-gnu-gcc toolchain installed above.
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --workspace --release --features rustbgpd/jemalloc --target ${{ matrix.target }}
+        run: cargo build --locked --workspace --release --features rustbgpd/jemalloc --target ${{ matrix.target }}
 
       - name: Package binaries
         run: |
@@ -179,7 +179,7 @@ jobs:
             RBGP=target/${{ matrix.target }}/release/rbgp
             RUSTBGPD=target/${{ matrix.target }}/release/rustbgpd
           else
-            cargo build -p rustbgpctl -p rustbgpd
+            cargo build --locked -p rustbgpctl -p rustbgpd
             RBGP=target/debug/rbgp
             RUSTBGPD=target/debug/rustbgpd
           fi

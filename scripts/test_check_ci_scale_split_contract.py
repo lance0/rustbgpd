@@ -7,19 +7,30 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.check_ci_scale_split_contract import _jobs, aggregate_shell, check
+from scripts.check_ci_scale_split_contract import WORKFLOWS, _jobs, aggregate_shell, check
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ".github/workflows/ci.yml"
 
 
 class ScaleSplitContractTests(unittest.TestCase):
-    def mutate(self, old: str, new: str = "", occurrence: int = 0) -> None:
+    def copy_workflows(self, root: Path) -> None:
+        for workflow in WORKFLOWS:
+            target = root / workflow
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / workflow, target)
+
+    def mutate(
+        self,
+        old: str,
+        new: str = "",
+        occurrence: int = 0,
+        workflow: str = WORKFLOW,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            target = root / WORKFLOW
-            target.parent.mkdir(parents=True)
-            shutil.copy2(ROOT / WORKFLOW, target)
+            self.copy_workflows(root)
+            target = root / workflow
             text = target.read_text()
             start = 0
             for _ in range(occurrence + 1):
@@ -32,6 +43,76 @@ class ScaleSplitContractTests(unittest.TestCase):
     def test_live_contract(self) -> None:
         self.assertEqual([], check(ROOT))
 
+    def test_comments_toolchain_selector_and_new_workflow_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.copy_workflows(root)
+            target = root / WORKFLOW
+            target.write_text(
+                "# cargo check --workspace\n"
+                + target.read_text().replace(
+                    "cargo check --locked -p rustbgpd-rib",
+                    "cargo +1.95 check --locked -p rustbgpd-rib",
+                    1,
+                )
+            )
+            self.assertEqual([], check(root))
+            added = root / ".github/workflows/new.yml"
+            added.write_text("jobs:\n  new:\n    steps:\n      - run: cargo +1.95 check --workspace\n")
+            self.assertIn("command is missing --locked", "\n".join(check(root)))
+            added.write_text(added.read_text().replace("check --workspace", "check --locked --locked --workspace"))
+            self.assertIn("command has duplicate --locked", "\n".join(check(root)))
+            added.unlink()
+            target.write_text(target.read_text() + "\n      - run: cargo check --workspace -- --locked \\\n")
+            self.assertIn("command has --locked after Cargo's -- separator", "\n".join(check(root)))
+
+    def test_lockfile_fidelity_mutations_fail_closed(self) -> None:
+        cases = (
+            (
+                WORKFLOW,
+                "cargo clippy --locked --workspace --all-targets",
+                "cargo clippy --workspace --all-targets",
+            ),
+            (
+                ".github/workflows/update-group-fault.yml",
+                'listing="$(cargo test --locked -p rustbgpd-rib --lib "$test_name" -- --ignored --exact --list)"',
+                'listing="$(cargo test -p rustbgpd-rib --lib "$test_name" -- --ignored --exact --list)" --locked',
+            ),
+            (
+                WORKFLOW,
+                "cargo check --locked -p rustbgpd-rib --features bench-internals --benches",
+                "cargo check -p rustbgpd-rib --features bench-internals --benches; echo --locked",
+            ),
+            (
+                WORKFLOW,
+                "cargo test --locked -p rustbgpd --no-default-features --features bench-internals --test policy_set_store_allocation shared_set_batch_allocations_do_not_scale_per_peer -- --exact",
+                "cargo test -p rustbgpd --no-default-features --features bench-internals --test policy_set_store_allocation shared_set_batch_allocations_do_not_scale_per_peer -- --locked --exact",
+            ),
+            (
+                WORKFLOW,
+                "bench/scale/rrharness/Cargo.toml --locked",
+                "bench/scale/rrharness/Cargo.toml",
+            ),
+            (
+                WORKFLOW,
+                "bench/scale/rrtransport/Cargo.toml --locked -- smoke",
+                "bench/scale/renamed/Cargo.toml --locked -- smoke",
+            ),
+            (
+                WORKFLOW,
+                "- run: cargo test --locked --workspace",
+                "- run: cargo test --locked --workspace\n      - run: cargo check --workspace",
+            ),
+            (
+                WORKFLOW,
+                "cargo build --locked -p rs-config-render",
+                "true",
+            ),
+        )
+        for workflow, old, new in cases:
+            with self.subTest(workflow=workflow, seam=old):
+                self.mutate(old, new, workflow=workflow)
+
     def test_semantic_mutations_fail_closed(self) -> None:
         cases = (
             ("  v064_validator:\n", "  renamed_validator:\n"),
@@ -41,8 +122,8 @@ class ScaleSplitContractTests(unittest.TestCase):
             ("  check:\n", "  renamed_check:\n"),
             ("  msrv:\n", "  renamed_msrv:\n"),
             ("  evpn_bum_filter_kernel:\n", "  renamed_evpn:\n"),
-            ("- run: cargo test --workspace", "- run: true"),
-            ("- run: cargo doc --workspace --lib --no-deps", "- run: true"),
+            ("- run: cargo test --locked --workspace", "- run: true"),
+            ("- run: cargo doc --locked --workspace --lib --no-deps", "- run: true"),
             ('RUSTDOCFLAGS: "-D warnings"', 'RUSTDOCFLAGS: ""'),
             (
                 "- name: Wire crate README freshness gate",
