@@ -83,21 +83,27 @@ sudo -u rustbgpd /usr/bin/rs-config-render activate \
 
 The service must read
 `/var/lib/rustbgpd/ixp-manager/activation/current/config.toml`. The state path
-must be absolute and its immediate parent must exist. Use `--initial` only for
-the first publication, when no current generation and no reachable daemon
-exist. Normalized comparison TOML is capped at 4,194,299 bytes so its encoded
-request, including five bytes of protobuf overhead, remains within 4 MiB. The
-helper rechecks a private immutable generation, atomically
-renames the relative `current` symlink, runs the command once, and requires both
-`rbgp health` and `rbgp config diff` to settle. Equal content is a no-op. A
-failed replacement attempts to restore the prior link and settle it again;
-exit 4 proves that link and runtime were restored.
+must be absolute, pre-created as a non-symlink mode-0700 directory, and owned by
+the `rustbgpd` account. Keep the candidate and state exclusively writable by
+that identity; do not run another publisher or reloader concurrently. Use
+`--initial` only when no current generation and no reachable daemon exist.
+Normalized comparison TOML is capped at 4,194,299 bytes so its encoded request,
+including five bytes of protobuf overhead, remains within 4 MiB.
+
+The helper rechecks a private immutable generation, atomically renames the
+relative `current` symlink, runs one synchronous executable, and requires both
+`rbgp health` and `rbgp config diff` to settle. Equal content is a no-op. Exit 4
+is limited to a command that could not start: the helper restores the prior
+link without a second activation and verifies the unchanged prior runtime. Once
+the command starts, a nonzero exit, timeout, or unsettled runtime leaves
+`current` on the candidate and returns exit 5 for explicit operator recovery.
 
 Authorize the `rustbgpd` account in sudoers for only the exact
 `/usr/bin/systemctl reload-or-restart rustbgpd` command. The private
 `activation-receipt.json` is written last; generations are retained for
-operator inspection. Exit 0 means activated or no-op, 2 refusal, 4 a proven
-rollback, and 5 means recovery or receipt durability is unproven. A receipt may
+operator inspection. Exit 0 means activated or no-op, 2 refusal, 4 proven
+pre-effect restoration, and 5 means recovery or receipt durability is
+unproven. A receipt may
 therefore be absent or stale after exit 5. The helper does not deploy services,
 prune generations, retry indefinitely, or call IXP Manager. These examples use
 package paths; release archives install the three binaries under `/usr/local/bin`.

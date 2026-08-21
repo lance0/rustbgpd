@@ -180,9 +180,10 @@ fn main() -> ExitCode {
             Err(error) => {
                 let (code, message) = match error {
                     rs_config_render::activation::Error::Refused(reason) => (2, reason),
-                    rs_config_render::activation::Error::RolledBack => {
-                        (4, "candidate failed settlement; prior generation restored")
-                    }
+                    rs_config_render::activation::Error::RolledBack => (
+                        4,
+                        "activation command did not start; prior generation restored",
+                    ),
                     rs_config_render::activation::Error::RecoveryRequired => {
                         (5, "recovery required; inspect private activation state")
                     }

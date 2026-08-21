@@ -18,10 +18,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no-transit policy, incomplete or ambiguous member data, and unsupported
   router modes fail closed. The local activation command rechecks and
   atomically publishes immutable generations, settles real health/config diff,
-  no-ops on equal content, and attempts to restore and re-settle the prior
-  generation on failure. Exit 4 proves restoration; exit 5 reports that
-  recovery or receipt durability is unproven. M96 proves the successful path
-  against MD5-authenticated FRR; authenticated fetch and IXP Manager callbacks
+  no-ops on equal content, and restores the prior link without a second
+  activation only when the command cannot start. Once started, failure or
+  unsettled state retains the candidate. Exit 4 proves pre-effect restoration;
+  exit 5 reports that recovery or receipt durability is unproven. M96 proves the
+  pre-effect path against MD5-authenticated FRR; focused tests prove the started
+  failure boundary. Authenticated fetch and IXP Manager callbacks
   remain external. (LAN-1105)
 - `birdwatcher-adapter` now serves IXP Manager v7.4.0's exact received and
   export route journeys for IPv4/IPv6 unicast. Every page carries the exact

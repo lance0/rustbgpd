@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M96: real IXP Manager v7.4 render -> atomic local activation -> rollback.
+# M96: real IXP Manager v7.4 render -> atomic local activation and refusal.
 
 set -euo pipefail
 
@@ -131,12 +131,12 @@ runtime_equal() {
 }
 
 private_state() {
-    docker exec "$RUST" bash -c \
-        "test \"\$(stat -c %a '$STATE')\" = 700
-         test \"\$(stat -c %a '$STATE/activation.lock')\" = 600
-         test \"\$(stat -c %a '$STATE/activation-receipt.json')\" = 600
-         test -L '$STATE/current'
-         ! find '$STATE/generations' -type d ! -perm 700 -print -quit | grep -q .
+    docker exec "$RUST" bash -ec \
+        "test \"\$(stat -c %a '$STATE')\" = 700 &&
+         test \"\$(stat -c %a '$STATE/activation.lock')\" = 600 &&
+         test \"\$(stat -c %a '$STATE/activation-receipt.json')\" = 600 &&
+         test -L '$STATE/current' &&
+         ! find '$STATE/generations' -type d ! -perm 700 -print -quit | grep -q . &&
          ! find '$STATE/generations' -type f ! -perm 600 -print -quit | grep -q ."
 }
 
@@ -186,6 +186,10 @@ jq -e '.status == "activated" and .initial == true and .activation_runs == 1
     "$WORK/initial-receipt.json" >/dev/null || fail "initial receipt is incomplete"
 ! grep -Fq "$SECRET" "$WORK/initial-receipt.json" || fail "initial receipt leaked MD5"
 private_state || fail "activation state or generation has a public or wrong file type/mode"
+docker exec "$RUST" chmod 0644 "$STATE/activation-receipt.json"
+if private_state; then fail "private-state probe accepted a public receipt"; fi
+docker exec "$RUST" chmod 0600 "$STATE/activation-receipt.json"
+private_state || fail "private-state probe did not recover after mode restoration"
 docker exec "$RUST" test ! -e /tmp/m96-shell-eval || fail "literal activation argument was shell-evaluated"
 wait_for "MD5 FRR session Established" session_ready
 wait_for "pinned IXP prefix accepted" has_route 31.135.128.0/19
@@ -229,7 +233,7 @@ docker exec "$RUST" bash -c \
 pid_before=$(docker exec "$RUST" pidof -s rustbgpd)
 state_before=$(neighbor)
 start_observer
-activate /var/lib/m96-restart-candidate 4 rollback
+activate /var/lib/m96-restart-candidate 4 rollback "" /definitely/missing/m96-activation
 stop_observer "$WORK/rollback-observer" "$prior_link"
 receipt >"$WORK/rollback-receipt.json"
 bad_target="generations/$(jq -r .candidate_sha256 "$WORK/rollback-receipt.json")"
@@ -250,15 +254,16 @@ jq -n --argjson before "$state_before" --argjson after "$state_after" \
      and (($before.flap_count // 0) == ($after.flap_count // 0))
      and (($after.uptime_seconds // 0) >= ($before.uptime_seconds // 0))' \
     >/dev/null || fail "FRR session flapped or its handle was replaced"
-jq -e '.status == "rolled_back" and .activation_runs == 2
+jq -e '.status == "rolled_back" and .activation_runs == 0
     and .phases.rollback_link.durable == true
-    and .phases.rollback_activation_ran == true and .phases.runtime_equal == true' \
+    and .phases.candidate_activation_ran == false
+    and .phases.rollback_activation_ran == false and .phases.runtime_equal == true' \
     "$WORK/rollback-receipt.json" >/dev/null || fail "rollback receipt is incomplete"
 ! grep -Fq "$SECRET" "$WORK/rollback-receipt.json" || fail "rollback receipt leaked MD5"
 wait_for "route remains accepted after exact rollback" has_route 31.135.128.0/19
 wait_for "hot-added route remains accepted after exact rollback" has_route 31.135.160.0/19
 private_state || fail "rollback left unsafe state modes"
-ok "restart-required SIGHUP candidate rolled back with exact bytes, PID, and session continuity"
+ok "unspawnable activation restored exact bytes, PID, runtime, and session continuity"
 
 docker exec "$FRR" vtysh -c 'show bgp neighbors 192.0.2.18 json' \
     | jq -e '.["192.0.2.18"].bgpState == "Established"' >/dev/null \
@@ -267,4 +272,4 @@ if find "$WORK" \( -name '*.output' -o -name '*receipt.json' \) \
     -exec grep -Fl "$SECRET" {} + | grep -q .; then
     fail "MD5 escaped into helper output or receipts"
 fi
-ok "M96 real-process activation and rollback contract complete"
+ok "M96 real-process activation and pre-effect restoration contract complete"
