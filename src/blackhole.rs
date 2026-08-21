@@ -8,15 +8,13 @@
 //! this daemon lifetime plus marker-matching rows it adopted at startup.
 //!
 //! Crash-restart reconciliation follows ADR-0079: the first reconcile
-//! pass sweeps the kernel dump for rows carrying our ownership marker
-//! (`RTPROT_BGP` + `RTN_BLACKHOLE` in the main table) and adopts them —
-//! they keep discarding traffic and no longer block re-installation as
-//! foreign. A desired prefix re-claims its adopted row implicitly; rows
-//! still unclaimed after a deferral window (FRR zebra's `-K` analog) are
-//! reaped, so a discard route left behind by a crashed daemon can no
-//! longer blackhole traffic forever.
+//! pass intersects marker rows with a durable exact-prefix receipt. They
+//! keep discarding traffic and no longer block re-installation as
+//! foreign. Only private receipt evidence authorizes
+//! adoption, withdrawal, or reaping; an operator marker remains foreign.
 
-use std::collections::{HashMap, HashSet};
+mod owned_state;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
@@ -30,9 +28,11 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::PinnedRuntimeStateDirectory;
 use crate::kernel_route_notify::{
     KernelRouteEvent, KernelRouteEventKind, KernelRouteType, recv_kernel_route_event,
 };
+use owned_state::OwnershipState;
 
 /// Linux `RT_TABLE_MAIN` — the only table this actor writes (the
 /// ADR-0079 ownership marker is scoped to it).
@@ -196,14 +196,16 @@ struct ReconcilerState {
     owned: HashMap<Prefix, OwnedBlackhole>,
     rejected: HashSet<RejectedBlackhole>,
     adoption: AdoptionSweep,
+    ownership: OwnershipState,
 }
 
 impl ReconcilerState {
-    fn new(reap_after: tokio::time::Instant) -> Self {
+    fn new(reap_after: tokio::time::Instant, ownership: OwnershipState) -> Self {
         Self {
             owned: HashMap::new(),
             rejected: HashSet::new(),
             adoption: AdoptionSweep::new(reap_after),
+            ownership,
         }
     }
 }
@@ -258,12 +260,13 @@ impl BlackholeHandle {
 /// Spawn the Linux-backed BLACKHOLE discard reconciler. Returns `None`
 /// when disabled or when the platform has no Linux route primitive.
 #[must_use]
-pub fn spawn(
+pub(crate) fn spawn(
     config: BlackholeConfig,
     rib_tx: mpsc::Sender<RibUpdate>,
     metrics: BgpMetrics,
     status_tx: watch::Sender<Vec<BlackholeStatus>>,
     shutdown: CancellationToken,
+    runtime_state_directory: Option<Arc<PinnedRuntimeStateDirectory>>,
 ) -> Option<BlackholeHandle> {
     if !config.enabled() {
         return None;
@@ -273,7 +276,13 @@ pub fn spawn(
     {
         match LinuxBlackholeFib::connect(metrics.clone()) {
             Ok(fib) => Some(spawn_with_fib(
-                config, rib_tx, fib, metrics, status_tx, shutdown,
+                config,
+                rib_tx,
+                fib,
+                metrics,
+                status_tx,
+                shutdown,
+                OwnershipState::load(runtime_state_directory),
             )),
             Err(e) => {
                 metrics.record_blackhole_discard_kernel_failure("setup");
@@ -291,13 +300,23 @@ fn spawn_with_fib<F>(
     metrics: BgpMetrics,
     status_tx: watch::Sender<Vec<BlackholeStatus>>,
     shutdown: CancellationToken,
+    ownership: OwnershipState,
 ) -> BlackholeHandle
 where
     F: BlackholeFib + Send + 'static,
 {
     let task_shutdown = shutdown.clone();
     let task = tokio::spawn(async move {
-        run_loop(config, rib_tx, fib, metrics, status_tx, task_shutdown).await;
+        run_loop(
+            config,
+            rib_tx,
+            fib,
+            metrics,
+            status_tx,
+            task_shutdown,
+            ownership,
+        )
+        .await;
     });
     BlackholeHandle { shutdown, task }
 }
@@ -309,10 +328,14 @@ async fn run_loop<F>(
     metrics: BgpMetrics,
     status_tx: watch::Sender<Vec<BlackholeStatus>>,
     shutdown: CancellationToken,
+    ownership: OwnershipState,
 ) where
     F: BlackholeFib,
 {
-    let mut state = ReconcilerState::new(tokio::time::Instant::now() + adoption_reap_deferral());
+    let mut state = ReconcilerState::new(
+        tokio::time::Instant::now() + adoption_reap_deferral(),
+        ownership,
+    );
     let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval.tick().await;
@@ -331,7 +354,7 @@ async fn run_loop<F>(
                 // place: a clean shutdown inside the deferral window must
                 // not reap rows BGP never got the chance to re-claim. The
                 // next start re-adopts them (ADR-0079 rule 4).
-                drain_owned(&mut fib, &metrics, &mut state.owned).await;
+                drain_owned(&mut fib, &metrics, &mut state).await;
                 status_tx.send_replace(Vec::new());
                 return;
             }
@@ -513,12 +536,7 @@ async fn reconcile_once<F>(
         })
         .collect();
 
-    let ReconcilerState {
-        owned,
-        rejected,
-        adoption,
-    } = state;
-    let mut statuses = Vec::with_capacity(derived.len() + owned.len());
+    let mut statuses = Vec::with_capacity(derived.len() + state.owned.len());
     let mut current_rejected = HashSet::new();
 
     // One kernel dump per pass replaces the previous per-candidate
@@ -532,38 +550,43 @@ async fn reconcile_once<F>(
                 error = %e,
                 "failed to dump kernel routes for BLACKHOLE reconcile; pass degraded to removals only"
             );
-            degraded_pass_without_dump(fib, metrics, status_tx, owned, rejected, derived).await;
+            degraded_pass_without_dump(fib, metrics, status_tx, state, derived).await;
             return;
         }
     };
 
-    if !adoption.swept {
-        adoption.swept = true;
-        for (prefix, presence) in &presences {
-            if *presence == KernelRoutePresence::Marker && !owned.contains_key(prefix) {
-                adoption.pending.insert(*prefix);
+    if !state.adoption.swept && state.ownership.available {
+        let retained: BTreeSet<Prefix> = state
+            .ownership
+            .prefixes
+            .iter()
+            .copied()
+            .filter(|prefix| presences.get(prefix) == Some(&KernelRoutePresence::Marker))
+            .collect();
+        if state.ownership.replace(retained.clone()) {
+            state.adoption.swept = true;
+            for prefix in retained {
+                state.adoption.pending.insert(prefix);
                 metrics.record_blackhole_discard_adopted();
                 info!(
                     %prefix,
-                    "adopted marker-matching BLACKHOLE discard route from a previous daemon lifetime"
+                    "adopted receipt-backed BLACKHOLE discard route from a previous daemon lifetime"
                 );
             }
         }
     }
 
-    for (prefix, installed) in owned.clone() {
+    for (prefix, installed) in state.owned.clone() {
         if desired.contains_key(&prefix) {
             continue;
         }
-        match fib.remove(prefix).await {
-            Ok(()) => {
-                owned.remove(&prefix);
+        match release_then_remove(fib, metrics, &mut state.ownership, prefix).await {
+            Removal::Removed => {
+                state.owned.remove(&prefix);
                 metrics.record_blackhole_discard_withdrawn();
                 info!(%prefix, "removed BLACKHOLE discard route");
             }
-            Err(e) => {
-                metrics.record_blackhole_discard_kernel_failure("remove");
-                warn!(%prefix, error = %e, "failed to remove BLACKHOLE discard route");
+            Removal::KernelFailed => {
                 statuses.push(BlackholeStatus {
                     prefix,
                     peer: installed.peer,
@@ -571,6 +594,7 @@ async fn reconcile_once<F>(
                     reason: "remove_failed".to_string(),
                 });
             }
+            Removal::OwnershipUnavailable => {}
         }
     }
 
@@ -581,7 +605,7 @@ async fn reconcile_once<F>(
                 reason: candidate.reason,
             };
             current_rejected.insert(rejected_key);
-            if !rejected.contains(&rejected_key) {
+            if !state.rejected.contains(&rejected_key) {
                 metrics.record_blackhole_discard_rejected(candidate.reason);
             }
             statuses.push(BlackholeStatus {
@@ -593,12 +617,22 @@ async fn reconcile_once<F>(
             continue;
         }
 
+        if !state.ownership.available {
+            statuses.push(BlackholeStatus {
+                prefix: candidate.prefix,
+                peer: candidate.route.peer,
+                state: BlackholeState::Failed,
+                reason: "ownership_state_unavailable".to_string(),
+            });
+            continue;
+        }
+
         let presence = presences
             .get(&candidate.prefix)
             .copied()
             .unwrap_or(KernelRoutePresence::Absent);
 
-        if owned.contains_key(&candidate.prefix) {
+        if state.owned.contains_key(&candidate.prefix) {
             match presence {
                 KernelRoutePresence::Marker => {
                     statuses.push(BlackholeStatus {
@@ -610,7 +644,11 @@ async fn reconcile_once<F>(
                     continue;
                 }
                 KernelRoutePresence::Absent => {
-                    owned.remove(&candidate.prefix);
+                    if !state.ownership.remove(candidate.prefix) {
+                        statuses.push(ownership_unavailable_status(&candidate));
+                        continue;
+                    }
+                    state.owned.remove(&candidate.prefix);
                     warn!(
                         prefix = %candidate.prefix,
                         peer = %candidate.route.peer,
@@ -618,7 +656,11 @@ async fn reconcile_once<F>(
                     );
                 }
                 KernelRoutePresence::Foreign => {
-                    owned.remove(&candidate.prefix);
+                    if !state.ownership.remove(candidate.prefix) {
+                        statuses.push(ownership_unavailable_status(&candidate));
+                        continue;
+                    }
+                    state.owned.remove(&candidate.prefix);
                     warn!(
                         prefix = %candidate.prefix,
                         peer = %candidate.route.peer,
@@ -637,13 +679,17 @@ async fn reconcile_once<F>(
 
         match presence {
             KernelRoutePresence::Marker => {
-                // Implicit re-claim (ADR-0079 rule 2): the kernel row is
-                // byte-identical to what we would install, so a desired
-                // prefix claims it instead of failing as foreign. This
-                // covers crash leftovers (the adoption sweep) and any
-                // marker row the owned map lost track of.
-                adoption.pending.remove(&candidate.prefix);
-                owned.insert(
+                if !state.ownership.prefixes.contains(&candidate.prefix) {
+                    statuses.push(BlackholeStatus {
+                        prefix: candidate.prefix,
+                        peer: candidate.route.peer,
+                        state: BlackholeState::Failed,
+                        reason: "foreign_route_exists".to_string(),
+                    });
+                    continue;
+                }
+                state.adoption.pending.remove(&candidate.prefix);
+                state.owned.insert(
                     candidate.prefix,
                     OwnedBlackhole {
                         peer: candidate.route.peer,
@@ -672,15 +718,23 @@ async fn reconcile_once<F>(
                 continue;
             }
             KernelRoutePresence::Absent => {
-                // The adopted row is gone from the kernel; nothing left
-                // to claim or reap — fall through to a fresh install.
-                adoption.pending.remove(&candidate.prefix);
+                if state.ownership.prefixes.contains(&candidate.prefix)
+                    && !state.ownership.remove(candidate.prefix)
+                {
+                    statuses.push(ownership_unavailable_status(&candidate));
+                    continue;
+                }
+                state.adoption.pending.remove(&candidate.prefix);
             }
         }
 
         match fib.install(candidate.prefix).await {
             Ok(()) => {
-                owned.insert(
+                if !state.ownership.add(candidate.prefix) {
+                    statuses.push(ownership_unavailable_status(&candidate));
+                    continue;
+                }
+                state.owned.insert(
                     candidate.prefix,
                     OwnedBlackhole {
                         peer: candidate.route.peer,
@@ -720,33 +774,88 @@ async fn reconcile_once<F>(
     reap_or_report_adopted(
         fib,
         metrics,
-        owned,
-        adoption,
+        &state.owned,
+        &mut state.adoption,
+        &mut state.ownership,
         &desired,
         &presences,
         &mut statuses,
     )
     .await;
 
-    *rejected = current_rejected;
+    state.rejected = current_rejected;
     status_tx.send_replace(statuses);
+}
+
+fn ownership_unavailable_status(candidate: &Candidate<'_>) -> BlackholeStatus {
+    BlackholeStatus {
+        prefix: candidate.prefix,
+        peer: candidate.route.peer,
+        state: BlackholeState::Failed,
+        reason: "ownership_state_unavailable".to_string(),
+    }
+}
+
+enum Removal {
+    Removed,
+    KernelFailed,
+    OwnershipUnavailable,
+}
+
+async fn release_then_remove<F>(
+    fib: &mut F,
+    metrics: &BgpMetrics,
+    ownership: &mut OwnershipState,
+    prefix: Prefix,
+) -> Removal
+where
+    F: BlackholeFib,
+{
+    if !ownership.available {
+        return Removal::OwnershipUnavailable;
+    }
+    if !ownership.prefixes.contains(&prefix) {
+        warn!(%prefix, reason = "receipt lacks owned prefix", "BLACKHOLE ownership disabled");
+        ownership.available = false;
+        return Removal::OwnershipUnavailable;
+    }
+    if !ownership.remove(prefix) {
+        return Removal::OwnershipUnavailable;
+    }
+    match fib.remove(prefix).await {
+        Ok(()) => Removal::Removed,
+        Err(error) => {
+            metrics.record_blackhole_discard_kernel_failure("remove");
+            warn!(%prefix, %error, "failed to remove BLACKHOLE discard route; restoring ownership receipt");
+            if ownership.add(prefix) {
+                Removal::KernelFailed
+            } else {
+                Removal::OwnershipUnavailable
+            }
+        }
+    }
 }
 
 /// Reap adopted-but-unclaimed rows after the deferral, or surface them
 /// as pending so a crash leftover is never invisible to the status
 /// surfaces while it keeps discarding traffic.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "ownership inputs keep the reap order explicit"
+)]
 async fn reap_or_report_adopted<F>(
     fib: &mut F,
     metrics: &BgpMetrics,
     owned: &HashMap<Prefix, OwnedBlackhole>,
     adoption: &mut AdoptionSweep,
+    ownership: &mut OwnershipState,
     desired: &HashMap<Prefix, &Route>,
     presences: &HashMap<Prefix, KernelRoutePresence>,
     statuses: &mut Vec<BlackholeStatus>,
 ) where
     F: BlackholeFib,
 {
-    if adoption.pending.is_empty() {
+    if adoption.pending.is_empty() || !ownership.available {
         return;
     }
     let reapable = tokio::time::Instant::now() >= adoption.reap_after;
@@ -766,7 +875,9 @@ async fn reap_or_report_adopted<F>(
                 // The row vanished or a non-marker route now occupies the
                 // prefix. Either way, the adopted marker is no longer ours
                 // to report or reap.
-                adoption.pending.remove(&prefix);
+                if ownership.remove(prefix) {
+                    adoption.pending.remove(&prefix);
+                }
                 continue;
             }
         }
@@ -782,8 +893,8 @@ async fn reap_or_report_adopted<F>(
             );
             continue;
         }
-        match fib.remove(prefix).await {
-            Ok(()) => {
+        match release_then_remove(fib, metrics, ownership, prefix).await {
+            Removal::Removed => {
                 adoption.pending.remove(&prefix);
                 metrics.record_blackhole_discard_reaped();
                 info!(
@@ -791,9 +902,7 @@ async fn reap_or_report_adopted<F>(
                     "reaped adopted BLACKHOLE discard route that no BGP route re-claimed"
                 );
             }
-            Err(e) => {
-                metrics.record_blackhole_discard_kernel_failure("remove");
-                warn!(%prefix, error = %e, "failed to reap adopted BLACKHOLE discard route");
+            Removal::KernelFailed => {
                 upsert_blackhole_status(
                     statuses,
                     BlackholeStatus {
@@ -804,6 +913,7 @@ async fn reap_or_report_adopted<F>(
                     },
                 );
             }
+            Removal::OwnershipUnavailable => return,
         }
     }
 }
@@ -836,8 +946,7 @@ async fn degraded_pass_without_dump<F>(
     fib: &mut F,
     metrics: &BgpMetrics,
     status_tx: &watch::Sender<Vec<BlackholeStatus>>,
-    owned: &mut HashMap<Prefix, OwnedBlackhole>,
-    rejected: &mut HashSet<RejectedBlackhole>,
+    state: &mut ReconcilerState,
     derived: Vec<Candidate<'_>>,
 ) where
     F: BlackholeFib,
@@ -846,22 +955,20 @@ async fn degraded_pass_without_dump<F>(
         .iter()
         .filter_map(|candidate| candidate.installable.then_some(candidate.prefix))
         .collect();
-    let mut statuses = Vec::with_capacity(derived.len() + owned.len());
+    let mut statuses = Vec::with_capacity(derived.len() + state.owned.len());
     let mut current_rejected = HashSet::new();
 
-    for (prefix, installed) in owned.clone() {
+    for (prefix, installed) in state.owned.clone() {
         if desired.contains(&prefix) {
             continue;
         }
-        match fib.remove(prefix).await {
-            Ok(()) => {
-                owned.remove(&prefix);
+        match release_then_remove(fib, metrics, &mut state.ownership, prefix).await {
+            Removal::Removed => {
+                state.owned.remove(&prefix);
                 metrics.record_blackhole_discard_withdrawn();
                 info!(%prefix, "removed BLACKHOLE discard route");
             }
-            Err(e) => {
-                metrics.record_blackhole_discard_kernel_failure("remove");
-                warn!(%prefix, error = %e, "failed to remove BLACKHOLE discard route");
+            Removal::KernelFailed => {
                 statuses.push(BlackholeStatus {
                     prefix,
                     peer: installed.peer,
@@ -869,6 +976,7 @@ async fn degraded_pass_without_dump<F>(
                     reason: "remove_failed".to_string(),
                 });
             }
+            Removal::OwnershipUnavailable => {}
         }
     }
 
@@ -878,7 +986,12 @@ async fn degraded_pass_without_dump<F>(
                 prefix: candidate.prefix,
                 peer: candidate.route.peer,
                 state: BlackholeState::Failed,
-                reason: "dump_failed".to_string(),
+                reason: if state.ownership.available {
+                    "dump_failed"
+                } else {
+                    "ownership_state_unavailable"
+                }
+                .to_string(),
             });
         } else {
             let rejected_key = RejectedBlackhole {
@@ -886,7 +999,7 @@ async fn degraded_pass_without_dump<F>(
                 reason: candidate.reason,
             };
             current_rejected.insert(rejected_key);
-            if !rejected.contains(&rejected_key) {
+            if !state.rejected.contains(&rejected_key) {
                 metrics.record_blackhole_discard_rejected(candidate.reason);
             }
             statuses.push(BlackholeStatus {
@@ -898,27 +1011,22 @@ async fn degraded_pass_without_dump<F>(
         }
     }
 
-    *rejected = current_rejected;
+    state.rejected = current_rejected;
     status_tx.send_replace(statuses);
 }
 
-async fn drain_owned<F>(
-    fib: &mut F,
-    metrics: &BgpMetrics,
-    owned: &mut HashMap<Prefix, OwnedBlackhole>,
-) where
+async fn drain_owned<F>(fib: &mut F, metrics: &BgpMetrics, state: &mut ReconcilerState)
+where
     F: BlackholeFib,
 {
-    for prefix in owned.keys().copied().collect::<Vec<_>>() {
-        match fib.remove(prefix).await {
-            Ok(()) => {
-                owned.remove(&prefix);
+    for prefix in state.owned.keys().copied().collect::<Vec<_>>() {
+        match release_then_remove(fib, metrics, &mut state.ownership, prefix).await {
+            Removal::Removed => {
+                state.owned.remove(&prefix);
                 metrics.record_blackhole_discard_withdrawn();
             }
-            Err(e) => {
-                metrics.record_blackhole_discard_kernel_failure("remove");
-                warn!(%prefix, error = %e, "failed to drain BLACKHOLE discard route");
-            }
+            Removal::KernelFailed => {}
+            Removal::OwnershipUnavailable => return,
         }
     }
 }
@@ -1201,6 +1309,8 @@ mod tests {
     use rustbgpd_rib::route::RouteOrigin;
     use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Origin};
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -1217,6 +1327,12 @@ mod tests {
         fail_install: HashMap<Prefix, String>,
         fail_remove: HashMap<Prefix, String>,
         fail_dump: Option<String>,
+        receipt: Option<BTreeSet<Prefix>>,
+        receipt_disk: Option<BTreeSet<Prefix>>,
+        receipt_path: Option<PathBuf>,
+        receipt_fault: Option<owned_state::FaultPoint>,
+        remove_receipt_after_dump: bool,
+        drain_after_reconcile: bool,
         install_calls: Vec<Prefix>,
         remove_calls: Vec<Prefix>,
         dump_calls: usize,
@@ -1245,6 +1361,10 @@ mod tests {
                     prefix: *prefix,
                     marker: false,
                 }));
+                if self.remove_receipt_after_dump {
+                    self.remove_receipt_after_dump = false;
+                    std::fs::remove_file(self.receipt_path.as_ref().unwrap()).unwrap();
+                }
                 Ok(entries)
             })
         }
@@ -1255,6 +1375,7 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
             self.install_calls.push(prefix);
             Box::pin(async move {
+                assert!(!receipt_has(self.receipt_path.as_deref(), prefix));
                 if let Some(error) = self.fail_install.get(&prefix) {
                     return Err(error.clone());
                 }
@@ -1269,6 +1390,7 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
             self.remove_calls.push(prefix);
             Box::pin(async move {
+                assert!(!receipt_has(self.receipt_path.as_deref(), prefix));
                 if let Some(error) = self.fail_remove.get(&prefix) {
                     return Err(error.clone());
                 }
@@ -1280,6 +1402,11 @@ mod tests {
         fn take_kernel_route_events(&mut self) -> Option<mpsc::Receiver<KernelRouteEvent>> {
             self.kernel_events.take()
         }
+    }
+
+    fn receipt_has(path: Option<&Path>, prefix: Prefix) -> bool {
+        path.and_then(|path| std::fs::read_to_string(path).ok())
+            .is_some_and(|content| content.contains(&format!("\"{prefix}\"")))
     }
 
     fn rib_with_routes(routes: Vec<Route>) -> mpsc::Sender<RibUpdate> {
@@ -1344,10 +1471,36 @@ mod tests {
     ) -> Vec<BlackholeStatus> {
         let rib_tx = rib_with_routes(routes);
         let (status_tx, status_rx) = watch::channel(Vec::new());
+        if !owned.is_empty() && fib.fail_dump.is_none() {
+            adoption.swept = true;
+        }
+        let receipt = fib.receipt.take().unwrap_or_else(|| {
+            fib.installed
+                .iter()
+                .copied()
+                .chain(owned.keys().copied())
+                .chain(adoption.pending.iter().copied())
+                .collect()
+        });
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = Arc::new(PinnedRuntimeStateDirectory::prepare(dir.path()).unwrap());
+        let (mut store, empty) = owned_state::OwnedStateStore::load(pinned).unwrap();
+        store.replace(&empty, &receipt).unwrap();
+        store.fault = fib
+            .receipt_fault
+            .take()
+            .unwrap_or(owned_state::FaultPoint::None);
+        fib.receipt_path = Some(dir.path().join("blackhole-owned.json"));
         let mut state = ReconcilerState {
             owned: std::mem::take(owned),
             rejected: std::mem::take(rejected),
             adoption: std::mem::replace(adoption, reapable_adoption()),
+            ownership: OwnershipState {
+                store: Some(store),
+                prefixes: receipt,
+                available: true,
+            },
         };
         reconcile_once(
             BlackholeConfig {
@@ -1361,9 +1514,19 @@ mod tests {
             &mut state,
         )
         .await;
+        if fib.drain_after_reconcile {
+            drain_owned(fib, metrics, &mut state).await;
+        }
         *owned = state.owned;
         *rejected = state.rejected;
         *adoption = state.adoption;
+        fib.receipt_disk = state
+            .ownership
+            .store
+            .as_ref()
+            .and_then(|store| store.read().ok().flatten());
+        fib.receipt = Some(state.ownership.prefixes);
+        fib.receipt_path = None;
         status_rx.borrow().clone()
     }
 
@@ -1646,6 +1809,7 @@ mod tests {
                 metrics,
                 status_tx,
                 task_shutdown,
+                OwnershipState::ephemeral([]),
             )
             .await;
         });
@@ -1707,6 +1871,7 @@ mod tests {
                 metrics,
                 status_tx,
                 task_shutdown,
+                OwnershipState::ephemeral([]),
             )
             .await;
         });
@@ -1891,6 +2056,7 @@ mod tests {
                 metrics,
                 status_tx,
                 task_shutdown,
+                OwnershipState::ephemeral([]),
             )
             .await;
         });
@@ -1963,6 +2129,7 @@ mod tests {
 
         assert_eq!(fib.install_calls, vec![prefix]);
         assert!(owned.contains_key(&prefix));
+        assert_eq!(fib.receipt_disk, Some([prefix].into()));
         assert_eq!(statuses[0].state, BlackholeState::Installed);
         assert_eq!(statuses[0].reason, "installed");
     }
@@ -1987,6 +2154,7 @@ mod tests {
 
         assert_eq!(fib.remove_calls, vec![prefix]);
         assert!(owned.contains_key(&prefix));
+        assert!(fib.receipt.as_ref().unwrap().contains(&prefix));
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, BlackholeState::Failed);
         assert_eq!(statuses[0].reason, "remove_failed");
@@ -2142,8 +2310,11 @@ mod tests {
     #[tokio::test]
     async fn adoption_claims_marker_row_for_desired_prefix() {
         let prefix = v4(32);
+        let stale = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 9), 32));
         let mut fib = FakeFib::default();
         fib.installed.insert(prefix); // crash leftover with our marker
+        fib.foreign.insert(stale);
+        fib.receipt = Some([prefix, stale].into());
         let metrics = BgpMetrics::with_registry(Registry::new());
         let mut owned = HashMap::new();
         let mut rejected = HashSet::new();
@@ -2168,6 +2339,7 @@ mod tests {
         assert!(owned.contains_key(&prefix));
         assert_eq!(statuses[0].state, BlackholeState::Installed);
         assert_eq!(statuses[0].reason, "adopted");
+        assert_eq!(fib.receipt_disk, Some([prefix].into()));
         let adopted = plain_counter_value(&metrics, "bgp_blackhole_discard_adopted_total");
         assert!((adopted - 1.0).abs() < f64::EPSILON, "got {adopted}");
     }
@@ -2240,6 +2412,7 @@ mod tests {
 
         assert!(fib.remove_calls.is_empty(), "must not reap before deadline");
         assert!(fib.installed.contains(&prefix));
+        assert_eq!(fib.receipt_disk, Some([prefix].into()));
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, BlackholeState::Installed);
         assert_eq!(statuses[0].reason, "adopted_pending_reap");
@@ -2472,14 +2645,13 @@ mod tests {
         assert!(adopted.abs() < f64::EPSILON, "got {adopted}");
     }
 
-    /// A prefix with both a marker row and a foreign row is unsafe to
-    /// claim — foreign presence dominates.
+    /// Marker identity without private receipt authority stays foreign.
     #[tokio::test]
-    async fn marker_row_shadowed_by_foreign_row_is_not_claimed() {
+    async fn unreceipted_marker_row_is_not_claimed() {
         let prefix = v4(32);
         let mut fib = FakeFib::default();
         fib.installed.insert(prefix);
-        fib.foreign.insert(prefix);
+        fib.receipt = Some(BTreeSet::new());
         let metrics = BgpMetrics::with_registry(Registry::new());
         let mut owned = HashMap::new();
         let mut rejected = HashSet::new();
@@ -2501,6 +2673,7 @@ mod tests {
         assert!(fib.install_calls.is_empty());
         assert_eq!(statuses[0].state, BlackholeState::Failed);
         assert_eq!(statuses[0].reason, "foreign_route_exists");
+        assert!(fib.installed.contains(&prefix));
     }
 
     /// The batching contract: one reconcile pass performs exactly one
@@ -2537,6 +2710,71 @@ mod tests {
 
         assert_eq!(fib.dump_calls, 1);
         assert_eq!(owned.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn receipt_loss_and_ambiguous_publication_failstop_actor() {
+        let announced = |prefix| {
+            route(
+                prefix,
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            )
+        };
+        let peer = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let old = v4(32);
+        let later = v6(128);
+        let mut fib = FakeFib {
+            remove_receipt_after_dump: true,
+            ..Default::default()
+        };
+        fib.installed.insert(old);
+        let mut owned = HashMap::from([(old, OwnedBlackhole { peer })]);
+        let mut rejected = HashSet::new();
+        let statuses = reconcile_for_test(
+            vec![announced(later)],
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+        )
+        .await;
+        assert!(owned.contains_key(&old));
+        assert!(fib.install_calls.is_empty() && fib.remove_calls.is_empty());
+        assert_eq!(statuses[0].reason, "ownership_state_unavailable");
+        let mut missing = OwnershipState::ephemeral([]);
+        let _ = release_then_remove(&mut fib, &metrics, &mut missing, old).await;
+        let _ = release_then_remove(&mut fib, &metrics, &mut missing, old).await;
+        let src = include_str!("blackhole.rs");
+        let boundary = src.find(concat!("if !ownership.", "available")).unwrap();
+        let warning = src.find(concat!("receipt lacks owned ", "prefix")).unwrap();
+        assert!(boundary < warning && !missing.available && fib.remove_calls.is_empty());
+        let retained = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 9), 32));
+        let pending = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 8), 32));
+        let mut fib = FakeFib {
+            receipt_fault: Some(owned_state::FaultPoint::DirectorySync),
+            drain_after_reconcile: true,
+            ..Default::default()
+        };
+        fib.installed.extend([retained, pending]);
+        let mut owned = HashMap::from([(retained, OwnedBlackhole { peer })]);
+        let mut adoption = reapable_adoption();
+        adoption.pending.insert(pending);
+        let statuses = reconcile_for_test_with_adoption(
+            vec![announced(retained), announced(old), announced(later)],
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+        assert_eq!(fib.install_calls, vec![old]);
+        assert!(fib.remove_calls.is_empty() && !fib.installed.contains(&later));
+        assert_eq!(fib.receipt_disk, Some([retained, pending, old].into()));
+        let unavailable = |row: &&BlackholeStatus| row.reason == "ownership_state_unavailable";
+        assert_eq!(statuses.iter().filter(unavailable).count(), 2);
     }
 
     /// A failed kernel dump degrades the pass: stale owned routes are

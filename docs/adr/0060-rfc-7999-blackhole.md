@@ -109,11 +109,15 @@ The first FIB slice is deliberately conservative:
 - **Failure discipline:** a failed discard install must not make the
   control plane claim enforcement succeeded. Failures are surfaced in
   `rbgp rib blackholes` and Prometheus counters.
+- **Private ownership:** exact canonical prefixes are recorded in
+  `<runtime_state_dir>/blackhole-owned.json`. Only receipt-backed marker rows
+  are adopted or deleted after a restart; marker-identical operator rows are
+  foreign.
 - **Blast-radius controls:** rate limits, maximum active blackholes,
   and a richer operator-visible audit trail remain follow-ups.
-- **Idempotent cleanup:** route withdrawal, policy rejection, peer flap,
-  and daemon shutdown remove only discard state installed by this daemon
-  lifetime.
+- **Idempotent cleanup:** withdrawal, reap, and shutdown durably release the
+  receipt before deleting a kernel row. A failed delete attempts durable
+  restoration; restoration failure makes ownership unavailable.
 
 Existing kernel routes for the same prefix are not overwritten. The
 Linux implementation preflights the main-table prefix before install
@@ -139,7 +143,7 @@ Positive:
 - The default behavior remains safe for route reflectors and route
   servers because it does not mutate the local kernel FIB.
 - Operators that explicitly opt into FIB enforcement get bounded local
-  RTBH behavior with host-route defaults and owned cleanup.
+  RTBH behavior with host-route defaults and crash-durable owned cleanup.
 
 Negative:
 

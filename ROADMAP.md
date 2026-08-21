@@ -1291,21 +1291,18 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   DF/BUM action, same-ESI local-bias eligibility, AC-gate state, and
   matching FDB-NHG refs in one place.
 - **Kernel-state crash-restart reconciliation** *(from the 2026-06 deep
-  audit; decided in ADR-0079 — startup adoption sweeps on kernel ownership
-  markers, reap deferred until reconvergence, no new persisted files).*
-  Today only the unicast FIB survives an unclean restart; the other
-  dataplane writers track ownership in memory only: RFC 7999 blackhole
-  discard routes (a crash leaves a permanent kernel discard route invisible
-  to every status surface, and preflight then rejects re-owning the
-  still-desired row as `foreign_route_exists`); EVPN symmetric-IRB L3 state
+  audit; decided in ADR-0079 — marker sweeps for EVPN, and private exact-prefix
+  authority where the BLACKHOLE marker is contested).*
+  The unicast FIB and BLACKHOLE slice survive an unclean restart; the other
+  dataplane writers track ownership in memory only: EVPN symmetric-IRB L3 state
   (VRF routes, permanent neighbors, and L3VXLAN FDB rows are never reaped
   after an unclean restart — a Type 5 withdrawn while the daemon was down
   keeps steering tenant traffic into a dead tunnel); and single-dst
   `extern_learn` FDB rows (ADR-0054 §7 promises next-startup cleanup that
   exists only for NHG-tagged rows). Ship order per the ADR: blackhole sweep
   first (fold in batching its presence checks into one kernel dump per
-  pass) — **done:** adopt-at-startup + implicit re-claim + 500 s deferred
-  reap + one-dump-per-pass shipped for the blackhole reconciler — then
+  pass) — **done:** `blackhole-owned.json` receipt∩marker authority, durable
+  release-before-delete, 500 s deferred reap, and one-dump passes — then
   single-dst FDB — **done:** diff-level implicit re-claim (a marker row
   absent from the OwnedSet is a crash leftover, not a foreign entry) +
   startup adoption + deferred reap behind the ADR-0059 convergence gate —

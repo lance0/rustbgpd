@@ -12,9 +12,9 @@
 #    (203.0.113.66/32) and B (203.0.113.68/32) install as
 #    `blackhole ... proto bgp` kernel rows and `ListBlackholeDiscards`
 #    reports both as `installed` (M41 asserts).
-# 2. A foreign `proto static` blackhole row (203.0.113.99/32) planted
-#    while rustbgpd is running survives the entire cycle — no
-#    `proto bgp` marker, so it is never adopted or reaped.
+# 2. The receipt contains exactly A+B before SIGKILL. Foreign
+#    `proto static` and unreceipted `proto bgp` rows planted while the
+#    daemon runs survive the cycle and never appear in status.
 # 3. After `kill -9` of the rustbgpd process (container and netns
 #    survive — this is NOT a container stop), rows A and B are still
 #    in the kernel FIB: the crash-leftover premise.
@@ -31,9 +31,8 @@
 #    would never emit that state), and after the reap B drops off the
 #    status surface entirely while A reads `installed` with reason
 #    `adopted`/`owned`.
-# 6. Prometheus reports bgp_blackhole_discard_adopted_total >= 2 and
-#    bgp_blackhole_discard_reaped_total == 1 for the restarted
-#    process.
+# 6. Prometheus reports exactly two adoptions and one reap; the final
+#    receipt contains exactly A.
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
@@ -53,7 +52,9 @@ source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 PREFIX_A="203.0.113.66/32"   # survives the cycle: adopted + re-claimed
 PREFIX_B="203.0.113.68/32"   # withdrawn while down: adopted + reaped
-FOREIGN_PREFIX="203.0.113.99/32"
+FOREIGN_STATIC="203.0.113.99/32"
+FOREIGN_BGP="203.0.113.100/32"
+RECEIPT="/var/lib/rustbgpd/blackhole-owned.json"
 REAP_DEFERRAL_SECS="5"
 # Bounded wait for the reap: 5 s deferral + the 30 s periodic
 # reconcile cadence (the reap fires on the first reconcile pass after
@@ -93,6 +94,12 @@ kernel_blackhole_foreign_present() {
     local prefix=${1:?}
     rb_route "$prefix" | grep -E "^blackhole ${prefix%/*}( |$)" \
         | grep -Eq 'proto (static|4)( |$)'
+}
+
+receipt_is() {
+    [ "$(docker exec "$RUSTBGPD" stat -c %a "$RECEIPT" 2>/dev/null || true)" = 600 ] &&
+        docker exec "$RUSTBGPD" cat "$RECEIPT" 2>/dev/null |
+        jq -e --argjson expected "${1:?}" '.schema == "rustbgpd.blackhole-owned/v1" and .prefixes == $expected' >/dev/null
 }
 
 grpc_blackholes() {
@@ -225,6 +232,11 @@ wait_kernel_blackhole_marker "$PREFIX_A" || exit 1
 wait_kernel_blackhole_marker "$PREFIX_B" || exit 1
 wait_blackhole_status "$PREFIX_A" "installed" || exit 1
 wait_blackhole_status "$PREFIX_B" "installed" || exit 1
+if receipt_is '["203.0.113.66/32","203.0.113.68/32"]'; then
+    ok "durable ownership receipt contains exactly A+B before SIGKILL"
+else
+    fail "ownership receipt is not exact A+B before SIGKILL"
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 2 — plant a foreign row while rustbgpd is running
@@ -233,12 +245,14 @@ wait_blackhole_status "$PREFIX_B" "installed" || exit 1
 # `proto static`, so it lacks the RTPROT_BGP half of the ownership
 # marker: never adopted, never reaped. Same table, same RTN_BLACKHOLE
 # type — a real negative test for the marker discriminator.
-log "Planting foreign blackhole row $FOREIGN_PREFIX (proto static) while rustbgpd is running..."
-docker exec "$RUSTBGPD" ip route add blackhole "$FOREIGN_PREFIX" proto static
-if kernel_blackhole_foreign_present "$FOREIGN_PREFIX"; then
-    ok "foreign proto-static blackhole row $FOREIGN_PREFIX planted"
+log "Planting foreign blackhole rows while rustbgpd is running..."
+docker exec "$RUSTBGPD" ip route add blackhole "$FOREIGN_STATIC" proto static
+docker exec "$RUSTBGPD" ip route add blackhole "$FOREIGN_BGP" proto bgp
+if kernel_blackhole_foreign_present "$FOREIGN_STATIC" \
+    && kernel_blackhole_marker_present "$FOREIGN_BGP"; then
+    ok "foreign static and unreceipted proto-bgp rows planted"
 else
-    fail "foreign blackhole row $FOREIGN_PREFIX did not land"
+    fail "a foreign blackhole row did not land"
 fi
 
 # ---------------------------------------------------------------------------
@@ -280,10 +294,11 @@ else
     fail "row B vanished with the process — no crash leftover to adopt"
     rb_route "$PREFIX_B" >&2
 fi
-if kernel_blackhole_foreign_present "$FOREIGN_PREFIX"; then
-    ok "foreign row $FOREIGN_PREFIX still present after the SIGKILL"
+if kernel_blackhole_foreign_present "$FOREIGN_STATIC" \
+    && kernel_blackhole_marker_present "$FOREIGN_BGP"; then
+    ok "both foreign rows remain after the SIGKILL"
 else
-    fail "foreign row $FOREIGN_PREFIX disappeared after the SIGKILL"
+    fail "a foreign row disappeared after the SIGKILL"
 fi
 
 # ---------------------------------------------------------------------------
@@ -418,20 +433,21 @@ else
     dump_state_on_failure
 fi
 
-# Foreign row: unmarked, untouched, never adopted (no status row).
-if kernel_blackhole_foreign_present "$FOREIGN_PREFIX"; then
-    ok "foreign row $FOREIGN_PREFIX survived the kill-and-restart cycle (still proto static)"
+# Foreign rows: unmarked static and marker-identical unreceipted BGP.
+if kernel_blackhole_foreign_present "$FOREIGN_STATIC" \
+    && kernel_blackhole_marker_present "$FOREIGN_BGP"; then
+    ok "foreign static and unreceipted proto-bgp rows survived the cycle"
 else
-    fail "foreign row $FOREIGN_PREFIX was deleted or re-protoed"
-    rb_route "$FOREIGN_PREFIX" >&2
+    fail "a foreign row was deleted or re-protoed"
 fi
-foreign_status=$(blackhole_status "$FOREIGN_PREFIX")
-if [ "$foreign_status" = "MISSING" ]; then
-    ok "foreign row $FOREIGN_PREFIX was never adopted (no status row)"
-else
-    fail "foreign row $FOREIGN_PREFIX has a status row (status: $foreign_status)"
-    dump_state_on_failure
-fi
+for prefix in "$FOREIGN_STATIC" "$FOREIGN_BGP"; do
+    foreign_status=$(blackhole_status "$prefix")
+    if [ "$foreign_status" = "MISSING" ]; then
+        ok "foreign row $prefix was never adopted"
+    else
+        fail "foreign row $prefix has status $foreign_status"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # Phase 6 — Prometheus adoption/reap counters
@@ -446,15 +462,15 @@ reaped=""
 for _ in $(seq 1 15); do
     adopted=$(prom_counter "bgp_blackhole_discard_adopted_total")
     reaped=$(prom_counter "bgp_blackhole_discard_reaped_total")
-    if [ "${adopted:-0}" -ge 2 ] 2>/dev/null && [ "${reaped:-0}" -eq 1 ] 2>/dev/null; then
+    if [ "${adopted:-0}" -eq 2 ] 2>/dev/null && [ "${reaped:-0}" -eq 1 ] 2>/dev/null; then
         break
     fi
     sleep 1
 done
-if [ "${adopted:-0}" -ge 2 ] 2>/dev/null; then
-    ok "bgp_blackhole_discard_adopted_total=$adopted (>= 2)"
+if [ "${adopted:-0}" -eq 2 ] 2>/dev/null; then
+    ok "bgp_blackhole_discard_adopted_total=$adopted (== 2)"
 else
-    fail "bgp_blackhole_discard_adopted_total='$adopted' (want >= 2)"
+    fail "bgp_blackhole_discard_adopted_total='$adopted' (want 2)"
     prom_scrape | grep -E '^bgp_blackhole' >&2 || true
 fi
 if [ "${reaped:-0}" -eq 1 ] 2>/dev/null; then
@@ -462,6 +478,11 @@ if [ "${reaped:-0}" -eq 1 ] 2>/dev/null; then
 else
     fail "bgp_blackhole_discard_reaped_total='$reaped' (want 1)"
     prom_scrape | grep -E '^bgp_blackhole' >&2 || true
+fi
+if receipt_is '["203.0.113.66/32"]'; then
+    ok "final durable ownership receipt contains exactly A"
+else
+    fail "final durable ownership receipt is not exact A"
 fi
 
 print_summary

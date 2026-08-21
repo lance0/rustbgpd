@@ -549,7 +549,7 @@ docker compose down
 For your own deployment:
 
 - **State**: mount a volume at the daemon's `runtime_state_dir` so the
-  GR restart marker and FIB ownership receipt survive container
+  GR restart marker and FIB and BLACKHOLE ownership receipts survive container
   restarts. The daemon runs as uid/gid 999 and rewrites its config in
   place, so both host directories must be owned by that uid and the
   config must already exist — the image's default command is
@@ -1082,7 +1082,13 @@ processes is unsupported even when their configuration files differ.
 | `<absolute lexical config path>.commit-confirm-locator.json` | Confidential paths/digests and sole v3 pending boot authority; no raw TOML. Published last and checked before candidate contents. | Until durable unlink and parent sync make the transaction terminal |
 | `config-history/*` | Last 20 owner-private, secret-bearing v2 JSON records for `rbgp config history`; newest is index 0. Retired TOML files are ignored and retained. V2 records hash but do not archive external sources and are rollback-eligible only when live sources exactly reproduce recorded provenance. | Yes |
 | `fib-owned.json` | FIB ownership receipt — which kernel routes the daemon installed (ADR-0061). Used to drain orphan installs on next start. | Yes |
+| `blackhole-owned.json` | Exact BLACKHOLE prefix authority. Mode `0600`; adoption and deletion require this receipt plus the kernel marker. | Yes |
 | `grpc.sock` | gRPC UDS endpoint (if `[global.telemetry.grpc_uds]` configured). | Recreated on start |
+
+Stop the daemon before deleting `blackhole-owned.json`; deletion intentionally
+preserves all surviving marker rows as foreign. Never share `runtime_state_dir`
+between live instances, and do not downgrade to marker-only adoption without a
+drain plan.
 
 The lexical config, metadata, and raw-prior paths resolve to absolute
 identities. A writer or present pending object requires daemon-owned real
