@@ -950,7 +950,7 @@ impl Parser<'_> {
                 self.bump();
                 self.expect(
                     Tok::AsKw,
-                    "`as` (`prepend as <asn|self|peer|origin> <count>`)",
+                    "`as` (`prepend as <asn|self|peer|origin|path-first> <count>`)",
                 )?;
                 // Computed operands (LAN-296): `self` / `peer` are
                 // keyword tokens (previously parse errors here, so
@@ -963,7 +963,9 @@ impl Parser<'_> {
                 } else if self.eat(Tok::PeerKw).is_some() {
                     PrependAsArg::Peer
                 } else {
-                    PrependAsArg::Value(self.u32_arg("an ASN, `self`, `peer`, or `origin`")?)
+                    PrependAsArg::Value(
+                        self.u32_arg("an ASN, `self`, `peer`, `origin`, or `path-first`")?,
+                    )
                 };
                 let count = self.u32_arg("a prepend count")?;
                 let span = token.span.to(count.span());

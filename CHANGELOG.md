@@ -19,12 +19,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The pinned IXP Manager v7.4 Foil exporter now emits strict
   `router-config/v2` ordered UI-filter rows. `rs-config-render` translates all
   advertise actions and exact ordered receive AS_IS/deny plus non-overlapping
-  peer-scoped PREPEND, while refusing global/overlapping PREPEND, malformed
-  scopes, missing peers, and 256-per-client or 4096-total overflow before a
-  receipt. The real Foil/MySQL oracle captures rows 31/33/35, strict-checks both
-  reachable variants, and executes their generated policies; v1 behavior and
-  bytes remain unchanged. This is a bounded subset, not a generic IXP Manager
-  policy engine. (LAN-1156)
+  peer-scoped or global PREPEND. Global rules use the typed first path ASN,
+  matching pinned BIRD `bgp_path.first`; optional prefix guards are exact and
+  overlapping PREPEND remains fail-closed. The real Foil/MySQL oracle captures
+  both forms, strict-checks them, and executes first-versus-origin policies; v1
+  behavior and bytes remain unchanged. This remains a bounded subset, not a
+  generic IXP Manager policy engine. (LAN-1156, LAN-1158)
 - The IXP Manager v7.4 renderer and Birdwatcher adapter now cover all ten
   reject reasons active in the pinned route-server templates, with named
   AS-path length/first-AS and separate IRRDB origin/prefix policy terms. The

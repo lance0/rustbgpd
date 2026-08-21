@@ -33,6 +33,30 @@ $render = static function (string $name) use ($router, $output): string {
 config(['ixp.no_transit_asns.override' => false]);
 $render('config-implicit.json');
 config(['ixp.no_transit_asns.override' => []]);
+DB::table('route_server_filters_prod')->where('id', 32)->update([
+    'peer_id' => null, 'vlan_id' => 1, 'received_prefix' => '203.0.113.0/24',
+    'advertised_prefix' => null, 'protocol' => 4, 'action_advertise' => 'AS_IS',
+    'action_receive' => 'PREPEND_ONCE', 'order_by' => 3,
+]);
+DB::table('route_server_filters_prod')->update(['enabled' => 0]);
+$router->template = 'api/v4/router/server/bird2/standard';
+$birdBaseline = (new ConfigurationGenerator($router))->render()->render();
+DB::table('route_server_filters_prod')->where('id', 32)->update(['enabled' => 1]);
+$birdCandidate = (new ConfigurationGenerator($router))->render()->render();
+$prepend = 'bgp_path.prepend( bgp_path.first );';
+$peerGuard = 'if ( bgp_path.first =';
+$fragment = "    if ( net = 203.0.113.0/24 ) then {\n"
+    . "        # PREPEND_ONCE\n"
+    . "        bgp_path.prepend( bgp_path.first );\n"
+    . "    }\n";
+if (substr_count($birdCandidate, $prepend) - substr_count($birdBaseline, $prepend) !== 1
+    || substr_count($birdCandidate, $peerGuard) - substr_count($birdBaseline, $peerGuard) !== 0
+    || str_contains($birdBaseline, $fragment)
+    || substr_count($birdCandidate, $fragment) !== 1) {
+    $fail('isolated pinned BIRD global PREPEND drifted');
+}
+unset($birdBaseline, $birdCandidate, $fragment, $prepend, $peerGuard);
+$router->template = 'api/v4/router/server/rustbgpd/json';
 DB::table('vlaninterface')->whereNotIn('id', [1, 4])->update(['rsclient' => 0]);
 DB::table('irrdb_asn')->where('customer_id', 2)->where('protocol', 4)
     ->where('asn', '<>', 1213)->delete();
@@ -53,11 +77,14 @@ if (array_column($filters, 'id') !== [31, 33, 35]
 }
 
 DB::table('route_server_filters_prod')->where('id', 31)->update(['enabled' => 0]);
+DB::table('route_server_filters_prod')->where('id', 32)->update(['enabled' => 1]);
 $supportedRaw = $render('ixp-manager-v7.4-rustbgpd.json');
 $supported = json_decode($supportedRaw, true, 512, JSON_THROW_ON_ERROR);
-if (array_column($supported['ui_filters'], 'id') !== [33, 35]
+if (array_column($supported['ui_filters'], 'id') !== [32, 33, 35]
     || array_column($supported['ui_filters'], 'action_receive')
-        !== ['PREPEND_TWICE', 'AS_IS']) {
+        !== ['PREPEND_ONCE', 'PREPEND_TWICE', 'AS_IS']
+    || $supported['ui_filters'][0]['peer'] !== null
+    || $supported['ui_filters'][0]['received_prefix'] !== '203.0.113.0/24') {
     $fail('row-31-disabled ordered UI-filter export drifted');
 }
 $second = (new ConfigurationGenerator($router))->render()->render();

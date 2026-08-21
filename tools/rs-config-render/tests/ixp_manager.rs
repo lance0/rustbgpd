@@ -381,11 +381,17 @@ test full-first-rule-denies-receive {
     assert_terms(
         client,
         "client-1-receive",
-        &["ui-receive-33", "ui-receive-35", "accept-unmatched"],
+        &[
+            "ui-receive-32",
+            "ui-receive-33",
+            "ui-receive-35",
+            "accept-unmatched",
+        ],
     );
     assert!(client.contains(
         "route.as-path matches \"^112_\" && route.prefix == 192.175.48.0/24 { prepend as 112 2 }"
     ));
+    assert!(client.contains("route.prefix == 203.0.113.0/24 { prepend as path-first 1 }"));
     assert!(!client.contains("ui-receive-31"));
     assert_policy_tests(
         client,
@@ -401,6 +407,30 @@ test wrong-received-prefix-does-not-prepend {
 test wrong-first-as-does-not-prepend {
     route { prefix 192.175.48.0/24; as-path "113" }
     expect client-1-receive == accept
+}
+test global-prepend-uses-path-first-not-origin {
+    route { prefix 203.0.113.0/24; as-path "64501 64500" }
+    expect client-1-receive == accept with prepend as 64501 1
+}
+test global-prepend-has-exact-prefix-guard {
+    route { prefix 203.0.114.0/24; as-path "64501 64500" }
+    expect client-1-receive == accept
+}
+"#,
+    );
+
+    let mut unscoped = v2_value(V2_SUPPORTED);
+    unscoped["ui_filters"].as_array_mut().unwrap().remove(1);
+    unscoped["ui_filters"][0]["received_prefix"] = serde_json::Value::Null;
+    unscoped["complete"]["ui_filter_count"] = 2.into();
+    let unscoped = &rendered_v2(&unscoped).unwrap().files["policy/client-1.rpol"];
+    assert!(unscoped.contains("term ui-receive-32 { prepend as path-first 1 }"));
+    assert_policy_tests(
+        unscoped,
+        r#"
+test unscoped-global-prepend {
+    route { prefix 203.0.113.0/24; as-path "64501 64500" }
+    expect client-1-receive == accept with prepend as 64501 1
 }
 "#,
     );
@@ -536,12 +566,12 @@ fn v2_receive_terminal_pruning_is_scope_aware_and_off_router_peers_are_valid() {
             "received_prefix": null, "advertised_prefix": null, "protocol": 4,
             "action_advertise": "AS_IS", "action_receive": "NO_ADVERTISE", "order_by": 7
         }));
-    terminal["complete"]["ui_filter_count"] = 3.into();
+    terminal["complete"]["ui_filter_count"] = 4.into();
     let source = &rendered_v2(&terminal).unwrap().files["policy/client-1.rpol"];
     assert!(source.contains("ui-receive-35"));
     assert!(!source.contains("ui-receive-37"));
 
-    terminal["ui_filters"][1]["action_receive"] = "NO_ADVERTISE".into();
+    terminal["ui_filters"][2]["action_receive"] = "NO_ADVERTISE".into();
     let source = &rendered_v2(&terminal).unwrap().files["policy/client-1.rpol"];
     assert_policy_tests(
         source,
@@ -555,21 +585,22 @@ test prepend-is-discarded-by-later-deny {
 
     let mut nonoverlap = v2_value(V2_SUPPORTED);
     nonoverlap["ui_filters"].as_array_mut().unwrap().insert(
-        1,
+        0,
         serde_json::json!({
             "id": 34, "customer_id": 2, "peer": {"customer_id": 4, "asn": 112},
             "received_prefix": "198.51.100.0/24", "advertised_prefix": null, "protocol": 4,
-            "action_advertise": "AS_IS", "action_receive": "PREPEND_ONCE", "order_by": 5
+            "action_advertise": "AS_IS", "action_receive": "PREPEND_ONCE", "order_by": 2
         }),
     );
-    nonoverlap["complete"]["ui_filter_count"] = 3.into();
+    nonoverlap["complete"]["ui_filter_count"] = 4.into();
     let source = &rendered_v2(&nonoverlap).unwrap().files["policy/client-1.rpol"];
     assert_terms(
         source,
         "client-1-receive",
         &[
-            "ui-receive-33",
             "ui-receive-34",
+            "ui-receive-32",
+            "ui-receive-33",
             "ui-receive-35",
             "accept-unmatched",
         ],
@@ -600,41 +631,41 @@ fn v2_refuses_malformed_unrepresentable_and_capped_filter_sets() {
     };
     refuses(
         v2_value(V2_SUPPORTED),
-        "/ui_filters/0/peer/asn",
+        "/ui_filters/1/peer/asn",
         serde_json::Value::Null,
     );
     refuses(
         v2_value(V2_SUPPORTED),
-        "/ui_filters/0/peer",
-        serde_json::Value::Null,
-    );
-    refuses(
-        v2_value(V2_SUPPORTED),
-        "/ui_filters/0/received_prefix",
+        "/ui_filters/1/received_prefix",
         "192.175.48.1/24".into(),
     );
     refuses(
         v2_value(V2_SUPPORTED),
-        "/ui_filters/0/received_prefix",
+        "/ui_filters/1/received_prefix",
         "192.175.48.0/024".into(),
     );
     refuses(
         v2_value(V2_SUPPORTED),
-        "/ui_filters/0/advertised_prefix",
+        "/ui_filters/1/advertised_prefix",
         "2001:db8::/32".into(),
     );
-    refuses(v2_value(V2_SUPPORTED), "/ui_filters/0/protocol", 6.into());
+    refuses(v2_value(V2_SUPPORTED), "/ui_filters/1/protocol", 6.into());
     refuses(
         v2_value(V2_SUPPORTED),
-        "/ui_filters/0/customer_id",
+        "/ui_filters/1/customer_id",
         999.into(),
     );
-    refuses(v2_value(V2_SUPPORTED), "/ui_filters/1/order_by", 3.into());
-    refuses(v2_value(V2_SUPPORTED), "/ui_filters/1/order_by", 4.into());
+    refuses(v2_value(V2_SUPPORTED), "/ui_filters/0/order_by", 0.into());
+    refuses(v2_value(V2_SUPPORTED), "/ui_filters/0/order_by", 4.into());
     refuses(
         v2_value(V2_SUPPORTED),
-        "/ui_filters/0/action_receive",
+        "/ui_filters/1/action_receive",
         "UNKNOWN".into(),
+    );
+    refuses(
+        v2_value(V2_SUPPORTED),
+        "/ui_filters/0/received_prefix",
+        serde_json::Value::Null,
     );
     for field in ["peer", "received_prefix", "advertised_prefix", "protocol"] {
         let mut missing = v2_value(V2_SUPPORTED);
@@ -663,21 +694,23 @@ fn v2_refuses_malformed_unrepresentable_and_capped_filter_sets() {
         v6["clients"][index]["peering_ips"] = serde_json::json!([address]);
         v6["clients"][index]["prefixes"] = serde_json::json!([prefix]);
     }
+    v6["ui_filters"][1]["protocol"] = 6.into();
+    v6["ui_filters"][1]["received_prefix"] = "2001:db8:2::/48".into();
+    v6["ui_filters"][1]["advertised_prefix"] = "2001:db8:1::/48".into();
     v6["ui_filters"][0]["protocol"] = 6.into();
-    v6["ui_filters"][0]["received_prefix"] = "2001:db8:2::/064".into();
-    v6["ui_filters"][0]["advertised_prefix"] = "2001:db8:1::/48".into();
+    v6["ui_filters"][0]["received_prefix"] = "2001:db8:3::/064".into();
     assert!(rendered_v2(&v6).is_err());
 
     let mut overlap = v2_value(V2_SUPPORTED);
     overlap["ui_filters"].as_array_mut().unwrap().insert(
-        1,
+        0,
         serde_json::json!({
             "id": 34, "customer_id": 2, "peer": {"customer_id": 4, "asn": 112},
             "received_prefix": null, "advertised_prefix": null, "protocol": 4,
-            "action_advertise": "AS_IS", "action_receive": "PREPEND_ONCE", "order_by": 5
+            "action_advertise": "AS_IS", "action_receive": "PREPEND_ONCE", "order_by": 2
         }),
     );
-    overlap["complete"]["ui_filter_count"] = 3.into();
+    overlap["complete"]["ui_filter_count"] = 4.into();
     assert!(rendered_v2(&overlap).is_err());
 
     let template = serde_json::json!({

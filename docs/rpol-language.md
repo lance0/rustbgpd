@@ -983,7 +983,7 @@ Two consequences worth internalizing:
 | `add large-community 65000:1:2` / `remove ...` | large communities |
 | `add ext-community RT:65001:100` / `remove ...` | extended communities (RT/RO, or well-known: `add ext-community OV_INVALID`) |
 | `prepend as <asn> <count>` | prepend `<count>` copies of `<asn>` (count: literal 1–255) |
-| `prepend as self\|peer\|origin <count>` | prepend a computed ASN (see below) |
+| `prepend as self\|peer\|origin\|path-first <count>` | prepend a computed ASN (see below) |
 
 The kind keyword must match the literal's kind (`add community
 RT:...` is a compile error pointing at `add ext-community`). Within a
@@ -1010,8 +1010,11 @@ route; see "Value expressions").
   non-empty `AS_SEQUENCE` (the same value `route.origin-as` reads).
   A policy *parameter* named `origin` shadows the operand — the
   parameter keeps its existing meaning.
+- **`path-first`** — the first ASN of a non-empty leading
+  `AS_SEQUENCE` in the typed route `AS_PATH`. A parameter with this
+  name also shadows the operand.
 
-**Direction legality.** `self` and `origin` are legal on import and
+**Direction legality.** `self`, `origin`, and `path-first` are legal on import and
 export chains. `peer` is **import-only**: on an export chain it would
 prepend the *receiving* peer's own ASN, which the receiver rejects as
 an own-AS loop (RFC 4271 §9.1.2) unless it runs allowas-in. A chain
@@ -1024,6 +1027,7 @@ policy and term, never a per-route runtime surprise.
 | `self`   | yes | yes | outbound TE; inbound self-prepend biases best-path like the literal form already could |
 | `peer`   | yes | **rejected at attach** | the inbound "prepend the neighbor's AS" idiom |
 | `origin` | yes | yes | origin AS is already in the path — no loop-detection impact |
+| `path-first` | yes | yes | route-derived BIRD `bgp_path.first` equivalent; does not read peer identity |
 
 *Comparison:* FRR's `set as-path prepend last-as N` (prepend the
 neighbor's AS) is its inbound route-map idiom and the model for
@@ -1035,7 +1039,8 @@ peer-AS prepend, hence the attach-time rejection.
 
 **Failure is closed.** A computed operand resolves when the matched
 term's action executes. If the value is unknown — no usable
-`AS_SEQUENCE` for `origin`, unknown peer ASN for `peer`, a chain
+`AS_SEQUENCE` for `origin`, no non-empty leading `AS_SEQUENCE` for
+`path-first` (including a leading `AS_SET`), unknown peer ASN for `peer`, a chain
 evaluated outside a daemon config for `self` — or the context value is
 zero (AS 0 is prohibited on the wire, RFC 7607), the route is
 **denied**: staged modifications are discarded, ASN 0 is never
@@ -1044,7 +1049,7 @@ reason.
 
 **Update-group note.** `prepend as peer` reads peer identity, so (like
 `peer.asn` guards) it keeps its peers out of shared update groups;
-`self` and `origin` never disqualify grouping.
+`self`, `origin`, and `path-first` never disqualify grouping.
 
 Extended-community wire encoding follows the daemon's other
 frontends: dotted-quad admin → RFC 4360 type 0x01, ASN > 65535 →
@@ -1290,7 +1295,7 @@ action      := "accept" | "reject"
              | "set" "next-hop" (IP | "self")
              | ("add" | "remove") ("community" | "large-community" | "ext-community") community
              | ("add" | "remove") "community" IDENT      # binding-valued
-             | "prepend" "as" (u32arg | "self" | "peer" | "origin") INT
+             | "prepend" "as" (u32arg | "self" | "peer" | "origin" | "path-first") INT
 expr        := and ("||" and)*
 and         := unary ("&&" unary)*
 unary       := "!" unary | "(" expr ")" | "apply" "(" IDENT ["(" u32arg,* ")"] ")" | predicate

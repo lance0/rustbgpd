@@ -280,7 +280,7 @@ pub enum NextHopAction {
 }
 
 /// Computed `AS_PATH` prepend operand (LAN-296): `.rpol`
-/// `prepend as self|peer|origin <count>`.
+/// `prepend as self|peer|origin|path-first <count>`.
 ///
 /// # Decision note — direction-aware computed prepend operands
 ///
@@ -348,6 +348,9 @@ pub enum PrependAs {
     /// `prepend as origin` — the route's origin AS
     /// (`RouteContext::origin_asn`).
     OriginAs,
+    /// `prepend as path-first` — the first ASN of the leading,
+    /// non-empty `AS_SEQUENCE` in the typed route `AS_PATH`.
+    PathFirst,
 }
 
 impl PrependAs {
@@ -358,6 +361,7 @@ impl PrependAs {
             PrependAs::LocalAs => "self",
             PrependAs::PeerAs => "peer",
             PrependAs::OriginAs => "origin",
+            PrependAs::PathFirst => "path-first",
         }
     }
 
@@ -371,6 +375,10 @@ impl PrependAs {
             PrependAs::LocalAs => local_asn,
             PrependAs::PeerAs => ctx.peer_asn,
             PrependAs::OriginAs => ctx.origin_asn,
+            PrependAs::PathFirst => match ctx.as_path?.segments.first()? {
+                AsPathSegment::AsSequence(asns) => asns.first().copied(),
+                AsPathSegment::AsSet(_) => None,
+            },
         }
         .filter(|&asn| asn != 0)
     }

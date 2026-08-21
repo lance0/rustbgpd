@@ -49,10 +49,13 @@ the active route-server-template partition `1,3,5,6,7,8,9,10,13,14`, keeps
 `2,4,11,12,15` defined-only, and proves fallback `0` remains untranslated.
 
 The same pinned v7.4 Foil/MySQL journey captures complete ordered UI-filter
-rows 31, 33, and 35, then disables row 31 and proves rows 33 and 35 remain in
-order. Both strict v2 captures render and pass `rustbgpd --check --strict`; the
+rows 31, 33, and 35, then proves a supported row 32 global PREPEND beside the
+distinct peer-scoped row 33. A baseline-delta check binds row 32 to BIRD's
+`bgp_path.first` behavior without retaining raw config. Both strict v2 captures
+render and pass `rustbgpd --check --strict`; the
 oracle executes the generated advertise and receive policies with `rbgp policy
-check`. Exact row objects, raw repeated-render bytes, v2 completion counts,
+check`, distinguishing path-first from origin and target-peer ASNs. Exact row
+objects, raw repeated-render bytes, v2 completion counts,
 receipt-last publication, and v3 refusal are load-bearing. This proves only the
 bounded manual export subset; it does not make the adapter runtime-compatible
 or claim a generic IXP Manager policy engine.

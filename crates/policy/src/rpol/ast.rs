@@ -399,7 +399,7 @@ pub enum PrependAsArg {
     /// and denotes the origin operand (see [`Self::operand`]) — the
     /// grammar-evolution rules (ADR-0103 Decision 2) forbid reserving
     /// `origin`, so a parameter of that name keeps its existing
-    /// meaning.
+    /// meaning. `path-first` follows the same contextual rule.
     Value(U32Arg),
     /// `prepend as self <count>` — the local speaker's ASN.
     SelfAs,
@@ -419,9 +419,14 @@ impl PrependAsArg {
             PrependAsArg::SelfAs => Some(crate::engine::PrependAs::LocalAs),
             PrependAsArg::Peer => Some(crate::engine::PrependAs::PeerAs),
             PrependAsArg::Value(U32Arg::Param(name))
-                if name.node == "origin" && !is_param(&name.node) =>
+                if matches!(name.node.as_str(), "origin" | "path-first")
+                    && !is_param(&name.node) =>
             {
-                Some(crate::engine::PrependAs::OriginAs)
+                Some(if name.node == "origin" {
+                    crate::engine::PrependAs::OriginAs
+                } else {
+                    crate::engine::PrependAs::PathFirst
+                })
             }
             PrependAsArg::Value(_) => None,
         }

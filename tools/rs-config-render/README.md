@@ -66,9 +66,10 @@ candidate without that receipt is incomplete and must not be deployed.
 `ixp-manager-v2` preserves ordered UI-filter rows. Advertise AS_IS is a no-op;
 deny and prepend actions add the exact IXP Manager route-server control large
 community and matching rules accumulate after hygiene and IRR checks. Receive
-PREPEND requires a peer, applies exact first-AS and received-prefix guards, and
-continues; receive AS_IS or deny terminates in order. Global or reachable
-overlapping receive PREPEND, missing peers, noncanonical or wrong-family
+PREPEND with a peer uses its literal ASN and an exact first-AS guard; global
+PREPEND uses the typed route's first path ASN. An optional received-prefix guard
+is exact, and PREPEND continues; receive AS_IS or deny terminates in order.
+Reachable overlapping receive PREPEND, malformed peers, noncanonical or wrong-family
 prefixes, malformed order/actions, more than 256 rows per client, or more than
 4096 rows total are refused before a receipt. The older `ixp-manager-v1`
 boundary remains available for legacy captures and still refuses active UI

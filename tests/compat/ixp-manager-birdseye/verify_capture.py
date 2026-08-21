@@ -72,7 +72,8 @@ MANUAL_CONFIG_EXPORT = {
             "AS_IS", "NO_ADVERTISE", "PREPEND_ONCE", "PREPEND_TWICE",
             "PREPEND_THRICE",
         ],
-        "receive_prepend_requires_peer": True,
+        "global_receive_prepend": "path-first-with-optional-received-prefix",
+        "peer_receive_prepend": "literal-peer-asn",
         "overlapping_receive_prepend": False,
         "per_client_cap": 256,
         "total_cap": 4096,
@@ -99,6 +100,16 @@ FULL_UI_FILTERS = [
         "action_advertise": "AS_IS", "action_receive": "AS_IS", "order_by": 6,
     },
 ]
+SUPPORTED_UI_FILTERS = [
+    {
+        "id": 32, "customer_id": 2, "peer": None,
+        "received_prefix": "203.0.113.0/24", "advertised_prefix": None,
+        "protocol": 4, "action_advertise": "AS_IS",
+        "action_receive": "PREPEND_ONCE", "order_by": 3,
+    },
+    FULL_UI_FILTERS[1],
+    FULL_UI_FILTERS[2],
+]
 
 
 def fail(message: str) -> None:
@@ -122,6 +133,17 @@ if manifest.get("reject_reasons") != REJECT_REASONS:
     fail("pinned reject-reason display or active partition drifted")
 if manifest.get("manual_config_export") != MANUAL_CONFIG_EXPORT:
     fail("strict manual v2 export contract drifted")
+consumer_source = (root / "config-consumer.php").read_text()
+for required in [
+    "$router->template = 'api/v4/router/server/bird2/standard';",
+    "substr_count($birdCandidate, $prepend) - substr_count($birdBaseline, $prepend) !== 1",
+    "substr_count($birdCandidate, $peerGuard) - substr_count($birdBaseline, $peerGuard) !== 0",
+    "str_contains($birdBaseline, $fragment)",
+    "substr_count($birdCandidate, $fragment) !== 1",
+    "unset($birdBaseline, $birdCandidate, $fragment, $prepend, $peerGuard);",
+]:
+    if required not in consumer_source:
+        fail(f"pinned in-memory BIRD path-first proof drifted: {required}")
 if manifest.get("protocol_aliases") != {
     "member-v4": "pb_as64496",
     "member-v4-reloaded": "pb_reloaded_as64496",
@@ -138,7 +160,7 @@ if len(sys.argv) == 3:
     )
     for name, document, filters in [
         ("full", full, FULL_UI_FILTERS),
-        ("row-31-disabled", supported, FULL_UI_FILTERS[1:]),
+        ("row-31-disabled", supported, SUPPORTED_UI_FILTERS),
     ]:
         if document.get("schema") != MANUAL_CONFIG_EXPORT["schema"]:
             fail(f"{name} UI-filter capture schema drifted")
