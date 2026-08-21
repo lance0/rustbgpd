@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The IXP Manager v7.4 renderer and Birdwatcher adapter now cover all ten
+  reject reasons active in the pinned route-server templates, with named
+  AS-path length/first-AS and separate IRRDB origin/prefix policy terms. The
+  pinned PHP consumer verifies every display meaning from 1 through 15 while
+  keeping the five defined-only IDs and ambiguous causes on fallback 0;
+  `runtime_compatibility` remains false. (LAN-1131)
 - `RibService.LookupBestPath` now provides an outside-v1, bounded IPv4/IPv6
   longest-prefix lookup that returns the installed winner and every alternative
   for the matched prefix in one actor turn. `birdwatcher-adapter` exposes that

@@ -26,7 +26,7 @@ EXPECTED = {
     "bird_failure": 503,
 }
 UNSUPPORTED = {
-    "complete-rejected-route-reason-inventory",
+    "defined-only-rejected-route-reason-emission",
     "full-table-snapshot",
     "direct-runtime-protocol-alias-reconfiguration",
 }
@@ -37,9 +37,26 @@ RUNTIME_SUPPORTED = {
     "less-specific-longest-prefix-match",
     "atomic-all-candidate-prefix-snapshot",
     "file-backed-runtime-protocol-alias-reconfiguration",
+    "active-rejected-route-reason-inventory",
 }
 ADAPTER_API_VERSION = {"kind": "product-identity", "prefix": "rustbgpd "}
 FILTERED_PREFIX_QUERY = {"global_admin": 65001, "function": 1101}
+REJECT_REASONS = {
+    "display": {
+        str(reason_id): meaning
+        for reason_id, meaning in enumerate([
+            "PREFIX LENGTH TOO LONG", "PREFIX LENGTH TOO SHORT", "BOGON",
+            "BOGON ASN", "AS PATH TOO LONG", "AS PATH TOO SHORT",
+            "FIRST AS NOT PEER AS", "NEXT HOP NOT PEER IP",
+            "IRRDB PREFIX FILTERED", "IRRDB ORIGIN AS FILTERED",
+            "PREFIX NOT IN ORIGIN AS", "RPKI UNKNOWN", "RPKI INVALID",
+            "TRANSIT FREE ASN", "TOO MANY COMMUNITIES",
+        ], 1)
+    },
+    "active_ids": [1, 3, 5, 6, 7, 8, 9, 10, 13, 14],
+    "defined_only_ids": [2, 4, 11, 12, 15],
+    "fallback_id": 0,
+}
 
 
 def fail(message: str) -> None:
@@ -59,6 +76,8 @@ if manifest.get("adapter_api_version") != ADAPTER_API_VERSION:
     fail("adapter api.version must remain an honest product identity")
 if manifest.get("filtered_prefix_query") != FILTERED_PREFIX_QUERY:
     fail("filtered-prefix namespace drifted")
+if manifest.get("reject_reasons") != REJECT_REASONS:
+    fail("pinned reject-reason display or active partition drifted")
 if manifest.get("protocol_aliases") != {
     "member-v4": "pb_as64496",
     "member-v4-reloaded": "pb_reloaded_as64496",

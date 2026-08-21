@@ -16,6 +16,28 @@
     "global_admin": 65001,
     "function": 1101
   },
+  "reject_reasons": {
+    "display": {
+      "1": "PREFIX LENGTH TOO LONG",
+      "2": "PREFIX LENGTH TOO SHORT",
+      "3": "BOGON",
+      "4": "BOGON ASN",
+      "5": "AS PATH TOO LONG",
+      "6": "AS PATH TOO SHORT",
+      "7": "FIRST AS NOT PEER AS",
+      "8": "NEXT HOP NOT PEER IP",
+      "9": "IRRDB PREFIX FILTERED",
+      "10": "IRRDB ORIGIN AS FILTERED",
+      "11": "PREFIX NOT IN ORIGIN AS",
+      "12": "RPKI UNKNOWN",
+      "13": "RPKI INVALID",
+      "14": "TRANSIT FREE ASN",
+      "15": "TOO MANY COMMUNITIES"
+    },
+    "active_ids": [1, 3, 5, 6, 7, 8, 9, 10, 13, 14],
+    "defined_only_ids": [2, 4, 11, 12, 15],
+    "fallback_id": 0
+  },
   "runtime_compatibility": false,
   "manual_config_export": {
     "schema": "rustbgpd.ixp-manager.router-config/v1",
@@ -29,10 +51,11 @@
     "filtered-prefix-wildcard",
     "less-specific-longest-prefix-match",
     "atomic-all-candidate-prefix-snapshot",
-    "file-backed-runtime-protocol-alias-reconfiguration"
+    "file-backed-runtime-protocol-alias-reconfiguration",
+    "active-rejected-route-reason-inventory"
   ],
   "unsupported": [
-    "complete-rejected-route-reason-inventory",
+    "defined-only-rejected-route-reason-emission",
     "full-table-snapshot",
     "direct-runtime-protocol-alias-reconfiguration"
   ]

@@ -41,8 +41,10 @@ daemon order. Bounded longest-prefix table search atomically returns the
 installed winner first and every alternative for that one matched prefix. The
 exact `{daemon ASN}:1101:*` filtered-prefix query reads only retained rejects,
 scrubs that reserved namespace, and adds one conservative reason. This remains
-partial runtime support: complete rejected-route reasons and full table
-snapshots are still unavailable. Global table lists, counts, and other
+partial runtime support: the ten reasons active in the pinned v7.4 route-server
+templates are mapped, while IDs 2, 4, 11, 12, and 15 are display-only and
+remain fallback 0 rather than gaining invented semantics. Full table snapshots,
+global table lists, counts, and other
 wildcard-community endpoints are not served. The adapter's table identity is a
 validated view over one global Loc-RIB, and `api.version` is rustbgpd product
 identity, not a Bird's Eye version claim; the adapter is not described as fully
@@ -67,6 +69,9 @@ schema versions or fields, incomplete terminal markers, placeholder or overlong
 effective authentication, and symlink/public input or output paths.
 It renders only independently owned rustbgpd policy; no IXP Manager BIRD
 template or GPL source enters the binary or packaged artifacts.
+The generated policy names the pinned active AS-path length/first-AS and IRRDB
+origin/prefix rejects individually; its 64/65 path boundary and authorized
+fallthrough are executed by focused tests.
 
 The local activation helper consumes only a complete strict-check receipt. M96
 feeds the live pinned Foil capture into the real renderer/checker, then proves

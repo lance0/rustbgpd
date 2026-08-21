@@ -219,6 +219,13 @@ route also carries human-readable `reject_reason` / `reject_reason_detail`
 fields (plus `rpki_validation` / `aspa_validation`) as extra JSON keys —
 visible to curl users, ignored by parsers that don't know them.
 
+The IXP Manager wildcard uses its separate `{daemon ASN}:1101:<id>` namespace.
+For the pinned v7.4 route-server templates the adapter maps the ten active IDs
+`1,3,5,6,7,8,9,10,13,14`: prefix length, bogon, AS-path length/first-AS,
+NEXT_HOP, IRRDB prefix/origin, RPKI-invalid, and transit-free-AS rejects.
+Generated-policy mappings require the exact renderer policy/term identity;
+ambiguous, custom, and the five defined-only IDs `2,4,11,12,15` remain `0`.
+
 Alice-LG config to render the reasons:
 
 ```ini

@@ -2,6 +2,8 @@ use std::fs;
 
 use rs_config_render::ixp_manager::{Error, render_document};
 use rs_config_render::ixp_manager_host::RenderBinding;
+use rustbgpd_policy::rpol::{RpolFile, run_rpol_tests};
+use rustbgpd_policy::sets::SetStore;
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/ixp-manager-v1-supported.json");
 const SECRET: &str = "mcWsqMdzGwTKt67g";
@@ -32,6 +34,26 @@ fn rendered(input: &serde_json::Value) -> Result<rs_config_render::ixp_manager::
     render_document(&serde_json::to_vec(input).unwrap(), 300, &binding())
 }
 
+fn assert_terms(source: &str, policy: &str, expected: &[&str]) {
+    let file = RpolFile::parse(source).unwrap();
+    let compiled = file
+        .compile_policy(policy, &[], &mut SetStore::new())
+        .unwrap();
+    assert_eq!(
+        compiled.policies[0]
+            .terms
+            .iter()
+            .map(|term| term.name.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+fn assert_policy_tests(source: &str, tests: &str) {
+    let report = run_rpol_tests(&format!("{source}\n{tests}")).unwrap();
+    assert!(report.all_passed(), "{:?}", report.failures);
+}
+
 #[test]
 fn supported_render_is_deterministic_and_explicit() {
     let first = render_document(FIXTURE, 300, &binding()).unwrap();
@@ -57,7 +79,7 @@ fn supported_render_is_deterministic_and_explicit() {
     let client = &first.files["policy/client-3.rpol"];
     assert!(client.contains("asn-set client-3-origins { 42 }"));
     assert!(client.contains("31.135.128.0/19"));
-    assert!(client.contains("term rest { reject }"));
+    assert!(client.contains("term accept-authorized { accept }"));
     let mut loose = value();
     loose["clients"][0]["more_specifics"] = true.into();
     assert!(
@@ -73,6 +95,88 @@ fn supported_render_is_deterministic_and_explicit() {
     assert!(
         !rendered(&maximum).unwrap().files["policy/ixp-hygiene.rpol"]
             .contains("ixp-manager-too-specific")
+    );
+}
+
+#[test]
+fn generated_reason_policies_execute_at_exact_boundaries_and_terms() {
+    let files = rendered(&value()).unwrap().files;
+    let hygiene = &files["policy/ixp-hygiene.rpol"];
+    assert_terms(
+        hygiene,
+        "ixp-manager-hygiene",
+        &[
+            "reject-too-specific",
+            "reject-as-path-too-short",
+            "reject-as-path-too-long",
+            "reject-rpki-invalid",
+        ],
+    );
+    let path64 = std::iter::repeat_n("42", 64).collect::<Vec<_>>().join(" ");
+    let path65 = std::iter::repeat_n("42", 65).collect::<Vec<_>>().join(" ");
+    assert_policy_tests(
+        hygiene,
+        &format!(
+            r#"
+test empty-as-path {{
+    route {{ prefix 31.135.128.0/19; as-path ""; rpki valid }}
+    expect ixp-manager-hygiene == reject
+}}
+test as-path-64 {{
+    route {{ prefix 31.135.128.0/19; as-path "{path64}"; rpki valid }}
+    expect ixp-manager-hygiene == accept
+}}
+test as-path-65 {{
+    route {{ prefix 31.135.128.0/19; as-path "{path65}"; rpki valid }}
+    expect ixp-manager-hygiene == reject
+}}
+"#,
+        ),
+    );
+
+    let client = &files["policy/client-3.rpol"];
+    assert!(
+        hygiene.contains("term reject-as-path-too-short { if route.as-path.len == 0 { reject } }")
+    );
+    assert!(
+        hygiene.contains("term reject-as-path-too-long { if route.as-path.len >= 65 { reject } }")
+    );
+    assert!(client.contains(
+        "term reject-irrdb-origin-as-filtered { if !(route.origin-as in client-3-origins) { reject } }"
+    ));
+    assert!(client.contains(
+        "term reject-irrdb-prefix-filtered { if !(route.prefix in client-3-prefixes) { reject } }"
+    ));
+    assert_terms(
+        client,
+        "client-3",
+        &[
+            "reject-first-as-not-peer-as",
+            "reject-irrdb-origin-as-filtered",
+            "reject-irrdb-prefix-filtered",
+            "accept-authorized",
+        ],
+    );
+    assert_policy_tests(
+        client,
+        r#"
+test nonempty-first-as-mismatch {
+    route { prefix 31.135.128.0/19; as-path "43 42" }
+    expect client-3 == reject
+}
+test bad-irrdb-origin {
+    route { prefix 31.135.128.0/19; as-path "42 43" }
+    expect client-3 == reject
+}
+test bad-irrdb-prefix {
+    route { prefix 31.135.160.0/19; as-path "42" }
+    expect client-3 == reject
+}
+test authorized-fallthrough {
+    route { prefix 31.135.128.0/19; as-path "42" }
+    expect client-3 == accept
+}
+"#,
     );
 }
 
