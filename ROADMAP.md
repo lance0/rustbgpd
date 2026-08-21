@@ -618,14 +618,16 @@ is limited to a command that could not start and proves exact prior-link/runtime
 restoration without a second activation. A started command that fails or does
 not settle leaves the candidate current; exit 5 requires explicit recovery.
 M96 proves the pre-effect restoration against an MD5-authenticated FRR member
-without a daemon restart or session flap. HTTP
-fetching, callbacks, active UI-filter
-translation, custom-skin migration, and multi-address ownership remain open
-under LAN-1105. The external adapter now also serves the IXP
-Manager v7.4 status, live protocol inventory/detail, symbols, member received,
-and member export slice through immutable aliases with an enforced response
-maximum. Remaining Bird's Eye work is global table/count and exact/less-specific
-lookup, wildcard-community search, and the complete reject-reason inventory;
+without a daemon restart or session flap. The authenticated v7.4 lifecycle now
+journals lock intent, fetches the real Foil boundary, drives that activation,
+and delivers explicit updated/release callbacks; M97 proves the real database
+transitions and MD5-FRR continuity. Active UI-filter translation, custom-skin
+migration, and multi-address ownership remain open. The external adapter now
+also serves the IXP Manager v7.4 status, live protocol inventory/detail,
+symbols, member received, and member export slice through immutable aliases
+with an enforced response maximum. Remaining Bird's Eye work is global
+table/count and exact/less-specific lookup, wildcard-community search, and the
+complete reject-reason inventory;
 no full compatibility claim is made.
 [ADR-0126](docs/adr/0126-shared-group-per-client-best.md) (Accepted) landed
 shared-group per-client best-path: the `per_client_best` path-hiding

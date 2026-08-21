@@ -124,7 +124,8 @@ jobs:
             done
             for file in lib/systemd/system/rustbgpd.service \
                         usr/share/man/man1/rbgp.1.gz \
-                        usr/share/man/man8/rustbgpd.8.gz; do
+                        usr/share/man/man8/rustbgpd.8.gz \
+                        usr/share/doc/rustbgpd/LICENSES.md; do
               test -s "$tree/$file" || { echo "missing or empty: $tree/$file" >&2; exit 1; }
             done
             # The packaged daemon must accept the config its own package

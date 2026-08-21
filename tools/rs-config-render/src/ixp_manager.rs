@@ -607,7 +607,20 @@ pub fn write_checked_candidate(
         return Err(Error::Refused("input capture must be mode 0600"));
     }
     let input = fs::read(context).map_err(|_| Error::Input)?;
-    let candidate = render_document(&input, restart_seconds)?;
+    write_checked_candidate_bytes(&input, out, restart_seconds, checker)
+}
+
+/// Render and strictly validate a private in-memory IXP Manager capture.
+///
+/// This is the authenticated-lifecycle entry point: callers retain ownership
+/// of the fetched secret-bearing bytes and never need to persist a raw capture.
+pub fn write_checked_candidate_bytes(
+    input: &[u8],
+    out: &Path,
+    restart_seconds: u32,
+    checker: &Path,
+) -> Result<usize, Error> {
+    let candidate = render_document(input, restart_seconds)?;
     prepare_output(out)?;
     for (relative, contents) in &candidate.files {
         let path = out.join(relative);

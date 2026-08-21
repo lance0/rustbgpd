@@ -159,6 +159,32 @@ retained state untouched and inspect the current private receipt if present;
 recovery or receipt durability is unproven, and the receipt may be absent or
 stale when its final write or directory sync failed.
 
+To drive the same path directly from IXP Manager v7.4, create a separate
+mode-0700 candidate directory for the run and store the API key in an absolute
+mode-0600 regular file owned by `rustbgpd`:
+
+```console
+sudo -u rustbgpd /usr/local/bin/rs-config-render ixp-manager-lifecycle run \
+  --ixp-origin https://ixp.example.net --router-handle rs1-ipv4 \
+  --api-key-file /var/lib/rustbgpd/ixp-manager/api-key \
+  --candidate-dir /var/lib/rustbgpd/ixp-manager/candidate-1 \
+  --state-dir /var/lib/rustbgpd/ixp-manager/activation \
+  --max-prefix-restart-seconds 300 \
+  --check-with /usr/local/bin/rustbgpd --rbgp /usr/local/bin/rbgp \
+  --rbgp-addr unix:///var/lib/rustbgpd/grpc.sock \
+  --activation-command /usr/bin/sudo \
+  --activation-arg=-n --activation-arg /usr/bin/systemctl \
+  --activation-arg reload-or-restart --activation-arg rustbgpd
+```
+
+The helper uses the exact v7.4 lock, Foil configuration, updated, and release
+endpoints. HTTPS platform roots are required; redirects, proxies, URL
+credentials, and path-prefixed origins are disabled. Requests send the API key
+only in the credential header. A synced private journal precedes each remote
+effect. Exit 6 means one callback is pending and may be retried with
+`ixp-manager-lifecycle resume`; exit 5 means acquisition or activation remains
+uncertain and no callback is attempted automatically. Delivery is at-least-once.
+
 ### Debian / RPM packages
 
 Tagged releases also publish native packages built with

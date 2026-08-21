@@ -108,6 +108,64 @@ therefore be absent or stale after exit 5. The helper does not deploy services,
 prune generations, retry indefinitely, or call IXP Manager. These examples use
 package paths; release archives install the three binaries under `/usr/local/bin`.
 
+### Authenticated IXP Manager lifecycle
+
+`ixp-manager-lifecycle run` wraps the pinned IXP Manager v7.4 router API around
+the same renderer and atomic activation path. It acquires the upstream router
+lock, fetches the real Foil JSON over HTTPS, renders and strictly checks a fresh
+private candidate, activates it, then delivers `updated` or
+`release-update-lock` as appropriate:
+
+```console
+sudo -u rustbgpd /usr/bin/rs-config-render ixp-manager-lifecycle run \
+  --ixp-origin https://ixp.example.net \
+  --router-handle rs1-ipv4 \
+  --api-key-file /var/lib/rustbgpd/ixp-manager/api-key \
+  --candidate-dir /var/lib/rustbgpd/ixp-manager/candidate-1 \
+  --state-dir /var/lib/rustbgpd/ixp-manager/lifecycle \
+  --max-prefix-restart-seconds 300 \
+  --check-with /usr/bin/rustbgpd --rbgp /usr/bin/rbgp \
+  --rbgp-addr unix:///var/lib/rustbgpd/grpc.sock \
+  --activation-command /usr/bin/sudo \
+  --activation-arg=-n --activation-arg /usr/bin/systemctl \
+  --activation-arg reload-or-restart --activation-arg rustbgpd
+```
+
+Supply a new absent or empty mode-0700 candidate directory for each run. The
+absolute state directory must already exist at mode 0700 and remain owned by
+the `rustbgpd` identity. The API-key path must be absolute, regular,
+non-symlink, mode 0600, and at most 4 KiB. The value appears only in the
+`X-IXP-Manager-API-Key` request header: it is not accepted in argv or the
+environment and is not retained in the lifecycle journal, render receipt,
+capture, output, or diagnostics.
+
+HTTPS with platform trust roots is mandatory. Redirects and environment
+proxies are disabled. `--allow-http-loopback` exists only for a numeric
+loopback test origin; hostname HTTP, `localhost`, URL credentials, query
+strings, fragments, and path-prefixed origins are refused. Requests use a
+bounded 1–300 second deadline, 32 KiB response-header ceiling, 64 KiB control
+body ceiling, and 4 MiB configuration ceiling.
+
+Lifecycle intent is written and synced before every upstream request. Exit 0
+means `updated` was delivered. Exit 2 means no lock was acquired or a definite
+pre-activation refusal was released. Exit 4 means the activation command never
+started, exact prior runtime was proven, and release was delivered. Exit 5
+does not issue a callback because lock acquisition or an activation effect is
+uncertain. Exit 6 leaves one durable `updated` or release callback pending;
+retry only that callback with the same identity:
+
+```console
+sudo -u rustbgpd /usr/bin/rs-config-render ixp-manager-lifecycle resume \
+  --ixp-origin https://ixp.example.net --router-handle rs1-ipv4 \
+  --api-key-file /var/lib/rustbgpd/ixp-manager/api-key \
+  --state-dir /var/lib/rustbgpd/ixp-manager/lifecycle
+```
+
+Callback delivery is at-least-once because IXP Manager v7.4 supplies no lease
+or idempotency token. `resume` never refetches, rerenders, or activates. It has
+no automatic action for exit 5; inspect retained activation/lifecycle state and
+the live daemon before explicitly resolving the upstream router lock.
+
 Release tarballs (`rustbgpd-<arch>.tar.gz` on the [releases
 page](https://github.com/lance0/rustbgpd/releases)) ship the
 `rs-config-render` binary alongside `rustbgpd` and `rbgp`; from

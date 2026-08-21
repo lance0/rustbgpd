@@ -16,6 +16,8 @@ clap = { workspace = true }
 sha2 = { workspace = true }
 toml = { workspace = true }
 rustbgpd-policy = { workspace = true }
+ureq = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
