@@ -2,13 +2,14 @@
 
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info};
 
 use rustbgpd_rib::RibUpdate;
+use rustbgpd_telemetry::BgpMetrics;
 
 use crate::codec;
 use crate::types::{MrtSnapshotData, MrtWriterConfig};
@@ -20,12 +21,37 @@ fn periodic_interval(period: Duration) -> tokio::time::Interval {
     interval
 }
 
+/// A failed or canceled dump: the operator-facing message plus the bounded
+/// `mrt_dump_failures_total{stage}` class. `stage` is `None` for a
+/// caller-canceled on-demand dump, which is not a writer failure.
+struct DumpError {
+    stage: Option<&'static str>,
+    message: String,
+}
+
+impl DumpError {
+    fn at(stage: &'static str, message: String) -> Self {
+        Self {
+            stage: Some(stage),
+            message,
+        }
+    }
+
+    fn canceled(message: &str) -> Self {
+        Self {
+            stage: None,
+            message: message.to_string(),
+        }
+    }
+}
+
 /// MRT dump manager. Periodically queries the RIB and writes `TABLE_DUMP_V2` files.
 pub struct MrtManager {
     config: MrtWriterConfig,
     rib_tx: mpsc::Sender<RibUpdate>,
     trigger_rx: mpsc::Receiver<oneshot::Sender<Result<PathBuf, String>>>,
     local_bgp_id: Ipv4Addr,
+    metrics: BgpMetrics,
 }
 
 impl MrtManager {
@@ -36,17 +62,21 @@ impl MrtManager {
         rib_tx: mpsc::Sender<RibUpdate>,
         trigger_rx: mpsc::Receiver<oneshot::Sender<Result<PathBuf, String>>>,
         local_bgp_id: Ipv4Addr,
+        metrics: BgpMetrics,
     ) -> Self {
         Self {
             config,
             rib_tx,
             trigger_rx,
             local_bgp_id,
+            metrics,
         }
     }
 
     /// Run the manager loop. Returns when the trigger channel closes.
     pub async fn run(mut self) {
+        self.metrics
+            .set_mrt_dump_interval_seconds(self.config.dump_interval);
         let mut interval = periodic_interval(Duration::from_secs(self.config.dump_interval));
         // Skip the immediate first tick — the first dump will fire after one interval.
         interval.tick().await;
@@ -89,18 +119,51 @@ impl MrtManager {
         info!("MRT manager shutting down");
     }
 
+    /// Run one dump and account for it: a published file stamps the
+    /// success gauges and bytes counter; a failure increments
+    /// `mrt_dump_failures_total{stage}`; a caller cancellation is neither.
     async fn do_dump(
         &self,
         cancel: Option<&mut oneshot::Sender<Result<PathBuf, String>>>,
     ) -> Result<PathBuf, String> {
+        let started = Instant::now();
+        match self.dump_once(cancel).await {
+            Ok((path, bytes_written)) => {
+                self.metrics
+                    .record_mrt_dump_success(bytes_written, started.elapsed());
+                Ok(path)
+            }
+            Err(DumpError { stage, message }) => {
+                if let Some(stage) = stage {
+                    self.metrics.record_mrt_dump_failure(stage);
+                }
+                Err(message)
+            }
+        }
+    }
+
+    async fn dump_once(
+        &self,
+        cancel: Option<&mut oneshot::Sender<Result<PathBuf, String>>>,
+    ) -> Result<(PathBuf, u64), DumpError> {
         // Reject structurally impossible output paths before asking the
         // RIB actor to clone a full snapshot. Permissions and storage can
         // still change before publication, so the write remains fallible.
         let config = self.config.clone();
         tokio::task::spawn_blocking(move || writer::prepare_output_dir(&config))
             .await
-            .map_err(|e| format!("output directory preflight join error: {e}"))?
-            .map_err(|e| format!("output directory preflight error: {e}"))?;
+            .map_err(|e| {
+                DumpError::at(
+                    "preflight",
+                    format!("output directory preflight join error: {e}"),
+                )
+            })?
+            .map_err(|e| {
+                DumpError::at(
+                    "preflight",
+                    format!("output directory preflight error: {e}"),
+                )
+            })?;
 
         let snapshot = self.query_snapshot(cancel).await?;
 
@@ -117,56 +180,57 @@ impl MrtManager {
             &snapshot.evpn_routes,
             ts32,
         )
-        .map_err(|e| format!("encode error: {e}"))?;
+        .map_err(|e| DumpError::at("encode", format!("encode error: {e}")))?;
 
         let config = self.config.clone();
-        tokio::task::spawn_blocking(move || writer::write_dump(&config, &data))
-            .await
-            .map_err(|e| format!("join error: {e}"))?
-            .map_err(|e| {
-                error!(error = %e, "MRT dump write failed");
-                format!("write error: {e}")
-            })
+        tokio::task::spawn_blocking(move || {
+            let path = writer::write_dump(&config, &data)?;
+            let bytes_written = std::fs::metadata(&path)?.len();
+            Ok::<_, std::io::Error>((path, bytes_written))
+        })
+        .await
+        .map_err(|e| DumpError::at("write", format!("join error: {e}")))?
+        .map_err(|e| {
+            error!(error = %e, "MRT dump write failed");
+            DumpError::at("write", format!("write error: {e}"))
+        })
     }
 
     async fn query_snapshot(
         &self,
         mut cancel: Option<&mut oneshot::Sender<Result<PathBuf, String>>>,
-    ) -> Result<MrtSnapshotData, String> {
+    ) -> Result<MrtSnapshotData, DumpError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let query = RibUpdate::QueryMrtSnapshot { reply: reply_tx };
+        let closed = |e| DumpError::at("snapshot", format!("RIB channel closed: {e}"));
+        let dropped = |e| DumpError::at("snapshot", format!("RIB reply dropped: {e}"));
 
         if let Some(cancel) = cancel.as_deref_mut() {
             tokio::select! {
                 biased;
                 () = cancel.closed() => {
-                    return Err("MRT dump canceled while queueing RIB snapshot".to_string());
+                    return Err(DumpError::canceled("MRT dump canceled while queueing RIB snapshot"));
                 }
                 result = self.rib_tx.send(query) => {
-                    result.map_err(|e| format!("RIB channel closed: {e}"))?;
+                    result.map_err(closed)?;
                 }
             }
         } else {
-            self.rib_tx
-                .send(query)
-                .await
-                .map_err(|e| format!("RIB channel closed: {e}"))?;
+            self.rib_tx.send(query).await.map_err(closed)?;
         }
 
         if let Some(cancel) = cancel {
             tokio::select! {
                 biased;
                 () = cancel.closed() => {
-                    Err("MRT dump canceled while awaiting RIB snapshot".to_string())
+                    Err(DumpError::canceled("MRT dump canceled while awaiting RIB snapshot"))
                 }
                 result = reply_rx => {
-                    result.map_err(|e| format!("RIB reply dropped: {e}"))
+                    result.map_err(dropped)
                 }
             }
         } else {
-            reply_rx
-                .await
-                .map_err(|e| format!("RIB reply dropped: {e}"))
+            reply_rx.await.map_err(dropped)
         }
     }
 }
@@ -177,6 +241,33 @@ mod tests {
 
     use super::*;
     use crate::types::MrtPeerEntry;
+
+    /// Read one exported sample (gauge or counter) by family name and an
+    /// optional label match; 0 when the family or series is absent.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the sampled families are integral gauges and counters"
+    )]
+    fn metric_sample(metrics: &BgpMetrics, name: &str, label: Option<(&str, &str)>) -> i64 {
+        metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|f| f.name() == name)
+            .and_then(|mut f| {
+                f.take_metric().into_iter().find(|m| match label {
+                    None => true,
+                    Some((k, v)) => m.label.iter().any(|l| l.name() == k && l.value() == v),
+                })
+            })
+            .map_or(0, |m| {
+                if m.gauge.is_some() {
+                    m.gauge.value() as i64
+                } else {
+                    m.counter.value() as i64
+                }
+            })
+    }
 
     fn test_config(output_dir: PathBuf) -> MrtWriterConfig {
         MrtWriterConfig {
@@ -220,7 +311,13 @@ mod tests {
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         let (trigger_tx, trigger_rx) = mpsc::channel(16);
 
-        let mgr = MrtManager::new(config, rib_tx, trigger_rx, Ipv4Addr::new(1, 2, 3, 4));
+        let mgr = MrtManager::new(
+            config,
+            rib_tx,
+            trigger_rx,
+            Ipv4Addr::new(1, 2, 3, 4),
+            BgpMetrics::new(),
+        );
         let handle = tokio::spawn(mgr.run());
 
         drop(trigger_tx);
@@ -242,8 +339,22 @@ mod tests {
 
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
         let (trigger_tx, trigger_rx) = mpsc::channel(16);
+        let metrics = BgpMetrics::new();
+        let before = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
 
-        let mgr = MrtManager::new(config, rib_tx, trigger_rx, Ipv4Addr::new(1, 2, 3, 4));
+        let mgr = MrtManager::new(
+            config,
+            rib_tx,
+            trigger_rx,
+            Ipv4Addr::new(1, 2, 3, 4),
+            metrics.clone(),
+        );
         let handle = tokio::spawn(mgr.run());
 
         // Spawn a task to reply to the RIB query
@@ -273,6 +384,24 @@ mod tests {
         assert!(path.exists());
         assert!(path.to_string_lossy().ends_with(".mrt"));
 
+        // Dump health metrics: the success stamps the timestamp, the bytes
+        // counter matches the published file, and nothing counts as a failure.
+        let on_disk = i64::try_from(std::fs::metadata(&path).unwrap().len()).unwrap();
+        assert!(on_disk > 0, "PEER_INDEX_TABLE must produce bytes");
+        assert_eq!(
+            metric_sample(&metrics, "mrt_dump_interval_seconds", None),
+            86400
+        );
+        assert!(
+            metric_sample(&metrics, "mrt_last_dump_success_timestamp_seconds", None) >= before,
+            "success timestamp must be stamped"
+        );
+        assert_eq!(
+            metric_sample(&metrics, "mrt_dump_bytes_written_total", None),
+            on_disk
+        );
+        assert_eq!(metric_sample(&metrics, "mrt_dump_failures_total", None), 0);
+
         rib_handler.await.unwrap();
         drop(trigger_tx);
         handle.await.unwrap();
@@ -291,7 +420,13 @@ mod tests {
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
         let (trigger_tx, trigger_rx) = mpsc::channel(16);
 
-        let mgr = MrtManager::new(config, rib_tx, trigger_rx, Ipv4Addr::new(1, 2, 3, 4));
+        let mgr = MrtManager::new(
+            config,
+            rib_tx,
+            trigger_rx,
+            Ipv4Addr::new(1, 2, 3, 4),
+            BgpMetrics::new(),
+        );
         let handle = tokio::spawn(mgr.run());
 
         // Count RIB snapshot queries: the canceled trigger must never
@@ -339,11 +474,13 @@ mod tests {
 
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
         let (trigger_tx, trigger_rx) = mpsc::channel(16);
+        let metrics = BgpMetrics::new();
         let manager = MrtManager::new(
             test_config(output_file.clone()),
             rib_tx,
             trigger_rx,
             Ipv4Addr::LOCALHOST,
+            metrics.clone(),
         );
         let handle = tokio::spawn(manager.run());
 
@@ -359,6 +496,19 @@ mod tests {
             rib_rx.try_recv().is_err(),
             "structurally impossible output must emit zero RIB queries"
         );
+        assert_eq!(
+            metric_sample(
+                &metrics,
+                "mrt_dump_failures_total",
+                Some(("stage", "preflight"))
+            ),
+            1
+        );
+        assert_eq!(
+            metric_sample(&metrics, "mrt_last_dump_success_timestamp_seconds", None),
+            0,
+            "a failed dump must not stamp a success"
+        );
 
         drop(trigger_tx);
         handle.await.unwrap();
@@ -370,11 +520,13 @@ mod tests {
         let output_dir = dir.path().join("lazy-output");
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
         let (trigger_tx, trigger_rx) = mpsc::channel(16);
+        let metrics = BgpMetrics::new();
         let manager = MrtManager::new(
             test_config(output_dir.clone()),
             rib_tx,
             trigger_rx,
             Ipv4Addr::LOCALHOST,
+            metrics.clone(),
         );
         let handle = tokio::spawn(manager.run());
 
@@ -413,6 +565,11 @@ mod tests {
         drop(snapshot_reply);
         drop(trigger_tx);
         handle.await.unwrap();
+        assert_eq!(
+            metric_sample(&metrics, "mrt_dump_failures_total", None),
+            0,
+            "a caller-canceled dump is not a writer failure"
+        );
     }
 
     #[tokio::test]
@@ -433,6 +590,7 @@ mod tests {
             rib_tx,
             trigger_rx,
             Ipv4Addr::LOCALHOST,
+            BgpMetrics::new(),
         );
         let handle = tokio::spawn(manager.run());
 

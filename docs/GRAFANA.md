@@ -77,7 +77,7 @@ dynamic-neighbor admission near-limit and rejection,
 actor polls above 200ms, exact-export rejection, malformed UPDATE disposition,
 selection-deferral timeout and ledger overflow, outbound route loss, RFC 9687
 send-hold teardown, live event-stream lag/desynchronization, BMP feed loss,
-and daemon down)
+stale MRT dumps, and daemon down)
 ships at
 [`examples/prometheus/rustbgpd-alerts.yml`](../examples/prometheus/rustbgpd-alerts.yml),
 with per-rule unit tests in

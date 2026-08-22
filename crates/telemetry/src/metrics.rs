@@ -387,6 +387,13 @@ struct BgpMetricsInner {
     bmp_loc_rib_dump_live_buffer_depth: IntGaugeVec,
     bmp_loc_rib_dump_live_buffer_high_watermark: IntGaugeVec,
 
+    // ── MRT dump export ────────────────────────────────────────
+    mrt_dump_interval_seconds: IntGauge,
+    mrt_last_dump_success_timestamp: IntGauge,
+    mrt_last_dump_duration_milliseconds: IntGauge,
+    mrt_dump_bytes_written: IntCounter,
+    mrt_dump_failures: IntCounterVec,
+
     // ── Event history outbox (ADR-0072) ───────────────────────
     event_outbox_committed: IntCounterVec,
     event_outbox_dropped: IntCounterVec,
@@ -1887,6 +1894,43 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        // ── MRT dump export ──────────────────────────────────────
+        let mrt_dump_interval_seconds = IntGauge::new(
+            "mrt_dump_interval_seconds",
+            "Configured seconds between periodic MRT TABLE_DUMP_V2 dumps \
+             ([mrt] dump_interval). Exists only when [mrt] is configured.",
+        )
+        .expect("valid metric definition");
+        let mrt_last_dump_success_timestamp = IntGauge::new(
+            "mrt_last_dump_success_timestamp_seconds",
+            "Unix time the last MRT dump (periodic or on-demand) was written \
+             and published successfully. 0 until the first success after \
+             start; a failed dump does NOT advance it, so `time() - <this>` \
+             is the age of the newest dump file.",
+        )
+        .expect("valid metric definition");
+        let mrt_last_dump_duration_milliseconds = IntGauge::new(
+            "mrt_last_dump_duration_milliseconds",
+            "Wall-clock duration of the last successful MRT dump from trigger \
+             to published file (RIB snapshot, encode, write, rename).",
+        )
+        .expect("valid metric definition");
+        let mrt_dump_bytes_written = IntCounter::new(
+            "mrt_dump_bytes_written_total",
+            "Bytes of MRT dump files published on disk (post-compression).",
+        )
+        .expect("valid metric definition");
+        let mrt_dump_failures = IntCounterVec::new(
+            Opts::new(
+                "mrt_dump_failures_total",
+                "MRT dumps that failed, by bounded stage (preflight, snapshot, \
+                 encode, write). Caller-canceled on-demand dumps are not \
+                 counted.",
+            ),
+            &["stage"],
+        )
+        .expect("valid metric definition");
+
         // ── Event history outbox (ADR-0072) ─────────────────────
         let event_outbox_committed = IntCounterVec::new(
             Opts::new(
@@ -2431,6 +2475,21 @@ impl BgpMetrics {
             ))
             .expect("metric not already registered");
         registry
+            .register(Box::new(mrt_dump_interval_seconds.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(mrt_last_dump_success_timestamp.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(mrt_last_dump_duration_milliseconds.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(mrt_dump_bytes_written.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(mrt_dump_failures.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(event_outbox_committed.clone()))
             .expect("metric not already registered");
         registry
@@ -2622,6 +2681,11 @@ impl BgpMetrics {
             bmp_control_event_drops,
             bmp_loc_rib_dump_live_buffer_depth,
             bmp_loc_rib_dump_live_buffer_high_watermark,
+            mrt_dump_interval_seconds,
+            mrt_last_dump_success_timestamp,
+            mrt_last_dump_duration_milliseconds,
+            mrt_dump_bytes_written,
+            mrt_dump_failures,
             event_outbox_committed,
             event_outbox_dropped,
             event_outbox_queue_depth,
@@ -4517,6 +4581,33 @@ impl BgpMetrics {
     /// retargeted at their backup PE.
     pub fn set_evpn_single_active_backup_active(&self, value: i64) {
         self.0.evpn_single_active_backup_active.set(value);
+    }
+
+    /// Publish the configured MRT dump cadence so dump age can be
+    /// alerted on relative to it (`MrtDumpStale` in the alert pack).
+    pub fn set_mrt_dump_interval_seconds(&self, seconds: u64) {
+        self.0
+            .mrt_dump_interval_seconds
+            .set(i64::try_from(seconds).unwrap_or(i64::MAX));
+    }
+
+    /// Record a successfully published MRT dump: stamp the current unix
+    /// time, the end-to-end duration, and the bytes put on disk.
+    pub fn record_mrt_dump_success(&self, bytes_written: u64, duration: std::time::Duration) {
+        self.0
+            .mrt_last_dump_success_timestamp
+            .set(unix_now_seconds());
+        self.0
+            .mrt_last_dump_duration_milliseconds
+            .set(i64::try_from(duration.as_millis()).unwrap_or(i64::MAX));
+        self.0.mrt_dump_bytes_written.inc_by(bytes_written);
+    }
+
+    /// Record a failed MRT dump by bounded `stage` (`preflight`,
+    /// `snapshot`, `encode`, `write`). Never called for a caller-canceled
+    /// on-demand dump.
+    pub fn record_mrt_dump_failure(&self, stage: &str) {
+        self.0.mrt_dump_failures.with_label_values(&[stage]).inc();
     }
 
     /// Record a BMP event dropped at the PeerSession→BmpManager channel.
@@ -6524,6 +6615,41 @@ mod tests {
 
         let families = m.registry().gather();
         assert!(!families.is_empty());
+    }
+
+    #[test]
+    fn mrt_dump_metrics_record_success_failure_and_interval() {
+        let m = BgpMetrics::new();
+        assert_eq!(m.0.mrt_last_dump_success_timestamp.get(), 0);
+
+        m.set_mrt_dump_interval_seconds(7200);
+        assert_eq!(m.0.mrt_dump_interval_seconds.get(), 7200);
+
+        let before = unix_now_seconds();
+        m.record_mrt_dump_success(1234, std::time::Duration::from_millis(250));
+        assert!(m.0.mrt_last_dump_success_timestamp.get() >= before);
+        assert_eq!(m.0.mrt_last_dump_duration_milliseconds.get(), 250);
+        assert_eq!(m.0.mrt_dump_bytes_written.get(), 1234);
+
+        let stamp = m.0.mrt_last_dump_success_timestamp.get();
+        m.record_mrt_dump_failure("write");
+        m.record_mrt_dump_failure("write");
+        m.record_mrt_dump_failure("snapshot");
+        assert_eq!(m.0.mrt_dump_failures.with_label_values(&["write"]).get(), 2);
+        assert_eq!(
+            m.0.mrt_dump_failures.with_label_values(&["snapshot"]).get(),
+            1
+        );
+        assert_eq!(
+            m.0.mrt_last_dump_success_timestamp.get(),
+            stamp,
+            "a failure must not advance the success timestamp"
+        );
+
+        let text = gather_text(&m);
+        assert!(text.contains("mrt_dump_interval_seconds 7200"));
+        assert!(text.contains("mrt_dump_bytes_written_total 1234"));
+        assert!(text.contains("mrt_dump_failures_total{stage=\"write\"} 2"));
     }
 
     #[test]

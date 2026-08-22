@@ -689,6 +689,89 @@ tests:
                 bgp_event_outbox_open_failures_total, then the daemon
                 log.
 
+  # ── MrtDumpStale ──────────────────────────────────────────
+  # Age is anchored on process start until the first success: edge1 never
+  # succeeds after starting at 5m and fires 2x interval later; edge2
+  # succeeded once at 10m then stalled; edge3's fresh success at 32m clears
+  # a pending alert; edge4's longer interval scales the threshold. All
+  # timestamps are promtool's epoch-relative clock.
+  - interval: 1m
+    input_series:
+      - series: 'mrt_dump_interval_seconds{job="rustbgpd", instance="edge1:9179"}'
+        values: "600x60"
+      - series: 'mrt_last_dump_success_timestamp_seconds{job="rustbgpd", instance="edge1:9179"}'
+        values: "0x60"
+      - series: 'process_start_time_seconds{job="rustbgpd", instance="edge1:9179"}'
+        values: "300x60"
+      - series: 'mrt_dump_interval_seconds{job="rustbgpd", instance="edge2:9179"}'
+        values: "600x60"
+      - series: 'mrt_last_dump_success_timestamp_seconds{job="rustbgpd", instance="edge2:9179"}'
+        values: "0x10 600x50"
+      - series: 'process_start_time_seconds{job="rustbgpd", instance="edge2:9179"}'
+        values: "0x60"
+      - series: 'mrt_dump_interval_seconds{job="rustbgpd", instance="edge3:9179"}'
+        values: "600x60"
+      - series: 'mrt_last_dump_success_timestamp_seconds{job="rustbgpd", instance="edge3:9179"}'
+        values: "0x10 600x20 1920x30"
+      - series: 'process_start_time_seconds{job="rustbgpd", instance="edge3:9179"}'
+        values: "0x60"
+      - series: 'mrt_dump_interval_seconds{job="rustbgpd", instance="edge4:9179"}'
+        values: "86400x60"
+      - series: 'mrt_last_dump_success_timestamp_seconds{job="rustbgpd", instance="edge4:9179"}'
+        values: "0x60"
+      - series: 'process_start_time_seconds{job="rustbgpd", instance="edge4:9179"}'
+        values: "0x60"
+      # A process-start series from another job must not anchor anything.
+      - series: 'process_start_time_seconds{job="node", instance="edge1:9100"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MrtDumpStale
+        exp_alerts: []
+      # edge1 crossed 2x interval at 25m30s and is still pending (for: 5m).
+      - eval_time: 30m
+        alertname: MrtDumpStale
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: MrtDumpStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: rustbgpd
+              instance: edge1:9179
+            exp_annotations:
+              summary: "MRT dump stale on edge1:9179"
+              description: >-
+                No MRT TABLE_DUMP_V2 file has been published on edge1:9179 for
+                more than twice the configured mrt_dump_interval_seconds. Check
+                mrt_dump_failures_total by stage and the daemon log for the
+                failing dump; `rbgp mrt-dump` runs one on demand.
+      - eval_time: 36m
+        alertname: MrtDumpStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: rustbgpd
+              instance: edge1:9179
+            exp_annotations:
+              summary: "MRT dump stale on edge1:9179"
+              description: >-
+                No MRT TABLE_DUMP_V2 file has been published on edge1:9179 for
+                more than twice the configured mrt_dump_interval_seconds. Check
+                mrt_dump_failures_total by stage and the daemon log for the
+                failing dump; `rbgp mrt-dump` runs one on demand.
+          - exp_labels:
+              severity: warning
+              job: rustbgpd
+              instance: edge2:9179
+            exp_annotations:
+              summary: "MRT dump stale on edge2:9179"
+              description: >-
+                No MRT TABLE_DUMP_V2 file has been published on edge2:9179 for
+                more than twice the configured mrt_dump_interval_seconds. Check
+                mrt_dump_failures_total by stage and the daemon log for the
+                failing dump; `rbgp mrt-dump` runs one on demand.
+
   # ── BgpUpdateGroupResidueGrowing ──────────────────────────────
   - interval: 1m
     input_series:
