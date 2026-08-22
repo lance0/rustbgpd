@@ -199,6 +199,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   deferral once before scanning every family queue for a gated family; with no
   deferral configured the per-route scans are skipped. Gate behavior is
   unchanged. (LAN-1161)
+- The RFC 9234 OTC egress fallback no longer clones routes it is about to
+  block; only the permitted subset is copied into the rebuilt announce slice.
+  Withdraw conversion and diagnostics are unchanged. (LAN-1167)
 
 - `rustbgpd-rib`, `rustbgpd-policy`, and `rustbgpd-bmp` no longer declare an
   unused `thiserror` dependency; the ROADMAP entry that tracked the transitive

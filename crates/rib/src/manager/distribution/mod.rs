@@ -2234,12 +2234,11 @@ impl RibManager {
             // Preserve the caller's withdrawal order while making duplicate
             // detection constant-time for large policy reload/resync batches.
             let mut withdrawn_keys: HashSet<(Prefix, u32)> = withdraw.iter().copied().collect();
-            for (route, next_hop) in announce
-                .iter()
-                .cloned()
-                .zip(next_hop_override.iter().cloned())
-            {
-                if otc_egress_blocked(&route, local_role) {
+            // `announce` is a shared slice, so the permitted subset has to be
+            // copied into a fresh one; blocked routes are inspected in place
+            // and never cloned.
+            for (route, next_hop) in announce.iter().zip(next_hop_override.iter()) {
+                if otc_egress_blocked(route, local_role) {
                     // A per-client-best group member's prior wire view is
                     // group-derived (no per-peer unicast Adj-RIB-Out), so
                     // the previously-advertised gate below cannot see it. A
@@ -2267,8 +2266,8 @@ impl RibManager {
                         withdraw.push((route.prefix, route.path_id));
                     }
                 } else {
-                    permitted.push(route);
-                    permitted_next_hops.push(next_hop);
+                    permitted.push(route.clone());
+                    permitted_next_hops.push(next_hop.clone());
                 }
             }
             announce = permitted.into();
