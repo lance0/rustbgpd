@@ -18,6 +18,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--apply` is given, refuses outright while a host fence exists, and never
   runs from the activation path. The README documents the rule, a cron-safe
   pattern, and measured bytes per generation. (LAN-1180)
+- The Prometheus alert pack gains `BmpSourceDrops`, `BmpLocRibSourceDrops`,
+  and `BmpCollectorDrops`, firing on any 10-minute increase of the BMP drop
+  counters so a lossy BMP feed is no longer silent. (LAN-1189)
 - A `semver-checks` CI workflow runs `cargo-semver-checks` for every
   publishable workspace crate (re-derived from the manifests; today
   `rustbgpd-wire` and `rustbgpd-fsm`) against its latest crates.io release on
