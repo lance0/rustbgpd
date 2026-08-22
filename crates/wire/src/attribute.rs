@@ -688,6 +688,10 @@ pub enum PathAttribute {
     AsPath(AsPath),
     /// `AGGREGATOR` attribute (type 7), normalized to a 4-octet ASN.
     Aggregator(Aggregator),
+    /// RFC 4271 §5.1.6 `ATOMIC_AGGREGATE` (type 6): well-known discretionary,
+    /// zero-length. A speaker that aggregates sets it; a speaker propagating
+    /// a route that carries it must not remove it (§9.1.4).
+    AtomicAggregate,
     /// `NEXT_HOP` attribute (type 3).
     NextHop(Ipv4Addr),
     /// `LOCAL_PREF` attribute (type 5).
@@ -726,6 +730,7 @@ impl PathAttribute {
             Self::Origin(_) => attr_type::ORIGIN,
             Self::AsPath(_) => attr_type::AS_PATH,
             Self::Aggregator(_) => attr_type::AGGREGATOR,
+            Self::AtomicAggregate => attr_type::ATOMIC_AGGREGATE,
             Self::NextHop(_) => attr_type::NEXT_HOP,
             Self::LocalPref(_) => attr_type::LOCAL_PREF,
             Self::Med(_) => attr_type::MULTI_EXIT_DISC,
@@ -745,9 +750,11 @@ impl PathAttribute {
     #[must_use]
     pub fn flags(&self) -> u8 {
         match self {
-            Self::Origin(_) | Self::AsPath(_) | Self::NextHop(_) | Self::LocalPref(_) => {
-                attr_flags::TRANSITIVE
-            }
+            Self::Origin(_)
+            | Self::AsPath(_)
+            | Self::NextHop(_)
+            | Self::LocalPref(_)
+            | Self::AtomicAggregate => attr_flags::TRANSITIVE,
             Self::Med(_)
             | Self::OriginatorId(_)
             | Self::ClusterList(_)
@@ -932,8 +939,8 @@ pub struct RevisedAttributeDecode {
 ///   and attribute parsing stops.
 /// - §7.6/§7.7: `ATOMIC_AGGREGATE` with a non-zero length and `AGGREGATOR`
 ///   with a length other than 6/8 (by the 4-octet-AS negotiation) are
-///   attribute-discard. The legacy decoder still preserves `ATOMIC_AGGREGATE`
-///   opaquely, but now decodes and length-validates typed `AGGREGATOR`.
+///   attribute-discard. The legacy decoder surfaces both length errors as
+///   `DecodeError` instead.
 /// - RFC 9552 §8.2.2: malformed TLV framing inside Attribute 29 is
 ///   attribute-discard; the attribute is omitted while the NLRI remains
 ///   available to the caller.
@@ -1022,9 +1029,9 @@ pub fn decode_path_attributes_revised(
             });
             continue;
         }
-        // RFC 7606 §7.6/§7.7 length checks. The legacy decoder stores both
-        // types opaquely as Unknown(RawAttribute) with no length validation,
-        // so these checks live only on the revised path. The attribute-discard
+        // RFC 7606 §7.6/§7.7 length checks, classified attribute-discard
+        // before `decode_attribute_value` (whose length errors the legacy
+        // decoder surfaces as `DecodeError`). The attribute-discard
         // shortcut applies only when the flags are correct: a flag conflict
         // must fall through to decode_attribute_value, whose flags error is
         // classified treat-as-withdraw below (§3 (c) — the stronger action
@@ -1666,9 +1673,23 @@ fn decode_attribute_value(
             let asn = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
             Ok(PathAttribute::OnlyToCustomer(asn))
         }
-        // ATOMIC_AGGREGATE and any unknown type -> RawAttribute. AS4_PATH and
-        // AS4_AGGREGATOR are kept raw only until the shared post-decode RFC
-        // 6793 normalizer consumes them.
+        attr_type::ATOMIC_AGGREGATE => {
+            // RFC 4271 §5.1.6: zero-length. RFC 7606 §7.6: any other length
+            // is malformed and the disposition is attribute-discard (the
+            // revised decoder classifies this error via
+            // `malformed_attr_disposition`; the legacy decoder surfaces it).
+            if !value.is_empty() {
+                return Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: format!("ATOMIC_AGGREGATE length {} (expected 0)", value.len()),
+                });
+            }
+            Ok(PathAttribute::AtomicAggregate)
+        }
+        // Any unknown type -> RawAttribute. AS4_PATH and AS4_AGGREGATOR are
+        // kept raw only until the shared post-decode RFC 6793 normalizer
+        // consumes them.
         _ => Ok(PathAttribute::Unknown(RawAttribute {
             flags,
             type_code,
@@ -2628,6 +2649,11 @@ fn encode_path_attributes_with_scratch(
                     }
                 }
                 value_scratch.extend_from_slice(&aggregator.router_id.octets());
+            }
+            PathAttribute::AtomicAggregate => {
+                // RFC 4271 §4.3: well-known, zero-length value.
+                flags = attr_flags::TRANSITIVE;
+                type_code = attr_type::ATOMIC_AGGREGATE;
             }
             PathAttribute::NextHop(addr) => {
                 flags = attr_flags::TRANSITIVE;
@@ -4139,11 +4165,31 @@ mod tests {
         );
     }
     #[test]
-    fn decode_atomic_aggregate_as_unknown() {
+    fn decode_atomic_aggregate_typed_and_roundtrips() {
         // ATOMIC_AGGREGATE: flags=0x40, type=6, len=0
         let buf = [0x40, 0x06, 0x00];
         let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
-        assert!(matches!(attrs[0], PathAttribute::Unknown(_)));
+        assert_eq!(attrs, vec![PathAttribute::AtomicAggregate]);
+        assert_eq!(attrs[0].type_code(), attr_type::ATOMIC_AGGREGATE);
+        assert_eq!(attrs[0].flags(), attr_flags::TRANSITIVE);
+        let mut encoded = Vec::new();
+        encode_path_attributes(&attrs, &mut encoded, true, false).unwrap();
+        assert_eq!(encoded, buf, "re-emitted with flags 0x40, type 6, length 0");
+    }
+    #[test]
+    fn decode_atomic_aggregate_nonzero_length_is_length_error() {
+        // RFC 7606 §7.6: the legacy decoder surfaces the length error; the
+        // revised decoder classifies it attribute-discard (tested below).
+        let err = decode_path_attributes(&[0x40, 0x06, 0x01, 0xAB], true, &[]).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                DecodeError::UpdateAttributeError { subcode, data, .. }
+                    if *subcode == update_subcode::ATTRIBUTE_LENGTH_ERROR
+                        && data == &[0x40, 0x06, 0x01, 0xAB]
+            ),
+            "{err:?}"
+        );
     }
     #[test]
     fn decode_extended_length() {
@@ -6238,7 +6284,9 @@ mod tests {
         ));
         let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
         assert_eq!(decoded.attributes.len(), 3);
+        assert!(!decoded.attributes.contains(&PathAttribute::AtomicAggregate));
         assert_eq!(decoded.malformed.len(), 1);
+        assert_eq!(decoded.malformed[0].type_code, attr_type::ATOMIC_AGGREGATE);
         assert_eq!(
             decoded.malformed[0].disposition,
             ErrorDisposition::AttributeDiscard

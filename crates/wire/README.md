@@ -119,6 +119,11 @@ before upgrading a consumer that asserts on acceptance or typed variants:
 - **AGGREGATOR decodes as a typed `PathAttribute::Aggregator` value** instead
   of falling through to `PathAttribute::Unknown`. Code matching on `Unknown`
   for type code 7 no longer sees it.
+- **ATOMIC_AGGREGATE decodes as `PathAttribute::AtomicAggregate`** (zero-length,
+  well-known discretionary) instead of `PathAttribute::Unknown`, so the
+  unrecognized-well-known validation no longer treat-as-withdraws routes that
+  carry it. A non-zero length is an attribute-length error (RFC 7606 §7.6
+  attribute-discard on the revised decode path).
 - **OPEN and KEEPALIVE over 4096 bytes are rejected** at header peek, before a
   framing caller buffers the declared body, regardless of a negotiated RFC 8654
   extended message length.
@@ -211,7 +216,7 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
 
 - **`Message`** — top-level enum: `Open`, `Update`, `Keepalive`, `Notification`, `RouteRefresh`
 - **`UpdateMessage`** / **`ParsedUpdate`** — raw wire form and parsed routes + attributes
-- **`PathAttribute`** — typed variants plus `Unknown` pass-through, including `AsPath`, `Aggregator`, `NextHop`, `Communities`, `MpReachNlri`, `LargeCommunities`, `PmsiTunnel` (RFC 6514), and `OnlyToCustomer` (RFC 9234)
+- **`PathAttribute`** — typed variants plus `Unknown` pass-through, including `AsPath`, `Aggregator`, `AtomicAggregate`, `NextHop`, `Communities`, `MpReachNlri`, `LargeCommunities`, `PmsiTunnel` (RFC 6514), and `OnlyToCustomer` (RFC 9234)
 - **`Prefix`** — `V4(Ipv4Prefix)` / `V6(Ipv6Prefix)` enum
 - **`RpkiValidation` / `AspaValidation` / `AspaValidationContext`** — shared
   routing-domain validation state and ASPA session context used by rustbgpd's
