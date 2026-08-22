@@ -52,6 +52,23 @@ struct ActivateArgs {
     activation_arg: Vec<OsString>,
 }
 
+#[derive(Parser)]
+#[command(
+    name = "rs-config-render prune",
+    about = "Remove activation generations no retention rule keeps (dry run unless --apply)"
+)]
+struct PruneArgs {
+    #[command(flatten)]
+    host: HostBindingArgs,
+    /// Most recent generations to retain besides current, its predecessor,
+    /// and anything a receipt or pending lifecycle journal references
+    #[arg(long)]
+    keep: usize,
+    /// Remove the planned generations instead of only reporting them
+    #[arg(long)]
+    apply: bool,
+}
+
 #[derive(clap::Args)]
 struct HostBindingArgs {
     #[arg(long)]
@@ -253,6 +270,13 @@ fn parse_activation() -> Option<ActivateArgs> {
         .then(|| ActivateArgs::parse_from(std::iter::once(binary).chain(args)))
 }
 
+fn parse_prune() -> Option<PruneArgs> {
+    let mut args = std::env::args_os();
+    let binary = args.next()?;
+    (args.next().as_deref() == Some(OsStr::new("prune")))
+        .then(|| PruneArgs::parse_from(std::iter::once(binary).chain(args)))
+}
+
 fn parse_lifecycle() -> Option<LifecycleArgs> {
     let mut args = std::env::args_os();
     let binary = args.next()?;
@@ -285,6 +309,48 @@ fn lifecycle_exit(
 }
 
 fn main() -> ExitCode {
+    if let Some(args) = parse_prune() {
+        let binding = match args.host.binding() {
+            Ok(binding) => binding,
+            Err(reason) => {
+                eprintln!("rs-config-render: prune: {reason}");
+                return Exit::Refused.into();
+            }
+        };
+        return match rs_config_render::prune::prune(&rs_config_render::prune::Options {
+            state_dir: &args.host.state_dir,
+            keep: args.keep,
+            apply: args.apply,
+            binding: &binding,
+        }) {
+            Ok(plan) => {
+                for (digest, error) in &plan.failed {
+                    eprintln!("rs-config-render: prune: cannot remove {digest}: {error}");
+                }
+                let (kept, removed) = (plan.kept.len(), plan.removed.len());
+                let summary = if args.apply {
+                    format!("prune: removed {removed} generation(s), kept {kept}")
+                } else {
+                    format!(
+                        "prune: dry run — {removed} generation(s) would be removed, {kept} kept; pass --apply to remove"
+                    )
+                };
+                let written = stdout_exit(write_stdout(|writer| {
+                    write!(writer, "{plan}")?;
+                    writeln!(writer, "{summary}")
+                }));
+                if plan.failed.is_empty() {
+                    written
+                } else {
+                    Exit::OutputUnusable.into()
+                }
+            }
+            Err(error) => {
+                eprintln!("rs-config-render: prune: {error}");
+                error.exit_code().into()
+            }
+        };
+    }
     if let Some(args) = parse_lifecycle() {
         return match args.command {
             LifecycleCommand::Run(args) => {

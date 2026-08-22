@@ -543,6 +543,20 @@ mod unix {
         Ok(journal)
     }
 
+    /// The `candidate_sha256` of a pending journal: `Ok(None)` when no journal
+    /// exists or it predates the candidate, `Err(())` when one exists but cannot
+    /// be parsed (callers treat that as forensic state and fail closed).
+    pub(crate) fn journal_candidate(state: &Path) -> std::result::Result<Option<String>, ()> {
+        let bytes = match fs::read(journal_path(state)) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(()),
+        };
+        serde_json::from_slice::<Journal>(&bytes)
+            .map(|journal| journal.candidate_sha256)
+            .map_err(|_| ())
+    }
+
     fn remove_journal(state: &Path) -> Result<()> {
         fs::remove_file(journal_path(state)).map_err(|_| Error::ManualRecovery)?;
         sync_dir(state)
@@ -800,5 +814,7 @@ mod unix {
     }
 }
 
+#[cfg(unix)]
+pub(crate) use unix::journal_candidate;
 #[cfg(unix)]
 pub use unix::{resume, run};

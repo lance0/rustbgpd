@@ -134,6 +134,14 @@ mod unix {
             .map_err(|_| Error::Refused("another host command is active"))?;
         Ok(file)
     }
+    /// True unless the fence file is proven absent; an unreadable fence counts
+    /// as present so callers fail closed.
+    pub(crate) fn fence_present(state: &Path) -> bool {
+        !matches!(
+            fs::symlink_metadata(state.join(FENCE)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    }
     fn read_fence(state: &Path) -> Result<Option<Binding>, Error> {
         let path = state.join(FENCE);
         let metadata = match fs::symlink_metadata(&path) {
@@ -218,3 +226,5 @@ mod unix {
 }
 #[cfg(unix)]
 pub use unix::Guard;
+#[cfg(unix)]
+pub(crate) use unix::fence_present;

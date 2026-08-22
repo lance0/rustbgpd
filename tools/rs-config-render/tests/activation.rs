@@ -726,3 +726,223 @@ fn refused_after_generation_copy_leaves_the_state_directory_unchanged() {
     );
     assert_ne!(snapshot(&rig.state), before);
 }
+
+mod prune {
+    use super::*;
+    use rs_config_render::prune::{Error as PruneError, Kept, Options as PruneOptions, prune};
+
+    impl Rig {
+        fn prune(
+            &self,
+            keep: usize,
+            apply: bool,
+        ) -> Result<rs_config_render::prune::Plan, PruneError> {
+            prune(&PruneOptions {
+                state_dir: &self.state,
+                keep,
+                apply,
+                binding: &self.binding(&self.state),
+            })
+        }
+
+        /// Activate `count` distinct candidates in order and return their
+        /// generation digests, oldest first.
+        fn generations(&self, count: u64) -> Vec<String> {
+            (0..count)
+                .map(|index| {
+                    let candidate = self.candidate(&format!("candidate-{index}"), 100 + index);
+                    // Distinct directory mtimes order the keep-N window.
+                    std::thread::sleep(Duration::from_millis(20));
+                    assert_eq!(
+                        self.run(&candidate, index == 0, &self.activation),
+                        Ok(Status::Activated)
+                    );
+                    self.current().trim_start_matches("generations/").to_owned()
+                })
+                .collect()
+        }
+
+        fn generation_exists(&self, digest: &str) -> bool {
+            self.state.join("generations").join(digest).is_dir()
+        }
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn kept(digest: &str, reasons: &[&'static str]) -> Kept {
+        Kept {
+            digest: digest.to_owned(),
+            reasons: reasons.to_vec(),
+        }
+    }
+
+    #[test]
+    fn prune_keeps_current_predecessor_receipt_and_journal_and_refuses_under_a_fence() {
+        let rig = Rig::new();
+        let g = rig.generations(5);
+
+        // keep 0: only references survive — current (+receipt candidate) and predecessor.
+        let plan = rig.prune(0, false).unwrap();
+        assert_eq!(
+            plan.kept,
+            vec![
+                kept(&g[4], &["current", "receipt"]),
+                kept(&g[3], &["predecessor"])
+            ]
+        );
+        assert_eq!(plan.removed, vec![g[2].clone(), g[1].clone(), g[0].clone()]);
+        assert!(plan.failed.is_empty());
+        assert!(
+            g.iter().all(|digest| rig.generation_exists(digest)),
+            "dry run removed nothing"
+        );
+
+        // A pending lifecycle journal naming g[1]'s render receipt keeps g[1].
+        let journal = serde_json::json!({
+            "schema": "rustbgpd.ixp-manager.lifecycle/v1",
+            "ixp_manager_version": "7.4.0",
+            "origin": "https://ixp.example.net",
+            "router_handle": "b2-rs1-lan1-ipv4",
+            "host": rig.binding(&rig.state),
+            "phase": "manual_recovery",
+            "callback": null,
+            "callback_attempts": 0,
+            "candidate_sha256": sha256_hex(
+                &fs::read(rig.state.join("generations").join(&g[1]).join("render-receipt.json")).unwrap()
+            ),
+            "activation_outcome": "recovery_required",
+            "error_class": "activation"
+        });
+        let journal_path = rig.state.join("ixp-manager-lifecycle.json");
+        fs::write(&journal_path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        let plan = rig.prune(0, false).unwrap();
+        assert_eq!(
+            plan.kept,
+            vec![
+                kept(&g[4], &["current", "receipt"]),
+                kept(&g[3], &["predecessor"]),
+                kept(&g[1], &["journal"]),
+            ]
+        );
+        assert_eq!(plan.removed, vec![g[2].clone(), g[0].clone()]);
+
+        // An unparseable journal is forensic state: refuse.
+        fs::write(&journal_path, b"{not json").unwrap();
+        assert!(matches!(rig.prune(0, true), Err(PruneError::Refused(_))));
+        fs::write(&journal_path, serde_json::to_vec(&journal).unwrap()).unwrap();
+
+        // Any host fence refuses outright, even with --apply.
+        let fence = rig.host.join("ixp-manager-host-fence.json");
+        fs::write(&fence, b"{}").unwrap();
+        assert_eq!(
+            rig.prune(0, true),
+            Err(PruneError::Refused(
+                "host fence present; resolve it before pruning (retained state is forensic)"
+            ))
+        );
+        assert!(
+            g.iter().all(|digest| rig.generation_exists(digest)),
+            "refusal removed nothing"
+        );
+        fs::remove_file(&fence).unwrap();
+
+        // Apply removes exactly the plan and leaves a coherent state.
+        let applied = rig.prune(0, true).unwrap();
+        assert_eq!(applied.removed, vec![g[2].clone(), g[0].clone()]);
+        assert!(applied.failed.is_empty());
+        for (index, digest) in g.iter().enumerate() {
+            assert_eq!(
+                rig.generation_exists(digest),
+                [1, 3, 4].contains(&index),
+                "{index}"
+            );
+        }
+        assert_eq!(rig.current(), format!("generations/{}", g[4]));
+        let again = rig.prune(0, true).unwrap();
+        assert!(again.removed.is_empty(), "{again:?}");
+        assert_eq!(again.kept.len(), 3);
+        fs::remove_file(&journal_path).unwrap();
+        let candidate = rig.candidate("candidate-noop", 104);
+        assert_eq!(
+            rig.run(&candidate, false, Path::new("/bin/false")),
+            Ok(Status::Noop)
+        );
+    }
+
+    #[test]
+    fn prune_cli_dry_run_lists_exactly_what_apply_removes_and_is_idempotent() {
+        let rig = Rig::new();
+        let g = rig.generations(4);
+        let run = |apply: bool| {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_rs-config-render"));
+            command
+                .args([
+                    "prune",
+                    "--router-handle",
+                    "b2-rs1-lan1-ipv4",
+                    "--keep",
+                    "1",
+                ])
+                .arg("--runtime-state-dir")
+                .arg(&rig.runtime)
+                .arg("--state-dir")
+                .arg(&rig.state)
+                .arg("--host-state-dir")
+                .arg(&rig.host)
+                .arg("--rbgp-addr")
+                .arg(rig.binding(&rig.state).rbgp_addr());
+            if apply {
+                command.arg("--apply");
+            }
+            let output = command.output().unwrap();
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let removed: Vec<String> = stdout
+                .lines()
+                .filter_map(|line| line.strip_prefix("remove "))
+                .map(str::to_owned)
+                .collect();
+            (output.status.code(), stdout, removed)
+        };
+
+        let (code, stdout, dry) = run(false);
+        assert_eq!(code, Some(0), "{stdout}");
+        assert_eq!(dry, vec![g[1].clone(), g[0].clone()]);
+        assert!(
+            stdout.contains(&format!("keep {} current,receipt,keep-N\n", g[3])),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("keep {} predecessor\n", g[2])),
+            "{stdout}"
+        );
+        assert!(
+            stdout.ends_with("prune: dry run — 2 generation(s) would be removed, 2 kept; pass --apply to remove\n"),
+            "{stdout}"
+        );
+        assert!(g.iter().all(|digest| rig.generation_exists(digest)));
+
+        let (code, stdout, applied) = run(true);
+        assert_eq!(code, Some(0), "{stdout}");
+        assert_eq!(applied, dry);
+        assert!(
+            stdout.ends_with("prune: removed 2 generation(s), kept 2\n"),
+            "{stdout}"
+        );
+        for (index, digest) in g.iter().enumerate() {
+            assert_eq!(rig.generation_exists(digest), index >= 2, "{index}");
+        }
+
+        let (code, stdout, second) = run(true);
+        assert_eq!(code, Some(0), "{stdout}");
+        assert!(second.is_empty(), "{stdout}");
+        assert!(
+            stdout.ends_with("prune: removed 0 generation(s), kept 2\n"),
+            "{stdout}"
+        );
+    }
+}

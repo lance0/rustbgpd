@@ -153,7 +153,9 @@ operator inspection. Exit 0 means activated or no-op, 2 refusal, 7 proven
 pre-effect restoration, and 5 means recovery or receipt durability is
 unproven (the full table is under [Exit codes](#exit-codes)). A receipt may
 therefore be absent or stale after exit 5. The helper does not deploy services,
-prune generations, retry indefinitely, or call IXP Manager. These examples use
+retry indefinitely, or call IXP Manager, and the activation path never removes a
+generation; retention is the separate, operator-run
+[`prune`](#pruning-retained-generations) command. These examples use
 package paths; release archives install the three binaries under `/usr/local/bin`.
 
 ### Authenticated IXP Manager lifecycle
@@ -228,6 +230,71 @@ or idempotency token. `resume` never refetches, rerenders, or activates. It has
 no automatic action for exit 5; inspect retained activation/lifecycle state and
 the live daemon before explicitly resolving the upstream router lock, following
 the [activation manual-recovery runbook](../../docs/cookbook/activation-manual-recovery.md).
+
+### Pruning retained generations
+
+Every distinct activated candidate becomes an immutable, content-addressed
+directory under `<state-dir>/generations/`; an identical re-render is a no-op
+and adds nothing. Nothing in the activation or lifecycle path ever removes one,
+because after an exit 5 those directories are the only forensics. Retention is
+a separate, opt-in command that defaults to a dry run:
+
+```console
+sudo -u rustbgpd /usr/bin/rs-config-render prune --keep 10 \
+  --router-handle rs1-ipv4 \
+  --runtime-state-dir /var/lib/rustbgpd/rs1-ipv4 \
+  --state-dir /var/lib/rustbgpd/rs1-ipv4/activation \
+  --host-state-dir /var/lib/rustbgpd/ixp-manager-host \
+  --rbgp-addr unix:///var/lib/rustbgpd/rs1-ipv4/grpc.sock
+```
+
+The retention rule, evaluated under the activation state lock:
+
+- the `current` target is kept (`current`);
+- the last `activation-receipt.json`'s candidate (`receipt`) and
+  `previous_generation` (`predecessor`) are kept, so the generation a
+  rollback restored from and the one it rolled back are both retained;
+- a generation whose `render-receipt.json` a pending lifecycle journal names
+  is kept (`journal`);
+- the `--keep N` most recently published generations are kept (`keep-N`);
+  `--keep 0` keeps only the referenced ones;
+- everything else is removed — by `--apply` only.
+
+`prune` **refuses outright (exit 2) while any host fence exists**, and while
+the activation receipt or lifecycle journal exists but cannot be parsed; resolve
+the fence with the [manual-recovery
+runbook](../../docs/cookbook/activation-manual-recovery.md) first. Output is
+exact and stable: one `keep <digest> <reasons>` line per retained generation,
+newest first, one `remove <digest>` line per removal, then a summary. Without
+`--apply` nothing is removed and the `remove` lines are exactly what `--apply`
+would remove; a second `--apply` removes nothing. A removal that fails exits 8
+and names the generation on stderr; rerun after fixing the directory.
+
+A cron-safe pattern runs the dry run on the same schedule as the lifecycle and
+applies only from a reviewed ticket, or applies unconditionally with a generous
+`--keep` — a refusal under a fence is the intended outcome, not an error to
+suppress:
+
+```sh
+# cron, as the rustbgpd identity, after the lifecycle run
+/usr/bin/rs-config-render prune --keep 48 --apply \
+  --router-handle rs1-ipv4 --runtime-state-dir /var/lib/rustbgpd/rs1-ipv4 \
+  --state-dir /var/lib/rustbgpd/rs1-ipv4/activation \
+  --host-state-dir /var/lib/rustbgpd/ixp-manager-host \
+  --rbgp-addr unix:///var/lib/rustbgpd/rs1-ipv4/grpc.sock \
+  || [ $? -eq 2 ]   # 2 = fenced or busy: leave it, the operator has work to do
+```
+
+Sizing: a generation is the rendered candidate copied verbatim — `config.toml`,
+the shared hygiene policy, one `.rpol` per member, the alias and reject maps,
+and the receipt. Measured on ext4 (4 KiB blocks) with synthetic IXP Manager v2
+members carrying 8 IRR prefixes each: 100 members → 104 files, 129 KiB apparent
+/ 484 KiB allocated; 250 members → 314 KiB / 1,188 KiB; 500 members →
+622 KiB / 2,348 KiB (32 prefixes per member: 851 KiB / 2,348 KiB). Allocation is
+block-dominated at roughly 4.8 KiB per member per generation, so a 500-member
+route server spends about 2.3 MiB per distinct generation; an hourly lifecycle
+whose render differs every run (the worst case) would retain about 20 GiB a
+year unpruned, and `--keep 48` bounds it to about 110 MiB.
 
 Release tarballs (`rustbgpd-<arch>.tar.gz` on the [releases
 page](https://github.com/lance0/rustbgpd/releases)) ship the
@@ -320,11 +387,12 @@ knowing which subcommand ran. The mapping is asserted by
 | 5 | **manual recovery** — the activation effect is uncertain: `current` stays on the candidate, retained state and any upstream lock are kept, and no callback is issued; inspect before acting |
 | 6 | **callback pending** — one durable `updated` or release callback is undelivered; run `ixp-manager-lifecycle resume` |
 | 7 | **rolled back** — the activation command never started; the prior generation is restored and proven and the lock is released; retrying is safe |
-| 8 | **output unusable** — the candidate directory is not an absent or empty private directory (IXP Manager mode) or could not be created or written (arouteserver mode) |
+| 8 | **output unusable** — the candidate directory is not an absent or empty private directory (IXP Manager mode), could not be created or written (arouteserver mode), or a `prune --apply` removal failed |
 | 9 | **strict check failed** — `rustbgpd --check --strict` ran and rejected the rendered IXP Manager candidate (the only path to this code); its files stay in the candidate directory without a receipt |
 
 Codes 1–4 and 8–9 leave the previous configuration running untouched
-(fail-stale); 5 and 6 need an operator; 7 is safe to retry.
+(fail-stale); 5 and 6 need an operator; 7 is safe to retry. `prune` uses 0, 2
+(fenced, busy, or unreadable forensic state — nothing removed), and 8.
 
 Refused knobs: RTT-based communities and `rtt_thresholds` (the daemon
 has no RTT source; permanent), configured
