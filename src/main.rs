@@ -2376,7 +2376,8 @@ reported at least one warning. For
 neither family; explicit
 .B listen_addresses
 mode could not bind every configured endpoint; a configured metrics/readiness
-listener failed to bind; or the RIB manager or gRPC server exited unexpectedly),
+listener failed to bind; or the RIB manager, gRPC server, BGP listener task,
+or BGP accept-forwarding task exited unexpectedly),
 so that a supervisor configured
 with
 .B Restart=on\-failure
@@ -2459,7 +2460,8 @@ fn main() -> ExitCode {
                   A running daemon exits 1 on a component failure that ends it\n     \
                   (legacy BGP mode bound neither family; an explicit listen_addresses\n     \
                   endpoint failed to bind; configured metrics/readiness bind failure;\n     \
-                  or unexpected RIB manager or gRPC server exit)\n  \
+                  or unexpected RIB manager, gRPC server, BGP listener task,\n     \
+                  or BGP accept-forwarding task exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument)\n  \
                70 Internal error",
                     env!("CARGO_PKG_VERSION")
@@ -2968,6 +2970,43 @@ const RIB_CHANNEL_CAPACITY: usize = 4096;
 /// unset, zero, or unparseable values keep the production capacity.
 const TEST_RIB_CHANNEL_CAPACITY_ENV: &str = "RUSTBGPD_TEST_RIB_CHANNEL_CAPACITY";
 
+/// Test-only fault injection; never set this in production. The only accepted
+/// values are `listener_panic` and `forwarder_return`; all others are ignored
+/// with a sanitized warning.
+const TEST_BGP_INGRESS_EXIT_ENV: &str = "RUSTBGPD_TEST_BGP_INGRESS_EXIT";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestBgpIngressExit {
+    ListenerPanic,
+    ForwarderReturn,
+}
+
+fn parse_test_bgp_ingress_exit(raw: Option<&str>) -> Result<Option<TestBgpIngressExit>, ()> {
+    match raw {
+        None => Ok(None),
+        Some("listener_panic") => Ok(Some(TestBgpIngressExit::ListenerPanic)),
+        Some("forwarder_return") => Ok(Some(TestBgpIngressExit::ForwarderReturn)),
+        Some(_) => Err(()),
+    }
+}
+
+fn resolve_test_bgp_ingress_exit() -> Option<TestBgpIngressExit> {
+    let raw = match std::env::var(TEST_BGP_INGRESS_EXIT_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            warn!(
+                "ignoring invalid {TEST_BGP_INGRESS_EXIT_ENV}; expected listener_panic or forwarder_return"
+            );
+            return None;
+        }
+    };
+    parse_test_bgp_ingress_exit(raw.as_deref()).unwrap_or_else(|()| {
+        warn!("ignoring invalid {TEST_BGP_INGRESS_EXIT_ENV}; expected listener_panic or forwarder_return");
+        None
+    })
+}
+
 /// Resolve the RIB channel capacity: [`TEST_RIB_CHANNEL_CAPACITY_ENV`]
 /// (if a positive integer) overrides the production default.
 fn resolve_rib_channel_capacity() -> usize {
@@ -3031,6 +3070,7 @@ async fn run<T>(
         .unwrap_or_else(|e| fatal_startup_error("failed to register SIGTERM handler", e));
     let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .unwrap_or_else(|e| fatal_startup_error("failed to register SIGHUP handler", e));
+    let test_bgp_ingress_exit = resolve_test_bgp_ingress_exit();
 
     let mut config = accepted.config();
     // Snapshot the gRPC listener config as it was at process start.
@@ -4944,7 +4984,7 @@ async fn run<T>(
     // partially initialized peer manager.
     let listener_peer_mgr_tx = peer_mgr_tx.clone();
     let listener_gate = daemon_gate.clone();
-    tokio::spawn(async move {
+    let mut bgp_forwarder_handle = tokio::spawn(async move {
         while let Some(conn) = accept_rx.recv().await {
             // Coordinated shutdown has begun: drop (close) the socket
             // instead of admitting a session into teardown.
@@ -4954,6 +4994,9 @@ async fn run<T>(
                     "rejecting inbound BGP connection: daemon is shutting down"
                 );
                 continue;
+            }
+            if test_bgp_ingress_exit == Some(TestBgpIngressExit::ForwarderReturn) {
+                return;
             }
             if let Err(e) = listener_peer_mgr_tx
                 .send(PeerManagerCommand::AcceptInbound {
@@ -4968,7 +5011,14 @@ async fn run<T>(
             }
         }
     });
-    tokio::spawn(listener.run());
+    let mut bgp_listener_handle = tokio::spawn(async move {
+        assert_ne!(
+            test_bgp_ingress_exit,
+            Some(TestBgpIngressExit::ListenerPanic),
+            "injected BGP listener task panic after successful bind"
+        );
+        listener.run().await;
+    });
 
     // Spawn telemetry HTTP server (if configured). `/metrics` serves
     // Prometheus text; `/livez` and `/readyz` provide minimal probe bodies.
@@ -5068,6 +5118,18 @@ async fn run<T>(
             result = &mut rib_handle => {
                 error!(?result, "RIB manager exited unexpectedly");
                 info!("initiating shutdown due to RIB manager failure");
+                component_failed = true;
+                break;
+            }
+            result = &mut bgp_listener_handle => {
+                error!(?result, "BGP listener task exited unexpectedly");
+                info!("initiating shutdown due to BGP listener task failure");
+                component_failed = true;
+                break;
+            }
+            result = &mut bgp_forwarder_handle => {
+                error!(?result, "BGP accept-forwarding task exited unexpectedly");
+                info!("initiating shutdown due to BGP accept-forwarding task failure");
                 component_failed = true;
                 break;
             }
@@ -5665,12 +5727,12 @@ mod tests {
         let post_registration_barrier = production
             .find("// Activate BGP ingress only after the complete configured-peer roster is")
             .expect("post-registration BGP ingress barrier must remain explicit");
-        let accept_forwarding_loop = production
-            .find("while let Some(conn) = accept_rx.recv().await {")
-            .expect("BGP accept forwarding loop must remain explicit");
+        let accept_forwarding_spawn = production
+            .find("let mut bgp_forwarder_handle = tokio::spawn(async move {")
+            .expect("BGP accept forwarding handle must remain retained");
         let listener_run_spawn = production
-            .find("tokio::spawn(listener.run());")
-            .expect("BGP listener run spawn must remain explicit");
+            .find("let mut bgp_listener_handle = tokio::spawn(async move {")
+            .expect("BGP listener run handle must remain retained");
         let metrics_startup = production
             .find("// Spawn telemetry HTTP server (if configured).")
             .expect("metrics/readiness startup boundary must remain explicit");
@@ -5698,10 +5760,26 @@ mod tests {
                 "configured-peer loop lost fatal startup arm: {fatal_message}"
             );
         }
-        assert!(post_registration_barrier < accept_forwarding_loop);
+        assert!(post_registration_barrier < accept_forwarding_spawn);
         assert!(post_registration_barrier < listener_run_spawn);
-        assert!(accept_forwarding_loop < metrics_startup);
+        assert!(accept_forwarding_spawn < metrics_startup);
         assert!(listener_run_spawn < metrics_startup);
+    }
+
+    #[test]
+    fn bgp_ingress_fault_parser_accepts_only_exact_modes() {
+        assert_eq!(parse_test_bgp_ingress_exit(None), Ok(None));
+        assert_eq!(
+            parse_test_bgp_ingress_exit(Some("listener_panic")),
+            Ok(Some(TestBgpIngressExit::ListenerPanic))
+        );
+        assert_eq!(
+            parse_test_bgp_ingress_exit(Some("forwarder_return")),
+            Ok(Some(TestBgpIngressExit::ForwarderReturn))
+        );
+        for raw in ["", "listener", " listener_panic", "forwarder_return "] {
+            assert_eq!(parse_test_bgp_ingress_exit(Some(raw)), Err(()));
+        }
     }
 
     #[test]

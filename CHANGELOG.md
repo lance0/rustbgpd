@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The bound BGP listener and inbound accept-forwarding tasks are now retained
+  beside the existing gRPC and RIB supervision. An unexpected clean return or
+  panic enters the same coordinated peer teardown and exits 1; live bound-listener
+  and accepted-connection fault proofs preserve signal and Shutdown RPC exit 0.
+  This does not add PeerManager supervision or in-process respawn. (LAN-1207)
 - BLACKHOLE kernel ownership now survives crashes through a private,
   descriptor-relative `blackhole-owned.json` exact-prefix receipt. Adoption
   and deletion require both receipt authority and the kernel marker; install

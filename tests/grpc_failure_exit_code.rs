@@ -2,10 +2,8 @@
 //!
 //! Operator-initiated shutdown (SIGTERM) exits 0; a component failure
 //! exits non-zero, so supervisors like systemd with `Restart=on-failure`
-//! restart the daemon instead of treating it as a clean stop. Three
-//! component failures are covered, all provoked by holding the port the
-//! daemon needs: the gRPC server exiting unexpectedly, the BGP listener
-//! failing to bind, and the metrics/readiness listener failing to bind.
+//! restart the daemon instead of treating it as a clean stop. Live proofs cover
+//! startup binds, the RIB manager, and both inbound-admission tasks.
 
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
@@ -267,6 +265,22 @@ fn establish_bgp_and_observe_shutdown(port: u16) {
     }
 }
 
+fn run_bgp_ingress_fault(mode: &str, connect: bool) -> (ExitStatus, String) {
+    let temp = private_tempdir();
+    let config_path = write_rib_fault_config(temp.path());
+    let mut daemon = spawn_daemon_with_env(
+        temp.path(),
+        &config_path,
+        Some(("RUSTBGPD_TEST_BGP_INGRESS_EXIT", mode)),
+    );
+    let port = wait_for_bound_bgp_port(&mut daemon);
+    let _connection = connect.then(|| {
+        TcpStream::connect(("127.0.0.1", port)).expect("connect to real bound BGP listener")
+    });
+    let status = daemon.wait_within(Duration::from_secs(30));
+    (status, daemon.logs())
+}
+
 #[test]
 fn grpc_bind_failure_exits_nonzero() {
     let temp = private_tempdir();
@@ -340,6 +354,99 @@ fn rib_supervision_is_fail_stop_and_uses_common_peer_teardown() {
 }
 
 #[test]
+fn bgp_ingress_tasks_are_retained_unconditionally_supervised_and_torn_down() {
+    let source = include_str!("../src/main.rs");
+    let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
+    assert_eq!(
+        production
+            .matches("std::env::var(TEST_BGP_INGRESS_EXIT_ENV)")
+            .count(),
+        1
+    );
+    let teardown = production
+        .find("send(PeerManagerCommand::Shutdown)")
+        .unwrap();
+    for (handle, diagnostic) in [
+        (
+            "bgp_listener_handle",
+            "BGP listener task exited unexpectedly",
+        ),
+        (
+            "bgp_forwarder_handle",
+            "BGP accept-forwarding task exited unexpectedly",
+        ),
+    ] {
+        let retained = production
+            .find(&format!("let mut {handle} = tokio::spawn"))
+            .unwrap_or_else(|| panic!("{handle} not retained"));
+        let arm = production
+            .find(&format!("result = &mut {handle} => {{"))
+            .unwrap_or_else(|| panic!("{handle} not selected"));
+        let body = production[arm..].split_once("\n            }").unwrap().0;
+        assert!(body.contains(diagnostic), "{handle}: {body}");
+        assert!(
+            body.contains("component_failed = true;"),
+            "{handle}: {body}"
+        );
+        assert!(body.contains("break;"), "{handle}: {body}");
+        assert!(
+            !body.contains("is_ok") && !body.contains("is_err"),
+            "{handle}: {body}"
+        );
+        assert!(retained < arm && arm < teardown, "{handle} ordering");
+    }
+    let rpc = production
+        .split_once("changed = rpc_shutdown_rx.changed() => {")
+        .unwrap()
+        .1;
+    let rpc = rpc.split_once("\n            }").unwrap().0;
+    assert!(
+        !rpc.contains("component_failed"),
+        "Shutdown RPC must stay clean"
+    );
+}
+
+#[test]
+fn bound_bgp_listener_panic_uses_common_shutdown_and_exits_nonzero() {
+    let (status, logs) = run_bgp_ingress_fault("listener_panic", false);
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "listener task panic must exit 1\n{logs}"
+    );
+    assert!(
+        logs.contains("injected BGP listener task panic after successful bind"),
+        "{logs}"
+    );
+    assert!(
+        logs.contains("BGP listener task exited unexpectedly"),
+        "{logs}"
+    );
+    assert!(
+        logs.contains("initiating shutdown due to BGP listener task failure"),
+        "{logs}"
+    );
+}
+
+#[test]
+fn accepted_connection_forwarder_return_uses_common_shutdown_and_exits_nonzero() {
+    let (status, logs) = run_bgp_ingress_fault("forwarder_return", true);
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "forwarder return must exit 1\n{logs}"
+    );
+    assert!(
+        logs.contains("BGP accept-forwarding task exited unexpectedly"),
+        "{logs}"
+    );
+    assert!(
+        logs.contains("initiating shutdown due to BGP accept-forwarding task failure"),
+        "{logs}"
+    );
+}
+
+#[test]
 fn help_and_man_distinguish_bgp_bind_modes_and_supervised_exits() {
     let output = |flag| {
         let output = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
@@ -352,10 +459,11 @@ fn help_and_man_distinguish_bgp_bind_modes_and_supervised_exits() {
     let help = output("--help");
     assert!(help.contains("legacy BGP mode bound neither family; an explicit listen_addresses"));
     assert!(help.contains("endpoint failed to bind; configured metrics/readiness bind failure;"));
-    assert!(help.contains("or unexpected RIB manager or gRPC server exit"));
+    assert!(help.contains("or unexpected RIB manager, gRPC server, BGP listener task,"));
+    assert!(help.contains("or BGP accept-forwarding task exit"));
     let man = output("--man");
     assert!(man.contains("legacy BGP listen mode could bind\nneither family; explicit\n.B listen_addresses\nmode could not bind every configured endpoint"));
-    assert!(man.contains("configured metrics/readiness\nlistener failed to bind; or the RIB manager or gRPC server exited unexpectedly"));
+    assert!(man.contains("the RIB manager, gRPC server, BGP listener task,\nor BGP accept-forwarding task exited unexpectedly"));
 }
 
 #[test]
@@ -494,7 +602,12 @@ fn sigterm_exits_zero() {
     let temp = private_tempdir();
 
     let config_path = write_config(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES);
-    let mut daemon = spawn_daemon(temp.path(), &config_path);
+    let hidden = "unknown-mode-must-not-be-echoed";
+    let mut daemon = spawn_daemon_with_env(
+        temp.path(),
+        &config_path,
+        Some(("RUSTBGPD_TEST_BGP_INGRESS_EXIT", hidden)),
+    );
 
     // Wait until the gRPC listener is up so SIGTERM lands on a fully
     // started daemon. No spawn retry: the daemon picks its own ports, so a
@@ -526,10 +639,18 @@ fn sigterm_exits_zero() {
     assert!(sigterm.success(), "kill -TERM failed: {sigterm}");
 
     let status = daemon.wait_within(Duration::from_secs(120));
+    let logs = daemon.logs();
     assert_eq!(
         status.code(),
         Some(0),
-        "SIGTERM must exit 0, got {status}\n{}",
-        daemon.logs()
+        "SIGTERM must exit 0, got {status}\n{logs}"
+    );
+    assert!(
+        logs.contains("ignoring invalid RUSTBGPD_TEST_BGP_INGRESS_EXIT"),
+        "{logs}"
+    );
+    assert!(
+        !logs.contains(hidden),
+        "unknown environment value leaked: {logs}"
     );
 }
