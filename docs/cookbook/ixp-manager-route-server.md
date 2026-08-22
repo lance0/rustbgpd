@@ -363,16 +363,16 @@ Exit codes, and exactly what each one guarantees:
 |---|---|---|
 | 0 | activated, or no-op (equal content) | `current` → the candidate's generation; receipt current |
 | 2 | refused before any effect (bad candidate/receipt, wrong modes, `--initial` misuse, helper contract violation) | unchanged |
-| 4 | the activation command **could not start** | the prior `current` is restored without a second activation and the prior runtime is verified unchanged — proven pre-effect restoration |
+| 7 | the activation command **could not start** | the prior `current` is restored without a second activation and the prior runtime is verified unchanged — proven pre-effect restoration |
 | 5 | the command started and then failed, timed out, or the runtime did not settle | `current` stays on the candidate; **recovery is operator-owned**; a synced owner fence stays in the host-state directory and every later activation or lifecycle run returns 5 until it is resolved — [Activation manual recovery](activation-manual-recovery.md) |
 
-Real exit-4 and exit-5 runs, on a changed candidate:
+Real exit-7 and exit-5 runs, on a changed candidate:
 
 ```console
 $ rs-config-render activate … --candidate candidate-2 --activation-command /usr/local/bin/does-not-exist
 rs-config-render: activation: activation command did not start; prior generation restored
 $ echo $?
-4
+7
 $ readlink /var/lib/rustbgpd/b2-rs1-lan1-ipv4/activation/current
 generations/a43f75ab…                       # unchanged
 
@@ -428,7 +428,7 @@ success the command prints `IXP Manager lifecycle updated`.
 |---|---|
 | 0 | `updated` delivered |
 | 2 | no lock acquired, or a definite pre-activation refusal was released back to IXP Manager |
-| 4 | activation command never started; exact prior runtime proven; release delivered |
+| 7 | activation command never started; exact prior runtime proven; release delivered |
 | 5 | lock acquisition or activation effect is **uncertain** — no callback is issued; the owner fence stands; operator recovery ([runbook](activation-manual-recovery.md)) |
 | 6 | one durable `updated` or release callback is still pending — retry only that with `resume` |
 
@@ -554,7 +554,7 @@ handle; the activation path must be exactly `<runtime>/activation`; mode
 0700, owned by `rustbgpd`), or `--initial` was passed with a live daemon
 or omitted on first publication. Nothing was published.
 
-**Activate exits 4.** `sudo`/`systemctl` could not be executed (sudoers
+**Activate exits 7.** `sudo`/`systemctl` could not be executed (sudoers
 line missing, wrong path). The prior generation is restored and the prior
 runtime proven unchanged. Fix the command and re-run.
 

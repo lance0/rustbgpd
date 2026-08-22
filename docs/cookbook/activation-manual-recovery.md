@@ -270,19 +270,16 @@ cron may resume.
 
 A wrapper around that cron run can rely on 5 meaning "a human is needed", and
 on a 2 whose message is `IXP Manager update lock was not acquired` meaning step
-3 was skipped. One pair of codes it cannot yet tell apart: exit 4 from the
-lifecycle means the activation command never started and the prior runtime was
-proven untouched, while exit 4 from the arouteserver render mode of the same
-binary means the context's top-level shape drifted from the pinned
-fingerprint. A wrapper that drives both paths through one exit-code table will
-file a benign, already-released lifecycle rollback as a renderer problem (or
-the reverse) until those codes are separated.
+3 was skipped. Every `rs-config-render` subcommand shares one exit-code table
+(the [tool README](../../tools/rs-config-render/README.md#exit-codes)), so a
+wrapper can branch on the code alone: 7 is always the benign, already-released
+lifecycle rollback and 4 is always arouteserver shape drift.
 
 ## What this runbook does not cover
 
 - Exit 6 (one callback pending): run `ixp-manager-lifecycle resume`; it replays
   only that callback.
-- Exit 4 (the activation command never started): nothing to recover, `current`
+- Exit 7 (the activation command never started): nothing to recover, `current`
   was restored and the lock released.
 - An unreadable or foreign fence or journal (wrong mode, symlink, another
   handle's binding, unparseable JSON): the helper exits 5 for those too;

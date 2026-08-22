@@ -209,14 +209,14 @@ the [tool README](../tools/rs-config-render/README.md#exit-codes):
 |---|---|
 | 0 | **success** — rendered, candidate validated, activated or no-op, or `updated` delivered |
 | 1 | **invalid input** — the context or IXP Manager document is unreadable, unparseable, or carries an unknown field, or a site-local file is unreadable (also the generic failure when the final stdout line cannot be written) |
-| 2 | **refused** — an unsupported knob, an invalid option combination, an unmet precondition, no upstream lock acquired, or a definite pre-activation refusal released; nothing written, nothing activated |
+| 2 | **refused** — an unsupported knob, an invalid option combination, an unmet precondition (including an unavailable strict checker), no upstream lock acquired, or a definite pre-activation refusal released; nothing is published or activated and no generation, receipt, or journal is left behind (the lifecycle folds a strict-check rejection into this code and leaves that candidate, receipt-less, in its candidate directory for inspection) |
 | 3 | **aborted** — a generated set is empty or under the plausibility floor (arouteserver mode) |
 | 4 | **shape drift** — the context's top-level structure drifted from the pinned fingerprint; pass `--allow-shape-drift` to proceed (arouteserver mode) |
 | 5 | **manual recovery** — the activation effect is uncertain: `current` stays on the candidate, retained state and any upstream lock are kept, and no callback is issued; inspect before acting |
 | 6 | **callback pending** — one durable `updated` or release callback is undelivered; run `ixp-manager-lifecycle resume` |
 | 7 | **rolled back** — the activation command never started; the prior generation is restored and proven and the lock is released; retrying is safe |
 | 8 | **output unusable** — the candidate directory is not an absent or empty private directory (IXP Manager mode) or could not be created or written (arouteserver mode) |
-| 9 | **strict check failed** — `rustbgpd --check --strict` rejected the rendered candidate; files are written without a receipt |
+| 9 | **strict check failed** — `rustbgpd --check --strict` ran and rejected the rendered IXP Manager candidate (the only path to this code); its files stay in the candidate directory without a receipt |
 
 ### Debian / RPM packages
 

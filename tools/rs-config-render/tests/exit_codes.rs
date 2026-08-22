@@ -37,25 +37,47 @@ fn row_code(row: &str) -> u8 {
         .unwrap_or_else(|_| panic!("exit-code row without a numeric first column: {row}"))
 }
 
+/// Every `Exit` variant, enumerated independently of `Exit::ALL`: a chain
+/// whose arms name each variant literally. Adding a variant makes the `match`
+/// non-exhaustive until an arm exists, and the linked arm puts it in the chain;
+/// exactly one arm (the last variant) ends the chain.
+fn witnessed() -> Vec<Exit> {
+    let mut chain = Vec::new();
+    let mut next = Some(Exit::Success);
+    while let Some(exit) = next {
+        chain.push(exit);
+        next = match exit {
+            Exit::Success => Some(Exit::InvalidInput),
+            Exit::InvalidInput => Some(Exit::Refused),
+            Exit::Refused => Some(Exit::Implausible),
+            Exit::Implausible => Some(Exit::ShapeDrift),
+            Exit::ShapeDrift => Some(Exit::ManualRecovery),
+            Exit::ManualRecovery => Some(Exit::CallbackPending),
+            Exit::CallbackPending => Some(Exit::RolledBack),
+            Exit::RolledBack => Some(Exit::OutputUnusable),
+            Exit::OutputUnusable => Some(Exit::StrictCheckFailed),
+            Exit::StrictCheckFailed => None,
+        };
+    }
+    chain
+}
+
 #[test]
 fn every_exit_code_is_unique_and_enumerated() {
-    // Exhaustiveness witness: adding an `Exit` variant fails to compile here
-    // until it is also added to `Exit::ALL` and the README table.
-    for exit in Exit::ALL {
-        match exit {
-            Exit::Success
-            | Exit::InvalidInput
-            | Exit::Refused
-            | Exit::Implausible
-            | Exit::ShapeDrift
-            | Exit::ManualRecovery
-            | Exit::CallbackPending
-            | Exit::RolledBack
-            | Exit::OutputUnusable
-            | Exit::StrictCheckFailed => {}
-        }
-    }
+    assert_eq!(
+        witnessed(),
+        Exit::ALL.to_vec(),
+        "`Exit::ALL` must list every variant"
+    );
     let codes: Vec<u8> = Exit::ALL.iter().map(|e| e.code()).collect();
+    assert_eq!(
+        codes
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        codes.len(),
+        "duplicate exit code"
+    );
     assert_eq!(codes, (0..=9).collect::<Vec<u8>>());
     assert_eq!(
         std::process::ExitCode::from(Exit::RolledBack),
@@ -114,6 +136,7 @@ fn every_error_variant_maps_to_the_shared_table() {
         (ixp_manager::Error::Input, Exit::InvalidInput),
         (ixp_manager::Error::Refused(""), Exit::Refused),
         (ixp_manager::Error::Output, Exit::OutputUnusable),
+        (ixp_manager::Error::CheckerUnavailable, Exit::Refused),
         (ixp_manager::Error::Checker, Exit::StrictCheckFailed),
     ];
     for (error, exit) in &candidate {
@@ -121,6 +144,7 @@ fn every_error_variant_maps_to_the_shared_table() {
             ixp_manager::Error::Input
             | ixp_manager::Error::Refused(_)
             | ixp_manager::Error::Output
+            | ixp_manager::Error::CheckerUnavailable
             | ixp_manager::Error::Checker => {}
         }
         assert_eq!(error.exit_code(), *exit, "{error:?}");

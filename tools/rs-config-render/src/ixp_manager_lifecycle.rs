@@ -629,6 +629,8 @@ mod unix {
         let path = journal_path(options.state_dir);
         match fs::symlink_metadata(&path) {
             Ok(_) if private(&path, false, 0o600) => {
+                // Refusal must not leave the fence this run just wrote.
+                guard.clear().map_err(host_error)?;
                 return Err(Error::Refused("pending lifecycle state requires resume"));
             }
             Ok(_) => return Err(Error::ManualRecovery),

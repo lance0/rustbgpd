@@ -1305,3 +1305,34 @@ fn workflow_and_gpl_source_only_boundaries_are_pinned() {
         "integrations/ixp-manager/gpl-2.0-only/LICENSE"
     ]));
 }
+
+#[test]
+fn missing_checker_is_refused_before_any_write() {
+    use std::process::Command;
+    let temp = tempfile::tempdir().unwrap();
+    let input = temp.path().join("input.json");
+    fs::write(&input, FIXTURE).unwrap();
+    set_mode(&input, 0o600);
+    let out = temp.path().join("candidate");
+    let output = Command::new(env!("CARGO_BIN_EXE_rs-config-render"))
+        .args(["--input-format", "ixp-manager-v1", "--context"])
+        .arg(&input)
+        .arg("--out-dir")
+        .arg(&out)
+        .args(["--max-prefix-restart-seconds", "300", "--check-with"])
+        .arg(temp.path().join("no-such-rustbgpd"))
+        .args(["--router-handle", "b2-rs1-lan1-ipv4"])
+        .arg("--runtime-state-dir")
+        .arg(temp.path().join("b2-rs1-lan1-ipv4"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("strict checker is unavailable"),
+        "{output:?}"
+    );
+    assert!(
+        !out.exists(),
+        "an unavailable checker must not leave a candidate"
+    );
+}
