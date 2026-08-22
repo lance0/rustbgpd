@@ -245,3 +245,10 @@ mysql_address=$(docker inspect \
 CAPTURE_OUTPUT="$capture_output" "$root/run-adapter-consumer.sh" \
   "$tmp/ixp-manager" "$image" "$tmp/birdseye" "$mysql_address" >/dev/null
 python3 "$root/verify_capture.py" --nagios "$capture_output/nagios-monitoring.json"
+
+# Populated oracle leg: pinned BIRD 2.0.12 + Bird's Eye and rustbgpd + adapter
+# fed by the same announcers, read by the same pinned consumer, diffed against
+# the runtime divergence allow-list. Prints one "populated oracle proof:" line.
+CAPTURE_OUTPUT="$capture_output" "$root/run-oracle-leg.sh" \
+  "$tmp/ixp-manager" "$image" "$tmp/birdseye" >/dev/null
+python3 "$root/verify_capture.py" --populated "$capture_output" "$tmp/birdseye/routes/web.php"

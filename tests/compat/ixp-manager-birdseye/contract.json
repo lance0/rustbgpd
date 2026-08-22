@@ -59,6 +59,488 @@
     "daemon_check": "nagios-check-birdseye.php",
     "session_protocol": "pb_{vlan_interface_id:04}_as{asn}"
   },
+  "populated_topology": {
+    "network": {
+      "ipv4": "198.51.100.0/24",
+      "ipv6": "2001:db8:5100::/64"
+    },
+    "route_servers": {
+      "oracle": {
+        "software": "BIRD 2.0.12 + Bird's Eye 2.1.0",
+        "ipv4": "198.51.100.3",
+        "ipv6": "2001:db8:5100::3"
+      },
+      "live": {
+        "software": "rustbgpd + birdwatcher-adapter",
+        "ipv4": "198.51.100.1",
+        "ipv6": "2001:db8:5100::1"
+      }
+    },
+    "router_id": "10.0.0.1",
+    "asn": 65001,
+    "max_routes": 100,
+    "protocols": {
+      "member-v4": "pb_as64496",
+      "member-v6": "pb6_as64496",
+      "second-member-v4": "pb_as64497",
+      "second-member-v6": "pb6_as64497"
+    },
+    "announcers": {
+      "64496": {
+        "ipv4": "198.51.100.2",
+        "ipv6": "2001:db8:5100::2",
+        "ipv4_routes": [
+          "203.0.113.0/24",
+          "203.0.113.128/25",
+          "203.0.113.64/26"
+        ],
+        "ipv6_routes": [
+          "2001:db8:a::/48",
+          "2001:db8:b::/48"
+        ]
+      },
+      "64497": {
+        "ipv4": "198.51.100.4",
+        "ipv6": "2001:db8:5100::4",
+        "ipv4_routes": [
+          "192.0.2.0/24"
+        ],
+        "ipv6_routes": [
+          "2001:db8:c::/48"
+        ]
+      }
+    }
+  },
+  "birdseye_routes": {
+    "in_scope": [
+      "api/status",
+      "api/protocols/bgp",
+      "api/protocol/{protocol}",
+      "api/symbols",
+      "api/routes/protocol/{protocol}",
+      "api/routes/table/{table}",
+      "api/routes/export/{protocol}",
+      "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}",
+      "api/route/{net}/table/{table}",
+      "api/route/{net}/protocol/{protocol}",
+      "api/route/{net}/export/{protocol}"
+    ],
+    "out_of_scope": [
+      "test",
+      "/",
+      "api/symbols/tables",
+      "api/symbols/protocols",
+      "api/routes/count/protocol/{protocol}",
+      "api/routes/count/table/{table}",
+      "api/routes/count/export/{protocol}",
+      "api/route/{net}",
+      "lg/",
+      "lg/protocols/bgp",
+      "lg/routes/protocol/{protocol}",
+      "lg/routes/table/{table}",
+      "lg/routes/export/{protocol}",
+      "lg/route",
+      "lg/route/{net}/protocol/{protocol}",
+      "lg/route/{net}/table/{table}"
+    ]
+  },
+  "runtime_divergences": [
+    {
+      "endpoint": "*",
+      "path": "api.version",
+      "kind": "value",
+      "birdseye": "Bird's Eye semantic version (2.1.0)",
+      "adapter": "rustbgpd <version> product identity",
+      "rationale": "api.version names the implementation, not the contract; the gate keeps asserting the rustbgpd prefix",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": "*",
+      "path": "api.Version",
+      "kind": "extra",
+      "birdseye": "absent",
+      "adapter": "duplicate of api.version",
+      "rationale": "Birdwatcher-shaped api block; the Alice-LG surface of the same adapter reads it",
+      "consumer_visible": false
+    },
+    {
+      "endpoint": "*",
+      "path": "api.result_from_cache",
+      "kind": "extra",
+      "birdseye": "absent",
+      "adapter": "always false",
+      "rationale": "Birdwatcher-shaped api block; there is no cache to skip",
+      "consumer_visible": false
+    },
+    {
+      "endpoint": "api/status",
+      "path": "status.version",
+      "kind": "value",
+      "birdseye": "BIRD version (2.0.12)",
+      "adapter": "rustbgpd <version>",
+      "rationale": "product identity; the pinned looking-glass layout prints it as the router version",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": "api/status",
+      "path": "status.message",
+      "kind": "value",
+      "birdseye": "last show status line (Daemon is up and running)",
+      "adapter": "rustbgpd AS<asn>",
+      "rationale": "product identity; no pinned consumer reads status.message",
+      "consumer_visible": false
+    },
+    {
+      "endpoint": "api/status",
+      "path": "status.current_server",
+      "kind": "extra",
+      "birdseye": "absent",
+      "adapter": "current wall-clock timestamp",
+      "rationale": "Birdwatcher status field; no pinned consumer reads it",
+      "consumer_visible": false
+    },
+    {
+      "endpoint": [
+        "api/protocols/bgp",
+        "api/protocol/{protocol}"
+      ],
+      "path": [
+        "protocols.*.connection",
+        "protocol.connection"
+      ],
+      "kind": "value",
+      "birdseye": "BIRD 2 info column with its padding (\"  Established   \")",
+      "adapter": "\" Established\" (one leading space)",
+      "rationale": "whitespace only; the bgp-summary modal and the diagnostics suite read connection but HTML collapses the padding",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": [
+        "api/protocols/bgp",
+        "api/protocol/{protocol}"
+      ],
+      "path": [
+        "protocols.*.hold_timer_now",
+        "protocol.hold_timer_now",
+        "protocols.*.keepalive_now",
+        "protocol.keepalive_now"
+      ],
+      "kind": "missing",
+      "birdseye": "live countdowns from the BIRD timers",
+      "adapter": "absent",
+      "rationale": "live-hold-keepalive-countdowns is an unsupported entry; the daemon exposes negotiated values only, and the diagnostics suite guards them with isset",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": [
+        "api/protocols/bgp",
+        "api/protocol/{protocol}"
+      ],
+      "path": [
+        "protocols.*.preference",
+        "protocol.preference"
+      ],
+      "kind": "missing",
+      "birdseye": "BIRD protocol preference (100)",
+      "adapter": "absent",
+      "rationale": "BIRD-internal route preference with no rustbgpd equivalent; shown by the bgp-summary modal when present",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": [
+        "api/protocols/bgp",
+        "api/protocol/{protocol}"
+      ],
+      "path": [
+        "protocols.*.input_filter",
+        "protocol.input_filter",
+        "protocols.*.output_filter",
+        "protocol.output_filter"
+      ],
+      "kind": "missing",
+      "birdseye": "BIRD filter names (ACCEPT)",
+      "adapter": "absent",
+      "rationale": "rustbgpd policy chains have no BIRD filter identity; shown by the bgp-summary modal when present",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": [
+        "api/protocols/bgp",
+        "api/protocol/{protocol}"
+      ],
+      "path": [
+        "protocols.*.route_changes.*.*",
+        "protocol.route_changes.*.*"
+      ],
+      "kind": "missing",
+      "birdseye": "BIRD per-channel route change statistics",
+      "adapter": "absent",
+      "rationale": "the gRPC NeighborState carries no import/export update and withdraw counters; the bgp-summary modal renders the block when present",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": [
+        "api/protocols/bgp",
+        "api/protocol/{protocol}"
+      ],
+      "path": [
+        "protocols.*.routes.preferred",
+        "protocol.routes.preferred"
+      ],
+      "kind": "missing",
+      "birdseye": "always 0 (the pinned parser's Routes: regex drops BIRD's preferred count)",
+      "adapter": "absent",
+      "rationale": "the oracle value is a parser constant, not a best count; the adapter omits rather than fabricate one",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": [
+        "api/protocols/bgp",
+        "api/protocol/{protocol}"
+      ],
+      "path": [
+        "protocols.*.routes.filtered",
+        "protocol.routes.filtered"
+      ],
+      "kind": "extra",
+      "birdseye": "absent",
+      "adapter": "retained-reject count",
+      "rationale": "Birdwatcher protocol field backing the filtered-route views; no pinned consumer reads it",
+      "consumer_visible": false
+    },
+    {
+      "endpoint": [
+        "api/protocols/bgp",
+        "api/protocol/{protocol}"
+      ],
+      "path": [
+        "protocols.*.neighbor_capabilities.*",
+        "protocol.neighbor_capabilities.*"
+      ],
+      "kind": "extra",
+      "birdseye": "absent (BIRD 2 prints a multi-line Neighbor capabilities block the pinned Neighbor caps: regex never matches)",
+      "adapter": "negotiated capability list (refresh, AS4)",
+      "rationale": "the adapter keeps the BIRD 1 shape; the bgp-summary modal renders the list when present",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": [
+        "api/routes/protocol/{protocol}",
+        "api/routes/table/{table}",
+        "api/routes/export/{protocol}",
+        "api/route/{net}/protocol/{protocol}",
+        "api/route/{net}/table/{table}",
+        "api/route/{net}/export/{protocol}",
+        "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}"
+      ],
+      "path": "routes.*.bgp.as_path.*",
+      "kind": "type",
+      "birdseye": "strings",
+      "adapter": "integers",
+      "rationale": "Bird's Eye splits the BGP.as_path text; the adapter emits the numeric path; the pinned route views implode either",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": [
+        "api/routes/protocol/{protocol}",
+        "api/routes/table/{table}",
+        "api/routes/export/{protocol}",
+        "api/route/{net}/protocol/{protocol}",
+        "api/route/{net}/table/{table}",
+        "api/route/{net}/export/{protocol}",
+        "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}"
+      ],
+      "path": "routes.*.bgp.local_pref",
+      "kind": "type",
+      "birdseye": "string \"100\" (BIRD's default local preference assigned at import)",
+      "adapter": "number 0 (the received attribute, absent on an eBGP session)",
+      "rationale": "type and meaning differ: BIRD prints a local preference for every route, the adapter prints the attribute that arrived",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": [
+        "api/routes/protocol/{protocol}",
+        "api/routes/table/{table}",
+        "api/routes/export/{protocol}",
+        "api/route/{net}/protocol/{protocol}",
+        "api/route/{net}/table/{table}",
+        "api/route/{net}/export/{protocol}",
+        "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}"
+      ],
+      "path": "routes.*.bgp.med",
+      "kind": "extra",
+      "birdseye": "absent when the route carries no MED",
+      "adapter": "0 when absent",
+      "rationale": "the adapter always emits med; equal whenever the attribute is present",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": [
+        "api/routes/protocol/{protocol}",
+        "api/routes/table/{table}",
+        "api/routes/export/{protocol}",
+        "api/route/{net}/protocol/{protocol}",
+        "api/route/{net}/table/{table}",
+        "api/route/{net}/export/{protocol}",
+        "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}"
+      ],
+      "path": "routes.*.bgp.aggregator",
+      "kind": "missing",
+      "birdseye": "\"<address> AS<asn>\"",
+      "adapter": "absent",
+      "rationale": "the adapter does not emit AGGREGATOR; the pinned route view prints it when present",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": [
+        "api/routes/protocol/{protocol}",
+        "api/routes/table/{table}",
+        "api/routes/export/{protocol}",
+        "api/route/{net}/protocol/{protocol}",
+        "api/route/{net}/table/{table}",
+        "api/route/{net}/export/{protocol}",
+        "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}"
+      ],
+      "path": "routes.*.interface",
+      "kind": "value",
+      "birdseye": "BIRD egress interface (eth0)",
+      "adapter": "\"\"",
+      "rationale": "a route server has no kernel interface to report; no pinned consumer reads it",
+      "consumer_visible": false
+    },
+    {
+      "endpoint": [
+        "api/routes/protocol/{protocol}",
+        "api/routes/table/{table}",
+        "api/routes/export/{protocol}",
+        "api/route/{net}/protocol/{protocol}",
+        "api/route/{net}/table/{table}",
+        "api/route/{net}/export/{protocol}",
+        "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}"
+      ],
+      "path": "routes.*.learnt_from",
+      "kind": "value",
+      "birdseye": "\"\" (BIRD prints from <address> only when it differs from the next hop)",
+      "adapter": "peer address",
+      "rationale": "no pinned consumer reads it",
+      "consumer_visible": false
+    },
+    {
+      "endpoint": [
+        "api/routes/protocol/{protocol}",
+        "api/routes/table/{table}",
+        "api/routes/export/{protocol}",
+        "api/route/{net}/protocol/{protocol}",
+        "api/route/{net}/table/{table}",
+        "api/route/{net}/export/{protocol}",
+        "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}"
+      ],
+      "path": "routes.*.metric",
+      "kind": "value",
+      "birdseye": "BIRD route preference (100)",
+      "adapter": "0",
+      "rationale": "BIRD-internal preference; the pinned route view prints metric",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": [
+        "api/routes/protocol/{protocol}",
+        "api/routes/export/{protocol}",
+        "api/route/{net}/protocol/{protocol}",
+        "api/route/{net}/export/{protocol}",
+        "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}"
+      ],
+      "path": "routes.*.primary",
+      "kind": "value",
+      "birdseye": "true for the best route in every view",
+      "adapter": "false outside the table view",
+      "rationale": "the adapter reports primary only where it reads the Loc-RIB; the pinned route view prints it",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": [
+        "api/routes/protocol/{protocol}",
+        "api/routes/table/{table}",
+        "api/routes/export/{protocol}",
+        "api/route/{net}/protocol/{protocol}",
+        "api/route/{net}/table/{table}",
+        "api/route/{net}/export/{protocol}",
+        "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}"
+      ],
+      "path": "routes.*.type.*",
+      "kind": "semantics",
+      "birdseye": "[\"BGP\", \"univ\"] (BIRD 2 Type: BGP univ)",
+      "adapter": "[\"BGP\", \"unicast\", \"univ\"] (BIRD 1 shape)",
+      "rationale": "the adapter keeps the BIRD 1 type triple; the pinned route view prints the list",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": [
+        "api/route/{net}/protocol/{protocol}",
+        "api/route/{net}/export/{protocol}"
+      ],
+      "path": "routes",
+      "kind": "semantics",
+      "birdseye": "show route for: longest match, so a covering-only prefix or a host address returns the covering route",
+      "adapter": "exact prefix match: the same inputs return []",
+      "rationale": "IXP Manager passes listed exact networks; the exact-vs-longest choice is recorded, not hidden",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": "api/route/{net}/table/{table}",
+      "path": "<response>",
+      "kind": "semantics",
+      "birdseye": "HTTP 200 with routes: [] for host-bit input (BIRD rejects the lookup)",
+      "adapter": "HTTP 400, which the pinned consumer collapses to \"\"",
+      "rationale": "network-aligned input only; IXP Manager renders an empty page either way",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}",
+      "path": "routes",
+      "kind": "semantics",
+      "birdseye": "every route carrying (x, y, *) in the protocol's table",
+      "adapter": "retained rejects tagged <daemon asn>:1101:* only; [] for any other (x, y)",
+      "rationale": "the filtered-prefix view is the only pinned use; accepted routes are never scanned",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}",
+      "path": "retention.*",
+      "kind": "extra",
+      "birdseye": "absent",
+      "adapter": "retention completeness metadata",
+      "rationale": "filtered_retention_metadata block; no pinned consumer reads it",
+      "consumer_visible": false
+    },
+    {
+      "endpoint": "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}",
+      "path": "api.max_routes",
+      "kind": "value",
+      "birdseye": "MAX_ROUTES",
+      "adapter": "retention capacity for the daemon (x, y)",
+      "rationale": "filtered_retention_metadata.api_max_routes; the pinned layout prints api.max_routes",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": "api/symbols",
+      "path": "symbols.protocol.*",
+      "kind": "semantics",
+      "birdseye": "every BIRD protocol, including device1",
+      "adapter": "BGP sessions only",
+      "rationale": "the daemon has no BIRD symbol table; the pinned route-search view lists symbols.protocol",
+      "consumer_visible": true
+    },
+    {
+      "endpoint": "api/symbols",
+      "path": "symbols.undefined.*",
+      "kind": "missing",
+      "birdseye": "BIRD 2.0.12 show symbols reports configuration keywords under an undefined class",
+      "adapter": "absent",
+      "rationale": "Bird's Eye passes every class through; no pinned consumer reads undefined",
+      "consumer_visible": false
+    }
+  ],
   "runtime_compatibility": false,
   "manual_config_export": {
     "schema": "rustbgpd.ixp-manager.router-config/v2",

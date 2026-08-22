@@ -100,6 +100,30 @@ The strict candidates also append the router-own-AS large-community scrub last
 to the global export chain and every v2 client receive override. The manifest
 pins its exact removal-only syntax, placement, and foreign-admin preservation.
 
+The populated oracle leg stands the real reference next to the live leg. A
+pinned BIRD 2.0.12 (Debian bookworm `bird2`, `Dockerfile.oracle`) runs next to
+the same installed Bird's Eye checkout, and rustbgpd plus `birdwatcher-adapter`
+run on the host; both route servers (`oracle-bird.conf` and the rustbgpd
+config inside `run-oracle-leg.sh`: same ASN, router ID, descriptions, and
+accept-all policy) peer with two pinned ExaBGP announcers
+(`oracle-announcer-as64496.conf`, `oracle-announcer-as64497.conf`) over one
+harness network with both address families. The announcements are
+deterministic: a multi-hop AS path, MED, a received LOCAL_PREF, standard and
+large communities, an AGGREGATOR, and a more-specific inside a covering
+prefix. `oracle-consumer.php` drives the pinned IXP Manager `BirdsEye`
+consumer through all eleven in-scope endpoints (24 journeys, including a
+covering-only prefix, a host address, host-bit input, and a foreign
+large-community wildcard) against each leg, and `verify_capture.py
+--populated` normalizes both captures (timestamps, the rustbgpd version,
+countdowns, each leg's own route-server addresses, route and symbol order),
+pins them as `fixtures/populated-oracle.json` and
+`fixtures/populated-live.json`, diffs oracle against live through the
+`runtime_divergences` allow-list in `contract.json`, proves the allow-list
+fail-closed on every run (each entry removed in turn surfaces an unlisted
+difference; a bogus entry is reported stale), and checks the pinned
+`routes/web.php` route set against `birdseye_routes`. It prints one
+`populated oracle proof:` line; silent success is a failure.
+
 Run the gate from the repository root:
 
 ```console
@@ -224,32 +248,114 @@ route set parsed from pinned routes/web.php != SCOPE | OUT_OF_SCOPE
 
 Each `fail(...)` is the existing fail-closed style; the oracle and live
 captures are fixtures under `fixtures/` with the same `CAPTURE_FIXTURES=1`
-refresh path as today. This is not a one-assertion addition to an existing
-check, because the populated oracle leg does not exist yet, so it is described
-here and not implemented.
+refresh path as today. Everything below the first line is implemented in
+`verify_capture.py --populated` (see the populated oracle leg paragraph
+above); only the flag inversion on the first line is pending, behind the
+decisions in the work list.
 
 ### Work list
 
-Each line names the gap and the evidence that closes it.
+Each line names the gap and the evidence that closes it. Items 1, 2, 15, and
+16 are done; items 3 to 14 record what the oracle diff showed, with the
+observed JSON paths, so the remaining decisions are grounded. Every observed
+divergence is an entry in `contract.json` `runtime_divergences`; the README
+predicted eight more that the diff did not show, listed after the table.
 
-1. Populated oracle leg: pinned BIRD 2.0.12 + Bird's Eye 2.1.0 and rustbgpd + adapter fed identical synthetic announcements, both read by the pinned IXP Manager consumer, captured as an oracle/live fixture pair — evidence: `verify_capture.py` diffs the pair; today's live leg proves empty arrays only.
-2. Machine-readable divergence allow-list in `contract.json`, pinned to a constant in `verify_capture.py` like every other block — evidence: the gate fails on an unlisted difference and on a stale entry.
-3. `bgp.as_path` element type (integers vs strings) — decide emit-strings or allow-list; evidence: oracle diff clean.
-4. `bgp.local_pref` type (number vs string) — same decision; evidence: oracle diff clean.
-5. Route sentinels `gateway`, `interface`, `metric`, `primary`, `learnt_from`, `age` — allow-list entries citing the pinned parser's BIRD 2 `via`-line output in `fixtures/birdseye-contract.json`; evidence: entries present and non-stale.
-6. `bgp.atomic_aggr` / `bgp.aggregator` absent — emit when the attribute is present or allow-list; evidence: an aggregated announcement in the oracle topology.
-7. Protocol row fields `preference`, `input_filter`, `output_filter`, `route_changes.*`, `routes.preferred`, `description_short`, `hold_timer_now`, `keepalive_now` absent and `routes.filtered` extra — decide each (serve or allow-list); `routes.preferred` needs a per-peer best count on `NeighborState` first; evidence: oracle diff on an established peer.
-8. `status.version`, `status.message`, extra `current_server` — allow-list as product identity; evidence: entries present.
-9. `symbols` classes beyond `protocol` and `routing table` — allow-list (the daemon has no BIRD symbol table); evidence: entry present.
-10. `/route/{net}/protocol|export` exact-match versus Bird's Eye longest-match, and HTTP 400 on host or unmasked input on all three lookups — decide allow-list (IXP Manager always passes a listed exact network) or implement longest-match for peer views; evidence: oracle cases with a host address and a covering-only prefix.
-11. `lc-zwild` answers only `{daemon ASN}:1101:*` and returns empty for other `(x, y)` without scanning accepted routes — allow-list by design; evidence: an oracle case for a foreign `(x, y)`.
-12. Upstream failure HTTP 502 versus Bird's Eye 503 — allow-list or change; evidence: the existing `bird_failure` case mirrored on the live leg.
-13. No throttle (429) and no cache (`from_cache`, `ttl_mins`, `use_cache`) — allow-list as deployment concerns; evidence: entries present.
-14. `/api` base path — document as reverse-proxy configuration, not adapter behaviour; evidence: README line plus allow-list note.
-15. Out-of-scope set (`symbols/tables`, `symbols/protocols`, three counts, untabled `route/{net}`, `/test`, `/`, `/lg/*`) written into the gate so a new pinned upstream route fails it; evidence: route-table parse of `routes/web.php` at `birdseye_commit`.
-16. Which route and protocol fields the pinned IXP Manager looking-glass views actually read is unverified; reading `resources/views/services/lg/*.foil.php` at `ixp_manager_commit` would let the allow-list mark consumer-visible versus invisible divergences — evidence: a per-entry `consumer_visible` flag.
-17. `tests/birdwatcher_adapter_smoke.rs` pins `adapter-consumer.php` journey counts (`symbols()`, `protocolTable(`, `routesForTable(` exactly once each); a populated leg must keep or update that test — evidence: `cargo test --workspace` green.
-18. The flip itself: `runtime_compatibility: true`, the `verify_capture.py` inversion, this README's intro sentence, `docs/INTEROP.md`, and `CHANGELOG.md` — last, only after 1–17.
+1. Done. Populated oracle leg: pinned BIRD 2.0.12 + Bird's Eye 2.1.0 and
+   rustbgpd + adapter fed identical synthetic announcements, both read by the
+   pinned IXP Manager consumer, captured as the oracle/live fixture pair
+   `fixtures/populated-oracle.json` and `fixtures/populated-live.json`;
+   `verify_capture.py --populated` diffs the pair.
+2. Done. Machine-readable divergence allow-list `runtime_divergences` in
+   `contract.json` (per entry: endpoint, JSON path, kind, Bird's Eye shape,
+   adapter shape, rationale, `consumer_visible`), pinned to a constant in
+   `verify_capture.py`; the gate fails on an unlisted difference and on a stale
+   entry, and re-proves both on every run.
+3. `bgp.as_path` element type: observed on every route view,
+   `routes.*.bgp.as_path.*` strings upstream, integers from the adapter. Still
+   to decide: emit strings or keep the entry.
+4. `bgp.local_pref`: observed as a type and meaning difference,
+   `routes.*.bgp.local_pref` is the string `"100"` upstream (BIRD's default
+   local preference assigned at import, also for the route announced with
+   LOCAL_PREF 200, which both route servers ignore on the eBGP session) and the
+   number `0` from the adapter (the received attribute). Still to decide.
+5. Route sentinels: observed `routes.*.interface` (`"eth0"` vs `""`),
+   `routes.*.metric` (BIRD preference `100` vs `0`), `routes.*.primary`
+   (`true` for the best route in every upstream view, `false` from the adapter
+   outside the table view), `routes.*.learnt_from` (`""` upstream because BIRD
+   prints `from <address>` only when it differs from the next hop, peer address
+   from the adapter), and `routes.*.type` (`["BGP", "univ"]` from BIRD 2 vs the
+   BIRD 1 triple). Not observed: `gateway` (the pinned parser takes the BIRD 2
+   `via` line, which equals the adapter's next hop), `age` (both carry a
+   receive timestamp), `from_protocol`. The sentinel values in
+   `fixtures/birdseye-contract.json` come from `fake-birdc`'s BIRD 1 line
+   format, not from BIRD 2.
+6. `bgp.aggregator`: observed missing from the adapter
+   (`routes.*.bgp.aggregator` is `"203.0.113.1 AS64496"` upstream).
+   `bgp.atomic_aggr` is not exercised: rustbgpd currently treat-as-withdraws
+   any UPDATE carrying ATOMIC_AGGREGATE (the wire decoder keeps the attribute
+   opaque and the unrecognized-well-known check then rejects it), so the
+   topology announces AGGREGATOR without ATOMIC_AGGREGATE until that is fixed;
+   adding `atomic-aggregate;` back to the announcer config and refreshing the
+   fixtures closes the gap.
+7. Protocol row: observed missing `preference`, `input_filter`,
+   `output_filter`, `route_changes.*.*`, `routes.preferred`, `hold_timer_now`,
+   `keepalive_now`; observed extra `routes.filtered` and
+   `neighbor_capabilities` (BIRD 2 prints a multi-line `Neighbor capabilities`
+   block that the pinned `Neighbor caps:` regex never matches, so the oracle
+   row has no such field); observed `connection` as a whitespace-only
+   difference (`"  Established   "` vs `" Established"`). `routes.preferred`
+   upstream is the parser constant `0` (its `Routes:` regex drops BIRD's
+   preferred count), so a per-peer best count would not close that entry.
+   `description_short` is not observed (Bird's Eye emits it only with
+   `PARSER_PROTOCOL_BGP_DESCRIPTION`). `import_limit` and `limit_action` are
+   absent on both sides without a configured limit.
+8. `status.version`, `status.message`, extra `status.current_server`:
+   observed, allow-listed as product identity; `status.router_id`,
+   `last_reboot`, `last_reconfig`, and `server_time` match after timestamp
+   normalization.
+9. `symbols`: observed `symbols.protocol` carrying BIRD's `device1` next to
+   the BGP sessions, and a `symbols.undefined` class (BIRD 2.0.12 `show
+   symbols` reports configuration keywords there) the adapter never emits.
+10. Exact versus longest match: observed on `route/{net}/protocol` and
+    `route/{net}/export` (a covering-only prefix and a host address return the
+    covering route upstream, `routes: []` from the adapter) and on
+    `route/{net}/table` for host-bit input (HTTP 200 `routes: []` upstream
+    because BIRD rejects the lookup, HTTP 400 from the adapter, which the
+    consumer collapses to `""`). Still to decide.
+11. `lc-zwild`: observed for a foreign `(x, y)` (the route carrying that large
+    community upstream, `routes: []` from the adapter) plus the adapter's extra
+    `retention.*` and `api.max_routes` as the retention capacity for the daemon
+    `(x, y)`; both legs return `routes: []` for the daemon `(x, y)`.
+12. 502 versus 503: not observed; the populated leg has no upstream-failure
+    case (the existing `bird_failure` case stays on the `fake-birdc` oracle).
+13. Throttle and cache: not observed as a body difference; `ttl_mins` is
+    absent on both sides because `CACHE_DRIVER=array` strips it upstream and
+    `from_cache` is `false` on both; the per-minute throttle is not hit by the
+    24 journeys.
+14. `/api` base path: not a body difference; IXP Manager's `Router.api` base
+    URL absorbs it (`.../api` for Bird's Eye, the adapter root for rustbgpd).
+15. Done. The in-scope and out-of-scope route sets are `birdseye_routes` in
+    `contract.json`; `verify_capture.py --populated` parses `routes/web.php`
+    at `birdseye_commit` and fails on any new or removed route.
+16. Done. Every allow-list entry carries `consumer_visible`, set from the
+    pinned `resources/views/services/lg/*.foil.php` views, the looking-glass
+    layout, and the BGP-sessions diagnostics suite at `ixp_manager_commit`.
+17. `tests/birdwatcher_adapter_smoke.rs` pins `adapter-consumer.php` journey
+    counts (`symbols()`, `protocolTable(`, `routesForTable(` exactly once
+    each); the populated leg uses its own `oracle-consumer.php`, so the pin is
+    unchanged — evidence: `cargo test --workspace` green.
+18. The flip itself: `runtime_compatibility: true`, the `verify_capture.py`
+    inversion, this README's intro sentence, `docs/INTEROP.md`, and
+    `CHANGELOG.md` — last, only after 1–17.
+
+Normalization applied to both legs before the diff (recorded in each
+fixture's `provenance.normalization`): timestamps, the rustbgpd version,
+`hold_timer_now`/`keepalive_now`, each leg's own route-server addresses, and
+route and symbol list order. The two route servers cannot share one address
+on one segment, so `source_address` is compared as `<route-server>`; BIRD's
+default hold time is mirrored in the rustbgpd config so the negotiated timers
+match.
 
 ## Provenance and licensing
 
