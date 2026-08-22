@@ -45,9 +45,10 @@ exact `{daemon ASN}:1101:*` filtered-prefix query reads only retained rejects,
 scrubs that reserved namespace, and adds one conservative reason. This remains
 partial runtime support: the ten reasons active in the pinned v7.4 route-server
 templates are mapped, while IDs 2, 4, 11, 12, and 15 are display-only and
-remain fallback 0 rather than gaining invented semantics. Global table lists,
-full-table counts, and other
-wildcard-community endpoints are not served. The adapter's table identity is a
+remain fallback 0 rather than gaining invented semantics. The full-table view
+and longest-prefix table search are served; full-table counts are not, other
+wildcard-community pairs return empty, and the contract's
+`runtime_compatibility` stays `false`. The adapter's table identity is a
 validated view over one global Loc-RIB, and `api.version` is rustbgpd product
 identity, not a Bird's Eye version claim; the adapter is not described as fully
 IXP Manager / Bird's Eye compatible.
