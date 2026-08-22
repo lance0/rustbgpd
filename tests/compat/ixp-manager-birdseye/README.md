@@ -115,7 +115,8 @@ consumer through all eleven in-scope endpoints (24 journeys, including a
 covering-only prefix, a host address, host-bit input, and a foreign
 large-community wildcard) against each leg, and `verify_capture.py
 --populated` normalizes both captures (timestamps, the rustbgpd version,
-countdowns, each leg's own route-server addresses, route and symbol order),
+countdowns, each leg's own route-server addresses, BIRD's `route_changes`
+counters, route and symbol order),
 pins them as `fixtures/populated-oracle.json` and
 `fixtures/populated-live.json`, diffs oracle against live through the
 `runtime_divergences` allow-list in `contract.json`, proves the allow-list
@@ -348,8 +349,10 @@ predicted eight more that the diff did not show, listed after the table.
 
 Normalization applied to both legs before the diff (recorded in each
 fixture's `provenance.normalization`): timestamps, the rustbgpd version,
-`hold_timer_now`/`keepalive_now`, each leg's own route-server addresses, and
-route and symbol list order. The two route servers cannot share one address
+`hold_timer_now`/`keepalive_now`, each leg's own route-server addresses,
+route and symbol list order, and BIRD's `route_changes` counters (they follow
+announcer arrival order; the block's shape is still compared). The two route
+servers cannot share one address
 on one segment, so `source_address` is compared as `<route-server>`; BIRD's
 default hold time is mirrored in the rustbgpd config so the negotiated timers
 match.

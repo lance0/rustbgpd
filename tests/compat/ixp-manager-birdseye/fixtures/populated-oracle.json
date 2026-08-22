@@ -554,27 +554,27 @@
           "protocol": "pb_as64496",
           "route_changes": {
             "export_updates": {
-              "accepted": 1,
-              "filtered": 0,
-              "received": 4,
-              "rejected": 3
+              "accepted": "<counter>",
+              "filtered": "<counter>",
+              "received": "<counter>",
+              "rejected": "<counter>"
             },
             "export_withdraws": {
-              "accepted": 0,
-              "received": 0
+              "accepted": "<counter>",
+              "received": "<counter>"
             },
             "import_updates": {
-              "accepted": 3,
-              "filtered": 0,
-              "ignored": 0,
-              "received": 3,
-              "rejected": 0
+              "accepted": "<counter>",
+              "filtered": "<counter>",
+              "ignored": "<counter>",
+              "received": "<counter>",
+              "rejected": "<counter>"
             },
             "import_withdraws": {
-              "accepted": 0,
-              "ignored": 0,
-              "received": 0,
-              "rejected": 0
+              "accepted": "<counter>",
+              "ignored": "<counter>",
+              "received": "<counter>",
+              "rejected": "<counter>"
             }
           },
           "route_limit_at": 3,
@@ -621,27 +621,27 @@
           "protocol": "pb6_as64496",
           "route_changes": {
             "export_updates": {
-              "accepted": 1,
-              "filtered": 0,
-              "received": 3,
-              "rejected": 2
+              "accepted": "<counter>",
+              "filtered": "<counter>",
+              "received": "<counter>",
+              "rejected": "<counter>"
             },
             "export_withdraws": {
-              "accepted": 0,
-              "received": 0
+              "accepted": "<counter>",
+              "received": "<counter>"
             },
             "import_updates": {
-              "accepted": 2,
-              "filtered": 0,
-              "ignored": 0,
-              "received": 2,
-              "rejected": 0
+              "accepted": "<counter>",
+              "filtered": "<counter>",
+              "ignored": "<counter>",
+              "received": "<counter>",
+              "rejected": "<counter>"
             },
             "import_withdraws": {
-              "accepted": 0,
-              "ignored": 0,
-              "received": 0,
-              "rejected": 0
+              "accepted": "<counter>",
+              "ignored": "<counter>",
+              "received": "<counter>",
+              "rejected": "<counter>"
             }
           },
           "route_limit_at": 2,
@@ -689,27 +689,27 @@
             "protocol": "pb6_as64496",
             "route_changes": {
               "export_updates": {
-                "accepted": 1,
-                "filtered": 0,
-                "received": 3,
-                "rejected": 2
+                "accepted": "<counter>",
+                "filtered": "<counter>",
+                "received": "<counter>",
+                "rejected": "<counter>"
               },
               "export_withdraws": {
-                "accepted": 0,
-                "received": 0
+                "accepted": "<counter>",
+                "received": "<counter>"
               },
               "import_updates": {
-                "accepted": 2,
-                "filtered": 0,
-                "ignored": 0,
-                "received": 2,
-                "rejected": 0
+                "accepted": "<counter>",
+                "filtered": "<counter>",
+                "ignored": "<counter>",
+                "received": "<counter>",
+                "rejected": "<counter>"
               },
               "import_withdraws": {
-                "accepted": 0,
-                "ignored": 0,
-                "received": 0,
-                "rejected": 0
+                "accepted": "<counter>",
+                "ignored": "<counter>",
+                "received": "<counter>",
+                "rejected": "<counter>"
               }
             },
             "route_limit_at": 2,
@@ -746,27 +746,27 @@
             "protocol": "pb6_as64497",
             "route_changes": {
               "export_updates": {
-                "accepted": 2,
-                "filtered": 0,
-                "received": 3,
-                "rejected": 1
+                "accepted": "<counter>",
+                "filtered": "<counter>",
+                "received": "<counter>",
+                "rejected": "<counter>"
               },
               "export_withdraws": {
-                "accepted": 0,
-                "received": 0
+                "accepted": "<counter>",
+                "received": "<counter>"
               },
               "import_updates": {
-                "accepted": 1,
-                "filtered": 0,
-                "ignored": 0,
-                "received": 1,
-                "rejected": 0
+                "accepted": "<counter>",
+                "filtered": "<counter>",
+                "ignored": "<counter>",
+                "received": "<counter>",
+                "rejected": "<counter>"
               },
               "import_withdraws": {
-                "accepted": 0,
-                "ignored": 0,
-                "received": 0,
-                "rejected": 0
+                "accepted": "<counter>",
+                "ignored": "<counter>",
+                "received": "<counter>",
+                "rejected": "<counter>"
               }
             },
             "route_limit_at": 1,
@@ -803,27 +803,27 @@
             "protocol": "pb_as64496",
             "route_changes": {
               "export_updates": {
-                "accepted": 1,
-                "filtered": 0,
-                "received": 4,
-                "rejected": 3
+                "accepted": "<counter>",
+                "filtered": "<counter>",
+                "received": "<counter>",
+                "rejected": "<counter>"
               },
               "export_withdraws": {
-                "accepted": 0,
-                "received": 0
+                "accepted": "<counter>",
+                "received": "<counter>"
               },
               "import_updates": {
-                "accepted": 3,
-                "filtered": 0,
-                "ignored": 0,
-                "received": 3,
-                "rejected": 0
+                "accepted": "<counter>",
+                "filtered": "<counter>",
+                "ignored": "<counter>",
+                "received": "<counter>",
+                "rejected": "<counter>"
               },
               "import_withdraws": {
-                "accepted": 0,
-                "ignored": 0,
-                "received": 0,
-                "rejected": 0
+                "accepted": "<counter>",
+                "ignored": "<counter>",
+                "received": "<counter>",
+                "rejected": "<counter>"
               }
             },
             "route_limit_at": 3,
@@ -860,27 +860,27 @@
             "protocol": "pb_as64497",
             "route_changes": {
               "export_updates": {
-                "accepted": 3,
-                "filtered": 0,
-                "received": 4,
-                "rejected": 1
+                "accepted": "<counter>",
+                "filtered": "<counter>",
+                "received": "<counter>",
+                "rejected": "<counter>"
               },
               "export_withdraws": {
-                "accepted": 0,
-                "received": 0
+                "accepted": "<counter>",
+                "received": "<counter>"
               },
               "import_updates": {
-                "accepted": 1,
-                "filtered": 0,
-                "ignored": 0,
-                "received": 1,
-                "rejected": 0
+                "accepted": "<counter>",
+                "filtered": "<counter>",
+                "ignored": "<counter>",
+                "received": "<counter>",
+                "rejected": "<counter>"
               },
               "import_withdraws": {
-                "accepted": 0,
-                "ignored": 0,
-                "received": 0,
-                "rejected": 0
+                "accepted": "<counter>",
+                "ignored": "<counter>",
+                "received": "<counter>",
+                "rejected": "<counter>"
               }
             },
             "route_limit_at": 1,
@@ -1618,7 +1618,8 @@
       "rustbgpd <semver> -> rustbgpd <version>",
       "hold_timer_now and keepalive_now -> <countdown>",
       "each leg's own route-server addresses -> <route-server>",
-      "routes sorted by network, symbol lists sorted"
+      "routes sorted by network, symbol lists sorted",
+      "route_changes counters -> <counter>"
     ],
     "software": "BIRD 2.0.12 + Bird's Eye 2.1.0"
   }

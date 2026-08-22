@@ -263,6 +263,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The IXP Manager / Bird's Eye populated oracle fixtures now mask BIRD's
+  timing-dependent `route_changes` counters (shape still compared), so the
+  pinned-contract job no longer fails on announcer arrival order.
 - Routes carrying `ATOMIC_AGGREGATE` were treat-as-withdrawn: the zero-length
   well-known attribute was decoded as an unrecognized well-known attribute
   and rejected with UPDATE error subcode 2. It is now a first-class

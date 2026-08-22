@@ -1331,7 +1331,8 @@
       "rustbgpd <semver> -> rustbgpd <version>",
       "hold_timer_now and keepalive_now -> <countdown>",
       "each leg's own route-server addresses -> <route-server>",
-      "routes sorted by network, symbol lists sorted"
+      "routes sorted by network, symbol lists sorted",
+      "route_changes counters -> <counter>"
     ],
     "software": "rustbgpd + birdwatcher-adapter"
   }
