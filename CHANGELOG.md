@@ -234,6 +234,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   client logs the clamp of a cache-advertised expire down to
   `max_expire_interval` at `warn` rather than `debug`, matching its sibling
   End of Data timer adjustments.
+- `rustbgpd-wire` 0.17.1 → 0.17.2 (additive): `PathAttribute` gains the
+  `AtomicAggregate` variant on the `#[non_exhaustive]` enum, a zero-length
+  `ATOMIC_AGGREGATE` decodes to it instead of `Unknown`, and the attribute
+  decode path returns typed `DecodeError`s where it carried `unreachable!`
+  arms. `rustbgpd-fsm` stays at 0.4.1; its `^0.17.1` requirement admits the
+  patch.
+
 - `rs-config-render` now uses one exit-code table across every subcommand
   (render, IXP Manager candidate, `activate`, `ixp-manager-lifecycle`): each
   code has exactly one meaning. This renumbers codes that previously meant

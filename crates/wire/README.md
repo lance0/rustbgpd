@@ -67,6 +67,33 @@ analyzers, test harnesses, MRT readers, etc.
 | 10005 | Link Bandwidth Extended Community receiver subset: decode exact transitive/non-transitive types 0x00/0x40, subtype 0x04, as raw AS + IEEE-754 bytes/second; the constructor remains non-transitive type 0x40 |
 | draft-abraitis-idr-addpath-paths-limit-04 | Experimental Paths-Limit capability (`PathsLimitFamily`, IANA-assigned capability code 76). The draft is expired and archived; interoperability and behavior remain experimental |
 
+### 0.17.2 compatibility note
+
+`rustbgpd-wire` 0.17.2 is **additive**. `PathAttribute` (a `#[non_exhaustive]`
+enum) gains `PathAttribute::AtomicAggregate`, and one decode classification
+changes:
+
+- **ATOMIC_AGGREGATE (type 6) decodes as `PathAttribute::AtomicAggregate`**
+  (zero-length, well-known discretionary, RFC 4271 §5.1.6) instead of
+  `PathAttribute::Unknown`. Under 0.17.1 the `Unknown` value tripped the
+  unrecognized-well-known validation and the UPDATE was treat-as-withdrawn
+  (subcode 2); it now validates, and the encoder re-emits the attribute with
+  the transitive flag and a zero-length value. A non-zero length is an
+  attribute-length error — attribute-discard on the revised decode path
+  (RFC 7606 §7.6). On the legacy strict path (`decode_path_attributes`, used
+  by the MRT reader) that error fails the whole decode, so an MRT RIB entry
+  carrying a non-zero-length ATOMIC_AGGREGATE is rejected where it previously
+  read back as `PathAttribute::Unknown`. Code matching on `Unknown` for type
+  code 6 no longer sees it.
+
+The attribute decode path also replaces its `unreachable!` arms (`AS4_PATH`
+segment types, the `COMMUNITIES` / `EXTENDED_COMMUNITIES` / `CLUSTER_LIST` /
+`LARGE_COMMUNITIES` length checks, and the BGP-LS and VPN `MP_REACH_NLRI`
+next-hop lengths) with the typed `DecodeError` the surrounding validation
+already produces. Acceptance is unchanged for every input those guards
+already rejected. No signature changed and nothing was removed; code that
+builds against 0.17.1 builds unchanged against 0.17.2.
+
 ### 0.17.1 compatibility note
 
 `rustbgpd-wire` 0.17.1 is a **documentation-only patch**. There is no public
@@ -119,15 +146,6 @@ before upgrading a consumer that asserts on acceptance or typed variants:
 - **AGGREGATOR decodes as a typed `PathAttribute::Aggregator` value** instead
   of falling through to `PathAttribute::Unknown`. Code matching on `Unknown`
   for type code 7 no longer sees it.
-- **ATOMIC_AGGREGATE decodes as `PathAttribute::AtomicAggregate`** (zero-length,
-  well-known discretionary) instead of `PathAttribute::Unknown`, so the
-  unrecognized-well-known validation no longer treat-as-withdraws routes that
-  carry it. A non-zero length is an attribute-length error (RFC 7606 §7.6
-  attribute-discard on the revised decode path). On the legacy strict path
-  (`decode_path_attributes`, used by the MRT reader) that error fails the
-  whole decode, so an MRT RIB entry carrying a non-zero-length
-  ATOMIC_AGGREGATE is rejected where it previously read back as
-  `PathAttribute::Unknown`.
 - **OPEN and KEEPALIVE over 4096 bytes are rejected** at header peek, before a
   framing caller buffers the declared body, regardless of a negotiated RFC 8654
   extended message length.

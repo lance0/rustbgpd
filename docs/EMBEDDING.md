@@ -76,7 +76,7 @@ Public surface (re-exported at crate root — `crates/wire/src/lib.rs`):
 - **`UpdateMessage`** — raw wire framing + `parse()` → `ParsedUpdate`
   (decoded NLRI + `Vec<PathAttribute>`).
 - **`PathAttribute`** — typed variants + `Unknown` pass-through (`AsPath`,
-  `Aggregator`, `NextHop`, `Communities`, `MpReachNlri`, `LargeCommunities`,
+  `Aggregator`, `AtomicAggregate`, `NextHop`, `Communities`, `MpReachNlri`, `LargeCommunities`,
   `PmsiTunnel`, `OnlyToCustomer`, ...).
 - **`Prefix`** (`V4(Ipv4Prefix)` / `V6(Ipv6Prefix)`), `NlriEntry`, Add-Path IDs.
 - **`Afi` / `Safi`** — IANA address-family identifiers.
@@ -153,7 +153,7 @@ This is the "MRT reader / monitor / analyzer" consumer. Links only
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.17.1"
+rustbgpd-wire = "0.17.2"
 bytes = "1"
 ```
 
@@ -213,7 +213,7 @@ intentional split (ADR-0002: inherent methods, no I/O in the FSM).
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.17.1"
+rustbgpd-wire = "0.17.2"
 rustbgpd-fsm = "0.4.1"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
@@ -312,7 +312,7 @@ once that crate is published.
 **Status: `wire` → `fsm` are published; `rpki` is next; `rib`, `bmp`, `mrt`,
 and `policy` are later.**
 
-1. **`rustbgpd-wire` (published as `0.17.1`).** This is the
+1. **`rustbgpd-wire` (published as `0.17.2`).** This is the
    foundation — dependent crate versions cannot publish before their wire
    dependency exists on crates.io. `0.15.0` brought `Capability::PathsLimit`
    with its `PathsLimitFamily` entry type (experimental capability code 76),
@@ -338,7 +338,21 @@ and `policy` are later.**
    RFC 7432 §7.8 citation, and the FlowSpec next-hop citation to RFC 8955 §4).
    There is no public API, wire-format, or decoder/encoder behavior change,
    and therefore nothing to migrate — code that builds against `0.17.0`
-   builds and behaves identically against `0.17.1`.
+   builds and behaves identically against `0.17.1`. `0.17.2` is
+   **additive**: `PathAttribute` (a `#[non_exhaustive]` enum) gains the
+   `AtomicAggregate` variant, and a zero-length `ATOMIC_AGGREGATE` (type 6)
+   now decodes to it instead of `PathAttribute::Unknown`. Under `0.17.1` that
+   `Unknown` value tripped the unrecognized-well-known-attribute validation,
+   so the UPDATE was treat-as-withdrawn with subcode 2; under `0.17.2` the
+   route validates and the encoder re-emits the attribute. A non-zero length
+   stays an attribute-length error — attribute-discard on the revised decode
+   path per RFC 7606 §7.6. Code matching `PathAttribute::Unknown` for type
+   code 6 no longer sees it; no signature changed and nothing was removed, so
+   `cargo semver-checks` reports no required bump and consumers compiled
+   against `0.17.1` build unchanged. The same release replaces the
+   `unreachable!` arms on the attribute decode path with the typed
+   `DecodeError` the surrounding validation already produces; acceptance is
+   unchanged for every input those guards already rejected.
 
 2. **`rustbgpd-fsm` (published as `0.4.1`).** The `0.4.0` release makes no
    FSM API changes of its own — it exists because the FSM's public surface
@@ -352,7 +366,9 @@ and `policy` are later.**
    boundary while the session is live. `Session::negotiated()` keeps its
    `Option<&NegotiatedSession>` signature, nothing was removed or changed,
    and `0.4.1` re-pins `rustbgpd-wire ^0.17.1` — a patch-level wire move with
-   no API change, so there is nothing to migrate. (History: `0.3.1` added
+   no API change, so there is nothing to migrate. The FSM does not move for
+   wire `0.17.2`: its `^0.17.1` requirement already resolves to the new patch
+   and the FSM's own source is unchanged since `0.4.1`. (History: `0.3.1` added
    `min_hold_time` and `required_families` to the `#[non_exhaustive]`
    `PeerConfig`, made the last duplicate Graceful Restart capability win, and
    rejected invalid OPEN identities.) Why the FSM was the second published crate:
@@ -444,7 +460,7 @@ To be the de facto Rust BGP codec, the concrete gaps:
 
 ## 7. Published-crate release boundary
 
-`rustbgpd-wire 0.17.1` and `rustbgpd-fsm 0.4.1` are published and are the
+`rustbgpd-wire 0.17.2` and `rustbgpd-fsm 0.4.1` are published and are the
 versions the §3 dependency examples name. The ordering rules that govern every
 future publish are:
 
