@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The Shutdown RPC now synchronously signals main's coordinated teardown watch
+  without sending directly to PeerManager. Quickstart timeout failures kill and
+  reap the daemon before preserving stderr and cleanup evidence; this removes
+  the proven pre-signal stall and order bypass without attributing historical
+  timeout latency. (LAN-1221)
 - Mixed daemon-owned and unmarked static Linux FDB contributors now classify foreign in either
   order; reconciliation relinquishes ownership once and preserves the operator row. (LAN-1218)
 - Startup now resolves validated policy and EVPN state and acquires BFD, BGP,
