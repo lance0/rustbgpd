@@ -263,6 +263,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `MrtDumpStale` in the shipped alert pack no longer fires on instances
+  without `[mrt]` configured: the `mrt_*` gauges are exported as 0 on every
+  instance, so the unguarded rule anchored dump age on process start with a
+  zero threshold and fired five minutes after every start. The rule now
+  requires a configured interval (`mrt_dump_interval_seconds > 0`); the
+  OPERATIONS.md MRT metrics table no longer claims the series exists only
+  when `[mrt]` is configured.
 - The IXP Manager / Bird's Eye populated oracle fixtures now mask BIRD's
   timing-dependent `route_changes` counters (shape still compared), so the
   pinned-contract job no longer fails on announcer arrival order.

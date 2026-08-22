@@ -1136,7 +1136,7 @@ any 10-minute increase of these two counters and of
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `mrt_dump_interval_seconds` | The configured `[mrt] dump_interval`; the series exists only when `[mrt]` is configured. The alert pack's `MrtDumpStale` fires once the newest dump is older than twice this value |
+| `mrt_dump_interval_seconds` | The configured `[mrt] dump_interval`. Exported on every instance: 0 when `[mrt]` is not configured, otherwise always > 0. The alert pack's `MrtDumpStale` guards on a value > 0 and fires once the newest dump is older than twice it |
 | `mrt_last_dump_success_timestamp_seconds` | Unix time the last periodic or on-demand dump was published successfully; 0 until the first success after start. A failed dump does not advance it, so `time() - <this>` is the age of the newest dump file |
 | `mrt_last_dump_duration_milliseconds` | Wall-clock duration of the last successful dump from trigger to published file (RIB snapshot, encode, write, rename) |
 | `mrt_dump_bytes_written_total` | Bytes of dump files published on disk (after compression) |

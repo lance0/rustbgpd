@@ -693,7 +693,9 @@ tests:
   # Age is anchored on process start until the first success: edge1 never
   # succeeds after starting at 5m and fires 2x interval later; edge2
   # succeeded once at 10m then stalled; edge3's fresh success at 32m clears
-  # a pending alert; edge4's longer interval scales the threshold. All
+  # a pending alert; edge4's longer interval scales the threshold; edge5 has
+  # no [mrt] configured (interval and timestamp both exported as 0) and must
+  # never fire, which every exhaustive exp_alerts list below asserts. All
   # timestamps are promtool's epoch-relative clock.
   - interval: 1m
     input_series:
@@ -720,6 +722,12 @@ tests:
       - series: 'mrt_last_dump_success_timestamp_seconds{job="rustbgpd", instance="edge4:9179"}'
         values: "0x60"
       - series: 'process_start_time_seconds{job="rustbgpd", instance="edge4:9179"}'
+        values: "0x60"
+      - series: 'mrt_dump_interval_seconds{job="rustbgpd", instance="edge5:9179"}'
+        values: "0x60"
+      - series: 'mrt_last_dump_success_timestamp_seconds{job="rustbgpd", instance="edge5:9179"}'
+        values: "0x60"
+      - series: 'process_start_time_seconds{job="rustbgpd", instance="edge5:9179"}'
         values: "0x60"
       # A process-start series from another job must not anchor anything.
       - series: 'process_start_time_seconds{job="node", instance="edge1:9100"}'

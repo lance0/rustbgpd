@@ -305,8 +305,10 @@ groups:
         # mrt_last_dump_success_timestamp_seconds stays 0 until the first
         # successful dump, so dump age is anchored on process start until
         # then: a daemon whose dumps have never succeeded alerts after the
-        # same 2x interval as one whose dumps stopped. Both mrt_* gauges
-        # exist only when [mrt] is configured, so this cannot fire elsewhere.
+        # same 2x interval as one whose dumps stopped. The mrt_* gauges are
+        # exported (as 0) on every instance, [mrt] configured or not; the
+        # `mrt_dump_interval_seconds > 0` guard is what keeps a 0 interval
+        # (no [mrt]) from firing 5m after every start.
         expr: >-
           time()
           - (
@@ -315,6 +317,7 @@ groups:
             or process_start_time_seconds{job="rustbgpd"}
           )
           > 2 * mrt_dump_interval_seconds
+          and mrt_dump_interval_seconds > 0
         for: 5m
         labels:
           severity: warning
