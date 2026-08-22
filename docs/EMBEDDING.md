@@ -287,7 +287,7 @@ The three services that matter for a route-injection controller:
 | Service | Methods you will actually call |
 |---------|-------------------------------|
 | `InjectionService` | `AddPath` / `DeletePath` (unicast prefixes), `AddFlowSpec` / `DeleteFlowSpec`, `AddEvpnRoute` / `DeleteEvpnRoute` |
-| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainBestPath`, `ExplainAdvertisedRoute`, `WatchRoutes`, `WatchRouteEvents` |
+| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainBestPath`, `ExplainAdvertisedRoute`, `ListRouteEvents` |
 | `EventService` | `WatchEvents` (live stream), `SubscribeFromEvent` (durable cursor replay, §8) |
 
 Route origination is `InjectionService`, not `RibService` — `RibService` is the

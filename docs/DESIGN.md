@@ -115,7 +115,6 @@ service RibService {
   rpc ExplainBestPath(ExplainBestPathRequest) returns (ExplainBestPathResponse);
   rpc LookupBestPath(LookupBestPathRequest) returns (ExplainBestPathResponse); // outside v1
   rpc ListRouteEvents(ListRouteEventsRequest) returns (ListRouteEventsResponse);
-  rpc WatchRoutes(WatchRoutesRequest)         returns (stream RouteEvent);
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
 }
 
@@ -161,14 +160,13 @@ message ListRoutesResponse {
 }
 ```
 
-**Streaming watch (opt-in).** `WatchRoutes` returns a live stream of
-`RouteEvent` messages (add, withdraw, best-path change). A bounded broadcast
-channel prevents a slow consumer from becoming a DoS vector. If a consumer
-falls behind, `WatchRoutes` skips the missed events, increments
-`bgp_event_stream_lagged_total`, and keeps the stream connected; its legacy
-bare `RouteEvent` response cannot carry an in-band lag warning. Clients that
-need an explicit `stream_lagged` event use `WatchRouteEvents` or
-`EventService.WatchEvents`, and clients that need durable replay use
+**Streaming watch (opt-in).** `EventService.WatchEvents` with
+`EVENT_CATEGORY_ROUTE` returns a live stream of route events (add, withdraw,
+best-path change, export-policy filtered) wrapped in `BgpEvent`. A bounded
+broadcast channel prevents a slow consumer from becoming a DoS vector. If a
+consumer falls behind, the missed events are skipped,
+`bgp_event_stream_lagged_total` increments, and the stream stays connected
+with an in-band `stream_lagged` event. Clients that need durable replay use
 `SubscribeFromEvent` with event history enabled.
 
 **Recent event history.** `ListRouteEvents` exposes the same unicast
@@ -448,7 +446,7 @@ Dynamic peer management, per-peer policy, typed communities, real-time route eve
 - Shared types (`PeerManagerCommand`, `PeerInfo`) live in `crates/api/src/peer_types.rs` to avoid circular dependencies between the binary and API crates.
 - Per-peer export policy: `RibManager` stores per-peer policies from `PeerUp`, resolves via `export_policy_for()` (per-peer overrides global). Config supports per-neighbor `import_policy` / `export_policy` sections.
 - Typed COMMUNITIES (RFC 1997): `PathAttribute::Communities(Vec<u32>)` replaces opaque `Unknown` for type code 8. Each `u32` is `(ASN << 16) | value`.
-- `WatchRoutes` uses `tokio::sync::broadcast` (ADR-0018) — zero overhead with no subscribers, independent receivers, and lagged receivers skip missed events without blocking.
+- Route-event streaming uses `tokio::sync::broadcast` (ADR-0018) — zero overhead with no subscribers, independent receivers, and lagged receivers skip missed events without blocking.
 - `PeerHandle::query_state()` enables FSM state queries from PeerManager without shared mutable state.
 - Starting with zero configured neighbors is now valid — peers can be added entirely via gRPC.
 
@@ -456,7 +454,7 @@ Dynamic peer management, per-peer policy, typed communities, real-time route eve
 - Dynamic peer add/remove via gRPC, verified end-to-end.
 - Per-peer export policy enforcement (different peers see different routes).
 - Communities decoded, exposed in gRPC, injected via AddPath.
-- WatchRoutes streams real-time route events to multiple subscribers.
+- Route-event streaming delivers real-time route events to multiple subscribers.
 - 10-peer interop validated against FRR 10.3.1 (17/17 automated tests pass).
 - 306 tests pass (M4), clippy clean, fmt clean.
 

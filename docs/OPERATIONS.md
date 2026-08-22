@@ -1103,13 +1103,12 @@ signal.
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `bgp_event_stream_lagged_total{service,source}` | Events skipped because a live stream subscriber fell behind the bounded broadcast channel. `service` is `watch_events`, `watch_route_events`, or `watch_routes`; `source` is `route`, `session`, `policy`, `evpn`, `dataplane`, `dataplane_route`, or `bfd` where applicable |
+| `bgp_event_stream_lagged_total{service,source}` | Events skipped because a live stream subscriber fell behind the bounded broadcast channel. `service` is `watch_events`; `source` is `route`, `session`, `policy`, `evpn`, `dataplane`, `dataplane_route`, or `bfd` where applicable |
 | `bgp_event_stream_subscribers{service,source}` | Current live stream subscriber count by service/source |
 | `bgp_route_event_history_depth` | Current number of unicast route events retained for `ListRouteEvents` / `rbgp events` history queries |
 | `bgp_route_event_history_capacity` | Fixed capacity of the bounded unicast route-event history ring |
 
-`WatchEvents`, `WatchRouteEvents`, and `WatchRoutes` are live tails, not
-durable queues. Non-zero `bgp_event_stream_lagged_total` means at least one
+`WatchEvents` is a live tail, not a durable queue. Non-zero `bgp_event_stream_lagged_total` means at least one
 client missed events and should combine a fresh snapshot or `ListRouteEvents`
 query with a new live watch.
 
@@ -1150,7 +1149,7 @@ The durable outbox (`SubscribeFromEvent` RPC, CLI
 `rbgp events watch --from-event-id <N>`, and the
 `examples/event-bridge/` reference binary) survives daemon restart and
 exposes a monotonic `event_id` cursor. The legacy live surfaces above
-(`WatchEvents` / `WatchRoutes` / `List*Events`) keep their existing
+(`WatchEvents` / `List*Events`) keep their existing
 ring-backed behavior and are unaffected by this section.
 
 **Opt-in — default off as of v0.32.0.** The outbox is disabled by default
@@ -1168,7 +1167,7 @@ max_bytes = 256_000_000   # size retention to your collector's reconnect SLA
 
 - **Lean / high-scale (the default):** `[event_history].enabled = false`.
   Routing fast and lean; `SubscribeFromEvent` and gNMI `Subscribe ON_CHANGE`
-  return `FAILED_PRECONDITION`, but the live `WatchEvents` / `WatchRoutes` /
+  return `FAILED_PRECONDITION`, but the live `WatchEvents` /
   `List*Events` surfaces still provide real-time observability.
   **Security-signal caveat:** the structured `OTC_ROUTE_BLOCKED` event (RFC 9234
   route-leak prevention — per-decision prefixes, AS_PATH, roles) is emitted
@@ -1393,7 +1392,7 @@ The RPCs that deserve the most attention are:
 | Class | Examples | Guardrail |
 |-------|----------|-----------|
 | Large sensitive reads | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ListEvpnRoutes`, `ListFlowSpecRoutes`, `GetMetrics` | Prefer pagination or narrow filters, set client deadlines, and alert on sustained `sensitive_read` volume |
-| Live streams | `WatchRoutes`, `WatchRouteEvents`, `EventService.WatchEvents` | Keep clients draining, reconnect after `stream_lagged`, and alert on subscriber count or lag spikes |
+| Live streams | `EventService.WatchEvents`, `EventService.SubscribeFromEvent` | Keep clients draining, reconnect after `stream_lagged`, and alert on subscriber count or lag spikes |
 | History queries | `ListRouteEvents`, `ListSessionEvents`, `ListPolicyEvents` | Histories are bounded and process-local; use explicit limits for dashboards |
 | Mutating calls | Neighbor, policy, peer-group, injection RPCs | Use listener `max_tier`, role enforcement, and audit alerts on `mutating` volume |
 | Operator-only calls | `Shutdown`, `TriggerMrtDump`, `SetGracefulShutdown`, selected policy/global changes | Restrict to operator principals/listeners and page on unexpected `operator_only` activity |
@@ -2088,10 +2087,9 @@ Shows sessions, prefix counts, message rates, RPKI VRP counts, and
 streaming route events in a terminal UI. The route-event subscription is
 opened only while the events panel is visible (`e`).
 The panel uses the lag-aware `WatchEvents` route stream, including exact missed
-counts and policy-filter source/target/reason/Add-Path context. With an older
-daemon that rejects `WatchEvents` as unimplemented, it uses legacy
-`WatchRoutes` and keeps a `DEGRADED` warning visible because that stream cannot
-report missed events. Other admission and stream errors do not downgrade.
+counts and policy-filter source/target/reason/Add-Path context. Admission and
+stream errors are shown as a visible status and retried; there is no fallback
+stream.
 Global identity is retried
 on each normal poll until the first successful fetch, then cached; the
 Prometheus metrics scrape runs on a separate 60-second cadence. Before either

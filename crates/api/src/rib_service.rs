@@ -19,7 +19,6 @@ use rustbgpd_rib::{
     RouteQueryFilter, RouteQueryKey, RouteQueryScope, RouteSourceIdentity, RtcRibRoute,
     VpnRibRoute, route_query_key,
 };
-use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
     Afi, AsPathSegment, EvpnRoute, LargeCommunity, PathAttribute, Prefix, bgpls::BgpLsNlriType,
 };
@@ -136,7 +135,6 @@ pub struct RibService {
     rib_tx: mpsc::Sender<RibUpdate>,
     blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
     fib_route_snapshot: FibRouteSnapshotFn,
-    metrics: BgpMetrics,
     /// Per-listener access mode; gates the mutating FIB-table RPCs as
     /// defense-in-depth behind the authz interceptor's `Mutating` tier.
     access_mode: crate::server::AccessMode,
@@ -156,7 +154,6 @@ impl RibService {
             rib_tx,
             blackhole_discard_snapshot: std::sync::Arc::new(Vec::new),
             fib_route_snapshot: std::sync::Arc::new(Vec::new),
-            metrics: BgpMetrics::new(),
             // Fail closed: callers opt into mutations via `with_fib_table_control`.
             access_mode: crate::server::AccessMode::ReadOnly,
             fib_table_control: None,
@@ -166,33 +163,15 @@ impl RibService {
     }
 
     /// Create a RIB service with live kernel route status snapshots.
-    #[allow(dead_code)]
     pub fn with_status_snapshots(
         rib_tx: mpsc::Sender<RibUpdate>,
         blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
         fib_route_snapshot: FibRouteSnapshotFn,
     ) -> Self {
-        Self::with_status_snapshots_and_metrics(
-            rib_tx,
-            blackhole_discard_snapshot,
-            fib_route_snapshot,
-            BgpMetrics::new(),
-        )
-    }
-
-    /// Create a RIB service with live kernel route status snapshots and
-    /// shared metrics.
-    pub fn with_status_snapshots_and_metrics(
-        rib_tx: mpsc::Sender<RibUpdate>,
-        blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
-        fib_route_snapshot: FibRouteSnapshotFn,
-        metrics: BgpMetrics,
-    ) -> Self {
         Self {
             rib_tx,
             blackhole_discard_snapshot,
             fib_route_snapshot,
-            metrics,
             access_mode: crate::server::AccessMode::ReadOnly,
             fib_table_control: None,
             #[cfg(feature = "bench-internals")]
@@ -2628,7 +2607,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::test_support::metrics_text as gather_text;
     use proto::rib_service_server::RibService as _;
 
     fn make_service() -> RibService {

@@ -377,7 +377,7 @@ transaction-backed config subset.
 # Stream route changes in real time over the default UDS listener
 grpcurl -plaintext -unix /var/lib/rustbgpd/grpc.sock \
   -import-path . -proto proto/rustbgpd.proto \
-  rustbgpd.v1.RibService/WatchRoutes
+  rustbgpd.v1.EventService/WatchEvents
 ```
 
 Config changes get the full Junos-style transactional quartet: `rbgp config

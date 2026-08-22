@@ -359,7 +359,7 @@ editing config files.
 ```
 SDN controller / orchestrator
     |
-    v  gRPC (AddPath, SetPolicy, WatchRoutes)
+    v  gRPC (AddPath, SetPolicy, WatchEvents)
 rustbgpd
     |
     ├──► eBGP to datacenter fabric (announce service IPs)
@@ -370,7 +370,6 @@ rustbgpd
 **Key capabilities:**
 - **Route injection** — announce/withdraw prefixes programmatically
 - **Policy CRUD** — create/modify/delete policies at runtime without restart
-- **WatchRoutes streaming** — receive real-time route change events
 - **WatchEvents unified stream** — one subscription covers route, session lifecycle, BGP NOTIFICATION metadata, policy-mutation audit, and FIB / BLACKHOLE dataplane status; `stream_lagged` signals tell the controller when a slow consumer fell behind
 - **Community manipulation** — set communities for traffic engineering
 - **AS_PATH prepend** — steer traffic across multiple upstreams
@@ -403,7 +402,7 @@ grpcurl -plaintext -d '{
 }' localhost:50051 rustbgpd.v1.PolicyService/SetGlobalExportChain
 
 # Stream route changes in real time for the controller
-grpcurl -plaintext -H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)" localhost:50051 rustbgpd.v1.RibService/WatchRoutes
+grpcurl -plaintext -H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)" -d '{"categories": ["EVENT_CATEGORY_ROUTE"]}' localhost:50051 rustbgpd.v1.EventService/WatchEvents
 ```
 
 ---
@@ -430,7 +429,7 @@ IX peer C  ──┘
 
 **Key capabilities:**
 - **ListReceivedRoutes / ListBestRoutes** — query Adj-RIB-In and Loc-RIB
-- **WatchRoutes** — stream route changes to a dashboard in real time
+- **WatchEvents** — stream route changes to a dashboard in real time
 - **MRT TABLE_DUMP_V2** — periodic snapshots for offline analysis (compatible
   with bgpdump, BGPKIT parser, and RouteViews/RIPE RIS tooling)
 - **BMP export** — stream to OpenBMP or pmacct for long-term archival
@@ -545,7 +544,7 @@ rbgp rib received 10.0.0.1
 rbgp rib --prefix 10.0.0.0/24 --explain
 
 # Stream all route changes (pipe to your analysis tool)
-grpcurl -plaintext -H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)" localhost:50051 rustbgpd.v1.RibService/WatchRoutes
+grpcurl -plaintext -H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)" -d '{"categories": ["EVENT_CATEGORY_ROUTE"]}' localhost:50051 rustbgpd.v1.EventService/WatchEvents
 ```
 
 ---

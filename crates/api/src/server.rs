@@ -1775,11 +1775,10 @@ async fn run_tcp_listener(
     let incoming = bounded_handshakes(incoming);
     let mut routes = tonic::service::Routes::builder();
     routes.add_service(RibServiceServer::with_interceptor(
-        RibService::with_status_snapshots_and_metrics(
+        RibService::with_status_snapshots(
             rib_query_tx.clone(),
             blackhole_discard_snapshot.clone(),
             fib_route_snapshot.clone(),
-            metrics.clone(),
         )
         .with_fib_table_control(access_mode, fib_table_control.clone()),
         interceptor.clone(),
@@ -2004,11 +2003,10 @@ async fn run_uds_listener(
     let interceptor = AuthInterceptor::new(credential_store, credential_index);
     let mut routes = tonic::service::Routes::builder();
     routes.add_service(RibServiceServer::with_interceptor(
-        RibService::with_status_snapshots_and_metrics(
+        RibService::with_status_snapshots(
             rib_query_tx.clone(),
             blackhole_discard_snapshot.clone(),
             fib_route_snapshot.clone(),
-            metrics.clone(),
         )
         .with_fib_table_control(access_mode, fib_table_control.clone()),
         interceptor.clone(),

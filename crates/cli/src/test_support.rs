@@ -46,7 +46,6 @@ pub(crate) struct MockState {
     pub(crate) watch_events_stream_error: Mutex<Option<(Code, String)>>,
     pub(crate) watch_events_response: Mutex<Vec<server_proto::BgpEvent>>,
     pub(crate) last_watch_events: Mutex<Option<server_proto::WatchEventsRequest>>,
-    pub(crate) watch_routes_calls: AtomicUsize,
     pub(crate) list_session_events_calls: AtomicUsize,
     pub(crate) list_policy_events_calls: AtomicUsize,
     pub(crate) config_diff_calls: AtomicUsize,
@@ -1636,11 +1635,6 @@ impl rustbgpd_api::proto::event_service_server::EventService for MockEventServic
 
 #[tonic::async_trait]
 impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
-    type WatchRoutesStream =
-        std::pin::Pin<Box<dyn Stream<Item = Result<server_proto::RouteEvent, Status>> + Send>>;
-    type WatchRouteEventsStream =
-        std::pin::Pin<Box<dyn Stream<Item = Result<server_proto::BgpEvent, Status>> + Send>>;
-
     async fn list_received_routes(
         &self,
         request: Request<server_proto::ListRoutesRequest>,
@@ -2046,21 +2040,6 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         Ok(Response::new(server_proto::ListRouteEventsResponse {
             events: vec![],
         }))
-    }
-
-    async fn watch_routes(
-        &self,
-        _request: Request<server_proto::WatchRoutesRequest>,
-    ) -> Result<Response<Self::WatchRoutesStream>, Status> {
-        self.state.watch_routes_calls.fetch_add(1, Ordering::SeqCst);
-        Err(Status::unimplemented("not used in CLI tests"))
-    }
-
-    async fn watch_route_events(
-        &self,
-        _request: Request<server_proto::WatchRoutesRequest>,
-    ) -> Result<Response<Self::WatchRouteEventsStream>, Status> {
-        Err(Status::unimplemented("not used in CLI tests"))
     }
 
     async fn list_flow_spec_routes(

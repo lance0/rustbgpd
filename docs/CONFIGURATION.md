@@ -3985,7 +3985,7 @@ benchmarking measured a material always-on cost (~62 MB RSS and roughly
 double the peak CPU at 2p/100k); a routing daemon should be lean by
 default. While disabled, `SubscribeFromEvent` and gNMI `Subscribe
 ON_CHANGE` return `FAILED_PRECONDITION`; the live `WatchEvents` /
-`WatchRoutes` / `List*Events` surfaces are unaffected. When enabled, the
+`List*Events` surfaces are unaffected. When enabled, the
 outbox is bounded by a hard `max_events` count cap plus a `max_bytes`
 retention trigger. SQLite reuses freed pages after DELETE and does not
 guarantee that the main database file immediately shrinks without a
@@ -4074,8 +4074,8 @@ for the alert + sizing playbook.
 When `enabled = false`, when EHM failed to start with
 `required = false`, or when EHM dropped into pass-through
 mode at runtime, `SubscribeFromEvent` returns
-`FAILED_PRECONDITION`. The legacy `WatchEvents`,
-`WatchRoutes`, and `List*Events` surfaces are byte-identical
+`FAILED_PRECONDITION`. The live `WatchEvents`
+and `List*Events` surfaces are byte-identical
 to pre-ADR-0072 behavior in all three cases — they're
 backed by the existing in-memory rings.
 

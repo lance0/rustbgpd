@@ -1,7 +1,7 @@
 # Containerlab topology: rustbgpd ↔ 10× FRR (Milestone 4 — Route Server Mode)
 #
 # Validates: dynamic peer management (AddNeighbor/DeleteNeighbor), per-peer
-# export policy, communities pass-through, WatchRoutes streaming, 10-peer
+# export policy, communities pass-through, route-event streaming, 10-peer
 # scale, enable/disable.
 #
 # rustbgpd (AS 65001) sits in the center. 10 FRR peers on separate /24 links:
