@@ -290,10 +290,10 @@ pub struct BfdRuntimeEvent {
 }
 
 #[cfg(target_os = "linux")]
-// `BfdRuntimeHandle` is the public return type of `spawn`; the name isn't
+// These are crate-internal daemon wiring types; their names are not all
 // referenced directly in this binary crate, hence the allow.
 #[allow(unused_imports)]
-pub use linux::{BfdRuntimeHandle, spawn};
+pub use linux::{BfdRuntimeHandle, PreparedRuntime, prepare_runtime, spawn_prepared};
 
 /// RFC 5880 §6.8.6 demultiplexing decision (pure, testable): pick the session a
 /// received packet belongs to. A non-zero Your Discriminator selects the session
@@ -416,6 +416,12 @@ mod linux {
         v6: Option<FamilySockets>,
     }
 
+    /// BFD sockets acquired during fail-fast startup and retained, inactive,
+    /// until the daemon reaches the existing BFD activation point.
+    pub struct PreparedRuntime {
+        sockets: RuntimeSockets,
+    }
+
     /// Open sockets for exactly the families that have configured sessions.
     /// A family that has sessions and cannot open its sockets fails startup
     /// with the family named; a family with zero sessions is skipped entirely.
@@ -442,32 +448,28 @@ mod linux {
         }))
     }
 
-    /// Spawn the BFD actor. Returns `None` when the initial desired set is
-    /// empty (no BFD-configured neighbors at startup) — BFD config is
-    /// restart-required, so the actor's existence is fixed at startup; the
-    /// `desired_rx` watch then drives enable/disable/strict among that set.
-    ///
-    /// Receive and transmit sockets are opened synchronously before the actor
-    /// task is spawned, for exactly the address families that have configured
-    /// sessions. A family that has sessions and cannot open its sockets
-    /// returns an error to daemon startup instead of letting BGP serve
-    /// without BFD coupling; a family with no sessions is never opened.
-    pub fn spawn(
+    /// Open the required family sockets without spawning the BFD actor.
+    pub fn prepare_runtime(config: &BfdRuntimeConfig) -> std::io::Result<Option<PreparedRuntime>> {
+        let sockets = prepare_runtime_sockets(
+            config.needs_ipv4(),
+            config.needs_ipv6(),
+            FamilySockets::open,
+        )?;
+        Ok(sockets.map(|sockets| PreparedRuntime { sockets }))
+    }
+
+    /// Activate an already prepared BFD runtime. Socket acquisition cannot
+    /// fail here; `None` means no BFD family was configured at startup.
+    pub fn spawn_prepared(
+        prepared: Option<PreparedRuntime>,
         desired_rx: watch::Receiver<BfdRuntimeConfig>,
         metrics: BgpMetrics,
         status_tx: watch::Sender<Vec<BfdStatus>>,
         event_tx: broadcast::Sender<BfdRuntimeEvent>,
         state_change_tx: BfdStateChangeSender,
         shutdown: CancellationToken,
-    ) -> std::io::Result<Option<BfdRuntimeHandle>> {
-        let (needs_v4, needs_v6) = {
-            let desired = desired_rx.borrow();
-            (desired.needs_ipv4(), desired.needs_ipv6())
-        };
-        let Some(sockets) = prepare_runtime_sockets(needs_v4, needs_v6, FamilySockets::open)?
-        else {
-            return Ok(None);
-        };
+    ) -> Option<BfdRuntimeHandle> {
+        let PreparedRuntime { sockets } = prepared?;
         let task_shutdown = shutdown.clone();
         let task = tokio::spawn(async move {
             run(
@@ -481,7 +483,7 @@ mod linux {
             )
             .await;
         });
-        Ok(Some(BfdRuntimeHandle { shutdown, task }))
+        Some(BfdRuntimeHandle { shutdown, task })
     }
 
     /// One running session plus its provenance.
@@ -1518,7 +1520,7 @@ mod linux {
     #[cfg(test)]
     mod flood {
         use super::super::state_change_channel;
-        use super::{BfdRuntimeConfig, BfdSessionParams, spawn};
+        use super::{BfdRuntimeConfig, BfdSessionParams, prepare_runtime, spawn_prepared};
         use prometheus::Registry;
         use rustbgpd_telemetry::BgpMetrics;
         use std::sync::Arc;
@@ -1558,13 +1560,15 @@ mod linux {
                     enabled: true,
                 }],
             };
+            let prepared = prepare_runtime(&config).expect("actor sockets open");
             let (status_tx, mut status_rx) = watch::channel(Vec::new());
             let (event_tx, _event_rx) = broadcast::channel(64);
             let (_desired_tx, desired_rx) = watch::channel(config);
             let (state_change_tx, _state_change_rx) = state_change_channel();
             let shutdown = CancellationToken::new();
             let metrics = BgpMetrics::with_registry(Registry::new());
-            let handle = spawn(
+            let handle = spawn_prepared(
+                prepared,
                 desired_rx,
                 metrics,
                 status_tx,
@@ -1572,7 +1576,6 @@ mod linux {
                 state_change_tx,
                 shutdown.clone(),
             )
-            .expect("actor sockets open")
             .expect("actor spawns with one session");
             // The actor is up once it has published its session status.
             assert!(
@@ -1942,7 +1945,9 @@ bfd = {{ profile = "p" }}
     // mirroring `fib_runtime`'s pattern.
     #[cfg(target_os = "linux")]
     mod netns {
-        use super::super::{BfdRuntimeConfig, BfdSessionParams, BfdStatus, spawn};
+        use super::super::{
+            BfdRuntimeConfig, BfdSessionParams, BfdStatus, prepare_runtime, spawn_prepared,
+        };
         use prometheus::Registry;
         use rustbgpd_bfd::{ControlPacket, Diagnostic, SessionState};
         use rustbgpd_telemetry::BgpMetrics;
@@ -2199,6 +2204,7 @@ bfd = {{ profile = "p" }}
                     enabled: true,
                 }],
             };
+            let prepared = prepare_runtime(&config).expect("actor sockets open");
             let registry = Registry::new();
             let metrics = BgpMetrics::with_registry(registry.clone());
             let (status_tx, status_rx) = watch::channel(Vec::new());
@@ -2206,7 +2212,8 @@ bfd = {{ profile = "p" }}
             let (_desired_tx, desired_rx) = watch::channel(config);
             let (state_change_tx, mut state_change_rx) = super::super::state_change_channel();
             let shutdown = CancellationToken::new();
-            let handle = spawn(
+            let handle = spawn_prepared(
+                prepared,
                 desired_rx,
                 metrics,
                 status_tx,
@@ -2214,7 +2221,6 @@ bfd = {{ profile = "p" }}
                 state_change_tx,
                 shutdown.clone(),
             )
-            .expect("actor sockets open")
             .expect("actor should start with one session");
 
             // The up gauge is seeded to 0 at session creation, before any

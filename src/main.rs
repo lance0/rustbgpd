@@ -3383,6 +3383,120 @@ async fn run<T>(
         process::exit(1);
     });
 
+    // Resolve every validated policy/EVPN startup derivation before the first
+    // teardown-owned actor starts. A second failure after config validation is
+    // a programming error, but remains daemon-fatal instead of dropping state.
+    let export_policy = config.export_chain().unwrap_or_else(|e| {
+        error!("invalid global export policy: {e}");
+        process::exit(1);
+    });
+    let evpn_instances = std::sync::Arc::new(config.resolve_evpn_instances().unwrap_or_else(|e| {
+        fatal_startup_error(
+            "EVPN instances failed to re-resolve after configuration validation",
+            e,
+        );
+    }));
+    let evpn_ip_vrfs = std::sync::Arc::new(config.resolve_evpn_ip_vrfs().unwrap_or_else(|e| {
+        fatal_startup_error(
+            "EVPN IP-VRFs failed to re-resolve after configuration validation",
+            e,
+        );
+    }));
+    let evpn_managed_netdevs =
+        std::sync::Arc::new(config.resolve_managed_netdevs().unwrap_or_else(|e| {
+            fatal_startup_error(
+                "managed EVPN netdevs failed to re-resolve after configuration validation",
+                e,
+            );
+        }));
+    let ethernet_segments = config.resolve_ethernet_segments().unwrap_or_else(|e| {
+        fatal_startup_error(
+            "Ethernet segments failed to re-resolve after configuration validation",
+            e,
+        );
+    });
+
+    // Acquire every later-activated data-plane listener/socket now. Retaining
+    // these resources reserves the operator's configured addresses, but no
+    // BFD actor, BGP accept loop, or metrics HTTP server runs before its
+    // existing activation barrier below.
+    let bfd_initial = bfd_runtime::BfdRuntimeConfig::from_config(&config);
+    let bfd_prepared = bfd_runtime::prepare_runtime(&bfd_initial).unwrap_or_else(|error| {
+        fatal_startup_error(
+            "failed to acquire sockets for configured BFD sessions",
+            error,
+        );
+    });
+    let listener_options =
+        ListenerSocketOptions {
+            tcp_ao_keys: peer_configs
+                .iter()
+                .filter_map(tcp_ao_listener_key_for_neighbor)
+                .chain(
+                    config
+                        .dynamic_neighbors
+                        .iter()
+                        .filter_map(tcp_ao_listener_key_for_dynamic_range),
+                )
+                .collect(),
+            md5_keys: peer_configs
+                .iter()
+                .filter_map(md5_listener_key_for_neighbor)
+                .chain(config.dynamic_neighbors.iter().filter_map(|range| {
+                    md5_listener_key_for_dynamic_range(range, &config.peer_groups)
+                }))
+                .collect(),
+            ttl_security: peer_configs
+                .iter()
+                .map(ttl_security_listener_policy_for_neighbor)
+                .chain(config.dynamic_neighbors.iter().filter_map(|range| {
+                    ttl_security_listener_policy_for_dynamic_range(range, &config.peer_groups)
+                }))
+                .collect(),
+        };
+    let (accept_tx, mut accept_rx) = mpsc::channel::<rustbgpd_transport::AcceptedConnection>(64);
+    let explicit_endpoints = config.explicit_listen_endpoints();
+    let (listen_addr_v4, listen_addr_v6) = config.listen_addrs();
+    let requested_endpoints = explicit_endpoints
+        .clone()
+        .unwrap_or_else(|| vec![listen_addr_v4, listen_addr_v6]);
+    let listener_result = if let Some(endpoints) = explicit_endpoints.as_ref() {
+        BgpListener::bind_strict_with_options(endpoints.clone(), accept_tx, listener_options).await
+    } else {
+        BgpListener::bind_dual_with_options(
+            listen_addr_v4,
+            listen_addr_v6,
+            accept_tx,
+            listener_options,
+        )
+        .await
+    };
+    let listener = match listener_result {
+        Ok(listener) => listener,
+        Err(e) => {
+            error!(
+                requested_endpoints = ?requested_endpoints,
+                error = %e,
+                "failed to bind BGP listener on either address family (legacy mode) or every explicitly configured endpoint (explicit mode); inbound BGP sessions cannot be accepted — exiting"
+            );
+            process::exit(1);
+        }
+    };
+    let tcp_ao_listener_handle = Some(listener.tcp_ao_rotation_handle());
+    let metrics_listener = if let Some(prometheus_addr) = config.prometheus_addr() {
+        Some(
+            metrics_server::MetricsListener::bind(prometheus_addr)
+                .await
+                .unwrap_or_else(|error| {
+                    fatal_startup_error(
+                        "failed to bind configured metrics/readiness listener",
+                        error,
+                    )
+                }),
+        )
+    } else {
+        None
+    };
     // ── ADR-0072: Durable event outbox (EventHistoryManager) ───────
     //
     // Spawned before any producer so the handle is available when
@@ -3427,11 +3541,10 @@ async fn run<T>(
         (None, None)
     };
 
-    // Build global export policy chain for RIB manager fallback
-    let export_policy = config.export_chain().unwrap_or_else(|e| {
-        error!("invalid global export policy: {e}");
-        process::exit(1);
-    });
+    // ── STARTUP TEARDOWN-OWNERSHIP BOUNDARY ───────────────────────
+    // EventHistoryManager above is the first actor that can require bounded
+    // shutdown. All remaining fatal startup arms are the configured-peer add
+    // transaction, which LAN-1210 intentionally leaves for the next tranche.
 
     // Spawn RIB manager. When EHM is enabled, install an EHM-backed
     // event sink so route + EVPN events flow into the durable
@@ -3729,7 +3842,6 @@ async fn run<T>(
     // ADR-0067 step 4 — BFD/BGP coupling channels. Created here so PeerManager
     // (the desired-set owner) can take the sender + state-change receiver; the
     // BFD actor takes the matching receiver + sender when it spawns below.
-    let bfd_initial = bfd_runtime::BfdRuntimeConfig::from_config(&config);
     let (bfd_desired_tx, bfd_desired_rx) = tokio::sync::watch::channel(bfd_initial.clone());
     let (bfd_state_change_tx, bfd_state_change_rx) = bfd_runtime::state_change_channel();
 
@@ -3848,40 +3960,6 @@ async fn run<T>(
         }
     }
 
-    // Resolve declared EVPN instances once at startup and hand the
-    // gRPC layer a shared `Arc`. The validation pass at config load
-    // already proved this resolution succeeds, so a second failure
-    // here would be a programming error rather than operator input,
-    // but we still surface it as a daemon-fatal diagnostic to avoid
-    // silently dropping instances if a future code path skips validation.
-    let evpn_instances = std::sync::Arc::new(config.resolve_evpn_instances().unwrap_or_else(|e| {
-        fatal_startup_error(
-            "EVPN instances failed to re-resolve after configuration validation",
-            e,
-        );
-    }));
-
-    // Gate 9 IP-VRFs (`[[evpn_ip_vrfs]]`). Same fatal-after-validate
-    // pattern as `evpn_instances`. Empty for any deployment without
-    // Gate 9 config; the dataplane short-circuits `probe_ip_vrfs` when
-    // empty so L2-only and RR-only deployments incur zero added cost.
-    let evpn_ip_vrfs = std::sync::Arc::new(config.resolve_evpn_ip_vrfs().unwrap_or_else(|e| {
-        fatal_startup_error(
-            "EVPN IP-VRFs failed to re-resolve after configuration validation",
-            e,
-        );
-    }));
-
-    // ADR-0091 managed EVPN netdev desired state. Empty by default;
-    // configured rows opt into class-scoped Linux link lifecycle.
-    let evpn_managed_netdevs =
-        std::sync::Arc::new(config.resolve_managed_netdevs().unwrap_or_else(|e| {
-            fatal_startup_error(
-                "managed EVPN netdevs failed to re-resolve after configuration validation",
-                e,
-            );
-        }));
-
     let (evpn_duplicate_mac_quarantine_tx, evpn_duplicate_mac_quarantine_rx) =
         tokio::sync::watch::channel(std::sync::Arc::new(std::collections::BTreeSet::<
             rustbgpd_evpn::DuplicateMacKey,
@@ -3922,17 +4000,6 @@ async fn run<T>(
     // and `local_mac_rx` is therefore `None`.
     let evpn_originator_shutdown = tokio_util::sync::CancellationToken::new();
     let evpn_originated_local_mac_counts = evpn_originator::OriginatedLocalMacCounts::default();
-    // Resolve `[[ethernet_segments]]` early so the originator can
-    // attach the right ESI to Type 2 routes for MACs learned on
-    // multi-homed VNIs (Gate 8b ESI-aware MAC origination). The
-    // same resolved table is consumed by `evpn_segment::spawn`
-    // below.
-    let ethernet_segments = config.resolve_ethernet_segments().unwrap_or_else(|e| {
-        fatal_startup_error(
-            "Ethernet segments failed to re-resolve after configuration validation",
-            e,
-        );
-    });
     let vni_to_esi = evpn_runtime_converger::evpn_vni_to_esi_map(&ethernet_segments);
     // ADR-0063 EVPN runtime coordinator. The public API validates full
     // candidates through this handle and commits only after daemon
@@ -4390,20 +4457,15 @@ async fn run<T>(
     // The desired-set receiver + state-change sender are the actor's ends of the
     // coupling channels created above (PeerManager owns the other ends).
     let bfd_runtime_shutdown = tokio_util::sync::CancellationToken::new();
-    let bfd_runtime_handle = bfd_runtime::spawn(
+    let bfd_runtime_handle = bfd_runtime::spawn_prepared(
+        bfd_prepared,
         bfd_desired_rx,
         metrics.clone(),
         bfd_status_tx,
         bfd_event_tx,
         bfd_state_change_tx,
         bfd_runtime_shutdown.clone(),
-    )
-    .unwrap_or_else(|error| {
-        fatal_startup_error(
-            "failed to start configured BFD runtime; refusing to serve BFD-configured peers",
-            error,
-        );
-    });
+    );
 
     // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
@@ -4805,84 +4867,6 @@ async fn run<T>(
         .await;
     });
 
-    // Spawn the BGP inbound TCP listener behind one accept loop. Legacy mode
-    // uses both wildcard families; explicit mode uses only configured exact
-    // endpoints. The complete configured-family auth inventory is handed to
-    // the transport layer, which installs each TCP-AO MKT, MD5 key, and GTSM
-    // selector on the socket matching its peer family. Outbound active-open sockets
-    // still install their per-neighbor key independently below.
-    let listener_options =
-        ListenerSocketOptions {
-            tcp_ao_keys: peer_configs
-                .iter()
-                .filter_map(tcp_ao_listener_key_for_neighbor)
-                .chain(
-                    config
-                        .dynamic_neighbors
-                        .iter()
-                        .filter_map(tcp_ao_listener_key_for_dynamic_range),
-                )
-                .collect(),
-            md5_keys: peer_configs
-                .iter()
-                .filter_map(md5_listener_key_for_neighbor)
-                .chain(config.dynamic_neighbors.iter().filter_map(|range| {
-                    md5_listener_key_for_dynamic_range(range, &config.peer_groups)
-                }))
-                .collect(),
-            ttl_security: peer_configs
-                .iter()
-                .map(ttl_security_listener_policy_for_neighbor)
-                .chain(config.dynamic_neighbors.iter().filter_map(|range| {
-                    ttl_security_listener_policy_for_dynamic_range(range, &config.peer_groups)
-                }))
-                .collect(),
-        };
-
-    let (accept_tx, mut accept_rx) = mpsc::channel::<rustbgpd_transport::AcceptedConnection>(64);
-    let explicit_endpoints = config.explicit_listen_endpoints();
-    let (listen_addr_v4, listen_addr_v6) = config.listen_addrs();
-    let requested_endpoints = explicit_endpoints
-        .clone()
-        .unwrap_or_else(|| vec![listen_addr_v4, listen_addr_v6]);
-    let listener_result = if let Some(endpoints) = explicit_endpoints.as_ref() {
-        BgpListener::bind_strict_with_options(endpoints.clone(), accept_tx, listener_options).await
-    } else {
-        BgpListener::bind_dual_with_options(
-            listen_addr_v4,
-            listen_addr_v6,
-            accept_tx,
-            listener_options,
-        )
-        .await
-    };
-    let listener = match listener_result {
-        Ok(listener) => listener,
-        Err(e) => {
-            // Legacy wildcard mode degrades a single failed family to a
-            // warning; explicit mode is atomic and any failed endpoint is
-            // fatal. `listen_port` is mandatory, the
-            // listener is never rebound without a restart, and
-            // outbound-only operation silently drops every passive peer,
-            // every dynamic-neighbor range, and every peer that wins the
-            // connect race. Staying up in that state offered no recovery
-            // the operator could reach, and `/readyz` — the only surface
-            // that reported it — exists only when `prometheus_addr` is
-            // configured. Exit 1 (the same code as an unexpected gRPC
-            // server exit) so supervisors with Restart=on-failure retry,
-            // which also clears a transient bind failure without an
-            // operator. On the down daemon `rbgp doctor` names the cause
-            // (port in use, missing CAP_NET_BIND_SERVICE).
-            error!(
-                requested_endpoints = ?requested_endpoints,
-                error = %e,
-                "failed to bind BGP listener on either address family (legacy mode) or every explicitly configured endpoint (explicit mode); inbound BGP sessions cannot be accepted — exiting"
-            );
-            process::exit(1);
-        }
-    };
-    let tcp_ao_listener_handle = Some(listener.tcp_ao_rotation_handle());
-
     // ADR-0113: install the configured outbound prefix maxima before the
     // first session can register, so a limited peer admits its initial feed
     // up to the cap instead of flooding and only then discovering it is over
@@ -5024,15 +5008,7 @@ async fn run<T>(
     // Prometheus text; `/livez` and `/readyz` provide minimal probe bodies.
     // Spawn after startup wiring and initial peer registration so readiness
     // cannot go green while initialization is still in progress.
-    if let Some(prometheus_addr) = config.prometheus_addr() {
-        let metrics_listener = metrics_server::MetricsListener::bind(prometheus_addr)
-            .await
-            .unwrap_or_else(|error| {
-                fatal_startup_error(
-                    "failed to bind configured metrics/readiness listener",
-                    error,
-                )
-            });
+    if let Some(metrics_listener) = metrics_listener {
         let metrics_clone = metrics.clone();
         let readiness_probe = rustbgpd_api::health_probe::CoreReadinessProbe::new(
             peer_mgr_tx.clone(),
@@ -5764,6 +5740,77 @@ mod tests {
         assert!(post_registration_barrier < listener_run_spawn);
         assert!(accept_forwarding_spawn < metrics_startup);
         assert!(listener_run_spawn < metrics_startup);
+    }
+
+    #[test]
+    fn startup_preflight_precedes_first_owned_actor_and_late_activation() {
+        let source = include_str!("main.rs");
+        let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
+        let ehm = production
+            .find("EventHistoryManager::start(ehm_config).await")
+            .expect("first teardown-owned actor must remain explicit");
+        let boundary = production
+            .find("// ── STARTUP TEARDOWN-OWNERSHIP BOUNDARY")
+            .expect("startup ownership boundary must remain explicit");
+
+        for preflight in [
+            "let export_policy = config.export_chain()",
+            "config.resolve_evpn_instances()",
+            "config.resolve_evpn_ip_vrfs()",
+            "config.resolve_managed_netdevs()",
+            "config.resolve_ethernet_segments()",
+            "bfd_runtime::prepare_runtime(&bfd_initial)",
+            "let listener_result =",
+            "metrics_server::MetricsListener::bind(prometheus_addr)",
+        ] {
+            let position = production
+                .find(preflight)
+                .unwrap_or_else(|| panic!("missing startup preflight: {preflight}"));
+            assert!(position < ehm, "{preflight} follows EventHistoryManager");
+        }
+        assert!(ehm < boundary);
+
+        for activation in [
+            "bfd_runtime::spawn_prepared(",
+            "let mut bgp_forwarder_handle = tokio::spawn(async move {",
+            "let mut bgp_listener_handle = tokio::spawn(async move {",
+            "metrics_server::serve_metrics(",
+        ] {
+            let position = production
+                .find(activation)
+                .unwrap_or_else(|| panic!("missing retained-resource activation: {activation}"));
+            assert!(
+                boundary < position,
+                "{activation} moved before ownership boundary"
+            );
+        }
+        let bfd_activation = production.find("bfd_runtime::spawn_prepared(").unwrap();
+        assert!(
+            production
+                .find("let fib_runtime_handle = fib_runtime::spawn(")
+                .unwrap()
+                < bfd_activation
+        );
+        assert!(bfd_activation < production.find("// Spawn gRPC API server").unwrap());
+        assert!(
+            production
+                .find("// Activate BGP ingress only after the complete configured-peer roster is")
+                .unwrap()
+                < production.find("metrics_server::serve_metrics(").unwrap()
+        );
+
+        let after_boundary = &production[boundary..];
+        assert_eq!(after_boundary.matches("fatal_startup_error(").count(), 3);
+        for message in [
+            "failed to send configured peer to peer manager during startup",
+            "failed to add configured peer during startup",
+            "peer manager dropped configured-peer reply during startup",
+        ] {
+            assert!(
+                after_boundary.contains(message),
+                "missing fatal arm: {message}"
+            );
+        }
     }
 
     #[test]
