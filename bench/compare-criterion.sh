@@ -272,7 +272,9 @@ if [[ -n $lan395_gate_out ]]; then
     exit 2
   }
   "$repo/bench/scale/compare-rrharness.sh" \
-    --validate-only --base "$base_sha" --head "$head_sha"
+    --validate-only --base "$base_sha" --head "$head_sha" \
+    --pin "$repo/bench/scale/rebaseline/lan395-run-pin.env" \
+    --diff-path crates/rib/src/manager/distribution/mod.rs
 fi
 
 if [[ "$use_taskset" -eq 1 ]] && ! command -v taskset >/dev/null 2>&1; then
@@ -611,6 +613,7 @@ import json
 import os
 import statistics
 import sys
+from collections import Counter
 from pathlib import Path
 
 criterion_dir = Path(os.environ["CRITERION_DIR"])
@@ -846,6 +849,24 @@ elif rows:
     lines.append("No confident regressions by the configured verdict rule.")
 else:
     lines.append("No benchmark rows were discovered.")
+if rows:
+    counts = Counter(row[-1] for row in rows)
+    lines.append(
+        "Row verdicts: " + ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
+    )
+    if attempts < verdict_min_attempts:
+        lines.append(
+            f"Noise: {attempts} attempt(s) is below the {verdict_min_attempts} needed to "
+            "measure the across-attempt spread, so no row here is a regression or an "
+            f"improvement — rerun with --attempts >= {verdict_min_attempts} (interleaved) "
+            "before reading any delta as a result."
+        )
+    else:
+        lines.append(
+            "Noise: read stddev and min..max before mean delta; a row whose min..max "
+            "brackets zero is noise whatever its mean, and a same-SHA control on this host "
+            "at this shape is the only honest floor."
+        )
 
 summary_file.write_text("\n".join(lines) + "\n")
 print(summary_file.read_text())

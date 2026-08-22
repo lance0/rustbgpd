@@ -310,6 +310,38 @@ rss_end_mib 210
             )
             self.assertFalse(comparison.exists())
 
+    def test_no_gates_keeps_rows_advisory_and_writes_rung_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_text:
+            directory = Path(directory_text)
+            matrix = directory / "matrix.csv"
+            raw_dir = directory / "raw"
+            comparison = directory / "comparison.csv"
+            summary = directory / "summary.csv"
+            # 1.14 misses the pinned 15% gate; without gates it is just a reading.
+            self.write_matrix(matrix, raw_dir, head_multiplier=1.14)
+            result = self.run_parser(
+                "compare",
+                "--input",
+                str(matrix),
+                "--raw-dir",
+                str(raw_dir),
+                "--output",
+                str(comparison),
+                "--summary",
+                str(summary),
+                "--no-gates",
+            )
+            with comparison.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual({row["verdict"] for row in rows}, {"advisory"})
+            with summary.open(newline="", encoding="utf-8") as handle:
+                rungs = list(csv.DictReader(handle))
+            self.assertEqual(len(rungs), 4)
+            self.assertEqual({row["reading"] for row in rungs}, {"head-faster"})
+            self.assertEqual({row["repetitions"] for row in rungs}, {"2"})
+            self.assertEqual({row["head_improvement_percent_mean"] for row in rungs}, {"14.000"})
+            self.assertIn("head-faster", result.stdout)
+
     def test_matrix_rejects_tampered_numeric_and_hash_evidence(self) -> None:
         mutations = {
             "nonfinite rate": ("rate", "NaN"),

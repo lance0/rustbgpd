@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Parse and gate the pinned LAN-395 rrharness comparison matrix."""
+"""Parse, summarise, and optionally gate the rrharness comparison matrix.
+
+`compare` applies the pinned throughput gates by default; `--no-gates` keeps
+every row advisory and `--summary PATH` adds a per-rung table.
+"""
 
 from __future__ import annotations
 
@@ -53,6 +57,21 @@ COMPARISON_FIELDS = (
     "required_improvement_percent",
     "maximum_regression_percent",
     "verdict",
+)
+
+SUMMARY_FIELDS = (
+    "mode",
+    "clients",
+    "candidates",
+    "prefixes",
+    "rate_name",
+    "repetitions",
+    "base_rate_mean",
+    "head_rate_mean",
+    "head_improvement_percent_mean",
+    "head_improvement_percent_min",
+    "head_improvement_percent_max",
+    "reading",
 )
 
 EXPECTED_SHAPES = {
@@ -397,14 +416,19 @@ def compare_command(args: argparse.Namespace) -> None:
         base_rate = finite_number(variants["base"]["rate"], "base rate")
         head_rate = finite_number(variants["head"]["rate"], "head rate")
         improvement = (head_rate / base_rate - 1.0) * 100.0
-        required_improvement = 15.0 if mode == "churn" or clients == 1000 else 0.0
-        maximum_regression = 5.0 if clients == 256 else 0.0
-        verdict = "pass"
-        if required_improvement and improvement + 1e-9 < required_improvement:
-            verdict = "fail-improvement"
-        elif maximum_regression and improvement < -maximum_regression - 1e-9:
-            verdict = "fail-regression"
-        failed |= verdict != "pass"
+        if args.no_gates:
+            required_improvement = 0.0
+            maximum_regression = 0.0
+            verdict = "advisory"
+        else:
+            required_improvement = 15.0 if mode == "churn" or clients == 1000 else 0.0
+            maximum_regression = 5.0 if clients == 256 else 0.0
+            verdict = "pass"
+            if required_improvement and improvement + 1e-9 < required_improvement:
+                verdict = "fail-improvement"
+            elif maximum_regression and improvement < -maximum_regression - 1e-9:
+                verdict = "fail-regression"
+            failed |= verdict != "pass"
         comparisons.append(
             {
                 "mode": mode,
@@ -426,8 +450,68 @@ def compare_command(args: argparse.Namespace) -> None:
         writer = csv.DictWriter(handle, fieldnames=COMPARISON_FIELDS, lineterminator="\n")
         writer.writeheader()
         writer.writerows(comparisons)
+    if args.summary is not None:
+        write_summary(args.summary, comparisons)
     if failed:
         raise ValueError("one or more LAN-395 throughput gates failed")
+
+
+def write_summary(path: Path, comparisons: list[dict[str, object]]) -> None:
+    """One row per rung across its repetitions, plus a printed table.
+
+    `reading` is deliberately coarse: with two counterbalanced repetitions a
+    rung is `noise` when the per-repetition deltas straddle zero and only
+    `head-faster` / `head-slower` when both agree in sign. It is a reading of
+    this run, not a pass/fail verdict.
+    """
+    rungs: dict[tuple[object, ...], list[dict[str, object]]] = {}
+    for row in comparisons:
+        key = (row["mode"], row["clients"], row["candidates"], row["prefixes"])
+        rungs.setdefault(key, []).append(row)
+    summary_rows: list[dict[str, object]] = []
+    for (mode, clients, candidates, prefixes), rows in rungs.items():
+        deltas = [float(row["head_improvement_percent"]) for row in rows]
+        base_mean = sum(float(row["base_rate"]) for row in rows) / len(rows)
+        head_mean = sum(float(row["head_rate"]) for row in rows) / len(rows)
+        if min(deltas) <= 0.0 <= max(deltas):
+            reading = "noise"
+        elif min(deltas) > 0.0:
+            reading = "head-faster"
+        else:
+            reading = "head-slower"
+        summary_rows.append(
+            {
+                "mode": mode,
+                "clients": clients,
+                "candidates": candidates,
+                "prefixes": prefixes,
+                "rate_name": "blocks_per_s" if mode == "flood" else "waves_per_s",
+                "repetitions": len(rows),
+                "base_rate_mean": f"{base_mean:.6f}",
+                "head_rate_mean": f"{head_mean:.6f}",
+                "head_improvement_percent_mean": f"{sum(deltas) / len(deltas):.3f}",
+                "head_improvement_percent_min": f"{min(deltas):.3f}",
+                "head_improvement_percent_max": f"{max(deltas):.3f}",
+                "reading": reading,
+            }
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=SUMMARY_FIELDS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(summary_rows)
+    print(
+        f"{'rung':<22} {'reps':>4} {'base rate':>14} {'head rate':>14} "
+        f"{'delta% mean':>11} {'min..max':>18}  reading"
+    )
+    for row in summary_rows:
+        rung = f"{row['mode']} {row['clients']}x{row['candidates']}x{row['prefixes']}"
+        print(
+            f"{rung:<22} {row['repetitions']:>4} {row['base_rate_mean']:>14} "
+            f"{row['head_rate_mean']:>14} {row['head_improvement_percent_mean']:>11} "
+            f"{row['head_improvement_percent_min']:>8}..{row['head_improvement_percent_max']:<8}  "
+            f"{row['reading']}"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -449,6 +533,12 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--input", type=Path, required=True)
     compare.add_argument("--raw-dir", type=Path, required=True)
     compare.add_argument("--output", type=Path, required=True)
+    compare.add_argument("--summary", type=Path, help="per-rung summary CSV (also printed)")
+    compare.add_argument(
+        "--no-gates",
+        action="store_true",
+        help="keep every row advisory instead of applying the pinned throughput gates",
+    )
     compare.set_defaults(run=compare_command)
     return parser
 

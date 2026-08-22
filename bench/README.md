@@ -207,6 +207,47 @@ bench/compare-criterion.sh \
   --bench codec
 ```
 
+### Local A/B recipe (the former CI workflow)
+
+There is no CI benchmark lane: the self-hosted runner behind the
+`Criterion Bench Compare` / `Criterion Bench Nightly` workflows was retired
+and both workflows were removed. They were thin wrappers around this script,
+so the recipe they ran is simply the local invocation below. Run it on a
+quiet host.
+
+```bash
+bench/compare-criterion.sh \
+  --base origin/main \
+  --head HEAD \
+  --package rustbgpd-rib \
+  --bench rib_ops \
+  --core 8 \
+  --attempts 4 \
+  --harness-ref HEAD \
+  --harness-path crates/rib/benches/rib_ops.rs \
+  --require-performance
+```
+
+- `--attempts` ≥ 3, always; even N cancels first-vs-second order bias. One
+  attempt cannot separate a delta from the host's own spread, and the summary
+  says so in its verdict block.
+- Pin one core (`--core`) and check the governor (`--require-performance`
+  where the host exposes cpufreq; on a virtualised host it cannot).
+- `--harness-ref HEAD --harness-path crates/rib/benches/rib_ops.rs` overlays
+  one benchmark source on both sides so a bench-file edit is not measured as a
+  code change; drop it when the benchmark itself is what changed.
+- Criterion takes `--save-baseline` *or* `--baseline`, never both in one run;
+  the script saves a baseline per ref and attempt and computes deltas from the
+  saved medians. `--bench NAME` is required per target because the libtest
+  lib target rejects `--save-baseline`.
+
+Honesty rule for anything pasted into a PR: interleaved samples, every run
+reported (no dropping the inconvenient attempt), no receipt claim from a busy
+host, and the noise floor is whatever a same-SHA control on *this* host at
+*this* shape measured — never a number carried over from another machine. The
+retired runner's ~11% spread was that runner's figure and transfers to
+nothing.
+
 ## VPN query campaign
 
 `run-vpn-query-campaign.sh` drives the retained VPN query benchmark
@@ -244,7 +285,9 @@ harnesses are excluded by name.
 
 See `bench/scale/README.md` for the manager-level `rrharness` and
 real-transport `rrtransport` scale drivers plus their scenario
-directories.
+directories. `bench/scale/compare-rrharness.sh` is the A/B runner for the
+rrharness flood/churn matrix between any two refs (usage and the pinned
+exact-export form are in `bench/scale/rrharness/README.md`).
 
 ## RIB memory compare
 

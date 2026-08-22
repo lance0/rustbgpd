@@ -96,18 +96,50 @@ rrharness churn 256  256  3000 20 churn-256-{a,b}
 rrharness churn 1000 1000 3000 20 churn-1000-{a,b}
 ```
 
-For the pinned LAN-395 A/B campaign, use
-[`../compare-rrharness.sh`](../compare-rrharness.sh). It builds the exact base
-and candidate in detached worktrees, launches prebuilt binaries directly on a
-performance-governor CPU, counterbalances two repetitions of every shape, and
-refuses to complete a receipt unless every log/profile parses and every
-throughput gate passes. The companion parser and its adversarial tests live in
+To A/B that matrix between two refs, use
+[`../compare-rrharness.sh`](../compare-rrharness.sh). It builds base and
+candidate in detached worktrees with `cargo build --release --locked` into
+separate target directories, launches the prebuilt binaries directly on a
+`taskset`-pinned performance-governor CPU behind the shared host lock, waits
+for an idle host before every cell, and runs two counterbalanced repetitions
+of every shape (repetition 1 base-first, repetition 2 head-first). The
+rrharness tree must be identical at both refs — the instrument cannot be part
+of the change.
+
+```text
+bench/scale/compare-rrharness.sh \
+  --base origin/main \
+  --head my-branch \
+  --core 5 \
+  --output-dir target/rrharness-compare/my-branch
+```
+
+Without `--pin` the receipt is advisory: `comparison.csv` has one row per
+cell, `summary.csv` one row per rung (mean/min/max head-vs-base throughput
+and a `noise` / `head-faster` / `head-slower` reading), and the manifest
+records `"gates": "none"`. Two repetitions are a reading, not a verdict;
+report every run.
+
+`--pin FILE --diff-path PATH` is the opt-in exact form used for the original
+grouped exact-export A/B: base and head must resolve to the pin's commits, the
+normalized `base..head` diff of every `--diff-path` must hash to the pin's
+digest, Cargo/toolchain inputs may not drift, and the pinned throughput gates
+are applied. That campaign reproduces as:
+
+```text
+bench/scale/compare-rrharness.sh \
+  --base b2ec55f21364978f26662b1ec35fd47ddcfce9a6 \
+  --head ea579bea4ad6602dc719a1664441f04330c5ef64 \
+  --pin bench/scale/rebaseline/lan395-run-pin.env \
+  --diff-path crates/rib/src/manager/distribution/mod.rs \
+  --core 5 \
+  --output-dir target/rrharness-compare/reproduction
+```
+
+The companion parser and its adversarial tests live in
 [`../rebaseline/parse_rrharness.py`](../rebaseline/parse_rrharness.py) and
-[`../rebaseline/test_parse_rrharness.py`](../rebaseline/test_parse_rrharness.py).
-Retained runs must execute from the canonical driver in a clean pin commit;
-that commit may add only `lan395-run-pin.env` over the reviewed tooling parent.
-This binds the driver, parser, classifier, production refs, and normalized
-production diff before the shared host lock or any build begins.
+[`../rebaseline/test_parse_rrharness.py`](../rebaseline/test_parse_rrharness.py);
+`bench/tests/test-rrharness-driver.sh` covers the driver's refusals.
 
 A tiny smoke shape (`flood 4 100 2 /tmp/smoke`) runs in a couple of seconds and
 emits a folded profile.
