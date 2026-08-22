@@ -43,6 +43,7 @@ Flags (also settable via env):
 | `--listen` | `BIRDWATCHER_ADAPTER_LISTEN` | `127.0.0.1:8080` | REST listen address |
 | `--protocol-alias PROTOCOL=PEER_IP@TABLE` | `BIRDWATCHER_ADAPTER_PROTOCOL_ALIASES` (semicolon-delimited) | (unset) | Repeatable startup-only Bird's Eye protocol/table identity |
 | `--protocol-alias-file PATH` | `BIRDWATCHER_ADAPTER_PROTOCOL_ALIAS_FILE` | (unset) | File-backed aliases; mutually exclusive with `--protocol-alias` |
+| `--arouteserver-reject-communities-file PATH` | `BIRDWATCHER_ADAPTER_AROUTESERVER_REJECT_COMMUNITIES_FILE` | (unset) | Startup-only artifact emitted by `rs-config-render` for effective `tag_and_reject` peers |
 | `--max-routes` | `BIRDWATCHER_ADAPTER_MAX_ROUTES` | `1000` | Maximum RIB-derived route-array response size; must be non-zero |
 
 The command-line token path takes precedence over the environment variable.
@@ -252,6 +253,28 @@ The ids are append-only and term detail does not create new ids. Each filtered
 route also carries human-readable `reject_reason` / `reject_reason_detail`
 fields (plus `rpki_validation` / `aspa_validation`) as extra JSON keys —
 visible to curl users, ignored by parsers that don't know them.
+
+When the renderer artifact is configured, ordinary `/routes/filtered/{id}`
+responses for peers named in it use the site's ARouteServer namespaces: the
+adapter removes every received value in each configured dynamic namespace and
+every exact configured cause-map value, then adds generic cause `0`, a known
+cause when the structured daemon reason is unambiguous, and its configured map
+value. Unknown reasons remain generic; AS_SET paths and BLACKHOLE requests
+cannot receive the guarded late causes. Order is stable and duplicates are
+removed. The artifact is parsed once at
+startup; changing it requires an adapter restart. A malformed, oversized, or
+over-4096-peer artifact refuses startup without echoing its contents.
+Only long-AS-path (`1`) and next-hop (`5`) causes are unconditional. Black-list
+(`3`) and IRR origin/prefix (`9`/`12`) causes require a valid IPv4 prefix or an
+IPv6 prefix provably inside `2000::/3`; malformed or outside-range prefixes stay
+generic. Causes `2`, `6`, `7`, `8`, `10`, `13`, `14`, and `15` also stay generic
+because the retained rustbgpd reason cannot prove ARouteServer's first cause.
+
+This presentation applies only to the ordinary filtered endpoint. The IXP
+Manager `{daemon ASN}:1101:*` wildcard keeps its separate scrub and mapping
+rules, so configuring ARouteServer data does not change that consumer surface.
+This remains an adapter presentation feature; no full runtime compatibility
+claim is made.
 
 The IXP Manager wildcard uses its separate `{daemon ASN}:1101:<id>` namespace.
 For the pinned v7.4 route-server templates the adapter maps the ten active IDs

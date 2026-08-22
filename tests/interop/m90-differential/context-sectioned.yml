@@ -204,9 +204,9 @@ cfg:
       type: inbound
     reject_cause:
       ext: null
-      lrg: null
+      lrg: 64496:65520:dyn_val
       peer_as: false
-      std: null
+      std: 65520:dyn_val
       type: internal
     reject_cause_map_1:
       ext: null
@@ -258,9 +258,9 @@ cfg:
       type: internal
     reject_cause_map_3:
       ext: null
-      lrg: null
+      lrg: 64496:65521:3
       peer_as: false
-      std: null
+      std: '64512:3'
       type: internal
     reject_cause_map_4:
       ext: null
@@ -384,7 +384,7 @@ cfg:
       policy: strict
     reject_invalid_as_in_as_path: false
     reject_policy:
-      policy: reject
+      policy: tag_and_reject
     roles:
       enabled: false
       strict_mode: false
@@ -501,7 +501,7 @@ clients:
         policy: strict
       reject_invalid_as_in_as_path: false
       reject_policy:
-        policy: reject
+        policy: tag_and_reject
       roles:
         enabled: false
         local_role: rs
@@ -562,7 +562,7 @@ clients:
         policy: strict
       reject_invalid_as_in_as_path: false
       reject_policy:
-        policy: reject
+        policy: tag_and_reject
       roles:
         enabled: false
         local_role: rs
@@ -623,7 +623,7 @@ clients:
         policy: strict
       reject_invalid_as_in_as_path: false
       reject_policy:
-        policy: reject
+        policy: tag_and_reject
       roles:
         enabled: false
         local_role: rs

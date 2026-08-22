@@ -316,11 +316,6 @@ fn refusal_matrix() {
             "reject_policy `tag`",
         ),
         (
-            &["cfg", "filtering", "reject_policy", "policy"],
-            Value::String("tag_and_reject".into()),
-            "reject_policy `tag_and_reject`",
-        ),
-        (
             &["rtt_based_functions_are_used"],
             Value::Bool(true),
             "RTT-based communities",
@@ -358,6 +353,109 @@ fn refusal_matrix() {
         assert!(
             items.iter().any(|i| i.contains(marker)),
             "no refusal containing {marker:?} for {path:?}: {items:?}"
+        );
+    }
+}
+
+fn tag_and_reject_value() -> serde_yaml::Value {
+    let mut value = healthy_value();
+    set_path(
+        &mut value,
+        &["cfg", "filtering", "reject_policy", "policy"],
+        "tag_and_reject".into(),
+    );
+    for (name, values) in [
+        (
+            "reject_cause",
+            "{std: '65520:dyn_val', lrg: '64496:65520:dyn_val'}",
+        ),
+        (
+            "reject_cause_map_3",
+            "{std: '64512:3', lrg: '64496:65521:3'}",
+        ),
+        ("reject_cause_map_12", "{lrg: '64496:65521:12'}"),
+    ] {
+        set_general_community(&mut value, name, serde_yaml::from_str(values).unwrap());
+    }
+    set_client(
+        &mut value,
+        0,
+        &["cfg", "filtering", "reject_policy"],
+        serde_yaml::from_str("{policy: reject}").unwrap(),
+    );
+    value
+}
+
+#[test]
+fn tag_and_reject_artifact_and_order_are_exact_and_mixed_policy_scoped() {
+    let baseline = render(&to_yaml(&healthy_value()), &rtr_options()).unwrap();
+    let rendered = render(&to_yaml(&tag_and_reject_value()), &rtr_options()).unwrap();
+    assert_eq!(
+        rendered.files["birdwatcher-reject-communities.json"],
+        "{\n  \"schema\": \"rustbgpd.arouteserver-reject-communities.v1\",\n  \"peers\": [\n    \"2001:db8:0:1::22\"\n  ],\n  \"std\": {\n    \"dynamic\": \"65520:dyn_val\",\n    \"cause_map\": {\n      \"3\": \"64512:3\"\n    }\n  },\n  \"lrg\": {\n    \"dynamic\": \"64496:65520:dyn_val\",\n    \"cause_map\": {\n      \"3\": \"64496:65521:3\",\n      \"12\": \"64496:65521:12\"\n    }\n  }\n}\n"
+    );
+    assert_eq!(
+        rendered.files["policy/client-as4242-1.rpol"],
+        baseline.files["policy/client-as4242-1.rpol"]
+    );
+    let policy = &rendered.files["policy/client-as197000-1.rpol"];
+    let positions = [
+        "reject-irrdb-origin-as-filtered",
+        "reject-irrdb-prefix-filtered",
+        "term accept-authorized",
+    ]
+    .map(|term| policy.find(term).unwrap());
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "{policy}"
+    );
+    assert!(!policy.contains("term rest"), "{policy}");
+
+    let mut reverse = tag_and_reject_value();
+    set_path(
+        &mut reverse,
+        &["cfg", "filtering", "reject_policy", "policy"],
+        "reject".into(),
+    );
+    set_client(
+        &mut reverse,
+        0,
+        &["cfg", "filtering", "reject_policy"],
+        serde_yaml::from_str("{policy: tag_and_reject}").unwrap(),
+    );
+    let reverse = render(&to_yaml(&reverse), &rtr_options()).unwrap();
+    let artifact: serde_json::Value =
+        serde_json::from_str(&reverse.files["birdwatcher-reject-communities.json"]).unwrap();
+    assert_eq!(artifact["peers"], serde_json::json!(["192.0.2.11"]));
+    assert!(reverse.files["policy/client-as4242-1.rpol"].contains("reject-irrdb-prefix-filtered"));
+    assert_eq!(
+        reverse.files["policy/client-as197000-1.rpol"],
+        baseline.files["policy/client-as197000-1.rpol"]
+    );
+}
+
+#[test]
+fn tag_and_reject_refuses_malformed_extended_announcer_and_invalid_causes() {
+    for (name, values, marker) in [
+        ("reject_cause", "{std: 'dyn_val:1'}", "dyn_val exactly last"),
+        (
+            "reject_cause",
+            "{lrg: '64496:65520:dyn_val', ext: 'RT:1:1'}",
+            ".ext is unsupported",
+        ),
+        (
+            "rejected_route_announced_by",
+            "{std: '65520:dyn_val'}",
+            "authoritative announcer data",
+        ),
+        ("reject_cause_map_16", "{std: '64512:16'}", "outside 1..15"),
+    ] {
+        let mut value = tag_and_reject_value();
+        set_general_community(&mut value, name, serde_yaml::from_str(values).unwrap());
+        let errors = refusals(render(&to_yaml(&value), &rtr_options()));
+        assert!(
+            errors.iter().any(|error| error.contains(marker)),
+            "{errors:?}"
         );
     }
 }

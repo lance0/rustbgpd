@@ -97,6 +97,9 @@ struct Args {
     )]
     protocol_alias_file: Option<PathBuf>,
 
+    #[arg(long, env = "BIRDWATCHER_ADAPTER_AROUTESERVER_REJECT_COMMUNITIES_FILE")]
+    arouteserver_reject_communities_file: Option<PathBuf>,
+
     /// Maximum routes returned by RIB-derived route-array endpoints.
     #[arg(
         long,
@@ -122,6 +125,125 @@ struct IdentityResolver {
 
 const MAX_ALIAS_FILE_BYTES: usize = 1024 * 1024;
 const MAX_ALIAS_FILE_ENTRIES: usize = 4096;
+const ARS_REJECT_SCHEMA: &str = "rustbgpd.arouteserver-reject-communities.v1";
+struct ArsRejectCommunities {
+    peers: Vec<IpAddr>,
+    std: Option<ArsCommunityFamily>,
+    lrg: Option<ArsCommunityFamily>,
+}
+
+struct ArsCommunityFamily {
+    dynamic: Option<Vec<u64>>,
+    cause_map: BTreeMap<u8, Vec<u64>>,
+}
+
+fn ars_artifact_error() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "invalid ARouteServer artifact")
+}
+
+fn load_arouteserver_reject_communities(path: &FsPath) -> io::Result<ArsRejectCommunities> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take((MAX_ALIAS_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_ALIAS_FILE_BYTES {
+        return Err(ars_artifact_error());
+    }
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| ars_artifact_error())?;
+    let root = ars_object(&value, &["schema", "peers", "std", "lrg"])?;
+    if root.get("schema").and_then(Value::as_str) != Some(ARS_REJECT_SCHEMA) {
+        return Err(ars_artifact_error());
+    }
+    let peer_values = root
+        .get("peers")
+        .and_then(Value::as_array)
+        .ok_or_else(ars_artifact_error)?;
+    if peer_values.len() > MAX_ALIAS_FILE_ENTRIES {
+        return Err(ars_artifact_error());
+    }
+    let peer_text = peer_values
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(ars_artifact_error)?;
+    if peer_text.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(ars_artifact_error());
+    }
+    let peers = peer_text
+        .into_iter()
+        .map(str::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ars_artifact_error())?;
+    let family = |name, count, max| {
+        root.get(name)
+            .map(|value| parse_ars_family(value, count, max))
+            .transpose()
+    };
+    let std = family("std", 2, u16::MAX as u64)?;
+    let lrg = family("lrg", 3, u32::MAX as u64)?;
+    if std.is_none() && lrg.is_none() {
+        return Err(ars_artifact_error());
+    }
+    Ok(ArsRejectCommunities { peers, std, lrg })
+}
+
+fn ars_object<'a>(
+    value: &'a Value,
+    allowed: &[&str],
+) -> io::Result<&'a serde_json::Map<String, Value>> {
+    let object = value.as_object().ok_or_else(ars_artifact_error)?;
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(ars_artifact_error());
+    }
+    Ok(object)
+}
+
+fn parse_ars_family(value: &Value, count: usize, max: u64) -> io::Result<ArsCommunityFamily> {
+    let family = ars_object(value, &["dynamic", "cause_map"])?;
+    let dynamic = family
+        .get("dynamic")
+        .map(|value| {
+            parse_ars_parts(
+                value
+                    .as_str()
+                    .and_then(|value| value.strip_suffix(":dyn_val"))
+                    .ok_or_else(ars_artifact_error)?,
+                count - 1,
+                max,
+            )
+        })
+        .transpose()?;
+    let mut cause_map = BTreeMap::new();
+    let causes = family
+        .get("cause_map")
+        .map(|value| value.as_object().ok_or_else(ars_artifact_error))
+        .transpose()?;
+    for (code, value) in causes.into_iter().flatten() {
+        let code = code.parse::<u8>().map_err(|_| ars_artifact_error())?;
+        if !(1..=15).contains(&code) {
+            return Err(ars_artifact_error());
+        }
+        cause_map.insert(
+            code,
+            parse_ars_parts(value.as_str().ok_or_else(ars_artifact_error)?, count, max)?,
+        );
+    }
+    if dynamic.is_none() && cause_map.is_empty() {
+        return Err(ars_artifact_error());
+    }
+    Ok(ArsCommunityFamily { dynamic, cause_map })
+}
+
+fn parse_ars_parts(text: &str, count: usize, max: u64) -> io::Result<Vec<u64>> {
+    let parts = text
+        .split(':')
+        .map(|part| part.parse::<u64>().ok().filter(|value| *value <= max))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(ars_artifact_error)?;
+    (parts.len() == count)
+        .then_some(parts)
+        .ok_or_else(ars_artifact_error)
+}
 
 fn load_alias_file(path: &FsPath) -> io::Result<IdentityResolver> {
     let mut bytes = Vec::new();
@@ -424,6 +546,7 @@ struct AppState {
     identities: Arc<IdentityResolver>,
     identity_store: Arc<ResolverStore>,
     max_routes: u64,
+    arouteserver_reject_communities: Option<Arc<ArsRejectCommunities>>,
 }
 
 impl Clone for AppState {
@@ -433,6 +556,7 @@ impl Clone for AppState {
             identities: self.identity_store.snapshot(),
             identity_store: Arc::clone(&self.identity_store),
             max_routes: self.max_routes,
+            arouteserver_reject_communities: self.arouteserver_reject_communities.clone(),
         }
     }
 }
@@ -471,6 +595,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         identities: identity_store.snapshot(),
         identity_store,
         max_routes: args.max_routes,
+        arouteserver_reject_communities: args
+            .arouteserver_reject_communities_file
+            .as_deref()
+            .map(load_arouteserver_reject_communities)
+            .transpose()?
+            .map(Arc::new),
     };
 
     let app = Router::new()
@@ -1336,6 +1466,7 @@ async fn routes_filtered(
         &resp,
         peer_addr,
         &state.identities,
+        state.arouteserver_reject_communities.as_deref(),
     )))
 }
 
@@ -1424,7 +1555,9 @@ fn filtered_routes_body(
     resp: &proto::ListRejectedRoutesResponse,
     peer: IpAddr,
     identities: &IdentityResolver,
+    arouteserver: Option<&ArsRejectCommunities>,
 ) -> Value {
+    let arouteserver = arouteserver.filter(|config| config.peers.contains(&peer));
     if !resp.retention_enabled {
         info!(
             peer = %peer,
@@ -1435,7 +1568,7 @@ fn filtered_routes_body(
     let routes: Vec<Value> = if resp.retention_enabled {
         resp.routes
             .iter()
-            .map(|r| rejected_route_to_birdwatcher(r, peer, identities))
+            .map(|r| rejected_route_to_birdwatcher(r, peer, identities, arouteserver))
             .collect()
     } else {
         Vec::new()
@@ -1488,6 +1621,7 @@ fn rejected_route_to_birdwatcher(
     route: &proto::RejectedRoute,
     peer: IpAddr,
     identities: &IdentityResolver,
+    arouteserver: Option<&ArsRejectCommunities>,
 ) -> Value {
     render_rejected_route(
         route,
@@ -1495,6 +1629,7 @@ fn rejected_route_to_birdwatcher(
         identities,
         reject_reason_community(&route.reason),
         None,
+        arouteserver,
     )
 }
 
@@ -1514,7 +1649,63 @@ fn ixp_manager_rejected_route_to_birdwatcher(
             ixp_manager_reject_reason_id(route),
         ],
         Some([daemon_asn, IXP_MANAGER_REJECT_FUNCTION]),
+        None,
     )
+}
+
+fn arouteserver_reject_cause(route: &proto::RejectedRoute) -> Option<u8> {
+    let detail = route.reason_detail.as_str();
+    let late_cause = || {
+        !route.as_path.contains('{')
+            && !route.communities.contains(&0xffff_029a)
+            && match route.prefix.parse::<IpAddr>() {
+                Ok(IpAddr::V4(_)) => route.prefix_length <= 32,
+                Ok(IpAddr::V6(address)) => {
+                    (3..=128).contains(&route.prefix_length)
+                        && address.segments()[0] & 0xe000 == 0x2000
+                }
+                Err(_) => false,
+            }
+    };
+    match (route.reason.as_str(), detail) {
+        ("policy_reject", "rs-hygiene:reject-long-as-path") => Some(1),
+        ("next_hop_ownership", _) => Some(5),
+        ("policy_reject", "rs-hygiene:reject-black-list-prefix") if late_cause() => Some(3),
+        ("policy_reject", detail)
+            if late_cause() && detail.ends_with(":reject-irrdb-origin-as-filtered") =>
+        {
+            Some(9)
+        }
+        ("policy_reject", detail)
+            if late_cause() && detail.ends_with(":reject-irrdb-prefix-filtered") =>
+        {
+            Some(12)
+        }
+        _ => None,
+    }
+}
+
+fn apply_ars_family(values: &mut Vec<Vec<u64>>, family: &ArsCommunityFamily, cause: Option<u8>) {
+    values.retain(|value| {
+        family
+            .dynamic
+            .as_ref()
+            .is_none_or(|prefix| !value.starts_with(prefix))
+            && !family.cause_map.values().any(|mapped| value == mapped)
+    });
+    if let Some(prefix) = &family.dynamic {
+        for suffix in [Some(0), cause.map(u64::from)].into_iter().flatten() {
+            values.push(prefix.iter().copied().chain([suffix]).collect());
+        }
+    }
+    if let Some(value) = cause.and_then(|cause| family.cause_map.get(&cause)) {
+        values.push(value.clone());
+    }
+}
+
+fn stable_dedupe<T: Clone + Eq + std::hash::Hash>(values: &mut Vec<T>) {
+    let mut seen = HashSet::new();
+    values.retain(|value| seen.insert(value.clone()));
 }
 
 fn ixp_manager_reject_reason_id(route: &proto::RejectedRoute) -> u64 {
@@ -1566,11 +1757,12 @@ fn render_rejected_route(
     identities: &IdentityResolver,
     reason_community: [u64; 3],
     reserved_namespace: Option<[u64; 2]>,
+    arouteserver: Option<&ArsRejectCommunities>,
 ) -> Value {
-    let communities: Vec<Vec<u32>> = route
+    let mut communities: Vec<Vec<u64>> = route
         .communities
         .iter()
-        .map(|c| vec![(*c >> 16) & 0xffff, *c & 0xffff])
+        .map(|c| vec![u64::from((*c >> 16) & 0xffff), u64::from(*c & 0xffff)])
         .collect();
 
     // Wire large communities the route carried, then the synthesized reason
@@ -1588,7 +1780,19 @@ fn render_rejected_route(
             .then_some(parts)
         })
         .collect();
-    large_communities.push(reason_community.to_vec());
+    if let Some(config) = arouteserver {
+        let cause = arouteserver_reject_cause(route);
+        if let Some(family) = &config.std {
+            apply_ars_family(&mut communities, family, cause);
+        }
+        if let Some(family) = &config.lrg {
+            apply_ars_family(&mut large_communities, family, cause);
+        }
+        stable_dedupe(&mut communities);
+        stable_dedupe(&mut large_communities);
+    } else {
+        large_communities.push(reason_community.to_vec());
+    }
 
     // The retained AS_PATH is a lossless display string ("65001 {65002
     // 65003}"); birdwatcher wants an ASN array, so flatten it (AS_SET
@@ -2174,6 +2378,7 @@ mod tests {
             identities: store.snapshot(),
             identity_store: store,
             max_routes: 1,
+            arouteserver_reject_communities: None,
         };
         let mut neighbor = proto::NeighborState {
             config: Some(proto::NeighborConfig {
@@ -2365,7 +2570,7 @@ mod tests {
             ..Default::default()
         };
         let peer: IpAddr = "192.0.2.1".parse().unwrap();
-        let json = rejected_route_to_birdwatcher(&route, peer, &IdentityResolver::default());
+        let json = rejected_route_to_birdwatcher(&route, peer, &IdentityResolver::default(), None);
 
         assert_eq!(json["network"], "10.66.0.0/24");
         assert_eq!(json["gateway"], "192.0.2.99");
@@ -2391,6 +2596,142 @@ mod tests {
         );
     }
 
+    fn ars_config(peer: IpAddr) -> ArsRejectCommunities {
+        let family = |dynamic, cause| ArsCommunityFamily {
+            dynamic: Some(dynamic),
+            cause_map: [(3, cause)].into(),
+        };
+        ArsRejectCommunities {
+            peers: [peer].into(),
+            std: Some(family(vec![65520], vec![64512, 3])),
+            lrg: Some(family(vec![64496, 65520], vec![64496, 65521, 3])),
+        }
+    }
+
+    #[test]
+    fn arouteserver_translation_is_scoped_scrubbed_deduped_and_conservative() {
+        let peer = "192.0.2.1".parse().unwrap();
+        let config = ars_config(peer);
+        let render = |route: &proto::RejectedRoute, peer| {
+            let configured = Some(&config).filter(|config| config.peers.contains(&peer));
+            rejected_route_to_birdwatcher(route, peer, &IdentityResolver::default(), configured)
+        };
+        let cause = |prefix: &str, length, reason: &str, detail: &str| {
+            arouteserver_reject_cause(&proto::RejectedRoute {
+                prefix: prefix.into(),
+                prefix_length: length,
+                reason: reason.into(),
+                reason_detail: detail.into(),
+                ..Default::default()
+            })
+        };
+        for (reason, detail, expected) in [
+            ("policy_reject", "rs-hygiene:reject-long-as-path", 1),
+            ("next_hop_ownership", "foreign_next_hop", 5),
+        ] {
+            assert_eq!(cause("fc00::", 7, reason, detail), Some(expected));
+        }
+        for (detail, expected) in [
+            ("rs-hygiene:reject-black-list-prefix", 3),
+            ("client:x:reject-irrdb-origin-as-filtered", 9),
+            ("client:x:reject-irrdb-prefix-filtered", 12),
+        ] {
+            let actual = cause("2001:db8::", 32, "policy_reject", detail);
+            assert_eq!(actual, Some(expected));
+            for (prefix, length) in [
+                ("fc00::", 7),
+                ("2000::", 2),
+                ("2001:db8::", 129),
+                ("192.0.2.0", 33),
+                ("malformed", 24),
+            ] {
+                assert_eq!(cause(prefix, length, "policy_reject", detail), None);
+            }
+        }
+        for (reason, detail) in [
+            ("policy_reject", "rs-hygiene:reject-bogon-prefix"),
+            ("treat_as_withdraw", "aspa_first_as_mismatch"),
+            ("policy_reject", "rs-hygiene:reject-invalid-asn"),
+            ("policy_reject", "rs-hygiene:reject-transit-free-in-path"),
+            ("policy_reject", "rs-hygiene:reject-never-via-rs"),
+            ("policy_reject", "reject-special-purpose:reject-non-global"),
+            ("policy_reject", "rs-hygiene:reject-v4-len-outside-window"),
+            ("policy_reject", "client:x:reject-rpki-invalid"),
+        ] {
+            assert_eq!(cause("192.0.2.0", 24, reason, detail), None);
+        }
+        let mut route = proto::RejectedRoute {
+            prefix: "192.0.2.0".into(),
+            prefix_length: 24,
+            reason: "policy_reject".into(),
+            reason_detail: "rs-hygiene:reject-black-list-prefix".into(),
+            communities: vec![
+                (65520 << 16) | 99,
+                (64512 << 16) | 3,
+                (65000 << 16) | 7,
+                (65000 << 16) | 7,
+            ],
+            large_communities: vec![
+                "64496:65520:99".into(),
+                "64496:65521:3".into(),
+                "65000:7:1".into(),
+                "65000:7:1".into(),
+            ],
+            ..Default::default()
+        };
+        route.as_path = "{64500}".into();
+        assert_eq!(arouteserver_reject_cause(&route), None);
+        route.as_path.clear();
+        route.communities.push(0xffff_029a);
+        assert_eq!(arouteserver_reject_cause(&route), None);
+        route.communities.pop();
+        let translated = render(&route, peer);
+        assert_eq!(
+            translated["bgp"]["communities"].to_string(),
+            "[[65000,7],[65520,0],[65520,3],[64512,3]]"
+        );
+        assert_eq!(
+            translated["bgp"]["large_communities"].to_string(),
+            "[[65000,7,1],[64496,65520,0],[64496,65520,3],[64496,65521,3]]"
+        );
+        route.reason_detail = "unknown".into();
+        route.large_communities.clear();
+        let large = |peer| render(&route, peer)["bgp"]["large_communities"].to_string();
+        let other = "192.0.2.2".parse().unwrap();
+        assert_eq!(large(peer), "[[64496,65520,0]]");
+        assert_eq!(large(other), "[[64496,65520,1]]");
+    }
+
+    #[test]
+    fn arouteserver_artifact_parser_is_strict_and_bounded() {
+        let path = std::env::temp_dir().join(format!("ars-{}.json", std::process::id()));
+        let write = |bytes| std::fs::write(&path, bytes).unwrap();
+        let valid = r#"{"schema":"rustbgpd.arouteserver-reject-communities.v1","peers":["192.0.2.1"],"std":{"dynamic":"65520:dyn_val","cause_map":{"3":"64512:3"}},"lrg":{"dynamic":"64496:65520:dyn_val"}}"#;
+        for invalid in [
+            valid.replace("\"schema\"", "\"unknown\":1,\"schema\""),
+            valid.replace("\"3\"", "\"0\""),
+            valid.replace("\"3\"", "\"16\""),
+            valid.replace("65520:dyn_val", "dyn_val:65520"),
+            valid.replace(
+                "\"dynamic\":\"65520:dyn_val\"",
+                "\"dynamic\":\"65520:dyn_val\",\"ext\":\"RT:1:1\"",
+            ),
+            valid.replace("\"192.0.2.1\"", "\"192.0.2.2\",\"192.0.2.1\""),
+        ] {
+            write(invalid.into_bytes());
+            assert!(load_arouteserver_reject_communities(&path).is_err());
+        }
+        write(vec![b' '; MAX_ALIAS_FILE_BYTES + 1]);
+        assert!(load_arouteserver_reject_communities(&path).is_err());
+        let peers = (0..=MAX_ALIAS_FILE_ENTRIES)
+            .map(|index| format!(r#""2001:db8::{index:x}""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        write(format!(r#"{{"schema":"{ARS_REJECT_SCHEMA}","peers":[{peers}],"std":{{"dynamic":"65520:dyn_val"}}}}"#).into_bytes());
+        assert!(load_arouteserver_reject_communities(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
     /// Sparse retention entries (pre-policy safety gates keep only what
     /// was decodable) render with empty sentinels, and the reason
     /// community is still present.
@@ -2403,7 +2744,7 @@ mod tests {
             ..Default::default()
         };
         let peer: IpAddr = "2001:db8::1".parse().unwrap();
-        let json = rejected_route_to_birdwatcher(&route, peer, &IdentityResolver::default());
+        let json = rejected_route_to_birdwatcher(&route, peer, &IdentityResolver::default(), None);
         assert_eq!(json["network"], "2001:db8:bad::/48");
         assert_eq!(json["from_protocol"], "bgp_2001_db8__1");
         assert_eq!(json["age"], "");
@@ -2549,7 +2890,7 @@ mod tests {
                 },
                 evictions_since_reset: Some(0),
             };
-            let body = filtered_routes_body(&resp, peer, &IdentityResolver::default());
+            let body = filtered_routes_body(&resp, peer, &IdentityResolver::default(), None);
             assert!(body["api"].is_object(), "{body}");
             assert_eq!(body["api"]["max_routes"], 1024, "{body}");
             assert_eq!(body["routes"], serde_json::json!([]), "{body}");
@@ -2839,6 +3180,7 @@ mod tests {
             identities: store.snapshot(),
             identity_store: Arc::clone(&store),
             max_routes: 1,
+            arouteserver_reject_communities: None,
         };
         let request_a = state.clone();
         assert_eq!(store.replace(parse("old")).unwrap(), (1, false));

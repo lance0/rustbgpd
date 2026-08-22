@@ -914,6 +914,7 @@ struct ResolvedClient<'a> {
     blackhole: Option<ResolvedBlackhole>,
     pref_len: Option<(u8, u8)>,
     reject_rpki_invalid: bool,
+    tag_and_reject: bool,
 }
 #[derive(Clone)]
 struct ResolvedBlackhole {
@@ -993,6 +994,9 @@ fn render_inner(
             format!("policy/client-{}.rpol", rc.slug),
             render_client_rpol(rc, &found_fingerprint),
         );
+    }
+    if let Some(artifact) = render_reject_communities(&ctx, &resolved)? {
+        files.insert("birdwatcher-reject-communities.json".to_owned(), artifact);
     }
     files.insert(
         "config.toml".to_owned(),
@@ -1666,14 +1670,145 @@ fn check_next_hop_policy(policy: &str, scope: &str, refusals: &mut Vec<String>) 
 
 fn check_reject_policy(policy: &str, scope: &str, refusals: &mut Vec<String>) {
     match policy {
-        "reject" => {}
-        "tag" | "tag_and_reject" => refusals.push(format!(
-            "{scope}: reject_policy `{policy}` needs reject-reason community wiring for \
-             the looking-glass surface; only `reject` is rendered (the daemon retains \
-             rejected routes with reasons natively — see the route-server cookbook)"
+        "reject" | "tag_and_reject" => {}
+        "tag" => refusals.push(format!(
+            "{scope}: reject_policy `tag` accepts invalid routes into BIRD's master table; \
+             native rejected-route retention cannot reproduce that behavior"
         )),
         other => refusals.push(format!("{scope}: unknown reject_policy `{other}`")),
     }
+}
+
+#[derive(Serialize)]
+struct RejectCommunityArtifact<'a> {
+    schema: &'static str,
+    peers: Vec<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    std: Option<RejectCommunityFamily<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lrg: Option<RejectCommunityFamily<'a>>,
+}
+
+#[derive(Serialize)]
+struct RejectCommunityFamily<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dynamic: Option<&'a str>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    cause_map: BTreeMap<u8, &'a str>,
+}
+
+fn render_reject_communities(
+    ctx: &Context,
+    clients: &[ResolvedClient<'_>],
+) -> Result<Option<String>, RenderError> {
+    let peers = clients
+        .iter()
+        .filter(|client| client.tag_and_reject)
+        .map(|client| client.client.ip.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if peers.is_empty() {
+        return Ok(None);
+    }
+    let reject = ctx.cfg.communities.get("reject_cause");
+    let mut refusals = Vec::new();
+    if reject.is_none_or(|values| values.std.is_none() && values.lrg.is_none()) {
+        refusals.push("tag_and_reject requires communities.reject_cause std or lrg".to_owned());
+    }
+    if reject.and_then(|values| values.ext.as_ref()).is_some() {
+        refusals.push("communities.reject_cause.ext is unsupported".to_owned());
+    }
+    for (value, parts, max) in [
+        (reject.and_then(|v| v.std.as_deref()), 2, u16::MAX as u64),
+        (reject.and_then(|v| v.lrg.as_deref()), 3, u32::MAX as u64),
+    ] {
+        if value.is_some_and(|value| !valid_reject_community(value, parts, max, true)) {
+            refusals.push("communities.reject_cause must place dyn_val exactly last".to_owned());
+        }
+    }
+    if ctx
+        .cfg
+        .communities
+        .get("rejected_route_announced_by")
+        .is_some_and(community_configured)
+    {
+        refusals.push(
+            "communities.rejected_route_announced_by requires authoritative announcer data"
+                .to_owned(),
+        );
+    }
+    for (name, values) in ctx
+        .cfg
+        .communities
+        .iter()
+        .filter(|(name, _)| name.starts_with("reject_cause_map_"))
+    {
+        if name[17..]
+            .parse::<u8>()
+            .ok()
+            .is_none_or(|code| !(1..=15).contains(&code))
+        {
+            refusals.push(format!("communities.{name} has a cause outside 1..15"));
+        }
+        if values.ext.is_some() {
+            refusals.push(format!("communities.{name}.ext is unsupported"));
+        }
+        for (value, parts, max) in [
+            (values.std.as_deref(), 2, u16::MAX as u64),
+            (values.lrg.as_deref(), 3, u32::MAX as u64),
+        ] {
+            if value.is_some_and(|value| !valid_reject_community(value, parts, max, false)) {
+                refusals.push(format!("communities.{name} is malformed"));
+            }
+        }
+    }
+    if !refusals.is_empty() {
+        return Err(RenderError::Refused(refusals));
+    }
+    let reject = reject.expect("validated reject_cause");
+    let cause_map = |select: fn(&CommunityValues) -> Option<&str>| {
+        ctx.cfg
+            .communities
+            .iter()
+            .filter_map(|(name, values)| {
+                Some((
+                    name.strip_prefix("reject_cause_map_")?.parse().ok()?,
+                    select(values)?,
+                ))
+            })
+            .collect::<BTreeMap<u8, &str>>()
+    };
+    let std_map = cause_map(|values| values.std.as_deref());
+    let lrg_map = cause_map(|values| values.lrg.as_deref());
+    let artifact = RejectCommunityArtifact {
+        schema: "rustbgpd.arouteserver-reject-communities.v1",
+        peers,
+        std: (reject.std.is_some() || !std_map.is_empty()).then_some(RejectCommunityFamily {
+            dynamic: reject.std.as_deref(),
+            cause_map: std_map,
+        }),
+        lrg: (reject.lrg.is_some() || !lrg_map.is_empty()).then_some(RejectCommunityFamily {
+            dynamic: reject.lrg.as_deref(),
+            cause_map: lrg_map,
+        }),
+    };
+    serde_json::to_string_pretty(&artifact)
+        .map(|mut json| {
+            json.push('\n');
+            Some(json)
+        })
+        .map_err(|error| RenderError::Parse(error.to_string()))
+}
+
+fn valid_reject_community(value: &str, parts: usize, max: u64, dynamic: bool) -> bool {
+    let mut fields = value.split(':').collect::<Vec<_>>();
+    if fields.len() != parts || (dynamic && fields.pop() != Some("dyn_val")) {
+        return false;
+    }
+    fields
+        .iter()
+        .all(|field| field.parse::<u64>().is_ok_and(|value| value <= max))
 }
 
 #[derive(Clone, Copy)]
@@ -1772,6 +1907,12 @@ fn resolve_clients<'a>(
     for client in &ctx.clients {
         let slug = client.id.to_lowercase().replace('_', "-");
         let filtering = &client.cfg.filtering;
+        let tag_and_reject = filtering
+            .reject_policy
+            .as_ref()
+            .unwrap_or(&ctx.cfg.filtering.reject_policy)
+            .policy
+            == "tag_and_reject";
         let enforce_origin = ctx.cfg.filtering.irrdb.enforce_origin_in_as_set;
         let enforce_prefix = ctx.cfg.filtering.irrdb.enforce_prefix_in_as_set;
 
@@ -1894,6 +2035,7 @@ fn resolve_clients<'a>(
             },
             reject_rpki_invalid: ctx.cfg.filtering.rpki_bgp_origin_validation.enabled
                 && ctx.cfg.filtering.rpki_bgp_origin_validation.reject_invalid,
+            tag_and_reject,
         });
     }
 
@@ -2624,18 +2766,35 @@ fn render_client_rpol(rc: &ResolvedClient<'_>, fingerprint: &str) -> String {
         }
     }
 
-    let _ = write!(
-        out,
-        "\npolicy client-{slug} {{\n\
-         {blackhole_terms}\
-         \x20   term accept-authorized {{\n\
-         \x20       if {} {{ accept }}\n\
-         \x20   }}\n\
-         \x20   # Fail-closed: anything the IRR data does not authorize is rejected.\n\
-         \x20   term rest {{ reject }}\n\
-         }}\n",
-        conjuncts.join(" && ")
-    );
+    if rc.tag_and_reject {
+        let _ = write!(out, "\npolicy client-{slug} {{\n{blackhole_terms}");
+        if rc.enforce_origin {
+            let _ = writeln!(
+                out,
+                "    term reject-irrdb-origin-as-filtered {{ if !(route.origin-as in client-{slug}-origins) {{ reject }} }}"
+            );
+        }
+        if rc.enforce_prefix {
+            let _ = writeln!(
+                out,
+                "    term reject-irrdb-prefix-filtered {{ if !(route.prefix in client-{slug}-prefixes) {{ reject }} }}"
+            );
+        }
+        out.push_str("    term accept-authorized { accept }\n}\n");
+    } else {
+        let _ = write!(
+            out,
+            "\npolicy client-{slug} {{\n\
+             {blackhole_terms}\
+             \x20   term accept-authorized {{\n\
+             \x20       if {} {{ accept }}\n\
+             \x20   }}\n\
+             \x20   # Fail-closed: anything the IRR data does not authorize is rejected.\n\
+             \x20   term rest {{ reject }}\n\
+             }}\n",
+            conjuncts.join(" && ")
+        );
+    }
 
     // In-language tests derived from the client's own IRR data.
     if let (true, Some(first_origin)) = (rc.enforce_origin, rc.origins.first()) {

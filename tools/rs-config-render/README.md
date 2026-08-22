@@ -316,9 +316,7 @@ has no RTT source; permanent), configured
 cannot reproduce its tagging and inbound anti-spoof scrubbing), `next_hop.policy` other
 than `strict`
 (`same-as` needs the deferred fleet-inventory mode), `reject_policy`
-`tag`/`tag_and_reject` (reject-reason community wiring is a tracked
-follow-up; the daemon retains rejected routes with reasons natively —
-see the route-server cookbook's filtered-route view), `prepend_rs_as`,
+`tag` (it accepts invalid routes into the master table), `prepend_rs_as`,
 `perform_graceful_shutdown`, `max_prefix.action` `block`/`warning`,
 and an effective `max_prefix.count_rejected_routes: true` while a positive
 shutdown or restart limit is active (ARouteServer 1.23.2 defaults this option to true,
@@ -330,6 +328,15 @@ enforcement knobs. `shutdown` emits the positive family ceilings;
 `restart` additionally requires a positive `restart_after` in minutes, checked
 while converting to `u32` seconds. An absent action or zero family limits emit
 neither ceilings nor a restart timer.
+
+An effective `reject_policy: tag_and_reject` instead emits ordered origin- and
+prefix-reject terms plus `birdwatcher-reject-communities.json`. The startup
+artifact contains only effective tag-and-reject peer addresses and configured
+standard/large dynamic and cause-map values; absent families stay absent. The
+adapter validates it strictly, refuses files over 1 MiB or 4096 unique peers,
+and never silently downgrades an invalid artifact. Extended communities and
+`rejected_route_announced_by` remain refused because the retained route lacks
+authoritative data to reproduce them.
 
 The renderer also refuses effective nonzero multihop and RFC 8950 on an
 IPv6 session. Blackhole policies support `propagate-unchanged` and
