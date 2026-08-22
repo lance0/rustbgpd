@@ -288,6 +288,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are done, closing the window in which an activation or lifecycle run could
   write a fence between the fence check and the removals; a held host lock now
   refuses as busy (exit 2, nothing removed).
+- The `rs-config-render` exit-code table (README, `docs/deployment.md`, and the
+  `Exit` enum docs) no longer claims that exit 5 always leaves `current` on the
+  candidate: a `recover rollback --apply` that does not settle exits 5 with
+  `current` re-pointed at the rollback target, as the runbook already stated.
 - The IXP Manager / Bird's Eye populated oracle fixtures now mask BIRD's
   timing-dependent `route_changes` counters (shape still compared), so the
   pinned-contract job no longer fails on announcer arrival order.
