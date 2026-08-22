@@ -12,13 +12,19 @@ $ixp = getenv('IXP_MANAGER_ROOT');
 require $ixp . '/vendor/autoload.php';
 $app = require $ixp . '/bootstrap/app.php';
 require_once $ixp . '/version.php';
-$app->make(Kernel::class)->bootstrap();
-// The console bootstrap renders uncaught exceptions to stdout and exits 0;
-// the gate must go red instead.
-set_exception_handler(static function (Throwable $exception): never {
+// IXP Manager's console bootstrap installs an exception handler that renders
+// to stdout and exits 0; the gate must go red instead, both for failures inside
+// bootstrap() and for everything after it.
+$die = static function (Throwable $exception): never {
     fwrite(STDERR, $exception . "\n");
     exit(1);
-});
+};
+try {
+    $app->make(Kernel::class)->bootstrap();
+} catch (Throwable $exception) {
+    $die($exception);
+}
+set_exception_handler($die);
 
 $manifest = json_decode(
     file_get_contents(__DIR__ . '/contract.json'),
