@@ -378,6 +378,39 @@ mod tests {
         assert!(msg.path_attributes.is_empty());
         assert!(msg.nlri.is_empty());
     }
+    /// The fuzz seed carrying `ATOMIC_AGGREGATE` + `AGGREGATOR` decodes
+    /// cleanly on the revised path with both attributes typed and no
+    /// malformed record.
+    #[test]
+    fn fuzz_seed_atomic_aggregate_with_aggregator_decodes_clean() {
+        let body: &[u8] =
+            include_bytes!("../fuzz/seeds/decode_update/atomic_aggregate_with_aggregator");
+        let mut buf = Bytes::copy_from_slice(body);
+        let msg = UpdateMessage::decode(&mut buf, body.len()).unwrap();
+        let parsed = msg.parse_revised(true, false, false, &[]).unwrap();
+        assert!(parsed.malformed.is_empty(), "{:?}", parsed.malformed);
+        assert!(
+            parsed
+                .update
+                .attributes
+                .contains(&PathAttribute::AtomicAggregate)
+        );
+        assert!(
+            parsed
+                .update
+                .attributes
+                .contains(&PathAttribute::Aggregator(crate::attribute::Aggregator {
+                    asn: 65001,
+                    router_id: std::net::Ipv4Addr::new(192, 0, 2, 1),
+                    partial: false,
+                }))
+        );
+        assert_eq!(parsed.update.announced.len(), 1);
+        assert_eq!(
+            parsed.update.announced[0].prefix,
+            crate::Ipv4Prefix::new(std::net::Ipv4Addr::new(20, 1, 0, 0), 16)
+        );
+    }
     #[test]
     fn decode_with_withdrawn_routes() {
         // withdrawn_len=3, withdrawn=[0x18, 0x0A, 0x00] (10.0.0.0/24), attrs_len=0

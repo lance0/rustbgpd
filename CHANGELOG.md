@@ -215,6 +215,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Routes carrying `ATOMIC_AGGREGATE` were treat-as-withdrawn: the zero-length
+  well-known attribute was decoded as an unrecognized well-known attribute
+  and rejected with UPDATE error subcode 2. It is now a first-class
+  `PathAttribute::AtomicAggregate` that validates, survives Adj-RIB-In →
+  Loc-RIB → Adj-RIB-Out, and is re-emitted on export, BMP, and MRT. A
+  non-zero length stays attribute-discard (RFC 7606 §7.6). (LAN-1235)
+
 - The `AS4_PATH`, `COMMUNITIES`, `EXTENDED_COMMUNITIES`, `CLUSTER_LIST`,
   `LARGE_COMMUNITIES`, BGP-LS next-hop, and VPN next-hop decoders return typed
   `DecodeError`s on every malformed-length and unknown-segment-type branch

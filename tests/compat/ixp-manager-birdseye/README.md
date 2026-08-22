@@ -109,8 +109,8 @@ accept-all policy) peer with two pinned ExaBGP announcers
 (`oracle-announcer-as64496.conf`, `oracle-announcer-as64497.conf`) over one
 harness network with both address families. The announcements are
 deterministic: a multi-hop AS path, MED, a received LOCAL_PREF, standard and
-large communities, an AGGREGATOR, and a more-specific inside a covering
-prefix. `oracle-consumer.php` drives the pinned IXP Manager `BirdsEye`
+large communities, an aggregate carrying ATOMIC_AGGREGATE and AGGREGATOR, and
+a more-specific inside a covering prefix. `oracle-consumer.php` drives the pinned IXP Manager `BirdsEye`
 consumer through all eleven in-scope endpoints (24 journeys, including a
 covering-only prefix, a host address, host-bit input, and a foreign
 large-community wildcard) against each leg, and `verify_capture.py
@@ -290,14 +290,11 @@ predicted eight more that the diff did not show, listed after the table.
    receive timestamp), `from_protocol`. The sentinel values in
    `fixtures/birdseye-contract.json` come from `fake-birdc`'s BIRD 1 line
    format, not from BIRD 2.
-6. `bgp.aggregator`: observed missing from the adapter
-   (`routes.*.bgp.aggregator` is `"203.0.113.1 AS64496"` upstream).
-   `bgp.atomic_aggr` is not exercised: rustbgpd currently treat-as-withdraws
-   any UPDATE carrying ATOMIC_AGGREGATE (the wire decoder keeps the attribute
-   opaque and the unrecognized-well-known check then rejects it), so the
-   topology announces AGGREGATOR without ATOMIC_AGGREGATE until that is fixed;
-   adding `atomic-aggregate;` back to the announcer config and refreshing the
-   fixtures closes the gap.
+6. `bgp.aggregator` and `bgp.atomic_aggr`: observed missing from the adapter
+   (`routes.*.bgp.aggregator` is `"203.0.113.1 AS64496"` upstream and
+   `routes.*.bgp.atomic_aggr` is `""`, the key BIRD prints with no value).
+   rustbgpd accepts and re-exports both attributes; the adapter's route view
+   does not render them. Still to decide: emit them or keep the entries.
 7. Protocol row: observed missing `preference`, `input_filter`,
    `output_filter`, `route_changes.*.*`, `routes.preferred`, `hold_timer_now`,
    `keepalive_now`; observed extra `routes.filtered` and

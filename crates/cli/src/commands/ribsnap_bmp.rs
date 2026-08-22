@@ -971,6 +971,13 @@ fn convert_attribute<'a>(
             attr_type::ONLY_TO_CUSTOMER,
             asn.to_be_bytes().to_vec(),
         )),
+        PathAttribute::AtomicAggregate => {
+            base.unknown_attrs.push((
+                attr_flags::TRANSITIVE,
+                attr_type::ATOMIC_AGGREGATE,
+                Vec::new(),
+            ));
+        }
         PathAttribute::Aggregator(aggregator) => {
             let flags = attr_flags::OPTIONAL
                 | attr_flags::TRANSITIVE

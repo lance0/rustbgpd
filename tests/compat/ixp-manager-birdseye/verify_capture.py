@@ -290,6 +290,12 @@ RUNTIME_DIVERGENCES = [
         "consumer_visible": True,
     },
     {
+        "endpoint": ROUTE_VIEWS, "path": "routes.*.bgp.atomic_aggr", "kind": "missing",
+        "birdseye": "\"\" (BIRD prints the key with no value)", "adapter": "absent",
+        "rationale": "the adapter does not emit ATOMIC_AGGREGATE; the pinned route view prints it when present",
+        "consumer_visible": True,
+    },
+    {
         "endpoint": ROUTE_VIEWS, "path": "routes.*.bgp.aggregator", "kind": "missing",
         "birdseye": "\"<address> AS<asn>\"", "adapter": "absent",
         "rationale": "the adapter does not emit AGGREGATOR; the pinned route view prints it when present",

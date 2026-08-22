@@ -495,6 +495,28 @@ mod tests {
         let err = validate_update_attributes(&attrs, false, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::UNRECOGNIZED_WELLKNOWN);
     }
+    /// RFC 4271 §5.1.6: a zero-length `ATOMIC_AGGREGATE` (type 6, flags
+    /// 0x40) is a well-known discretionary attribute, not an unrecognized
+    /// well-known one — the UPDATE must validate, not treat-as-withdraw
+    /// with subcode 2.
+    #[test]
+    fn zero_length_atomic_aggregate_is_not_unrecognized_wellknown() {
+        let mut buf = vec![
+            0x40, 0x01, 0x01, 0x00, // ORIGIN IGP
+            0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0xFD, 0xE9, // AS_PATH [65001]
+            0x40, 0x03, 0x04, 0x0A, 0x00, 0x00, 0x01, // NEXT_HOP 10.0.0.1
+        ];
+        buf.extend_from_slice(&[attr_flags::TRANSITIVE, attr_type::ATOMIC_AGGREGATE, 0x00]);
+        let decoded =
+            crate::attribute::decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert!(decoded.malformed.is_empty(), "{:?}", decoded.malformed);
+        assert_eq!(decoded.attributes.len(), 4);
+        let verdict = validate_update_attributes(&decoded.attributes, true, true, true);
+        assert!(
+            verdict.is_ok(),
+            "zero-length ATOMIC_AGGREGATE must not be treat-as-withdrawn: {verdict:?}"
+        );
+    }
     #[test]
     fn optional_unknown_attribute_ok() {
         let attrs = vec![PathAttribute::Unknown(RawAttribute {
