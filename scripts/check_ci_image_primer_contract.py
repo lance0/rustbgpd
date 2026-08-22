@@ -20,6 +20,28 @@ KERNEL = (
     "m36 m37 m37-ip m38 m39 m39b m48 m60 m61 m62 m40 m42 m50 m52 "
     "m58 m53 m51 m43 m47 m69 m70 m65 m71 m72 m66 m67 m68"
 ).split()
+NETNS_MAPPINGS = {
+    "link_carrier": ('TEST_BIN="netns_link_carrier"', 'FILTER=""'),
+    "ac_gate": ('TEST_BIN="netns_ac_gate"', 'FILTER=""'),
+    "nexthop_raw": ('TEST_BIN="netns_nexthop_raw"', 'FILTER=""'),
+    "foreign_state_l2": (
+        'TEST_BIN="netns_foreign_state"',
+        'FILTER="l2_foreign_takeover_row_survives_withdrawal_and_shutdown"',
+    ),
+    "foreign_state_nhid": (
+        'TEST_BIN="netns_foreign_state"',
+        'FILTER="nhid_reserved_range_foreign_object_not_clobbered_adopted_or_reaped"',
+    ),
+    "foreign_state_l3": (
+        'TEST_BIN="netns_foreign_state"',
+        'FILTER="l3_foreign_takeover_triple_survives_withdrawal_and_shutdown"',
+    ),
+    "l3_route_event": (
+        'TEST_BIN="netns_l3_install"',
+        'FILTER="linux_dataplane_route_event_wakes_within_2s"',
+    ),
+}
+NETNS_VRF_SELECTORS = {"foreign_state_l3", "l3_route_event"}
 WORKFLOWS = ("ci.yml", "audit.yml", "interop.yml", "kernel-dataplane.yml")
 GROUP = "group: ${{ github.workflow }}-${{ github.ref }}"
 PRIMER_GROUP = "group: rustbgpd-dev-image-${{ github.sha }}"
@@ -729,6 +751,35 @@ def check(root: Path) -> list[str]:
         errors.append("kernel-dataplane.yml:netns must remain independent")
     if "grpcurl_archive" in netns or GRPCURL_ACTION in netns:
         errors.append("kernel-dataplane.yml:netns must remain grpcurl-independent")
+    harness_path = root / "crates/evpn-linux/tests/docker/run-netns-tests.sh"
+    harness = harness_path.read_text() if harness_path.is_file() else ""
+    harness_missing = not harness
+    if harness_missing:
+        errors.append("netns harness is missing")
+    docker_args = re.search(r"(?ms)^DOCKER_ARGS=\(\n(.*?)^\)\n", harness)
+    netns_env = re.findall(r"(?m)^\s*-e\s+(EVPN_LINUX_NETNS=\S+)\s*$", docker_args.group(1)) if docker_args else []
+    if not harness_missing and (
+        harness.count("-e EVPN_LINUX_NETNS=1") != 1
+        or not docker_args
+        or netns_env != ["EVPN_LINUX_NETNS=1"]
+    ):
+        errors.append("netns harness must export EVPN_LINUX_NETNS=1 exactly once")
+    steps = re.split(r"(?m)(?=^      - name: )", netns)
+    for selector, mapping in NETNS_MAPPINGS.items():
+        case = re.search(rf"(?m)^    {re.escape(selector)}\)(.*?) ;;$", harness)
+        segments = [part.strip() for part in case.group(1).split(";")] if case else []
+        if not harness_missing and segments != list(mapping):
+            errors.append(f"netns harness mapping drifted for {selector}")
+        command = f"run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh {selector}"
+        matched = [step for step in steps if _has_line(step, f"        {command}")]
+        if len(matched) != 1:
+            errors.append(f"kernel-dataplane.yml:netns must invoke {selector} once")
+            continue
+        gated = _has_line(
+            matched[0], "        if: steps.vrf.outputs.vrf-available == 'true'"
+        )
+        if gated != (selector in NETNS_VRF_SELECTORS):
+            errors.append(f"kernel-dataplane.yml:netns {selector} VRF gate drifted")
 
     action = (
         root / ".github" / "actions" / "setup-dataplane-host" / "action.yml"
