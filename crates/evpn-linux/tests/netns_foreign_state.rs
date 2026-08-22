@@ -34,7 +34,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustbgpd_evpn::ip_vrf::{RemoteIpPrefixEntry, RemoteIpPrefixTable};
+use rustbgpd_evpn::ip_vrf::{IpVrfStatus, RemoteIpPrefixEntry, RemoteIpPrefixTable};
 use rustbgpd_evpn::{
     BumEnforcementTable, DataplaneIntent, EvpnInstance, EvpnInstanceId, EvpnInstanceTable, IpVrf,
     IpVrfId, IpVrfTable, Ipv4Prefix, MacAddress, RemoteMacEntry, RemoteMacSource, RemoteMacTable,
@@ -602,7 +602,7 @@ fn l3_intent(generation: u64, desired: bool) -> Arc<DataplaneIntent> {
 }
 
 fn setup_l3_topology(ns: &NetnsFixture) {
-    let mac = mac_str(l3_router_mac());
+    let mac = mac_str(l3_local_mac());
     ns.exec(
         "ip",
         &["addr", "add", &format!("{L3_LOCAL_IP}/32"), "dev", "lo"],
@@ -704,6 +704,15 @@ async fn l3_foreign_takeover_triple_survives_withdrawal_and_shutdown() {
     intent_tx.send(l3_intent(1, true)).unwrap();
     let report = wait_for_report_generation(&mut report_rx, 1).await;
     assert!(report.failed.is_empty(), "install: {:?}", report.failed);
+    assert!(
+        matches!(
+            report.ip_vrf_status.as_slice(),
+            [row] if row.vrf_id == IpVrfId::new(L3_VNI).unwrap()
+                && matches!(&row.status, IpVrfStatus::Ready { .. })
+        ),
+        "install: sole IP-VRF 101 must be Ready: {:?}",
+        report.ip_vrf_status
+    );
     let routes = shell("ip", &["route", "show", "table", &L3_TABLE_ID.to_string()]);
     assert!(routes.contains(L3_PREFIX), "owned route missing:\n{routes}");
 
@@ -767,6 +776,9 @@ async fn l3_foreign_takeover_triple_survives_withdrawal_and_shutdown() {
 
     // 5. Shutdown drain — the foreign triple must survive that too.
     shutdown.cancel();
-    let _ = tokio::time::timeout(Duration::from_secs(10), actor_join).await;
+    tokio::time::timeout(Duration::from_secs(10), actor_join)
+        .await
+        .expect("actor shutdown timed out")
+        .expect("actor panicked");
     assert_foreign_l3_triple_present("after shutdown drain");
 }
