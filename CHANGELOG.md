@@ -202,6 +202,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The RFC 9234 OTC egress fallback no longer clones routes it is about to
   block; only the permitted subset is copied into the rebuilt announce slice.
   Withdraw conversion and diagnostics are unchanged. (LAN-1167)
+- The RIB manager now caches the nearest GR, LLGR, and enhanced-route-refresh
+  deadline instead of rescanning each registry on every actor-loop iteration;
+  a rescan happens only after an entry whose deadline equals the cached
+  minimum is removed or overwritten (conservative on ties). Timer firing and
+  sweep behavior are unchanged. (LAN-1166)
 
 - `rustbgpd-rib`, `rustbgpd-policy`, and `rustbgpd-bmp` no longer declare an
   unused `thiserror` dependency; the ROADMAP entry that tracked the transitive

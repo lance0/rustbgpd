@@ -354,7 +354,7 @@ pub struct RibManager {
     /// Active inbound enhanced route refresh windows by peer/family.
     refresh_in_progress: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
     /// Per-peer/per-family deadlines for active enhanced route refresh windows.
-    refresh_deadlines: HashMap<(IpAddr, Afi, Safi), tokio::time::Instant>,
+    refresh_deadlines: graceful_restart::DeadlineMap<(IpAddr, Afi, Safi)>,
     /// Unicast routes still awaiting replacement during an inbound refresh.
     refresh_stale_routes: HashMap<IpAddr, HashSet<(Prefix, u32)>>,
     /// `FlowSpec` routes still awaiting replacement during an inbound refresh.
@@ -376,7 +376,7 @@ pub struct RibManager {
     /// Value is the set of (AFI, SAFI) families still awaiting End-of-RIB.
     gr_peers: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
     /// Deadlines for sweeping stale routes per GR peer.
-    gr_stale_deadlines: HashMap<IpAddr, tokio::time::Instant>,
+    gr_stale_deadlines: graceful_restart::DeadlineMap<IpAddr>,
     /// Configured stale-routes-time per GR peer (seconds), used to reset
     /// the timer on `PeerUp` during graceful restart.
     gr_stale_routes_time: HashMap<IpAddr, u64>,
@@ -389,7 +389,7 @@ pub struct RibManager {
     /// deliberately survives re-establishment while routes remain
     /// LLGR-stale: the ORIGINAL Long-Lived Stale Time bounds total
     /// retention, so a reconnect-then-down never restarts the timer.
-    llgr_stale_deadlines: HashMap<(IpAddr, Afi, Safi), tokio::time::Instant>,
+    llgr_stale_deadlines: graceful_restart::DeadlineMap<(IpAddr, Afi, Safi)>,
     /// Configured per-peer LLGR parameters, stored on `PeerGracefulRestart`.
     llgr_peer_config: HashMap<IpAddr, LlgrPeerConfig>,
     /// Maximum Add-Path paths per prefix per peer (0 = single-best only).
@@ -1141,7 +1141,7 @@ impl RibManager {
             pending_initial_registrations: VecDeque::new(),
             initial_dump_defer_min_routes: INITIAL_DUMP_DEFER_MIN_ROUTES,
             refresh_in_progress: HashMap::new(),
-            refresh_deadlines: HashMap::new(),
+            refresh_deadlines: graceful_restart::DeadlineMap::default(),
             refresh_stale_routes: HashMap::new(),
             refresh_stale_flowspec: HashMap::new(),
             refresh_stale_evpn: HashMap::new(),
@@ -1151,10 +1151,10 @@ impl RibManager {
             refresh_stale_rtc: HashMap::new(),
             refresh_stale_counts: HashMap::new(),
             gr_peers: HashMap::new(),
-            gr_stale_deadlines: HashMap::new(),
+            gr_stale_deadlines: graceful_restart::DeadlineMap::default(),
             gr_stale_routes_time: HashMap::new(),
             llgr_peers: HashMap::new(),
-            llgr_stale_deadlines: HashMap::new(),
+            llgr_stale_deadlines: graceful_restart::DeadlineMap::default(),
             llgr_peer_config: HashMap::new(),
             peer_add_path_send_max: HashMap::new(),
             peer_add_path_send_limits: HashMap::new(),
@@ -1399,7 +1399,7 @@ impl RibManager {
         self.refresh_stale_counts
             .retain(|(stale_peer, _, _), _| *stale_peer != peer);
         self.refresh_deadlines
-            .retain(|(stale_peer, _, _), _| *stale_peer != peer);
+            .retain(|(stale_peer, _, _)| *stale_peer != peer);
     }
 
     /// Advance one scope version without ever reusing a process-local value.
