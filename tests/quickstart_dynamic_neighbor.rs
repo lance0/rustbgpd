@@ -61,7 +61,15 @@ impl Daemon {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             match self.child.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(status)) => {
+                    assert_eq!(
+                        status.code(),
+                        Some(0),
+                        "rbgp shutdown must exit the daemon cleanly, got {status}\nstderr:\n{}",
+                        self.stderr()
+                    );
+                    return;
+                }
                 Ok(None) => thread::sleep(Duration::from_millis(50)),
                 Err(_) => break,
             }

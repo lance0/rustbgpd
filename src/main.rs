@@ -2376,8 +2376,8 @@ reported at least one warning. For
 neither family; explicit
 .B listen_addresses
 mode could not bind every configured endpoint; a configured metrics/readiness
-listener failed to bind; or the RIB manager, gRPC server, BGP listener task,
-or BGP accept-forwarding task exited unexpectedly),
+listener failed to bind; or the RIB manager, peer manager, gRPC server,
+BGP listener task, or BGP accept-forwarding task exited unexpectedly),
 so that a supervisor configured
 with
 .B Restart=on\-failure
@@ -2460,8 +2460,8 @@ fn main() -> ExitCode {
                   A running daemon exits 1 on a component failure that ends it\n     \
                   (legacy BGP mode bound neither family; an explicit listen_addresses\n     \
                   endpoint failed to bind; configured metrics/readiness bind failure;\n     \
-                  or unexpected RIB manager, gRPC server, BGP listener task,\n     \
-                  or BGP accept-forwarding task exit)\n  \
+                  or unexpected RIB manager, peer manager, gRPC server,\n     \
+                  BGP listener task, or BGP accept-forwarding task exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument)\n  \
                70 Internal error",
                     env!("CARGO_PKG_VERSION")
@@ -2980,6 +2980,21 @@ const TEST_BGP_INGRESS_EXIT_ENV: &str = "RUSTBGPD_TEST_BGP_INGRESS_EXIT";
 /// without echoing the raw environment value.
 const TEST_INITIAL_PEER_REJECTION_AT_ENV: &str = "RUSTBGPD_TEST_INITIAL_PEER_REJECTION_AT";
 
+/// Test-only fault injection; never set this in production. The only accepted
+/// value is `1`; all others are ignored with a sanitized warning.
+const TEST_PEER_MANAGER_PANIC_ENV: &str = "RUSTBGPD_TEST_PEER_MANAGER_PANIC";
+
+fn resolve_test_peer_manager_panic() -> bool {
+    match std::env::var(TEST_PEER_MANAGER_PANIC_ENV) {
+        Err(std::env::VarError::NotPresent) => false,
+        Ok(value) if value == "1" => true,
+        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
+            warn!("ignoring invalid {TEST_PEER_MANAGER_PANIC_ENV}; expected 1");
+            false
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TestBgpIngressExit {
     ListenerPanic,
@@ -3104,6 +3119,7 @@ async fn run<T>(
         .unwrap_or_else(|e| fatal_startup_error("failed to register SIGHUP handler", e));
     let test_bgp_ingress_exit = resolve_test_bgp_ingress_exit();
     let test_initial_peer_rejection_at = resolve_test_initial_peer_rejection_at();
+    let test_peer_manager_panic = resolve_test_peer_manager_panic();
 
     let mut config = accepted.config();
     // Snapshot the gRPC listener config as it was at process start.
@@ -3912,7 +3928,12 @@ async fn run<T>(
         drop(bfd_state_change_rx);
         peer_mgr
     };
-    let peer_mgr_handle = tokio::spawn(peer_mgr.run());
+    // Retained: supervised by the shutdown `select!` below and joined by the
+    // coordinated teardown after it.
+    let mut peer_mgr_handle = tokio::spawn(async move {
+        assert!(!test_peer_manager_panic, "injected peer manager task panic");
+        Box::pin(peer_mgr.run()).await;
+    });
 
     // Spawn config persister (converts gRPC config events → disk writes).
     //
@@ -5110,7 +5131,7 @@ async fn run<T>(
     }
 
     // Wait for shutdown signal, Shutdown RPC, SIGHUP, or an unexpected
-    // gRPC/RIB component exit.
+    // supervised-component exit (gRPC, RIB, BGP ingress, peer manager).
     //
     // SIGHUP runs `reload_config` on a dedicated tokio task so the
     // signal-arm dispatch returns immediately. Without this, the SIGHUP
@@ -5129,6 +5150,9 @@ async fn run<T>(
     let mut reload_in_flight: Option<
         tokio::task::JoinHandle<Result<SighupAuthority, SighupReloadError>>,
     > = None;
+    // Set only by the peer-manager supervision arm, which consumes the
+    // JoinHandle; the coordinated teardown below must not join it twice.
+    let mut peer_mgr_exited = false;
     loop {
         if initial_peer_boot_failed {
             break;
@@ -5170,6 +5194,16 @@ async fn run<T>(
             result = &mut bgp_forwarder_handle => {
                 error!(?result, "BGP accept-forwarding task exited unexpectedly");
                 info!("initiating shutdown due to BGP accept-forwarding task failure");
+                component_failed = true;
+                break;
+            }
+            // Intentional shutdown never reaches this arm: the signal and
+            // Shutdown RPC arms break first, and the peer manager only
+            // returns once the teardown below sends `PeerManagerCommand::Shutdown`.
+            result = &mut peer_mgr_handle => {
+                error!(?result, "peer manager task exited unexpectedly");
+                info!("initiating shutdown due to peer manager task failure");
+                peer_mgr_exited = true;
                 component_failed = true;
                 break;
             }
@@ -5625,8 +5659,9 @@ async fn run<T>(
 
     let _ = peer_mgr_tx.send(PeerManagerCommand::Shutdown).await;
 
-    // 2. Wait for PeerManager to finish draining all peers
-    if let Err(e) = peer_mgr_handle.await {
+    // 2. Wait for PeerManager to finish draining all peers (unless the
+    // supervision arm already observed its exit and consumed the handle).
+    if !peer_mgr_exited && let Err(e) = peer_mgr_handle.await {
         error!(error = %e, "peer manager task panicked");
     }
 

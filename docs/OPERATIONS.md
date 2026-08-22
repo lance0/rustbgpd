@@ -700,12 +700,14 @@ coordinated shutdown (NOTIFICATION to all peers, GR marker write). This is
 deliberate: losing the control plane means losing the ability to shut down
 cleanly later. See [ADR-0022](adr/0022-grpc-server-supervision.md).
 
-### RIB manager exits unexpectedly
+### RIB manager or peer manager exits unexpectedly
 
-The daemon likewise treats any RIB manager return or panic as fatal. It logs
-`RIB manager exited unexpectedly`, performs the ordinary coordinated shutdown
-(including peer NOTIFICATIONs), and exits 1 for `Restart=on-failure`. The
-daemon does not claim active supervision of the PeerManager itself.
+The daemon likewise treats any RIB manager or peer manager return or panic as
+fatal. It logs `RIB manager exited unexpectedly` or `peer manager task exited
+unexpectedly`, performs the ordinary coordinated shutdown (including peer
+NOTIFICATIONs where the actor that sends them is still alive), and exits 1 for
+`Restart=on-failure`. An intentional shutdown still stops the peer manager as
+part of the ordered teardown and exits 0.
 
 ### RPKI cache unreachable
 
