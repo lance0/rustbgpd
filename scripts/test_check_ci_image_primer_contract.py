@@ -101,6 +101,9 @@ class PrimerContractTests(unittest.TestCase):
                 target = root / fixture
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(source, target)
+            harness = Path("crates/evpn-linux/tests/docker/run-netns-tests.sh")
+            (root / harness).parent.mkdir(parents=True)
+            shutil.copy2(ROOT / harness, root / harness)
             installer = root / ".github" / "scripts" / "install-grpcurl.sh"
             installer.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / installer.relative_to(root), installer)
@@ -138,6 +141,9 @@ class PrimerContractTests(unittest.TestCase):
             ".github/actions/stage-gobgp-artifact",
         ):
             shutil.copytree(ROOT / fixture, root / fixture)
+        harness = Path("crates/evpn-linux/tests/docker/run-netns-tests.sh")
+        (root / harness).parent.mkdir(parents=True)
+        shutil.copy2(ROOT / harness, root / harness)
         shutil.copy2(ROOT / "Dockerfile", root / "Dockerfile")
         interop = root / "tests" / "interop"
         interop.mkdir(parents=True)
@@ -878,6 +884,35 @@ class PrimerContractTests(unittest.TestCase):
                     f"# {old}",
                     occurrence=2,
                 )
+
+    def test_kernel_netns_selector_contract_is_load_bearing(self):
+        workflow = ".github/workflows/kernel-dataplane.yml"
+        harness = "crates/evpn-linux/tests/docker/run-netns-tests.sh"
+        cases = (
+            (harness, "    -e EVPN_LINUX_NETNS=1", "    -e RUST_BACKTRACE=1"),
+            (harness, "    -e EVPN_LINUX_NETNS=1", ")\n-e EVPN_LINUX_NETNS=1\nDOCKER_ARGS+=("),
+            (harness, "    -e EVPN_LINUX_NETNS=1\n    -e RUST_BACKTRACE=1", "    -e EVPN_LINUX_NETNS=1\n    -e EVPN_LINUX_NETNS=0\n    -e RUST_BACKTRACE=1"),
+            (workflow, "run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh link_carrier", "run: true"),
+            (workflow, "        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh link_carrier", "        # run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh link_carrier"),
+            (harness, 'ac_gate)            TEST_BIN="netns_ac_gate"', 'ac_gate)            TEST_BIN="netns_link_carrier"'),
+            (harness, 'ac_gate)            TEST_BIN="netns_ac_gate"; FILTER=""', 'ac_gate)            TEST_BIN="netns_ac_gate"; FILTER=""; TEST_BIN="netns_link_carrier"'),
+            (harness, 'ac_gate)            TEST_BIN="netns_ac_gate"; FILTER=""', 'ac_gate)            false; TEST_BIN="netns_ac_gate"; FILTER=""'),
+            (harness, 'nexthop_raw)        TEST_BIN="netns_nexthop_raw"', 'nexthop_raw)        TEST_BIN="netns_ac_gate"'),
+            (harness, "l2_foreign_takeover_row_survives_withdrawal_and_shutdown", "wrong_l2_filter"),
+            (workflow, "run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_nhid", "run: true"),
+            (workflow, "        if: steps.vrf.outputs.vrf-available == 'true'\n        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l3", "        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l3"),
+            (workflow, "        if: steps.vrf.outputs.vrf-available == 'true'\n        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l3", "        # if: steps.vrf.outputs.vrf-available == 'true'\n        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l3"),
+            (harness, "linux_dataplane_route_event_wakes_within_2s", "wrong_route_event_filter"),
+        )
+        for relative, old, new in cases:
+            with self.subTest(seam=old):
+                self.mutate(relative, old, new)
+        with tempfile.TemporaryDirectory() as temporary:
+            self.stage_indexed_fixture(root := Path(temporary))
+            (root / harness).unlink()
+            workflow_path = root / workflow
+            workflow_path.write_text(workflow_path.read_text().replace("        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh link_carrier", "        run: true"))
+            self.assertEqual(["netns harness is missing", "kernel-dataplane.yml:netns must invoke link_carrier once"], check(root))
 
     def test_destructive_workflow_seams(self):
         cases = (

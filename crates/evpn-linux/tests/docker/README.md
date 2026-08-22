@@ -39,6 +39,13 @@ bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg   # FDB nexthop g
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg_roundtrip # FDB-NHG round-trip only
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg_cve # FDB-NHG nolearning guard only
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime # ADR-0061 FIB runtime
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh link_carrier # ADR-0085 carrier monitor
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh ac_gate # AC-gate port-state round-trip
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh nexthop_raw # all five raw nexthop tests
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l2 # L2 foreign takeover
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_nhid # reserved-NHID non-clobber
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l3 # L3 foreign takeover (VRF)
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_route_event # route-event wake (VRF)
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_vlan_fdb # ADR-0089 VLAN FDB proof
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_fdb_vni # LAN-64 SVD explicit FDB VNI proof
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_multipath # LAN-70 L3VNI multipath/FDB-NHG proof
@@ -69,6 +76,11 @@ caches across runs.
 | `fdb_nhg_roundtrip` | `round_trip_install_and_remove_fdb_nhg`          | FDB-NHG member + group + FDB-row install, dump, and teardown      |
 | `fdb_nhg_cve` | `cve_guard_blocks_install_when_learning_enabled`        | CVE-2025-39851 nolearning readiness guard for FDB-NHG installs   |
 | `fib_runtime` | `fib_runtime::tests::netns_general_unicast_fib_runtime_round_trip` | ADR-0061 route install / foreign preservation / withdraw / drain |
+| `link_carrier` | `link_carrier_monitor_tracks_veth_carrier_transitions` | RTNLGRP_LINK carrier transitions |
+| `ac_gate` | `linux_dataplane_set_ac_port_state_round_trip` | AC-gate port state and flood-flag preservation |
+| `nexthop_raw` | `netns_nexthop_raw` | all five raw nexthop socket tests |
+| `foreign_state_l2` / `foreign_state_nhid` | exact `netns_foreign_state` L2/NHID tests | foreign takeover and reserved-NHID non-clobber |
+| `foreign_state_l3` / `l3_route_event` | exact VRF-dependent tests | L3 foreign takeover and route-event wake latency |
 | `dataplane_vlan_fdb` | `linux_dataplane_programs_vlan_scoped_remote_mac_add_remove` | ADR-0089 VLAN-scoped single-dst FDB add/remove and scoped delete |
 | `svd_fdb_vni` | `svd_topology_is_ready_and_programs_vni_scoped_fdb_rows` | LAN-64 collect-metadata VXLAN Ready + explicit `src_vni` FDB programming / scoped-delete proof |
 | `l3_multipath` | `l3vxlan_all_active_multipath_kernel_shape` | LAN-70 L3VNI route multipath acceptance, same-MAC FDB collapse, and FDB-NHG lifecycle |
@@ -134,9 +146,9 @@ runs the shell spike and Rust round-trip against the GitHub-hosted
 runner's kernel (Ubuntu 24.04, kernel 6.x — well past the 4.18 floor
 for `IFLA_BRPORT_BCAST_FLOOD`).
 
-Other selectors are local / manual validation unless a workflow names
-them explicitly. In particular, `fdb_nhg` and `fib_runtime` are
-reviewer-run privileged smokes today, not default PR-CI gates.
+The kernel-dataplane workflow names its CI-gated privileged selector
+inventory explicitly; its L3/VRF selectors run only when the existing
+host VRF-availability probe succeeds.
 
 The CI step pre-builds the harness image with `docker/build-push-action`
 + GHA layer caching, then invokes `run-netns-tests.sh` with

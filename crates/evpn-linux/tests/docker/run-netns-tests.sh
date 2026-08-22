@@ -50,6 +50,16 @@
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh ac_gate
 #       (single-active AC-gate IFLA_BRPORT_STATE round-trip +
 #        flood-flag non-clobber proof)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh nexthop_raw
+#       (all five raw RTM_NEWNEXTHOP/RTM_DELNEXTHOP proofs)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l2
+#       (L2 foreign-takeover preservation proof)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_nhid
+#       (reserved-NHID foreign-object non-clobber proof)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l3
+#       (L3 foreign-takeover preservation proof; requires VRF)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_route_event
+#       (route-event wake proof; requires VRF)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_vlan_fdb
 #       (ADR-0089 VLAN-scoped single-dst FDB add/remove proof)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_fdb_vni
@@ -110,6 +120,11 @@ case "${1:-all}" in
     bgp_unnumbered)     TEST_BIN="netns_bgp_unnumbered"; FILTER="" ;;
     link_carrier)       TEST_BIN="netns_link_carrier"; FILTER="" ;;
     ac_gate)            TEST_BIN="netns_ac_gate"; FILTER="" ;;
+    nexthop_raw)        TEST_BIN="netns_nexthop_raw"; FILTER="" ;;
+    foreign_state_l2)   TEST_BIN="netns_foreign_state"; FILTER="l2_foreign_takeover_row_survives_withdrawal_and_shutdown" ;;
+    foreign_state_nhid) TEST_BIN="netns_foreign_state"; FILTER="nhid_reserved_range_foreign_object_not_clobbered_adopted_or_reaped" ;;
+    foreign_state_l3)   TEST_BIN="netns_foreign_state"; FILTER="l3_foreign_takeover_triple_survives_withdrawal_and_shutdown" ;;
+    l3_route_event)     TEST_BIN="netns_l3_install"; FILTER="linux_dataplane_route_event_wakes_within_2s" ;;
     dataplane_vlan_fdb) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_programs_vlan_scoped_remote_mac_add_remove" ;;
     macip_vlan_attribution) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_attributes_vlan_mac_ip_observations" ;;
     svd_fdb_vni)        TEST_BIN="netns_svd"; FILTER="svd_topology_is_ready_and_programs_vni_scoped_fdb_rows" ;;
@@ -122,7 +137,7 @@ case "${1:-all}" in
     managed_ready)      TEST_BIN="netns_managed_netdev"; FILTER="managed_bridge_and_vxlan_make_instance_ready_round_trip" ;;
     managed_ip_vrf_ready) TEST_BIN="netns_managed_netdev"; FILTER="managed_vrf_and_l3vxlan_make_ip_vrf_ready_round_trip" ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier, ac_gate, dataplane_vlan_fdb, macip_vlan_attribution, svd_fdb_vni, l3_multipath, l3_all_active_writer, managed_bridge, managed_vxlan, managed_svd_vxlan, managed_vlan_upper, managed_ready, managed_ip_vrf_ready" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier, ac_gate, nexthop_raw, foreign_state_l2, foreign_state_nhid, foreign_state_l3, l3_route_event, dataplane_vlan_fdb, macip_vlan_attribution, svd_fdb_vni, l3_multipath, l3_all_active_writer, managed_bridge, managed_vxlan, managed_svd_vxlan, managed_vlan_upper, managed_ready, managed_ip_vrf_ready" >&2
         exit 2
         ;;
 esac
