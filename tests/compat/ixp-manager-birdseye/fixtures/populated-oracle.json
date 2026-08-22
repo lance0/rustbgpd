@@ -1091,6 +1091,7 @@
               "as_path": [
                 "64496"
               ],
+              "atomic_aggr": "",
               "local_pref": "100",
               "med": 30,
               "next_hop": "198.51.100.2",
@@ -1328,6 +1329,7 @@
               "as_path": [
                 "64496"
               ],
+              "atomic_aggr": "",
               "local_pref": "100",
               "med": 30,
               "next_hop": "198.51.100.2",
