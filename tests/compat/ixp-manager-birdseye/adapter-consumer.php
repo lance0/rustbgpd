@@ -189,3 +189,4 @@ foreach ($responses as $journey => $response) {
 $responses['symbols'] = $symbols;
 
 echo json_encode($responses, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
+fwrite(STDERR, "adapter proof: $protocol " . implode(', ', array_keys($responses)) . " verified\n");

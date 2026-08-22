@@ -7,6 +7,7 @@ ixp_manager=${1:?IXP Manager checkout is required}
 image=${2:?PHP contract image is required}
 birdseye=${3:?Birdseye checkout is required}
 database=${4:?IXP Manager MySQL address is required}
+capture_output=${CAPTURE_OUTPUT:?capture output directory is required}
 tmp=$(mktemp -d)
 daemon_pid=
 adapter_pid=
@@ -125,7 +126,9 @@ docker run --rm --network host --user "$(id -u):$(id -g)" \
   --env BIRDSEYE_API="http://127.0.0.1:$port" \
   --env DB_HOST="$database" \
   --env DB_DATABASE=ixp_ci --env DB_USERNAME=root --env DB_PASSWORD= \
+  --env CAPTURE_OUTPUT=/capture-output \
   --volume "$root:/harness:ro" \
   --volume "$ixp_manager:/upstreams/ixp-manager" \
   --volume "$birdseye:/upstreams/birdseye:ro" \
+  --volume "$capture_output:/capture-output" \
   "$image" php /harness/nagios-consumer.php

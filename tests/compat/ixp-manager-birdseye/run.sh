@@ -242,5 +242,6 @@ test supported-leading-set-fails-closed {
 
 mysql_address=$(docker inspect \
   --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$mysql")
-"$root/run-adapter-consumer.sh" "$tmp/ixp-manager" "$image" "$tmp/birdseye" \
-  "$mysql_address" >/dev/null
+CAPTURE_OUTPUT="$capture_output" "$root/run-adapter-consumer.sh" \
+  "$tmp/ixp-manager" "$image" "$tmp/birdseye" "$mysql_address" >/dev/null
+python3 "$root/verify_capture.py" --nagios "$capture_output/nagios-monitoring.json"

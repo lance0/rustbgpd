@@ -57,7 +57,10 @@ membership plus both route-server client session services named
 `pb_0001_as1213` and `pb_0004_as112`. It then runs the pinned Bird's Eye
 `nagios-check-birdseye.php` plugin against the emitted `_apiurl` and requires
 `OK` with a populated `Last Reconfigure` and the one configured, down session
-counted. Alerting content and thresholds are out of scope.
+counted. The step writes `nagios-monitoring.json` into the capture directory
+and prints one `nagios proof:` line on stderr; `verify_capture.py --nagios`
+fails the gate when that artifact is missing or drifted. Alerting content and
+thresholds are out of scope.
 
 The real pinned IXP Manager PHP extension also translates every defined
 `:1101:<id>` display entry from 1 through 15. The executable contract records
