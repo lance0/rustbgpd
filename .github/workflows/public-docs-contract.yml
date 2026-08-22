@@ -16,6 +16,10 @@ on:
       - SUPPORT.md
       - scripts/check_public_tracker_ids.py
       - scripts/test_check_public_tracker_ids.py
+      - examples/birdwatcher-adapter/README.md
+      - tests/compat/ixp-manager-birdseye/contract.json
+      - scripts/check_ixp_manager_docs.py
+      - scripts/test_check_ixp_manager_docs.py
       - .github/workflows/public-docs-contract.yml
   pull_request:
     paths: *paths
@@ -32,3 +36,7 @@ jobs:
         run: |
           python3 -m unittest -v scripts/test_check_public_tracker_ids.py
           python3 scripts/check_public_tracker_ids.py
+      - name: Check IXP Manager docs against the pinned contract
+        run: |
+          python3 -m unittest -v scripts/test_check_ixp_manager_docs.py
+          python3 scripts/check_ixp_manager_docs.py

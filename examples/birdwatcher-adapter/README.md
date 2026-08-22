@@ -179,13 +179,33 @@ unknown identities return 404, and daemon failures return a sanitized 502.
 
 This is deliberately partial IXP Manager support: status, live BGP inventory
 and detail, protocol symbols, member received routes, and member exported
-routes, including exact protocol/export lookup, are available. The exact
-filtered-prefix wildcard journey described below and a single-prefix
-less-specific table search are also available. The table name validates the
-live routing-table identity over rustbgpd's one global Loc-RIB; it is not an
-independent table selector. Full table snapshots, counts, other
-large-community wildcard queries, and the complete reject-reason inventory are
-not implemented; the adapter does not claim full Bird's Eye compatibility.
+routes are available, and the boundary is the executable contract in
+[`tests/compat/ixp-manager-birdseye/contract.json`](../../tests/compat/ixp-manager-birdseye/contract.json)
+(`runtime_supported` / `unsupported`). The table below is checked against that
+contract by `scripts/check_ixp_manager_docs.py`, so the two cannot drift
+silently:
+
+| Contract capability | Status | Adapter surface |
+|---|---|---|
+| `exact-protocol-route` | supported | `/route/{prefix}/protocol/{id}`: exact prefix on every gRPC page, every Add-Path candidate in daemon order |
+| `exact-export-route` | supported | `/route/{prefix}/export/{id}`: the same discipline over the Adj-RIB-Out |
+| `filtered-prefix-wildcard` | supported | `/routes/lc-zwild/protocol/{id}/{daemon ASN}/1101`, answered from the session's retained rejects only |
+| `less-specific-longest-prefix-match` | supported | `/route/{prefix}/table/{table}`: one bounded longest-prefix lookup |
+| `atomic-full-table-snapshot` | supported | `/routes/table/{table}`: accepted candidates joined with installed winners under one Received/Best generation; refuses rather than truncates |
+| `atomic-all-candidate-prefix-snapshot` | supported | the table lookup returns the installed winner first and every same-prefix alternative in one response |
+| `file-backed-runtime-protocol-alias-reconfiguration` | supported | `--protocol-alias-file`, replaced as one resolver generation on `SIGHUP` |
+| `active-rejected-route-reason-inventory` | supported | the ten template-active `{daemon ASN}:1101:<id>` reasons tabulated below |
+| `live-session-transport-detail` | supported | `source_address`, `keepalive`, `connection`, `bgp_session` from one `ListNeighbors` snapshot |
+| `full-table-count` | unsupported | no count endpoints; the full-table view does not add counts |
+| `direct-runtime-protocol-alias-reconfiguration` | unsupported | `--protocol-alias` values are startup-only and do not reload |
+| `live-hold-keepalive-countdowns` | unsupported | `hold_timer_now` / `keepalive_now` are never fabricated |
+| `defined-only-rejected-route-reason-emission` | unsupported | the five display-only reason ids are never emitted; such causes fall back to `0` |
+| `full-ixp-manager-ui-filter-policy-engine` | unsupported | only the bounded `rs-config-render` manual-export subset exists |
+
+Other large-community wildcard queries return an empty route array. The table
+name validates the live routing-table identity over rustbgpd's one global
+Loc-RIB; it is not an independent table selector. The adapter does not claim
+full Bird's Eye compatibility.
 
 IXP Manager v7.4 queries member-filtered prefixes through
 `/routes/lc-zwild/protocol/{id}/{daemon ASN}/1101`. The adapter answers only
@@ -201,18 +221,37 @@ positive eviction count marks retained loss without hiding retained rows.
 Each returned route carries exactly one synthesized `{daemon ASN}:1101:<id>`
 reason. Before adding it, the adapter removes every wire-supplied community in
 that reserved namespace, preventing a member from forging the displayed
-reason while preserving unrelated large communities. Mapping is deliberately
+reason while preserving unrelated large communities. The emitted ids are
+exactly the ten active in the pinned IXP Manager v7.4 route-server templates
+(`reject_reasons.active_ids` in the contract); generated-policy causes require
+the exact renderer policy/term identity, and mapping is deliberately
 conservative:
 
-| Retained cause | IXP Manager reason id |
-|---|---:|
-| `.rpol` term `reject-too-specific` | 1 |
-| `.rpol` term `reject-non-global` | 3 |
-| first-AS mismatch | 7 |
-| strict next-hop ownership | 8 |
-| `.rpol` term `reject-rpki-invalid` with invalid RPKI state | 13 |
-| `.rpol` term `reject-transit-leak` | 14 |
-| any other or ambiguous cause | 0 |
+| Retained cause | IXP Manager reason id | Bird's Eye display |
+|---|---:|---|
+| `.rpol` term `ixp-manager-hygiene:reject-too-specific` | 1 | PREFIX LENGTH TOO LONG |
+| `.rpol` term `reject-special-purpose:reject-non-global` | 3 | BOGON |
+| `.rpol` term `ixp-manager-hygiene:reject-as-path-too-long` | 5 | AS PATH TOO LONG |
+| `.rpol` term `ixp-manager-hygiene:reject-as-path-too-short`, or first-AS treat-as-withdraw on an empty AS_PATH | 6 | AS PATH TOO SHORT |
+| first-AS mismatch: treat-as-withdraw, or generated `client-<id>:reject-first-as-not-peer-as` | 7 | FIRST AS NOT PEER AS |
+| strict next-hop ownership | 8 | NEXT HOP NOT PEER IP |
+| generated `client-<id>:reject-irrdb-prefix-filtered` | 9 | IRRDB PREFIX FILTERED |
+| generated `client-<id>:reject-irrdb-origin-as-filtered` | 10 | IRRDB ORIGIN AS FILTERED |
+| `.rpol` term `ixp-manager-hygiene:reject-rpki-invalid` with invalid RPKI state | 13 | RPKI INVALID |
+| `.rpol` term `ixp-manager-hygiene:reject-transit-leak` | 14 | TRANSIT FREE ASN |
+| any other or ambiguous cause | 0 | (fallback; IXP Manager leaves it untranslated) |
+
+The five ids the pinned templates define but never set
+(`reject_reasons.defined_only_ids`) are display-only: the adapter never emits
+them, and such causes fall back to `0` rather than gaining invented semantics:
+
+| Defined-only id | Bird's Eye display | Emitted as |
+|---:|---|---:|
+| 2 | PREFIX LENGTH TOO SHORT | 0 |
+| 4 | BOGON ASN | 0 |
+| 11 | PREFIX NOT IN ORIGIN AS | 0 |
+| 12 | RPKI UNKNOWN | 0 |
+| 15 | TOO MANY COMMUNITIES | 0 |
 
 ## Filtered routes and reject reasons
 
