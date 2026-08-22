@@ -9,6 +9,9 @@ currently does better, the row links the comparison rather than
 omitting it. To evaluate against live members with zero blast radius,
 start with the
 [route-server shadow pilot](cookbook/route-server-shadow-pilot.md).
+Provisioning is one of three mutually exclusive modes — hand-written,
+arouteserver-driven, or IXP Manager-driven — chosen in the
+[cookbook's fork](cookbook/README.md#ixp-provisioning-three-modes).
 
 | # | Capability | Status | What exists | Evidence |
 |---|------------|--------|-------------|----------|

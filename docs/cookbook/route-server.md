@@ -26,6 +26,13 @@ deterministic probes intentionally occupy RFC 6598 Shared Address Space and
 TEST-NET-3, so it does not load the public example's dual-stack
 special-purpose snapshot.
 
+This is the **hand-written** provisioning mode, for an exchange with no
+external member source. If your members live in arouteserver's
+`general.yml`/`clients.yml`, use the [IXP filter pipeline](ixp-filter-pipeline.md);
+if they live in IXP Manager v7.4, use the
+[IXP Manager route server](ixp-manager-route-server.md) — the three-way
+fork is in the [cookbook index](README.md#ixp-provisioning-three-modes).
+
 ## Quickstart
 
 Start from the checked-in route-server example:
