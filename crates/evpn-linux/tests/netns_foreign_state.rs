@@ -264,15 +264,24 @@ fn setup_l2_topology(ns: &NetnsFixture) {
     ns.exec("ip", &["link", "set", "vxlan100", "up"]);
 }
 
-fn l2_fdb_line(dump: &str, mac: &str) -> Option<String> {
-    dump.lines()
-        .find(|line| line.contains(mac) && !line.contains("dst"))
-        .map(str::to_owned)
-        .or_else(|| {
-            dump.lines()
-                .find(|line| line.contains(mac))
-                .map(str::to_owned)
+fn l2_rows_match(dump: &str, mac: &str, owned_sibling: bool) -> bool {
+    let rows: Vec<_> = dump.lines().filter(|line| line.starts_with(mac)).collect();
+    let has = |required: &str, forbidden: &str| {
+        rows.iter().any(|row| {
+            let tokens: Vec<_> = row.split_whitespace().collect();
+            let required = required
+                .split_whitespace()
+                .all(|token| tokens.contains(&token));
+            let allowed = forbidden
+                .split_whitespace()
+                .all(|token| !tokens.contains(&token));
+            required && allowed
         })
+    };
+    rows.len() == 2 + usize::from(owned_sibling)
+        && has("master br100 static", "vlan dst extern_learn self")
+        && has("vlan 1 master br100 static", "dst extern_learn self")
+        && (!owned_sibling || has("dst 10.0.0.2 self extern_learn permanent", "master vlan"))
 }
 
 /// LAN-283 L2: a foreign `static` FDB row that replaces the owned row
@@ -310,40 +319,68 @@ async fn l2_foreign_takeover_row_survives_withdrawal_and_shutdown() {
     );
 
     // 2. Foreign takeover: operator replaces the row (permanent, no
-    //    extern_learn) under the same key.
+    //    extern_learn) after deleting the owned master contributor.
+    run("bridge", &["fdb", "del", &mac, "dev", "vxlan100", "master"]);
     run(
         "bridge",
-        &[
-            "fdb", "replace", &mac, "dev", "vxlan100", "master", "static",
-        ],
+        &["fdb", "add", &mac, "dev", "vxlan100", "master", "static"],
     );
+    let dump = shell("bridge", &["fdb", "show", "dev", "vxlan100"]);
+    assert!(l2_rows_match(&dump, &mac, true), "takeover:\n{dump}");
 
     // 3. Re-reconcile with the MAC still desired — rustbgpd must NOT
     //    repair its row back over the foreign one.
     intent_tx.send(l2_intent(2, true)).unwrap();
-    let _ = wait_for_report_generation(&mut report_rx, 2).await;
+    let counters = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut total = (0, 0);
+        loop {
+            let report = report_rx.recv().await.expect("dataplane report channel");
+            total.0 += report.foreign_state_counters.owned_relinquished;
+            total.1 += report.foreign_state_counters.replaces_blocked;
+            if report.intent_generation >= 2 {
+                break total;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for takeover report");
+    assert_eq!(counters, (1, 1));
     let dump = shell("bridge", &["fdb", "show", "dev", "vxlan100"]);
-    let line = l2_fdb_line(&dump, &mac).expect("foreign row present");
     assert!(
-        !line.contains("extern_learn"),
+        l2_rows_match(&dump, &mac, true),
         "foreign row must not be replaced by an extern_learn repair:\n{dump}"
     );
 
-    // 4. Withdraw the MAC — the foreign row must survive.
-    intent_tx.send(l2_intent(3, false)).unwrap();
-    let _ = wait_for_report_generation(&mut report_rx, 3).await;
-    let dump = shell("bridge", &["fdb", "show", "dev", "vxlan100"]);
-    assert!(
-        l2_fdb_line(&dump, &mac).is_some(),
-        "foreign row must survive withdrawal:\n{dump}"
+    run(
+        "bridge",
+        &[
+            "fdb", "del", &mac, "dev", "vxlan100", "self", "dst", "10.0.0.2",
+        ],
     );
+    let dump = shell("bridge", &["fdb", "show", "dev", "vxlan100"]);
+    assert!(l2_rows_match(&dump, &mac, false), "cleanup:\n{dump}");
+    intent_tx.send(l2_intent(3, true)).unwrap();
+    let report = wait_for_report_generation(&mut report_rx, 3).await;
+    assert_eq!(report.foreign_state_counters, Default::default());
+    let dump = shell("bridge", &["fdb", "show", "dev", "vxlan100"]);
+    assert!(l2_rows_match(&dump, &mac, false), "reconcile:\n{dump}");
+
+    // 4. Withdraw the MAC — the foreign row must survive.
+    intent_tx.send(l2_intent(4, false)).unwrap();
+    let report = wait_for_report_generation(&mut report_rx, 4).await;
+    assert_eq!(report.foreign_state_counters, Default::default());
+    let dump = shell("bridge", &["fdb", "show", "dev", "vxlan100"]);
+    assert!(l2_rows_match(&dump, &mac, false), "withdrawal:\n{dump}");
 
     // 5. Shutdown drain — the foreign row must survive that too.
     shutdown.cancel();
-    let _ = tokio::time::timeout(Duration::from_secs(10), actor_join).await;
+    tokio::time::timeout(Duration::from_secs(10), actor_join)
+        .await
+        .expect("actor shutdown timed out")
+        .expect("actor panicked");
     let dump = shell("bridge", &["fdb", "show", "dev", "vxlan100"]);
     assert!(
-        l2_fdb_line(&dump, &mac).is_some(),
+        l2_rows_match(&dump, &mac, false),
         "foreign row must survive the shutdown drain:\n{dump}"
     );
 }
