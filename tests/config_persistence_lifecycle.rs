@@ -426,14 +426,13 @@ async fn establish(ctx: Arc<Ctx>, i: usize) -> Result<mpsc::Sender<Message>, Str
 
     let reader_ctx = Arc::clone(&ctx);
     tokio::spawn(async move {
-        let mut frame = BytesMut::with_capacity(1 << 16);
+        // Start from the OPEN loop's leftover: on loopback the daemon's
+        // first KEEPALIVE often shares a read with its OPEN, so parse
+        // what is already buffered before the first read instead of
+        // dropping it.
+        let mut frame = buf;
         let mut tmp = vec![0u8; 1 << 16];
         loop {
-            let n = match reader.read(&mut tmp).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => n,
-            };
-            frame.extend_from_slice(&tmp[..n]);
             loop {
                 if frame.len() < HEADER_LEN {
                     break;
@@ -537,6 +536,11 @@ async fn establish(ctx: Arc<Ctx>, i: usize) -> Result<mpsc::Sender<Message>, Str
                     _ => {}
                 }
             }
+            let n = match reader.read(&mut tmp).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            frame.extend_from_slice(&tmp[..n]);
         }
         record_link_drop(&reader_ctx, i);
     });
