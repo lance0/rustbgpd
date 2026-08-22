@@ -140,7 +140,9 @@ relative `current` symlink, runs one synchronous executable, and requires both
 is limited to a command that could not start: the helper restores the prior
 link without a second activation and verifies the unchanged prior runtime. Once
 the command starts, a nonzero exit, timeout, or unsettled runtime leaves
-`current` on the candidate and returns exit 5 for explicit operator recovery.
+`current` on the candidate and returns exit 5 for explicit operator recovery;
+the operator procedure for that state is the
+[activation manual-recovery runbook](../../docs/cookbook/activation-manual-recovery.md).
 
 Authorize the `rustbgpd` account in sudoers for only the exact per-handle
 `/usr/bin/systemctl reload-or-restart rustbgpd@rs1-ipv4` command. A second
@@ -224,7 +226,8 @@ sudo -u rustbgpd /usr/bin/rs-config-render ixp-manager-lifecycle resume \
 Callback delivery is at-least-once because IXP Manager v7.4 supplies no lease
 or idempotency token. `resume` never refetches, rerenders, or activates. It has
 no automatic action for exit 5; inspect retained activation/lifecycle state and
-the live daemon before explicitly resolving the upstream router lock.
+the live daemon before explicitly resolving the upstream router lock, following
+the [activation manual-recovery runbook](../../docs/cookbook/activation-manual-recovery.md).
 
 Release tarballs (`rustbgpd-<arch>.tar.gz` on the [releases
 page](https://github.com/lance0/rustbgpd/releases)) ship the

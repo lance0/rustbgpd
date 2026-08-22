@@ -158,7 +158,9 @@ runtime is verified unchanged. Once it starts, a nonzero exit, timeout, or
 unsettled result leaves `current` on the candidate and returns exit 5. Leave
 retained state untouched and inspect the current private receipt if present;
 recovery or receipt durability is unproven, and the receipt may be absent or
-stale when its final write or directory sync failed.
+stale when its final write or directory sync failed. The operator procedure for
+exit 5 is the
+[activation manual-recovery runbook](cookbook/activation-manual-recovery.md).
 
 To drive the same path directly from IXP Manager v7.4, create a separate
 mode-0700 candidate directory for the run and store the API key in an absolute
@@ -184,7 +186,9 @@ credentials, and path-prefixed origins are disabled. Requests send the API key
 only in the credential header. A synced private journal precedes each remote
 effect. Exit 6 means one callback is pending and may be retried with
 `ixp-manager-lifecycle resume`; exit 5 means acquisition or activation remains
-uncertain and no callback is attempted automatically. Delivery is at-least-once.
+uncertain and no callback is attempted automatically — see the
+[activation manual-recovery runbook](cookbook/activation-manual-recovery.md).
+Delivery is at-least-once.
 
 ### Debian / RPM packages
 
