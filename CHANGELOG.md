@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.66.0] — 2026-08-22
+
 ### Added
 
 - `bench/scale/compare-rrharness.sh` now compares any two refs: `--base`/`--head`
