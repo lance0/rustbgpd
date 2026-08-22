@@ -1,0 +1,8 @@
+# Populated oracle leg: pinned BIRD 2.0.12 (Debian bookworm bird2) next to a
+# PHP runtime that satisfies the Bird's Eye v2.1.0 lockfile, so the real
+# Bird's Eye server can shell out to the real birdc in one container.
+FROM php:8.3-cli-bookworm@sha256:97bcc5ac3fce7ba7fb769b4709c9da2b64aef3a2685c8271c2c61b409d8fa74e
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive \
+    apt-get install -y --no-install-recommends bird2 \
+    && rm -rf /var/lib/apt/lists/*

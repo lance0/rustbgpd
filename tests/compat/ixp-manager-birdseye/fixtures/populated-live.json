@@ -1,0 +1,1338 @@
+{
+  "journeys": {
+    "lookup_export_covering": {
+      "endpoint": "api/route/{net}/export/{protocol}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": []
+      }
+    },
+    "lookup_export_exact": {
+      "endpoint": "api/route/{net}/export/{protocol}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64497
+              ],
+              "communities": [
+                [
+                  64497,
+                  100
+                ]
+              ],
+              "large_communities": [
+                [
+                  64497,
+                  1,
+                  1
+                ]
+              ],
+              "local_pref": 0,
+              "med": 0,
+              "next_hop": "198.51.100.4",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb_as64497",
+            "gateway": "198.51.100.4",
+            "interface": "",
+            "learnt_from": "198.51.100.4",
+            "metric": 0,
+            "network": "192.0.2.0/24",
+            "primary": false,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          }
+        ]
+      }
+    },
+    "lookup_export_v6": {
+      "endpoint": "api/route/{net}/export/{protocol}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64497,
+                64530
+              ],
+              "communities": [
+                [
+                  64497,
+                  600
+                ]
+              ],
+              "large_communities": [
+                [
+                  64497,
+                  3,
+                  1
+                ]
+              ],
+              "local_pref": 0,
+              "med": 5,
+              "next_hop": "2001:db8:5100::4",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb6_as64497",
+            "gateway": "2001:db8:5100::4",
+            "interface": "",
+            "learnt_from": "2001:db8:5100::4",
+            "metric": 0,
+            "network": "2001:db8:c::/48",
+            "primary": false,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          }
+        ]
+      }
+    },
+    "lookup_protocol_covering": {
+      "endpoint": "api/route/{net}/protocol/{protocol}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": []
+      }
+    },
+    "lookup_protocol_exact": {
+      "endpoint": "api/route/{net}/protocol/{protocol}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64496,
+                64510,
+                64520
+              ],
+              "communities": [
+                [
+                  64496,
+                  100
+                ],
+                [
+                  64496,
+                  200
+                ]
+              ],
+              "large_communities": [
+                [
+                  64496,
+                  1,
+                  1
+                ],
+                [
+                  64496,
+                  1,
+                  2
+                ]
+              ],
+              "local_pref": 0,
+              "med": 10,
+              "next_hop": "198.51.100.2",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb_as64496",
+            "gateway": "198.51.100.2",
+            "interface": "",
+            "learnt_from": "198.51.100.2",
+            "metric": 0,
+            "network": "203.0.113.0/24",
+            "primary": false,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          }
+        ]
+      }
+    },
+    "lookup_protocol_host": {
+      "endpoint": "api/route/{net}/protocol/{protocol}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": []
+      }
+    },
+    "lookup_protocol_v6": {
+      "endpoint": "api/route/{net}/protocol/{protocol}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64496,
+                64510
+              ],
+              "communities": [
+                [
+                  64496,
+                  600
+                ]
+              ],
+              "large_communities": [
+                [
+                  64496,
+                  3,
+                  1
+                ]
+              ],
+              "local_pref": 0,
+              "med": 20,
+              "next_hop": "2001:db8:5100::2",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb6_as64496",
+            "gateway": "2001:db8:5100::2",
+            "interface": "",
+            "learnt_from": "2001:db8:5100::2",
+            "metric": 0,
+            "network": "2001:db8:a::/48",
+            "primary": false,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          }
+        ]
+      }
+    },
+    "lookup_table_exact": {
+      "endpoint": "api/route/{net}/table/{table}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64496
+              ],
+              "communities": [
+                [
+                  64496,
+                  300
+                ]
+              ],
+              "large_communities": [
+                [
+                  64496,
+                  2,
+                  1
+                ]
+              ],
+              "local_pref": 0,
+              "med": 0,
+              "next_hop": "198.51.100.2",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb_as64496",
+            "gateway": "198.51.100.2",
+            "interface": "",
+            "learnt_from": "198.51.100.2",
+            "metric": 0,
+            "network": "203.0.113.128/25",
+            "primary": true,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          }
+        ]
+      }
+    },
+    "lookup_table_less_specific": {
+      "endpoint": "api/route/{net}/table/{table}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64496
+              ],
+              "communities": [
+                [
+                  64496,
+                  300
+                ]
+              ],
+              "large_communities": [
+                [
+                  64496,
+                  2,
+                  1
+                ]
+              ],
+              "local_pref": 0,
+              "med": 0,
+              "next_hop": "198.51.100.2",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb_as64496",
+            "gateway": "198.51.100.2",
+            "interface": "",
+            "learnt_from": "198.51.100.2",
+            "metric": 0,
+            "network": "203.0.113.128/25",
+            "primary": true,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          }
+        ]
+      }
+    },
+    "lookup_table_unaligned": {
+      "endpoint": "api/route/{net}/table/{table}",
+      "response": ""
+    },
+    "lookup_table_v6": {
+      "endpoint": "api/route/{net}/table/{table}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64497,
+                64530
+              ],
+              "communities": [
+                [
+                  64497,
+                  600
+                ]
+              ],
+              "large_communities": [
+                [
+                  64497,
+                  3,
+                  1
+                ]
+              ],
+              "local_pref": 0,
+              "med": 5,
+              "next_hop": "2001:db8:5100::4",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb6_as64497",
+            "gateway": "2001:db8:5100::4",
+            "interface": "",
+            "learnt_from": "2001:db8:5100::4",
+            "metric": 0,
+            "network": "2001:db8:c::/48",
+            "primary": true,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          }
+        ]
+      }
+    },
+    "protocol_v4": {
+      "endpoint": "api/protocol/{protocol}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "protocol": {
+          "bgp_session": [
+            "external",
+            "route-server",
+            "AS4"
+          ],
+          "bgp_state": "Established",
+          "bird_protocol": "BGP",
+          "connection": " Established",
+          "description": "oracle client AS64496",
+          "hold_timer": 180,
+          "keepalive": 60,
+          "neighbor_address": "198.51.100.2",
+          "neighbor_as": 64496,
+          "neighbor_capabilities": [
+            "AS4"
+          ],
+          "neighbor_id": "198.51.100.2",
+          "protocol": "pb_as64496",
+          "route_limit_at": 3,
+          "routes": {
+            "exported": 1,
+            "filtered": 0,
+            "imported": 3
+          },
+          "source_address": "<route-server>",
+          "state": "up",
+          "state_changed": "<timestamp>",
+          "table": "master4"
+        }
+      }
+    },
+    "protocol_v6": {
+      "endpoint": "api/protocol/{protocol}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "protocol": {
+          "bgp_session": [
+            "external",
+            "route-server",
+            "AS4"
+          ],
+          "bgp_state": "Established",
+          "bird_protocol": "BGP",
+          "connection": " Established",
+          "description": "oracle client AS64496 IPv6",
+          "hold_timer": 180,
+          "keepalive": 60,
+          "neighbor_address": "2001:db8:5100::2",
+          "neighbor_as": 64496,
+          "neighbor_capabilities": [
+            "AS4"
+          ],
+          "neighbor_id": "198.51.100.2",
+          "protocol": "pb6_as64496",
+          "route_limit_at": 2,
+          "routes": {
+            "exported": 1,
+            "filtered": 0,
+            "imported": 2
+          },
+          "source_address": "<route-server>",
+          "state": "up",
+          "state_changed": "<timestamp>",
+          "table": "master6"
+        }
+      }
+    },
+    "protocols": {
+      "endpoint": "api/protocols/bgp",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "protocols": {
+          "pb6_as64496": {
+            "bgp_session": [
+              "external",
+              "route-server",
+              "AS4"
+            ],
+            "bgp_state": "Established",
+            "bird_protocol": "BGP",
+            "connection": " Established",
+            "description": "oracle client AS64496 IPv6",
+            "hold_timer": 180,
+            "keepalive": 60,
+            "neighbor_address": "2001:db8:5100::2",
+            "neighbor_as": 64496,
+            "neighbor_capabilities": [
+              "AS4"
+            ],
+            "neighbor_id": "198.51.100.2",
+            "protocol": "pb6_as64496",
+            "route_limit_at": 2,
+            "routes": {
+              "exported": 1,
+              "filtered": 0,
+              "imported": 2
+            },
+            "source_address": "<route-server>",
+            "state": "up",
+            "state_changed": "<timestamp>",
+            "table": "master6"
+          },
+          "pb6_as64497": {
+            "bgp_session": [
+              "external",
+              "route-server",
+              "AS4"
+            ],
+            "bgp_state": "Established",
+            "bird_protocol": "BGP",
+            "connection": " Established",
+            "description": "oracle client AS64497 IPv6",
+            "hold_timer": 180,
+            "keepalive": 60,
+            "neighbor_address": "2001:db8:5100::4",
+            "neighbor_as": 64497,
+            "neighbor_capabilities": [
+              "AS4"
+            ],
+            "neighbor_id": "198.51.100.4",
+            "protocol": "pb6_as64497",
+            "route_limit_at": 1,
+            "routes": {
+              "exported": 2,
+              "filtered": 0,
+              "imported": 1
+            },
+            "source_address": "<route-server>",
+            "state": "up",
+            "state_changed": "<timestamp>",
+            "table": "master6"
+          },
+          "pb_as64496": {
+            "bgp_session": [
+              "external",
+              "route-server",
+              "AS4"
+            ],
+            "bgp_state": "Established",
+            "bird_protocol": "BGP",
+            "connection": " Established",
+            "description": "oracle client AS64496",
+            "hold_timer": 180,
+            "keepalive": 60,
+            "neighbor_address": "198.51.100.2",
+            "neighbor_as": 64496,
+            "neighbor_capabilities": [
+              "AS4"
+            ],
+            "neighbor_id": "198.51.100.2",
+            "protocol": "pb_as64496",
+            "route_limit_at": 3,
+            "routes": {
+              "exported": 1,
+              "filtered": 0,
+              "imported": 3
+            },
+            "source_address": "<route-server>",
+            "state": "up",
+            "state_changed": "<timestamp>",
+            "table": "master4"
+          },
+          "pb_as64497": {
+            "bgp_session": [
+              "external",
+              "route-server",
+              "AS4"
+            ],
+            "bgp_state": "Established",
+            "bird_protocol": "BGP",
+            "connection": " Established",
+            "description": "oracle client AS64497",
+            "hold_timer": 180,
+            "keepalive": 60,
+            "neighbor_address": "198.51.100.4",
+            "neighbor_as": 64497,
+            "neighbor_capabilities": [
+              "AS4"
+            ],
+            "neighbor_id": "198.51.100.4",
+            "protocol": "pb_as64497",
+            "route_limit_at": 1,
+            "routes": {
+              "exported": 3,
+              "filtered": 0,
+              "imported": 1
+            },
+            "source_address": "<route-server>",
+            "state": "up",
+            "state_changed": "<timestamp>",
+            "table": "master4"
+          }
+        }
+      }
+    },
+    "routes_export_v4": {
+      "endpoint": "api/routes/export/{protocol}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64497
+              ],
+              "communities": [
+                [
+                  64497,
+                  100
+                ]
+              ],
+              "large_communities": [
+                [
+                  64497,
+                  1,
+                  1
+                ]
+              ],
+              "local_pref": 0,
+              "med": 0,
+              "next_hop": "198.51.100.4",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb_as64497",
+            "gateway": "198.51.100.4",
+            "interface": "",
+            "learnt_from": "198.51.100.4",
+            "metric": 0,
+            "network": "192.0.2.0/24",
+            "primary": false,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          }
+        ]
+      }
+    },
+    "routes_export_v6": {
+      "endpoint": "api/routes/export/{protocol}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64497,
+                64530
+              ],
+              "communities": [
+                [
+                  64497,
+                  600
+                ]
+              ],
+              "large_communities": [
+                [
+                  64497,
+                  3,
+                  1
+                ]
+              ],
+              "local_pref": 0,
+              "med": 5,
+              "next_hop": "2001:db8:5100::4",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb6_as64497",
+            "gateway": "2001:db8:5100::4",
+            "interface": "",
+            "learnt_from": "2001:db8:5100::4",
+            "metric": 0,
+            "network": "2001:db8:c::/48",
+            "primary": false,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          }
+        ]
+      }
+    },
+    "routes_protocol_v4": {
+      "endpoint": "api/routes/protocol/{protocol}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64496,
+                64510,
+                64520
+              ],
+              "communities": [
+                [
+                  64496,
+                  100
+                ],
+                [
+                  64496,
+                  200
+                ]
+              ],
+              "large_communities": [
+                [
+                  64496,
+                  1,
+                  1
+                ],
+                [
+                  64496,
+                  1,
+                  2
+                ]
+              ],
+              "local_pref": 0,
+              "med": 10,
+              "next_hop": "198.51.100.2",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb_as64496",
+            "gateway": "198.51.100.2",
+            "interface": "",
+            "learnt_from": "198.51.100.2",
+            "metric": 0,
+            "network": "203.0.113.0/24",
+            "primary": false,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          },
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64496
+              ],
+              "communities": [
+                [
+                  64496,
+                  300
+                ]
+              ],
+              "large_communities": [
+                [
+                  64496,
+                  2,
+                  1
+                ]
+              ],
+              "local_pref": 0,
+              "med": 0,
+              "next_hop": "198.51.100.2",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb_as64496",
+            "gateway": "198.51.100.2",
+            "interface": "",
+            "learnt_from": "198.51.100.2",
+            "metric": 0,
+            "network": "203.0.113.128/25",
+            "primary": false,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          },
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64496
+              ],
+              "communities": [],
+              "large_communities": [],
+              "local_pref": 0,
+              "med": 30,
+              "next_hop": "198.51.100.2",
+              "origin": "Incomplete"
+            },
+            "from_protocol": "pb_as64496",
+            "gateway": "198.51.100.2",
+            "interface": "",
+            "learnt_from": "198.51.100.2",
+            "metric": 0,
+            "network": "203.0.113.64/26",
+            "primary": false,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          }
+        ]
+      }
+    },
+    "routes_protocol_v6": {
+      "endpoint": "api/routes/protocol/{protocol}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64496,
+                64510
+              ],
+              "communities": [
+                [
+                  64496,
+                  600
+                ]
+              ],
+              "large_communities": [
+                [
+                  64496,
+                  3,
+                  1
+                ]
+              ],
+              "local_pref": 0,
+              "med": 20,
+              "next_hop": "2001:db8:5100::2",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb6_as64496",
+            "gateway": "2001:db8:5100::2",
+            "interface": "",
+            "learnt_from": "2001:db8:5100::2",
+            "metric": 0,
+            "network": "2001:db8:a::/48",
+            "primary": false,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          },
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64496
+              ],
+              "communities": [
+                [
+                  64496,
+                  700
+                ]
+              ],
+              "large_communities": [
+                [
+                  64496,
+                  3,
+                  2
+                ]
+              ],
+              "local_pref": 0,
+              "med": 0,
+              "next_hop": "2001:db8:5100::2",
+              "origin": "EGP"
+            },
+            "from_protocol": "pb6_as64496",
+            "gateway": "2001:db8:5100::2",
+            "interface": "",
+            "learnt_from": "2001:db8:5100::2",
+            "metric": 0,
+            "network": "2001:db8:b::/48",
+            "primary": false,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          }
+        ]
+      }
+    },
+    "routes_table_v4": {
+      "endpoint": "api/routes/table/{table}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64497
+              ],
+              "communities": [
+                [
+                  64497,
+                  100
+                ]
+              ],
+              "large_communities": [
+                [
+                  64497,
+                  1,
+                  1
+                ]
+              ],
+              "local_pref": 0,
+              "med": 0,
+              "next_hop": "198.51.100.4",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb_as64497",
+            "gateway": "198.51.100.4",
+            "interface": "",
+            "learnt_from": "198.51.100.4",
+            "metric": 0,
+            "network": "192.0.2.0/24",
+            "primary": true,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          },
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64496,
+                64510,
+                64520
+              ],
+              "communities": [
+                [
+                  64496,
+                  100
+                ],
+                [
+                  64496,
+                  200
+                ]
+              ],
+              "large_communities": [
+                [
+                  64496,
+                  1,
+                  1
+                ],
+                [
+                  64496,
+                  1,
+                  2
+                ]
+              ],
+              "local_pref": 0,
+              "med": 10,
+              "next_hop": "198.51.100.2",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb_as64496",
+            "gateway": "198.51.100.2",
+            "interface": "",
+            "learnt_from": "198.51.100.2",
+            "metric": 0,
+            "network": "203.0.113.0/24",
+            "primary": true,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          },
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64496
+              ],
+              "communities": [
+                [
+                  64496,
+                  300
+                ]
+              ],
+              "large_communities": [
+                [
+                  64496,
+                  2,
+                  1
+                ]
+              ],
+              "local_pref": 0,
+              "med": 0,
+              "next_hop": "198.51.100.2",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb_as64496",
+            "gateway": "198.51.100.2",
+            "interface": "",
+            "learnt_from": "198.51.100.2",
+            "metric": 0,
+            "network": "203.0.113.128/25",
+            "primary": true,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          },
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64496
+              ],
+              "communities": [],
+              "large_communities": [],
+              "local_pref": 0,
+              "med": 30,
+              "next_hop": "198.51.100.2",
+              "origin": "Incomplete"
+            },
+            "from_protocol": "pb_as64496",
+            "gateway": "198.51.100.2",
+            "interface": "",
+            "learnt_from": "198.51.100.2",
+            "metric": 0,
+            "network": "203.0.113.64/26",
+            "primary": true,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          }
+        ]
+      }
+    },
+    "routes_table_v6": {
+      "endpoint": "api/routes/table/{table}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64496,
+                64510
+              ],
+              "communities": [
+                [
+                  64496,
+                  600
+                ]
+              ],
+              "large_communities": [
+                [
+                  64496,
+                  3,
+                  1
+                ]
+              ],
+              "local_pref": 0,
+              "med": 20,
+              "next_hop": "2001:db8:5100::2",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb6_as64496",
+            "gateway": "2001:db8:5100::2",
+            "interface": "",
+            "learnt_from": "2001:db8:5100::2",
+            "metric": 0,
+            "network": "2001:db8:a::/48",
+            "primary": true,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          },
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64496
+              ],
+              "communities": [
+                [
+                  64496,
+                  700
+                ]
+              ],
+              "large_communities": [
+                [
+                  64496,
+                  3,
+                  2
+                ]
+              ],
+              "local_pref": 0,
+              "med": 0,
+              "next_hop": "2001:db8:5100::2",
+              "origin": "EGP"
+            },
+            "from_protocol": "pb6_as64496",
+            "gateway": "2001:db8:5100::2",
+            "interface": "",
+            "learnt_from": "2001:db8:5100::2",
+            "metric": 0,
+            "network": "2001:db8:b::/48",
+            "primary": true,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          },
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                64497,
+                64530
+              ],
+              "communities": [
+                [
+                  64497,
+                  600
+                ]
+              ],
+              "large_communities": [
+                [
+                  64497,
+                  3,
+                  1
+                ]
+              ],
+              "local_pref": 0,
+              "med": 5,
+              "next_hop": "2001:db8:5100::4",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb6_as64497",
+            "gateway": "2001:db8:5100::4",
+            "interface": "",
+            "learnt_from": "2001:db8:5100::4",
+            "metric": 0,
+            "network": "2001:db8:c::/48",
+            "primary": true,
+            "type": [
+              "BGP",
+              "unicast",
+              "univ"
+            ]
+          }
+        ]
+      }
+    },
+    "status": {
+      "endpoint": "api/status",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "status": {
+          "current_server": "<timestamp>",
+          "last_reboot": "<timestamp>",
+          "last_reconfig": "<timestamp>",
+          "message": "rustbgpd AS65001",
+          "router_id": "10.0.0.1",
+          "server_time": "<timestamp>",
+          "version": "rustbgpd <version>"
+        }
+      }
+    },
+    "symbols": {
+      "endpoint": "api/symbols",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "symbols": {
+          "protocol": [
+            "pb6_as64496",
+            "pb6_as64497",
+            "pb_as64496",
+            "pb_as64497"
+          ],
+          "routing table": [
+            "master4",
+            "master6"
+          ]
+        }
+      }
+    },
+    "wildcard_daemon": {
+      "endpoint": "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 1024,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "retention": {
+          "capacity": 1024,
+          "enabled": true,
+          "evictions_since_reset": 0,
+          "may_be_incomplete": false
+        },
+        "routes": []
+      }
+    },
+    "wildcard_foreign": {
+      "endpoint": "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}",
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "retention": {
+          "capacity": null,
+          "enabled": null,
+          "evictions_since_reset": null,
+          "may_be_incomplete": null
+        },
+        "routes": []
+      }
+    }
+  },
+  "provenance": {
+    "birdseye_commit": "7f8c2375e610578bcf6ea5ceec630a180f945b89",
+    "ixp_manager_commit": "300b7e0ba9adb0aaac975899e45fc8bcbc0ca37d",
+    "leg": "live",
+    "normalization": [
+      "timestamps -> <timestamp>",
+      "rustbgpd <semver> -> rustbgpd <version>",
+      "hold_timer_now and keepalive_now -> <countdown>",
+      "each leg's own route-server addresses -> <route-server>",
+      "routes sorted by network, symbol lists sorted"
+    ],
+    "software": "rustbgpd + birdwatcher-adapter"
+  }
+}
