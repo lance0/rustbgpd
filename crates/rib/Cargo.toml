@@ -23,7 +23,6 @@ rustc-hash.workspace = true
 prefix-trie.workspace = true
 ipnet.workspace = true
 lru.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

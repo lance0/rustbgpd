@@ -15,7 +15,6 @@ readme = "README.md"
 rustbgpd-telemetry.workspace = true
 rustbgpd-wire.workspace = true
 bytes.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
