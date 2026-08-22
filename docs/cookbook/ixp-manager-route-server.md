@@ -581,6 +581,15 @@ carries IXP Manager's per-session password verbatim; a member whose IXP
 Manager record has a placeholder or overlong password is refused at render,
 not silently rendered without authentication.
 
+**The route server is missing from the generated Nagios configuration, and
+nothing complained.** If the router row in IXP Manager was added without
+API type `Birdseye` and the Birdwatcher adapter URL, both of IXP Manager's
+Nagios configuration generators return HTTP 200 and silently omit the
+router — an unmonitored route server with no error anywhere
+([M98](../INTEROP.md), against pinned v7.4.0). Fix: set the router row's
+API type to `Birdseye` and its API URL to the adapter. Check: the generated
+Nagios configuration must contain the router's host entry.
+
 **The looking glass shows `bgp_<address>` names instead of `pb_…`.** The
 adapter was not pointed at the published alias file, or was not SIGHUPed
 after activation. Point it at the `current` path (not a generation path)
