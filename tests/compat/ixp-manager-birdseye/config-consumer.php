@@ -12,6 +12,12 @@ require $ixp . '/vendor/autoload.php';
 $app = require $ixp . '/bootstrap/app.php';
 require_once $ixp . '/version.php';
 $app->make(Kernel::class)->bootstrap();
+// The console bootstrap renders uncaught exceptions to stdout and exits 0;
+// the gate must go red instead.
+set_exception_handler(static function (Throwable $exception): never {
+    fwrite(STDERR, $exception . "\n");
+    exit(1);
+});
 
 $output = rtrim((string)getenv('CAPTURE_OUTPUT'), '/');
 $router = Router::whereHandle('b2-rs1-lan1-ipv4')->firstOrFail();

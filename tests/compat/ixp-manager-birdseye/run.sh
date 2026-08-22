@@ -240,4 +240,7 @@ test supported-leading-set-fails-closed {
     expect client-1-receive == error absent-prepend-operand
 }'
 
-"$root/run-adapter-consumer.sh" "$tmp/ixp-manager" "$image" >/dev/null
+mysql_address=$(docker inspect \
+  --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$mysql")
+"$root/run-adapter-consumer.sh" "$tmp/ixp-manager" "$image" "$tmp/birdseye" \
+  "$mysql_address" >/dev/null

@@ -5,6 +5,8 @@ root=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo=$(CDPATH='' cd -- "$root/../../.." && pwd)
 ixp_manager=${1:?IXP Manager checkout is required}
 image=${2:?PHP contract image is required}
+birdseye=${3:?Birdseye checkout is required}
+database=${4:?IXP Manager MySQL address is required}
 tmp=$(mktemp -d)
 daemon_pid=
 adapter_pid=
@@ -110,3 +112,20 @@ if grep -q 'secret_member\|secret_peer' "$tmp/adapter.log"; then
   exit 1
 fi
 run_consumer pb_reloaded_as64496
+
+# Both pinned Nagios generators filter routers on api_type = Birdseye, so an
+# excluded route server is simply absent from generated monitoring. Point the
+# fixture router at the live adapter, render both generators, then run the
+# pinned daemon plugin against the _apiurl the generator emitted. The host
+# network namespace reaches both the loopback adapter and the MySQL bridge
+# address; the pinned IXP Manager database config has no port knob.
+docker run --rm --network host --user "$(id -u):$(id -g)" \
+  --env IXP_MANAGER_ROOT=/upstreams/ixp-manager \
+  --env BIRDSEYE_ROOT=/upstreams/birdseye \
+  --env BIRDSEYE_API="http://127.0.0.1:$port" \
+  --env DB_HOST="$database" \
+  --env DB_DATABASE=ixp_ci --env DB_USERNAME=root --env DB_PASSWORD= \
+  --volume "$root:/harness:ro" \
+  --volume "$ixp_manager:/upstreams/ixp-manager" \
+  --volume "$birdseye:/upstreams/birdseye:ro" \
+  "$image" php /harness/nagios-consumer.php

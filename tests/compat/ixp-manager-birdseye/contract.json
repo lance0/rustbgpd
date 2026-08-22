@@ -53,6 +53,12 @@
     "defined_only_ids": [2, 4, 11, 12, 15],
     "fallback_id": 0
   },
+  "nagios_monitoring": {
+    "router_filter": "api_type = Birdseye",
+    "generators": ["birdseye-daemons", "birdseye-bgp-sessions"],
+    "daemon_check": "nagios-check-birdseye.php",
+    "session_protocol": "pb_{vlan_interface_id:04}_as{asn}"
+  },
   "runtime_compatibility": false,
   "manual_config_export": {
     "schema": "rustbgpd.ixp-manager.router-config/v2",

@@ -76,6 +76,12 @@ REJECT_REASONS = {
     "defined_only_ids": [2, 4, 11, 12, 15],
     "fallback_id": 0,
 }
+NAGIOS_MONITORING = {
+    "router_filter": "api_type = Birdseye",
+    "generators": ["birdseye-daemons", "birdseye-bgp-sessions"],
+    "daemon_check": "nagios-check-birdseye.php",
+    "session_protocol": "pb_{vlan_interface_id:04}_as{asn}",
+}
 MANUAL_CONFIG_EXPORT = {
     "schema": "rustbgpd.ixp-manager.router-config/v2",
     "ixp_manager_version": "7.4.0",
@@ -180,6 +186,8 @@ if manifest.get("reject_reasons") != REJECT_REASONS:
     fail("pinned reject-reason display or active partition drifted")
 if manifest.get("manual_config_export") != MANUAL_CONFIG_EXPORT:
     fail("strict manual v2 export contract drifted")
+if manifest.get("nagios_monitoring") != NAGIOS_MONITORING:
+    fail("pinned Nagios monitoring contract drifted")
 consumer_source = (root / "config-consumer.php").read_text()
 for required in [
     "$router->template = 'api/v4/router/server/bird2/standard';",
