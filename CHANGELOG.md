@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `bench/scale/compare-rrharness.sh` now compares any two refs: `--base`/`--head`
+  are the only required inputs, the original grouped exact-export pin is
+  opt-in via `--pin FILE --diff-path PATH`, and unpinned runs write an
+  advisory `comparison.csv` plus a per-rung `summary.csv` instead of applying
+  the pinned throughput gates (`parse_rrharness.py compare --no-gates
+  --summary`). `bench/compare-criterion.sh` prints an explicit noise line in
+  its verdict and `bench/README.md` documents it as the local replacement for
+  the removed CI bench workflows. (LAN-1234)
 - `rs-config-render prune --keep N` removes activation generations that no
   retention rule keeps: the `current` target, the last activation receipt's
   candidate and predecessor, anything a pending lifecycle journal names, and

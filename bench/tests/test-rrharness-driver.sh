@@ -1,31 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo=$(git rev-parse --show-toplevel)
-driver="$repo/bench/scale/compare-rrharness.sh"
-pin_rel=bench/scale/rebaseline/lan395-run-pin.env
-pin="$repo/$pin_rel"
-
-# The retained driver deliberately refuses to measure from any descendant of
-# the exact pin commit. Once the receipt documentation is added above that
-# commit, run the mechanics suite from a clean detached pin worktree instead
-# of weakening the measurement fence for ordinary CI checkouts.
-pin_commit=$(git -C "$repo" log -1 --format=%H -- "$pin_rel")
-current_commit=$(git -C "$repo" rev-parse --verify HEAD)
-if [[ $current_commit != "$pin_commit" ]]; then
-  pin_worktree=$(mktemp -d "${TMPDIR:-/tmp}/lan395-pin-worktree.XXXXXX")
-  rmdir "$pin_worktree"
+# The driver requires a clean invoking checkout, so exercise it from a fresh
+# detached worktree at HEAD rather than trusting the caller's tree (CI leaves
+# build output around; a developer may have edits in flight).
+if [[ -z ${RRHARNESS_DRIVER_TEST_WORKTREE:-} ]]; then
+  origin=$(git rev-parse --show-toplevel)
+  worktree=$(mktemp -d "${TMPDIR:-/tmp}/rrharness-driver-test.XXXXXX")
+  rmdir "$worktree"
   # shellcheck disable=SC2317 # Invoked indirectly by the trap below.
-  cleanup_pin_worktree() {
-    git -C "$repo" worktree remove --force "$pin_worktree" >/dev/null 2>&1 || true
+  cleanup_worktree() {
+    git -C "$origin" worktree remove --force "$worktree" >/dev/null 2>&1 || true
   }
-  trap cleanup_pin_worktree EXIT INT TERM
-  git -C "$repo" worktree add --detach "$pin_worktree" "$pin_commit" >/dev/null
-  (cd "$pin_worktree" && bench/tests/test-rrharness-driver.sh)
+  trap cleanup_worktree EXIT INT TERM
+  git -C "$origin" worktree add --detach "$worktree" HEAD >/dev/null
+  (cd "$worktree" && RRHARNESS_DRIVER_TEST_WORKTREE=1 bench/tests/test-rrharness-driver.sh)
   exit
 fi
 
-marker="$repo/.lan395-dirty-probe"
+repo=$(git rev-parse --show-toplevel)
+driver="$repo/bench/scale/compare-rrharness.sh"
+pin="$repo/bench/scale/rebaseline/lan395-run-pin.env"
+diff_path=crates/rib/src/manager/distribution/mod.rs
+
+marker="$repo/.rrharness-dirty-probe"
 external_driver=$(mktemp "${TMPDIR:-/tmp}/compare-rrharness.XXXXXX")
 privacy_fixture=$(mktemp -d "${TMPDIR:-/tmp}/rrharness-privacy.XXXXXX")
 cleanup() {
@@ -39,43 +37,46 @@ pin_value() {
   awk -F= -v key="$key" '$1 == key { print substr($0, length(key) + 2) }' "$pin"
 }
 
+expect_rc() {
+  local expected=$1 label=$2 rc=0
+  shift 2
+  "$@" >/dev/null 2>&1 || rc=$?
+  [[ $rc -eq $expected ]] || {
+    printf '%s returned %s instead of %s\n' "$label" "$rc" "$expected" >&2
+    exit 1
+  }
+}
+
 base=$(pin_value base_commit)
 head=$(pin_value head_commit)
 [[ -n $base && -n $head ]]
+git -C "$repo" cat-file -e "${base}^{commit}"
+git -C "$repo" cat-file -e "${head}^{commit}"
 
+"$driver" --help >/dev/null
 "$driver" --validate-only --base "$base" --head "$head" >/dev/null
+"$driver" --validate-only --base "$base" --head "$head" \
+  --pin "$pin" --diff-path "$diff_path" >/dev/null
 
-set +e
-"$driver" --validate-only --base "$head" --head "$head" >/dev/null 2>&1
-wrong_ref_rc=$?
-set -e
-[[ $wrong_ref_rc -eq 2 ]] || {
-  printf 'wrong pinned ref returned %s instead of 2\n' "$wrong_ref_rc" >&2
-  exit 1
-}
+expect_rc 2 'missing --base' "$driver" --validate-only --head "$head"
+expect_rc 2 'identical refs' "$driver" --validate-only --base "$head" --head "$head"
+expect_rc 2 'pinned ref drift' "$driver" --validate-only \
+  --base "${base}~1" --head "$head" --pin "$pin" --diff-path "$diff_path"
+expect_rc 2 '--pin without --diff-path' "$driver" --validate-only \
+  --base "$base" --head "$head" --pin "$pin"
+expect_rc 2 '--diff-path without --pin' "$driver" --validate-only \
+  --base "$base" --head "$head" --diff-path "$diff_path"
+expect_rc 2 'pinned diff drift' "$driver" --validate-only \
+  --base "$base" --head "$head" --pin "$pin" --diff-path bench/scale/rrharness/README.md
 
 cp "$driver" "$external_driver"
 chmod +x "$external_driver"
-set +e
-"$external_driver" --validate-only --base "$base" --head "$head" >/dev/null 2>&1
-external_rc=$?
-set -e
-[[ $external_rc -eq 2 ]] || {
-  printf 'external driver returned %s instead of 2\n' "$external_rc" >&2
-  exit 1
-}
+expect_rc 2 'external driver' "$external_driver" --validate-only --base "$base" --head "$head"
 
 [[ ! -e $marker ]]
 touch "$marker"
-set +e
-"$driver" --validate-only --base "$base" --head "$head" >/dev/null 2>&1
-dirty_rc=$?
-set -e
+expect_rc 1 'dirty checkout' "$driver" --validate-only --base "$base" --head "$head"
 rm -f "$marker"
-[[ $dirty_rc -eq 1 ]] || {
-  printf 'dirty checkout returned %s instead of 1\n' "$dirty_rc" >&2
-  exit 1
-}
 
 mkdir -p "$privacy_fixture/measurement-sources" "$privacy_fixture/raw"
 printf 'pid vocabulary belongs in retained reviewed source\n' \
@@ -110,9 +111,12 @@ rg -F 'privacy scan failed while inspecting' "$driver" >/dev/null || {
   printf 'rrharness driver does not fail closed on privacy scanner errors\n' >&2
   exit 1
 }
-
 rg -F 'export PYTHONDONTWRITEBYTECODE=1' "$driver" >/dev/null || {
   printf 'rrharness driver does not disable retained Python bytecode writes\n' >&2
+  exit 1
+}
+rg -F 'cargo build --release --locked' "$driver" >/dev/null || {
+  printf 'rrharness driver does not build both sides with --release --locked\n' >&2
   exit 1
 }
 mkdir "$privacy_fixture/python-import"
@@ -124,4 +128,4 @@ PYTHONPATH="$privacy_fixture/python-import" PYTHONDONTWRITEBYTECODE=1 \
   exit 1
 }
 
-printf 'LAN-395 rrharness driver mechanics passed\n'
+printf 'rrharness driver mechanics passed\n'
