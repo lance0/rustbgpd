@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A `semver-checks` CI workflow runs `cargo-semver-checks` for every
+  publishable workspace crate (re-derived from the manifests; today
+  `rustbgpd-wire` and `rustbgpd-fsm`) against its latest crates.io release on
+  pull requests that touch the crate, so an API break without the matching
+  version bump fails before publish. (LAN-1209)
+
 - The Shutdown RPC now synchronously signals main's coordinated teardown watch
   without sending directly to PeerManager. Quickstart timeout failures kill and
   reap the daemon before preserving stderr and cleanup evidence; this removes

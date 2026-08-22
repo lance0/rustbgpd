@@ -684,7 +684,9 @@ changed.
 1. **Did `crates/wire/` change since the last wire publish?**
    - If no: skip. Do not publish a no-op release.
    - If yes: continue.
-2. Decide semver bump (see below)
+2. Decide semver bump (see below). The `semver-checks` workflow already
+   compared the crate against its latest crates.io release on the PR, so a
+   bump it reported as required is not optional.
 3. Update `version` in `crates/wire/Cargo.toml`
 4. Add a `rustbgpd-wire` entry in `CHANGELOG.md`
 5. `cargo publish -p rustbgpd-wire --dry-run`
@@ -716,6 +718,8 @@ do not force an FSM release for every daemon tag.
      non-breaking negotiation surfaces.
    - **Major**: changed method signatures, removed variants, or enum/struct
      shape changes not protected by `#[non_exhaustive]`.
+   The `semver-checks` workflow applies the same crates.io comparison to this
+   crate on the PR.
 3. Update `version` in `crates/fsm/Cargo.toml`
 4. Add a `rustbgpd-fsm` entry in `CHANGELOG.md`
 5. `cargo publish -p rustbgpd-fsm --dry-run`

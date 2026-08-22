@@ -425,9 +425,10 @@ To be the de facto Rust BGP codec, the concrete gaps:
    crate* (gated on a `tokio-codec` feature that pulls `bytes` only — no full
    tokio) so any async consumer gets framed decode for free. This is the
    "battery-included" ergonomic that bgp-rs/zettabgp lack.
-3. **Run `cargo-semver-checks` in CI** against the published wire crate so
-   accidental breaking changes are caught before publish. Add to
-   `.github/workflows/ci.yml` on the wire crate path.
+3. **Run `cargo-semver-checks` in CI** against the published crates so
+   accidental breaking changes are caught before publish. Done: the
+   `semver-checks` workflow checks every publishable workspace crate against
+   its latest crates.io release on pull requests that touch it.
 4. **docs.rs is the storefront.** Ensure `cargo doc` is warning-clean (already
    a release gate) and that the README's supported-RFC table stays the landing
    page. Add per-type examples in doc-comments for `decode_message`,
