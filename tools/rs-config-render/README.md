@@ -296,6 +296,46 @@ route server spends about 2.3 MiB per distinct generation; an hourly lifecycle
 whose render differs every run (the worst case) would retain about 20 GiB a
 year unpruned, and `--keep 48` bounds it to about 110 MiB.
 
+### Inspecting activation and lifecycle state
+
+`status` reads the three durable artifacts that define an exit 5 — the host
+fence, the lifecycle journal, and the generation tree with its `current` link —
+plus the advisory activation receipt, and prints one `key: value` line per
+field in a fixed order. It takes the same binding flags as `activate` and
+changes nothing; with `--rbgp` it also runs the settle path's own probe
+(`rbgp health`, then `rbgp config diff` against the `current` generation):
+
+```console
+sudo -u rustbgpd /usr/bin/rs-config-render status \
+  --router-handle rs1-ipv4 \
+  --runtime-state-dir /var/lib/rustbgpd/rs1-ipv4 \
+  --state-dir /var/lib/rustbgpd/rs1-ipv4/activation \
+  --host-state-dir /var/lib/rustbgpd/ixp-manager-host \
+  --rbgp-addr unix:///var/lib/rustbgpd/rs1-ipv4/grpc.sock \
+  --rbgp /usr/bin/rbgp
+```
+
+| Key | Values |
+|---|---|
+| `fence` | `absent`, `present` (this binding's; automation may not resume), `foreign` (another handle's), `unreadable` |
+| `journal` | `absent`, `present`, `unreadable` |
+| `phase`, `callback`, `callback_attempts`, `activation_outcome`, `error_class` | the journal's own values; `none`/`0` without a journal |
+| `lock` | the upstream update lock as the journal proves it: `none` (no journal), `retained`, `unknown` (the lock request itself was ambiguous) |
+| `current` | the `current` target, `none`, or `invalid (<reason>)` |
+| `candidate` | the generation the journal's render receipt names; without a journal, `current` when the receipt describes it; `none` when the journal proves no candidate was rendered; else `unknown` |
+| `current_is_candidate` | `yes`, `no`, `unknown` |
+| `advisory_receipt` | `matches-current` (its `candidate_sha256` is the `current` target), `stale`, `absent`, `unreadable`; the receipt is advisory and may be absent or stale after an exit 5 |
+| `advisory_receipt_status`, `advisory_receipt_previous_generation` | the receipt's values or `none` |
+| `daemon` | `not-probed` (no `--rbgp`), `healthy`, `unhealthy`, `unreachable`, `invalid` |
+| `runtime_equals_current` | `yes`, `no`, `unknown` (not probed, unreachable, or no valid `current`) |
+
+Exit 0 whenever the state could be read — manual recovery is a report, not an
+error — and 1 only when the state directory is unreadable. `status` takes no
+lock and writes nothing durable; the comparison file it hands to `rbgp config
+diff` is created and removed inside the state directory. The
+[manual-recovery runbook](../../docs/cookbook/activation-manual-recovery.md)
+reads its output field by field.
+
 Release tarballs (`rustbgpd-<arch>.tar.gz` on the [releases
 page](https://github.com/lance0/rustbgpd/releases)) ship the
 `rs-config-render` binary alongside `rustbgpd` and `rbgp`; from
@@ -371,7 +411,7 @@ stuck for more than a couple of refresh intervals should page, not rot.
 ## Exit codes
 
 One table for every subcommand (`render`, `--input-format ixp-manager-*`,
-`activate`, `ixp-manager-lifecycle run|resume`): each code has exactly one
+`activate`, `ixp-manager-lifecycle run|resume`, `prune`, `status`): each code has exactly one
 meaning, so a cron or systemd wrapper can branch on the code alone without
 knowing which subcommand ran. The mapping is asserted by
 `tests/exit_codes.rs` against this table and its mirror in
@@ -392,7 +432,9 @@ knowing which subcommand ran. The mapping is asserted by
 
 Codes 1–4 and 8–9 leave the previous configuration running untouched
 (fail-stale); 5 and 6 need an operator; 7 is safe to retry. `prune` uses 0, 2
-(fenced, busy, or unreadable forensic state — nothing removed), and 8.
+(fenced, busy, or unreadable forensic state — nothing removed), and 8. `status`
+uses 0 (any readable state, manual recovery included), 1 (unreadable state
+directory), and 2 (invalid binding).
 
 Refused knobs: RTT-based communities and `rtt_thresholds` (the daemon
 has no RTT source; permanent), configured

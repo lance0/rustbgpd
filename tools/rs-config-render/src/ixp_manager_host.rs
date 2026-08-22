@@ -142,7 +142,9 @@ mod unix {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound
         )
     }
-    fn read_fence(state: &Path) -> Result<Option<Binding>, Error> {
+    /// The fence's owner binding: `Ok(None)` when no fence exists, `Err` when
+    /// one exists but is not a private, well-formed fence.
+    pub(crate) fn read_fence(state: &Path) -> Result<Option<Binding>, Error> {
         let path = state.join(FENCE);
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
@@ -227,4 +229,4 @@ mod unix {
 #[cfg(unix)]
 pub use unix::Guard;
 #[cfg(unix)]
-pub(crate) use unix::fence_present;
+pub(crate) use unix::{fence_present, read_fence};
