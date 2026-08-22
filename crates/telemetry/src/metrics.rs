@@ -1908,7 +1908,7 @@ impl BgpMetrics {
         let mrt_dump_interval_seconds = IntGauge::new(
             "mrt_dump_interval_seconds",
             "Configured seconds between periodic MRT TABLE_DUMP_V2 dumps \
-             ([mrt] dump_interval). Exists only when [mrt] is configured.",
+             ([mrt] dump_interval); 0 when [mrt] is not configured.",
         )
         .expect("valid metric definition");
         let mrt_last_dump_success_timestamp = IntGauge::new(
