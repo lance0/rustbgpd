@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::Exit;
 use crate::ixp_manager_host::Binding;
 
 #[derive(Debug)]
@@ -29,6 +30,16 @@ pub enum Error {
     Refused(&'static str),
     RolledBack,
     RecoveryRequired,
+}
+
+impl Error {
+    pub const fn exit_code(&self) -> Exit {
+        match self {
+            Self::Refused(_) => Exit::Refused,
+            Self::RolledBack => Exit::RolledBack,
+            Self::RecoveryRequired => Exit::ManualRecovery,
+        }
+    }
 }
 
 #[cfg(not(unix))]

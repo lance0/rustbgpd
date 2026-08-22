@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::Exit;
 use crate::ixp_manager_host::Binding;
 
 #[derive(Debug)]
@@ -53,12 +54,12 @@ pub enum Error {
 }
 
 impl Error {
-    pub const fn exit_code(&self) -> u8 {
+    pub const fn exit_code(&self) -> Exit {
         match self {
-            Self::Refused(_) => 2,
-            Self::RolledBack => 4,
-            Self::ManualRecovery => 5,
-            Self::CallbackPending => 6,
+            Self::Refused(_) => Exit::Refused,
+            Self::RolledBack => Exit::RolledBack,
+            Self::ManualRecovery => Exit::ManualRecovery,
+            Self::CallbackPending => Exit::CallbackPending,
         }
     }
 }

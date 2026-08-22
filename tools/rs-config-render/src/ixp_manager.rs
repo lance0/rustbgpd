@@ -11,6 +11,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::Exit;
 use crate::ixp_manager_host::RenderBinding;
 
 #[cfg(unix)]
@@ -53,11 +54,12 @@ pub enum Error {
 }
 
 impl Error {
-    pub const fn exit_code(&self) -> u8 {
+    pub const fn exit_code(&self) -> Exit {
         match self {
-            Self::Input => 1,
-            Self::Refused(_) => 2,
-            Self::Output | Self::Checker => 3,
+            Self::Input => Exit::InvalidInput,
+            Self::Refused(_) => Exit::Refused,
+            Self::Output => Exit::OutputUnusable,
+            Self::Checker => Exit::StrictCheckFailed,
         }
     }
 }

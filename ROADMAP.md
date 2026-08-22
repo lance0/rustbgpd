@@ -616,7 +616,7 @@ ships as `tools/rs-config-render`. Its manual IXP Manager v7.4 seam now accepts
 an original Foil JSON export, fails closed on unsupported effective policy, and
 writes a private candidate, validates it with the selected rustbgpd binary's
 strict offline check, then writes the validated receipt last. Its local helper
-now rechecks, atomically publishes and settles immutable generations. Exit 4
+now rechecks, atomically publishes and settles immutable generations. Exit 7
 is limited to a command that could not start and proves exact prior-link/runtime
 restoration without a second activation. A started command that fails or does
 not settle leaves the candidate current; exit 5 requires explicit recovery.

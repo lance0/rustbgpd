@@ -11,7 +11,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use rs_config_render::{
-    Options, RenderError, SiteLocalFile, SiteLocalInput, render, render_site_local,
+    Exit, Options, RenderError, SiteLocalFile, SiteLocalInput, render, render_site_local,
 };
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -230,14 +230,14 @@ fn stdout_exit_with(
     diagnostic: &mut dyn std::io::Write,
 ) -> ExitCode {
     match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(StdoutWriteError::BrokenPipe) => ExitCode::from(1),
+        Ok(()) => Exit::Success.into(),
+        Err(StdoutWriteError::BrokenPipe) => Exit::InvalidInput.into(),
         Err(StdoutWriteError::Other(error)) => {
             let _ = writeln!(
                 diagnostic,
                 "rs-config-render: failed to write stdout: {error}"
             );
-            ExitCode::from(1)
+            Exit::InvalidInput.into()
         }
     }
 }
@@ -279,7 +279,7 @@ fn lifecycle_exit(
         }
         Err(error) => {
             eprintln!("rs-config-render: IXP Manager lifecycle: {error}");
-            ExitCode::from(error.exit_code())
+            error.exit_code().into()
         }
     }
 }
@@ -293,7 +293,7 @@ fn main() -> ExitCode {
                     Ok(binding) => binding,
                     Err(reason) => {
                         eprintln!("rs-config-render: IXP Manager lifecycle: {reason}");
-                        return ExitCode::from(2);
+                        return Exit::Refused.into();
                     }
                 };
                 lifecycle_exit(rs_config_render::ixp_manager_lifecycle::run(
@@ -323,7 +323,7 @@ fn main() -> ExitCode {
                     Ok(binding) => binding,
                     Err(reason) => {
                         eprintln!("rs-config-render: IXP Manager lifecycle: {reason}");
-                        return ExitCode::from(2);
+                        return Exit::Refused.into();
                     }
                 };
                 lifecycle_exit(rs_config_render::ixp_manager_lifecycle::resume(
@@ -345,7 +345,7 @@ fn main() -> ExitCode {
             Ok(binding) => binding,
             Err(reason) => {
                 eprintln!("rs-config-render: activation: {reason}");
-                return ExitCode::from(2);
+                return Exit::Refused.into();
             }
         };
         let options = rs_config_render::activation::Options {
@@ -371,18 +371,17 @@ fn main() -> ExitCode {
                 }))
             }
             Err(error) => {
-                let (code, message) = match error {
-                    rs_config_render::activation::Error::Refused(reason) => (2, reason),
-                    rs_config_render::activation::Error::RolledBack => (
-                        4,
-                        "activation command did not start; prior generation restored",
-                    ),
+                let message = match error {
+                    rs_config_render::activation::Error::Refused(reason) => reason,
+                    rs_config_render::activation::Error::RolledBack => {
+                        "activation command did not start; prior generation restored"
+                    }
                     rs_config_render::activation::Error::RecoveryRequired => {
-                        (5, "recovery required; inspect private activation state")
+                        "recovery required; inspect private activation state"
                     }
                 };
                 eprintln!("rs-config-render: activation: {message}");
-                ExitCode::from(code)
+                error.exit_code().into()
             }
         };
     }
@@ -401,7 +400,7 @@ fn main() -> ExitCode {
             || cli.allow_shape_drift
         {
             eprintln!("rs-config-render: IXP Manager mode does not accept arouteserver options");
-            return ExitCode::from(2);
+            return Exit::Refused.into();
         }
         let (Some(restart), Some(checker)) =
             (cli.max_prefix_restart_seconds, cli.check_with.as_deref())
@@ -409,7 +408,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "rs-config-render: IXP Manager mode requires --max-prefix-restart-seconds and --check-with"
             );
-            return ExitCode::from(2);
+            return Exit::Refused.into();
         };
         let (Some(handle), Some(runtime)) = (
             cli.router_handle.as_deref(),
@@ -418,14 +417,14 @@ fn main() -> ExitCode {
             eprintln!(
                 "rs-config-render: IXP Manager mode requires --router-handle and --runtime-state-dir"
             );
-            return ExitCode::from(2);
+            return Exit::Refused.into();
         };
         let binding = match rs_config_render::ixp_manager_host::RenderBinding::new(handle, runtime)
         {
             Ok(binding) => binding,
             Err(reason) => {
                 eprintln!("rs-config-render: {reason}");
-                return ExitCode::from(2);
+                return Exit::Refused.into();
             }
         };
         return match rs_config_render::ixp_manager::write_checked_candidate(
@@ -445,7 +444,7 @@ fn main() -> ExitCode {
             })),
             Err(error) => {
                 eprintln!("rs-config-render: {error}");
-                ExitCode::from(error.exit_code())
+                error.exit_code().into()
             }
         };
     }
@@ -457,7 +456,7 @@ fn main() -> ExitCode {
         eprintln!(
             "rs-config-render: IXP Manager options require --input-format ixp-manager-v1 or ixp-manager-v2"
         );
-        return ExitCode::from(2);
+        return Exit::Refused.into();
     }
     if customized && (cli.extra_rpol.is_empty() || cli.merge_toml.len() != 1) {
         eprintln!(
@@ -467,7 +466,7 @@ fn main() -> ExitCode {
                     .into(),
             ])
         );
-        return ExitCode::from(2);
+        return Exit::Refused.into();
     }
     let context = match std::fs::read_to_string(&cli.context) {
         Ok(context) => context,
@@ -476,7 +475,7 @@ fn main() -> ExitCode {
                 "rs-config-render: cannot read {}: {e}",
                 cli.context.display()
             );
-            return ExitCode::from(1);
+            return Exit::InvalidInput.into();
         }
     };
     let opts = Options {
@@ -503,7 +502,7 @@ fn main() -> ExitCode {
         Ok(site) => site,
         Err(error) => {
             eprintln!("rs-config-render: {error}");
-            return ExitCode::from(1);
+            return Exit::InvalidInput.into();
         }
     };
     let rendered = match site.as_ref().map_or_else(
@@ -513,7 +512,7 @@ fn main() -> ExitCode {
         Ok(rendered) => rendered,
         Err(e) => {
             eprintln!("rs-config-render: {e}");
-            return ExitCode::from(u8::try_from(e.exit_code()).unwrap_or(1));
+            return e.exit_code().into();
         }
     };
     for warning in &rendered.warnings {
@@ -525,11 +524,11 @@ fn main() -> ExitCode {
             && let Err(e) = std::fs::create_dir_all(parent)
         {
             eprintln!("rs-config-render: cannot create {}: {e}", parent.display());
-            return ExitCode::from(1);
+            return Exit::OutputUnusable.into();
         }
         if let Err(e) = std::fs::write(&path, contents) {
             eprintln!("rs-config-render: cannot write {}: {e}", path.display());
-            return ExitCode::from(1);
+            return Exit::OutputUnusable.into();
         }
     }
     let receipt_path = cli.out_dir.join("render-receipt.json");
@@ -540,7 +539,7 @@ fn main() -> ExitCode {
             "rs-config-render: cannot write {}: {e}",
             receipt_path.display()
         );
-        return ExitCode::from(1);
+        return Exit::OutputUnusable.into();
     }
     stdout_exit(write_stdout(|writer| {
         writeln!(
@@ -565,13 +564,16 @@ mod tests {
         let result = write_stdout_with(&mut writer, |out| out.write_all(b"complete"));
         assert_eq!(writer.buffer(), b"complete");
         let mut err = Vec::new();
-        assert_eq!(stdout_exit_with(result, &mut err), ExitCode::from(1));
+        assert_eq!(
+            stdout_exit_with(result, &mut err),
+            ExitCode::from(Exit::InvalidInput)
+        );
         let err_text = String::from_utf8(err.clone()).unwrap();
         assert!(err_text.starts_with("rs-config-render: failed to write stdout: "));
         assert!(err_text.ends_with('\n'));
         err.clear();
         let broken = stdout_exit_with(Err(StdoutWriteError::BrokenPipe), &mut err);
-        assert_eq!(broken, ExitCode::from(1));
+        assert_eq!(broken, ExitCode::from(Exit::InvalidInput));
         assert!(err.is_empty());
     }
 }

@@ -1,0 +1,164 @@
+//! One exit-code namespace for every subcommand: the `Exit` enum is the only
+//! source of numbers, every error type maps into it, and the README table
+//! (plus its `docs/deployment.md` mirror) must list exactly those codes.
+
+use rs_config_render::{Exit, RenderError, activation, ixp_manager, ixp_manager_lifecycle};
+
+fn table_rows(markdown: &str) -> Vec<String> {
+    let mut lines = markdown.lines();
+    let mut tables = Vec::new();
+    while let Some(line) = lines.next() {
+        if line.trim() != "| Exit | Meaning |" {
+            continue;
+        }
+        assert_eq!(lines.next().map(str::trim), Some("|---|---|"));
+        let rows: Vec<String> = lines
+            .by_ref()
+            .take_while(|l| l.starts_with('|'))
+            .map(str::to_owned)
+            .collect();
+        tables.push(rows);
+    }
+    assert_eq!(
+        tables.len(),
+        1,
+        "expected exactly one `| Exit | Meaning |` table"
+    );
+    tables.pop().unwrap()
+}
+
+fn row_code(row: &str) -> u8 {
+    row.trim_start_matches('|')
+        .split('|')
+        .next()
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("exit-code row without a numeric first column: {row}"))
+}
+
+#[test]
+fn every_exit_code_is_unique_and_enumerated() {
+    // Exhaustiveness witness: adding an `Exit` variant fails to compile here
+    // until it is also added to `Exit::ALL` and the README table.
+    for exit in Exit::ALL {
+        match exit {
+            Exit::Success
+            | Exit::InvalidInput
+            | Exit::Refused
+            | Exit::Implausible
+            | Exit::ShapeDrift
+            | Exit::ManualRecovery
+            | Exit::CallbackPending
+            | Exit::RolledBack
+            | Exit::OutputUnusable
+            | Exit::StrictCheckFailed => {}
+        }
+    }
+    let codes: Vec<u8> = Exit::ALL.iter().map(|e| e.code()).collect();
+    assert_eq!(codes, (0..=9).collect::<Vec<u8>>());
+    assert_eq!(
+        std::process::ExitCode::from(Exit::RolledBack),
+        std::process::ExitCode::from(7)
+    );
+}
+
+#[test]
+fn readme_table_and_deployment_mirror_list_exactly_the_enum() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
+    let deployment = std::fs::read_to_string(root.join("../../docs/deployment.md")).unwrap();
+    let rows = table_rows(&readme);
+    assert_eq!(
+        rows,
+        table_rows(&deployment),
+        "docs/deployment.md exit-code table must mirror the README byte for byte"
+    );
+    let documented: Vec<u8> = rows.iter().map(|r| row_code(r)).collect();
+    let defined: Vec<u8> = Exit::ALL.iter().map(|e| e.code()).collect();
+    assert_eq!(
+        documented, defined,
+        "README exit-code table drifted from `Exit`"
+    );
+}
+
+#[test]
+fn every_error_variant_maps_to_the_shared_table() {
+    // Each list is exhaustive for its enum; a new variant must be added here
+    // (the `match` in each closure makes omission a compile error).
+    let render = [
+        (RenderError::Parse(String::new()), Exit::InvalidInput),
+        (RenderError::Refused(Vec::new()), Exit::Refused),
+        (RenderError::Implausible(Vec::new()), Exit::Implausible),
+        (
+            RenderError::ShapeMismatch {
+                expected_fingerprint: String::new(),
+                found_fingerprint: String::new(),
+                missing: Vec::new(),
+                unexpected: Vec::new(),
+            },
+            Exit::ShapeDrift,
+        ),
+    ];
+    for (error, exit) in &render {
+        match error {
+            RenderError::Parse(_)
+            | RenderError::Refused(_)
+            | RenderError::Implausible(_)
+            | RenderError::ShapeMismatch { .. } => {}
+        }
+        assert_eq!(error.exit_code(), *exit, "{error:?}");
+    }
+
+    let candidate = [
+        (ixp_manager::Error::Input, Exit::InvalidInput),
+        (ixp_manager::Error::Refused(""), Exit::Refused),
+        (ixp_manager::Error::Output, Exit::OutputUnusable),
+        (ixp_manager::Error::Checker, Exit::StrictCheckFailed),
+    ];
+    for (error, exit) in &candidate {
+        match error {
+            ixp_manager::Error::Input
+            | ixp_manager::Error::Refused(_)
+            | ixp_manager::Error::Output
+            | ixp_manager::Error::Checker => {}
+        }
+        assert_eq!(error.exit_code(), *exit, "{error:?}");
+    }
+
+    let activate = [
+        (activation::Error::Refused(""), Exit::Refused),
+        (activation::Error::RolledBack, Exit::RolledBack),
+        (activation::Error::RecoveryRequired, Exit::ManualRecovery),
+    ];
+    for (error, exit) in &activate {
+        match error {
+            activation::Error::Refused(_)
+            | activation::Error::RolledBack
+            | activation::Error::RecoveryRequired => {}
+        }
+        assert_eq!(error.exit_code(), *exit, "{error:?}");
+    }
+
+    let lifecycle = [
+        (ixp_manager_lifecycle::Error::Refused(""), Exit::Refused),
+        (ixp_manager_lifecycle::Error::RolledBack, Exit::RolledBack),
+        (
+            ixp_manager_lifecycle::Error::ManualRecovery,
+            Exit::ManualRecovery,
+        ),
+        (
+            ixp_manager_lifecycle::Error::CallbackPending,
+            Exit::CallbackPending,
+        ),
+    ];
+    for (error, exit) in &lifecycle {
+        match error {
+            ixp_manager_lifecycle::Error::Refused(_)
+            | ixp_manager_lifecycle::Error::RolledBack
+            | ixp_manager_lifecycle::Error::ManualRecovery
+            | ixp_manager_lifecycle::Error::CallbackPending => {}
+        }
+        assert_eq!(error.exit_code(), *exit, "{error:?}");
+    }
+}

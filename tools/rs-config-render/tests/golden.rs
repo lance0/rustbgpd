@@ -4,7 +4,7 @@
 //! fixture proves the implausible-set abort and every other case is a
 //! targeted mutation of the same context.
 
-use rs_config_render::{Options, RenderError, render};
+use rs_config_render::{Exit, Options, RenderError, render};
 
 const FIXTURE: &str = include_str!("fixtures/context-small.yml");
 
@@ -960,7 +960,7 @@ fn sectioned_malformed_section_body_is_a_parse_error() {
     assert_ne!(corrupted, SECTIONED, "corruption target not found");
     match render(&corrupted, &Options::default()) {
         Err(err @ RenderError::Parse(_)) => {
-            assert_eq!(err.exit_code(), 1);
+            assert_eq!(err.exit_code(), Exit::InvalidInput);
             assert!(err.to_string().contains("rpki_roas"), "{err}");
         }
         other => panic!("expected parse error, got {other:?}"),

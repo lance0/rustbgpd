@@ -1194,7 +1194,7 @@ fn cli_enforces_private_checker_order_receipt_last_and_redaction() {
 
     let failed = temp.path().join("failed");
     let result = run_cli(&temp, &failed, true, 0o600, &[]);
-    assert_eq!(result.status.code(), Some(3));
+    assert_eq!(result.status.code(), Some(9));
     assert!(failed.join("config.toml").is_file());
     assert!(!failed.join("render-receipt.json").exists());
     assert!(!String::from_utf8_lossy(&result.stderr).contains(SECRET));
@@ -1204,14 +1204,14 @@ fn cli_enforces_private_checker_order_receipt_last_and_redaction() {
     fs::write(nonempty.join("old"), b"stale").unwrap();
     assert_eq!(
         run_cli(&temp, &nonempty, false, 0o600, &[]).status.code(),
-        Some(3)
+        Some(8)
     );
     let public = temp.path().join("public");
     fs::create_dir(&public).unwrap();
     set_mode(&public, 0o755);
     assert_eq!(
         run_cli(&temp, &public, false, 0o600, &[]).status.code(),
-        Some(3)
+        Some(8)
     );
     assert_eq!(
         run_cli(&temp, &temp.path().join("public-input"), false, 0o644, &[])
@@ -1233,7 +1233,7 @@ fn cli_enforces_private_checker_order_receipt_last_and_redaction() {
     symlink(&empty, &out_link).unwrap();
     assert_eq!(
         run_cli(&temp, &out_link, false, 0o600, &[]).status.code(),
-        Some(3)
+        Some(8)
     );
     fs::remove_file(temp.path().join("input.json")).unwrap();
     let input_target = temp.path().join("input-target.json");

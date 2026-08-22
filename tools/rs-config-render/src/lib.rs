@@ -129,17 +129,82 @@ impl Default for Options {
     }
 }
 
+/// Process exit codes shared by every `rs-config-render` subcommand.
+///
+/// One code has exactly one meaning regardless of subcommand, so a wrapper can
+/// branch on the code alone. The `repr(u8)` discriminants are the only source
+/// of numbers; every error type maps into this enum, and the "Exit codes" table
+/// in `README.md` (mirrored in `docs/deployment.md`) is asserted against it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Exit {
+    /// Rendered, validated, activated, no-op, or `updated` delivered.
+    Success = 0,
+    /// Input unreadable or invalid: context/document unreadable, unparseable,
+    /// unknown field, site-local file unreadable; also the generic failure
+    /// when the final stdout report cannot be written.
+    InvalidInput = 1,
+    /// Refused: unsupported knob, invalid option combination, unmet
+    /// precondition, no lock acquired or a definite pre-activation refusal
+    /// released. Nothing written, nothing activated.
+    Refused = 2,
+    /// Aborted: a generated set is empty or under the plausibility floor.
+    Implausible = 3,
+    /// Context top-level shape differs from the pinned fingerprint.
+    ShapeDrift = 4,
+    /// Activation effect uncertain; `current` left on the candidate, retained
+    /// state and any upstream lock kept; no callback issued.
+    ManualRecovery = 5,
+    /// One durable lifecycle callback is pending; run `resume`.
+    CallbackPending = 6,
+    /// Activation command never started; prior generation restored and proven,
+    /// lock released; retry is safe.
+    RolledBack = 7,
+    /// Output directory unusable: not an absent or empty private directory
+    /// (IXP Manager mode) or could not be created or written.
+    OutputUnusable = 8,
+    /// `rustbgpd --check --strict` rejected the candidate; no receipt written.
+    StrictCheckFailed = 9,
+}
+
+impl Exit {
+    /// Every code, in numeric order. The table test enumerates this.
+    pub const ALL: [Exit; 10] = [
+        Exit::Success,
+        Exit::InvalidInput,
+        Exit::Refused,
+        Exit::Implausible,
+        Exit::ShapeDrift,
+        Exit::ManualRecovery,
+        Exit::CallbackPending,
+        Exit::RolledBack,
+        Exit::OutputUnusable,
+        Exit::StrictCheckFailed,
+    ];
+
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+}
+
+impl From<Exit> for std::process::ExitCode {
+    fn from(exit: Exit) -> Self {
+        Self::from(exit.code())
+    }
+}
+
 #[derive(Debug)]
 pub enum RenderError {
     /// Context unreadable / not valid YAML-or-JSON / missing required
-    /// fields. Exit 1.
+    /// fields. [`Exit::InvalidInput`].
     Parse(String),
     /// Unsupported knob in the context; the render must not proceed.
-    /// Exit 2.
+    /// [`Exit::Refused`].
     Refused(Vec<String>),
-    /// Empty or implausibly small generated set. Exit 3.
+    /// Empty or implausibly small generated set. [`Exit::Implausible`].
     Implausible(Vec<String>),
-    /// Top-level key structure differs from the pinned shape. Exit 4.
+    /// Top-level key structure differs from the pinned shape.
+    /// [`Exit::ShapeDrift`].
     ShapeMismatch {
         expected_fingerprint: String,
         found_fingerprint: String,
@@ -149,12 +214,12 @@ pub enum RenderError {
 }
 
 impl RenderError {
-    pub fn exit_code(&self) -> i32 {
+    pub const fn exit_code(&self) -> Exit {
         match self {
-            RenderError::Parse(_) => 1,
-            RenderError::Refused(_) => 2,
-            RenderError::Implausible(_) => 3,
-            RenderError::ShapeMismatch { .. } => 4,
+            RenderError::Parse(_) => Exit::InvalidInput,
+            RenderError::Refused(_) => Exit::Refused,
+            RenderError::Implausible(_) => Exit::Implausible,
+            RenderError::ShapeMismatch { .. } => Exit::ShapeDrift,
         }
     }
 }

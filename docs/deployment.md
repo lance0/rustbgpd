@@ -152,7 +152,7 @@ let another process publish or reload during the call. Add `--initial` only when
 both no current generation and no reachable daemon exist. Normalized comparison
 TOML is limited to 4,194,299 bytes (4 MiB minus five encoded-request bytes).
 
-The activation executable must be synchronous. Exit 4 occurs only when it could
+The activation executable must be synchronous. Exit 7 occurs only when it could
 not start: the prior link is restored without another activation and the prior
 runtime is verified unchanged. Once it starts, a nonzero exit, timeout, or
 unsettled result leaves `current` on the candidate and returns exit 5. Leave
@@ -189,6 +189,24 @@ effect. Exit 6 means one callback is pending and may be retried with
 uncertain and no callback is attempted automatically — see the
 [activation manual-recovery runbook](cookbook/activation-manual-recovery.md).
 Delivery is at-least-once.
+
+#### rs-config-render exit codes
+
+Every `rs-config-render` subcommand shares one exit-code table, mirrored from
+the [tool README](../tools/rs-config-render/README.md#exit-codes):
+
+| Exit | Meaning |
+|---|---|
+| 0 | **success** — rendered, candidate validated, activated or no-op, or `updated` delivered |
+| 1 | **invalid input** — the context or IXP Manager document is unreadable, unparseable, or carries an unknown field, or a site-local file is unreadable (also the generic failure when the final stdout line cannot be written) |
+| 2 | **refused** — an unsupported knob, an invalid option combination, an unmet precondition, no upstream lock acquired, or a definite pre-activation refusal released; nothing written, nothing activated |
+| 3 | **aborted** — a generated set is empty or under the plausibility floor (arouteserver mode) |
+| 4 | **shape drift** — the context's top-level structure drifted from the pinned fingerprint; pass `--allow-shape-drift` to proceed (arouteserver mode) |
+| 5 | **manual recovery** — the activation effect is uncertain: `current` stays on the candidate, retained state and any upstream lock are kept, and no callback is issued; inspect before acting |
+| 6 | **callback pending** — one durable `updated` or release callback is undelivered; run `ixp-manager-lifecycle resume` |
+| 7 | **rolled back** — the activation command never started; the prior generation is restored and proven and the lock is released; retrying is safe |
+| 8 | **output unusable** — the candidate directory is not an absent or empty private directory (IXP Manager mode) or could not be created or written (arouteserver mode) |
+| 9 | **strict check failed** — `rustbgpd --check --strict` rejected the rendered candidate; files are written without a receipt |
 
 ### Debian / RPM packages
 
