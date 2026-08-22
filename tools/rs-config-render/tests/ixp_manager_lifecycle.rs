@@ -18,6 +18,13 @@ use rs_config_render::ixp_manager_lifecycle::{self as lifecycle, Error, Status};
 const FIXTURE: &[u8] = include_bytes!("fixtures/ixp-manager-v2-supported.json");
 const V1_FIXTURE: &[u8] = include_bytes!("fixtures/ixp-manager-v1-supported.json");
 const API_KEY: &str = "lifecycle-api-key-must-not-leak";
+// Serialize the binary: a foreign child can inherit another test's flock descriptor.
+static LIFECYCLE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn lifecycle_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    let guard = LIFECYCLE_TEST_LOCK.lock();
+    guard.unwrap_or_else(|error| error.into_inner())
+}
 
 fn mode(path: &Path, mode: u32) {
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
@@ -384,6 +391,7 @@ fn assert_no_key(path: &Path) {
 
 #[test]
 fn noop_lifecycle_uses_exact_authenticated_order_and_acknowledges() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let rig = Rig::new();
     let server = Server::start(vec![
         Response::json(200),
@@ -407,6 +415,7 @@ fn noop_lifecycle_uses_exact_authenticated_order_and_acknowledges() {
 
 #[test]
 fn definite_lock_and_render_failures_have_bounded_release_semantics() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let rig = Rig::new();
     let unavailable = Server::start(vec![Response::json(423)]);
     assert!(matches!(
@@ -456,6 +465,7 @@ fn definite_lock_and_render_failures_have_bounded_release_semantics() {
 
 #[test]
 fn failed_callback_is_durable_and_resume_never_refetches_or_activates() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let rig = Rig::new();
     let server = Server::start(vec![
         Response::json(200),
@@ -488,6 +498,7 @@ fn failed_callback_is_durable_and_resume_never_refetches_or_activates() {
 
 #[test]
 fn started_activation_uncertainty_retains_remote_lock_for_manual_recovery() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let rig = Rig::new();
     executable(&rig.activation, "#!/bin/sh\nexit 9\n");
     let server = Server::start(vec![Response::json(200), Response::config(FIXTURE)]);
@@ -529,6 +540,7 @@ fn started_activation_uncertainty_retains_remote_lock_for_manual_recovery() {
 
 #[test]
 fn redirects_and_unsafe_origins_or_key_files_are_refused_without_key_forwarding() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let rig = Rig::new();
     let sink = TcpListener::bind("127.0.0.1:0").unwrap();
     sink.set_nonblocking(true).unwrap();
@@ -590,6 +602,7 @@ fn redirects_and_unsafe_origins_or_key_files_are_refused_without_key_forwarding(
 
 #[test]
 fn control_and_configuration_body_caps_fail_closed() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let rig = Rig::new();
     let slow = Server::start(vec![
         Response::json(200).after_delay(Duration::from_millis(1_500)),
@@ -649,6 +662,7 @@ fn control_and_configuration_body_caps_fail_closed() {
 
 #[test]
 fn in_memory_renderer_is_byte_identical_to_private_file_entry_point() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let temp = tempfile::tempdir().unwrap();
     let input = temp.path().join("input.json");
     fs::write(&input, FIXTURE).unwrap();
@@ -693,6 +707,7 @@ fn in_memory_renderer_is_byte_identical_to_private_file_entry_point() {
 
 #[test]
 fn host_lock_is_exclusive_before_any_network_request() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let rig = Rig::new();
     let _held = Guard::claim_new(rig.binding()).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_rs-config-render"))
@@ -727,6 +742,7 @@ fn host_lock_is_exclusive_before_any_network_request() {
 
 #[test]
 fn guard_clear_is_bound_to_the_claimed_host() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let first = Rig::new();
     let second = Rig::new();
     let first_guard = Guard::claim_new(first.binding()).unwrap();
@@ -739,6 +755,7 @@ fn guard_clear_is_bound_to_the_claimed_host() {
 
 #[test]
 fn per_handle_state_lock_refuses_before_publishing_host_fence() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let rig = Rig::new();
     let lock = rig.state.join("ixp-manager-lifecycle.lock");
     fs::write(&lock, []).unwrap();
@@ -754,6 +771,7 @@ fn per_handle_state_lock_refuses_before_publishing_host_fence() {
 
 #[test]
 fn topology_mismatches_are_refused_before_network_effects() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let rig = Rig::new();
     let forged: Binding = serde_json::from_value(serde_json::json!({
         "router_handle": "foreign",
@@ -811,6 +829,7 @@ fn topology_mismatches_are_refused_before_network_effects() {
 
 #[test]
 fn killed_run_retains_owner_fence_and_foreign_resume_cannot_bypass_it() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let rig = Rig::new();
     let server = Server::start(vec![
         Response::json(200).after_delay(Duration::from_secs(30)),
@@ -870,6 +889,7 @@ fn killed_run_retains_owner_fence_and_foreign_resume_cannot_bypass_it() {
 
 #[test]
 fn callback_cleanup_failure_retains_fence_until_matching_resume() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let rig = Rig::new();
     let server = Server::start(vec![
         Response::json(200),
@@ -895,6 +915,7 @@ fn callback_cleanup_failure_retains_fence_until_matching_resume() {
 
 #[test]
 fn additive_cli_help_pins_run_and_callback_only_resume() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let binary = env!("CARGO_BIN_EXE_rs-config-render");
     let root = Command::new(binary)
         .args(["ixp-manager-lifecycle", "--help"])
@@ -928,6 +949,7 @@ fn additive_cli_help_pins_run_and_callback_only_resume() {
 
 #[test]
 fn poisoned_proxy_is_ignored_and_cli_reports_the_exact_terminal_status() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let rig = Rig::new();
     let server = Server::start(vec![
         Response::json(200),
@@ -991,6 +1013,7 @@ fn poisoned_proxy_is_ignored_and_cli_reports_the_exact_terminal_status() {
 
 #[test]
 fn only_the_pinned_definite_lock_statuses_clear_the_intent() {
+    let _lifecycle_guard = lifecycle_test_guard();
     for status in [401, 403, 404, 405, 422, 423] {
         let rig = Rig::new();
         let server = Server::start(vec![Response::json(status)]);
@@ -1016,6 +1039,7 @@ fn only_the_pinned_definite_lock_statuses_clear_the_intent() {
 
 #[test]
 fn corrupt_or_contradictory_durable_state_never_sends_a_callback() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let rig = Rig::new();
     let server = Server::start(vec![
         Response::json(200),
@@ -1061,6 +1085,7 @@ fn corrupt_or_contradictory_durable_state_never_sends_a_callback() {
 
 #[test]
 fn release_resume_preserves_the_original_refusal_or_rollback_exit() {
+    let _lifecycle_guard = lifecycle_test_guard();
     let rig = Rig::new();
     let refused = Server::start(vec![
         Response::json(200),
@@ -1099,4 +1124,29 @@ fn release_resume_preserves_the_original_refusal_or_rollback_exit() {
     let requests = rolled_back.finish();
     assert_request(&requests[2], "POST", "release-update-lock");
     assert_request(&requests[3], "POST", "release-update-lock");
+}
+
+#[test]
+fn every_lifecycle_test_acquires_the_process_guard_first() {
+    let _lifecycle_guard = lifecycle_test_guard();
+    let lines: Vec<_> = include_str!("ixp_manager_lifecycle.rs").lines().collect();
+    let tests = lines
+        .windows(3)
+        .filter(|window| window[0] == "#[test]")
+        .map(|window| {
+            assert_eq!(
+                window[2], "    let _lifecycle_guard = lifecycle_test_guard();",
+                "{} must acquire the process guard before fixtures or children",
+                window[1]
+            );
+            window[1]
+                .strip_prefix("fn ")
+                .and_then(|line| line.strip_suffix("() {"))
+                .expect("lifecycle tests must keep simple named functions")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tests.join(","),
+        "noop_lifecycle_uses_exact_authenticated_order_and_acknowledges,definite_lock_and_render_failures_have_bounded_release_semantics,failed_callback_is_durable_and_resume_never_refetches_or_activates,started_activation_uncertainty_retains_remote_lock_for_manual_recovery,redirects_and_unsafe_origins_or_key_files_are_refused_without_key_forwarding,control_and_configuration_body_caps_fail_closed,in_memory_renderer_is_byte_identical_to_private_file_entry_point,host_lock_is_exclusive_before_any_network_request,guard_clear_is_bound_to_the_claimed_host,per_handle_state_lock_refuses_before_publishing_host_fence,topology_mismatches_are_refused_before_network_effects,killed_run_retains_owner_fence_and_foreign_resume_cannot_bypass_it,callback_cleanup_failure_retains_fence_until_matching_resume,additive_cli_help_pins_run_and_callback_only_resume,poisoned_proxy_is_ignored_and_cli_reports_the_exact_terminal_status,only_the_pinned_definite_lock_statuses_clear_the_intent,corrupt_or_contradictory_durable_state_never_sends_a_callback,release_resume_preserves_the_original_refusal_or_rollback_exit,every_lifecycle_test_acquires_the_process_guard_first"
+    );
 }
