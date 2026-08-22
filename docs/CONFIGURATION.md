@@ -2212,7 +2212,7 @@ address = "[2001:db8::10]:3323"
 | `refresh_interval` | u64 | no | 3600 | Seconds between Serial Queries |
 | `retry_interval` | u64 | no | 600 | Seconds before reconnect on failure |
 | `expire_interval` | u64 | no | 7200 | Seconds before discarding stale VRPs, until the cache's End of Data supplies its own expire |
-| `max_expire_interval` | u64 | no | unset | Ceiling on the effective expire, in seconds: the cache-advertised expire (and `expire_interval`) is clamped down to it, so this cache's VRPs are discarded once older than this no matter what the cache advertises. Must be <= 172800 and > `refresh_interval`. Unset: only the two-day maximum applies |
+| `max_expire_interval` | u64 | no | unset | Ceiling on the effective expire, in seconds: the cache-advertised expire (and `expire_interval`) is clamped down to it, so this cache's VRPs are discarded once older than this no matter what the cache advertises. Must be <= 172800 and > both `refresh_interval` and `retry_interval`. Unset: only the two-day maximum applies |
 
 ### Validation states
 
@@ -4239,7 +4239,7 @@ starting:
 | RT/RO local administrator must be <= 65535 for a 4-octet ASN or dotted IPv4 administrator; numeric ASNs <= 65535 carry a u32 local value | `local admin ... exceeds 65535 for ...` |
 | RPKI `refresh_interval`, `retry_interval`, `expire_interval` must be > 0 | `must be > 0` |
 | RPKI `expire_interval` must be >= `refresh_interval` | `expire_interval must be >= refresh_interval` |
-| RPKI `max_expire_interval`, when set, must be <= 172800 and > `refresh_interval` | `max_expire_interval ... must be <= 172800` / `must be > refresh_interval` |
+| RPKI `max_expire_interval`, when set, must be <= 172800 and > both `refresh_interval` and `retry_interval` | `max_expire_interval ... must be <= 172800` / `must be > refresh_interval` / `must be > retry_interval` |
 | RPKI cache addresses must be unique numeric `IP:port` endpoints (bracketed for IPv6) | `invalid address` / `duplicate address` |
 | Named policy referenced in chain must exist in `[policy.definitions]` | `undefined policy` |
 | Inline policy and policy chain cannot both be set for the same neighbor/direction | `mutually exclusive` |
