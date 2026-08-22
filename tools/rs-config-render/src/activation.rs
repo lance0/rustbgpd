@@ -89,7 +89,7 @@ mod unix {
         config: Vec<u8>,
     }
 
-    fn private(path: &Path, directory: bool, mode: u32) -> bool {
+    pub(crate) fn private(path: &Path, directory: bool, mode: u32) -> bool {
         fs::symlink_metadata(path).is_ok_and(|metadata| {
             let kind = metadata.file_type();
             let exact_kind = kind.is_dir() == directory
@@ -107,7 +107,7 @@ mod unix {
             })
     }
 
-    fn valid_digest(value: &str) -> bool {
+    pub(crate) fn valid_digest(value: &str) -> bool {
         value.len() == 64
             && value
                 .bytes()
@@ -316,7 +316,7 @@ mod unix {
             .ok_or(Error::Refused("state directories must be mode 0700"))
     }
 
-    fn state_lock(state: &Path) -> AResult<File> {
+    pub(crate) fn state_lock(state: &Path) -> AResult<File> {
         let path = state.join("activation.lock");
         let file = match OpenOptions::new()
             .read(true)
@@ -973,4 +973,4 @@ mod unix {
 #[cfg(unix)]
 pub use unix::activate;
 #[cfg(unix)]
-pub(crate) use unix::activate_guarded;
+pub(crate) use unix::{activate_guarded, private, state_lock, valid_digest};

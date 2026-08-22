@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rs-config-render prune --keep N` removes activation generations that no
+  retention rule keeps: the `current` target, the last activation receipt's
+  candidate and predecessor, anything a pending lifecycle journal names, and
+  the N most recent generations always survive. It is a dry run unless
+  `--apply` is given, refuses outright while a host fence exists, and never
+  runs from the activation path. The README documents the rule, a cron-safe
+  pattern, and measured bytes per generation. (LAN-1180)
 - A `semver-checks` CI workflow runs `cargo-semver-checks` for every
   publishable workspace crate (re-derived from the manifests; today
   `rustbgpd-wire` and `rustbgpd-fsm`) against its latest crates.io release on

@@ -512,8 +512,10 @@ the facts rather than discovering them mid-pilot:
   command, one fence per host, no remote activation, no cross-host
   coordination. Two hosts are two independent lifecycles.
 - **Automatic housekeeping of activation state.** Every activated
-  generation is retained under `<runtime>/activation/generations/` and
-  never pruned; exit 5 (`ManualRecovery`) leaves a fence that blocks
+  generation is retained under `<runtime>/activation/generations/` until
+  an operator runs the opt-in, dry-run-by-default
+  [`rs-config-render prune`](../../tools/rs-config-render/README.md#pruning-retained-generations);
+  exit 5 (`ManualRecovery`) leaves a fence that blocks
   every later run until an operator resolves it —
   [Activation manual recovery](activation-manual-recovery.md). Neither
   matters to a shadow that never activates, but both matter to the

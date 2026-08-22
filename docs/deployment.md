@@ -215,7 +215,7 @@ the [tool README](../tools/rs-config-render/README.md#exit-codes):
 | 5 | **manual recovery** — the activation effect is uncertain: `current` stays on the candidate, retained state and any upstream lock are kept, and no callback is issued; inspect before acting |
 | 6 | **callback pending** — one durable `updated` or release callback is undelivered; run `ixp-manager-lifecycle resume` |
 | 7 | **rolled back** — the activation command never started; the prior generation is restored and proven and the lock is released; retrying is safe |
-| 8 | **output unusable** — the candidate directory is not an absent or empty private directory (IXP Manager mode) or could not be created or written (arouteserver mode) |
+| 8 | **output unusable** — the candidate directory is not an absent or empty private directory (IXP Manager mode), could not be created or written (arouteserver mode), or a `prune --apply` removal failed |
 | 9 | **strict check failed** — `rustbgpd --check --strict` ran and rejected the rendered IXP Manager candidate (the only path to this code); its files stay in the candidate directory without a receipt |
 
 ### Debian / RPM packages

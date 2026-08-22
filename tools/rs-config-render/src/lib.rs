@@ -47,6 +47,8 @@ pub mod activation;
 pub mod ixp_manager;
 pub mod ixp_manager_host;
 pub mod ixp_manager_lifecycle;
+#[cfg(unix)]
+pub mod prune;
 
 /// Top-level keys of the supported `template-context` shape, sorted.
 ///
