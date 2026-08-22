@@ -104,6 +104,10 @@ log_format = "json"
 address = "127.0.0.1:{grpc_port}"
 token_file = "{token_path}"
 principal = "rustbgpd://observer/exit-code-test"
+
+[event_history]
+enabled = true
+required = true
 "#,
         runtime_dir = runtime_dir.display(),
         token_path = token_path.display()
@@ -481,6 +485,7 @@ fn metrics_listener_bind_failure_exits_nonzero() {
     let mut daemon = spawn_daemon(temp.path(), &config_path);
     let status = daemon.wait_within(Duration::from_secs(30));
     let logs = daemon.logs();
+    assert!(!logs.contains("event history manager started"), "{logs}");
     assert!(
         logs.contains("failed to bind configured metrics/readiness listener"),
         "the diagnostic must identify the configured health surface\n{logs}"
@@ -530,6 +535,7 @@ fn bgp_listener_bind_failure_exits_nonzero() {
     let mut daemon = spawn_daemon(temp.path(), &config_path);
     let status = daemon.wait_within(Duration::from_secs(120));
     let logs = daemon.logs();
+    assert!(!logs.contains("event history manager started"), "{logs}");
     assert!(
         logs.contains("failed to bind BGP listener on either address family"),
         "the daemon must exit for the BGP listener, not some other cause\n{logs}"

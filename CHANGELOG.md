@@ -11,6 +11,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Startup now resolves validated policy and EVPN state and acquires BFD, BGP,
+  and metrics resources before EventHistoryManager starts. Retained resources
+  remain inactive until their existing activation barriers; configured-peer
+  add failures remain the later boot-error boundary. (LAN-1210)
 - The bound BGP listener and inbound accept-forwarding tasks are now retained
   beside the existing gRPC and RIB supervision. An unexpected clean return or
   panic enters the same coordinated peer teardown and exits 1; live bound-listener
