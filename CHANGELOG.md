@@ -186,6 +186,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tools/rs-config-render/README.md`, mirrored in `docs/deployment.md` and
   asserted by a test. (LAN-1174)
 
+- `rustbgpd-rib`, `rustbgpd-policy`, and `rustbgpd-bmp` no longer declare an
+  unused `thiserror` dependency; the ROADMAP entry that tracked the transitive
+  `thiserror` 1.x/2.x duplicate is now a dependency-hygiene note naming the
+  pulling crate (`protobuf` via `prometheus`) instead of an open item. (LAN-1213)
+
 ### Fixed
 
 - The `AS4_PATH`, `COMMUNITIES`, `EXTENDED_COMMUNITIES`, `CLUSTER_LIST`,

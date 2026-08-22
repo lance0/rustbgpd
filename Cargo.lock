@@ -3132,7 +3132,6 @@ dependencies = [
  "bytes",
  "rustbgpd-telemetry",
  "rustbgpd-wire",
- "thiserror 2.0.20",
  "tokio",
  "tracing",
 ]
@@ -3238,7 +3237,6 @@ dependencies = [
  "rustc-hash 2.1.3",
  "sha2 0.11.0",
  "tempfile",
- "thiserror 2.0.20",
  "tracing",
 ]
 
@@ -3259,7 +3257,6 @@ dependencies = [
  "rustbgpd-wire",
  "rustc-hash 2.1.3",
  "smallvec",
- "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
  "tracing",

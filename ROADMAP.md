@@ -2148,10 +2148,10 @@ branch is between features.
 - **Mega-module posture.** Prior concern and test-module extraction waves are
   complete (inventory refresh: #1552). Further splits are not planned; revisit
   only when measured conflict frequency or review cost demonstrates demand.
-- [ ] **Doc-precision + lint-policy consistency sweep (v0.41.0 review).** A
+- [x] **Doc-precision + lint-policy consistency sweep (v0.41.0 review).** A
   whole-codebase review found no correctness or security defects; the residue was
   documentation/policy drift, all low-risk. The documentation and lint-policy
-  sub-items are now closed:
+  sub-items are closed:
   - ARCHITECTURE.md design-invariant #3 re-enumerates the intentional
     unbounded-channel set (collision notifications, `peer_manager` internals,
     the `reload.rs` coordinator, the transport writer's priority channel, BFD
@@ -2171,11 +2171,12 @@ branch is between features.
     `dhat-heap` allocator features, and the test/bench targets that carry
     justified `unsafe` outside any shipped path.
 
-  The one live residue is the `thiserror` 1.x/2.x duplicate (1.0.69 + 2.0.19 both
-  resolved) — upstream-blocked, since 1.x is transitive through
-  `protobuf` / `prometheus` and `rtnetlink`, and no first-party crate depends
-  on 1.x directly. Periodic hygiene at a dependency refresh, not actionable
-  until upstream moves off it.
+  Dependency-hygiene note, not a work item: the lockfile resolves both
+  `thiserror` 1.x and 2.x. Every first-party crate that derives with it
+  declares `thiserror = "2"` via the workspace dependency; the 1.x copy is
+  transitive only, pulled by `protobuf` (the `prometheus` text-format
+  dependency). It clears when `protobuf` moves to
+  2.x; re-check with `cargo tree -i thiserror@1` at a dependency refresh.
 - [x] **Retire `rustbgpctl` in favor of `rbgp` (single CLI name).** The CLI
   crate now ships only the `rbgp` binary. The old `include!` alias/shim and
   long-form binary are removed; supported docs, package artifacts, generated
