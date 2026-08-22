@@ -1188,6 +1188,12 @@ short version for first deployment:
   is fine for single-host operator access.
 - **BGP authentication.** TCP-MD5 (RFC 2385) and TCP-AO (RFC 5925) are
   both supported. TCP-AO is preferred; see ADR-0062.
+- **RPKI cache transport.** RTR (RFC 8210) sessions are plain TCP:
+  unauthenticated and unencrypted. Run caches on loopback or a trusted
+  segment, or tunnel the session (WireGuard, an SSH or stunnel forward).
+  A remote cache reached over an untrusted path is a validation-integrity
+  problem: anything on the path can rewrite the VRPs the daemon validates
+  against.
 - **Firewall.** Allow inbound TCP/179 only from configured peer
   addresses (or address ranges if using `[[dynamic_neighbors]]`).
   Block everything else.

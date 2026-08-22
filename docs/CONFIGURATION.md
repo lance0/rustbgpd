@@ -2174,6 +2174,10 @@ You need a running RPKI validator that speaks RTR:
 | [FORT](https://fortproject.net/) | 8323 | C, lightweight |
 | [OctoRPKI](https://github.com/cloudflare/cfrpki) | 8282 | Go, Cloudflare |
 
+RTR runs over plain TCP with no authentication or encryption. Keep caches on
+loopback or a trusted segment, or tunnel the session; see the
+[security checklist](deployment.md#security-checklist) in the deployment guide.
+
 ### Basic setup
 
 ```toml
