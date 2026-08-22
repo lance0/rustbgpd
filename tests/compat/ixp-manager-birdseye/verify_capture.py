@@ -454,6 +454,7 @@ POPULATED_NORMALIZATION = [
     "hold_timer_now and keepalive_now -> <countdown>",
     "each leg's own route-server addresses -> <route-server>",
     "routes sorted by network, symbol lists sorted",
+    "route_changes counters -> <counter>",
 ]
 TIMESTAMP = re.compile(
     r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\+00:00)?$|^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$"
@@ -461,7 +462,27 @@ TIMESTAMP = re.compile(
 PRODUCT_VERSION = re.compile(r"^rustbgpd \d+\.\d+\.\d+\S*$")
 
 
+def mask_counters(value):
+    """Keep the shape of BIRD's per-channel route change statistics, drop the
+    numbers: they count how many times BIRD processed updates, which depends
+    on announcer arrival order."""
+    if isinstance(value, dict):
+        return {k: mask_counters(v) for k, v in value.items()}
+    return "<counter>"
+
+
+def raw_counters(document):
+    """Numeric leaves under any route_changes key: a fixture still carrying
+    them is itself a bug."""
+    return [
+        path for path, value in flatten(document).items()
+        if ".route_changes." in path and json_type(value) == "number"
+    ]
+
+
 def normalize_value(value, key, own_addresses):
+    if key == "route_changes" and isinstance(value, dict):
+        return mask_counters(value)
     if isinstance(value, dict):
         return {k: normalize_value(v, k, own_addresses) for k, v in value.items()}
     if isinstance(value, list):
@@ -625,12 +646,16 @@ def verify_populated(capture_dir: Path, web_php: Path) -> None:
             output = Path(os.environ["CAPTURE_OUTPUT"])
             output.mkdir(parents=True, exist_ok=True)
             (output / fixture.name).write_text(text)
-        elif fixture.read_text() != text:
-            sys.stderr.writelines(difflib.unified_diff(
-                fixture.read_text().splitlines(True), text.splitlines(True),
-                fromfile=str(fixture), tofile=f"populated-{leg}-capture",
-            ))
-            fail(f"populated {leg} capture drifted from its fixture")
+        else:
+            pinned = fixture.read_text()
+            if raw_counters(json.loads(pinned)):
+                fail(f"{fixture.name} carries raw route_changes counters; re-capture it")
+            if pinned != text:
+                sys.stderr.writelines(difflib.unified_diff(
+                    pinned.splitlines(True), text.splitlines(True),
+                    fromfile=str(fixture), tofile=f"populated-{leg}-capture",
+                ))
+                fail(f"populated {leg} capture drifted from its fixture")
 
     unlisted, stale = check_divergences(docs["oracle"], docs["live"], RUNTIME_DIVERGENCES)
     for item in unlisted:
