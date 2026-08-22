@@ -359,6 +359,21 @@ OpenBGPD 9.1 head-to-head at 700 peers × 400k prefixes under live churn
 convergence, and RSS — with identical wire inputs, config disclosure,
 and the losses published alongside the wins.
 
+At IRR scale, the [grouped per-client-best IRR reload
+receipt](perf/irr-reload-grouped-per-client-best-2026-08.md) (ADR-0126
+acceptance) reloads 320 members × 183,040 prefixes × 3,218,965 IRR filter
+entries through one harness on one host: steady-state reload completion p50
+3.25–3.77 s for rustbgpd (reloads 2–4, both announcement-overlap points) vs
+~11.5–13.6 s for BIRD 3.3.1 and ~56–59 s for OpenBGPD 9.1, with every
+member's received view byte-identical to the ungrouped per-client-best
+baseline. The earlier
+[per-client receipt](perf/irr-reload-comparison-2026-08.md) measured
+67.2–69.4 s at the same shape; ADR-0126's shared winner walk is what changed
+it. BIRD still holds the lower RSS peak there (1,375–1,420 MiB vs rustbgpd's
+1,972–2,098 MiB), and rustbgpd's first-reload-cheap pattern (completion p50
+2.1–2.3 s at reload 1 vs 3.3–3.8 s after) remains the open item the
+per-client receipt recorded.
+
 A separate [1,000-peer retained receipt](perf/route-server-1000-2026-07.md)
 exercises a uniform all-eBGP route-server fleet against the real daemon: 400k
 routes, 399.6 million observer-NLRI cold deliveries, four generation-complete

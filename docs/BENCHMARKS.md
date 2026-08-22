@@ -1420,7 +1420,23 @@ unbounded loop and hung about 11 minutes before the attempt was killed. The
 comparison is therefore four-way. Root cause and retained evidence are in the
 [receipt](perf/competitive-bgperf2-2026-07.md#openbgpd-could-not-be-collected--harness-defect-not-a-daemon-result).
 The [IXP receipt matrix](perf/ixp-matrix-2026-07.md) carries a head-to-head
-OpenBGPD 9.1 comparison through a different harness.
+OpenBGPD 9.1 comparison through a different harness (700 clients × 400,400
+routes, policy reload), and the IRR-scale reload receipts carry a third:
+
+| IRR-scale filter reload (320 members × 183,040 routes × 3,218,965 IRR entries, steady-state reloads 2–4, both announcement-overlap points) | rustbgpd | BIRD 3.3.1 | OpenBGPD 9.1 |
+|---|---|---|---|
+| Reload completion p50 | **3.25–3.77 s** | ~11.5–13.6 s | ~56–59 s |
+| Sampler RSS peak | 1,972–2,098 MiB | **1,375–1,420 MiB** | 1,133–1,439 MiB |
+
+Source: the [grouped per-client-best IRR reload
+receipt](perf/irr-reload-grouped-per-client-best-2026-08.md) (ADR-0126
+acceptance), every member's received view byte-identical to the ungrouped
+per-client-best baseline. The earlier [per-client
+receipt](perf/irr-reload-comparison-2026-08.md) measured 67.2–69.4 s at the
+same shape; ADR-0126's shared winner walk is what changed it. BIRD still holds
+the lower RSS peak, and rustbgpd's first-reload-cheap pattern (completion p50
+2.1–2.3 s at reload 1 vs 3.3–3.8 s after) remains the open item the
+per-client receipt recorded.
 
 One BIRD cell needed a third run: 100p × 1k total measured 24.51 s, then
 15.17 s, then 15.22 s, and the published median is 15.22 s. The outlier is a
