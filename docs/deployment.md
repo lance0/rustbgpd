@@ -129,26 +129,34 @@ rs-config-render --version
 in the archive either way, so install it now rather than discovering it is
 missing from a cron refresh later.
 
-For an IXP Manager candidate, point the service at a stable activation symlink,
-then let the renderer publish and settle an immutable generation:
+For an IXP Manager candidate, run the per-handle
+[`rustbgpd@.service`](#systemd) instance (its `ExecStart` reads
+`/var/lib/rustbgpd/<handle>/activation/current/config.toml`), then let the
+renderer publish and settle an immutable generation under that handle:
 
 ```console
 sudo -u rustbgpd /usr/local/bin/rs-config-render activate \
+  --router-handle rs1-ipv4 \
   --candidate /var/lib/rustbgpd/ixp-manager/candidate \
-  --state-dir /var/lib/rustbgpd/ixp-manager/activation \
+  --runtime-state-dir /var/lib/rustbgpd/rs1-ipv4 \
+  --state-dir /var/lib/rustbgpd/rs1-ipv4/activation \
+  --host-state-dir /var/lib/rustbgpd/ixp-manager-host \
   --check-with /usr/local/bin/rustbgpd --rbgp /usr/local/bin/rbgp \
-  --rbgp-addr unix:///var/lib/rustbgpd/grpc.sock \
+  --rbgp-addr unix:///var/lib/rustbgpd/rs1-ipv4/grpc.sock \
   --activation-command /usr/bin/sudo \
   --activation-arg=-n --activation-arg /usr/bin/systemctl \
-  --activation-arg reload-or-restart --activation-arg rustbgpd
+  --activation-arg reload-or-restart --activation-arg rustbgpd@rs1-ipv4
 ```
 
 Render and activate as the `rustbgpd` service identity; it must own the private
-candidate and activation-state parent. Configure `ExecStart` to read
-`.../activation/current/config.toml`, and authorize that account in sudoers for
-only `/usr/bin/systemctl reload-or-restart rustbgpd`. Pre-create the absolute
-state directory as a non-symlink mode-0700 directory owned by `rustbgpd`; do not
-let another process publish or reload during the call. Add `--initial` only when
+candidate, the per-handle runtime and activation directories, and the shared
+host-state directory. The runtime directory basename must equal the handle, the
+activation directory must be exactly `<runtime>/activation`, and `--rbgp-addr`
+must be that runtime's `grpc.sock`. Authorize that account in sudoers for only
+the literal `/usr/bin/systemctl reload-or-restart rustbgpd@rs1-ipv4`. Pre-create
+the absolute runtime, activation, and host-state directories as non-symlink
+mode-0700 directories owned by `rustbgpd`; do not let another process publish or
+reload during the call. Add `--initial` only when
 both no current generation and no reachable daemon exist. Normalized comparison
 TOML is limited to 4,194,299 bytes (4 MiB minus five encoded-request bytes).
 
@@ -171,13 +179,15 @@ sudo -u rustbgpd /usr/local/bin/rs-config-render ixp-manager-lifecycle run \
   --ixp-origin https://ixp.example.net --router-handle rs1-ipv4 \
   --api-key-file /var/lib/rustbgpd/ixp-manager/api-key \
   --candidate-dir /var/lib/rustbgpd/ixp-manager/candidate-1 \
-  --state-dir /var/lib/rustbgpd/ixp-manager/activation \
+  --runtime-state-dir /var/lib/rustbgpd/rs1-ipv4 \
+  --state-dir /var/lib/rustbgpd/rs1-ipv4/activation \
+  --host-state-dir /var/lib/rustbgpd/ixp-manager-host \
   --max-prefix-restart-seconds 300 \
   --check-with /usr/local/bin/rustbgpd --rbgp /usr/local/bin/rbgp \
-  --rbgp-addr unix:///var/lib/rustbgpd/grpc.sock \
+  --rbgp-addr unix:///var/lib/rustbgpd/rs1-ipv4/grpc.sock \
   --activation-command /usr/bin/sudo \
   --activation-arg=-n --activation-arg /usr/bin/systemctl \
-  --activation-arg reload-or-restart --activation-arg rustbgpd
+  --activation-arg reload-or-restart --activation-arg rustbgpd@rs1-ipv4
 ```
 
 The helper uses the exact v7.4 lock, Foil configuration, updated, and release
