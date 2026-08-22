@@ -2,7 +2,9 @@
 //! source of numbers, every error type maps into it, and the README table
 //! (plus its `docs/deployment.md` mirror) must list exactly those codes.
 
-use rs_config_render::{Exit, RenderError, activation, ixp_manager, ixp_manager_lifecycle, prune};
+use rs_config_render::{
+    Exit, RenderError, activation, ixp_manager, ixp_manager_lifecycle, prune, recover,
+};
 
 fn table_rows(markdown: &str) -> Vec<String> {
     let mut lines = markdown.lines();
@@ -168,6 +170,17 @@ fn every_error_variant_maps_to_the_shared_table() {
     for (error, exit) in &pruning {
         match error {
             prune::Error::Refused(_) => {}
+        }
+        assert_eq!(error.exit_code(), *exit, "{error:?}");
+    }
+
+    let recovery = [
+        (recover::Error::Unreadable(""), Exit::InvalidInput),
+        (recover::Error::Refused(""), Exit::Refused),
+    ];
+    for (error, exit) in &recovery {
+        match error {
+            recover::Error::Unreadable(_) | recover::Error::Refused(_) => {}
         }
         assert_eq!(error.exit_code(), *exit, "{error:?}");
     }

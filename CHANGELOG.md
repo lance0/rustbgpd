@@ -27,6 +27,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   > `refresh_interval`; unset changes nothing. The new
   `bgp_rpki_cache_effective_expire_seconds{cache}` gauge shows the effective
   expire per cache.
+- `rs-config-render status` reports the activation and lifecycle state of one
+  handle without changing it: the host fence, the lifecycle journal (phase,
+  callback, outcome, error class, upstream-lock disposition), the `current`
+  generation versus the journal's candidate, the advisory activation receipt,
+  and, with `--rbgp`, the settle path's own health and config-diff probe. It
+  prints one `key: value` line per field in a fixed order, takes no lock, exits
+  0 for any readable state (manual recovery included) and 1 only when the state
+  directory is unreadable. The manual-recovery runbook's "is the candidate
+  live?" step now reads its output. (LAN-1229)
 - `rs-config-render prune --keep N` removes activation generations that no
   retention rule keeps: the `current` target, the last activation receipt's
   candidate and predecessor, anything a pending lifecycle journal names, and

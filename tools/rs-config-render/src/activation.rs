@@ -81,12 +81,12 @@ mod unix {
     const REFUSAL_KEYS: &[&str] = &["status", "active_ui_filters", SKINS, MULTI];
     type AResult<T> = Result<T, Error>;
 
-    struct Verified {
-        digest: String,
+    pub(crate) struct Verified {
+        pub(crate) digest: String,
         files: BTreeMap<String, String>,
         directories: Vec<String>,
         checker_version: String,
-        config: Vec<u8>,
+        pub(crate) config: Vec<u8>,
     }
 
     pub(crate) fn private(path: &Path, directory: bool, mode: u32) -> bool {
@@ -162,7 +162,7 @@ mod unix {
         Ok(())
     }
 
-    fn verify_candidate(root: &Path, binding: &Binding) -> AResult<Verified> {
+    pub(crate) fn verify_candidate(root: &Path, binding: &Binding) -> AResult<Verified> {
         if !private(root, true, 0o700) || !private(&root.join(RECEIPT), false, 0o600) {
             return Err(Error::Refused(
                 "candidate and receipt must be private regular paths",
@@ -371,7 +371,7 @@ mod unix {
         }
     }
 
-    struct Comparison(PathBuf);
+    pub(crate) struct Comparison(PathBuf);
 
     impl AsRef<Path> for Comparison {
         fn as_ref(&self) -> &Path {
@@ -452,7 +452,7 @@ mod unix {
         Ok((final_path, true))
     }
 
-    fn current_target(state: &Path, binding: &Binding) -> AResult<Option<String>> {
+    pub(crate) fn current_target(state: &Path, binding: &Binding) -> AResult<Option<String>> {
         let current = state.join("current");
         let metadata = match fs::symlink_metadata(&current) {
             Ok(metadata) => metadata,
@@ -519,7 +519,7 @@ mod unix {
         }
     }
 
-    fn normalized_toml(config: &[u8], state: &Path) -> AResult<Vec<u8>> {
+    pub(crate) fn normalized_toml(config: &[u8], state: &Path) -> AResult<Vec<u8>> {
         let current = fs::canonicalize(state)
             .map_err(|_| Error::Refused("state path is invalid"))?
             .join("current");
@@ -562,7 +562,7 @@ mod unix {
         Ok(bytes)
     }
 
-    fn comparison_file(bytes: &[u8], state: &Path, label: &str) -> AResult<Comparison> {
+    pub(crate) fn comparison_file(bytes: &[u8], state: &Path, label: &str) -> AResult<Comparison> {
         let path = state.join(unique_name(&format!(".compare-{label}")));
         let mut file = OpenOptions::new()
             .write(true)
@@ -591,16 +591,16 @@ mod unix {
         }
     }
 
-    #[derive(PartialEq, Eq)]
-    enum Health {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Health {
         Reachable(bool),
         Unreachable,
         Invalid,
     }
 
-    fn health_probe(options: &Options<'_>, deadline: Instant) -> Health {
-        let Ok(child) = Command::new(options.rbgp)
-            .args(["--json", "--addr", options.rbgp_addr, "health"])
+    pub(crate) fn health_probe(rbgp: &Path, rbgp_addr: &str, deadline: Instant) -> Health {
+        let Ok(child) = Command::new(rbgp)
+            .args(["--json", "--addr", rbgp_addr, "health"])
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -627,9 +627,14 @@ mod unix {
         }
     }
 
-    fn equal_runtime(options: &Options<'_>, comparison: &Path, deadline: Instant) -> bool {
-        let Ok(child) = Command::new(options.rbgp)
-            .args(["--addr", options.rbgp_addr, "config", "diff"])
+    pub(crate) fn equal_runtime(
+        rbgp: &Path,
+        rbgp_addr: &str,
+        comparison: &Path,
+        deadline: Instant,
+    ) -> bool {
+        let Ok(child) = Command::new(rbgp)
+            .args(["--addr", rbgp_addr, "config", "diff"])
             .arg(comparison)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -642,8 +647,8 @@ mod unix {
 
     fn settle(options: &Options<'_>, comparison: &Path, deadline: Instant) -> bool {
         loop {
-            if health_probe(options, deadline) == Health::Reachable(true)
-                && equal_runtime(options, comparison, deadline)
+            if health_probe(options.rbgp, options.rbgp_addr, deadline) == Health::Reachable(true)
+                && equal_runtime(options.rbgp, options.rbgp_addr, comparison, deadline)
             {
                 return true;
             }
@@ -811,7 +816,11 @@ mod unix {
             ));
         }
         if options.initial
-            && health_probe(options, Instant::now() + options.settle) != Health::Unreachable
+            && health_probe(
+                options.rbgp,
+                options.rbgp_addr,
+                Instant::now() + options.settle,
+            ) != Health::Unreachable
         {
             return Err(Error::Refused("--initial requires no reachable daemon"));
         }
@@ -871,8 +880,14 @@ mod unix {
                 "prior",
             )?;
             let known_good_deadline = Instant::now() + options.settle;
-            if health_probe(options, known_good_deadline) != Health::Reachable(true)
-                || !equal_runtime(options, prior_comparison.as_ref(), known_good_deadline)
+            if health_probe(options.rbgp, options.rbgp_addr, known_good_deadline)
+                != Health::Reachable(true)
+                || !equal_runtime(
+                    options.rbgp,
+                    options.rbgp_addr,
+                    prior_comparison.as_ref(),
+                    known_good_deadline,
+                )
             {
                 return Err(Error::Refused("current runtime is not known-good"));
             }
@@ -907,8 +922,14 @@ mod unix {
                     }
                     let deadline = Instant::now() + options.settle;
                     if rollback == Publication::Durable
-                        && health_probe(options, deadline) == Health::Reachable(true)
-                        && equal_runtime(options, prior_comparison.as_ref(), deadline)
+                        && health_probe(options.rbgp, options.rbgp_addr, deadline)
+                            == Health::Reachable(true)
+                        && equal_runtime(
+                            options.rbgp,
+                            options.rbgp_addr,
+                            prior_comparison.as_ref(),
+                            deadline,
+                        )
                     {
                         phases.runtime_equal = true;
                         drop(prior_comparison);
@@ -973,4 +994,7 @@ mod unix {
 #[cfg(unix)]
 pub use unix::activate;
 #[cfg(unix)]
-pub(crate) use unix::{activate_guarded, private, state_lock, valid_digest};
+pub(crate) use unix::{
+    Comparison, Health, activate_guarded, comparison_file, current_target, equal_runtime,
+    health_probe, normalized_toml, private, state_lock, valid_digest, verify_candidate,
+};

@@ -127,7 +127,7 @@ mod unix {
 
     #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
     #[serde(rename_all = "snake_case")]
-    enum Phase {
+    pub(crate) enum Phase {
         LockRequestPending,
         Locked,
         ActivationStarted,
@@ -136,27 +136,50 @@ mod unix {
         ManualRecovery,
     }
 
+    impl Phase {
+        /// The journal's own spelling of the phase.
+        pub(crate) const fn name(self) -> &'static str {
+            match self {
+                Self::LockRequestPending => "lock_request_pending",
+                Self::Locked => "locked",
+                Self::ActivationStarted => "activation_started",
+                Self::UpdatedPending => "updated_pending",
+                Self::ReleasePending => "release_pending",
+                Self::ManualRecovery => "manual_recovery",
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
     #[serde(rename_all = "snake_case")]
-    enum Callback {
+    pub(crate) enum Callback {
         Updated,
         Release,
     }
 
+    impl Callback {
+        pub(crate) const fn name(self) -> &'static str {
+            match self {
+                Self::Updated => "updated",
+                Self::Release => "release",
+            }
+        }
+    }
+
     #[derive(Debug, Deserialize, Serialize)]
     #[serde(deny_unknown_fields)]
-    struct Journal {
+    pub(crate) struct Journal {
         schema: String,
         ixp_manager_version: String,
         origin: String,
         router_handle: String,
         host: Binding,
-        phase: Phase,
-        callback: Option<Callback>,
-        callback_attempts: u32,
-        candidate_sha256: Option<String>,
-        activation_outcome: Option<String>,
-        error_class: Option<String>,
+        pub(crate) phase: Phase,
+        pub(crate) callback: Option<Callback>,
+        pub(crate) callback_attempts: u32,
+        pub(crate) candidate_sha256: Option<String>,
+        pub(crate) activation_outcome: Option<String>,
+        pub(crate) error_class: Option<String>,
     }
 
     struct Client {
@@ -516,6 +539,16 @@ mod unix {
         Ok(())
     }
 
+    /// The journal as a read-only inspection: `Ok(None)` when none exists,
+    /// `Err(())` when one exists but is not a private, well-formed journal.
+    pub(crate) fn inspect_journal(state: &Path) -> std::result::Result<Option<Journal>, ()> {
+        match read_journal(state) {
+            Ok(journal) => Ok(Some(journal)),
+            Err(Error::Refused(_)) => Ok(None),
+            Err(_) => Err(()),
+        }
+    }
+
     fn read_journal(state: &Path) -> Result<Journal> {
         let path = journal_path(state);
         match fs::symlink_metadata(&path) {
@@ -578,7 +611,7 @@ mod unix {
         }
     }
 
-    fn candidate_digest(path: &Path) -> Option<String> {
+    pub(crate) fn candidate_digest(path: &Path) -> Option<String> {
         let bytes = fs::read(path.join("render-receipt.json")).ok()?;
         Some(
             Sha256::digest(bytes)
@@ -815,6 +848,6 @@ mod unix {
 }
 
 #[cfg(unix)]
-pub(crate) use unix::journal_candidate;
+pub(crate) use unix::{Journal, Phase, candidate_digest, inspect_journal, journal_candidate};
 #[cfg(unix)]
 pub use unix::{resume, run};

@@ -69,6 +69,20 @@ struct PruneArgs {
     apply: bool,
 }
 
+#[derive(Parser)]
+#[command(
+    name = "rs-config-render status",
+    about = "Report activation and lifecycle state for one handle without changing it"
+)]
+struct StatusArgs {
+    #[command(flatten)]
+    host: HostBindingArgs,
+    /// Exact rbgp executable; when given, probe the daemon and compare its
+    /// runtime with `current`
+    #[arg(long)]
+    rbgp: Option<PathBuf>,
+}
+
 #[derive(clap::Args)]
 struct HostBindingArgs {
     #[arg(long)]
@@ -270,6 +284,13 @@ fn parse_activation() -> Option<ActivateArgs> {
         .then(|| ActivateArgs::parse_from(std::iter::once(binary).chain(args)))
 }
 
+fn parse_status() -> Option<StatusArgs> {
+    let mut args = std::env::args_os();
+    let binary = args.next()?;
+    (args.next().as_deref() == Some(OsStr::new("status")))
+        .then(|| StatusArgs::parse_from(std::iter::once(binary).chain(args)))
+}
+
 fn parse_prune() -> Option<PruneArgs> {
     let mut args = std::env::args_os();
     let binary = args.next()?;
@@ -309,6 +330,26 @@ fn lifecycle_exit(
 }
 
 fn main() -> ExitCode {
+    if let Some(args) = parse_status() {
+        let binding = match args.host.binding() {
+            Ok(binding) => binding,
+            Err(reason) => {
+                eprintln!("rs-config-render: status: {reason}");
+                return Exit::Refused.into();
+            }
+        };
+        return match rs_config_render::recover::status(&rs_config_render::recover::StatusOptions {
+            state_dir: &args.host.state_dir,
+            binding: &binding,
+            rbgp: args.rbgp.as_deref(),
+        }) {
+            Ok(report) => stdout_exit(write_stdout(|writer| write!(writer, "{report}"))),
+            Err(error) => {
+                eprintln!("rs-config-render: status: {error}");
+                error.exit_code().into()
+            }
+        };
+    }
     if let Some(args) = parse_prune() {
         let binding = match args.host.binding() {
             Ok(binding) => binding,

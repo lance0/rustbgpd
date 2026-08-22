@@ -29,118 +29,74 @@ rs-config-render: IXP Manager lifecycle: manual recovery required; upstream lock
 rs-config-render: activation: recovery required; inspect private activation state
 ```
 
-`current` points at the candidate generation, not the one that was live
-before, and an owner fence stands in the shared host-state directory:
+Then read the state with `status`. It takes the same binding flags as
+`activate`, changes nothing (no lock, nothing written), and with `--rbgp` runs
+the helper's own settlement probe against the daemon:
 
 ```bash
-readlink $STATE/current
-ls -la $HOST
+rs-config-render status --router-handle rs1-ipv4 \
+  --runtime-state-dir /var/lib/rustbgpd/rs1-ipv4 --state-dir $STATE \
+  --host-state-dir $HOST --rbgp-addr $UDS --rbgp /usr/bin/rbgp
 ```
 
 ```text
-generations/53fa45222b96917cac847a870e16a6a29da9195adf5db717a4bd3b305f9e1d9c
--rw------- 1 rustbgpd rustbgpd  274 Aug 22 15:01 ixp-manager-host-fence.json
--rw------- 1 rustbgpd rustbgpd    0 Aug 22 15:01 ixp-manager-host.lock
+fence: present
+journal: present
+phase: manual_recovery
+callback: none
+callback_attempts: 0
+activation_outcome: recovery_required
+error_class: activation
+lock: retained
+current: generations/53fa45222b96917cac847a870e16a6a29da9195adf5db717a4bd3b305f9e1d9c
+candidate: generations/53fa45222b96917cac847a870e16a6a29da9195adf5db717a4bd3b305f9e1d9c
+current_is_candidate: yes
+advisory_receipt: matches-current
+advisory_receipt_status: recovery_required
+advisory_receipt_previous_generation: generations/55de8d9cf767c58ce9b197129f69b2a776aa54bad6542385c4e5be924d8e460a
+daemon: healthy
+runtime_equals_current: no
 ```
 
-If the receipt was written, it says so (the next step covers when it was not):
-
-```bash
-grep -E '"(status|candidate_sha256|previous_generation|runtime_equal)"' $STATE/activation-receipt.json
-```
-
-```text
-  "candidate_sha256": "53fa45222b96917cac847a870e16a6a29da9195adf5db717a4bd3b305f9e1d9c",
-    "runtime_equal": false
-  "previous_generation": "generations/55de8d9cf767c58ce9b197129f69b2a776aa54bad6542385c4e5be924d8e460a",
-  "status": "recovery_required",
-```
-
-A lifecycle run additionally leaves a journal with the lock still owed:
-
-```bash
-grep -E '"(phase|callback|activation_outcome|error_class)"' $STATE/ixp-manager-lifecycle.json
-```
-
-```text
-  "phase": "manual_recovery",
-  "callback": null,
-  "activation_outcome": "recovery_required",
-  "error_class": "activation"
-```
+`fence: present` is the owner fence standing in the shared host-state
+directory: while it stands, `resume` and every new `run` or `activate` answer
+with the same exit 5 line and touch nothing (`resume` has no action for this
+phase). `current_is_candidate: yes` says `current` was moved onto the candidate
+and `advisory_receipt_previous_generation` names what was live before.
 
 `error_class` tells you how far it got. `activation` (the case this runbook
 walks) means the candidate was rendered, `current` was moved, and the
-activation command started. `transport`, `status`, or `control_body` mean the
-*lock request itself* was ambiguous: nothing was rendered or moved, `current`
-is unchanged, and you can go straight to steps 3 and 5. A plain `activate`
-leaves no journal and holds no upstream lock — skip step 3.
+activation command started; `lock: retained` means the IXP Manager update lock
+is still owed. `transport`, `status`, or `control_body` mean the *lock request
+itself* was ambiguous: the output then reads `activation_outcome: none`,
+`lock: unknown`, `candidate: none`, `current_is_candidate: no` — nothing was
+rendered or moved — and you can go straight to steps 3 and 5. A plain
+`activate` leaves no journal (`journal: absent`, `lock: none`) and holds no
+upstream lock — skip step 3.
 
-While the fence stands, `resume` and every new `run` or `activate` answer with
-the same exit 5 line and touch nothing; `resume` has no action for this phase.
+The activation receipt is advisory: `advisory_receipt: stale` or `absent`
+means its final write never landed (step 4). The journal, the fence, and the
+generation tree are the state; the receipt is not.
 
 ## 1. Is the candidate live and healthy, live and broken, or down?
 
-The helper's settlement test is `rbgp health` plus `rbgp config diff` against
-the candidate; run the same two by hand. The generation's `config.toml` names
-its policy files relatively, and the daemon resolves those against its own
-working directory, so diff a copy with the paths rewritten to the live
-`current/` prefix (exactly what the helper compares):
+The last two `status` lines are the helper's own settlement test — `rbgp
+health`, then `rbgp config diff` against the `current` generation with its
+policy paths rewritten to the live `current/` prefix (exactly what the helper
+compares). Read them together:
 
-```bash
-rbgp --addr $UDS health
-umask 077
-sed 's#"policy/#"'"$STATE"'/current/policy/#' $STATE/current/config.toml > $STATE/.compare.toml
-rbgp --addr $UDS config diff $STATE/.compare.toml; echo "rc=$?"
-rm $STATE/.compare.toml
-```
+| `daemon` | `runtime_equals_current` | Meaning |
+|---|---|---|
+| `healthy` | `yes` | **Live and equal**: the reload landed; the helper only ran out of settle budget, or the receipt write failed afterwards. |
+| `healthy` | `no` | **Live but still on the previous generation**: the activation command ran and failed without reloading (a sudoers denial, a wrong unit name) or the daemon rejected the reload. The daemon log has no `config reload complete` line for the attempt. |
+| `unreachable` | `unknown` | **Down**: a restart took the old process out and the new one never came up. |
+| `unhealthy`, or `invalid` | any | **Live and broken**: treat it as the down case and prefer the previous generation. |
 
-**Live and equal** (the reload landed; the helper only ran out of settle
-budget, or the receipt write failed afterwards):
-
-```text
-Status:  healthy
-Uptime:  00:00:05
-Peers:   0
-Routes:  0
-No changes.
-rc=0
-```
-
-**Live but still on the previous generation** (the activation command ran and
-failed without reloading — a sudoers denial, a wrong unit name — or the daemon
-rejected the reload). The diff lists exactly what the daemon is missing:
-
-```text
-Status:  healthy
-Reload-applied changes:
-
-  Neighbors:
-    ~ 10.1.0.10:
-        max_prefixes_ipv4: 900 → 1000  [hot-applied]
-
-Plan: 1 to change · no session resets expected
-rc=2
-```
-
-Confirm by diffing the previous generation from the receipt the same way
-(`sed … $STATE/generations/<previous_generation>/config.toml`, still rewriting
-to the `current/` prefix): `No changes.` / `rc=0` means the daemon runs the
-previous generation. If the two generations differ only in policy files this
-comparison reads them through `current/`, so re-point first (step 2) and diff
-again. The daemon log has no `config reload complete` line for the attempt.
-
-**Down** (a restart took the old process out and the new one never came up):
-
-```text
-Error: cannot reach rustbgpd at unix:///var/lib/rustbgpd/rs1-ipv4/grpc.sock (socket does not exist)
-  hint: is the daemon running? if it uses a different endpoint, pass -s or set RUSTBGPD_ADDR
-rc=1
-```
-
-`healthy: false` from `rbgp --json health`, or a diff that errors on a reachable
-daemon, is "live and broken": treat it as the down case and prefer the previous
-generation.
+To see *what* the daemon is missing in the second row, or to confirm it runs
+the previous generation, run the diff by hand
+([appendix A](#a-reading-the-state-by-hand)). If the two generations differ
+only in policy files that comparison reads them through `current/`, so
+re-point first (step 2) and diff again.
 
 ## 2. Keep the candidate or roll back
 
@@ -167,14 +123,9 @@ generations/55de8d9cf767c58ce9b197129f69b2a776aa54bad6542385c4e5be924d8e460a
 | Live on the previous generation | Run your activation command by hand. | Re-point only; the daemon already runs it. |
 | Down | Run your activation command by hand (`reload-or-restart` starts a stopped unit on `current`). | Re-point, then run your activation command by hand. |
 
-Then repeat step 1 until it reads `No changes.` / `rc=0` — that is the
-"current and daemon agree" state every later helper run requires:
-
-```text
-Status:  healthy
-No changes.
-rc=0
-```
+Then repeat `status --rbgp` until it reads `daemon: healthy` and
+`runtime_equals_current: yes` — that is the "current and daemon agree" state
+every later helper run requires.
 
 Whichever you chose decides the callback in step 3: kept means `updated`,
 rolled back means `release-update-lock`.
@@ -221,19 +172,14 @@ rolled away from.
 ## 4. The activation receipt may be absent or stale
 
 Exit 5 also covers "the receipt's final write or directory sync failed", so
-before re-running anything check whether `activation-receipt.json` describes
-this attempt at all:
-
-```bash
-grep -E '"(status|candidate_sha256)"' $STATE/activation-receipt.json; readlink $STATE/current
-```
-
-It describes this attempt when `candidate_sha256` equals the generation
-`current` pointed at when you arrived. A receipt naming an older generation
-(or `"status": "activated"` for the previous run, or no file) is stale: the
-write never landed, and `previous_generation` is then whatever generation
-`current` pointed at *before* the failed run — confirm it by the diff in step 1
-rather than the receipt. After a rollback the receipt is stale by construction
+before re-running anything check the `advisory_receipt` line of `status`.
+`matches-current` means the receipt describes this attempt (its
+`candidate_sha256` equals the generation `current` pointed at when you
+arrived). `stale` (a receipt naming an older generation, or `"status":
+"activated"` for the previous run) or `absent` means the write never landed,
+and `previous_generation` is then whatever generation `current` pointed at
+*before* the failed run — confirm it by the hand diff in appendix A rather than
+the receipt. After a rollback the receipt is stale by construction
 (it still names the candidate). Leave it alone: the helper never reads it back
 — it verifies the render receipt inside each generation instead — and the next
 successful run rewrites it.
@@ -242,7 +188,8 @@ successful run rewrites it.
 
 The fence and the journal are the helper's own proof that a human has not yet
 decided; clearing them is not currently supported as a command. The manual
-procedure, once steps 1–4 are done and step 1 reads `No changes.`:
+procedure, once steps 1–4 are done and `status --rbgp` reads `daemon: healthy`
+and `runtime_equals_current: yes`:
 
 ```bash
 rm $STATE/ixp-manager-lifecycle.json $HOST/ixp-manager-host-fence.json && sync $STATE $HOST
@@ -274,6 +221,106 @@ on a 2 whose message is `IXP Manager update lock was not acquired` meaning step
 (the [tool README](../../tools/rs-config-render/README.md#exit-codes)), so a
 wrapper can branch on the code alone: 7 is always the benign, already-released
 lifecycle rollback and 4 is always arouteserver shape drift.
+
+## A. Reading the state by hand
+
+Everything `status` prints comes from four files; when the binary is not at
+hand, or to see the diff itself, read them directly.
+
+`current` points at the candidate generation, not the one that was live
+before, and an owner fence stands in the shared host-state directory:
+
+```bash
+readlink $STATE/current
+ls -la $HOST
+```
+
+```text
+generations/53fa45222b96917cac847a870e16a6a29da9195adf5db717a4bd3b305f9e1d9c
+-rw------- 1 rustbgpd rustbgpd  274 Aug 22 15:01 ixp-manager-host-fence.json
+-rw------- 1 rustbgpd rustbgpd    0 Aug 22 15:01 ixp-manager-host.lock
+```
+
+If the receipt was written, it says so:
+
+```bash
+grep -E '"(status|candidate_sha256|previous_generation|runtime_equal)"' $STATE/activation-receipt.json
+```
+
+```text
+  "candidate_sha256": "53fa45222b96917cac847a870e16a6a29da9195adf5db717a4bd3b305f9e1d9c",
+    "runtime_equal": false
+  "previous_generation": "generations/55de8d9cf767c58ce9b197129f69b2a776aa54bad6542385c4e5be924d8e460a",
+  "status": "recovery_required",
+```
+
+A lifecycle run additionally leaves a journal with the lock still owed:
+
+```bash
+grep -E '"(phase|callback|activation_outcome|error_class)"' $STATE/ixp-manager-lifecycle.json
+```
+
+```text
+  "phase": "manual_recovery",
+  "callback": null,
+  "activation_outcome": "recovery_required",
+  "error_class": "activation"
+```
+
+The settlement test by hand is `rbgp health` plus `rbgp config diff` against
+the candidate. The generation's `config.toml` names its policy files
+relatively, and the daemon resolves those against its own working directory,
+so diff a copy with the paths rewritten to the live `current/` prefix:
+
+```bash
+rbgp --addr $UDS health
+umask 077
+sed 's#"policy/#"'"$STATE"'/current/policy/#' $STATE/current/config.toml > $STATE/.compare.toml
+rbgp --addr $UDS config diff $STATE/.compare.toml; echo "rc=$?"
+rm $STATE/.compare.toml
+```
+
+**Live and equal** (`runtime_equals_current: yes`):
+
+```text
+Status:  healthy
+Uptime:  00:00:05
+Peers:   0
+Routes:  0
+No changes.
+rc=0
+```
+
+**Live but still on the previous generation** (`runtime_equals_current: no`);
+the diff lists exactly what the daemon is missing:
+
+```text
+Status:  healthy
+Reload-applied changes:
+
+  Neighbors:
+    ~ 10.1.0.10:
+        max_prefixes_ipv4: 900 → 1000  [hot-applied]
+
+Plan: 1 to change · no session resets expected
+rc=2
+```
+
+Confirm by diffing the previous generation from the receipt the same way
+(`sed … $STATE/generations/<previous_generation>/config.toml`, still rewriting
+to the `current/` prefix): `No changes.` / `rc=0` means the daemon runs the
+previous generation.
+
+**Down** (`daemon: unreachable`):
+
+```text
+Error: cannot reach rustbgpd at unix:///var/lib/rustbgpd/rs1-ipv4/grpc.sock (socket does not exist)
+  hint: is the daemon running? if it uses a different endpoint, pass -s or set RUSTBGPD_ADDR
+rc=1
+```
+
+`healthy: false` from `rbgp --json health` (`daemon: unhealthy`), or a diff
+that errors on a reachable daemon, is "live and broken".
 
 ## What this runbook does not cover
 
