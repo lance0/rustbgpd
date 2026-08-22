@@ -1908,7 +1908,7 @@ impl BgpMetrics {
         let mrt_dump_interval_seconds = IntGauge::new(
             "mrt_dump_interval_seconds",
             "Configured seconds between periodic MRT TABLE_DUMP_V2 dumps \
-             ([mrt] dump_interval). Exists only when [mrt] is configured.",
+             ([mrt] dump_interval); 0 when [mrt] is not configured.",
         )
         .expect("valid metric definition");
         let mrt_last_dump_success_timestamp = IntGauge::new(
@@ -6773,21 +6773,16 @@ mod tests {
         let m = BgpMetrics::new();
         m.record_bmp_collector_drop("127.0.0.1:5000", "fan_out", "channel_full", 1);
         m.record_bmp_collector_drop("127.0.0.1:5000", "fan_out", "channel_full", 1);
-        // Replay abort: count every cached-PeerUp message that was
-        // skipped, not just one.
-        m.record_bmp_collector_drop("127.0.0.1:5000", "replay", "channel_full", 7);
+        // A batched drop counts every message that was skipped, not just
+        // one; `phase` is one of the documented values (fan_out,
+        // loc_rib_dump).
+        m.record_bmp_collector_drop("127.0.0.1:5000", "fan_out", "channel_full", 7);
 
         let fan_out =
             m.0.bmp_collector_drops
                 .with_label_values(&["127.0.0.1:5000", "fan_out", "channel_full"])
                 .get();
-        assert_eq!(fan_out, 2);
-
-        let replay =
-            m.0.bmp_collector_drops
-                .with_label_values(&["127.0.0.1:5000", "replay", "channel_full"])
-                .get();
-        assert_eq!(replay, 7);
+        assert_eq!(fan_out, 9);
     }
 
     #[test]

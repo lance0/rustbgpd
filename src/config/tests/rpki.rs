@@ -300,3 +300,16 @@ fn rpki_max_expire_interval_not_above_refresh_rejected() {
         "{err}"
     );
 }
+
+#[test]
+fn rpki_max_expire_interval_not_above_retry_rejected() {
+    let err = parse(&rpki_toml(
+        "refresh_interval = 300\nmax_expire_interval = 600",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("cache_servers[0]: max_expire_interval (600) must be > retry_interval (600)"),
+        "{err}"
+    );
+}

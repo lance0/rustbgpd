@@ -968,6 +968,15 @@ impl Config {
                             ),
                         });
                     }
+                    if max <= server.retry_interval {
+                        return Err(ConfigError::InvalidRpkiConfig {
+                            reason: format!(
+                                "cache_servers[{i}]: max_expire_interval ({max}) must be > \
+                                 retry_interval ({})",
+                                server.retry_interval
+                            ),
+                        });
+                    }
                 }
             }
         }

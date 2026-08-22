@@ -24,7 +24,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `expire_interval`) is clamped down to it, so that cache's VRPs are discarded
   once older than the ceiling no matter what the cache advertises, on the same
   expiry path as the RFC 8210 two-day maximum. Rejected unless <= 172800 and
-  > `refresh_interval`; unset changes nothing. The new
+  > both `refresh_interval` and `retry_interval`; unset changes nothing. The new
   `bgp_rpki_cache_effective_expire_seconds{cache}` gauge shows the effective
   expire per cache.
 - `rs-config-render status` reports the activation and lifecycle state of one
@@ -227,6 +227,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `[[rpki.cache_servers]] max_expire_interval` is now rejected at config
+  validation unless it is also above the cache's `retry_interval` (it was
+  already required to exceed `refresh_interval`), so the ceiling alone never
+  forces the RTR client to lower retry below its configured value. The RTR
+  client logs the clamp of a cache-advertised expire down to
+  `max_expire_interval` at `warn` rather than `debug`, matching its sibling
+  End of Data timer adjustments.
 - `rs-config-render` now uses one exit-code table across every subcommand
   (render, IXP Manager candidate, `activate`, `ixp-manager-lifecycle`): each
   code has exactly one meaning. This renumbers codes that previously meant

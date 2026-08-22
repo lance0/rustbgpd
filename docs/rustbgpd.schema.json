@@ -432,7 +432,7 @@
           "minimum": 0
         },
         "max_expire_interval": {
-          "description": "Operator ceiling on the effective expire interval in seconds. The\ncache-advertised End of Data expire (and `expire_interval`) is clamped\ndown to it, so this cache's VRPs are discarded once older than this\nregardless of what the cache advertises. Must be <= 172800 (the\nRFC 8210 two-day maximum) and > `refresh_interval`. Unset: only the\ntwo-day maximum applies.",
+          "description": "Operator ceiling on the effective expire interval in seconds. The\ncache-advertised End of Data expire (and `expire_interval`) is clamped\ndown to it, so this cache's VRPs are discarded once older than this\nregardless of what the cache advertises. Must be <= 172800 (the\nRFC 8210 two-day maximum) and > both `refresh_interval` and\n`retry_interval`. Unset: only the two-day maximum applies.",
           "type": [
             "integer",
             "null"

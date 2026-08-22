@@ -561,8 +561,8 @@ pub struct CacheServer {
     /// cache-advertised End of Data expire (and `expire_interval`) is clamped
     /// down to it, so this cache's VRPs are discarded once older than this
     /// regardless of what the cache advertises. Must be <= 172800 (the
-    /// RFC 8210 two-day maximum) and > `refresh_interval`. Unset: only the
-    /// two-day maximum applies.
+    /// RFC 8210 two-day maximum) and > both `refresh_interval` and
+    /// `retry_interval`. Unset: only the two-day maximum applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_expire_interval: Option<u64>,
 }

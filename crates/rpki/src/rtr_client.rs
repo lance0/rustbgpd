@@ -591,7 +591,7 @@ impl RtrClient {
             if let Some(max) = self.config.max_expire_interval
                 && expire > max
             {
-                debug!(
+                warn!(
                     server = %self.config.server_addr,
                     expire,
                     max_expire_interval = max,

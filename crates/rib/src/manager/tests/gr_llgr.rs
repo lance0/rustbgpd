@@ -2160,6 +2160,28 @@ mod deadline_map {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn removing_one_of_tied_minima_rescans_to_the_survivor() {
+        let mut map = DeadlineMap::default();
+        map.insert("a", at(10));
+        map.insert("b", at(10));
+        map.insert("c", at(30));
+        assert_eq!(map.min(), Some(at(10)));
+        assert_eq!(map.remove("a"), Some(at(10)));
+        assert!(
+            map.is_stale(),
+            "removing a value equal to the cached minimum invalidates it"
+        );
+        assert_eq!(
+            map.min(),
+            Some(at(10)),
+            "the tied survivor is still the minimum"
+        );
+        assert!(!map.is_stale());
+        assert_eq!(map.remove("b"), Some(at(10)));
+        assert_eq!(map.min(), Some(at(30)));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn overwriting_the_minimum_rescans_to_the_new_value() {
         let mut map = DeadlineMap::default();
         map.insert("a", at(10));
