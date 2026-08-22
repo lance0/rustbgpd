@@ -3857,8 +3857,14 @@ async fn run<T>(
                 refresh_interval: server.refresh_interval,
                 retry_interval: server.retry_interval,
                 expire_interval: server.expire_interval,
+                max_expire_interval: server.max_expire_interval,
             };
-            let client = rustbgpd_rpki::RtrClient::new(client_config, vrp_update_tx.clone());
+            let expire_metrics = metrics.clone();
+            let cache_label = addr.to_string();
+            let client = rustbgpd_rpki::RtrClient::new(client_config, vrp_update_tx.clone())
+                .with_expire_observer(move |secs| {
+                    expire_metrics.set_rpki_cache_effective_expire_seconds(&cache_label, secs);
+                });
             info!(server = %addr, "spawning RTR client for RPKI cache");
             tokio::spawn(client.run());
         }

@@ -19,6 +19,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   --summary`). `bench/compare-criterion.sh` prints an explicit noise line in
   its verdict and `bench/README.md` documents it as the local replacement for
   the removed CI bench workflows. (LAN-1234)
+- `[[rpki.cache_servers]] max_expire_interval` caps the effective RTR expire
+  interval per cache: the cache-advertised End of Data expire (and
+  `expire_interval`) is clamped down to it, so that cache's VRPs are discarded
+  once older than the ceiling no matter what the cache advertises, on the same
+  expiry path as the RFC 8210 two-day maximum. Rejected unless <= 172800 and
+  > `refresh_interval`; unset changes nothing. The new
+  `bgp_rpki_cache_effective_expire_seconds{cache}` gauge shows the effective
+  expire per cache.
 - `rs-config-render prune --keep N` removes activation generations that no
   retention rule keeps: the `current` target, the last activation receipt's
   candidate and predecessor, anything a pending lifecycle journal names, and

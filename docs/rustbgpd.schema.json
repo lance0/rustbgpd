@@ -431,6 +431,15 @@
           "default": 7200,
           "minimum": 0
         },
+        "max_expire_interval": {
+          "description": "Operator ceiling on the effective expire interval in seconds. The\ncache-advertised End of Data expire (and `expire_interval`) is clamped\ndown to it, so this cache's VRPs are discarded once older than this\nregardless of what the cache advertises. Must be <= 172800 (the\nRFC 8210 two-day maximum) and > `refresh_interval`. Unset: only the\ntwo-day maximum applies.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
         "refresh_interval": {
           "description": "RTR refresh interval in seconds. Default 3600.",
           "type": "integer",

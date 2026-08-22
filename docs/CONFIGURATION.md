@@ -2161,7 +2161,10 @@ rustbgpd connects to one or more RPKI cache validators and uses their VRP
 The RTR session stays connected after `EndOfData`, uses `SerialNotify` for
 immediate refreshes when the cache sends them, falls back to periodic serial
 polling at `refresh_interval`, and expires cached VRPs if no fresh `EndOfData`
-arrives before the effective expiry timer.
+arrives before the effective expiry timer. That timer is the cache's advertised
+End of Data expire (capped at the RFC 8210 two-day maximum), or
+`expire_interval` until the cache supplies one; `max_expire_interval` lets the
+operator cap it lower.
 
 ### Prerequisites
 
@@ -2208,7 +2211,8 @@ address = "[2001:db8::10]:3323"
 | `address` | string | yes | -- | Numeric cache server `IP:port`; bracket IPv6 addresses |
 | `refresh_interval` | u64 | no | 3600 | Seconds between Serial Queries |
 | `retry_interval` | u64 | no | 600 | Seconds before reconnect on failure |
-| `expire_interval` | u64 | no | 7200 | Seconds before discarding stale VRPs |
+| `expire_interval` | u64 | no | 7200 | Seconds before discarding stale VRPs, until the cache's End of Data supplies its own expire |
+| `max_expire_interval` | u64 | no | unset | Ceiling on the effective expire, in seconds: the cache-advertised expire (and `expire_interval`) is clamped down to it, so this cache's VRPs are discarded once older than this no matter what the cache advertises. Must be <= 172800 and > `refresh_interval`. Unset: only the two-day maximum applies |
 
 ### Validation states
 
@@ -2259,6 +2263,7 @@ Prometheus metrics exposed at the configured metrics endpoint:
 | Metric | Description |
 |--------|-------------|
 | `bgp_rpki_vrp_count{af="ipv4\|ipv6"}` | Current VRP entries by address family |
+| `bgp_rpki_cache_effective_expire_seconds{cache}` | Effective expire interval per cache after the two-day maximum and `max_expire_interval` are applied |
 
 See [ADR-0034](adr/0034-rpki-origin-validation.md) for design details.
 
@@ -4234,6 +4239,7 @@ starting:
 | RT/RO local administrator must be <= 65535 for a 4-octet ASN or dotted IPv4 administrator; numeric ASNs <= 65535 carry a u32 local value | `local admin ... exceeds 65535 for ...` |
 | RPKI `refresh_interval`, `retry_interval`, `expire_interval` must be > 0 | `must be > 0` |
 | RPKI `expire_interval` must be >= `refresh_interval` | `expire_interval must be >= refresh_interval` |
+| RPKI `max_expire_interval`, when set, must be <= 172800 and > `refresh_interval` | `max_expire_interval ... must be <= 172800` / `must be > refresh_interval` |
 | RPKI cache addresses must be unique numeric `IP:port` endpoints (bracketed for IPv6) | `invalid address` / `duplicate address` |
 | Named policy referenced in chain must exist in `[policy.definitions]` | `undefined policy` |
 | Inline policy and policy chain cannot both be set for the same neighbor/direction | `mutually exclusive` |

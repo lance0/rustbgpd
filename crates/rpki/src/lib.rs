@@ -59,7 +59,9 @@ use std::sync::Arc;
 
 pub use aspa::{AspaRecord, AspaTable};
 pub use aspa_verify::{AspaInvalidHop, AspaVerificationResult};
-pub use rtr_client::{RtrClient, RtrClientConfig, VrpUpdate};
+pub use rtr_client::{
+    EXPIRE_MAX_SECS as RTR_EXPIRE_MAX_SECS, RtrClient, RtrClientConfig, VrpUpdate,
+};
 pub use vrp::{VrpEntry, VrpTable};
 pub use vrp_manager::{AspaTableUpdate, RpkiTableUpdate, VrpManager};
 
