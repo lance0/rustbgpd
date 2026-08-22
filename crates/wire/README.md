@@ -123,7 +123,11 @@ before upgrading a consumer that asserts on acceptance or typed variants:
   well-known discretionary) instead of `PathAttribute::Unknown`, so the
   unrecognized-well-known validation no longer treat-as-withdraws routes that
   carry it. A non-zero length is an attribute-length error (RFC 7606 §7.6
-  attribute-discard on the revised decode path).
+  attribute-discard on the revised decode path). On the legacy strict path
+  (`decode_path_attributes`, used by the MRT reader) that error fails the
+  whole decode, so an MRT RIB entry carrying a non-zero-length
+  ATOMIC_AGGREGATE is rejected where it previously read back as
+  `PathAttribute::Unknown`.
 - **OPEN and KEEPALIVE over 4096 bytes are rejected** at header peek, before a
   framing caller buffers the declared body, regardless of a negotiated RFC 8654
   extended message length.

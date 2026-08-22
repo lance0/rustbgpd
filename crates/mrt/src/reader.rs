@@ -1199,6 +1199,45 @@ mod tests {
         assert!(matches!(err, Some(ReadError::Truncated { .. })));
     }
 
+    /// The reader decodes entry attributes on the legacy strict path, so a
+    /// non-zero-length `ATOMIC_AGGREGATE` (RFC 4271 §5.1.6 says zero) is an
+    /// attribute-length error that fails the record instead of reading back
+    /// as `PathAttribute::Unknown`.
+    #[test]
+    fn nonzero_length_atomic_aggregate_is_attribute_length_error() {
+        use rustbgpd_wire::notification::update_subcode::ATTRIBUTE_LENGTH_ERROR;
+        let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
+        let mut data =
+            encode_snapshot(COLLECTOR, std::slice::from_ref(&peer), &[], &[], TS).unwrap();
+        // ATOMIC_AGGREGATE with flags 0x40, length 1, one value byte.
+        let attr = [attr_flags::TRANSITIVE, attr_type::ATOMIC_AGGREGATE, 1, 0];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0u32.to_be_bytes());
+        payload.push(24);
+        payload.extend_from_slice(&[192, 168, 1]);
+        payload.extend_from_slice(&1u16.to_be_bytes());
+        payload.extend_from_slice(&0u16.to_be_bytes()); // peer index
+        payload.extend_from_slice(&TS.to_be_bytes()); // originated
+        payload.extend_from_slice(&u16::try_from(attr.len()).unwrap().to_be_bytes());
+        payload.extend_from_slice(&attr);
+        data.extend_from_slice(&raw_record(13, 2, &payload));
+        let mut reader = SnapshotReader::new(&data).unwrap();
+        let (entries, err) = drain(&mut reader);
+        assert!(entries.is_empty());
+        assert!(
+            matches!(
+                err,
+                Some(ReadError::AttributeDecode(
+                    DecodeError::UpdateAttributeError {
+                        subcode: ATTRIBUTE_LENGTH_ERROR,
+                        ..
+                    }
+                ))
+            ),
+            "{err:?}"
+        );
+    }
+
     #[test]
     fn bad_prefix_length_is_malformed() {
         let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
