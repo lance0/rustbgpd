@@ -14,7 +14,7 @@
 //! for the contract: after insertion into `route_event_history` or
 //! `evpn_route_event_history`, the non-blocking sink sidecar fires before the
 //! corresponding `route_events_tx` or `evpn_events_tx` live broadcast. The
-//! legacy live surfaces (`WatchRoutes`, `WatchEvents`, `ListRouteEvents`)
+//! live surfaces (`WatchEvents`, `ListRouteEvents`)
 //! remain unchanged; `SubscribeFromEvent` consumes the durable sink path.
 
 use std::sync::Arc;

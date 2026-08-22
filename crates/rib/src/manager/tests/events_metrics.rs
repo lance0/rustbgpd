@@ -807,7 +807,7 @@ async fn multiple_subscribers_receive_same_events() {
     handle.await.unwrap();
 }
 
-// --- WatchRoutes event tests ---
+// --- Route event shape tests ---
 
 #[tokio::test]
 async fn route_event_withdrawn_carries_previous_peer() {

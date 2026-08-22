@@ -1327,9 +1327,9 @@ tests:
     input_series:
       - series: 'bgp_event_stream_lagged_total{service="watch_events", source="route", instance="edge1:9179"}'
         values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
-      - series: 'bgp_event_stream_lagged_total{service="watch_route_events", source="route", instance="edge2:9179"}'
+      - series: 'bgp_event_stream_lagged_total{service="watch_events", source="policy", instance="edge2:9179"}'
         values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
-      - series: 'bgp_event_stream_lagged_total{service="watch_routes", source="route", instance="edge3:9179"}'
+      - series: 'bgp_event_stream_lagged_total{service="watch_events", source="evpn", instance="edge3:9179"}'
         values: "10 10 10 10 10 10 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
       - series: 'bgp_event_stream_lagged_total{service="watch_events", source="session", instance="edge1:9179"}'
         values: "9x22"
@@ -1358,27 +1358,26 @@ tests:
                 service and source, then restart the live watch.
           - exp_labels:
               severity: warning
-              service: watch_route_events
-              source: route
+              service: watch_events
+              source: policy
               instance: edge2:9179
             exp_annotations:
-              summary: >-
-                Live event stream lagged (watch_route_events/route)
+              summary: "Live event stream lagged (watch_events/policy)"
               description: >-
-                bgp_event_stream_lagged_total for watch_route_events consuming
-                route events on edge2:9179 increased by 1 in the last 10
-                minutes. The live consumer missed events and its incremental
-                view is desynchronized; take a fresh authoritative snapshot
-                for this service and source, then restart the live watch.
+                bgp_event_stream_lagged_total for watch_events consuming policy
+                events on edge2:9179 increased by 1 in the last 10 minutes.
+                The live consumer missed events and its incremental view is
+                desynchronized; take a fresh authoritative snapshot for this
+                service and source, then restart the live watch.
           - exp_labels:
               severity: warning
-              service: watch_routes
-              source: route
+              service: watch_events
+              source: evpn
               instance: edge3:9179
             exp_annotations:
-              summary: "Live event stream lagged (watch_routes/route)"
+              summary: "Live event stream lagged (watch_events/evpn)"
               description: >-
-                bgp_event_stream_lagged_total for watch_routes consuming route
+                bgp_event_stream_lagged_total for watch_events consuming evpn
                 events on edge3:9179 increased by 1 in the last 10 minutes.
                 The live consumer missed events and its incremental view is
                 desynchronized; take a fresh authoritative snapshot for this

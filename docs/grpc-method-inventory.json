@@ -6,10 +6,10 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 105,
+  "method_count": 103,
   "tier_counts": {
     "read": 0,
-    "sensitive_read": 61,
+    "sensitive_read": 59,
     "mutating": 20,
     "operator_only": 24
   },
@@ -82,8 +82,6 @@
     { "service": "rustbgpd.v1.RibService", "method": "DeleteFibTable", "path": "/rustbgpd.v1.RibService/DeleteFibTable", "tier": "mutating" },
     { "service": "rustbgpd.v1.RibService", "method": "ListFibTables", "path": "/rustbgpd.v1.RibService/ListFibTables", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ListRouteEvents", "path": "/rustbgpd.v1.RibService/ListRouteEvents", "tier": "sensitive_read" },
-    { "service": "rustbgpd.v1.RibService", "method": "WatchRoutes", "path": "/rustbgpd.v1.RibService/WatchRoutes", "tier": "sensitive_read" },
-    { "service": "rustbgpd.v1.RibService", "method": "WatchRouteEvents", "path": "/rustbgpd.v1.RibService/WatchRouteEvents", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ListFlowSpecRoutes", "path": "/rustbgpd.v1.RibService/ListFlowSpecRoutes", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ListEvpnRoutes", "path": "/rustbgpd.v1.RibService/ListEvpnRoutes", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ListBgpLsRoutes", "path": "/rustbgpd.v1.RibService/ListBgpLsRoutes", "tier": "sensitive_read" },

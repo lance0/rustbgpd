@@ -64,9 +64,9 @@ pub struct EventService {
     bfd_events: BfdEventBroadcaster,
     /// Optional handle to the durable event outbox (ADR-0072). When
     /// `None`, `SubscribeFromEvent` returns
-    /// `Status::failed_precondition`; the legacy `WatchEvents` /
-    /// `WatchRoutes` / `List*Events` surfaces continue to work
-    /// unchanged regardless of this field.
+    /// `Status::failed_precondition`; the live `WatchEvents` /
+    /// `List*Events` surfaces continue to work unchanged
+    /// regardless of this field.
     event_history: Option<rustbgpd_event_history::EventHistoryHandle>,
     metrics: BgpMetrics,
 }
@@ -586,8 +586,8 @@ impl proto::event_service_server::EventService for EventService {
     /// false`, when EHM failed to start with
     /// `required = false`, or when EHM dropped into pass-through
     /// mode at runtime, returns `Status::failed_precondition`. The
-    /// legacy `WatchEvents` / `WatchRoutes` / `List*Events` surfaces
-    /// continue to work in all those cases.
+    /// live `WatchEvents` / `List*Events` surfaces continue to work
+    /// in all those cases.
     async fn subscribe_from_event(
         &self,
         request: Request<proto::SubscribeFromEventRequest>,
