@@ -156,8 +156,11 @@ pub enum Exit {
     Implausible = 3,
     /// Context top-level shape differs from the pinned fingerprint.
     ShapeDrift = 4,
-    /// Activation effect uncertain; `current` left on the candidate, retained
-    /// state and any upstream lock kept; no callback issued.
+    /// A human is needed: the activation effect is uncertain (`current` left
+    /// on the candidate) or a `recover --apply` step did not complete
+    /// (`current` wherever that step left it — the rollback target after a
+    /// rollback that did not settle); retained state and any upstream lock
+    /// kept; no callback issued.
     ManualRecovery = 5,
     /// One durable lifecycle callback is pending; run `resume`.
     CallbackPending = 6,

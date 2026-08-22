@@ -371,8 +371,38 @@ esac
     ) -> (i32, Vec<String>, String) {
         let before = snapshot(&self.root);
         let mut command = Command::new(env!("CARGO_BIN_EXE_rs-config-render"));
+        self.recover_args(&mut command, verb, apply, origin);
+        let output = command.output().unwrap();
+        if !apply {
+            assert_eq!(snapshot(&self.root), before, "dry run changed state");
+        }
+        self.recover_output(verb, output)
+    }
+
+    /// `recover … --apply` through the binary under RLIMIT_FSIZE 0: every
+    /// file write past zero bytes fails with EFBIG (SIGXFSZ ignored).
+    fn recover_cli_unwritable(
+        &self,
+        verb: &[&str],
+        origin: Option<&str>,
+    ) -> (i32, Vec<String>, String) {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "trap '' XFSZ; ulimit -f 0; exec \"$@\"", "sh"])
+            .arg(env!("CARGO_BIN_EXE_rs-config-render"));
+        self.recover_args(&mut command, verb, true, origin);
+        self.recover_output(verb, command.output().unwrap())
+    }
+
+    fn recover_args(
+        &self,
+        command: &mut Command,
+        verb: &[&str],
+        apply: bool,
+        origin: Option<&str>,
+    ) {
         command.arg("recover").args(verb);
-        self.binding_args(&mut command);
+        self.binding_args(command);
         if apply {
             command.arg("--apply");
         }
@@ -382,10 +412,13 @@ esac
                 .arg(&self.key)
                 .args(["--request-timeout-seconds", "2", "--allow-http-loopback"]);
         }
-        let output = command.output().unwrap();
-        if !apply {
-            assert_eq!(snapshot(&self.root), before, "dry run changed state");
-        }
+    }
+
+    fn recover_output(
+        &self,
+        verb: &[&str],
+        output: std::process::Output,
+    ) -> (i32, Vec<String>, String) {
         let prefix = format!("recover {}: ", verb[0]);
         let lines = String::from_utf8(output.stdout)
             .unwrap()
@@ -401,6 +434,47 @@ esac
             lines,
             String::from_utf8(output.stderr).unwrap(),
         )
+    }
+
+    /// A second checked candidate (max_prefix 12 differs from the bootstrap).
+    fn second_candidate(&self) -> PathBuf {
+        let candidate = self.root.join("second");
+        private_dir(&candidate);
+        let mut input: serde_json::Value = serde_json::from_slice(FIXTURE).unwrap();
+        input["clients"][0]["max_prefix"] = 12.into();
+        ixp_manager::write_checked_candidate_bytes(
+            &serde_json::to_vec(&input).unwrap(),
+            &candidate,
+            300,
+            &self.checker,
+            &self.binding.render_binding(),
+        )
+        .unwrap();
+        candidate
+    }
+
+    /// `activate` through the binary, optionally under RLIMIT_FSIZE 0.
+    fn activate_cli(&self, candidate: &Path, unwritable: bool) -> std::process::Output {
+        let mut command = if unwritable {
+            let mut shell = Command::new("/bin/sh");
+            shell
+                .args(["-c", "trap '' XFSZ; ulimit -f 0; exec \"$@\"", "sh"])
+                .arg(env!("CARGO_BIN_EXE_rs-config-render"));
+            shell
+        } else {
+            Command::new(env!("CARGO_BIN_EXE_rs-config-render"))
+        };
+        command.args(["activate", "--candidate"]).arg(candidate);
+        self.binding_args(&mut command);
+        command
+            .arg("--check-with")
+            .arg(&self.checker)
+            .arg("--rbgp")
+            .arg(&self.rbgp)
+            .args(["--settle-seconds", "2", "--activation-command"])
+            .arg(&self.activation)
+            .output()
+            .unwrap()
     }
 
     fn runtime(&self) -> String {
@@ -1245,18 +1319,7 @@ fn a_plain_activate_exit_5_recovers_without_a_journal_or_connection() {
     let previous = rig.current();
     // A second candidate through the bare activation path, failing after the
     // command started: exit 5 with a fence and no journal.
-    let candidate = rig.root.join("second");
-    private_dir(&candidate);
-    let mut input: serde_json::Value = serde_json::from_slice(FIXTURE).unwrap();
-    input["clients"][0]["max_prefix"] = 12.into();
-    ixp_manager::write_checked_candidate_bytes(
-        &serde_json::to_vec(&input).unwrap(),
-        &candidate,
-        300,
-        &rig.checker,
-        &rig.binding.render_binding(),
-    )
-    .unwrap();
+    let candidate = rig.second_candidate();
     rig.set("activation-mode", "fail");
     assert_eq!(
         activation::activate(&activation::Options {
@@ -1304,5 +1367,203 @@ fn a_plain_activate_exit_5_recovers_without_a_journal_or_connection() {
     assert_eq!(lines[1], "remove host fence");
     assert_eq!(rig.current(), previous);
     assert_eq!(rig.runtime(), previous);
+    assert!(!rig.fence().exists());
+}
+
+#[test]
+fn a_rollback_that_does_not_settle_exits_5_with_current_on_the_target() {
+    let _guard = test_guard();
+    let rig = Rig::new();
+    let previous = rig.current();
+    // The daemon loaded the candidate before the command failed.
+    let server = rig.induce_exit_5("load-then-fail", vec![Response::json(200)]);
+    let candidate = rig.current();
+    assert_eq!(rig.runtime(), candidate);
+    // Rollback re-points current and runs the command, which loads nothing.
+    rig.set("activation-mode", "fail");
+    let rollback = rollback_args(&rig);
+    let (code, lines, stderr) = rig.recover_cli(&strs(&rollback), true, Some(&server.origin));
+    rig.set("activation-mode", "ok");
+    assert_eq!(code, 5, "{stderr}");
+    assert!(lines.is_empty(), "no step completed: {lines:?}");
+    assert!(
+        stderr.contains(
+            "rollback did not settle: current is re-pointed but the daemon did not prove it; inspect with status"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(rig.current(), previous, "current is on the rollback target");
+    assert_eq!(
+        rig.runtime(),
+        candidate,
+        "the daemon still runs the candidate"
+    );
+    // The receipt records the unsettled rollback of the candidate …
+    let receipt = rig.receipt_value();
+    assert_eq!(receipt["status"], "recovery_required");
+    assert_eq!(
+        format!(
+            "generations/{}",
+            receipt["candidate_sha256"].as_str().unwrap()
+        ),
+        candidate
+    );
+    assert_eq!(receipt["previous_generation"], previous);
+    assert_eq!(receipt["phases"]["rollback_link"]["published"], true);
+    assert_eq!(receipt["phases"]["rollback_activation_ran"], true);
+    assert_eq!(receipt["phases"]["runtime_equal"], false);
+    // … fence and journal stay, no callback was attempted …
+    assert!(rig.fence().exists() && rig.journal().exists());
+    let journal = rig.journal_value();
+    assert_eq!(journal["phase"], "manual_recovery");
+    assert_eq!(journal["callback"], serde_json::Value::Null);
+    assert_eq!(journal["callback_attempts"], 0);
+    assert_eq!(journal["lock_released"], false);
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
+    // … and status reports exactly that state.
+    let (code, fields, _) = rig.status_cli(true);
+    assert_eq!(code, 0);
+    assert_fields(
+        &fields,
+        &[
+            ("fence", "present"),
+            ("journal", "present"),
+            ("phase", "manual_recovery"),
+            ("callback", "none"),
+            ("lock", "retained"),
+            ("current", &previous),
+            ("candidate", &candidate),
+            ("current_is_candidate", "no"),
+            ("advisory_receipt", "stale"),
+            ("advisory_receipt_status", "recovery_required"),
+            ("advisory_receipt_previous_generation", &previous),
+            ("daemon", "healthy"),
+            ("runtime_equals_current", "no"),
+        ],
+    );
+    // The lock is still owed and release-lock + clear settle the state.
+    let (code, _, stderr) = rig.recover_cli(
+        &["release-lock", "--rolled-back"],
+        true,
+        Some(&server.origin),
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_request(&server.finish()[2], "POST", "release-update-lock");
+    let (code, _, stderr) = rig.recover_cli(&["clear"], true, None);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!rig.journal().exists() && !rig.fence().exists());
+    assert_eq!(rig.current(), previous);
+}
+
+#[test]
+fn a_journal_write_failure_before_the_callback_exits_5_and_sends_nothing() {
+    let _guard = test_guard();
+    let rig = Rig::new();
+    let server = rig.induce_exit_5("load-then-fail", vec![Response::json(200)]);
+    let before = rig.journal_value();
+    // The intent write that precedes the request cannot land.
+    let (code, lines, stderr) =
+        rig.recover_cli_unwritable(&["release-lock", "--kept"], Some(&server.origin));
+    assert_eq!(code, 5, "{stderr}");
+    assert!(lines.is_empty(), "{lines:?}");
+    assert!(
+        stderr.contains("lifecycle journal could not be written"),
+        "{stderr}"
+    );
+    assert_eq!(rig.journal_value(), before, "journal unchanged");
+    assert_eq!(
+        server.requests.lock().unwrap().len(),
+        2,
+        "no callback without a journaled intent"
+    );
+    assert!(rig.fence().exists());
+    assert!(
+        fs::read_dir(&rig.state).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".ixp-manager-lifecycle.json.")
+        }),
+        "journal staging file left behind"
+    );
+    let (_, fields, _) = rig.status_cli(false);
+    assert_fields(
+        &fields,
+        &[
+            ("phase", "manual_recovery"),
+            ("callback", "none"),
+            ("callback_attempts", "0"),
+            ("lock", "retained"),
+        ],
+    );
+    // The same verb, writable again, journals the intent and delivers.
+    let (code, lines, stderr) =
+        rig.recover_cli(&["release-lock", "--kept"], true, Some(&server.origin));
+    assert_eq!(code, 0, "{stderr}");
+    assert!(lines[0].ends_with("(attempt 1)"), "{lines:?}");
+    assert_request(&server.finish()[2], "POST", "updated");
+    let journal = rig.journal_value();
+    assert_eq!(journal["callback_attempts"], 1);
+    assert_eq!(journal["lock_released"], true);
+}
+
+#[test]
+fn a_fence_write_failure_exits_5_and_leaves_a_fence_only_a_hand_can_clear() {
+    let _guard = test_guard();
+    let rig = Rig::new();
+    let current = rig.current();
+    let candidate = rig.second_candidate();
+    // The fence is created but its bytes cannot land: exit 5 before anything
+    // else happened.
+    let output = rig.activate_cli(&candidate, true);
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    assert_eq!(rig.current(), current);
+    assert_eq!(
+        fs::read_dir(rig.state.join("generations")).unwrap().count(),
+        1,
+        "nothing was staged"
+    );
+    assert!(!rig.journal().exists());
+    assert_eq!(fs::metadata(rig.fence()).unwrap().len(), 0);
+    let (code, fields, _) = rig.status_cli(false);
+    assert_eq!(code, 0);
+    assert_fields(
+        &fields,
+        &[
+            ("fence", "unreadable"),
+            ("journal", "absent"),
+            ("current", &current),
+            ("advisory_receipt", "matches-current"),
+        ],
+    );
+    // Every recover verb refuses to act on a fence it cannot read …
+    let keep = keep_args(&rig);
+    let rollback = rollback_args(&rig);
+    let verbs: [&[&str]; 4] = [
+        &strs(&keep),
+        &strs(&rollback),
+        &["release-lock", "--rolled-back"],
+        &["clear"],
+    ];
+    for verb in verbs {
+        let (code, lines, stderr) = rig.recover_cli(verb, true, None);
+        assert_eq!(code, 2, "{verb:?}: {stderr}");
+        assert!(lines.is_empty());
+        assert!(
+            stderr.contains("host fence is unreadable; inspect it before recovering"),
+            "{stderr}"
+        );
+    }
+    // … and every later activation is fenced out (exit 5, nothing changed) …
+    let output = rig.activate_cli(&candidate, false);
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    assert_eq!(rig.current(), current);
+    assert_eq!(fs::metadata(rig.fence()).unwrap().len(), 0);
+    // … until the fence is removed by hand.
+    fs::remove_file(rig.fence()).unwrap();
+    let output = rig.activate_cli(&candidate, false);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_ne!(rig.current(), current);
     assert!(!rig.fence().exists());
 }

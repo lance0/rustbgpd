@@ -785,7 +785,7 @@ fn every_activation_test_acquires_the_process_guard_first() {
             );
         })
         .count();
-    assert_eq!(tests, 11);
+    assert_eq!(tests, 13);
 }
 
 mod prune {
@@ -825,6 +825,17 @@ mod prune {
 
         fn generation_exists(&self, digest: &str) -> bool {
             self.state.join("generations").join(digest).is_dir()
+        }
+
+        /// Dot-prefixed entries of `generations/`: staging leftovers.
+        fn staging_leftovers(&self) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(self.state.join("generations"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with('.'))
+                .collect();
+            names.sort_unstable();
+            names
         }
     }
 
@@ -1007,5 +1018,79 @@ mod prune {
             stdout.ends_with("prune: removed 0 generation(s), kept 2\n"),
             "{stdout}"
         );
+    }
+
+    #[test]
+    fn prune_apply_failure_leaves_a_staging_leftover_never_a_torn_generation() {
+        let _serial = activation_test_guard();
+        let rig = Rig::new();
+        let g = rig.generations(4);
+        let generations = rig.state.join("generations");
+        // g[0]'s policy directory cannot be emptied: its removal fails midway.
+        mode(&generations.join(&g[0]).join("policy"), 0o500);
+        let plan = rig.prune(0, true).unwrap();
+        assert_eq!(plan.removed, vec![g[1].clone()]);
+        assert_eq!(plan.failed.len(), 1, "{plan:?}");
+        assert_eq!(plan.failed[0].0, g[0]);
+        // The torn tree left its content-addressed name before the removal
+        // started, so it is a staging leftover, not a generation …
+        assert!(!rig.generation_exists(&g[0]));
+        let leftovers = rig.staging_leftovers();
+        assert_eq!(leftovers.len(), 1, "{leftovers:?}");
+        assert!(leftovers[0].starts_with(&format!(".{}.", g[0])));
+        // … and activating the same content again publishes it afresh.
+        let again = rig.candidate("candidate-0-again", 100);
+        assert_eq!(
+            rig.run(&again, false, &rig.activation),
+            Ok(Status::Activated)
+        );
+        assert_eq!(rig.current(), format!("generations/{}", g[0]));
+        // Once removable, the leftover is swept by the next --apply.
+        mode(&generations.join(&leftovers[0]).join("policy"), 0o700);
+        let plan = rig.prune(0, true).unwrap();
+        assert!(plan.failed.is_empty(), "{plan:?}");
+        assert_eq!(plan.removed, vec![g[2].clone()]);
+        assert!(rig.staging_leftovers().is_empty());
+        let plan = rig.prune(0, false).unwrap();
+        assert_eq!(plan.kept.len(), 2, "{plan:?}");
+    }
+
+    #[test]
+    fn prune_holds_the_host_lock_from_the_fence_check_through_the_removals() {
+        let _serial = activation_test_guard();
+        let rig = Rig::new();
+        let g = rig.generations(3);
+        let all_present = || g.iter().all(|digest| rig.generation_exists(digest));
+        // The fence is written and cleared under the host lock: while a guard
+        // holds it (fence present), prune is refused and removes nothing.
+        let guard =
+            rs_config_render::ixp_manager_host::Guard::claim_new(&rig.binding(&rig.state)).unwrap();
+        assert!(matches!(rig.prune(0, true), Err(PruneError::Refused(_))));
+        assert!(all_present());
+        guard.clear().unwrap();
+        drop(guard);
+        // The bare lock with no fence refuses too: prune never plans against a
+        // fence check it cannot hold until its removals are done.
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(rig.host.join("ixp-manager-host.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        assert_eq!(
+            rig.prune(0, true),
+            Err(PruneError::Refused("another host command is active"))
+        );
+        assert!(all_present());
+        drop(lock);
+        let plan = rig.prune(0, true).unwrap();
+        assert_eq!(plan.removed, vec![g[0].clone()]);
+        assert!(!rig.generation_exists(&g[0]));
+        // The lock is taken before the fence is read and lives to the end.
+        let source = include_str!("../src/prune.rs");
+        let lock_at = source.find("ixp_manager_host::host_lock(").unwrap();
+        let fence_at = source.find("ixp_manager_host::fence_present(").unwrap();
+        assert!(lock_at < fence_at, "host lock must precede the fence check");
+        assert!(source.contains("let _host_lock ="));
     }
 }

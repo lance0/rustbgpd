@@ -2,9 +2,11 @@
 //!
 //! Generations are content-addressed and immutable; the activation path never
 //! removes one. `prune` is a separate operator-run command: it plans under the
-//! activation state lock, defaults to a dry run, and refuses outright while a
-//! host fence exists, so it can never remove the forensic state an exit 5
-//! leaves behind.
+//! host lock and the activation state lock, defaults to a dry run, and refuses
+//! outright while a host fence exists, so it can never remove the forensic
+//! state an exit 5 leaves behind. The host lock is the one every fence write
+//! happens under and is held until the removals are done, so no fence can
+//! appear between the check and the last removal.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -118,6 +120,13 @@ pub fn prune(options: &Options<'_>) -> Result<Plan, Error> {
             "state directory must be a pre-created absolute mode-0700 directory",
         ));
     }
+    // Same order as activation: host lock, then the activation state lock.
+    let _host_lock = ixp_manager_host::host_lock(&options.binding.host_state_dir).map_err(
+        |error| match error {
+            ixp_manager_host::Error::Refused(reason) => Error::Refused(reason),
+            ixp_manager_host::Error::RecoveryRequired => Error::Refused("host lock failed"),
+        },
+    )?;
     if ixp_manager_host::fence_present(&options.binding.host_state_dir) {
         return Err(Error::Refused(
             "host fence present; resolve it before pruning (retained state is forensic)",
@@ -131,6 +140,9 @@ pub fn prune(options: &Options<'_>) -> Result<Plan, Error> {
     })?;
     let generations_dir = options.state_dir.join(GENERATIONS);
     let mut generations: BTreeMap<String, SystemTime> = BTreeMap::new();
+    // Staging leftovers (`.<digest>.<pid>.<nanos>`): a generation copy or a
+    // prune removal that failed midway. Never a generation; swept by `--apply`.
+    let mut leftovers: Vec<String> = Vec::new();
     match fs::read_dir(&generations_dir) {
         Ok(entries) => {
             for entry in entries {
@@ -141,12 +153,16 @@ pub fn prune(options: &Options<'_>) -> Result<Plan, Error> {
                 let metadata = entry
                     .metadata()
                     .map_err(|_| Error::Refused("generations are unreadable"))?;
-                // Staging leftovers (`.<digest>.<pid>.<nanos>`) are not generations.
-                if activation::valid_digest(&name) && metadata.file_type().is_dir() {
+                if !metadata.file_type().is_dir() {
+                    continue;
+                }
+                if activation::valid_digest(&name) {
                     // ponytail: publication order = directory mtime (set when the
                     // generation was staged, immediately before its rename into
                     // place); the receipt carries no timestamp to prefer.
                     generations.insert(name, metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH));
+                } else if name.starts_with('.') {
+                    leftovers.push(name);
                 }
             }
         }
@@ -228,12 +244,23 @@ pub fn prune(options: &Options<'_>) -> Result<Plan, Error> {
         }
     }
     if options.apply {
+        // Rename out of the content-addressed name first: a removal that fails
+        // midway must leave a staging leftover, never a torn generation that
+        // fails verification on the next activation of the same content.
         for digest in &plan.removed {
-            if let Err(error) = fs::remove_dir_all(generations_dir.join(digest)) {
+            let staging = generations_dir.join(activation::unique_name(&format!(".{digest}")));
+            if let Err(error) = fs::rename(generations_dir.join(digest), &staging)
+                .and_then(|()| fs::remove_dir_all(&staging))
+            {
                 plan.failed.push((digest.clone(), error.to_string()));
             }
         }
-        if !plan.removed.is_empty()
+        for leftover in &leftovers {
+            if let Err(error) = fs::remove_dir_all(generations_dir.join(leftover)) {
+                plan.failed.push((leftover.clone(), error.to_string()));
+            }
+        }
+        if (!plan.removed.is_empty() || !leftovers.is_empty())
             && fs::File::open(&generations_dir)
                 .and_then(|directory| directory.sync_all())
                 .is_err()

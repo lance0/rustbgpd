@@ -260,15 +260,20 @@ The retention rule, evaluated under the activation state lock:
   `--keep 0` keeps only the referenced ones;
 - everything else is removed — by `--apply` only.
 
-`prune` **refuses outright (exit 2) while any host fence exists**, and while
-the activation receipt or lifecycle journal exists but cannot be parsed; resolve
+`prune` **refuses outright (exit 2) while any host fence exists** (checked under
+the host lock every fence write happens under, and the lock is held until the
+last removal, so no fence can appear mid-prune; a held lock refuses as busy), and
+while the activation receipt or lifecycle journal exists but cannot be parsed; resolve
 the fence with the [manual-recovery
 runbook](../../docs/cookbook/activation-manual-recovery.md) first. Output is
 exact and stable: one `keep <digest> <reasons>` line per retained generation,
 newest first, one `remove <digest>` line per removal, then a summary. Without
 `--apply` nothing is removed and the `remove` lines are exactly what `--apply`
-would remove; a second `--apply` removes nothing. A removal that fails exits 8
-and names the generation on stderr; rerun after fixing the directory.
+would remove; a second `--apply` removes nothing. Each removal renames the
+generation to a staging name (`.<digest>.<pid>.<nanos>`) first, so a removal
+that fails midway leaves a staging leftover, never a torn generation under its
+content-addressed name; it exits 8 and names the generation on stderr, and the
+next `--apply` sweeps the leftover once the directory is fixed.
 
 A cron-safe pattern runs the dry run on the same schedule as the lifecycle and
 applies only from a reviewed ticket, or applies unconditionally with a generous
@@ -450,7 +455,7 @@ knowing which subcommand ran. The mapping is asserted by
 | 2 | **refused** — an unsupported knob, an invalid option combination, an unmet precondition (including an unavailable strict checker), no upstream lock acquired, or a definite pre-activation refusal released; nothing is published or activated and no generation, receipt, or journal is left behind (the lifecycle folds a strict-check rejection into this code and leaves that candidate, receipt-less, in its candidate directory for inspection) |
 | 3 | **aborted** — a generated set is empty or under the plausibility floor (arouteserver mode) |
 | 4 | **shape drift** — the context's top-level structure drifted from the pinned fingerprint; pass `--allow-shape-drift` to proceed (arouteserver mode) |
-| 5 | **manual recovery** — the activation effect is uncertain: `current` stays on the candidate, retained state and any upstream lock are kept, and no callback is issued; inspect before acting |
+| 5 | **manual recovery** — a human is needed: the activation effect is uncertain (`current` stays on the candidate) or a `recover --apply` step did not complete (`current` is wherever that step left it — on the rollback target after a rollback that did not settle); retained state and any upstream lock are kept and no callback is issued; inspect with `status` before acting |
 | 6 | **callback pending** — one durable `updated` or release callback is undelivered; run `ixp-manager-lifecycle resume` |
 | 7 | **rolled back** — the activation command never started; the prior generation is restored and proven and the lock is released; retrying is safe |
 | 8 | **output unusable** — the candidate directory is not an absent or empty private directory (IXP Manager mode), could not be created or written (arouteserver mode), or a `prune --apply` removal failed |

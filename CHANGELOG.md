@@ -277,6 +277,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   requires a configured interval (`mrt_dump_interval_seconds > 0`); the
   OPERATIONS.md MRT metrics table no longer claims the series exists only
   when `[mrt]` is configured.
+- `rs-config-render prune --apply` renames each generation to a staging name
+  (`.<digest>.<pid>.<nanos>`) before removing it, so a removal that fails
+  midway leaves a staging leftover rather than a torn tree under the
+  content-addressed name; previously every later activation of the same
+  content was refused (exit 2) because the torn generation failed
+  verification. Staging leftovers are swept by the next `--apply`.
+- `rs-config-render prune` takes the host lock (the one every fence write
+  happens under) before reading the host fence and holds it until its removals
+  are done, closing the window in which an activation or lifecycle run could
+  write a fence between the fence check and the removals; a held host lock now
+  refuses as busy (exit 2, nothing removed).
+- The `rs-config-render` exit-code table (README, `docs/deployment.md`, and the
+  `Exit` enum docs) no longer claims that exit 5 always leaves `current` on the
+  candidate: a `recover rollback --apply` that does not settle exits 5 with
+  `current` re-pointed at the rollback target, as the runbook already stated.
 - The IXP Manager / Bird's Eye populated oracle fixtures now mask BIRD's
   timing-dependent `route_changes` counters (shape still compared), so the
   pinned-contract job no longer fails on announcer arrival order.
