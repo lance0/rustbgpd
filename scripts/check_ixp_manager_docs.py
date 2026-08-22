@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Fail closed when the IXP Manager documentation drifts from its contract.
 
-Three documents restate facts that `tests/compat/ixp-manager-birdseye/contract.json`
+Four documents restate facts that `tests/compat/ixp-manager-birdseye/contract.json`
 pins executably, and each has drifted silently before:
 
 - the Birdwatcher adapter README's reason-id tables versus
   `reject_reasons.active_ids` / `defined_only_ids` / `fallback_id` / `display`;
 - the same README's capability table versus `runtime_supported` / `unsupported`;
-- `docs/RECEIPTS.md`, which must carry a row for every M-series receipt that
-  `docs/INTEROP.md` claims in its IXP Manager sections.
+- `docs/RECEIPTS.md` and `docs/OPERATIONAL_PROOF.md`, which must each carry a
+  row for every M-series receipt that `docs/INTEROP.md` claims in its IXP
+  Manager sections.
 
 The checks parse the markdown tables positively; an absent table or an empty
 M-number set is itself a failure, because a guard that cannot fail is worse
@@ -27,6 +28,7 @@ CONTRACT = ROOT / "tests" / "compat" / "ixp-manager-birdseye" / "contract.json"
 README = ROOT / "examples" / "birdwatcher-adapter" / "README.md"
 INTEROP = ROOT / "docs" / "INTEROP.md"
 RECEIPTS = ROOT / "docs" / "RECEIPTS.md"
+PROOF = ROOT / "docs" / "OPERATIONAL_PROOF.md"
 
 REASON_HEADER = ("Retained cause", "IXP Manager reason id", "Bird's Eye display")
 DEFINED_ONLY_HEADER = ("Defined-only id", "Bird's Eye display", "Emitted as")
@@ -155,8 +157,8 @@ def interop_ixp_receipts(interop: str) -> set[str]:
     return found
 
 
-def receipt_rows(receipts: str) -> set[str]:
-    """M-numbers in the first cell of every `| Receipt | ... |` table row."""
+def receipt_rows(receipts: str, header: str = "Receipt") -> set[str]:
+    """M-numbers in the first cell of every `| <header> | ... |` table row."""
     found: set[str] = set()
     in_table = False
     for line in receipts.splitlines():
@@ -164,29 +166,35 @@ def receipt_rows(receipts: str) -> set[str]:
             in_table = False
             continue
         first = _cells(line)[0]
-        if first == "Receipt":
+        if first == header:
             in_table = True
         elif in_table:
             found.update(M_NUMBER.findall(first))
     return found
 
 
-def check_receipts(interop: str, receipts: str) -> list[str]:
+def check_receipts(interop: str, receipts: str, proof: str) -> list[str]:
     claimed = interop_ixp_receipts(interop)
     if not claimed:
         return ["INTEROP.md IXP Manager sections name no M-series receipts; the walk is broken"]
-    missing = sorted(claimed - receipt_rows(receipts), key=lambda m: (len(m), m))
-    return [
-        f"INTEROP.md claims {m} in its IXP Manager sections but RECEIPTS.md has no row for it"
-        for m in missing
-    ]
+    errors: list[str] = []
+    # OPERATIONAL_PROOF.md keys its compact index by `| Receipts | Coverage |`.
+    for name, rows in (
+        ("RECEIPTS.md", receipt_rows(receipts)),
+        ("OPERATIONAL_PROOF.md", receipt_rows(proof, "Receipts")),
+    ):
+        for m in sorted(claimed - rows, key=lambda m: (len(m), m)):
+            errors.append(
+                f"INTEROP.md claims {m} in its IXP Manager sections but {name} has no row for it"
+            )
+    return errors
 
 
-def check(readme: str, contract: dict, interop: str, receipts: str) -> list[str]:
+def check(readme: str, contract: dict, interop: str, receipts: str, proof: str) -> list[str]:
     return (
         check_reason_ids(readme, contract)
         + check_capabilities(readme, contract)
-        + check_receipts(interop, receipts)
+        + check_receipts(interop, receipts, proof)
     )
 
 
@@ -197,6 +205,7 @@ def main() -> int:
             json.loads(CONTRACT.read_text(encoding="utf-8")),
             INTEROP.read_text(encoding="utf-8"),
             RECEIPTS.read_text(encoding="utf-8"),
+            PROOF.read_text(encoding="utf-8"),
         )
     except (OSError, KeyError, ValueError) as error:
         errors = [f"cannot load the IXP Manager contract surface: {error!r}"]

@@ -28,7 +28,7 @@ operator-facing index that answers "what has actually been proved?"
 | BIRD / GoBGP / StayRTR diversity | Mixed CI/manual | BIRD TCP-AO and GoBGP coverage are documented. The RTR-dependent RPKI/ASPA cases are hosted in `interop.yml`: M84 multi-cache RTR/ASPA epoch conformance against Routinator and StayRTR, M27/M59 ASPA against the RTR v2 mock, and M83's route-server StayRTR fixture. The earlier M21 origin-validation lab and broader platform-diversity runs remain local/manual where extra fixtures are required. |
 | Long-wall-clock gates | Manual/local | GR/LLGR soak-style gates and M33 scale churn are intentionally not PR-CI jobs because they consume substantial wall-clock. |
 
-Compact M36-M90 index (details and assertions stay in
+Compact M36-M98 index (details and assertions stay in
 [`INTEROP.md`](INTEROP.md#ci-coverage)):
 
 | Receipts | Coverage |
@@ -38,6 +38,9 @@ Compact M36-M90 index (details and assertions stay in
 | M39, M39b, M47, M48, M60, M61, M68, M70, M71, M72 | EVPN L3VNI / Type 5 / runtime convergence / adoption / VLAN-aware / overlay-index dataplane receipts. |
 | M42, M50, M51, M52, M53, M58, M62 | Non-EVPN kernel dataplane receipts in the same hosted span: FIB runtime/CRUD, BFD, BGP unnumbered, and BLACKHOLE adoption. |
 | M43 | Conditional TCP-AO queued-child receipt, uninterrupted no-flap add/select/deprecate/delete against BIRD with a 100 ms route-continuity oracle, and a separate three-phase SIGKILL/restart recovery gate requiring exact fresh-start inventory/auth/session state; probed and skipped only when the selected runner kernel lacks support. |
+| M96 | [IXP Manager local activation](INTEROP.md#ixp-manager-v74-manual-configuration-oracle) (local): the pinned v7.4 Foil capture through the real renderer/strict checker, then atomic initial, no-op, hot-reload, and pre-effect spawn-failure restoration against MD5-authenticated FRR with exact prior bytes, unchanged daemon PID, and route/session continuity. |
+| M97 | [IXP Manager authenticated lifecycle](INTEROP.md#ixp-manager-v74-manual-configuration-oracle) (local): pinned v7.4 API lock/fetch/callback state for two same-host IPv4/IPv6 handles with distinct PIDs, state/UDS endpoints, and TCP/179 listeners, plus a shared durable host fence, paired competing-423 behavior, sequential callbacks, and cross-handle failure containment. |
+| M98 | [IXP Manager Nagios monitoring](INTEROP.md#ixp-manager-v74-manual-configuration-oracle) (`ixp-compat.yml`): the pinned v7.4 `birdseye-daemons` and `birdseye-bgp-sessions` generators include the rustbgpd route server (host, service, hostgroup, both client session services with rendered alias names), and the pinned Bird's Eye daemon plugin reports `OK` with `Last Reconfigure` against the live adapter. |
 | Other M41-M90 rows in this span | Foundation interop receipts such as BLACKHOLE FIB discard, gRPC/gNMI, EVPN Type 5 injection, BGP Roles/ORF/ASPA, inbound backpressure, IPv6-only peering, BGP-LS reflection, VPNv4 route-reflection, RT-Constrain VPNv4 filtering, RFC 9107 ORR divergent-best, RR-family GR/LLGR stale preservation, multi-cluster ORR with inter-RR Add-Path, RFC 8277 labeled-unicast reflection + GR, ADR-0096 `.rpol` policy parity vs FRR route-maps (M80), BMP trio + BMPv4/path-marking against pmacct/gobmp/tshark (M81), EVPN VLAN-aware-bundle non-zero Ethernet Tag reflection (M82), RFC 7947 route-server profile transparency/path-hiding/ROV proof (M83), and the arouteserver/BIRD/rustbgpd filtering differential (M90) remain catalogued in `INTEROP.md`. |
 
 ## Scale and benchmark receipts
