@@ -83,6 +83,7 @@ id matches the milestone. Full procedures: [`INTEROP.md`](INTEROP.md).
 | M93 | Exact required-family OPEN 2/7 rejection, dual-stack recovery, and empty-requirement partial-negotiation compatibility | BIRD 2.0.12 |
 | M94 | RFC 6793 legacy ingress reconstruction, semantic loop rejection, exact type 2/17 + type 7/18 egress, withdrawal, and session continuity | ExaBGP 5.0.9 source + independent Python OLD-speaker sink |
 | M95 | ADR-0112 live RFC 8212 policy-presence transitions: Route Refresh qualification, whole-edit rejection with nothing mutated, real refresh convergence in both directions, and GR-stale deferral | FRR 10.3.1 + BIRD 2.0.12 (Route Refresh disabled) |
+| M98 | [IXP Manager Nagios monitoring](INTEROP.md#ixp-manager-v74-manual-configuration-oracle): the pinned v7.4 `birdseye-daemons` and `birdseye-bgp-sessions` generators include the rustbgpd route server (host, service, hostgroup, both client session services with rendered alias names), and the pinned Bird's Eye daemon plugin reports `OK` with `Last Reconfigure` against the live adapter; gated by `ixp-compat.yml` | IXP Manager v7.4.0 + Bird's Eye v2.1.0 plugin + live `birdwatcher-adapter` |
 
 ## Interop labs — kernel dataplane, PR + nightly (`kernel-dataplane.yml`)
 
@@ -139,6 +140,8 @@ covered by later CI receipts). Procedures and results:
 | M32 / M32b | EVPN multi-homing Type 1 EAD + Type 4 ES reflection (kernel bond / synthetic ESI) | FRR 10.3.1 ×3 |
 | M33 | EVPN RR scale: 50k Type 2 routes + 60 s of 1000/s churn | in-tree `bench/evpn-load` |
 | M90 | ADR-0110 filtering differential: one arouteserver site produces BIRD and rustbgpd policy, with exact verdict/explain parity over 11 announcements and a red-producing policy mutation | BIRD 2.0.12 + GoBGP 3.37.0 ×3 + arouteserver 1.23.2 |
+| M96 | [IXP Manager local activation](INTEROP.md#ixp-manager-v74-manual-configuration-oracle): the pinned v7.4 Foil capture through the real renderer/strict checker, then atomic initial, no-op, hot-reload, and pre-effect spawn-failure restoration with exact prior bytes, unchanged daemon PID, and session continuity | FRR 10.3.1 (TCP MD5) + pinned IXP Manager v7.4.0 capture |
+| M97 | [IXP Manager authenticated lifecycle](INTEROP.md#ixp-manager-v74-manual-configuration-oracle): pinned v7.4 API lock/fetch/callback state for two same-host IPv4/IPv6 handles with distinct PIDs, state/UDS endpoints, and TCP/179 listeners, plus a shared durable host fence, paired competing-423 behavior, sequential callbacks, and cross-handle failure containment | FRR 10.3.1 (TCP MD5) + IXP Manager v7.4.0 + MySQL 8.4 |
 
 ## Performance and scale receipts
 
