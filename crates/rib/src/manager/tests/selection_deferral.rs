@@ -719,6 +719,66 @@ fn staged_selection_rejects_eor_and_refresh_marker_commits() {
 }
 
 #[test]
+fn deferred_selection_rejects_route_commit_until_release() {
+    let source = peer(1);
+    let target = peer(2);
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
+        .with_selection_deferral(config(Duration::from_mins(1), &[source]));
+    assert!(manager.selection_deferred(FAMILY));
+
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
+    manager.outbound_peers.insert(target, outbound_tx);
+    manager.peer_export_encoders.insert(
+        target,
+        crate::manager::permissive_test_exact_export_encoder(),
+    );
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let commit = |manager: &mut RibManager| {
+        manager.try_send_and_commit_outbound_update(
+            target,
+            vec![None].into(),
+            vec![make_route_with_lp(prefix, Ipv4Addr::new(10, 0, 0, 2), 100)].into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    };
+    assert!(
+        !commit(&mut manager),
+        "active selection deferral must fail a route-bearing commit closed"
+    );
+    assert!(outbound_rx.try_recv().is_err());
+
+    let released = manager
+        .selection_deferral
+        .as_mut()
+        .unwrap()
+        .expire(&metrics);
+    assert_eq!(released, vec![FAMILY]);
+    assert!(manager.selection_deferral.is_some());
+    assert!(!manager.selection_deferred(FAMILY));
+    assert!(
+        commit(&mut manager),
+        "a released deferral must let the same route commit through"
+    );
+    assert!(outbound_rx.try_recv().is_ok());
+}
+
+#[test]
 fn staged_selection_classifies_refresh_response_as_convergence_deferred() {
     let source = peer(1);
     let target = peer(2);

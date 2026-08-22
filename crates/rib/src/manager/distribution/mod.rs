@@ -2109,46 +2109,50 @@ impl RibManager {
         #[cfg(feature = "bench-internals")]
         let bench_per_client_best_resync = self.peer_per_client_best.contains(&peer)
             && (self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer));
-        let gated = announce
-            .iter()
-            .any(|route| self.selection_deferred(prefix_family(&route.prefix)))
-            || withdraw
+        // Every arm below is provably false without an active deferral state:
+        // `selection_deferred` / `selection_convergence_held` short-circuit on
+        // `None`. Guard once so the common no-gate commit skips all the scans.
+        let gated = self.selection_deferral.is_some()
+            && (announce
                 .iter()
-                .any(|(prefix, _)| self.selection_deferred(prefix_family(prefix)))
-            || end_of_rib
-                .iter()
-                .any(|family| self.selection_convergence_held(*family))
-            || refresh_markers
-                .iter()
-                .any(|(afi, safi, _)| self.selection_convergence_held((*afi, *safi)))
-            || flowspec_announce
-                .iter()
-                .any(|route| self.selection_deferred((route.afi, Safi::FlowSpec)))
-            || flowspec_withdraw
-                .iter()
-                .any(|key| self.selection_deferred((key.afi, Safi::FlowSpec)))
-            || ((!evpn_announce.is_empty() || !evpn_withdraw.is_empty())
-                && self.selection_deferred((Afi::L2Vpn, Safi::Evpn)))
-            || bgpls_announce
-                .iter()
-                .any(|route| self.selection_deferred(route.family.to_afi_safi()))
-            || bgpls_withdraw
-                .iter()
-                .any(|key| self.selection_deferred(key.family.to_afi_safi()))
-            || vpn_announce
-                .iter()
-                .any(|route| self.selection_deferred(route.afi_safi()))
-            || vpn_withdraw
-                .iter()
-                .any(|key| self.selection_deferred(key.afi_safi()))
-            || labeled_announce
-                .iter()
-                .any(|route| self.selection_deferred(route.afi_safi()))
-            || labeled_withdraw
-                .iter()
-                .any(|key| self.selection_deferred(key.afi_safi()))
-            || ((!rtc_announce.is_empty() || !rtc_withdraw.is_empty())
-                && self.selection_deferred(crate::route::RtcRibRouteKey::afi_safi()));
+                .any(|route| self.selection_deferred(prefix_family(&route.prefix)))
+                || withdraw
+                    .iter()
+                    .any(|(prefix, _)| self.selection_deferred(prefix_family(prefix)))
+                || end_of_rib
+                    .iter()
+                    .any(|family| self.selection_convergence_held(*family))
+                || refresh_markers
+                    .iter()
+                    .any(|(afi, safi, _)| self.selection_convergence_held((*afi, *safi)))
+                || flowspec_announce
+                    .iter()
+                    .any(|route| self.selection_deferred((route.afi, Safi::FlowSpec)))
+                || flowspec_withdraw
+                    .iter()
+                    .any(|key| self.selection_deferred((key.afi, Safi::FlowSpec)))
+                || ((!evpn_announce.is_empty() || !evpn_withdraw.is_empty())
+                    && self.selection_deferred((Afi::L2Vpn, Safi::Evpn)))
+                || bgpls_announce
+                    .iter()
+                    .any(|route| self.selection_deferred(route.family.to_afi_safi()))
+                || bgpls_withdraw
+                    .iter()
+                    .any(|key| self.selection_deferred(key.family.to_afi_safi()))
+                || vpn_announce
+                    .iter()
+                    .any(|route| self.selection_deferred(route.afi_safi()))
+                || vpn_withdraw
+                    .iter()
+                    .any(|key| self.selection_deferred(key.afi_safi()))
+                || labeled_announce
+                    .iter()
+                    .any(|route| self.selection_deferred(route.afi_safi()))
+                || labeled_withdraw
+                    .iter()
+                    .any(|key| self.selection_deferred(key.afi_safi()))
+                || ((!rtc_announce.is_empty() || !rtc_withdraw.is_empty())
+                    && self.selection_deferred(crate::route::RtcRibRouteKey::afi_safi())));
         if gated {
             warn!(%peer, "outbound transaction intersected an active RFC 4724 selection gate; failing closed");
             return false;

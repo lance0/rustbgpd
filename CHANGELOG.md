@@ -195,6 +195,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   old numbers. The authoritative table is the "Exit codes" section of
   `tools/rs-config-render/README.md`, mirrored in `docs/deployment.md` and
   asserted by a test. (LAN-1174)
+- Outbound Adj-RIB-Out commits now test for an active RFC 4724 selection
+  deferral once before scanning every family queue for a gated family; with no
+  deferral configured the per-route scans are skipped. Gate behavior is
+  unchanged. (LAN-1161)
 
 - `rustbgpd-rib`, `rustbgpd-policy`, and `rustbgpd-bmp` no longer declare an
   unused `thiserror` dependency; the ROADMAP entry that tracked the transitive
