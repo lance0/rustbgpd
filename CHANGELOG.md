@@ -222,6 +222,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Loc-RIB → Adj-RIB-Out, and is re-emitted on export, BMP, and MRT. A
   non-zero length stays attribute-discard (RFC 7606 §7.6). (LAN-1235)
 
+- The peer manager task is now supervised beside the RIB, gRPC, and BGP
+  ingress tasks: a panic or unexpected return enters the same coordinated
+  teardown and exits 1 instead of leaving a daemon that can no longer admit,
+  tear down, mutate, or shut down peers. Intentional shutdown (signals, the
+  Shutdown RPC) still joins the task after the ordered teardown and exits 0;
+  live fault and Shutdown RPC proofs pin both paths. (LAN-1237)
 - The `AS4_PATH`, `COMMUNITIES`, `EXTENDED_COMMUNITIES`, `CLUSTER_LIST`,
   `LARGE_COMMUNITIES`, BGP-LS next-hop, and VPN next-hop decoders return typed
   `DecodeError`s on every malformed-length and unknown-segment-type branch

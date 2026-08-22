@@ -3,7 +3,8 @@
 //! Operator-initiated shutdown (SIGTERM) exits 0; a component failure
 //! exits non-zero, so supervisors like systemd with `Restart=on-failure`
 //! restart the daemon instead of treating it as a clean stop. Live proofs cover
-//! startup binds, the RIB manager, and both inbound-admission tasks.
+//! startup binds, the RIB manager, both inbound-admission tasks, and the peer
+//! manager; the Shutdown RPC proof pins the intentional exit-0 path beside them.
 
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
@@ -296,6 +297,22 @@ fn establish_bgp_and_observe_shutdown(port: u16) {
     }
 }
 
+fn rbgp(grpc_addr: &str, args: &[&str]) -> std::process::Output {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_rbgp") {
+        let mut cmd = Command::new(path);
+        cmd.arg("--addr").arg(grpc_addr).args(args).output()
+    } else {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let mut cmd = Command::new(cargo);
+        cmd.args(["run", "--quiet", "-p", "rustbgpctl", "--bin", "rbgp", "--"])
+            .arg("--addr")
+            .arg(grpc_addr)
+            .args(args)
+            .output()
+    }
+    .expect("failed to spawn rbgp subprocess")
+}
+
 fn run_bgp_ingress_fault(mode: &str, connect: bool) -> (ExitStatus, String) {
     let temp = private_tempdir();
     let config_path = write_rib_fault_config(temp.path());
@@ -427,6 +444,151 @@ fn rib_supervision_is_fail_stop_and_uses_common_peer_teardown() {
 }
 
 #[test]
+fn peer_manager_panic_uses_common_shutdown_and_exits_nonzero() {
+    let temp = private_tempdir();
+    let config_path = write_config(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES);
+    let mut daemon = spawn_daemon_with_env(
+        temp.path(),
+        &config_path,
+        Some(("RUSTBGPD_TEST_PEER_MANAGER_PANIC", "1")),
+    );
+    let status = daemon.wait_within(Duration::from_secs(30));
+    let logs = daemon.logs();
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "peer manager task panic must exit 1\n{logs}"
+    );
+    for message in [
+        "injected peer manager task panic",
+        "peer manager task exited unexpectedly",
+        "initiating shutdown due to peer manager task failure",
+        "initiating coordinated shutdown",
+        "rustbgpd exiting",
+    ] {
+        assert!(logs.contains(message), "missing {message:?}\n{logs}");
+    }
+    // The supervision arm consumed the JoinHandle; the teardown must not
+    // join it a second time (that would panic the daemon mid-teardown).
+    assert!(!logs.contains("peer manager task panicked"), "{logs}");
+    assert!(
+        !logs.contains("JoinHandle polled after completion"),
+        "{logs}"
+    );
+    let reports = std::fs::read_dir(temp.path().join("runtime/crash"))
+        .expect("panic report directory")
+        .flatten()
+        .map(|entry| std::fs::read_to_string(entry.path()).expect("read panic report"))
+        .collect::<Vec<_>>();
+    assert_eq!(reports.len(), 1, "one durable panic report: {reports:?}");
+    assert!(reports[0].contains("injected peer manager task panic"));
+}
+
+#[test]
+fn shutdown_rpc_exits_zero_with_peer_manager_supervised() {
+    let temp = private_tempdir();
+    let config_path = write_config(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES);
+    let hidden = "unknown-value-must-not-be-echoed";
+    let mut daemon = spawn_daemon_with_env(
+        temp.path(),
+        &config_path,
+        Some(("RUSTBGPD_TEST_PEER_MANAGER_PANIC", hidden)),
+    );
+    // Startup is complete once the gRPC TCP listener is bound; the Shutdown
+    // RPC then rides the implicit owner-only local socket.
+    wait_for_bound_grpc_port(&mut daemon);
+    let grpc_addr = format!("unix://{}", temp.path().join("runtime/grpc.sock").display());
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let output = rbgp(&grpc_addr, &["shutdown", "--reason", "exit-code test"]);
+        if output.status.success() {
+            break;
+        }
+        if let Ok(Some(status)) = daemon.child.try_wait() {
+            panic!(
+                "rustbgpd exited before accepting the Shutdown RPC: {status}\n{}",
+                daemon.logs()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "rbgp shutdown never succeeded\nstderr:\n{}\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            daemon.logs()
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let status = daemon.wait_within(Duration::from_secs(120));
+    let logs = daemon.logs();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "Shutdown RPC must exit 0, got {status}\n{logs}"
+    );
+    // The peer manager exited as part of the ordered teardown, not through
+    // the supervision arm.
+    assert!(logs.contains("shutdown initiated via gRPC"), "{logs}");
+    assert!(
+        logs.contains("peer manager shutting down 0 peers"),
+        "{logs}"
+    );
+    assert!(
+        !logs.contains("peer manager task exited unexpectedly"),
+        "{logs}"
+    );
+    assert!(
+        logs.contains("ignoring invalid RUSTBGPD_TEST_PEER_MANAGER_PANIC"),
+        "{logs}"
+    );
+    assert!(
+        !logs.contains(hidden),
+        "unknown environment value leaked: {logs}"
+    );
+}
+
+#[test]
+fn peer_manager_supervision_is_fail_stop_and_joins_once() {
+    let source = include_str!("../src/main.rs");
+    let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
+    let retained = production
+        .find("let mut peer_mgr_handle = tokio::spawn(async move {")
+        .expect("peer manager JoinHandle must be retained");
+    let arm = production
+        .find("result = &mut peer_mgr_handle => {")
+        .expect("shutdown select must supervise the peer manager task");
+    let body = production[arm..].split_once("\n            }").unwrap().0;
+    assert!(
+        body.contains("peer manager task exited unexpectedly"),
+        "{body}"
+    );
+    assert!(body.contains("peer_mgr_exited = true;"), "{body}");
+    assert!(body.contains("component_failed = true;"), "{body}");
+    assert!(body.contains("break;"), "{body}");
+    assert!(
+        !body.contains("is_ok") && !body.contains("is_err"),
+        "{body}"
+    );
+    let teardown = production
+        .find("send(PeerManagerCommand::Shutdown)")
+        .expect("component failure must retain coordinated peer shutdown");
+    let join = production
+        .find("if !peer_mgr_exited && let Err(e) = peer_mgr_handle.await {")
+        .expect("coordinated teardown must join the peer manager exactly once");
+    assert!(retained < arm && arm < teardown && teardown < join);
+    assert_eq!(production.matches("peer_mgr_handle.await").count(), 1);
+    let rpc = production
+        .split_once("changed = rpc_shutdown_rx.changed() => {")
+        .unwrap()
+        .1;
+    let rpc = rpc.split_once("\n            }").unwrap().0;
+    assert!(
+        !rpc.contains("peer_mgr"),
+        "Shutdown RPC arm must not touch the peer manager"
+    );
+}
+
+#[test]
 fn bgp_ingress_tasks_are_retained_unconditionally_supervised_and_torn_down() {
     let source = include_str!("../src/main.rs");
     let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
@@ -532,11 +694,11 @@ fn help_and_man_distinguish_bgp_bind_modes_and_supervised_exits() {
     let help = output("--help");
     assert!(help.contains("legacy BGP mode bound neither family; an explicit listen_addresses"));
     assert!(help.contains("endpoint failed to bind; configured metrics/readiness bind failure;"));
-    assert!(help.contains("or unexpected RIB manager, gRPC server, BGP listener task,"));
-    assert!(help.contains("or BGP accept-forwarding task exit"));
+    assert!(help.contains("or unexpected RIB manager, peer manager, gRPC server,"));
+    assert!(help.contains("BGP listener task, or BGP accept-forwarding task exit"));
     let man = output("--man");
     assert!(man.contains("legacy BGP listen mode could bind\nneither family; explicit\n.B listen_addresses\nmode could not bind every configured endpoint"));
-    assert!(man.contains("the RIB manager, gRPC server, BGP listener task,\nor BGP accept-forwarding task exited unexpectedly"));
+    assert!(man.contains("the RIB manager, peer manager, gRPC server,\nBGP listener task, or BGP accept-forwarding task exited unexpectedly"));
 }
 
 #[test]
