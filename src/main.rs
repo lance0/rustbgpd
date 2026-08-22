@@ -2975,6 +2975,11 @@ const TEST_RIB_CHANNEL_CAPACITY_ENV: &str = "RUSTBGPD_TEST_RIB_CHANNEL_CAPACITY"
 /// with a sanitized warning.
 const TEST_BGP_INGRESS_EXIT_ENV: &str = "RUSTBGPD_TEST_BGP_INGRESS_EXIT";
 
+/// Test-only one-based configured-peer ordinal that forces the real
+/// `PeerManager` validation path to reject that peer. Invalid values are ignored
+/// without echoing the raw environment value.
+const TEST_INITIAL_PEER_REJECTION_AT_ENV: &str = "RUSTBGPD_TEST_INITIAL_PEER_REJECTION_AT";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TestBgpIngressExit {
     ListenerPanic,
@@ -3003,6 +3008,33 @@ fn resolve_test_bgp_ingress_exit() -> Option<TestBgpIngressExit> {
     };
     parse_test_bgp_ingress_exit(raw.as_deref()).unwrap_or_else(|()| {
         warn!("ignoring invalid {TEST_BGP_INGRESS_EXIT_ENV}; expected listener_panic or forwarder_return");
+        None
+    })
+}
+
+fn parse_test_initial_peer_rejection_at(raw: Option<&str>) -> Result<Option<usize>, ()> {
+    match raw {
+        None => Ok(None),
+        Some(raw) => raw
+            .parse::<std::num::NonZeroUsize>()
+            .map(|ordinal| Some(ordinal.get()))
+            .map_err(|_| ()),
+    }
+}
+
+fn resolve_test_initial_peer_rejection_at() -> Option<usize> {
+    let raw = match std::env::var(TEST_INITIAL_PEER_REJECTION_AT_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            warn!(
+                "ignoring invalid {TEST_INITIAL_PEER_REJECTION_AT_ENV}; expected a positive one-based ordinal"
+            );
+            return None;
+        }
+    };
+    parse_test_initial_peer_rejection_at(raw.as_deref()).unwrap_or_else(|()| {
+        warn!("ignoring invalid {TEST_INITIAL_PEER_REJECTION_AT_ENV}; expected a positive one-based ordinal");
         None
     })
 }
@@ -3071,6 +3103,7 @@ async fn run<T>(
     let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .unwrap_or_else(|e| fatal_startup_error("failed to register SIGHUP handler", e));
     let test_bgp_ingress_exit = resolve_test_bgp_ingress_exit();
+    let test_initial_peer_rejection_at = resolve_test_initial_peer_rejection_at();
 
     let mut config = accepted.config();
     // Snapshot the gRPC listener config as it was at process start.
@@ -4876,7 +4909,12 @@ async fn run<T>(
     }
 
     // Add initial peers from config via PeerManager
+    // Failures after the ownership boundary enter the common bounded teardown.
+    let mut component_failed = false;
+    let mut initial_peer_boot_failed = false;
+    let mut peer_ordinal = 0;
     for neighbor in peer_configs {
+        peer_ordinal += 1;
         let transport_config = neighbor.transport_config;
         let label = neighbor.label;
         let import_policy = neighbor.import_policy;
@@ -4889,77 +4927,92 @@ async fn run<T>(
             "adding peer from config"
         );
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        if let Err(error) = peer_mgr_tx
+        let mut peer_config = PeerManagerNeighborConfig {
+            address: transport_config.remote_addr.ip(),
+            interface: transport_config.peer_interface.clone(),
+            scope_id: transport_config.peer_scope_id,
+            remote_asn: transport_config.peer.remote_asn,
+            description: label.clone(),
+            peer_group,
+            hold_time: Some(transport_config.peer.hold_time),
+            min_hold_time: transport_config.peer.min_hold_time,
+            send_hold_time: Some(transport_config.peer.send_hold_time),
+            max_prefixes: transport_config.max_prefixes,
+            max_prefixes_ipv4: transport_config.max_prefixes_ipv4,
+            max_prefixes_ipv6: transport_config.max_prefixes_ipv6,
+            max_prefix_restart_seconds: neighbor.max_prefix_restart_seconds,
+            md5_password: transport_config.md5_password.clone(),
+            tcp_ao: transport_config.tcp_ao.clone(),
+            ttl_security: transport_config.ttl_security,
+            families: transport_config.peer.families.clone(),
+            required_families: transport_config.peer.required_families.clone(),
+            graceful_restart: transport_config.peer.graceful_restart,
+            gr_restart_time: transport_config.peer.gr_restart_time,
+            gr_peer_restart_time_max: transport_config.gr_peer_restart_time_max,
+            gr_stale_routes_time: transport_config.gr_stale_routes_time,
+            llgr_stale_time: transport_config.llgr_stale_time,
+            gr_restart_eligible: true,
+            local_ipv6_nexthop: transport_config.local_ipv6_nexthop,
+            route_reflector_client: transport_config.route_reflector_client,
+            orr_vantage: transport_config.orr_vantage,
+            route_server_client: transport_config.route_server_client,
+            per_client_best: transport_config.per_client_best,
+            next_hop_ownership_strict_peer: transport_config.next_hop_ownership_strict_peer,
+            slow_peer_threshold_pct: transport_config.slow_peer_threshold_pct,
+            slow_peer_duration: transport_config.slow_peer_duration,
+            slow_peer_isolation: transport_config.slow_peer_isolation,
+            interpret_rfc1997: transport_config.interpret_rfc1997,
+            rs_control_communities: transport_config.rs_control_communities,
+            remove_private_as: transport_config.remove_private_as,
+            add_path_receive: transport_config.peer.add_path_receive,
+            add_path_send: transport_config.peer.add_path_send,
+            add_path_send_max: transport_config.peer.add_path_send_max,
+            paths_limit_receive_max: transport_config.peer.paths_limit_receive_max,
+            local_role: transport_config.peer.local_role,
+            strict_role: transport_config.peer.strict_role,
+            prefix_orf_receive: transport_config.peer.prefix_orf_receive,
+            disable_ipv4_unicast: transport_config.peer.disable_ipv4_unicast,
+            import_policy,
+            export_policy,
+        };
+        if test_initial_peer_rejection_at == Some(peer_ordinal) {
+            peer_config.interface = Some("rustbgpd-test-invalid-interface".to_string());
+        }
+        let peer_error = if let Err(error) = peer_mgr_tx
             .send(PeerManagerCommand::AddPeer {
-                config: PeerManagerNeighborConfig {
-                    address: transport_config.remote_addr.ip(),
-                    interface: transport_config.peer_interface.clone(),
-                    scope_id: transport_config.peer_scope_id,
-                    remote_asn: transport_config.peer.remote_asn,
-                    description: label.clone(),
-                    peer_group,
-                    hold_time: Some(transport_config.peer.hold_time),
-                    min_hold_time: transport_config.peer.min_hold_time,
-                    send_hold_time: Some(transport_config.peer.send_hold_time),
-                    max_prefixes: transport_config.max_prefixes,
-                    max_prefixes_ipv4: transport_config.max_prefixes_ipv4,
-                    max_prefixes_ipv6: transport_config.max_prefixes_ipv6,
-                    max_prefix_restart_seconds: neighbor.max_prefix_restart_seconds,
-                    md5_password: transport_config.md5_password.clone(),
-                    tcp_ao: transport_config.tcp_ao.clone(),
-                    ttl_security: transport_config.ttl_security,
-                    families: transport_config.peer.families.clone(),
-                    required_families: transport_config.peer.required_families.clone(),
-                    graceful_restart: transport_config.peer.graceful_restart,
-                    gr_restart_time: transport_config.peer.gr_restart_time,
-                    gr_peer_restart_time_max: transport_config.gr_peer_restart_time_max,
-                    gr_stale_routes_time: transport_config.gr_stale_routes_time,
-                    llgr_stale_time: transport_config.llgr_stale_time,
-                    gr_restart_eligible: true,
-                    local_ipv6_nexthop: transport_config.local_ipv6_nexthop,
-                    route_reflector_client: transport_config.route_reflector_client,
-                    orr_vantage: transport_config.orr_vantage,
-                    route_server_client: transport_config.route_server_client,
-                    per_client_best: transport_config.per_client_best,
-                    next_hop_ownership_strict_peer: transport_config.next_hop_ownership_strict_peer,
-                    slow_peer_threshold_pct: transport_config.slow_peer_threshold_pct,
-                    slow_peer_duration: transport_config.slow_peer_duration,
-                    slow_peer_isolation: transport_config.slow_peer_isolation,
-                    interpret_rfc1997: transport_config.interpret_rfc1997,
-                    rs_control_communities: transport_config.rs_control_communities,
-                    remove_private_as: transport_config.remove_private_as,
-                    add_path_receive: transport_config.peer.add_path_receive,
-                    add_path_send: transport_config.peer.add_path_send,
-                    add_path_send_max: transport_config.peer.add_path_send_max,
-                    paths_limit_receive_max: transport_config.peer.paths_limit_receive_max,
-                    local_role: transport_config.peer.local_role,
-                    strict_role: transport_config.peer.strict_role,
-                    prefix_orf_receive: transport_config.peer.prefix_orf_receive,
-                    disable_ipv4_unicast: transport_config.peer.disable_ipv4_unicast,
-                    import_policy,
-                    export_policy,
-                },
+                config: peer_config,
                 sync_config_snapshot: false,
                 reply: reply_tx,
             })
             .await
         {
-            fatal_startup_error(
+            Some((
                 "failed to send configured peer to peer manager during startup",
                 format!("{label}: {error}"),
-            );
+            ))
+        } else {
+            match reply_rx.await {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some((
+                    "failed to add configured peer during startup",
+                    format!("{label}: {error}"),
+                )),
+                Err(error) => Some((
+                    "peer manager dropped configured-peer reply during startup",
+                    format!("{label}: {error}"),
+                )),
+            }
+        };
+        if let Some((message, error)) = peer_error {
+            error!(error = %error, "{message}");
+            initial_peer_boot_failed = true;
+            component_failed = true;
+            break;
         }
-        match reply_rx.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => fatal_startup_error(
-                "failed to add configured peer during startup",
-                format!("{label}: {error}"),
-            ),
-            Err(error) => fatal_startup_error(
-                "peer manager dropped configured-peer reply during startup",
-                format!("{label}: {error}"),
-            ),
-        }
+    }
+
+    if initial_peer_boot_failed {
+        info!("initiating shortened coordinated shutdown after configured-peer startup failure");
     }
 
     // Activate BGP ingress only after the complete configured-peer roster is
@@ -4969,6 +5022,9 @@ async fn run<T>(
     let listener_peer_mgr_tx = peer_mgr_tx.clone();
     let listener_gate = daemon_gate.clone();
     let mut bgp_forwarder_handle = tokio::spawn(async move {
+        if initial_peer_boot_failed {
+            std::future::pending::<()>().await;
+        }
         while let Some(conn) = accept_rx.recv().await {
             // Coordinated shutdown has begun: drop (close) the socket
             // instead of admitting a session into teardown.
@@ -4996,6 +5052,9 @@ async fn run<T>(
         }
     });
     let mut bgp_listener_handle = tokio::spawn(async move {
+        if initial_peer_boot_failed {
+            std::future::pending::<()>().await;
+        }
         assert_ne!(
             test_bgp_ingress_exit,
             Some(TestBgpIngressExit::ListenerPanic),
@@ -5008,7 +5067,7 @@ async fn run<T>(
     // Prometheus text; `/livez` and `/readyz` provide minimal probe bodies.
     // Spawn after startup wiring and initial peer registration so readiness
     // cannot go green while initialization is still in progress.
-    if let Some(metrics_listener) = metrics_listener {
+    if let Some(metrics_listener) = metrics_listener.filter(|_| !initial_peer_boot_failed) {
         let metrics_clone = metrics.clone();
         let readiness_probe = rustbgpd_api::health_probe::CoreReadinessProbe::new(
             peer_mgr_tx.clone(),
@@ -5042,7 +5101,10 @@ async fn run<T>(
         ),
     ));
     match config::gnmi_dialout_targets(&config) {
-        Ok(targets) => gnmi_dialout_manager.lock().await.apply(&targets),
+        Ok(targets) if !initial_peer_boot_failed => {
+            gnmi_dialout_manager.lock().await.apply(&targets);
+        }
+        Ok(_) => {}
         // Unreachable in practice: Config::load validated the section.
         Err(reason) => error!(error = %reason, "invalid [gnmi_dialout] section; dial-out disabled"),
     }
@@ -5067,8 +5129,10 @@ async fn run<T>(
     let mut reload_in_flight: Option<
         tokio::task::JoinHandle<Result<SighupAuthority, SighupReloadError>>,
     > = None;
-    let mut component_failed = false;
     loop {
+        if initial_peer_boot_failed {
+            break;
+        }
         tokio::select! {
             _ = sigint.recv() => {
                 info!("received SIGINT");
@@ -5309,7 +5373,7 @@ async fn run<T>(
     let mut checkpoint_failure = None;
     let mut evpn_apply_fence = None;
 
-    if warm_checkpoint_on_shutdown {
+    if warm_checkpoint_on_shutdown && !initial_peer_boot_failed {
         if let Some(directory) = warm_bundle_directory.clone() {
             let deadline = runtime_config_deadline;
             if checkpoint_failure.is_none() {
@@ -5373,14 +5437,14 @@ async fn run<T>(
         }
     }
 
-    if let Some(error) = checkpoint_failure.as_deref() {
+    if !initial_peer_boot_failed && let Some(error) = checkpoint_failure.as_deref() {
         warn!(
             %error,
             "warm checkpoint publication failed; retaining a generationless GR marker"
         );
     }
 
-    if let Some(restart_time_secs) = restart_time_secs {
+    if !initial_peer_boot_failed && let Some(restart_time_secs) = restart_time_secs {
         let restart_duration = Duration::from_secs(restart_time_secs);
         let store = gr_restart_marker_store.clone();
         let generation = checkpoint_generation.clone();
@@ -5455,7 +5519,7 @@ async fn run<T>(
                 "GR restart marker publication exceeded its terminal deadline; continuing shutdown — restarting-speaker mode is not guaranteed on the next start"
             );
         }
-    } else if let Some(store) = gr_restart_marker_store.clone() {
+    } else if !initial_peer_boot_failed && let Some(store) = gr_restart_marker_store.clone() {
         match bounded_gr_marker_io(GR_MARKER_IO_DEADLINE, move || store.remove()).await {
             Some(Ok(())) => {}
             Some(Err(e)) => {
@@ -5719,13 +5783,9 @@ mod tests {
             peer_registration_loop.ends_with("\n    }\n\n    "),
             "ingress barrier must follow the rustfmt-indented closing brace of the peer loop"
         );
-        assert_eq!(
-            peer_registration_loop
-                .matches("fatal_startup_error(")
-                .count(),
-            3,
-            "every configured-peer registration failure must remain fatal"
-        );
+        assert!(!peer_registration_loop.contains("fatal_startup_error("));
+        assert!(peer_registration_loop.contains("component_failed = true;"));
+        assert!(peer_registration_loop.contains("break;"));
         for fatal_message in [
             "failed to send configured peer to peer manager during startup",
             "failed to add configured peer during startup",
@@ -5740,6 +5800,27 @@ mod tests {
         assert!(post_registration_barrier < listener_run_spawn);
         assert!(accept_forwarding_spawn < metrics_startup);
         assert!(listener_run_spawn < metrics_startup);
+        assert_eq!(
+            production
+                .matches("std::future::pending::<()>().await;")
+                .count(),
+            2
+        );
+        assert!(production.contains("metrics_listener.filter(|_| !initial_peer_boot_failed)"));
+        assert!(production.contains("Ok(targets) if !initial_peer_boot_failed"));
+        assert!(
+            production.contains("if initial_peer_boot_failed {\n            break;\n        }")
+        );
+        let fence = production
+            .find("// ADR-0080: fence in-flight EVPN")
+            .unwrap();
+        let withdraw = production
+            .find("info!(\"draining EVPN originator\")")
+            .unwrap();
+        let cease = production
+            .find("send(PeerManagerCommand::Shutdown)")
+            .unwrap();
+        assert!(fence < withdraw && withdraw < cease);
     }
 
     #[test]
@@ -5800,7 +5881,7 @@ mod tests {
         );
 
         let after_boundary = &production[boundary..];
-        assert_eq!(after_boundary.matches("fatal_startup_error(").count(), 3);
+        assert_eq!(after_boundary.matches("fatal_startup_error(").count(), 0);
         for message in [
             "failed to send configured peer to peer manager during startup",
             "failed to add configured peer during startup",
@@ -5811,6 +5892,16 @@ mod tests {
                 "missing fatal arm: {message}"
             );
         }
+        assert!(
+            after_boundary.contains("warm_checkpoint_on_shutdown && !initial_peer_boot_failed")
+        );
+        assert_eq!(
+            after_boundary
+                .matches("else if !initial_peer_boot_failed")
+                .count(),
+            1,
+            "GR marker removal must share the incomplete-boot guard"
+        );
     }
 
     #[test]
@@ -5826,6 +5917,11 @@ mod tests {
         );
         for raw in ["", "listener", " listener_panic", "forwarder_return "] {
             assert_eq!(parse_test_bgp_ingress_exit(Some(raw)), Err(()));
+        }
+        assert_eq!(parse_test_initial_peer_rejection_at(None), Ok(None));
+        assert_eq!(parse_test_initial_peer_rejection_at(Some("2")), Ok(Some(2)));
+        for raw in ["", "0", " 2", "2 ", "peer-two"] {
+            assert_eq!(parse_test_initial_peer_rejection_at(Some(raw)), Err(()));
         }
     }
 

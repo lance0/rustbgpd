@@ -165,6 +165,33 @@ fn write_rib_fault_config(dir: &Path) -> PathBuf {
     config_path
 }
 
+fn write_initial_peer_failure_config(dir: &Path) -> PathBuf {
+    let config_path = write_config_with_metrics(dir, DAEMON_CHOOSES, DAEMON_CHOOSES, Some(0));
+    let marker = "[global]\nasn = 65001";
+    let replacement = "[global]\nasn = 65001\nwarm_cache_checkpoint_on_shutdown = true";
+    let config = std::fs::read_to_string(&config_path).expect("read test config");
+    assert!(config.contains(marker), "missing global config marker");
+    let config = config.replacen(marker, replacement, 1);
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"{config}
+[[neighbors]]
+address = "127.0.0.1"
+remote_asn = 65020
+description = "peer-one"
+graceful_restart = true
+[[neighbors]]
+address = "127.0.0.2"
+remote_asn = 65021
+description = "peer-two"
+"#
+        ),
+    )
+    .expect("write initial-peer failure config");
+    config_path
+}
+
 /// Port the config asks for when the test does not care about the value.
 ///
 /// Picking one by binding `127.0.0.1:0` and dropping the listener reserves
@@ -283,6 +310,48 @@ fn run_bgp_ingress_fault(mode: &str, connect: bool) -> (ExitStatus, String) {
     });
     let status = daemon.wait_within(Duration::from_secs(30));
     (status, daemon.logs())
+}
+
+#[test]
+fn initial_peer_rejection_uses_shortened_coordinated_teardown() {
+    let temp = private_tempdir();
+    let config_path = write_initial_peer_failure_config(temp.path());
+    let mut daemon = spawn_daemon_with_env(
+        temp.path(),
+        &config_path,
+        Some(("RUSTBGPD_TEST_INITIAL_PEER_REJECTION_AT", "2")),
+    );
+    let status = daemon.wait_within(Duration::from_secs(30));
+    let logs = daemon.logs();
+
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "peer-add failure must exit 1\n{logs}"
+    );
+    for message in [
+        "event history manager started",
+        "failed to add configured peer during startup",
+        "peer-two: peer 127.0.0.2%rustbgpd-test-invalid-interface has an interface but is not IPv6 link-local",
+        "initiating shortened coordinated shutdown after configured-peer startup failure",
+        "peer manager shutting down 1 peers",
+        "shutdown requested",
+    ] {
+        assert!(logs.contains(message), "missing {message:?}\n{logs}");
+    }
+    for absent in [
+        "metrics server listening",
+        "finished GR restart marker publication for coordinated shutdown",
+        "failed to clear GR restart marker",
+    ] {
+        assert!(!logs.contains(absent), "unexpected {absent:?}\n{logs}");
+    }
+    assert!(!temp.path().join("runtime/gr-restart.toml").exists());
+    let warm_bundle = temp.path().join("runtime/warm-bundle-v1");
+    assert!(
+        !warm_bundle.exists() || std::fs::read_dir(warm_bundle).unwrap().next().is_none(),
+        "incomplete boot must not publish a warm checkpoint"
+    );
 }
 
 #[test]
