@@ -76,7 +76,8 @@ peer, RFC 8212 missing import/export policy, sustained outbound-prefix blocking,
 dynamic-neighbor admission near-limit and rejection,
 actor polls above 200ms, exact-export rejection, malformed UPDATE disposition,
 selection-deferral timeout and ledger overflow, outbound route loss, RFC 9687
-send-hold teardown, live event-stream lag/desynchronization, and daemon down)
+send-hold teardown, live event-stream lag/desynchronization, BMP feed loss,
+and daemon down)
 ships at
 [`examples/prometheus/rustbgpd-alerts.yml`](../examples/prometheus/rustbgpd-alerts.yml),
 with per-rule unit tests in
@@ -84,7 +85,7 @@ with per-rule unit tests in
 (`promtool test rules`). It assumes the scrape config above
 (`job_name: rustbgpd`).
 
-The three loss alerts use a 10-minute counter-increase window and clear after
+The loss alerts use a 10-minute counter-increase window and clear after
 the last increment ages out:
 
 - `BgpOutboundRouteDrops` is critical because the full outbound distribution
@@ -101,6 +102,14 @@ the last increment ages out:
   incremental events. Treat that consumer's local view as desynchronized:
   take a fresh authoritative snapshot for the named service and source, then
   restart the live watch. Use a durable cursor only when that API supports one.
+- `BmpSourceDrops`, `BmpLocRibSourceDrops`, and `BmpCollectorDrops` are
+  warning severity because routing is unaffected, but the BMP mirror is now
+  lossy: a dropped per-peer event forces a synthetic PeerDown/PeerUp so
+  collectors rebuild that peer, a dropped Loc-RIB event leaves Loc-RIB
+  collectors stale until their next reconnect, and a collector-side drop
+  leaves that collector incomplete until it reconnects. Find the slow
+  consumer via `bmp_collector_drops_total` and the
+  `bmp_loc_rib_dump_live_buffer_*` gauges.
 
 The rules intentionally alert on the exported loss counters, not adjacent
 queue-depth, subscriber-count, or slow-peer gauges. A flat non-zero counter is

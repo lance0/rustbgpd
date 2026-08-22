@@ -1295,3 +1295,171 @@ tests:
       - eval_time: 21m
         alertname: BgpEventStreamLagged
         exp_alerts: []
+
+  # ── BmpSourceDrops ────────────────────────────────────────
+  # Same shape as the other loss alerts: the old increment pins 10m versus
+  # 5m, the same-evaluation increment pins for: 0m, a flat counter stays
+  # quiet, and the late evaluation pins recovery. Native peer/reason labels
+  # are preserved; a different loss family must not satisfy the rule.
+  - interval: 1m
+    input_series:
+      - series: 'bmp_source_drops_total{peer="192.0.2.60", reason="channel_full", instance="edge1:9179"}'
+        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bmp_source_drops_total{peer="192.0.2.61", reason="channel_closed", instance="edge1:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bmp_source_drops_total{peer="192.0.2.62", reason="channel_full", instance="edge1:9179"}'
+        values: "3x22"
+      - series: 'bgp_outbound_route_drops_total{peer="192.0.2.63", instance="edge1:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BmpSourceDrops
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BmpSourceDrops
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.60
+              reason: channel_full
+              instance: edge1:9179
+            exp_annotations:
+              summary: "BMP events dropped for 192.0.2.60 (channel_full)"
+              description: >-
+                bmp_source_drops_total for peer 192.0.2.60 on edge1:9179
+                increased by 1 in the last 10 minutes (reason=channel_full).
+                The BMP manager is not draining the per-peer event channel as
+                fast as the session produces events; collectors receive a
+                peer-state reset and rebuild this peer's view. Find the slow
+                collector via bmp_collector_drops_total and the
+                bmp_loc_rib_dump_live_buffer_* gauges.
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.61
+              reason: channel_closed
+              instance: edge1:9179
+            exp_annotations:
+              summary: "BMP events dropped for 192.0.2.61 (channel_closed)"
+              description: >-
+                bmp_source_drops_total for peer 192.0.2.61 on edge1:9179
+                increased by 1 in the last 10 minutes (reason=channel_closed).
+                The BMP manager is not draining the per-peer event channel as
+                fast as the session produces events; collectors receive a
+                peer-state reset and rebuild this peer's view. Find the slow
+                collector via bmp_collector_drops_total and the
+                bmp_loc_rib_dump_live_buffer_* gauges.
+      - eval_time: 21m
+        alertname: BmpSourceDrops
+        exp_alerts: []
+
+  # ── BmpLocRibSourceDrops ──────────────────────────────────
+  # Process-global series keyed by event/reason only. The per-peer source
+  # counter must not satisfy the Loc-RIB rule.
+  - interval: 1m
+    input_series:
+      - series: 'bmp_loc_rib_source_drops_total{event="route_monitoring", reason="channel_full", instance="edge1:9179"}'
+        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bmp_loc_rib_source_drops_total{event="stats", reason="channel_full", instance="edge1:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bmp_loc_rib_source_drops_total{event="route_monitoring", reason="channel_closed", instance="edge1:9179"}'
+        values: "5x22"
+      - series: 'bmp_source_drops_total{peer="192.0.2.64", reason="channel_full", instance="edge1:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BmpLocRibSourceDrops
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BmpLocRibSourceDrops
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              event: route_monitoring
+              reason: channel_full
+              instance: edge1:9179
+            exp_annotations:
+              summary: "BMP Loc-RIB events dropped (route_monitoring, channel_full)"
+              description: >-
+                bmp_loc_rib_source_drops_total{event="route_monitoring",
+                reason="channel_full"} on edge1:9179 increased by 1 in the
+                last 10 minutes. Connected Loc-RIB collectors may hold a stale
+                table until their next reconnect; correlate with
+                bmp_collector_drops_total and the
+                bmp_loc_rib_dump_live_buffer_* gauges to find the slow
+                consumer.
+          - exp_labels:
+              severity: warning
+              event: stats
+              reason: channel_full
+              instance: edge1:9179
+            exp_annotations:
+              summary: "BMP Loc-RIB events dropped (stats, channel_full)"
+              description: >-
+                bmp_loc_rib_source_drops_total{event="stats",
+                reason="channel_full"} on edge1:9179 increased by 1 in the
+                last 10 minutes. Connected Loc-RIB collectors may hold a stale
+                table until their next reconnect; correlate with
+                bmp_collector_drops_total and the
+                bmp_loc_rib_dump_live_buffer_* gauges to find the slow
+                consumer.
+      - eval_time: 21m
+        alertname: BmpLocRibSourceDrops
+        exp_alerts: []
+
+  # ── BmpCollectorDrops ─────────────────────────────────────
+  # Per-collector identity is the listener socket address; phase/reason are
+  # the bounded vocabularies from the BMP manager. The reset-then-increment
+  # vector pins reset-safe increase versus delta. Replay attempts are a
+  # reconnect signal, not loss, and must not satisfy the rule.
+  - interval: 1m
+    input_series:
+      - series: 'bmp_collector_drops_total{collector="192.0.2.10:11019", phase="fan_out", reason="channel_full", instance="edge1:9179"}'
+        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bmp_collector_drops_total{collector="192.0.2.11:11019", phase="loc_rib_dump", reason="live_buffer_full", instance="edge1:9179"}'
+        values: "10 10 10 10 10 10 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bmp_collector_drops_total{collector="192.0.2.12:11019", phase="fan_out", reason="channel_closed", instance="edge1:9179"}'
+        values: "2x22"
+      - series: 'bmp_replay_attempts_total{collector="192.0.2.12:11019", instance="edge1:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BmpCollectorDrops
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BmpCollectorDrops
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              collector: 192.0.2.10:11019
+              phase: fan_out
+              reason: channel_full
+              instance: edge1:9179
+            exp_annotations:
+              summary: >-
+                BMP messages dropped toward collector 192.0.2.10:11019
+                (fan_out)
+              description: >-
+                bmp_collector_drops_total for collector 192.0.2.10:11019 on
+                edge1:9179 increased by 1 in the last 10 minutes
+                (phase=fan_out, reason=channel_full). The collector is not
+                keeping up or its connection failed; its BMP view is
+                incomplete until it reconnects and is re-fed.
+          - exp_labels:
+              severity: warning
+              collector: 192.0.2.11:11019
+              phase: loc_rib_dump
+              reason: live_buffer_full
+              instance: edge1:9179
+            exp_annotations:
+              summary: >-
+                BMP messages dropped toward collector 192.0.2.11:11019
+                (loc_rib_dump)
+              description: >-
+                bmp_collector_drops_total for collector 192.0.2.11:11019 on
+                edge1:9179 increased by 1 in the last 10 minutes
+                (phase=loc_rib_dump, reason=live_buffer_full). The collector
+                is not keeping up or its connection failed; its BMP view is
+                incomplete until it reconnects and is re-fed.
+      - eval_time: 21m
+        alertname: BmpCollectorDrops
+        exp_alerts: []

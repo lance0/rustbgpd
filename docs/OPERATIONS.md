@@ -1117,6 +1117,11 @@ query with a new live watch.
 The sibling `bmp_source_drops_total{peer,reason}` counts the same kind of
 loss on the per-peer PeerSession→BmpManager path (RFC 7854 Adj-RIB
 monitoring) with the same `reason` vocabulary.
+The shipped alert pack
+([`examples/prometheus/rustbgpd-alerts.yml`](../examples/prometheus/rustbgpd-alerts.yml))
+fires `BmpSourceDrops`, `BmpLocRibSourceDrops`, and `BmpCollectorDrops` on
+any 10-minute increase of these two counters and of
+`bmp_collector_drops_total`.
 
 ### Durable Event Cursor (ADR-0072)
 

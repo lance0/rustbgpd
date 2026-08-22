@@ -501,3 +501,68 @@ groups:
             {{ $value | printf "%.0f" }} in the last 15 minutes. The family
             exceeded the bounded identity ledger and used a complete release
             sweep; inspect table scale and retained-key pressure.
+
+      - alert: BmpSourceDrops
+        # The per-peer PeerSession→BmpManager channel is lossy by design
+        # (it never backpressures the session). Any increment means the
+        # collectors' Adj-RIB monitoring view for this peer is now wrong;
+        # a dropped RouteMonitoring forces a synthetic PeerDown/PeerUp reset
+        # once the channel drains, so the collector rebuilds from scratch.
+        expr: increase(bmp_source_drops_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            BMP events dropped for {{ $labels.peer }} ({{ $labels.reason }})
+          description: >-
+            bmp_source_drops_total for peer {{ $labels.peer }} on
+            {{ $labels.instance }} increased by
+            {{ $value | printf "%.0f" }} in the last 10 minutes
+            (reason={{ $labels.reason }}). The BMP manager is not draining the
+            per-peer event channel as fast as the session produces events;
+            collectors receive a peer-state reset and rebuild this peer's view.
+            Find the slow collector via bmp_collector_drops_total and the
+            bmp_loc_rib_dump_live_buffer_* gauges.
+
+      - alert: BmpLocRibSourceDrops
+        # RFC 9069 Loc-RIB events lost at the RIB/PeerManager→BmpManager
+        # channel. A dropped route_monitoring event diverges every Loc-RIB
+        # collector until its next reconnect-triggered table dump; a dropped
+        # stats event only skips one periodic report.
+        expr: increase(bmp_loc_rib_source_drops_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            BMP Loc-RIB events dropped ({{ $labels.event }},
+            {{ $labels.reason }})
+          description: >-
+            bmp_loc_rib_source_drops_total{event="{{ $labels.event }}",
+            reason="{{ $labels.reason }}"} on {{ $labels.instance }}
+            increased by {{ $value | printf "%.0f" }} in the last 10 minutes.
+            Connected Loc-RIB collectors may hold a stale table until their
+            next reconnect; correlate with bmp_collector_drops_total and the
+            bmp_loc_rib_dump_live_buffer_* gauges to find the slow consumer.
+
+      - alert: BmpCollectorDrops
+        # Messages discarded toward one collector, in fan_out (its outbound
+        # channel is full or closed) or loc_rib_dump (the bounded live buffer
+        # overflowed or the dump failed). The collector's view is incomplete
+        # until it reconnects and receives a fresh dump.
+        expr: increase(bmp_collector_drops_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            BMP messages dropped toward collector {{ $labels.collector }}
+            ({{ $labels.phase }})
+          description: >-
+            bmp_collector_drops_total for collector {{ $labels.collector }}
+            on {{ $labels.instance }} increased by
+            {{ $value | printf "%.0f" }} in the last 10 minutes
+            (phase={{ $labels.phase }}, reason={{ $labels.reason }}). The
+            collector is not keeping up or its connection failed; its BMP
+            view is incomplete until it reconnects and is re-fed.
