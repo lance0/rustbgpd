@@ -238,29 +238,6 @@ rm "${repo}/.git/hooks/post-checkout"
 
 grep -Fq "install_fixed_harness \"\$base_dir\" \"\$base_sha\" base" "$driver"
 grep -Fq "install_fixed_harness \"\$head_dir\" \"\$head_sha\" head" "$driver"
-for workflow in bench-nightly.yml bench.yml; do
-  file="${source_root}/.github/workflows/${workflow}"
-  python3 - "$file" <<'PY'
-import sys
-
-text = open(sys.argv[1], encoding="utf-8").read()
-marker = 'if [ "$PACKAGE" = "rustbgpd-rib" ] && [ "$BENCH" = "rib_ops" ]; then'
-start = text.index(marker)
-end = text.index("\n          fi", start)
-block = text[start:end]
-assert block.count("--harness-ref HEAD") == 1
-assert block.count("--harness-path crates/rib/benches/rib_ops.rs") == 1
-assert text.count("--harness-ref HEAD") == 1
-assert text.count("--harness-path crates/rib/benches/rib_ops.rs") == 1
-if sys.argv[1].endswith("bench-nightly.yml"):
-    invocation = text.index("bench/compare-criterion.sh", end)
-    assert text.count('"${harness_args[@]}"') == 1
-    assert text.index('"${harness_args[@]}"', invocation) > invocation
-else:
-    assert text.count('bench/compare-criterion.sh "${args[@]}"') == 1
-    assert text.index('bench/compare-criterion.sh "${args[@]}"') > end
-PY
-done
 ci="${source_root}/.github/workflows/ci.yml"
 grep -Fq 'bash -n bench/compare-criterion.sh bench/tests/test-compare-criterion-harness.sh' "$ci"
 grep -Fq 'shellcheck bench/compare-criterion.sh bench/tests/test-compare-criterion-harness.sh' "$ci"

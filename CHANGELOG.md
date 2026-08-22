@@ -218,6 +218,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `thiserror` 1.x/2.x duplicate is now a dependency-hygiene note naming the
   pulling crate (`protobuf` via `prometheus`) instead of an open item. (LAN-1213)
 
+### Removed
+
+- The `Criterion Bench Compare` (`bench.yml`) and `Criterion Bench Nightly`
+  (`bench-nightly.yml`) workflows, which targeted the retired
+  `[self-hosted, rustbgpd-bench]` runner. `bench/compare-criterion.sh` is the
+  local entrypoint for the same pinned, interleaved A/B method. (LAN-1214)
+
 ### Fixed
 
 - Routes carrying `ATOMIC_AGGREGATE` were treat-as-withdrawn: the zero-length

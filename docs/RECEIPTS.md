@@ -216,7 +216,6 @@ artifacts under [`artifacts/soak/`](artifacts/soak/). Harnesses live in
 | [`kernel-dataplane.yml`](../.github/workflows/kernel-dataplane.yml) | PR, push, nightly 07:00 UTC | Privileged EVPN/FIB/BFD/TCP-AO dataplane receipts + netns selectors |
 | [`fuzz.yml`](../.github/workflows/fuzz.yml) | nightly 04:00 UTC + manual dispatch | The sole scheduled 19-target campaign: libFuzzer wire, policy, EVPN route-target, MRT/warm-bundle, BFD, and RTR harnesses |
 | [`clusterfuzzlite.yml`](../.github/workflows/clusterfuzzlite.yml) | manual dispatch | On-demand official ClusterFuzzLite address-sanitized code-change fuzzing for the exact 19-target inventory; not a PR or scheduled gate |
-| [`bench-nightly.yml`](../.github/workflows/bench-nightly.yml) | manual dispatch (schedule disabled) | Benchmark tripwire; dormant since the bench runner was retired 2026-08-21 |
 | [`audit.yml`](../.github/workflows/audit.yml) | daily 06:00 UTC | `cargo audit` / dependency advisories |
 | [`privileged-interop.yml`](../.github/workflows/privileged-interop.yml) | manual dispatch | Direct-`cargo` privileged netns suites |
 

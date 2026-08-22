@@ -342,8 +342,10 @@ Verdict labels are:
   signal.
 - `missing`: no usable baseline pair was found for that row.
 
-The nightly workflow uses this mode against the latest release tag so real
-accumulated regressions go red without failing on noisy single-row movement.
+Run this mode against the latest release tag (`--base "$(git describe --tags
+--abbrev=0)"`) to catch accumulated regressions without failing on noisy
+single-row movement; a single-commit delta usually sits inside the host's
+noise floor.
 
 ## Tuning + safety
 
@@ -384,7 +386,6 @@ artifact directory when reviewing regressions; Criterion's HTML report remains
 the source for distribution details on timing benches, and the RIB-memory CSV is
 the source for structural memory rows.
 
-The same entrypoint is exposed through the manual `Criterion Bench Compare`
-GitHub Actions workflow. That workflow expects a self-hosted runner labeled
-`rustbgpd-bench` and defaults to `--attempts 3` for a usable signal on the
-current runner shape.
+There is no CI wrapper for this script: the `Criterion Bench Compare` and
+`Criterion Bench Nightly` workflows were removed with the self-hosted bench
+runner they targeted (2026-08-22). Run the script locally on a quiet host.
