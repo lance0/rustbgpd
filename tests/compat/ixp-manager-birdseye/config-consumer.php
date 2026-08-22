@@ -11,7 +11,19 @@ $ixp = getenv('IXP_MANAGER_ROOT');
 require $ixp . '/vendor/autoload.php';
 $app = require $ixp . '/bootstrap/app.php';
 require_once $ixp . '/version.php';
-$app->make(Kernel::class)->bootstrap();
+// IXP Manager's console bootstrap installs an exception handler that renders
+// to stdout and exits 0; the gate must go red instead, both for failures inside
+// bootstrap() and for everything after it.
+$die = static function (Throwable $exception): never {
+    fwrite(STDERR, $exception . "\n");
+    exit(1);
+};
+try {
+    $app->make(Kernel::class)->bootstrap();
+} catch (Throwable $exception) {
+    $die($exception);
+}
+set_exception_handler($die);
 
 $output = rtrim((string)getenv('CAPTURE_OUTPUT'), '/');
 $router = Router::whereHandle('b2-rs1-lan1-ipv4')->firstOrFail();

@@ -3,6 +3,7 @@ import difflib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 EXPECTED = {
@@ -75,6 +76,12 @@ REJECT_REASONS = {
     "active_ids": [1, 3, 5, 6, 7, 8, 9, 10, 13, 14],
     "defined_only_ids": [2, 4, 11, 12, 15],
     "fallback_id": 0,
+}
+NAGIOS_MONITORING = {
+    "router_filter": "api_type = Birdseye",
+    "generators": ["birdseye-daemons", "birdseye-bgp-sessions"],
+    "daemon_check": "nagios-check-birdseye.php",
+    "session_protocol": "pb_{vlan_interface_id:04}_as{asn}",
 }
 MANUAL_CONFIG_EXPORT = {
     "schema": "rustbgpd.ixp-manager.router-config/v2",
@@ -160,7 +167,6 @@ def fail(message: str) -> None:
 
 
 root = Path(__file__).resolve().parent
-capture = Path(sys.argv[1])
 manifest = json.loads((root / "contract.json").read_text())
 if manifest.get("runtime_compatibility") is not False:
     fail("contract oracle must not promote a runtime compatibility claim")
@@ -180,6 +186,8 @@ if manifest.get("reject_reasons") != REJECT_REASONS:
     fail("pinned reject-reason display or active partition drifted")
 if manifest.get("manual_config_export") != MANUAL_CONFIG_EXPORT:
     fail("strict manual v2 export contract drifted")
+if manifest.get("nagios_monitoring") != NAGIOS_MONITORING:
+    fail("pinned Nagios monitoring contract drifted")
 consumer_source = (root / "config-consumer.php").read_text()
 for required in [
     "$router->template = 'api/v4/router/server/bird2/standard';",
@@ -200,6 +208,30 @@ if manifest.get("protocol_aliases") != {
 if manifest.get("routing_tables") != ["master4"]:
     fail("live routing-table identity drifted")
 
+if sys.argv[1] == "--nagios":
+    # The live-adapter leg writes this after both pinned Nagios generators and
+    # the pinned daemon plugin ran; a missing or drifted file means the step
+    # did not execute, which is exactly the silent failure under test.
+    summary = json.loads(Path(sys.argv[2]).read_text())
+    handle = MANUAL_CONFIG_EXPORT["router_handle"]
+    if summary.get("router_handle") != handle:
+        fail("nagios capture: router handle drifted")
+    if f"host_name               bird-{handle}\n" not in summary.get("daemon_host", ""):
+        fail("nagios capture: birdseye-daemons host stanza omitted the router")
+    if summary.get("session_protocols") != ["pb_0001_as1213", "pb_0004_as112"]:
+        fail("nagios capture: birdseye-bgp-sessions client protocols drifted")
+    if not re.fullmatch(
+        r"OK: Bird rustbgpd \S+\. Bird's Eye rustbgpd \S+\. Router ID \S+\. "
+        r"Uptime: \d+ days\. Last Reconfigure: \d{4}-\d\d-\d\d \d\d:\d\d:\d\d\."
+        r"0 BGP sessions up of 1\.",
+        summary.get("daemon_check", ""),
+    ):
+        fail("nagios capture: pinned nagios-check-birdseye.php line drifted")
+    if not summary.get("last_reconfig"):
+        fail("nagios capture: daemon check Last Reconfigure is empty")
+    sys.exit(0)
+
+capture = Path(sys.argv[1])
 if len(sys.argv) == 3:
     config_capture = Path(sys.argv[2])
     default_asns = MANUAL_CONFIG_EXPORT["no_transit"]["default_asns"]

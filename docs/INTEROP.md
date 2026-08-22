@@ -87,6 +87,17 @@ secret-free receipts/output. M97 adds two exact IPv4/IPv6 handles in one host
 namespace: distinct PIDs, state/UDS endpoints, TCP/179 listeners, and real
 MD5-FRR sessions, plus a shared durable host fence, paired competing-423
 behavior, sequential callbacks, and cross-handle failure containment.
+M98 proves the monitoring seam: both pinned v7.4 Nagios generators
+(`birdseye-daemons`, `birdseye-bgp-sessions`) filter routers on
+`api_type = Birdseye`, so an excluded route server is silently absent rather
+than an error. The oracle sets the fixture route server to that API type with
+the live adapter URL, renders both generators through the real controller, and
+asserts the router's host, service, and hostgroup membership plus both
+route-server client session services with the rendered alias names, then runs
+the pinned Bird's Eye daemon plugin against the emitted `_apiurl` and requires
+`OK` with a populated `Last Reconfigure` and the one configured, down session
+counted. Alerting content, thresholds, notification routing, and the session
+plugin against a live member session are not covered.
 Ambiguous remote or activation effects remain operator
 owned. Filter translation, custom-skin migration, and multi-address parity
 remain open.
@@ -135,6 +146,7 @@ dispatch always run.
 - **Live policy-presence safety** — ADR-0112 RFC 8212 import-presence transitions qualified for Route Refresh, rejected whole when one peer cannot converge, and converged on the wire when it can: **M95**.
 - **IXP Manager local activation** — pinned v7.4 Foil render, atomic publication, live settlement, and pre-effect restoration against MD5-authenticated FRR: **M96** (local).
 - **IXP Manager authenticated lifecycle** — pinned v7.4 API lock/fetch/callback state for two same-host IPv4/IPv6 handles, with shared-fence, database, and MD5-FRR proof: **M97** (local).
+- **IXP Manager Nagios monitoring** — pinned v7.4 `birdseye-daemons` and `birdseye-bgp-sessions` generators include the rustbgpd route server, and the pinned Bird's Eye daemon plugin reports `OK` with `Last Reconfigure` against the live adapter: **M98** (`ixp-compat.yml`).
 - **Graceful Shutdown** — receiver/initiator coverage across unicast, FlowSpec, and EVPN: **M35**, **M35b**, **M35c**.
 - **BLACKHOLE FIB discard** — RFC 7999 install/withdraw plus durable exact-prefix
   crash ownership and an unreceipted `proto bgp` negative: **M41**, **M62**.

@@ -49,6 +49,21 @@ claim is made and `runtime_compatibility` remains false; the exit criterion
 that would flip it is in
 [What would flip `runtime_compatibility`](#what-would-flip-runtime_compatibility).
 
+The same live adapter also backs the pinned Nagios journey. IXP Manager's
+`birdseye-daemons` and `birdseye-bgp-sessions` generators filter routers on
+`api_type = Birdseye`, so an excluded route server is absent from generated
+monitoring rather than an error. The gate sets fixture router `b2-rs1-lan1-ipv4`
+to that API type with the adapter URL, renders both generators through the real
+`NagiosController`, and asserts the router's host, service, and hostgroup
+membership plus both route-server client session services named
+`pb_0001_as1213` and `pb_0004_as112`. It then runs the pinned Bird's Eye
+`nagios-check-birdseye.php` plugin against the emitted `_apiurl` and requires
+`OK` with a populated `Last Reconfigure` and the one configured, down session
+counted. The step writes `nagios-monitoring.json` into the capture directory
+and prints one `nagios proof:` line on stderr; `verify_capture.py --nagios`
+fails the gate when that artifact is missing or drifted. Alerting content and
+thresholds are out of scope.
+
 The real pinned IXP Manager PHP extension also translates every defined
 `:1101:<id>` display entry from 1 through 15. The executable contract records
 the active route-server-template partition `1,3,5,6,7,8,9,10,13,14`, keeps
