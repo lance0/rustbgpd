@@ -170,6 +170,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The `AS4_PATH`, `COMMUNITIES`, `EXTENDED_COMMUNITIES`, `CLUSTER_LIST`,
+  `LARGE_COMMUNITIES`, BGP-LS next-hop, and VPN next-hop decoders return typed
+  `DecodeError`s on every malformed-length and unknown-segment-type branch
+  instead of carrying `unreachable!` arms on the peer-fed decode path. (LAN-1208)
+
 - Route-server prepend control now gives every target-specific
   `RS:101|102|103:PEER` tag precedence over global `RS:10x:0` tags, matching
   pinned IXP Manager behavior while leaving other targets on the global count.

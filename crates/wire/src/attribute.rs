@@ -1243,11 +1243,6 @@ fn decode_as4_path(raw: &RawAttribute) -> Result<(AsPath, bool), DecodeError> {
         if count == 0 {
             return Err(malformed("zero-length AS4_PATH segment".to_string()));
         }
-        if !matches!(segment_type, 1..=4) {
-            return Err(malformed(format!(
-                "unknown AS4_PATH segment type {segment_type}"
-            )));
-        }
         let needed = count
             .checked_mul(4)
             .ok_or_else(|| malformed("AS4_PATH segment length overflow".to_string()))?;
@@ -1258,7 +1253,9 @@ fn decode_as4_path(raw: &RawAttribute) -> Result<(AsPath, bool), DecodeError> {
             )));
         }
         let (chunks, []) = value[..needed].as_chunks::<4>() else {
-            unreachable!("AS4_PATH length was validated")
+            return Err(malformed(
+                "AS4_PATH segment length is not a multiple of 4".to_string(),
+            ));
         };
         let asns = chunks
             .iter()
@@ -1275,7 +1272,11 @@ fn decode_as4_path(raw: &RawAttribute) -> Result<(AsPath, bool), DecodeError> {
             // RFC 6793 requires AS_CONFED_SEQUENCE to be removed from the
             // compatibility path before reconstruction.
             3 => confed_sequence_removed = true,
-            _ => unreachable!("segment type checked above"),
+            _ => {
+                return Err(malformed(format!(
+                    "unknown AS4_PATH segment type {segment_type}"
+                )));
+            }
         }
     }
     Ok((AsPath { segments }, confed_sequence_removed))
@@ -1506,18 +1507,18 @@ fn decode_attribute_value(
         }
         attr_type::COMMUNITIES => {
             // RFC 7606 §7.8: the length must be a NON-ZERO multiple of 4.
-            if value.is_empty() || !value.len().is_multiple_of(4) {
-                return Err(DecodeError::UpdateAttributeError {
-                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
-                    data: attr_error_data(flags, type_code, value),
-                    detail: format!(
-                        "COMMUNITIES length {} not a non-zero multiple of 4",
-                        value.len()
-                    ),
-                });
-            }
-            let (chunks, []) = value.as_chunks::<4>() else {
-                unreachable!("COMMUNITIES length was validated")
+            let chunks = match value.as_chunks::<4>() {
+                (chunks, []) if !chunks.is_empty() => chunks,
+                _ => {
+                    return Err(DecodeError::UpdateAttributeError {
+                        subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                        data: attr_error_data(flags, type_code, value),
+                        detail: format!(
+                            "COMMUNITIES length {} not a non-zero multiple of 4",
+                            value.len()
+                        ),
+                    });
+                }
             };
             let communities = chunks
                 .iter()
@@ -1527,18 +1528,18 @@ fn decode_attribute_value(
         }
         attr_type::EXTENDED_COMMUNITIES => {
             // RFC 7606 §7.14: the length must be a NON-ZERO multiple of 8.
-            if value.is_empty() || !value.len().is_multiple_of(8) {
-                return Err(DecodeError::UpdateAttributeError {
-                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
-                    data: attr_error_data(flags, type_code, value),
-                    detail: format!(
-                        "EXTENDED_COMMUNITIES length {} not a non-zero multiple of 8",
-                        value.len()
-                    ),
-                });
-            }
-            let (chunks, []) = value.as_chunks::<8>() else {
-                unreachable!("EXTENDED_COMMUNITIES length was validated")
+            let chunks = match value.as_chunks::<8>() {
+                (chunks, []) if !chunks.is_empty() => chunks,
+                _ => {
+                    return Err(DecodeError::UpdateAttributeError {
+                        subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                        data: attr_error_data(flags, type_code, value),
+                        detail: format!(
+                            "EXTENDED_COMMUNITIES length {} not a non-zero multiple of 8",
+                            value.len()
+                        ),
+                    });
+                }
             };
             let communities = chunks
                 .iter()
@@ -1562,15 +1563,12 @@ fn decode_attribute_value(
             Ok(PathAttribute::OriginatorId(addr))
         }
         attr_type::CLUSTER_LIST => {
-            if !value.len().is_multiple_of(4) {
+            let (chunks, []) = value.as_chunks::<4>() else {
                 return Err(DecodeError::UpdateAttributeError {
                     subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
                     data: attr_error_data(flags, type_code, value),
                     detail: format!("CLUSTER_LIST length {} not a multiple of 4", value.len()),
                 });
-            }
-            let (chunks, []) = value.as_chunks::<4>() else {
-                unreachable!("CLUSTER_LIST length was validated")
             };
             let ids = chunks
                 .iter()
@@ -1579,20 +1577,20 @@ fn decode_attribute_value(
             Ok(PathAttribute::ClusterList(ids))
         }
         attr_type::LARGE_COMMUNITIES => {
-            if value.is_empty() || !value.len().is_multiple_of(12) {
-                return Err(DecodeError::UpdateAttributeError {
-                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
-                    data: attr_error_data(flags, type_code, value),
-                    detail: format!(
-                        "LARGE_COMMUNITIES length {} invalid (must be non-zero multiple of 12)",
-                        value.len()
-                    ),
-                });
-            }
-            let mut seen = std::collections::HashSet::with_capacity(value.len() / 12);
-            let (chunks, []) = value.as_chunks::<12>() else {
-                unreachable!("LARGE_COMMUNITIES length was validated")
+            let chunks = match value.as_chunks::<12>() {
+                (chunks, []) if !chunks.is_empty() => chunks,
+                _ => {
+                    return Err(DecodeError::UpdateAttributeError {
+                        subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                        data: attr_error_data(flags, type_code, value),
+                        detail: format!(
+                            "LARGE_COMMUNITIES length {} invalid (must be non-zero multiple of 12)",
+                            value.len()
+                        ),
+                    });
+                }
             };
+            let mut seen = std::collections::HashSet::with_capacity(chunks.len());
             let communities = chunks
                 .iter()
                 .filter_map(|c| {
@@ -2395,14 +2393,6 @@ fn decode_bgpls_mp_next_hop(
             &nh_bytes[crate::bgpls::BGP_LS_ROUTE_DISTINGUISHER_LEN..],
         )
     } else {
-        if nh_len != 4 && nh_len != 16 && nh_len != 32 {
-            return Err(DecodeError::MalformedField {
-                message_type: "UPDATE",
-                detail: format!(
-                    "MP_REACH_NLRI BGP-LS next-hop length {nh_len} (expected 4, 16, or 32)"
-                ),
-            });
-        }
         (nh_len, nh_bytes)
     };
     let mut link_local_next_hop = None;
@@ -2423,7 +2413,14 @@ fn decode_bgpls_mp_next_hop(
             }
             IpAddr::V6(Ipv6Addr::from(octets))
         }
-        _ => unreachable!("BGP-LS next-hop length validated above"),
+        _ => {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: format!(
+                    "MP_REACH_NLRI BGP-LS next-hop length {nh_len} (expected 4, 16, or 32)"
+                ),
+            });
+        }
     };
     Ok((next_hop, link_local_next_hop))
 }
@@ -2463,13 +2460,18 @@ fn decode_vpn_mp_next_hop(
     nh_len: usize,
 ) -> Result<(IpAddr, Option<Ipv6Addr>), DecodeError> {
     const RD_LEN: usize = crate::vpn::ROUTE_DISTINGUISHER_LEN;
-    if nh_len != 12 && nh_len != 24 && nh_len != 48 {
-        return Err(DecodeError::MalformedField {
-            message_type: "UPDATE",
-            detail: format!("MP_REACH_NLRI VPN next-hop length {nh_len} (expected 12, 24, or 48)"),
-        });
-    }
-    let rd_offsets: &[usize] = if nh_len == 48 { &[0, 24] } else { &[0] };
+    let rd_offsets: &[usize] = match nh_len {
+        12 | 24 => &[0],
+        48 => &[0, 24],
+        _ => {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: format!(
+                    "MP_REACH_NLRI VPN next-hop length {nh_len} (expected 12, 24, or 48)"
+                ),
+            });
+        }
+    };
     for &off in rd_offsets {
         if nh_bytes[off..off + RD_LEN].iter().any(|byte| *byte != 0) {
             return Err(DecodeError::MalformedField {
@@ -2479,8 +2481,8 @@ fn decode_vpn_mp_next_hop(
         }
     }
     let ip_bytes = &nh_bytes[RD_LEN..];
-    match nh_len {
-        12 => Ok((
+    if nh_len == 12 {
+        return Ok((
             IpAddr::V4(Ipv4Addr::new(
                 ip_bytes[0],
                 ip_bytes[1],
@@ -2488,21 +2490,19 @@ fn decode_vpn_mp_next_hop(
                 ip_bytes[3],
             )),
             None,
-        )),
-        24 | 48 => {
-            let mut octets = [0_u8; 16];
-            octets.copy_from_slice(&ip_bytes[..16]);
-            let link_local = if nh_len == 48 {
-                let mut ll = [0_u8; 16];
-                ll.copy_from_slice(&nh_bytes[24 + RD_LEN..48]);
-                Some(Ipv6Addr::from(ll))
-            } else {
-                None
-            };
-            Ok((IpAddr::V6(Ipv6Addr::from(octets)), link_local))
-        }
-        _ => unreachable!("VPN next-hop length validated above"),
+        ));
     }
+    // 24 or 48 after the length match above.
+    let mut octets = [0_u8; 16];
+    octets.copy_from_slice(&ip_bytes[..16]);
+    let link_local = if nh_len == 48 {
+        let mut ll = [0_u8; 16];
+        ll.copy_from_slice(&nh_bytes[24 + RD_LEN..48]);
+        Some(Ipv6Addr::from(ll))
+    } else {
+        None
+    };
+    Ok((IpAddr::V6(Ipv6Addr::from(octets)), link_local))
 }
 fn encode_vpn_mp_next_hop(mp: &MpReachNlri, buf: &mut Vec<u8>) {
     const ZERO_RD: [u8; crate::vpn::ROUTE_DISTINGUISHER_LEN] =
@@ -3330,6 +3330,32 @@ mod tests {
             other => panic!("expected MalformedField, got: {other:?}"),
         }
     }
+    #[test]
+    fn mp_reach_bgpls_rejects_8_byte_next_hop() {
+        let route = bgpls_node(None);
+        let mut nlri = Vec::new();
+        crate::bgpls::encode_bgpls_nlri(&[route], &mut nlri).expect("encode BGP-LS NLRI");
+        let mut value = Vec::new();
+        value.extend_from_slice(&(Afi::BgpLs as u16).to_be_bytes());
+        value.push(Safi::BgpLs as u8);
+        value.push(8); // NH-Len: neither 4, 16, nor 32
+        value.extend_from_slice(&[192, 0, 2, 1, 192, 0, 2, 2]);
+        value.push(0);
+        value.extend_from_slice(&nlri);
+        let value_len =
+            u8::try_from(value.len()).expect("fixture MP_REACH value length fits in one octet");
+        let mut attr = vec![attr_flags::OPTIONAL, 14, value_len];
+        attr.extend_from_slice(&value);
+        let err = decode_path_attributes(&attr, true, &[])
+            .expect_err("BGP-LS next-hop must be 4, 16, or 32 bytes");
+        match err {
+            DecodeError::MalformedField { detail, .. } => assert_eq!(
+                detail,
+                "MP_REACH_NLRI BGP-LS next-hop length 8 (expected 4, 16, or 32)"
+            ),
+            other => panic!("expected MalformedField, got: {other:?}"),
+        }
+    }
     fn vpn_rd() -> crate::evpn::RouteDistinguisher {
         crate::evpn::RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1])
     }
@@ -3581,6 +3607,31 @@ mod tests {
                     "unexpected detail: {detail}"
                 );
             }
+            other => panic!("expected MalformedField, got: {other:?}"),
+        }
+    }
+    #[test]
+    fn mp_reach_vpn_rejects_16_byte_next_hop() {
+        let mut nlri = Vec::new();
+        crate::vpn::encode_vpnv4_nlri(&[vpnv4_nlri(100)], &mut nlri).expect("encode VPN NLRI");
+        let mut value = Vec::new();
+        value.extend_from_slice(&(Afi::Ipv4 as u16).to_be_bytes());
+        value.push(Safi::MplsVpn as u8);
+        value.push(16); // NH-Len: neither 12, 24, nor 48
+        value.extend_from_slice(&[0; 8]); // zero RD
+        value.extend_from_slice(&[192, 0, 2, 1, 192, 0, 2, 2]);
+        value.push(0); // Reserved
+        value.extend_from_slice(&nlri);
+        let value_len = u8::try_from(value.len()).unwrap();
+        let mut attr = vec![attr_flags::OPTIONAL, 14, value_len];
+        attr.extend_from_slice(&value);
+        let err = decode_path_attributes(&attr, true, &[])
+            .expect_err("VPN next-hop must be 12, 24, or 48 bytes");
+        match err {
+            DecodeError::MalformedField { detail, .. } => assert_eq!(
+                detail,
+                "MP_REACH_NLRI VPN next-hop length 16 (expected 12, 24, or 48)"
+            ),
             other => panic!("expected MalformedField, got: {other:?}"),
         }
     }
@@ -4280,6 +4331,20 @@ mod tests {
         assert!(decode_path_attributes(&buf, true, &[]).is_err());
     }
     #[test]
+    fn decode_communities_trailing_partial_community_is_length_error() {
+        // One whole community plus three trailing bytes: a non-empty 4-byte remainder.
+        let buf = [0xC0, 0x08, 0x07, 0, 0, 0, 1, 2, 3, 4];
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
+        match err {
+            DecodeError::UpdateAttributeError {
+                subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                detail,
+                ..
+            } => assert_eq!(detail, "COMMUNITIES length 7 not a non-zero multiple of 4"),
+            other => panic!("expected ATTRIBUTE_LENGTH_ERROR, got: {other:?}"),
+        }
+    }
+    #[test]
     fn communities_roundtrip() {
         let c1: u32 = (65001 << 16) | 0x0064;
         let c2: u32 = (65002 << 16) | 0x00C8;
@@ -4332,6 +4397,23 @@ mod tests {
         // length 5 is not a multiple of 8
         let buf = [0xC0, 0x10, 0x05, 0x01, 0x02, 0x03, 0x04, 0x05];
         assert!(decode_path_attributes(&buf, true, &[]).is_err());
+    }
+    #[test]
+    fn decode_extended_communities_trailing_partial_is_length_error() {
+        // One whole extended community plus one trailing byte: a non-empty 8-byte remainder.
+        let buf = [0xC0, 0x10, 0x09, 0, 2, 0xFD, 0xE9, 0, 0, 0, 100, 1];
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
+        match err {
+            DecodeError::UpdateAttributeError {
+                subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                detail,
+                ..
+            } => assert_eq!(
+                detail,
+                "EXTENDED_COMMUNITIES length 9 not a non-zero multiple of 8"
+            ),
+            other => panic!("expected ATTRIBUTE_LENGTH_ERROR, got: {other:?}"),
+        }
     }
     #[test]
     fn extended_communities_roundtrip() {
@@ -5121,6 +5203,20 @@ mod tests {
             }
         ));
     }
+    #[test]
+    fn cluster_list_trailing_partial_id_is_length_error() {
+        // Two whole cluster IDs plus one trailing byte: a non-empty 4-byte remainder.
+        let buf = [0x80, 0x0A, 0x09, 10, 0, 0, 1, 10, 0, 0, 2, 3];
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
+        match err {
+            DecodeError::UpdateAttributeError {
+                subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                detail,
+                ..
+            } => assert_eq!(detail, "CLUSTER_LIST length 9 not a multiple of 4"),
+            other => panic!("expected ATTRIBUTE_LENGTH_ERROR, got: {other:?}"),
+        }
+    }
     // -----------------------------------------------------------------------
     // Large Communities (RFC 8092)
     // -----------------------------------------------------------------------
@@ -5196,6 +5292,23 @@ mod tests {
                 ..
             }
         ));
+    }
+    #[test]
+    fn decode_large_community_trailing_partial_is_length_error() {
+        // One whole large community plus one trailing byte: a non-empty 12-byte remainder.
+        let buf = [0xC0, 32, 13, 0, 0, 0xFD, 0xE9, 0, 0, 0, 1, 0, 0, 0, 2, 9];
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
+        match err {
+            DecodeError::UpdateAttributeError {
+                subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                detail,
+                ..
+            } => assert_eq!(
+                detail,
+                "LARGE_COMMUNITIES length 13 invalid (must be non-zero multiple of 12)"
+            ),
+            other => panic!("expected ATTRIBUTE_LENGTH_ERROR, got: {other:?}"),
+        }
     }
     #[test]
     fn decode_large_community_empty_rejected() {
@@ -6610,6 +6723,46 @@ mod tests {
         }
     }
 
+    /// The typed error behind two `AS4_PATH` matrix rows: an unknown segment
+    /// type is rejected by the segment-type match itself, and a truncated
+    /// segment is rejected before its ASNs are chunked.
+    #[test]
+    fn malformed_as4_path_segment_errors_are_malformed_as_path() {
+        let cases = [
+            (
+                "unknown type",
+                &[5, 1, 0, 0, 0, 1][..],
+                "unknown AS4_PATH segment type 5",
+            ),
+            (
+                "truncated",
+                &[2, 2, 0, 0, 0, 1][..],
+                "AS4_PATH segment truncated: need 8 bytes, have 4",
+            ),
+        ];
+        for (name, value, detail) in cases {
+            let mut bytes = attr_bytes(
+                attr_flags::TRANSITIVE,
+                attr_type::AS_PATH,
+                &[2, 1, 0xFD, 0xE8],
+            );
+            bytes.extend(attr_bytes(
+                attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                attr_type::AS4_PATH,
+                value,
+            ));
+            let revised = decode_path_attributes_revised(&bytes, false, false, &[]).unwrap();
+            assert_eq!(revised.malformed.len(), 1, "{name}");
+            match &revised.malformed[0].error {
+                DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::MALFORMED_AS_PATH,
+                    detail: got,
+                    ..
+                } => assert_eq!(got, detail, "{name}"),
+                other => panic!("{name}: expected MALFORMED_AS_PATH, got: {other:?}"),
+            }
+        }
+    }
     /// Load-bearing strict-parser matrix: weakening any minimum/even/framing/
     /// count/type check makes the corresponding malformed `AS4_PATH` vanish
     /// instead of producing `AttributeDiscard`; discarding the complete
