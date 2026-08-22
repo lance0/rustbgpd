@@ -15,24 +15,48 @@ re-run here), or a commitment in either direction. rustbgpd is public
 alpha; the support and proof boundaries in [`SUPPORT.md`](../../SUPPORT.md)
 apply to everything below.
 
+## Which mode are you in
+
+rustbgpd route servers are provisioned in one of three mutually exclusive
+modes — hand-written, ARouteServer-driven, IXP Manager-driven — chosen in
+the [cookbook's fork](README.md#ixp-provisioning-three-modes). The pilot
+posture below (an export chain that sends nothing, verified on every
+revision) is expressed differently in each, and one of them cannot
+express it at all. Decide this first:
+
+| Your provisioning source | How the shadow is provisioned | Where the receive-only posture lives |
+|---|---|---|
+| None — you author members and policy | The hand-written [shadow config](#the-shadow-config) below: `examples/route-server/config.toml` reshaped, `rustbgpd --check --strict` on every revision | `export_chain = ["shadow-receive-only"]`, a deny-all TOML policy |
+| arouteserver `general.yml`/`clients.yml` | The [IXP filter pipeline](ixp-filter-pipeline.md) render with a site-local overlay: `rs-config-render … --extra-rpol shadow-receive-only.rpol --merge-toml shadow-hooks.toml` → `--check --strict` → swap → SIGHUP ([below](#the-same-posture-from-arouteserver-data)) | The overlay's deny-all `.rpol` policy, which the renderer prepends to every member's export chain and attests in `render-receipt.json` |
+| IXP Manager v7.4 | **Not from the IXP Manager path.** `rs-config-render --input-format ixp-manager-v2` refuses the site-local overlays, the Foil export has no receive-only knob, and the activation helper publishes only unmodified receipted candidates — so a candidate rendered from IXP Manager is always a production-posture, transparent route server. The pilot itself is the hand-written shadow (or the arouteserver overlay, if the site also runs arouteserver). What the IXP Manager path contributes to a pilot is a standing **render-and-check dry run** of your real member export ([below](#ixp-manager-sites-the-dry-run-that-is-also-evidence)) | The hand-written deny-all chain; the IXP Manager candidate is rendered, checked, and kept — never activated — during the pilot |
+
+Whichever mode, the shadow runs on its own host with the daemon shipped in
+the release tarball or package ([`deployment.md`](../deployment.md)), and
+the operations below — topologies, verification, the comparison loop,
+monitoring, teardown, data return — are identical.
+
 ## Zero blast radius, precisely
 
 "Non-authoritative" is a config property here, not a promise:
 
 - **No member relies on it.** Every member's production session to the
-  incumbent is untouched. The shadow's sessions are additional, on a
-  non-production listener (`listen_port = 1179` below), so there is no
-  TCP/179 collision with anything.
+  incumbent is untouched. The shadow's sessions are additional, on the
+  shadow's own host; the hand-written config also puts them on a
+  non-production listener (`listen_port = 1179` below) so nothing can
+  collide with TCP/179 on any host it shares. (The render modes emit
+  `listen_port = 179` and are not hand-edited — give the shadow its own
+  address.)
 - **Receive-only from the operator's view.** The export chain is a
-  single explicit deny-all policy (`shadow-receive-only` below: no
-  statements, `default_action = "deny"`). Zero UPDATE messages leave
-  the daemon toward any member — sessions carry OPEN and KEEPALIVE
-  only. This is stronger than "members should filter it": there is
-  nothing to filter.
+  single explicit deny-all policy (`shadow-receive-only`: no statements,
+  `default_action = "deny"` in TOML; `term everything { reject }` in
+  `.rpol`). Zero UPDATE messages leave the daemon toward any member —
+  sessions carry OPEN and KEEPALIVE only. This is stronger than "members
+  should filter it": there is nothing to filter.
 - **The failure mode of a misedit is still silence.** With
   `ebgp_requires_policy = true` (RFC 8212,
-  [ADR-0112](../adr/0112-rfc-8212-ebgp-requires-policy.md)), deleting
-  or misnaming the export chain does not fall back to permit-all — the
+  [ADR-0112](../adr/0112-rfc-8212-ebgp-requires-policy.md)) — set in the
+  hand-written config and emitted by both renderers — deleting or
+  misnaming the export chain does not fall back to permit-all: the
   reserved deny is installed and `rustbgpd --check` names the gap.
 - **Verified, not asserted.** Every config revision must pass
   `rustbgpd --check --strict <config>` (exit 0 — warnings fail). At
@@ -40,7 +64,9 @@ apply to everything below.
   `rbgp rib --prefix <p> advertised <member> --explain` shows the gate
   ladder stopping with `[STOP] export_policy` at the
   `shadow-receive-only` term, and the member's own session shows zero
-  received prefixes.
+  received prefixes. In the arouteserver mode, additionally confirm the
+  receipt: `render-receipt.json` → `site_local.final_neighbors[*].export_policy_chain`
+  begins with `shadow-receive-only` for every member.
 
 The worst the shadow can do, by construction: hold a TCP session and
 send keepalives. It never originates, propagates, or withdraws a route
@@ -52,10 +78,11 @@ anywhere.
 
 Volunteer members add a second BGP session to the shadow listener. The
 shadow receives their real announcements first-hand and runs the exact
-import hygiene the operator intends (or already runs on the incumbent —
-IXPs on arouteserver can render the same member filters with
-[`rs-config-render`](../../tools/rs-config-render/README.md), see the
-[filter-pipeline tutorial](ixp-filter-pipeline.md)).
+import hygiene the operator intends — or already runs on the incumbent:
+IXPs on arouteserver render the same member filters with
+[`rs-config-render`](../../tools/rs-config-render/README.md) and the
+overlay below, so the shadow's import side is the production filter set
+to the byte, attested by the same receipt.
 
 This is the richest evidence: per-member received views, per-member
 rejection ledgers, and real best-path selection over the volunteer set.
@@ -196,6 +223,97 @@ Volunteer taps can also be added and removed at runtime without a
 reload (`rbgp neighbor <addr> add ...` — see the
 [route-server cookbook](route-server.md)).
 
+### The same posture from arouteserver data
+
+If the incumbent's member filters come from arouteserver, do not
+hand-author them for the shadow: render them. The
+[IXP filter pipeline](ixp-filter-pipeline.md) is unchanged except for two
+small site-local files, which the renderer validates, compiles, attests
+in the receipt, and places *before* the generated transparent export on
+every member's chain. They are the shadow posture, verified exactly as
+shown (both files render against the checked-in M90 site context and the
+result passes `rustbgpd --check --strict`):
+
+```rpol
+# shadow-receive-only.rpol — the route server sends nothing to anyone.
+policy shadow-receive-only {
+    term everything { reject }
+}
+```
+
+```toml
+# shadow-hooks.toml — hook it into the global export chain.
+[policy]
+export_chain = ["shadow-receive-only"]
+```
+
+```console
+$ arouteserver template-context --output context.yml
+$ rs-config-render --context context.yml --out-dir candidate \
+    --rtr-cache 127.0.0.1:3323 \
+    --extra-rpol shadow-receive-only.rpol --merge-toml shadow-hooks.toml
+rendered 7 file(s) + receipt into candidate — gate with `rustbgpd --check --strict candidate/config.toml` before swapping
+$ rustbgpd --check --strict candidate/config.toml
+config OK: candidate/config.toml
+$ grep export_policy_chain candidate/config.toml
+export_policy_chain = ["shadow-receive-only", "rs-transparent-export"]
+export_policy_chain = ["shadow-receive-only", "rs-transparent-export"]
+export_policy_chain = ["shadow-receive-only", "rs-transparent-export"]
+```
+
+`render-receipt.json` carries a `site_local` block with the source and
+emitted hashes of the overlay and the final per-member chains — archive
+it with each dated comparison report, it is the proof that the shadow's
+import side was the production filter set and its export side was deny.
+Refresh on the incumbent's cadence exactly as the pipeline's cron does;
+the renderer refuses the overlay (exit 2, nothing written) if it ever
+names an unknown policy, collides with a generated name, or tries a
+modification the renderer will not carry (next-hop changes, AS prepends,
+community removals, BLACKHOLE-marker synthesis).
+
+The observer exception below, in this mode: the observer must itself be
+an arouteserver client (the renderer only hooks known client addresses),
+and instead of the global hook you list every *member* in
+`shadow-hooks.toml` and leave the observer out —
+
+```toml
+# shadow-hooks.toml, observer form: every member gets the deny-all hook;
+# the operator-owned observer is the one rendered client without it.
+[[neighbors]]
+address = "198.51.100.2"
+export_policy_chain = ["shadow-receive-only"]
+
+[[neighbors]]
+address = "198.51.100.3"
+export_policy_chain = ["shadow-receive-only"]
+```
+
+— which renders the observer's chain as the bare transparent export and
+every member's as `["shadow-receive-only", "rs-transparent-export"]`
+(verified on the M90 context; generate the file from `clients.yml`).
+
+### IXP Manager sites: the dry run that is also evidence
+
+An IXP Manager v7.4 site runs the zero-blast-radius shadow hand-written,
+as above. Separately, and from day one, run the
+[IXP Manager recipe](ixp-manager-route-server.md)'s render step against
+your real export — fetch the Foil JSON, `rs-config-render
+--input-format ixp-manager-v2 … --check-with rustbgpd` — on the same
+cadence as your BIRD route servers regenerate. **Do not activate it.**
+What you keep is a standing trail of `render-receipt.json` files
+(counts, refusal status, strict-check pass against the exact daemon
+version) or of refusals naming a member record the bounded subset
+cannot express. Both are pilot findings about *your* data, and the
+candidate is byte-for-byte what a later cutover would activate. The
+members it describes never see it: the candidate is never published,
+no `rustbgpd@<handle>` unit is started, no lock is taken in IXP
+Manager.
+
+A second router handle in IXP Manager driven by the lifecycle is a
+different thing: a production-posture transparent route server for every
+member who peers with it — the migration cookbook's
+[shadow trial](route-server-migration.md), not this pilot.
+
 ## The standing comparison loop
 
 The pilot's product is a trail of dated comparison artifacts, produced
@@ -222,7 +340,10 @@ routes carry canonical reason tokens (`policy_reject`, `as_path_loop`,
 this runs against the whole exchange feed: every retained rejection is
 a route production currently carries that the intended filter set would
 not. That list, exported periodically (`--json`), is the pilot's most
-directly actionable artifact for the operator.
+directly actionable artifact for the operator. (With arouteserver-rendered
+filters the `policy_reject` detail names the generated term —
+`rs-hygiene:…` or the member's `client-…` policy — so the ledger reads in
+the incumbent's own vocabulary.)
 
 **Per-member spot checks.** For a handful of prefixes per volunteer,
 walk the export gate ladder:
@@ -262,8 +383,11 @@ export_policy_chain = ["rs-transparent-export"]
 
 (`rs-transparent-export` is the declared permit-all from the
 [route-server example](../../examples/route-server/config.toml); add its
-definition alongside the others.) The blast-radius argument is intact:
-the only session that receives anything is operator-owned. Then:
+definition alongside the others — the shadow config plus this block and
+that definition passes `--check --strict` as one file. In the arouteserver
+mode use the observer form of `shadow-hooks.toml` above.) The
+blast-radius argument is intact: the only session that receives anything
+is operator-owned. Then:
 
 1. Snapshot the incumbent's advertised view **toward the observer**
    using whichever producer fits — the `birdc` / `vtysh` / `gobgp`
@@ -326,6 +450,10 @@ in [`GRAFANA.md`](../GRAFANA.md). Pilot-specific notes:
   disturbing volunteers' routers even while sending no routes.
 - `bgp_rejected_routes_retained{peer}` trending is the second-opinion
   signal, not an error: alert on sudden *changes*, not on nonzero.
+- In the arouteserver mode, alert on the age of `render-receipt.json`
+  and on `bgp_policy_generation_loaded_timestamp_seconds` exactly as the
+  pipeline does — a shadow whose filters silently stopped refreshing is
+  comparing against stale intent.
 - Route pilot alerts to whoever runs the pilot, not the production
   on-call — nothing here can page-worthily affect members.
 - Bracket the pilot with support bundles: `rbgp doctor --output ...`
@@ -340,27 +468,105 @@ in [`GRAFANA.md`](../GRAFANA.md). Pilot-specific notes:
 Nothing depends on the shadow, so teardown is unceremonious and total:
 
 1. Produce a final doctor bundle and a final dated diff report — the
-   pilot's close-out artifacts.
+   pilot's close-out artifacts. In the render modes, archive the last
+   `render-receipt.json` with them.
 2. Stop the daemon. No member session moves; no member routing changes.
 3. Volunteers delete their shadow-tap session; the incumbent operator
    deletes the feed/observer session. Both are ordinary neighbor
    removals on their side.
 4. Delete the shadow's `runtime_state_dir` (journal, event history,
-   MRT dumps, crash reports) once the close-out artifacts are archived.
+   MRT dumps, crash reports) — and its candidate/receipt directories —
+   once the close-out artifacts are archived.
 5. Confirm the exchange's state is prior state: incumbent session
    counts and member `PfxRcd` are what they were before step 1 of the
-   pilot.
+   pilot. Nothing in arouteserver or IXP Manager was changed by the
+   pilot (the overlay lives beside `clients.yml`, not in it; the IXP
+   Manager dry run never took a lock or published a candidate).
+
+## What a pilot cannot get yet
+
+Stated plainly, each verified at this commit, so the site decides with
+the facts rather than discovering them mid-pilot:
+
+- **A receive-only shadow from the IXP Manager path.** Covered above:
+  IXP Manager mode refuses the site-local overlays, the activation helper
+  publishes only unmodified receipted candidates, and there is no
+  receive-only knob in the Foil export. The pilot for an IXP Manager site
+  is hand-written (or arouteserver-rendered); the IXP Manager path
+  contributes the dry run.
+- **Full looking-glass compatibility.** The
+  [pinned contract](../../tests/compat/ixp-manager-birdseye/contract.json)
+  keeps `runtime_compatibility: false`: the birdwatcher adapter serves
+  Alice-LG's documented
+  [Birdwatcher subset](ixp-filter-pipeline.md#6-looking-glass-alice-lg-via-the-birdwatcher-adapter)
+  (status, peers, accepted, filtered, noexport — enough to show
+  volunteers their own shadow view) and the pinned IXP Manager v7.4
+  journeys listed in the [IXP Manager recipe's boundary](ixp-manager-route-server.md#the-boundary).
+  Full-table counts, other large-community wildcard queries, live
+  hold/keepalive countdowns, and any other Bird's Eye client are outside
+  what is proven. A pilot should not promise members a drop-in looking
+  glass.
+- **Anything beyond the local host from the activation tooling.**
+  `rs-config-render activate` and `ixp-manager-lifecycle` act on one
+  host: local state directories, a local executable as the activation
+  command, one fence per host, no remote activation, no cross-host
+  coordination. Two hosts are two independent lifecycles.
+- **Automatic housekeeping of activation state.** Every activated
+  generation is retained under `<runtime>/activation/generations/` and
+  never pruned; exit 5 (`ManualRecovery`) leaves a fence that blocks
+  every later run until an operator resolves it —
+  [Activation manual recovery](activation-manual-recovery.md). Neither
+  matters to a shadow that never activates, but both matter to the
+  production-shaped cutover the pilot is evidence for.
+- **A promise of compatibility beyond the v1 contract**, an SLA, or a
+  release cadence — the honest-boundaries list at the end.
+
+## Which evidence exists, and which does not
+
+What stands behind this pilot today:
+
+- **M83** — RFC 7947 route-server profile against BIRD 2 + GoBGP + FRR +
+  StayRTR: byte-level transparency on the wire, RFC 9234 OTC, per-member
+  views, ROV reject-at-import, both path-hiding mitigations live
+  ([route-server recipe](route-server.md)).
+- **M90** — the arouteserver differential: one site input drives
+  arouteserver/BIRD and `rs-config-render`/rustbgpd, **11/11**
+  accept/reject verdicts and explain terms agree, with a rust-only policy
+  mutation proving the differential can go red
+  ([`INTEROP.md`](../INTEROP.md)). This is the receipt behind "render
+  the shadow's filters from your `clients.yml`".
+- **M96 / M97** — the IXP Manager render → atomic activation → lifecycle
+  stack, against real pinned v7.4 and MD5-authenticated FRR, including
+  pre-effect restoration and two handles on one host
+  ([`INTEROP.md`](../INTEROP.md#ixp-manager-v74-manual-configuration-oracle)).
+  Local gates, not hosted CI.
+- **The IXP receipt matrix** and the **24 h route-server flagship soak**
+  — the shapes and numbers in the resource envelope above, wins and
+  losses together ([matrix](../perf/ixp-matrix-2026-07.md),
+  [soak](../soaks/soak-rs-flagship-24h.md)).
+
+What does not exist yet — and a pilot is exactly what would produce it:
+
+- Long-running history for the IXP Manager lifecycle stack: it has days
+  of use behind it, not months, and no soak receipt of its own.
+- Any published shadow-pilot result from a real exchange. Every
+  comparison artifact to date is from the project's own labs and fixtures.
+- Production operating history at an IXP, of any length, for the daemon
+  as a route server. The incumbents have well over a decade each.
+
+Let the site weigh those two lists; this document's job is to make sure
+both are on the table.
 
 ## The data-return contract
 
 Stated up front so nobody discovers an expectation mid-pilot.
 
 **The operator keeps everything.** The daemon runs on operator
-hardware; the dashboards, metrics, rejection ledgers, and diff reports
-are the operator's. The comparison tooling (`rbgp diff`, the snapshot
-adapters, `rbgp doctor`) is open source and remains useful after the
-pilot regardless of its outcome — including for auditing the incumbent
-against itself.
+hardware; the dashboards, metrics, rejection ledgers, render receipts,
+and diff reports are the operator's. The comparison tooling (`rbgp diff`,
+the snapshot adapters, `rbgp doctor`) is open source and remains useful
+after the pilot regardless of its outcome — including for auditing the
+incumbent against itself.
 
 **What comes back to the project** — only ever by the operator's own
 action, nothing phones home:
@@ -373,8 +579,9 @@ action, nothing phones home:
   operator before sharing. Raw snapshots and member-identifying route
   data stay on site unless the operator decides otherwise.
 - Findings: any divergence not explainable by the pre-explained
-  classes, any daemon misbehavior, any place the tooling refused or
-  confused. Negative results are as wanted as positive ones.
+  classes, any daemon misbehavior, any render refusal that should not
+  have been one, any place the tooling refused or confused. Negative
+  results are as wanted as positive ones.
 
 **"Publishable feedback" means exactly this:**
 
