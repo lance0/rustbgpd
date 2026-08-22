@@ -60,9 +60,10 @@ v0.4.2 snapshot. See *End-to-End System Benchmarks* below.
 > reclaimed. Benchmarking now runs on the primary host described above,
 > which is an upgrade for measurement: bare metal instead of a
 > virtualized guest, and directly comparable to the published receipts
-> rather than needing its own baseline. `bench-nightly.yml` and
-> `bench.yml` are retained with their schedule disabled — see those
-> files to revive them against a future runner.
+> rather than needing its own baseline. The `bench-nightly.yml` and
+> `bench.yml` workflows that drove this runner were removed on
+> 2026-08-22; the A/B method they wrapped lives on as
+> `bench/compare-criterion.sh` (see [`bench/README.md`](../bench/README.md)).
 >
 > This section stays because the numbers below and elsewhere in this
 > document were measured here, and a published figure keeps the
@@ -70,10 +71,10 @@ v0.4.2 snapshot. See *End-to-End System Benchmarks* below.
 > host, in the past tense of fact: the ~11% noise floor is a property of
 > that VPS and must not be assumed for any replacement.
 
-The `Criterion Bench Compare` workflow (`.github/workflows/bench.yml`)
-ran on a dedicated VPS registered as a `[self-hosted, rustbgpd-bench]`
-runner. Numbers from CI dispatches were produced in this environment,
-not the primary host described above.
+The removed `Criterion Bench Compare` workflow ran on a dedicated VPS
+registered as a `[self-hosted, rustbgpd-bench]` runner. Numbers from CI
+dispatches were produced in this environment, not the primary host
+described above.
 
 | Field | Value |
 |-------|-------|
@@ -308,20 +309,17 @@ cross-stack comparison below or the explain-cache comparison
 
 ## Manual CI Workflow
 
-`.github/workflows/bench.yml` exposes the same comparison as a manual
-`Criterion Bench Compare` workflow. It targets a `[self-hosted,
-rustbgpd-bench]` runner, and **no runner currently carries that label** — the
-VPS was retired 2026-08-21. The workflow is dispatch-only, so it cannot fire on
-its own; a manual dispatch today queues until a matching runner appears.
+There is no CI benchmark workflow. The manual `Criterion Bench Compare`
+dispatch and the `Criterion Bench Nightly` tripwire targeted the
+`[self-hosted, rustbgpd-bench]` runner retired on 2026-08-21 and were removed
+on 2026-08-22. Both were thin wrappers around `bench/compare-criterion.sh`,
+which is the supported entrypoint: run it locally, pinned to one core, with
+`--attempts` ≥ 3 so the summary's `stddev` and `min..max` columns carry a
+signal (`bench/README.md`, "Criterion compare").
 
-`bench-nightly.yml` is the same harness on a schedule, and that schedule is
-disabled for the same reason — a scheduled job against an absent label queues
-indefinitely rather than failing.
-
-Both files are kept intact for revival. Enable PR-triggered benchmark comments
-only after a replacement runner exists **and its own run-to-run noise floor has
-been measured** — the ~11% figure in this document belongs to the retired VPS
-and does not transfer.
+Stand up CI benchmarking again only after a replacement runner exists **and
+its own run-to-run noise floor has been measured** — the ~11% figure in this
+document belongs to the retired VPS and does not transfer.
 
 ## Reading the comparison output (for PR review)
 

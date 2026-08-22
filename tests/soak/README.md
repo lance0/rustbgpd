@@ -2,12 +2,11 @@
 
 Every soak entrypoint in this directory acquires an exclusive `flock` on
 `${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}` before
-doing real work. The `bench/compare-criterion.sh` script (and both GitHub
-Actions workflows that drive it — `Criterion Bench Compare` on dispatch
-and `Criterion Bench Nightly` on cron) takes the same lock on the same
-path. When the soak host is also the bench host, this guarantees only one
-workload runs at a time — a bench dispatch refuses to start while a soak
-is active, and a soak refuses to start while a bench is mid-attempt.
+doing real work. The `bench/compare-criterion.sh` script takes the same
+lock on the same path. When the soak host is also the bench host, this
+guarantees only one workload runs at a time — a bench run refuses to start
+while a soak is active, and a soak refuses to start while a bench is
+mid-attempt.
 
 The shared logic lives in `tests/soak/host-lock.sh`; sourcing it and
 calling `acquire_rustbgpd_host_lock` is a two-line block right after
@@ -48,8 +47,9 @@ exist — which silently disabled the mutex on the shared soak/bench host,
 where that directory was absent, so a soak and the nightly bench could
 run unprotected. An uncontended lock is free, so always taking it is
 transparent on laptops / dev boxes too. On contention the entrypoint
-exits `75` (`EX_TEMPFAIL`, "host busy") so an unattended caller — the
-`Criterion Bench Nightly` workflow — can skip cleanly rather than fail.
+exits `75` (`EX_TEMPFAIL`, "host busy") so an unattended caller (a cron
+wrapper around `bench/compare-criterion.sh`) can skip cleanly rather than
+fail.
 
 ---
 

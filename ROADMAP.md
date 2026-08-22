@@ -782,8 +782,8 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   rollback/receipt model, no partial silent drift. Gated by ADR-0064 tier authz.
 - **Operational proof / scale automation** *(parallel priority, small slices).*
   Re-stand the proof loop that makes the v0.x posture credible: a continuous
-  churn/soak shape, automated or easy-to-trigger Criterion comparisons on the
-  `[self-hosted, rustbgpd-bench]` runner, and a fixed high-N memory harness for
+  churn/soak shape, easy-to-trigger Criterion comparisons
+  (`bench/compare-criterion.sh`), and a fixed high-N memory harness for
   regressions. **Done:** the EVPN single-active failover + ES
   drain/undrain soak shape now exists as the M67 link-driven drain churn
   harness under `tests/soak/`: it repeats the real carrier-loss trigger and
@@ -1580,9 +1580,11 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
     route-list JSON serializes borrowed proto routes directly (#518).
     Lower-volume API/CLI snapshot/reporting paths should only be changed when a
     profile shows value.
-  - Benchmark infrastructure: automatic per-PR CI bench triggering on the pinned
-    `[self-hosted, rustbgpd-bench]` runner (the manual `Criterion Bench Compare`
-    workflow exists); a continuous churn bench (short criterion variant of the
+  - Benchmark infrastructure: automatic per-PR CI bench triggering (needs a
+    dedicated runner with a measured noise floor; the retired
+    `rustbgpd-bench` runner's workflows were removed and
+    `bench/compare-criterion.sh` is the local entrypoint); a continuous churn
+    bench (short criterion variant of the
     M33 soak shape); and `memory_profile` high-N harness non-scaling.
   - `best_path_cmp`: root-cause the ~6% full-tiebreak regression. The common
     LOCAL_PREF early-exit is unaffected (~1 ns/comparison, dwarfed by the
