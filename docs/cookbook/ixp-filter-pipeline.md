@@ -8,6 +8,12 @@ rustbgpd replaces only the daemon, via one render step
 ([`tools/rs-config-render/`](../../tools/rs-config-render/README.md),
 [ADR-0110](../adr/0110-irr-peeringdb-filtering-pipeline.md)).
 
+This is the **ARouteServer-driven** provisioning mode. With no external
+member source, hand-write the [IXP route server](route-server.md) instead;
+with IXP Manager v7.4 as the member database, use the
+[IXP Manager route server](ixp-manager-route-server.md) — the three-way
+fork is in the [cookbook index](README.md#ixp-provisioning-three-modes).
+
 The pipeline:
 
 ```text
