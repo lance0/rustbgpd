@@ -712,9 +712,10 @@ part of the ordered teardown and exits 0.
 ### RPKI cache unreachable
 
 Each RTR client reconnects independently after a fixed `retry_interval`
-(default 600s). If no fresh `EndOfData` arrives before
-`expire_interval` (default 7200s), cached VRPs for that server are discarded.
-Routes are re-validated against the remaining VRP table.
+(default 600s). If no fresh `EndOfData` arrives before the effective expire
+(the cache-advertised expire, `expire_interval` (default 7200s) until one
+arrives, both capped by `max_expire_interval` when set), cached VRPs for that
+server are discarded. Routes are re-validated against the remaining VRP table.
 
 When all caches are down, the VRP table is empty and all routes have
 validation state `NotFound`. If your policy denies `NotFound` routes, this
@@ -1532,6 +1533,7 @@ details stay in the structured daemon log and RPC status.
 |--------|-------------------|
 | `bgp_rpki_vrp_count{af="ipv4"}` | IPv4 VRP entries loaded |
 | `bgp_rpki_vrp_count{af="ipv6"}` | IPv6 VRP entries loaded |
+| `bgp_rpki_cache_effective_expire_seconds{cache}` | Effective RTR expire per cache (`IP:port`): the cache-advertised expire after the RFC 8210 two-day maximum and the configured `max_expire_interval` ceiling. Set at client start and after every End of Data |
 | `bgp_aspa_records` | ASPA customer records loaded in the merged table. Renamed from `bgp_aspa_records_total` (a gauge must not carry the counter `_total` suffix) |
 | `bgp_validation_import_refreshes_total{dependency, outcome}` | Inbound Route Refresh work triggered by VRP / ASPA cache updates for peers whose import policy matches validation state. `dependency` is `rpki` or `aspa`; `outcome` is `eligible`, `refreshed`, `skipped_not_established`, or `failed`. |
 

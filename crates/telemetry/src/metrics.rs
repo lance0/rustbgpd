@@ -317,6 +317,7 @@ struct BgpMetricsInner {
 
     // ── RPKI ───────────────────────────────────────────────────
     rpki_vrp_count: IntGaugeVec,
+    rpki_cache_effective_expire_seconds: IntGaugeVec,
 
     // ── ASPA ───────────────────────────────────────────────────
     aspa_records: IntGauge,
@@ -1434,6 +1435,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let rpki_cache_effective_expire_seconds = IntGaugeVec::new(
+            Opts::new(
+                "bgp_rpki_cache_effective_expire_seconds",
+                "Effective RTR expire interval per cache: the cache-advertised End of Data expire after the RFC 8210 two-day maximum and the configured max_expire_interval ceiling",
+            ),
+            &["cache"],
+        )
+        .expect("valid metric definition");
+
         let aspa_records = IntGauge::new(
             "bgp_aspa_records",
             "Number of ASPA customer records in the merged table",
@@ -2314,6 +2324,9 @@ impl BgpMetrics {
             .register(Box::new(rpki_vrp_count.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rpki_cache_effective_expire_seconds.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(aspa_records.clone()))
             .expect("metric not already registered");
         registry
@@ -2628,6 +2641,7 @@ impl BgpMetrics {
             selection_deferral_timeouts,
             selection_deferral_ledger_overflows,
             rpki_vrp_count,
+            rpki_cache_effective_expire_seconds,
             aspa_records,
             validation_import_refreshes,
             policy_dataset_refresh_errors,
@@ -3999,6 +4013,15 @@ impl BgpMetrics {
     /// Set RPKI VRP count by address family.
     pub fn set_rpki_vrp_count(&self, af: &str, count: i64) {
         self.0.rpki_vrp_count.with_label_values(&[af]).set(count);
+    }
+
+    /// Set the effective RTR expire interval (seconds) for one cache,
+    /// labelled by its canonical `IP:port`.
+    pub fn set_rpki_cache_effective_expire_seconds(&self, cache: &str, secs: u64) {
+        self.0
+            .rpki_cache_effective_expire_seconds
+            .with_label_values(&[cache])
+            .set(i64::try_from(secs).unwrap_or(i64::MAX));
     }
 
     /// Set ASPA record count.

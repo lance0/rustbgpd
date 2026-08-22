@@ -4,6 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
 use rustbgpd_api::authz::{LOCAL_OPERATOR_PRINCIPAL, uds_mode_is_owner_only};
+use rustbgpd_rpki::RTR_EXPIRE_MAX_SECS;
 use rustbgpd_transport::TCP_AO_MAX_INSPECT_KEYS;
 
 use super::parse::{
@@ -948,6 +949,25 @@ impl Config {
                             server.expire_interval, server.refresh_interval
                         ),
                     });
+                }
+                if let Some(max) = server.max_expire_interval {
+                    if max > RTR_EXPIRE_MAX_SECS {
+                        return Err(ConfigError::InvalidRpkiConfig {
+                            reason: format!(
+                                "cache_servers[{i}]: max_expire_interval ({max}) must be <= \
+                                 {RTR_EXPIRE_MAX_SECS} (the RFC 8210 two-day maximum)"
+                            ),
+                        });
+                    }
+                    if max <= server.refresh_interval {
+                        return Err(ConfigError::InvalidRpkiConfig {
+                            reason: format!(
+                                "cache_servers[{i}]: max_expire_interval ({max}) must be > \
+                                 refresh_interval ({})",
+                                server.refresh_interval
+                            ),
+                        });
+                    }
                 }
             }
         }

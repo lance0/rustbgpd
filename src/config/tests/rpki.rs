@@ -26,6 +26,7 @@ address = "127.0.0.1:3323"
     assert_eq!(rpki.cache_servers[0].refresh_interval, 3600);
     assert_eq!(rpki.cache_servers[0].retry_interval, 600);
     assert_eq!(rpki.cache_servers[0].expire_interval, 7200);
+    assert_eq!(rpki.cache_servers[0].max_expire_interval, None);
 }
 
 #[test]
@@ -264,4 +265,38 @@ fn rpki_valid_custom_timers_accepted() {
     assert_eq!(rpki.cache_servers[0].refresh_interval, 1800);
     assert_eq!(rpki.cache_servers[0].retry_interval, 300);
     assert_eq!(rpki.cache_servers[0].expire_interval, 3600);
+}
+
+#[test]
+fn rpki_max_expire_interval_accepted_and_parsed() {
+    let config = parse(&rpki_toml(
+        "refresh_interval = 600\nmax_expire_interval = 1800",
+    ))
+    .unwrap();
+    let rpki = config.rpki.as_ref().unwrap();
+    assert_eq!(rpki.cache_servers[0].max_expire_interval, Some(1800));
+}
+
+#[test]
+fn rpki_max_expire_interval_above_two_day_maximum_rejected() {
+    let err = parse(&rpki_toml("max_expire_interval = 172801"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("cache_servers[0]: max_expire_interval (172801) must be <= 172800"),
+        "{err}"
+    );
+}
+
+#[test]
+fn rpki_max_expire_interval_not_above_refresh_rejected() {
+    let err = parse(&rpki_toml("max_expire_interval = 3600"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains(
+            "cache_servers[0]: max_expire_interval (3600) must be > refresh_interval (3600)"
+        ),
+        "{err}"
+    );
 }
