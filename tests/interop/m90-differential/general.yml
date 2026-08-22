@@ -21,6 +21,14 @@ cfg:
   path_hiding: True
   gtsm: False
   add_path: False
+  communities:
+    reject_cause:
+      std: "65520:dyn_val"
+      lrg: "rs_as:65520:dyn_val"
+    reject_cause_map:
+      "3":
+        std: "64512:3"
+        lrg: "rs_as:65521:3"
   filtering:
     next_hop:
       policy: "strict"
@@ -56,3 +64,5 @@ cfg:
       count_rejected_routes: False
       peering_db:
         enabled: False
+    reject_policy:
+      policy: "tag_and_reject"

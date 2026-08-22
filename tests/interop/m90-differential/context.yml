@@ -21,7 +21,7 @@ list_ip_vers: [4, 6]
 live_tests: false
 rtt_based_functions_are_used: false
 perform_graceful_shutdown: false
-any_reject_cause_map_community_set: false
+any_reject_cause_map_community_set: true
 asn3216_map: {}
 arin_whois_records: {}
 registrobr_whois_records: {}
@@ -53,7 +53,10 @@ cfg:
     policy_ipv4: null
     policy_ipv6: null
   rtt_thresholds: null
-  communities: {}
+  communities:
+    reject_cause: {std: "65520:dyn_val", lrg: "64496:65520:dyn_val", ext: null}
+    reject_cause_map_3: {std: "64512:3", lrg: "64496:65521:3", ext: null}
+    rejected_route_announced_by: {std: null, lrg: null, ext: null}
   filtering:
     next_hop:
       policy: strict
@@ -79,7 +82,7 @@ cfg:
       count_rejected_routes: false
       peering_db: {enabled: false}
     reject_policy:
-      policy: reject
+      policy: tag_and_reject
 asns:
   AS64500: {as_sets: ["AS-M90-ONE"]}
   AS64501: {as_sets: ["AS-M90-TWO"]}

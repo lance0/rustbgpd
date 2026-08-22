@@ -100,10 +100,27 @@ bird_route_all() {
     docker exec "$BIRD" birdc "show route ${1:?} all" 2>/dev/null
 }
 
+bird_filtered_route_all() {
+    docker exec "$BIRD" birdc "show route ${1:?} filtered all" 2>/dev/null
+}
+
 # True if BIRD holds a path for the net from the given arouteserver
 # client protocol (protocol names follow the client ids: AS64500_1 ...).
 bird_has_from()   { bird_route_all "${1:?}" | grep -qF "[${2:?} "; }
 bird_lacks_from() { ! bird_has_from "$1" "$2"; }
+
+bird_filtered_has_tags() {
+    local output cause=${3:?}
+    output=$(bird_filtered_route_all "${1:?}")
+    grep -qF "[${2:?} " <<<"$output" \
+        && grep -Eq "\\(65520,[[:space:]]*0\\)" <<<"$output" \
+        && grep -Eq "\\(65520,[[:space:]]*$cause\\)" <<<"$output" \
+        && grep -Eq "\\(64496,[[:space:]]*65520,[[:space:]]*0\\)" <<<"$output" \
+        && grep -Eq "\\(64496,[[:space:]]*65520,[[:space:]]*$cause\\)" <<<"$output" \
+        && { [ "$cause" -ne 3 ] \
+            || { grep -Eq "\\(64512,[[:space:]]*3\\)" <<<"$output" \
+                && grep -Eq "\\(64496,[[:space:]]*65521,[[:space:]]*3\\)" <<<"$output"; }; }
+}
 
 rs_accepted_has()   { rs_ctl rib received "${1:?}" | grep -qF "${2:?}"; }
 rs_accepted_lacks() { ! rs_accepted_has "$1" "$2"; }
@@ -207,6 +224,24 @@ render_rustbgpd_config() {
     else
         fail "render receipt/config missing exact 3-member 100/12000 max-prefix limits"
         cat "$RENDER_DIR/render-receipt.json" >&2 || true
+        return 1
+    fi
+    if jq -e '
+        .schema == "rustbgpd.arouteserver-reject-communities.v1" and
+        .peers == ["192.0.2.11", "192.0.2.12", "192.0.2.13"] and
+        .std == {"dynamic":"65520:dyn_val","cause_map":{"3":"64512:3"}} and
+        .lrg == {"dynamic":"64496:65520:dyn_val","cause_map":{"3":"64496:65521:3"}}
+    ' "$RENDER_DIR/birdwatcher-reject-communities.json" >/dev/null; then
+        ok "renderer artifact carries the exact three members and configured communities"
+    else
+        fail "renderer reject-community artifact does not match the pinned site"
+        return 1
+    fi
+    if cargo test -q -p birdwatcher-adapter \
+        arouteserver_translation_is_scoped_scrubbed_deduped_and_conservative; then
+        ok "adapter maps order-ambiguous length/RPKI reasons to generic zero only"
+    else
+        fail "adapter order-ambiguous generic fallback proof failed"
         return 1
     fi
 
@@ -339,7 +374,7 @@ assert_rejects() {
     # a short settle for in-flight UPDATEs).
     sleep 2
 
-    local entry client ip prefix proto policy term explain
+    local entry client ip prefix proto policy term cause explain
     while IFS= read -r entry; do
         client=$(jq -r '.client' <<<"$entry")
         ip=$(jq -r '.ip' <<<"$entry")
@@ -347,6 +382,7 @@ assert_rejects() {
         proto=$(jq -r '.bird_protocol' <<<"$entry")
         policy=$(jq -r '.policy' <<<"$entry")
         term=$(jq -r '.term' <<<"$entry")
+        cause=$(jq -r '.cause' <<<"$entry")
 
         # Positive signal first: the rejection is retained with the
         # canonical reason token.
@@ -372,6 +408,12 @@ assert_rejects() {
         else
             fail "BIRD ACCEPTED $prefix from $client — differential verdict mismatch"
             bird_route_all "$prefix" >&2 || true
+        fi
+        if bird_filtered_has_tags "$prefix" "$proto" "$cause"; then
+            ok "BIRD filtered route carries generic and cause $cause communities"
+        else
+            fail "BIRD filtered route lacks exact generic/cause $cause communities"
+            bird_filtered_route_all "$prefix" >&2 || true
         fi
     done < <(jq -c '.[] | select(.expect == "reject")' "$MANIFEST")
 }

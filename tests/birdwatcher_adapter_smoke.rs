@@ -471,9 +471,15 @@ fn establish_bgp_and_announce(bgp_port: u16) -> TcpStream {
                 PathAttribute::Med(med),
             ];
             if forge_reason {
+                attributes.push(PathAttribute::Communities(vec![
+                    (65520 << 16) | 99,
+                    (64512 << 16) | 3,
+                ]));
                 attributes.push(PathAttribute::LargeCommunities(vec![
                     LargeCommunity::new(65001, 1101, 99),
                     LargeCommunity::new(65001, 999, 7),
+                    LargeCommunity::new(64496, 65520, 99),
+                    LargeCommunity::new(64496, 65521, 3),
                 ]));
             }
             rustbgpd_wire::attribute::encode_path_attributes(&attributes, &mut attrs, true, false)
@@ -696,6 +702,26 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
         );
     }
     let adapter = include_str!("../examples/birdwatcher-adapter/src/main.rs");
+    let causes = adapter
+        .split_once("fn arouteserver_reject_cause(")
+        .unwrap()
+        .1
+        .split_once("fn apply_ars_family(")
+        .unwrap()
+        .0
+        .split_whitespace()
+        .collect::<String>();
+    for exact in [
+        r#"("policy_reject","rs-hygiene:reject-long-as-path")=>Some(1)"#,
+        r#"("policy_reject","rs-hygiene:reject-black-list-prefix")iflate_cause()=>Some(3)"#,
+        r#"("next_hop_ownership",_)=>Some(5)"#,
+        r#"iflate_cause()&&detail.ends_with(":reject-irrdb-origin-as-filtered")=>{Some(9)}"#,
+        r#"iflate_cause()&&detail.ends_with(":reject-irrdb-prefix-filtered")=>{Some(12)}"#,
+    ] {
+        assert!(causes.contains(exact), "cause mapping drifted: {exact}");
+    }
+    assert!(causes.contains("(3..=128).contains(&route.prefix_length)"));
+    assert!(causes.contains("address.segments()[0]&0xe000==0x2000"));
     let inventory = adapter
         .split_once("async fn protocol_rows(")
         .unwrap()
@@ -753,11 +779,37 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         "pb_0001_as65020=127.0.0.1@master4\npb_0002_as65030=127.0.0.2@master4\n",
     )
     .expect("write initial aliases");
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ars_context = temp.path().join("arouteserver-context.yml");
+    let context =
+        std::fs::read_to_string(workspace.join("tests/interop/m90-differential/context.yml"))
+            .expect("read renderer context")
+            .replacen("192.0.2.11", "127.0.0.1", 1);
+    std::fs::write(&ars_context, context).expect("write smoke renderer context");
+    let ars_output = temp.path().join("arouteserver-render");
+    let rendered = Command::new(&cargo)
+        .current_dir(workspace)
+        .args(["run", "--quiet", "-p", "rs-config-render", "--"])
+        .arg("--context")
+        .arg(&ars_context)
+        .arg("--out-dir")
+        .arg(&ars_output)
+        .status()
+        .expect("run rs-config-render");
+    assert!(
+        rendered.success(),
+        "rs-config-render must emit smoke artifact"
+    );
+    let ars_artifact = ars_output.join("birdwatcher-reject-communities.json");
+    assert!(
+        ars_artifact.is_file(),
+        "renderer must emit startup artifact"
+    );
 
     // Spawn the adapter before its Unix socket exists. Built via
     // `cargo run` (same fallback pattern the rbgp test helper uses) —
     // the workspace build has usually compiled it already.
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let adapter_stderr = temp.path().join("adapter.stderr.log");
     let mut adapter = Proc {
         child: Command::new(&cargo)
@@ -770,6 +822,8 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
             .arg(format!("127.0.0.1:{PROCESS_CHOOSES}"))
             .arg("--protocol-alias-file")
             .arg(&aliases_path)
+            .arg("--arouteserver-reject-communities-file")
+            .arg(&ars_artifact)
             .args(["--max-routes", "2"])
             .stdout(Stdio::null())
             .stderr(Stdio::from(
@@ -1109,12 +1163,15 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     assert_eq!(reject["network"], "10.98.0.0/24", "{filtered}");
     assert_eq!(reject["reject_reason"], "as_path_loop", "{filtered}");
     assert_eq!(reject["from_protocol"], "pb_0001_as65020", "{filtered}");
-    let large_communities = &reject["bgp"]["large_communities"];
-    assert!(
-        large_communities
-            .as_array()
-            .is_some_and(|lcs| lcs.contains(&serde_json::json!([64496, 65520, 4]))),
-        "filtered route must carry the synthesized as_path_loop community: {filtered}"
+    assert_eq!(
+        reject["bgp"]["communities"],
+        serde_json::json!([[65520, 0]]),
+        "ARouteServer presentation must scrub forged values and stay conservative: {filtered}"
+    );
+    assert_eq!(
+        reject["bgp"]["large_communities"],
+        serde_json::json!([[65001, 1101, 99], [65001, 999, 7], [64496, 65520, 0]]),
+        "ARouteServer presentation must scrub both configured namespaces: {filtered}"
     );
 
     // IXP Manager v7.4 asks for `{daemon ASN}:1101:*`. This view uses only
@@ -1132,6 +1189,8 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         .as_array()
         .unwrap();
     assert!(ixp_communities.contains(&serde_json::json!([65001, 999, 7])));
+    assert!(ixp_communities.contains(&serde_json::json!([64496, 65520, 99])));
+    assert!(ixp_communities.contains(&serde_json::json!([64496, 65521, 3])));
     assert_eq!(
         ixp_communities
             .iter()

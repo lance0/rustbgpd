@@ -100,8 +100,15 @@ for render in render-real render-hand; do
         || die "$render config does not emit exactly three IPv4 limits of 100"
     [ "$(grep -c '^max_prefixes_ipv6 = 12000$' "$WORK/$render/config.toml")" -eq 3 ] \
         || die "$render config does not emit exactly three IPv6 limits of 12000"
+    jq -e '
+        .schema == "rustbgpd.arouteserver-reject-communities.v1" and
+        .peers == ["192.0.2.11", "192.0.2.12", "192.0.2.13"] and
+        .std == {"dynamic":"65520:dyn_val","cause_map":{"3":"64512:3"}} and
+        .lrg == {"dynamic":"64496:65520:dyn_val","cause_map":{"3":"64496:65521:3"}}
+    ' "$WORK/$render/birdwatcher-reject-communities.json" >/dev/null \
+        || die "$render reject-community artifact has the wrong peers or configured values"
 done
-ok "receipts and configs carry identical exact per-client limits"
+ok "receipts, configs, and startup artifacts carry exact member data"
 
 step "pipeline gates on the real-dump render"
 cargo run -q -p rustbgpd --manifest-path "$REPO_DIR/Cargo.toml" -- \

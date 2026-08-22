@@ -104,7 +104,24 @@ diverge and the lab fails.
   `router_id` in `general.yml` renders into both configs); they never
   peer with each other, so this is harmless.
 
-## Verified M90 receipt — 2026-07-19
+## Verified tag-and-reject receipt — 2026-08-22
+
+The LAN-1178 candidate on base `74496199bf66c81f784e605e864fc400e14ab7a0`
+ran against pinned ARouteServer 1.23.2, BIRD 2.0.12
+(`sha256:16f97b815292d2ca3acea82d22a6973b9f767ccfed7bf0d60eed8729725e493d`),
+GoBGP 3.37.0 (`sha256:a1dfdfc695108ac66245f7a2585b207ea0fdee4760d332bf2b0e2eda32f2e449`),
+and rustbgpd 0.65.0 (`sha256:481c00aae1ee5a8e28d25b20ac208470de7064004a04d9adda9ad3b180e8d1c0`).
+The fresh-image context proof passed 16/16 and the differential passed 74/74:
+all 11 verdicts and all six sessions survived, the artifact carried the exact
+three peers and standard/large values, and every BIRD filtered rejection kept
+generic plus first-cause tags. The two compound length rows honestly expose
+the precedence boundary: BIRD's earlier IRR check tags `12`, rustbgpd retains
+the shared-hygiene length term, and the adapter emits generic `0` only rather
+than guessing `12` or `13`. Fixture hashes: `general.yml` `c47fed81...`,
+`context.yml` `f979b7b7...`, sectioned context `f61c2a6d...`, and
+`announcements.json` `e55a7fae...`.
+
+## Earlier verified M90 receipt — 2026-07-19
 
 The lab was run from source revision
 `dfb03c1cfcaaed90543124d57fd1913abd63d73a` with these immutable
