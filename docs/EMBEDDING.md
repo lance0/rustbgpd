@@ -29,7 +29,7 @@ This document is the contract for embedders: which crate to depend on, what the
 | `rustbgpd-evpn-linux` | Disabled | `rustbgpd-evpn` | Linux netlink EVPN dataplane reconciler. |
 | `rustbgpd-evpn-load` | Disabled | `rustbgpd-wire` | EVPN route-reflector benchmark load generator. |
 | `rustbgpd-fsm` | Enabled | `rustbgpd-wire` | Pure RFC 4271 FSM; no I/O. |
-| `rustbgpd-mrt` | Disabled | `rustbgpd-rib`, `rustbgpd-wire` | RFC 6396 MRT dump export. |
+| `rustbgpd-mrt` | Disabled | `rustbgpd-rib`, `rustbgpd-telemetry`, `rustbgpd-wire` | RFC 6396 MRT dump export. |
 | `rustbgpd-policy` | Disabled | `rustbgpd-wire` | Import/export policy engine. |
 | `rustbgpd-rib` | Disabled | `rustbgpd-bmp`, `rustbgpd-policy`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-wire` | Adj-RIB and Loc-RIB best-path data structures. |
 | `rustbgpd-rpki` | Disabled | `rustbgpd-wire` | VRP table, RTR client, and origin validation. |
