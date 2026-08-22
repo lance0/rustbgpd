@@ -45,7 +45,9 @@ reserved-community scrubbing, reason fallback, filtering, and source alias
 direction. `api.version` remains
 `rustbgpd <package-version>` product
 identity, not Bird's Eye semantic-version compatibility. No full compatibility
-claim is made and `runtime_compatibility` remains false.
+claim is made and `runtime_compatibility` remains false; the exit criterion
+that would flip it is in
+[What would flip `runtime_compatibility`](#what-would-flip-runtime_compatibility).
 
 The real pinned IXP Manager PHP extension also translates every defined
 `:1101:<id>` display entry from 1 through 15. The executable contract records
@@ -117,6 +119,122 @@ makes the gate fail.
 The manual-export matrix separately records the 256-per-client, 4096-total-row,
 and 4096 compiled receive-cell caps. Bounded pinned-v7.4 overlap is supported;
 the full IXP Manager UI-filter policy engine remains unsupported.
+
+## What would flip `runtime_compatibility`
+
+`contract.json` says `"runtime_compatibility": false` and `verify_capture.py`
+fails the gate if that value is anything else. That is the correct claim
+today, but a standing `false` with no written definition of `true` cannot be
+worked toward, so this section is the exit criterion. Nothing here changes the
+flag; the flag flips only when the enforcement below is green. Alice-LG is not
+a party to it: its source backends are `birdwatcher`, `gobgp`, and `openbgpd`
+(upstream `pkg/sources`, unpinned), it has no Bird's Eye source, and the
+adapter's Alice-LG surface is a separate Birdwatcher contract.
+
+### Decisions
+
+| # | Decision | Recommendation | Rejected alternative |
+|---|---|---|---|
+| 1 | **Divergences** (decides the rest) | `true` means field-for-field equality with the pinned Bird's Eye oracle **after** an explicit, machine-readable divergence allow-list in `contract.json` (per entry: endpoint, JSON path, Bird's Eye shape, adapter shape, reason). `api.version` stays `rustbgpd <version>` product identity and is entry one of that list: the string names the implementation, not the contract, and `verify_capture.py` keeps asserting it. Divergences already encoded stay on the list as-is: product-identity `api.version`, `unsupported_countdowns`, the `filtered_retention_metadata` extras and capacity-as-`max_routes`, defined-only reject IDs on fallback `0`, the five `unsupported` entries. | Byte-identity. It would force `api.version: "2.1.0"` for a surface that has no counts, throttle, or cache, and it would force reproducing the pinned parser's BIRD 2 `via`-line output: `fixtures/birdseye-contract.json` (`protocol_routes`) shows `gateway: "via 198.51.100.1 on eth0"`, `from_protocol: "eth0"`, `learnt_from: "<timestamp>"`, `primary: false`, `metric: 0`, and no `age`. A list can be audited; byte-identity cannot be honest here. |
+| 2 | **Scope** | The eleven endpoints IXP Manager v7.4.0's `IXP\Services\LookingGlass\BirdsEye` calls (`status`, `protocols/bgp`, `protocol/{p}`, `symbols`, `routes/protocol|table|export`, `route/{net}/protocol|table|export`, `routes/lc-zwild/...`) — the set the adapter already routes. The six remaining JSON endpoints and the three non-API routes are named out of scope in the inventory below, so a new upstream endpoint is a visible re-decision, not silent drift. | Whole v2.1.0 surface. No pinned consumer drives the other six, so the flag would assert behaviour no oracle exercises; three of them are counts, and table count is the standing `full-table-count` blocker. |
+| 3 | **Depth** | Field-for-field JSON equality (decision 1) on a **populated** pinned topology: the same synthetic announcements into BIRD and rustbgpd, both read by the real pinned consumer. Today's live-adapter leg uses a deliberately down peer and `adapter-consumer.php` asserts `routes == []` for every route journey, so it proves empty-shape only. | Route counts plus a sampling rule. The differences found so far are shape and type (`bgp.as_path` integers vs strings, `bgp.local_pref` number vs string, sentinel fields), which counts cannot see; and the harness's own convention is an exact fixture diff (`verify_capture.py`), not a sample. |
+| 4 | **Oracle** | Pinned **BIRD 2.0.12 + Bird's Eye 2.1.0** as the reference, fed by the same announcer as the adapter leg, compared through the pinned IXP Manager consumer. BIRD 2.0.12 is what IXP Manager v7.4.0's `bird2`/`bird2-2025` templates target (its `server` template tree is `bird`, `bird2`, `bird2-2025`) and what `tests/interop/Dockerfile.bird` (`bird:2-bookworm`) already pins for the route-server labs. `fake-birdc` stays for the HTTP-contract cases (status codes, error bodies, production-mode keys). | BIRD 3.3.1 (the repo pins it only for TCP-AO, and IXP Manager v7.4.0 has no `bird3` template). The live IXP Manager MySQL oracle alone (`config-consumer.php` proves the configuration export; it never calls Bird's Eye). A real Alice-LG instance (no Bird's Eye source). Bird's Eye's own `USE_BIRD_DUMMY` sample dumps (a parser replay that cannot be correlated with what rustbgpd received). |
+| 5 | **Enforcement** | The gate keeps the flag honest in both directions: `verify_capture.py` inverts its flag assertion, diffs oracle against live per scoped endpoint after applying the allow-list, fails on any unlisted difference **and** on any allow-list entry that no longer changes anything (stale entry), and fails if the pinned `routes/web.php` route set differs from scope ∪ out-of-scope. Shape below. | Flipping on green journeys with no oracle diff. That is exactly the rot this section exists to prevent. |
+
+### Endpoint inventory — Bird's Eye v2.1.0 at `birdseye_commit` (`routes/web.php`)
+
+Adapter column cites the handler in
+[`examples/birdwatcher-adapter/src/main.rs`](../../../examples/birdwatcher-adapter/src/main.rs);
+the adapter serves at `/` where Bird's Eye serves under `/api/` (IXP Manager's
+`Router.api` base URL absorbs that; generic clients need a proxy prefix).
+
+| Bird's Eye endpoint | IXP Manager v7.4.0 method | Adapter | Status | Divergence to list |
+|---|---|---|---|---|
+| `GET /api/status` | `status()` | `status` | served, divergent | `status.version` and `status.message` are product identity (`rustbgpd <version>`, `rustbgpd AS<n>`) where Bird's Eye emits the BIRD version and the last `birdc` line; extra `current_server` key |
+| `GET /api/protocols/bgp` | `bgpSummary()` | `protocols_bgp` / `protocol_row` | served, divergent | row lacks `preference`, `input_filter`, `output_filter`, `route_changes.*`, `routes.preferred`, `description_short`, `hold_timer_now`, `keepalive_now`; adds `routes.filtered`; `import_limit`/`limit_action` only with a finite limit |
+| `GET /api/protocol/{protocol}` | `bgpNeighbourSummary()` | `protocol_detail` | served, divergent | same row as above (`live_session_detail` in `contract.json`) |
+| `GET /api/symbols` | `symbols()` | `symbols` | served, divergent | only `protocol` and `routing table` classes; Bird's Eye emits every `show symbols` class |
+| `GET /api/symbols/tables` | — | — | not served | out of scope |
+| `GET /api/symbols/protocols` | — | — | not served | out of scope |
+| `GET /api/routes/protocol/{protocol}` | `routesForProtocol()` | `routes_protocol` | served, divergent | route shape: `bgp.as_path` integers (strings upstream), `bgp.local_pref` number (string upstream), `gateway` = next hop, `interface` `""`, `metric` `0`, `primary` `false`, `learnt_from` = peer address, `age` from receive time, no `atomic_aggr`/`aggregator` |
+| `GET /api/routes/table/{table}` | `routesForTable()` | `routes_table` | served, divergent | route shape as above but `primary` is real; table is a validated alias over one global Loc-RIB, not a BIRD table |
+| `GET /api/routes/export/{protocol}` | `routesForExport()` | `routes_export` | served, divergent | route shape as above |
+| `GET /api/routes/count/protocol/{protocol}` | — | — | not served | out of scope (`total_count` exists on the first RIB page, so it is a cheap add if scope grows) |
+| `GET /api/routes/count/table/{table}` | — | — | not served | out of scope; standing `full-table-count` blocker |
+| `GET /api/routes/count/export/{protocol}` | — | — | not served | out of scope (same note as protocol count) |
+| `GET /api/routes/lc-zwild/protocol/{protocol}/{x}/{y}` | `routesProtocolLargeCommunityWildXYRoutes()` | `routes_protocol_large_community_wild_xy` | served, divergent | answers only `{daemon ASN}:1101:*` from retained rejects, empty for any other `(x, y)`; adds `retention.*`; `api.max_routes` is the retention capacity |
+| `GET /api/route/{net}` (default table `master`) | — | — | not served | out of scope |
+| `GET /api/route/{net}/table/{table}` | `protocolTable()` | `route_table` | served, divergent | requires a network-aligned `addr/len` (host or unmasked input is HTTP 400; Bird's Eye accepts `192.0.2.1` and runs `show route for`); returns the installed winner first plus same-prefix Add-Path alternatives; no per-minute throttle |
+| `GET /api/route/{net}/protocol/{protocol}` | `protocolRoute()` | `route_protocol` | served, divergent | **exact** prefix match where Bird's Eye's `show route for` is longest-match; network-aligned input only; all Add-Path candidates |
+| `GET /api/route/{net}/export/{protocol}` | `exportRoute()` | `route_export` | served, divergent | same as the protocol lookup |
+| `GET /test`, `GET /`, `/lg/*` | — | — | not served | out of scope (non-API: hello-world, HTML index, HTML looking glass) |
+
+Counts: **0 exact, 11 served with a divergence, 6 not served, 3 out of scope
+(non-API).** Zero is exact because every response carries the product-identity
+`api.version`, and each served endpoint also has at least one body-level
+difference. The adapter additionally serves `/routes/peer/{peer}`,
+`/routes/filtered/{id}`, and `/routes/noexport/{id}`, which are Birdwatcher,
+not Bird's Eye, endpoints.
+
+Cross-cutting differences that belong on the allow-list once: the `api` block
+adds Birdwatcher's `Version` and `result_from_cache` and never emits
+`ttl_mins`; `from_cache` is always `false` because there is no cache to skip
+(`use_cache` is ignored); upstream failure is HTTP 502 where Bird's Eye
+returns 503 `Error querying bird`; the `/api/route/*` per-minute throttle
+(`THROTTLE_PER_MIN`, HTTP 429) has no adapter equivalent; error bodies are
+always JSON `{"message": ...}` (Bird's Eye's error body format follows
+Lumen's default handler and the request's `Accept` header, which is why the
+fixture pins `Accept: application/json`; IXP Manager collapses every non-2xx
+to `""`).
+
+### Enforcement shape
+
+Today `verify_capture.py` asserts exactly one thing about the flag:
+`manifest.get("runtime_compatibility") is not False` fails with
+`contract oracle must not promote a runtime compatibility claim`. No Rust test
+reads the flag. After the flip the same file asserts:
+
+```text
+runtime_compatibility is not True            -> fail (claim withdrawn without a decision)
+for case in SCOPE (11 endpoints):
+    oracle = <case>.body from BIRD 2.0.12 + Bird's Eye 2.1.0
+    live   = <case>.body from rustbgpd + birdwatcher-adapter, same announcements
+    for entry in contract.json runtime divergence list for case:
+        apply(entry) to oracle/live      # delete path | coerce type | map value
+        if nothing changed               -> fail (stale allow-list entry)
+    if oracle != live                    -> fail (undocumented divergence)
+route set parsed from pinned routes/web.php != SCOPE | OUT_OF_SCOPE
+                                         -> fail (upstream surface changed; re-decide)
+```
+
+Each `fail(...)` is the existing fail-closed style; the oracle and live
+captures are fixtures under `fixtures/` with the same `CAPTURE_FIXTURES=1`
+refresh path as today. This is not a one-assertion addition to an existing
+check, because the populated oracle leg does not exist yet, so it is described
+here and not implemented.
+
+### Work list
+
+Each line names the gap and the evidence that closes it.
+
+1. Populated oracle leg: pinned BIRD 2.0.12 + Bird's Eye 2.1.0 and rustbgpd + adapter fed identical synthetic announcements, both read by the pinned IXP Manager consumer, captured as an oracle/live fixture pair — evidence: `verify_capture.py` diffs the pair; today's live leg proves empty arrays only.
+2. Machine-readable divergence allow-list in `contract.json`, pinned to a constant in `verify_capture.py` like every other block — evidence: the gate fails on an unlisted difference and on a stale entry.
+3. `bgp.as_path` element type (integers vs strings) — decide emit-strings or allow-list; evidence: oracle diff clean.
+4. `bgp.local_pref` type (number vs string) — same decision; evidence: oracle diff clean.
+5. Route sentinels `gateway`, `interface`, `metric`, `primary`, `learnt_from`, `age` — allow-list entries citing the pinned parser's BIRD 2 `via`-line output in `fixtures/birdseye-contract.json`; evidence: entries present and non-stale.
+6. `bgp.atomic_aggr` / `bgp.aggregator` absent — emit when the attribute is present or allow-list; evidence: an aggregated announcement in the oracle topology.
+7. Protocol row fields `preference`, `input_filter`, `output_filter`, `route_changes.*`, `routes.preferred`, `description_short`, `hold_timer_now`, `keepalive_now` absent and `routes.filtered` extra — decide each (serve or allow-list); `routes.preferred` needs a per-peer best count on `NeighborState` first; evidence: oracle diff on an established peer.
+8. `status.version`, `status.message`, extra `current_server` — allow-list as product identity; evidence: entries present.
+9. `symbols` classes beyond `protocol` and `routing table` — allow-list (the daemon has no BIRD symbol table); evidence: entry present.
+10. `/route/{net}/protocol|export` exact-match versus Bird's Eye longest-match, and HTTP 400 on host or unmasked input on all three lookups — decide allow-list (IXP Manager always passes a listed exact network) or implement longest-match for peer views; evidence: oracle cases with a host address and a covering-only prefix.
+11. `lc-zwild` answers only `{daemon ASN}:1101:*` and returns empty for other `(x, y)` without scanning accepted routes — allow-list by design; evidence: an oracle case for a foreign `(x, y)`.
+12. Upstream failure HTTP 502 versus Bird's Eye 503 — allow-list or change; evidence: the existing `bird_failure` case mirrored on the live leg.
+13. No throttle (429) and no cache (`from_cache`, `ttl_mins`, `use_cache`) — allow-list as deployment concerns; evidence: entries present.
+14. `/api` base path — document as reverse-proxy configuration, not adapter behaviour; evidence: README line plus allow-list note.
+15. Out-of-scope set (`symbols/tables`, `symbols/protocols`, three counts, untabled `route/{net}`, `/test`, `/`, `/lg/*`) written into the gate so a new pinned upstream route fails it; evidence: route-table parse of `routes/web.php` at `birdseye_commit`.
+16. Which route and protocol fields the pinned IXP Manager looking-glass views actually read is unverified; reading `resources/views/services/lg/*.foil.php` at `ixp_manager_commit` would let the allow-list mark consumer-visible versus invisible divergences — evidence: a per-entry `consumer_visible` flag.
+17. `tests/birdwatcher_adapter_smoke.rs` pins `adapter-consumer.php` journey counts (`symbols()`, `protocolTable(`, `routesForTable(` exactly once each); a populated leg must keep or update that test — evidence: `cargo test --workspace` green.
+18. The flip itself: `runtime_compatibility: true`, the `verify_capture.py` inversion, this README's intro sentence, `docs/INTEROP.md`, and `CHANGELOG.md` — last, only after 1–17.
 
 ## Provenance and licensing
 
