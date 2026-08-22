@@ -3874,8 +3874,13 @@ async fn run<T>(
                 file_prefix: mrt_config.file_prefix.clone(),
             };
             let (trigger_tx, trigger_rx) = mpsc::channel(16);
-            let mgr =
-                rustbgpd_mrt::MrtManager::new(writer_config, rib_tx.clone(), trigger_rx, router_id);
+            let mgr = rustbgpd_mrt::MrtManager::new(
+                writer_config,
+                rib_tx.clone(),
+                trigger_rx,
+                router_id,
+                metrics.clone(),
+            );
             info!(
                 output_dir = %mrt_config.output_dir,
                 interval = mrt_config.dump_interval,

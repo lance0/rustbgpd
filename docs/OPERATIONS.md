@@ -763,7 +763,12 @@ fails later, a periodic dump logs the error and skips that cycle. An on-demand
 `TriggerMrtDump` failure is returned to its caller while the RPC remains
 connected; only write failures also emit a manager error log. Periodic dumps
 continue on the next interval without replaying missed intervals in a catch-up
-burst. The daemon does not crash on MRT failures.
+burst. The daemon does not crash on MRT failures. Dump health is exported as
+the `mrt_*` metrics (see the MRT table under Metrics below):
+`mrt_dump_failures_total{stage}` names the failing stage and
+`mrt_last_dump_success_timestamp_seconds` stops advancing, which the shipped
+`MrtDumpStale` alert turns into a page once the newest dump is older than twice
+`dump_interval`.
 
 If an on-demand request is already canceled when the RIB actor handles it, the
 actor skips route materialization. Cancellation observed while the manager
@@ -851,7 +856,8 @@ Metric names are split by prefix on purpose: `bgp_*` covers the BGP core
 (sessions, RIB, policy, RPKI/ASPA, GR, event stream/outbox, FIB) and
 `evpn_*` covers the EVPN/VTEP dataplane surface — the two subsystems have
 different cardinality profiles and are typically dashboarded and alerted
-separately. `bfd_*` names the BFD liveness metrics. A ready-to-load
+separately. `bfd_*` names the BFD liveness metrics; `bmp_*` and `mrt_*`
+cover the BMP exporter and MRT dump export. A ready-to-load
 Prometheus alert-rule pack covering the high-signal `bgp_*` metrics ships
 at [`examples/prometheus/rustbgpd-alerts.yml`](../examples/prometheus/rustbgpd-alerts.yml).
 
@@ -1124,6 +1130,16 @@ The shipped alert pack
 fires `BmpSourceDrops`, `BmpLocRibSourceDrops`, and `BmpCollectorDrops` on
 any 10-minute increase of these two counters and of
 `bmp_collector_drops_total`.
+
+### MRT
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `mrt_dump_interval_seconds` | The configured `[mrt] dump_interval`; the series exists only when `[mrt]` is configured. The alert pack's `MrtDumpStale` fires once the newest dump is older than twice this value |
+| `mrt_last_dump_success_timestamp_seconds` | Unix time the last periodic or on-demand dump was published successfully; 0 until the first success after start. A failed dump does not advance it, so `time() - <this>` is the age of the newest dump file |
+| `mrt_last_dump_duration_milliseconds` | Wall-clock duration of the last successful dump from trigger to published file (RIB snapshot, encode, write, rename) |
+| `mrt_dump_bytes_written_total` | Bytes of dump files published on disk (after compression) |
+| `mrt_dump_failures_total{stage}` | Failed dumps by bounded stage: `preflight` (output directory), `snapshot` (RIB actor query), `encode`, `write`. A caller-canceled on-demand dump is not counted; a periodic failure also logs at error level, an on-demand failure is returned to its caller |
 
 ### Durable Event Cursor (ADR-0072)
 

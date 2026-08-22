@@ -3103,7 +3103,10 @@ changed targets redial; unchanged targets keep their live connection).
 
 Optional. Configures periodic MRT TABLE_DUMP_V2 (RFC 6396) RIB snapshots for
 offline analysis and archival. Dumps can also be triggered on demand via the
-gRPC `TriggerMrtDump` RPC or the `rbgp mrt-dump` CLI command.
+gRPC `TriggerMrtDump` RPC or the `rbgp mrt-dump` CLI command. Dump health is
+exported as the `mrt_*` Prometheus metrics (see the MRT table in
+[OPERATIONS.md](OPERATIONS.md)); the shipped alert pack's `MrtDumpStale` fires
+once the newest dump is older than twice `dump_interval`.
 
 ```toml
 [mrt]

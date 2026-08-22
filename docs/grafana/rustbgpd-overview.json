@@ -2822,6 +2822,39 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 66,
+      "type": "row",
+      "title": "MRT dump export",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 177 },
+      "panels": []
+    },
+    {
+      "id": 67,
+      "type": "stat",
+      "title": "Last successful MRT dump",
+      "description": "mrt_last_dump_success_timestamp_seconds rendered as an age. 'never' means no dump has been published since start; the MrtDumpStale alert fires once the age exceeds twice mrt_dump_interval_seconds. Check mrt_dump_failures_total by stage when stale.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 178 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeFromNow",
+          "mappings": [ { "type": "value", "options": { "0": { "text": "never", "index": 0 } } } ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "text", "value": null } ] }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "mrt_last_dump_success_timestamp_seconds{instance=~\"$instance\"} * 1000",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

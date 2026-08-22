@@ -8,7 +8,7 @@
 # Every expression references only metrics the daemon actually exports
 # (crates/telemetry/src/metrics.rs). The rules assume the scrape config
 # from docs/GRAFANA.md (`job_name: rustbgpd`) — adjust the `job` label
-# in RustbgpdDown if yours differs.
+# in RustbgpdDown, RustbgpdRestarted, and MrtDumpStale if yours differs.
 #
 # Current peer health uses the level gauges
 # `bgp_peer_admin_enabled{peer,interface}` and
@@ -300,6 +300,32 @@ groups:
             a durability-impacting drop, decode failure, or open failure
             since start. Check bgp_event_outbox_dropped_total and
             bgp_event_outbox_open_failures_total, then the daemon log.
+
+      - alert: MrtDumpStale
+        # mrt_last_dump_success_timestamp_seconds stays 0 until the first
+        # successful dump, so dump age is anchored on process start until
+        # then: a daemon whose dumps have never succeeded alerts after the
+        # same 2x interval as one whose dumps stopped. Both mrt_* gauges
+        # exist only when [mrt] is configured, so this cannot fire elsewhere.
+        expr: >-
+          time()
+          - (
+            mrt_last_dump_success_timestamp_seconds
+            > process_start_time_seconds{job="rustbgpd"}
+            or process_start_time_seconds{job="rustbgpd"}
+          )
+          > 2 * mrt_dump_interval_seconds
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MRT dump stale on {{ $labels.instance }}"
+          description: >-
+            No MRT TABLE_DUMP_V2 file has been published on
+            {{ $labels.instance }} for more than twice the configured
+            mrt_dump_interval_seconds. Check mrt_dump_failures_total by stage
+            and the daemon log for the failing dump; `rbgp mrt-dump` runs one
+            on demand.
 
       - alert: BgpUpdateGroupResidueGrowing
         # Withdrawal residue is bounded by the resync timer; a climb

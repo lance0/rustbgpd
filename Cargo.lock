@@ -3213,6 +3213,7 @@ dependencies = [
  "flate2",
  "nix 0.31.3",
  "rustbgpd-rib",
+ "rustbgpd-telemetry",
  "rustbgpd-wire",
  "serde",
  "serde_json",

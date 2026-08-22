@@ -29,6 +29,7 @@ tokio.workspace = true
 tracing.workspace = true
 rustbgpd-wire = { workspace = true }
 rustbgpd-rib = { workspace = true }
+rustbgpd-telemetry.workspace = true
 flate2.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 

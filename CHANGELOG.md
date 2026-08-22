@@ -21,6 +21,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The Prometheus alert pack gains `BmpSourceDrops`, `BmpLocRibSourceDrops`,
   and `BmpCollectorDrops`, firing on any 10-minute increase of the BMP drop
   counters so a lossy BMP feed is no longer silent. (LAN-1189)
+- MRT dump health is exported as `mrt_dump_interval_seconds`,
+  `mrt_last_dump_success_timestamp_seconds`, `mrt_last_dump_duration_milliseconds`,
+  `mrt_dump_bytes_written_total`, and `mrt_dump_failures_total{stage}`; the
+  alert pack gains `MrtDumpStale` (newest dump older than twice the configured
+  interval) and the Grafana dashboard a last-successful-dump stat. (LAN-1189)
 - A `semver-checks` CI workflow runs `cargo-semver-checks` for every
   publishable workspace crate (re-derived from the manifests; today
   `rustbgpd-wire` and `rustbgpd-fsm`) against its latest crates.io release on
