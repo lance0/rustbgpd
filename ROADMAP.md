@@ -850,8 +850,9 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   Refresh stale lifecycle (BoRR/EoRR sweep, family-isolated, intern-GC-safe).
   GR entry conservatively withdraws SAFI-128 routes (no stale preservation);
   Add-Path and next-hop rewriting stay rejected/inert per ADR-0077 §6. M74
-  proves the VPNv4 reflection, preservation, withdrawal, and
-  no-dataplane-install path with a GoBGP source and sink.
+  proves VPNv4 and VPNv6 reflection on shared RDs, family+peer-scoped API and
+  sink identity, same-path RFC 4456 attributes, family-isolated withdrawals,
+  and no dataplane install with a GoBGP source and sink.
   **Done:** RT-Constrain (RFC 4684, AFI 1 / SAFI 132) shipped as the VPN RR
   scalability companion: RTC NLRI codec with RFC-faithful 96-bit prefix
   matching (GoBGP-divergence documented in the ADR-0077 amendment), full

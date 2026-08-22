@@ -12,8 +12,9 @@ attachment circuits — the PEs keep their dataplane; the RR moves
 routes.
 
 **Proven by:** [M74](../RECEIPTS.md#interop-labs--pr-gated-interopyml)
-(VPNv4 reflection, RD/label/RT/next-hop field-equal on the sink's
-re-decoded NLRI, vs GoBGP), M75 (RT-Constrain filtering: strict
+(VPNv4/VPNv6 reflection over the same IPv4 sessions, with shared RDs,
+family/peer-scoped API and sink views, field-equal NLRI, and same-path RFC
+4456 attributes vs GoBGP), M75 (RT-Constrain filtering: strict
 empty-membership, widen/narrow without session reset, and the
 non-RTC-peer full-table rule), M77 (GR/LLGR stale preservation for the
 VPN and RTC families — RTC membership survives a PE restart, so no

@@ -6395,8 +6395,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Route Refresh stale lifecycle (BoRR/EoRR sweep, family-isolated), and
   conservative GR-entry withdraw (SAFI-128 routes are not preserved as
   stale). Add-Path, labeled-unicast (SAFI 4), and RT-Constrain remain
-  deferred. M74 proves reflection, field preservation, withdrawal, and
-  no-dataplane-install against a GoBGP source and sink.
+  deferred. M74 proves VPNv4/VPNv6 reflection over the same IPv4 sessions,
+  shared-RD identity, scoped single-path preservation with RFC 4456 attributes,
+  family-isolated withdrawals, and no dataplane install against GoBGP.
 
 ### Changed
 
