@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Mixed daemon-owned and unmarked static Linux FDB contributors now classify foreign in either
+  order; reconciliation relinquishes ownership once and preserves the operator row. (LAN-1218)
 - Startup now resolves validated policy and EVPN state and acquires BFD, BGP,
   and metrics resources before EventHistoryManager starts. Retained resources
   remain inactive until their existing activation barriers. Initial

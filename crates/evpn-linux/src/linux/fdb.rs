@@ -118,8 +118,13 @@ pub(crate) async fn dump_fdb(
 /// carries it, the bridge-master row doesn't); flag bools OR
 /// together so an entry that has both `extern_learn` (set by
 /// rustbgpd) and `master` (set by the bridge-FDB plumbing) reads
-/// correctly downstream. Pure helper kept testable in isolation.
+/// owned normally. An unmarked static master overrides it to foreign.
 fn merge_fdb_rows(existing: &mut KernelFdbEntry, incoming: &KernelFdbEntry) {
+    let foreign_static_master = |row: &KernelFdbEntry| {
+        !row.flags.extern_learn && row.flags.master && (row.flags.permanent || row.flags.noarp)
+    };
+    let has_foreign_static_master =
+        foreign_static_master(existing) || foreign_static_master(incoming);
     if existing.dst.is_none() && incoming.dst.is_some() {
         existing.dst = incoming.dst;
     }
@@ -141,6 +146,9 @@ fn merge_fdb_rows(existing: &mut KernelFdbEntry, incoming: &KernelFdbEntry) {
     existing.flags.noarp |= incoming.flags.noarp;
     existing.flags.master |= incoming.flags.master;
     existing.flags.self_flag |= incoming.flags.self_flag;
+    if has_foreign_static_master {
+        existing.flags.extern_learn = false;
+    }
 }
 
 type FdbSnapshotRow = ((EvpnInstanceId, Option<u16>, MacAddress), KernelFdbEntry);
@@ -161,6 +169,7 @@ fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnaps
     let mut protocol: Option<u8> = None;
     let mut vlan: Option<u16> = None;
     let mut explicit_vni: Option<u32> = None;
+    let mut master = false;
     for attr in &msg.attributes {
         match attr {
             NeighbourAttribute::LinkLayerAddress(bytes) if bytes.len() == 6 => {
@@ -193,6 +202,7 @@ fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnaps
             // platform-independent and don't see netlink enums.
             NeighbourAttribute::Protocol(p) => protocol = Some(u8::from(*p)),
             NeighbourAttribute::Vlan(v) => vlan = Some(*v),
+            NeighbourAttribute::Controller(_) => master = true,
             // SVD / collect-metadata VXLAN rows need an explicit
             // VNI because the VXLAN ifindex no longer identifies one
             // VNI. `src_vni` is the bridge FDB spelling for "the VNI
@@ -239,7 +249,7 @@ fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnaps
     // `NeighbourFlags::Controller` is the netlink-packet-route
     // spelling for `NTF_MASTER` — the bit set by `bridge fdb add
     // ... master`.
-    if hf.contains(NeighbourFlags::Controller) {
+    if master || hf.contains(NeighbourFlags::Controller) {
         flags.master = true;
     }
     decode_state(msg.header.state, &mut flags);
@@ -744,6 +754,12 @@ mod tests {
         assert!(acc.flags.extern_learn);
         assert!(acc.flags.permanent);
         assert!(acc.flags.noarp);
+
+        let mut noarp_master = master_row;
+        noarp_master.flags.extern_learn = false;
+        noarp_master.flags.permanent = false;
+        merge_fdb_rows(&mut acc, &noarp_master);
+        assert!(!acc.flags.extern_learn);
     }
 
     #[test]
@@ -761,6 +777,8 @@ mod tests {
                 ..FlagSet::default()
             }),
         );
+        let mut foreign_master = acc.clone();
+        foreign_master.flags.extern_learn = false;
         let self_row = fdb_row(
             Some("10.0.0.2"),
             flags(FlagSet {
@@ -779,6 +797,9 @@ mod tests {
         );
         assert!(acc.flags.master);
         assert!(acc.flags.self_flag);
+        merge_fdb_rows(&mut foreign_master, &self_row);
+        assert!(!foreign_master.flags.extern_learn);
+        assert_eq!(foreign_master.dst, Some(ipa("10.0.0.2")));
     }
 
     #[test]
@@ -1037,12 +1058,15 @@ mod tests {
 
         // Current kernels return no protocol attribute at all.
         let mut unstamped = build_remote_fdb_message(11, mac, ipa("10.0.0.2"), None, None);
+        unstamped.header.flags.remove(NeighbourFlags::Controller);
+        unstamped.attributes.push(NeighbourAttribute::Controller(7));
         unstamped
             .attributes
             .retain(|a| !matches!(a, NeighbourAttribute::Protocol(_)));
         let (_, entry) = parse_fdb_entry(&unstamped, &cache).unwrap();
         assert_eq!(entry.protocol, None);
         assert!(entry.is_extern_learned());
+        assert!(entry.flags.master);
     }
 
     #[test]
