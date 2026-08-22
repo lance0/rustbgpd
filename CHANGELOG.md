@@ -36,6 +36,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   0 for any readable state (manual recovery included) and 1 only when the state
   directory is unreadable. The manual-recovery runbook's "is the candidate
   live?" step now reads its output. (LAN-1229)
+- `rs-config-render recover keep-current|rollback|release-lock|clear` resolve
+  manual-recovery (exit 5) state as commands: each refuses outside that state,
+  plans and prints its steps, performs nothing without `--apply`, journals
+  callback intent before the request, and leaves its record in the activation
+  receipt (`kept`, `rolled_back`) and the journal it clears. `keep-current` is
+  health-gated (`--force` overrides) and delivers `updated`; `rollback`
+  re-stages the previous generation through the activation path and delivers
+  `release-update-lock`; `release-lock --kept|--rolled-back` delivers one
+  callback standalone and retryably; `clear` removes fence and journal only
+  once no upstream lock is owed. The runbook's steps 2–5 now show the verbs'
+  exact output and keep the hand procedures as an appendix. (LAN-1229)
 - `rs-config-render prune --keep N` removes activation generations that no
   retention rule keeps: the `current` target, the last activation receipt's
   candidate and predecessor, anything a pending lifecycle journal names, and

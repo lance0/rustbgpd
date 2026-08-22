@@ -339,17 +339,83 @@ esac
 
     /// Drive one lifecycle run into exit 5 with the activation command in
     /// `activation_mode`; the upstream lock is retained and no callback sent.
-    fn induce_exit_5(&self, activation_mode: &str) {
+    /// The stand-in keeps serving `afterwards` to whatever recovery follows.
+    fn induce_exit_5(&self, activation_mode: &str, afterwards: Vec<Response>) -> Server {
         self.set("activation-mode", activation_mode);
-        let server = Server::start(vec![Response::json(200), Response::config(FIXTURE)]);
+        let mut responses = vec![Response::json(200), Response::config(FIXTURE)];
+        responses.extend(afterwards);
+        let server = Server::start(responses);
         assert_eq!(
             lifecycle::run(&self.options(&server.origin)),
             Err(LifecycleError::ManualRecovery)
         );
-        assert_eq!(server.finish().len(), 2, "exit 5 must not callback");
+        assert_eq!(
+            server.requests.lock().unwrap().len(),
+            2,
+            "exit 5 must not callback"
+        );
         self.set("activation-mode", "ok");
         assert!(self.fence().exists());
         assert!(self.journal().exists());
+        server
+    }
+
+    /// One `recover` verb through the binary. A dry run is asserted to change
+    /// nothing; the returned lines are the `recover <verb>: ` step lines
+    /// without the prefix, followed by the summary line.
+    fn recover_cli(
+        &self,
+        verb: &[&str],
+        apply: bool,
+        origin: Option<&str>,
+    ) -> (i32, Vec<String>, String) {
+        let before = snapshot(&self.root);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rs-config-render"));
+        command.arg("recover").args(verb);
+        self.binding_args(&mut command);
+        if apply {
+            command.arg("--apply");
+        }
+        if let Some(origin) = origin {
+            command
+                .args(["--ixp-origin", origin, "--api-key-file"])
+                .arg(&self.key)
+                .args(["--request-timeout-seconds", "2", "--allow-http-loopback"]);
+        }
+        let output = command.output().unwrap();
+        if !apply {
+            assert_eq!(snapshot(&self.root), before, "dry run changed state");
+        }
+        let prefix = format!("recover {}: ", verb[0]);
+        let lines = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                line.strip_prefix(&prefix)
+                    .unwrap_or_else(|| panic!("unprefixed line: {line}"))
+                    .to_owned()
+            })
+            .collect();
+        (
+            output.status.code().unwrap(),
+            lines,
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    }
+
+    fn runtime(&self) -> String {
+        fs::read_to_string(self.root.join("runtime"))
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    fn journal_value(&self) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(self.journal()).unwrap()).unwrap()
+    }
+
+    fn receipt_value(&self) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(self.receipt()).unwrap()).unwrap()
     }
 
     /// One failed `updated` callback after a successful activation: exit 6.
@@ -555,7 +621,7 @@ fn status_reports_manual_recovery_with_the_candidate_live() {
     let _guard = test_guard();
     let rig = Rig::new();
     let previous = rig.current();
-    rig.induce_exit_5("load-then-fail");
+    rig.induce_exit_5("load-then-fail", vec![]);
     let current = rig.current();
     assert_ne!(current, previous);
     let (code, fields, _) = rig.status_cli(true);
@@ -587,7 +653,7 @@ fn status_reports_manual_recovery_with_the_candidate_live() {
 fn status_reports_manual_recovery_with_the_candidate_not_live() {
     let _guard = test_guard();
     let rig = Rig::new();
-    rig.induce_exit_5("fail");
+    rig.induce_exit_5("fail", vec![]);
     let (code, fields, _) = rig.status_cli(true);
     assert_eq!(code, 0);
     assert_fields(
@@ -622,7 +688,7 @@ fn status_marks_an_absent_or_stale_receipt_and_still_names_the_candidate() {
     let _guard = test_guard();
     let rig = Rig::new();
     let bootstrap_receipt = fs::read(rig.receipt()).unwrap();
-    rig.induce_exit_5("fail");
+    rig.induce_exit_5("fail", vec![]);
     let current = rig.current();
     fs::remove_file(rig.receipt()).unwrap();
     let (code, fields, _) = rig.status_cli(false);
@@ -752,4 +818,491 @@ fn status_exits_1_for_an_unreadable_state_directory_and_2_for_a_bad_binding() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
+}
+
+fn keep_args(rig: &Rig) -> Vec<String> {
+    vec![
+        "keep-current".into(),
+        "--rbgp".into(),
+        rig.rbgp.display().to_string(),
+    ]
+}
+
+fn rollback_args(rig: &Rig) -> Vec<String> {
+    vec![
+        "rollback".into(),
+        "--rbgp".into(),
+        rig.rbgp.display().to_string(),
+        "--settle-seconds".into(),
+        "2".into(),
+        "--activation-command".into(),
+        rig.activation.display().to_string(),
+    ]
+}
+
+fn strs(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).collect()
+}
+
+#[test]
+fn every_recover_verb_refuses_outside_manual_recovery() {
+    let _guard = test_guard();
+    let rig = Rig::new();
+    let keep = keep_args(&rig);
+    let rollback = rollback_args(&rig);
+    let verbs: [&[&str]; 4] = [
+        &strs(&keep),
+        &strs(&rollback),
+        &["release-lock", "--kept"],
+        &["clear"],
+    ];
+    // Healthy handle: no fence, nothing to recover.
+    for verb in verbs {
+        for apply in [false, true] {
+            let (code, lines, stderr) = rig.recover_cli(verb, apply, None);
+            assert_eq!(code, 2, "{verb:?}: {stderr}");
+            assert!(lines.is_empty());
+            assert_eq!(
+                stderr,
+                format!(
+                    "rs-config-render: recover {}: no host fence for this binding; nothing to recover\n",
+                    verb[0]
+                )
+            );
+        }
+    }
+    // Exit 6: the fence stands but the journal is resumable, not manual recovery.
+    let rig = Rig::new();
+    rig.induce_exit_6();
+    for verb in verbs {
+        let (code, _, stderr) = rig.recover_cli(verb, true, Some("http://127.0.0.1:9"));
+        assert_eq!(code, 2, "{verb:?}: {stderr}");
+        assert!(
+            stderr.contains("lifecycle state is resumable, not manual recovery"),
+            "{stderr}"
+        );
+    }
+    assert!(rig.journal().exists());
+    assert!(rig.fence().exists());
+}
+
+#[test]
+fn dry_runs_change_nothing_and_apply_performs_exactly_the_printed_steps() {
+    let _guard = test_guard();
+    let rig = Rig::new();
+    let previous = rig.current();
+    let server = rig.induce_exit_5("load-then-fail", vec![Response::json(200)]);
+    let candidate = rig.current();
+    let keep = keep_args(&rig);
+    // Without the connection a journal-holding recovery refuses before planning.
+    let (code, _, stderr) = rig.recover_cli(&strs(&keep), false, None);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("pass --ixp-origin and --api-key-file"),
+        "{stderr}"
+    );
+    let (code, dry, stderr) = rig.recover_cli(&strs(&keep), false, Some(&server.origin));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        dry,
+        vec![
+            "probe: daemon healthy, runtime equals current".to_owned(),
+            format!(
+                "write activation receipt: status kept, candidate {}, previous {previous}",
+                candidate.strip_prefix("generations/").unwrap()
+            ),
+            format!(
+                "deliver updated callback to {} for {HANDLE} (attempt 1)",
+                server.origin
+            ),
+            "remove lifecycle journal".to_owned(),
+            "remove host fence".to_owned(),
+            "dry run — 5 step(s) planned; pass --apply to perform them".to_owned(),
+        ]
+    );
+    assert!(rig.journal().exists() && rig.fence().exists());
+    let (code, applied, stderr) = rig.recover_cli(&strs(&keep), true, Some(&server.origin));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        applied[..5],
+        dry[..5],
+        "--apply must do what the dry run printed"
+    );
+    assert_eq!(applied[5], "applied 5 step(s)");
+    let requests = server.finish();
+    assert_eq!(requests.len(), 3);
+    assert_request(&requests[2], "POST", "updated");
+    assert!(!rig.journal().exists());
+    assert!(!rig.fence().exists());
+    assert_eq!(rig.current(), candidate);
+    let receipt = rig.receipt_value();
+    assert_eq!(receipt["status"], "kept");
+    assert_eq!(
+        format!(
+            "generations/{}",
+            receipt["candidate_sha256"].as_str().unwrap()
+        ),
+        candidate
+    );
+    assert_eq!(receipt["previous_generation"], previous);
+    assert_eq!(receipt["phases"]["runtime_equal"], true);
+    // The handle is usable again: status is clean and a new lifecycle runs.
+    let (_, fields, _) = rig.status_cli(true);
+    assert_fields(
+        &fields,
+        &[
+            ("fence", "absent"),
+            ("journal", "absent"),
+            ("advisory_receipt", "matches-current"),
+            ("advisory_receipt_status", "kept"),
+            ("runtime_equals_current", "yes"),
+        ],
+    );
+    fs::remove_dir_all(&rig.candidate).unwrap();
+    private_dir(&rig.candidate);
+    let again = Server::start(vec![
+        Response::json(200),
+        Response::config(FIXTURE),
+        Response::json(200),
+    ]);
+    assert_eq!(
+        lifecycle::run(&rig.options(&again.origin)),
+        Ok(lifecycle::Status::Noop)
+    );
+    again.finish();
+}
+
+#[test]
+fn keep_current_is_health_gated_unless_forced() {
+    let _guard = test_guard();
+    let rig = Rig::new();
+    let server = rig.induce_exit_5("fail", vec![Response::json(200)]);
+    let keep = keep_args(&rig);
+    // The daemon still runs the previous generation: not settled on current.
+    let (code, lines, stderr) = rig.recover_cli(&strs(&keep), true, Some(&server.origin));
+    assert_eq!(code, 2);
+    assert!(lines.is_empty());
+    assert!(
+        stderr.contains("daemon is not settled on current"),
+        "{stderr}"
+    );
+    assert!(rig.journal().exists() && rig.fence().exists());
+    rig.set("health-mode", "down");
+    let (code, _, stderr) = rig.recover_cli(&strs(&keep), true, Some(&server.origin));
+    assert_eq!(code, 2, "{stderr}");
+    rig.set("health-mode", "ok");
+    let mut forced = keep.clone();
+    forced.push("--force".into());
+    let (code, lines, stderr) = rig.recover_cli(&strs(&forced), true, Some(&server.origin));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        lines[0],
+        "probe: daemon healthy, runtime differs from current (overridden by --force)"
+    );
+    assert_request(&server.finish()[2], "POST", "updated");
+    assert!(!rig.journal().exists() && !rig.fence().exists());
+    assert_eq!(rig.receipt_value()["phases"]["runtime_equal"], false);
+}
+
+#[test]
+fn rollback_re_stages_the_previous_generation_through_the_activation_path() {
+    let _guard = test_guard();
+    let rig = Rig::new();
+    let previous = rig.current();
+    let server = rig.induce_exit_5("fail", vec![Response::json(200)]);
+    let candidate = rig.current();
+    assert_eq!(
+        rig.runtime(),
+        previous,
+        "the failed activation loaded nothing"
+    );
+    let rollback = rollback_args(&rig);
+    let (code, dry, stderr) = rig.recover_cli(&strs(&rollback), false, Some(&server.origin));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        dry[0],
+        format!(
+            "re-point current {candidate} -> {previous}, run `{}`, settle within 2s",
+            rig.activation.display()
+        )
+    );
+    assert_eq!(
+        dry[1],
+        format!(
+            "deliver release-update-lock callback to {} for {HANDLE} (attempt 1)",
+            server.origin
+        )
+    );
+    assert_eq!(
+        dry[2..],
+        [
+            "remove lifecycle journal",
+            "remove host fence",
+            "dry run — 4 step(s) planned; pass --apply to perform them"
+        ]
+    );
+    let activations = fs::read_to_string(rig.root.join("activation.log")).unwrap();
+    let (code, applied, stderr) = rig.recover_cli(&strs(&rollback), true, Some(&server.origin));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(applied[..4], dry[..4]);
+    assert_eq!(rig.current(), previous);
+    assert_eq!(
+        rig.runtime(),
+        previous,
+        "the activation command ran and the daemon loaded it"
+    );
+    assert_eq!(
+        fs::read_to_string(rig.root.join("activation.log")).unwrap(),
+        format!("{activations}{previous}\n"),
+        "exactly one activation command run"
+    );
+    assert_request(&server.finish()[2], "POST", "release-update-lock");
+    assert!(!rig.journal().exists() && !rig.fence().exists());
+    let receipt = rig.receipt_value();
+    assert_eq!(receipt["status"], "rolled_back");
+    assert_eq!(
+        format!(
+            "generations/{}",
+            receipt["candidate_sha256"].as_str().unwrap()
+        ),
+        candidate
+    );
+    assert_eq!(receipt["previous_generation"], previous);
+    assert_eq!(receipt["phases"]["rollback_activation_ran"], true);
+    assert_eq!(receipt["phases"]["runtime_equal"], true);
+    let (_, fields, _) = rig.status_cli(true);
+    assert_fields(
+        &fields,
+        &[
+            ("fence", "absent"),
+            ("current", &previous),
+            ("daemon", "healthy"),
+            ("runtime_equals_current", "yes"),
+        ],
+    );
+}
+
+#[test]
+fn rollback_needs_a_known_target_and_refuses_when_nothing_was_activated() {
+    let _guard = test_guard();
+    let rig = Rig::new();
+    let previous = rig.current();
+    let server = rig.induce_exit_5("fail", vec![Response::json(200)]);
+    let candidate = rig.current();
+    let rollback = rollback_args(&rig);
+    // A stale receipt cannot name the previous generation: --to is required.
+    fs::remove_file(rig.receipt()).unwrap();
+    let (code, _, stderr) = rig.recover_cli(&strs(&rollback), true, Some(&server.origin));
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("pass --to generations/<digest>"),
+        "{stderr}"
+    );
+    let mut explicit = rollback.clone();
+    explicit.extend(["--to".to_owned(), candidate.clone()]);
+    let (code, _, stderr) = rig.recover_cli(&strs(&explicit), true, Some(&server.origin));
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("rollback target is the current generation"),
+        "{stderr}"
+    );
+    let mut bogus = rollback.clone();
+    bogus.extend(["--to".to_owned(), format!("generations/{}", "0".repeat(64))]);
+    let (code, _, stderr) = rig.recover_cli(&strs(&bogus), true, Some(&server.origin));
+    assert_eq!(code, 2);
+    assert!(stderr.contains("not a published generation"), "{stderr}");
+    explicit.pop();
+    explicit.push(previous.clone());
+    let (code, _, stderr) = rig.recover_cli(&strs(&explicit), true, Some(&server.origin));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(rig.current(), previous);
+    server.finish();
+
+    // An ambiguous lock request staged nothing: rollback refuses, keep-current
+    // releases rather than claiming an update.
+    let rig = Rig::new();
+    let server = Server::start(vec![Response::json(500), Response::json(200)]);
+    assert_eq!(
+        lifecycle::run(&rig.options(&server.origin)),
+        Err(LifecycleError::ManualRecovery)
+    );
+    let rollback = rollback_args(&rig);
+    let (code, _, stderr) = rig.recover_cli(&strs(&rollback), true, Some(&server.origin));
+    assert_eq!(code, 2);
+    assert!(stderr.contains("no candidate was activated"), "{stderr}");
+    let keep = keep_args(&rig);
+    let (code, lines, stderr) = rig.recover_cli(&strs(&keep), true, Some(&server.origin));
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        lines[2].starts_with("deliver release-update-lock callback"),
+        "{lines:?}"
+    );
+    assert_request(&server.finish()[1], "POST", "release-update-lock");
+    assert!(!rig.journal().exists() && !rig.fence().exists());
+}
+
+#[test]
+fn release_lock_is_retryable_and_clear_waits_for_it() {
+    let _guard = test_guard();
+    let rig = Rig::new();
+    let server = rig.induce_exit_5(
+        "load-then-fail",
+        vec![Response::json(500), Response::json(200)],
+    );
+    // clear refuses while the journal still owes the lock.
+    let (code, _, stderr) = rig.recover_cli(&["clear"], true, None);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("upstream lock still owed"), "{stderr}");
+    // release-lock needs the connection and a direction.
+    let (code, _, stderr) = rig.recover_cli(&["release-lock", "--kept"], true, None);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("pass --ixp-origin and --api-key-file"),
+        "{stderr}"
+    );
+    let (code, dry, _) = rig.recover_cli(&["release-lock", "--kept"], false, Some(&server.origin));
+    assert_eq!(code, 0);
+    assert_eq!(
+        dry,
+        vec![
+            format!(
+                "deliver updated callback to {} for {HANDLE} (attempt 1)",
+                server.origin
+            ),
+            "mark the upstream lock released in the lifecycle journal".to_owned(),
+            "dry run — 2 step(s) planned; pass --apply to perform them".to_owned(),
+        ]
+    );
+    // First delivery fails (injected 500): exit 5, intent journaled, retry named.
+    let (code, lines, stderr) =
+        rig.recover_cli(&["release-lock", "--kept"], true, Some(&server.origin));
+    assert_eq!(code, 5, "{stderr}");
+    assert!(lines.is_empty(), "{lines:?}");
+    assert!(
+        stderr.contains("updated callback was not delivered; upstream lock retained — retry with recover release-lock --kept"),
+        "{stderr}"
+    );
+    let journal = rig.journal_value();
+    assert_eq!(journal["callback"], "updated");
+    assert_eq!(journal["callback_attempts"], 1);
+    assert_eq!(journal["lock_released"], false);
+    assert_eq!(journal["phase"], "manual_recovery");
+    let (code, _, stderr) = rig.recover_cli(&["clear"], true, None);
+    assert_eq!(code, 2, "{stderr}");
+    // Retry succeeds; the journal records delivery and stays for clear.
+    let (code, lines, stderr) =
+        rig.recover_cli(&["release-lock", "--kept"], true, Some(&server.origin));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        lines[0],
+        format!(
+            "deliver updated callback to {} for {HANDLE} (attempt 2)",
+            server.origin
+        )
+    );
+    let origin = server.origin.clone();
+    let requests = server.finish();
+    assert_eq!(requests.len(), 4);
+    assert_request(&requests[2], "POST", "updated");
+    assert_request(&requests[3], "POST", "updated");
+    let journal = rig.journal_value();
+    assert_eq!(journal["callback_attempts"], 2);
+    assert_eq!(journal["lock_released"], true);
+    assert!(rig.fence().exists());
+    let (_, fields, _) = rig.status_cli(false);
+    assert_fields(
+        &fields,
+        &[("lock", "released"), ("phase", "manual_recovery")],
+    );
+    // keep-current and rollback now defer to clear.
+    let keep = keep_args(&rig);
+    let (code, _, stderr) = rig.recover_cli(&strs(&keep), true, Some(&origin));
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("upstream lock already released; run recover clear"),
+        "{stderr}"
+    );
+    let (code, dry, _) = rig.recover_cli(&["clear"], false, None);
+    assert_eq!(code, 0);
+    assert_eq!(
+        dry,
+        [
+            "remove lifecycle journal",
+            "remove host fence",
+            "dry run — 2 step(s) planned; pass --apply to perform them"
+        ]
+    );
+    let (code, applied, stderr) = rig.recover_cli(&["clear"], true, None);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(applied[..2], dry[..2]);
+    assert!(!rig.journal().exists() && !rig.fence().exists());
+}
+
+#[test]
+fn a_plain_activate_exit_5_recovers_without_a_journal_or_connection() {
+    let _guard = test_guard();
+    let rig = Rig::new();
+    let previous = rig.current();
+    // A second candidate through the bare activation path, failing after the
+    // command started: exit 5 with a fence and no journal.
+    let candidate = rig.root.join("second");
+    private_dir(&candidate);
+    let mut input: serde_json::Value = serde_json::from_slice(FIXTURE).unwrap();
+    input["clients"][0]["max_prefix"] = 12.into();
+    ixp_manager::write_checked_candidate_bytes(
+        &serde_json::to_vec(&input).unwrap(),
+        &candidate,
+        300,
+        &rig.checker,
+        &rig.binding.render_binding(),
+    )
+    .unwrap();
+    rig.set("activation-mode", "fail");
+    assert_eq!(
+        activation::activate(&activation::Options {
+            candidate: &candidate,
+            state_dir: &rig.state,
+            checker: &rig.checker,
+            rbgp: &rig.rbgp,
+            rbgp_addr: rig.binding.rbgp_addr(),
+            settle: Duration::from_secs(2),
+            initial: false,
+            activation_command: &rig.activation,
+            activation_args: &[],
+            binding: &rig.binding,
+        }),
+        Err(activation::Error::RecoveryRequired)
+    );
+    rig.set("activation-mode", "ok");
+    assert!(rig.fence().exists() && !rig.journal().exists());
+    let (_, fields, _) = rig.status_cli(true);
+    assert_fields(
+        &fields,
+        &[
+            ("fence", "present"),
+            ("journal", "absent"),
+            ("lock", "none"),
+            ("current_is_candidate", "yes"),
+            ("runtime_equals_current", "no"),
+        ],
+    );
+    // release-lock has nothing to release; clear is allowed (no lock owed)
+    // but the runbook's choice is rollback here.
+    let (code, _, stderr) = rig.recover_cli(&["release-lock", "--rolled-back"], true, None);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("no lifecycle journal; no upstream lock is owed"),
+        "{stderr}"
+    );
+    let (code, dry, _) = rig.recover_cli(&["clear"], false, None);
+    assert_eq!(code, 0);
+    assert_eq!(dry[0], "remove host fence");
+    let rollback = rollback_args(&rig);
+    let (code, lines, stderr) = rig.recover_cli(&strs(&rollback), true, None);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert_eq!(lines[1], "remove host fence");
+    assert_eq!(rig.current(), previous);
+    assert_eq!(rig.runtime(), previous);
+    assert!(!rig.fence().exists());
 }

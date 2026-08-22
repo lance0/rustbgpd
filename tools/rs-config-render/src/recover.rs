@@ -1,11 +1,16 @@
-//! Operator inspection of the durable activation and lifecycle state.
+//! Operator inspection and recovery of the durable activation and lifecycle
+//! state.
 //!
 //! An exit 5 is characterised by three durable artifacts: the host fence, the
 //! lifecycle journal, and the generation tree with its `current` link. The
 //! activation receipt is advisory (it can be absent or stale after an exit 5).
 //! `status` reads all of them, probes the daemon when asked, and changes
-//! nothing; it is step 1 of the manual-recovery runbook.
+//! nothing; it is step 1 of the manual-recovery runbook. The `recover` verbs
+//! are steps 2–5: each refuses outside manual-recovery state, plans first,
+//! changes nothing without `--apply`, and leaves its record in the activation
+//! receipt and the journal it clears.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -15,8 +20,8 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::Exit;
-use crate::ixp_manager_host::{self, Binding};
-use crate::ixp_manager_lifecycle::{self as lifecycle, Journal, Phase};
+use crate::ixp_manager_host::{self, Binding, Guard};
+use crate::ixp_manager_lifecycle::{self as lifecycle, Callback, Journal, Phase};
 use crate::{activation, activation::Health};
 
 const ACTIVATION_RECEIPT: &str = "activation-receipt.json";
@@ -35,8 +40,12 @@ pub struct StatusOptions<'a> {
 pub enum Error {
     /// The state directory cannot be read at all; nothing can be reported.
     Unreadable(&'static str),
-    /// The options do not describe one handle's state.
+    /// The options do not describe one handle's state, or the state is not
+    /// one this verb may act on; nothing was changed.
     Refused(&'static str),
+    /// A `recover --apply` step did not complete: the state is still manual
+    /// recovery (fence and journal retained) and the message names the retry.
+    ManualRecovery(&'static str),
 }
 
 impl Error {
@@ -44,6 +53,7 @@ impl Error {
         match self {
             Self::Unreadable(_) => Exit::InvalidInput,
             Self::Refused(_) => Exit::Refused,
+            Self::ManualRecovery(_) => Exit::ManualRecovery,
         }
     }
 }
@@ -51,7 +61,9 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unreadable(reason) | Self::Refused(reason) => formatter.write_str(reason),
+            Self::Unreadable(reason) | Self::Refused(reason) | Self::ManualRecovery(reason) => {
+                formatter.write_str(reason)
+            }
         }
     }
 }
@@ -135,6 +147,9 @@ fn journal_generation(state: &Path, receipt_sha256: &str) -> Option<String> {
 
 /// What the journal proves about the upstream router lock.
 fn upstream_lock(journal: &Journal) -> &'static str {
+    if journal.lock_released {
+        return "released";
+    }
     match journal.phase {
         Phase::LockRequestPending => "unknown",
         Phase::Locked
@@ -320,4 +335,493 @@ pub fn status(options: &StatusOptions<'_>) -> Result<Report, Error> {
     report.push("daemon", daemon);
     report.push("runtime_equals_current", equal);
     Ok(report)
+}
+
+/// The IXP Manager connection a journal-holding recovery needs for its
+/// callback; the same shape `ixp-manager-lifecycle resume` takes.
+#[derive(Debug)]
+pub struct Connection<'a> {
+    pub ixp_origin: &'a str,
+    pub api_key_file: &'a Path,
+    pub timeout: Duration,
+    pub allow_http_loopback: bool,
+}
+
+#[derive(Debug)]
+pub struct Options<'a> {
+    pub state_dir: &'a Path,
+    pub binding: &'a Binding,
+    /// Perform the plan; otherwise only print it.
+    pub apply: bool,
+    /// Required whenever a lifecycle journal owes the upstream lock.
+    pub connection: Option<Connection<'a>>,
+}
+
+/// Which callback a `release-lock` delivers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Released {
+    /// The candidate stays live: `updated`.
+    Kept,
+    /// The candidate was rolled away from (or never activated):
+    /// `release-update-lock`.
+    RolledBack,
+}
+
+#[derive(Debug)]
+pub enum Verb<'a> {
+    /// Keep the candidate that is live: health-gated, `updated` callback,
+    /// fence and journal cleared.
+    KeepCurrent { rbgp: &'a Path, force: bool },
+    /// Re-stage the previous generation through the activation path,
+    /// `release-update-lock` callback, fence and journal cleared.
+    Rollback {
+        activation: RollbackActivation<'a>,
+        /// The generation to re-stage; defaults to the activation receipt's
+        /// `previous_generation` when that receipt describes the current attempt.
+        to: Option<&'a str>,
+    },
+    /// One callback, standalone and retryable; the journal records delivery.
+    ReleaseLock(Released),
+    /// Fence and journal only; refuses while the upstream lock is still owed.
+    Clear,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RollbackActivation<'a> {
+    pub rbgp: &'a Path,
+    pub settle: Duration,
+    pub activation_command: &'a Path,
+    pub activation_args: &'a [OsString],
+}
+
+impl Verb<'_> {
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::KeepCurrent { .. } => "keep-current",
+            Self::Rollback { .. } => "rollback",
+            Self::ReleaseLock(_) => "release-lock",
+            Self::Clear => "clear",
+        }
+    }
+}
+
+/// What a verb did (`--apply`) or would do: one line per step, in order. On
+/// an `--apply` failure the lines are exactly the steps that completed.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Outcome {
+    pub steps: Vec<String>,
+}
+
+enum Step {
+    Probe(String),
+    Receipt {
+        status: &'static str,
+        candidate: String,
+        previous: Option<String>,
+        runtime_equal: bool,
+    },
+    Republish {
+        from: String,
+        to: String,
+    },
+    Callback(Callback),
+    MarkReleased,
+    RemoveJournal,
+    ClearFence,
+}
+
+impl Step {
+    fn describe(&self, session: &Session<'_>) -> String {
+        match self {
+            Self::Probe(result) => format!("probe: {result}"),
+            Self::Receipt {
+                status,
+                candidate,
+                previous,
+                ..
+            } => format!(
+                "write activation receipt: status {status}, candidate {candidate}, previous {}",
+                previous.as_deref().unwrap_or("none")
+            ),
+            Self::Republish { from, to } => {
+                let activation = session.activation.expect("rollback carries its activation");
+                let mut command = activation.activation_command.display().to_string();
+                for arg in activation.activation_args {
+                    command.push(' ');
+                    command.push_str(&arg.to_string_lossy());
+                }
+                format!(
+                    "re-point current {from} -> {to}, run `{command}`, settle within {}s",
+                    activation.settle.as_secs()
+                )
+            }
+            Self::Callback(callback) => {
+                let client = session.client.as_ref().expect("callbacks carry a client");
+                let journal = session.journal.as_ref().expect("callbacks carry a journal");
+                format!(
+                    "deliver {} callback to {} for {} (attempt {})",
+                    match callback {
+                        Callback::Updated => "updated",
+                        Callback::Release => "release-update-lock",
+                    },
+                    client.origin,
+                    client.handle,
+                    journal.callback_attempts + 1
+                )
+            }
+            Self::MarkReleased => "mark the upstream lock released in the lifecycle journal".into(),
+            Self::RemoveJournal => "remove lifecycle journal".into(),
+            Self::ClearFence => "remove host fence".into(),
+        }
+    }
+}
+
+struct Session<'a> {
+    options: &'a Options<'a>,
+    guard: Guard,
+    journal: Option<Journal>,
+    client: Option<lifecycle::Client>,
+    activation: Option<RollbackActivation<'a>>,
+    checker_version: String,
+}
+
+fn host_refusal(error: ixp_manager_host::Error) -> Error {
+    match error {
+        ixp_manager_host::Error::Refused("no pending host fence exists") => {
+            Error::Refused("no host fence for this binding; nothing to recover")
+        }
+        ixp_manager_host::Error::Refused(reason) => Error::Refused(reason),
+        ixp_manager_host::Error::RecoveryRequired => {
+            Error::Refused("host fence is unreadable; inspect it before recovering")
+        }
+    }
+}
+
+fn activation_refusal(error: activation::Error) -> Error {
+    match error {
+        activation::Error::Refused(reason) => Error::Refused(reason),
+        activation::Error::RolledBack | activation::Error::RecoveryRequired => {
+            Error::Refused("activation state is unusable")
+        }
+    }
+}
+
+fn lifecycle_refusal(error: lifecycle::Error) -> Error {
+    match error {
+        lifecycle::Error::Refused(reason) => Error::Refused(reason),
+        _ => Error::Refused("lifecycle state is unusable"),
+    }
+}
+
+fn probe(rbgp: &Path, binding: &Binding, state: &Path, current: &str) -> (bool, String) {
+    let health = activation::health_probe(rbgp, binding.rbgp_addr(), Instant::now() + PROBE);
+    let daemon = match health {
+        Health::Reachable(true) => "healthy",
+        Health::Reachable(false) => "unhealthy",
+        Health::Unreachable => "unreachable",
+        Health::Invalid => "invalid",
+    };
+    let equal = health == Health::Reachable(true)
+        && comparison(state, current, binding).is_ok_and(|file| {
+            activation::equal_runtime(
+                rbgp,
+                binding.rbgp_addr(),
+                file.as_ref(),
+                Instant::now() + PROBE,
+            )
+        });
+    (
+        equal,
+        format!(
+            "daemon {daemon}, runtime {} current",
+            if equal { "equals" } else { "differs from" }
+        ),
+    )
+}
+
+/// Plan and, with `apply`, perform one recovery verb. Every verb refuses
+/// (exit 2, nothing changed) unless this binding's fence stands and the
+/// lifecycle journal, if any, is in manual recovery rather than resumable.
+pub fn recover(options: &Options<'_>, verb: &Verb<'_>) -> Result<Outcome, Error> {
+    let binding = options.binding;
+    let state = options.state_dir;
+    if state != binding.activation_state_dir {
+        return Err(Error::Refused("state directory must match host binding"));
+    }
+    let guard = Guard::claim_existing(binding).map_err(host_refusal)?;
+    let _activation_lock = activation::state_lock(state).map_err(activation_refusal)?;
+    let _lifecycle_lock = lifecycle::state_lock(state).map_err(lifecycle_refusal)?;
+    let journal = lifecycle::inspect_journal(state).map_err(|()| {
+        Error::Refused("lifecycle journal is unreadable; inspect it before recovering")
+    })?;
+    if let Some(journal) = &journal {
+        if journal.host != *binding {
+            return Err(Error::Refused("lifecycle journal identity does not match"));
+        }
+        if lifecycle::pending(journal).is_some() {
+            return Err(Error::Refused(
+                "lifecycle state is resumable, not manual recovery; run ixp-manager-lifecycle resume",
+            ));
+        }
+    }
+    // A callback needs the connection; validate it (origin, key file) before
+    // planning so a dry run refuses exactly where --apply would.
+    let client = match (&journal, &options.connection) {
+        (Some(journal), Some(connection)) => {
+            let client = lifecycle::Client::new(
+                connection.ixp_origin,
+                &binding.router_handle,
+                connection.api_key_file,
+                connection.timeout,
+                connection.allow_http_loopback,
+            )
+            .map_err(lifecycle_refusal)?;
+            if journal.origin != client.origin || journal.router_handle != client.handle {
+                return Err(Error::Refused("lifecycle journal identity does not match"));
+            }
+            Some(client)
+        }
+        (Some(_), None) if !matches!(verb, Verb::Clear) => {
+            return Err(Error::Refused(
+                "lifecycle journal owes the upstream lock; pass --ixp-origin and --api-key-file",
+            ));
+        }
+        _ => None,
+    };
+    let current = activation::current_target(state, binding).map_err(activation_refusal)?;
+    let receipt = read_receipt(state);
+    let receipt_previous = match (&receipt, &current) {
+        (
+            Receipt::Present {
+                candidate,
+                previous,
+                ..
+            },
+            Some(target),
+        ) if *target == format!("generations/{candidate}") => previous.clone(),
+        _ => None,
+    };
+    let mut session = Session {
+        options,
+        guard,
+        journal,
+        client,
+        activation: None,
+        checker_version: String::new(),
+    };
+    let journal = session.journal.as_ref();
+    let lock_released = journal.is_some_and(|journal| journal.lock_released);
+    // Lifecycle journals without an activation outcome never staged a
+    // candidate: the lock request itself was the ambiguous step.
+    let activated = journal.is_none_or(|journal| journal.activation_outcome.is_some());
+    let mut plan = Vec::new();
+    match verb {
+        Verb::KeepCurrent { rbgp, force } => {
+            if lock_released {
+                return Err(Error::Refused(
+                    "upstream lock already released; run recover clear",
+                ));
+            }
+            let Some(current) = current.as_deref() else {
+                return Err(Error::Refused("no current generation to keep"));
+            };
+            let (equal, detail) = probe(rbgp, binding, state, current);
+            if !equal && !*force {
+                return Err(Error::Refused(
+                    "daemon is not settled on current; fix the daemon by hand or pass --force",
+                ));
+            }
+            plan.push(Step::Probe(if equal {
+                detail
+            } else {
+                format!("{detail} (overridden by --force)")
+            }));
+            session.checker_version = activation::verify_candidate(&state.join(current), binding)
+                .map_err(activation_refusal)?
+                .checker_version;
+            plan.push(Step::Receipt {
+                status: "kept",
+                candidate: current
+                    .strip_prefix("generations/")
+                    .expect("current_target validated the prefix")
+                    .to_owned(),
+                previous: receipt_previous,
+                runtime_equal: equal,
+            });
+            if journal.is_some() {
+                plan.push(Step::Callback(if activated {
+                    Callback::Updated
+                } else {
+                    Callback::Release
+                }));
+                plan.push(Step::RemoveJournal);
+            }
+            plan.push(Step::ClearFence);
+        }
+        Verb::Rollback { activation, to } => {
+            if lock_released {
+                return Err(Error::Refused(
+                    "upstream lock already released; run recover clear",
+                ));
+            }
+            if !activated {
+                return Err(Error::Refused(
+                    "no candidate was activated (the lock request was ambiguous); run recover release-lock --rolled-back, then recover clear",
+                ));
+            }
+            let Some(current) = current.as_deref() else {
+                return Err(Error::Refused("no current generation to roll back from"));
+            };
+            let target = match to {
+                Some(to) => to.to_string(),
+                None => receipt_previous.ok_or(Error::Refused(
+                    "previous generation unknown (activation receipt absent or stale); pass --to generations/<digest>",
+                ))?,
+            };
+            if target == current {
+                return Err(Error::Refused(
+                    "rollback target is the current generation; run recover keep-current",
+                ));
+            }
+            if !target
+                .strip_prefix("generations/")
+                .is_some_and(activation::valid_digest)
+                || activation::verify_candidate(&state.join(&target), binding).is_err()
+            {
+                return Err(Error::Refused(
+                    "rollback target is not a published generation",
+                ));
+            }
+            session.activation = Some(*activation);
+            plan.push(Step::Republish {
+                from: current.to_owned(),
+                to: target,
+            });
+            if journal.is_some() {
+                plan.push(Step::Callback(Callback::Release));
+                plan.push(Step::RemoveJournal);
+            }
+            plan.push(Step::ClearFence);
+        }
+        Verb::ReleaseLock(released) => {
+            if journal.is_none() {
+                return Err(Error::Refused(
+                    "no lifecycle journal; no upstream lock is owed",
+                ));
+            }
+            plan.push(Step::Callback(match released {
+                Released::Kept => Callback::Updated,
+                Released::RolledBack => Callback::Release,
+            }));
+            plan.push(Step::MarkReleased);
+        }
+        Verb::Clear => {
+            if journal.is_some() && !lock_released {
+                return Err(Error::Refused(
+                    "upstream lock still owed; run recover keep-current, recover rollback, or recover release-lock first",
+                ));
+            }
+            if journal.is_some() {
+                plan.push(Step::RemoveJournal);
+            }
+            plan.push(Step::ClearFence);
+        }
+    }
+    let mut outcome = Outcome::default();
+    for step in &plan {
+        let line = step.describe(&session);
+        if options.apply {
+            session.perform(step)?;
+        }
+        outcome.steps.push(line);
+    }
+    Ok(outcome)
+}
+
+impl Session<'_> {
+    fn perform(&mut self, step: &Step) -> Result<(), Error> {
+        let state = self.options.state_dir;
+        let binding = self.options.binding;
+        match step {
+            Step::Probe(_) => Ok(()),
+            Step::Receipt {
+                candidate,
+                previous,
+                runtime_equal,
+                ..
+            } => activation::write_kept_receipt(
+                state,
+                candidate,
+                previous.as_deref(),
+                *runtime_equal,
+                &self.checker_version,
+                binding,
+            )
+            .map_err(|_| Error::ManualRecovery("activation receipt could not be written")),
+            Step::Republish { from, to } => {
+                let activation = self.activation.expect("rollback carries its activation");
+                let candidate = from
+                    .strip_prefix("generations/")
+                    .expect("current_target validated the prefix");
+                let settled = activation::republish(
+                    state,
+                    to,
+                    candidate,
+                    activation::Activation {
+                        command: activation.activation_command,
+                        args: activation.activation_args,
+                        rbgp: activation.rbgp,
+                        rbgp_addr: binding.rbgp_addr(),
+                        settle: activation.settle,
+                    },
+                    binding,
+                )
+                .map_err(|error| match error {
+                    activation::Error::Refused(reason) => Error::Refused(reason),
+                    _ => Error::ManualRecovery("activation receipt could not be written"),
+                })?;
+                if settled {
+                    Ok(())
+                } else {
+                    Err(Error::ManualRecovery(
+                        "rollback did not settle: current is re-pointed but the daemon did not prove it; inspect with status",
+                    ))
+                }
+            }
+            Step::Callback(callback) => {
+                let client = self.client.as_ref().expect("callbacks carry a client");
+                let journal = self.journal.as_mut().expect("callbacks carry a journal");
+                // Intent before the request, like the lifecycle itself.
+                journal.callback = Some(*callback);
+                journal.callback_attempts = journal.callback_attempts.saturating_add(1);
+                lifecycle::write_journal(state, journal)
+                    .map_err(|_| Error::ManualRecovery("lifecycle journal could not be written"))?;
+                match client.callback(*callback) {
+                    Ok(()) => {
+                        journal.lock_released = true;
+                        lifecycle::write_journal(state, journal).map_err(|_| {
+                            Error::ManualRecovery("lifecycle journal could not be written")
+                        })
+                    }
+                    Err(_) => Err(Error::ManualRecovery(match callback {
+                        Callback::Updated => {
+                            "updated callback was not delivered; upstream lock retained — retry with recover release-lock --kept"
+                        }
+                        Callback::Release => {
+                            "release-update-lock callback was not delivered; upstream lock retained — retry with recover release-lock --rolled-back"
+                        }
+                    })),
+                }
+            }
+            // Delivery already marked the journal; the step exists so the plan
+            // names the durable effect.
+            Step::MarkReleased => Ok(()),
+            Step::RemoveJournal => lifecycle::remove_journal(state)
+                .map_err(|_| Error::ManualRecovery("lifecycle journal could not be removed")),
+            Step::ClearFence => self
+                .guard
+                .clear()
+                .map_err(|_| Error::ManualRecovery("host fence could not be removed")),
+        }
+    }
 }

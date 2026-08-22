@@ -336,6 +336,32 @@ diff` is created and removed inside the state directory. The
 [manual-recovery runbook](../../docs/cookbook/activation-manual-recovery.md)
 reads its output field by field.
 
+### Recovering from exit 5
+
+The `recover` verbs are the runbook's steps 2–5 as commands. Each takes the
+binding flags `status` takes, plans first and prints one `recover <verb>:
+<step>` line per step, performs nothing without `--apply` (with it, the lines
+are exactly the steps that completed), and refuses (exit 2, nothing changed)
+unless this binding's fence stands and the lifecycle journal, if any, is in
+manual recovery rather than resumable. A journal owes the upstream lock, so a
+journal-holding recovery also needs `--ixp-origin` and `--api-key-file` (the
+connection `resume` takes); a plain `activate` exit 5 needs neither.
+
+| Verb | Does | Refuses when |
+|---|---|---|
+| `keep-current --rbgp <PATH> [--force]` | probes the daemon (`rbgp health` + `config diff` against `current`), writes the receipt as `kept`, delivers `updated` (or `release-update-lock` when the journal shows nothing was activated), removes journal and fence | the probe is not healthy and equal (unless `--force`); the lock was already released |
+| `rollback --rbgp <PATH> --activation-command … [--activation-arg …] [--settle-seconds N] [--to generations/<digest>]` | re-points `current` at the previous generation and runs the activation command through the same publish-activate-settle path as a first activation, writes the receipt as `rolled_back`, delivers `release-update-lock`, removes journal and fence | the previous generation is unknown (receipt absent or stale) and `--to` is not given; the target is `current` or not a published generation; the journal shows nothing was activated; the lock was already released |
+| `release-lock --kept\|--rolled-back` | delivers that one callback and marks the journal `lock_released`; retryable | there is no journal |
+| `clear` | removes journal and fence | a journal exists whose callback no verb delivered |
+
+Callback intent is journaled before the request, exactly as the lifecycle does
+it. A step that does not complete under `--apply` — a callback not delivered, a
+rollback that does not settle — exits 5 with fence and journal retained and a
+message naming the retry (`recover release-lock --kept`, `status`); exit 5 keeps
+its single table meaning, "a human is needed". The
+[manual-recovery runbook](../../docs/cookbook/activation-manual-recovery.md)
+shows each verb's exact output and keeps the hand procedures as an appendix.
+
 Release tarballs (`rustbgpd-<arch>.tar.gz` on the [releases
 page](https://github.com/lance0/rustbgpd/releases)) ship the
 `rs-config-render` binary alongside `rustbgpd` and `rbgp`; from
@@ -411,7 +437,7 @@ stuck for more than a couple of refresh intervals should page, not rot.
 ## Exit codes
 
 One table for every subcommand (`render`, `--input-format ixp-manager-*`,
-`activate`, `ixp-manager-lifecycle run|resume`, `prune`, `status`): each code has exactly one
+`activate`, `ixp-manager-lifecycle run|resume`, `prune`, `status`, `recover`): each code has exactly one
 meaning, so a cron or systemd wrapper can branch on the code alone without
 knowing which subcommand ran. The mapping is asserted by
 `tests/exit_codes.rs` against this table and its mirror in
@@ -434,7 +460,10 @@ Codes 1–4 and 8–9 leave the previous configuration running untouched
 (fail-stale); 5 and 6 need an operator; 7 is safe to retry. `prune` uses 0, 2
 (fenced, busy, or unreadable forensic state — nothing removed), and 8. `status`
 uses 0 (any readable state, manual recovery included), 1 (unreadable state
-directory), and 2 (invalid binding).
+directory), and 2 (invalid binding). The `recover` verbs use 0, 2 (no fence for
+this binding, resumable or unreadable state, an unmet gate — nothing changed),
+and 5 (an `--apply` step did not complete; fence and journal retained, the
+message names the retry).
 
 Refused knobs: RTT-based communities and `rtt_thresholds` (the daemon
 has no RTT source; permanent), configured
