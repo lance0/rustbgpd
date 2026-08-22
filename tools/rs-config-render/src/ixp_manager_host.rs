@@ -109,7 +109,10 @@ mod unix {
             .and_then(|directory| directory.sync_all())
             .map_err(|_| Error::RecoveryRequired)
     }
-    fn host_lock(state: &Path) -> Result<File, Error> {
+    /// The host-state lock every fence write and clear happens under; held
+    /// for the returned file's lifetime. Non-blocking: a second holder is
+    /// refused.
+    pub(crate) fn host_lock(state: &Path) -> Result<File, Error> {
         let path = state.join("ixp-manager-host.lock");
         let file = OpenOptions::new()
             .read(true)
@@ -229,4 +232,4 @@ mod unix {
 #[cfg(unix)]
 pub use unix::Guard;
 #[cfg(unix)]
-pub(crate) use unix::{fence_present, read_fence};
+pub(crate) use unix::{fence_present, host_lock, read_fence};

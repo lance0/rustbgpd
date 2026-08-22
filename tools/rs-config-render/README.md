@@ -260,8 +260,10 @@ The retention rule, evaluated under the activation state lock:
   `--keep 0` keeps only the referenced ones;
 - everything else is removed — by `--apply` only.
 
-`prune` **refuses outright (exit 2) while any host fence exists**, and while
-the activation receipt or lifecycle journal exists but cannot be parsed; resolve
+`prune` **refuses outright (exit 2) while any host fence exists** (checked under
+the host lock every fence write happens under, and the lock is held until the
+last removal, so no fence can appear mid-prune; a held lock refuses as busy), and
+while the activation receipt or lifecycle journal exists but cannot be parsed; resolve
 the fence with the [manual-recovery
 runbook](../../docs/cookbook/activation-manual-recovery.md) first. Output is
 exact and stable: one `keep <digest> <reasons>` line per retained generation,

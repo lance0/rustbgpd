@@ -283,6 +283,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   content-addressed name; previously every later activation of the same
   content was refused (exit 2) because the torn generation failed
   verification. Staging leftovers are swept by the next `--apply`.
+- `rs-config-render prune` takes the host lock (the one every fence write
+  happens under) before reading the host fence and holds it until its removals
+  are done, closing the window in which an activation or lifecycle run could
+  write a fence between the fence check and the removals; a held host lock now
+  refuses as busy (exit 2, nothing removed).
 - The IXP Manager / Bird's Eye populated oracle fixtures now mask BIRD's
   timing-dependent `route_changes` counters (shape still compared), so the
   pinned-contract job no longer fails on announcer arrival order.

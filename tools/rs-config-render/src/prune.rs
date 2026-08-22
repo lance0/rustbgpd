@@ -2,9 +2,11 @@
 //!
 //! Generations are content-addressed and immutable; the activation path never
 //! removes one. `prune` is a separate operator-run command: it plans under the
-//! activation state lock, defaults to a dry run, and refuses outright while a
-//! host fence exists, so it can never remove the forensic state an exit 5
-//! leaves behind.
+//! host lock and the activation state lock, defaults to a dry run, and refuses
+//! outright while a host fence exists, so it can never remove the forensic
+//! state an exit 5 leaves behind. The host lock is the one every fence write
+//! happens under and is held until the removals are done, so no fence can
+//! appear between the check and the last removal.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -118,6 +120,13 @@ pub fn prune(options: &Options<'_>) -> Result<Plan, Error> {
             "state directory must be a pre-created absolute mode-0700 directory",
         ));
     }
+    // Same order as activation: host lock, then the activation state lock.
+    let _host_lock = ixp_manager_host::host_lock(&options.binding.host_state_dir).map_err(
+        |error| match error {
+            ixp_manager_host::Error::Refused(reason) => Error::Refused(reason),
+            ixp_manager_host::Error::RecoveryRequired => Error::Refused("host lock failed"),
+        },
+    )?;
     if ixp_manager_host::fence_present(&options.binding.host_state_dir) {
         return Err(Error::Refused(
             "host fence present; resolve it before pruning (retained state is forensic)",
