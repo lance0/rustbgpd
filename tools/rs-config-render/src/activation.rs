@@ -497,7 +497,7 @@ mod unix {
         UnchangedError,
     }
 
-    fn unique_name(prefix: &str) -> String {
+    pub(crate) fn unique_name(prefix: &str) -> String {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |value| value.as_nanos());
@@ -1105,6 +1105,6 @@ pub use unix::activate;
 #[cfg(unix)]
 pub(crate) use unix::{
     Activation, Comparison, Health, activate_guarded, comparison_file, current_target,
-    equal_runtime, health_probe, normalized_toml, private, republish, state_lock, valid_digest,
-    verify_candidate, write_kept_receipt,
+    equal_runtime, health_probe, normalized_toml, private, republish, state_lock, unique_name,
+    valid_digest, verify_candidate, write_kept_receipt,
 };

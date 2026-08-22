@@ -277,6 +277,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   requires a configured interval (`mrt_dump_interval_seconds > 0`); the
   OPERATIONS.md MRT metrics table no longer claims the series exists only
   when `[mrt]` is configured.
+- `rs-config-render prune --apply` renames each generation to a staging name
+  (`.<digest>.<pid>.<nanos>`) before removing it, so a removal that fails
+  midway leaves a staging leftover rather than a torn tree under the
+  content-addressed name; previously every later activation of the same
+  content was refused (exit 2) because the torn generation failed
+  verification. Staging leftovers are swept by the next `--apply`.
 - The IXP Manager / Bird's Eye populated oracle fixtures now mask BIRD's
   timing-dependent `route_changes` counters (shape still compared), so the
   pinned-contract job no longer fails on announcer arrival order.

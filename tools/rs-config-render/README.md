@@ -267,8 +267,11 @@ runbook](../../docs/cookbook/activation-manual-recovery.md) first. Output is
 exact and stable: one `keep <digest> <reasons>` line per retained generation,
 newest first, one `remove <digest>` line per removal, then a summary. Without
 `--apply` nothing is removed and the `remove` lines are exactly what `--apply`
-would remove; a second `--apply` removes nothing. A removal that fails exits 8
-and names the generation on stderr; rerun after fixing the directory.
+would remove; a second `--apply` removes nothing. Each removal renames the
+generation to a staging name (`.<digest>.<pid>.<nanos>`) first, so a removal
+that fails midway leaves a staging leftover, never a torn generation under its
+content-addressed name; it exits 8 and names the generation on stderr, and the
+next `--apply` sweeps the leftover once the directory is fixed.
 
 A cron-safe pattern runs the dry run on the same schedule as the lifecycle and
 applies only from a reviewed ticket, or applies unconditionally with a generous
