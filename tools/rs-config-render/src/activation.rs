@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::Exit;
 use crate::ixp_manager_host::Binding;
 
 #[derive(Debug)]
@@ -29,6 +30,16 @@ pub enum Error {
     Refused(&'static str),
     RolledBack,
     RecoveryRequired,
+}
+
+impl Error {
+    pub const fn exit_code(&self) -> Exit {
+        match self {
+            Self::Refused(_) => Exit::Refused,
+            Self::RolledBack => Exit::RolledBack,
+            Self::RecoveryRequired => Exit::ManualRecovery,
+        }
+    }
 }
 
 #[cfg(not(unix))]
@@ -374,12 +385,14 @@ mod unix {
         }
     }
 
+    /// Publish the verified candidate as an immutable generation; the flag is
+    /// true when this call created it (false when equal content already existed).
     fn copy_generation(
         candidate: &Path,
         state: &Path,
         verified: &Verified,
         binding: &Binding,
-    ) -> AResult<PathBuf> {
+    ) -> AResult<(PathBuf, bool)> {
         let generations = state.join("generations");
         create_private_dir(&generations)?;
         let final_path = generations.join(&verified.digest);
@@ -389,7 +402,7 @@ mod unix {
                 return Err(Error::Refused("immutable generation content mismatch"));
             }
             sync_dir(&generations)?;
-            return Ok(final_path);
+            return Ok((final_path, false));
         }
         let temporary = generations.join(unique_name(&format!(".{}", verified.digest)));
         fs::DirBuilder::new()
@@ -436,7 +449,7 @@ mod unix {
             .map_err(|_| Error::Refused("cannot publish generation"))?;
         staging.0.take();
         sync_dir(&generations)?;
-        Ok(final_path)
+        Ok((final_path, true))
     }
 
     fn current_target(state: &Path, binding: &Binding) -> AResult<Option<String>> {
@@ -814,12 +827,15 @@ mod unix {
             initial: options.initial,
             ..Phases::default()
         };
-        let generation = copy_generation(
+        let (generation, created) = copy_generation(
             options.candidate,
             options.state_dir,
             &candidate,
             options.binding,
         )?;
+        // A refusal from here until `current` is published must leave no trace:
+        // a generation this run created and never linked is removed again.
+        let mut unpublished = Staging(created.then(|| generation.clone()));
         let check_child = Command::new(options.checker)
             .args(["--check", "--strict"])
             .arg(generation.join("config.toml"))
@@ -873,6 +889,7 @@ mod unix {
                     "atomic current publication failed before rename",
                 ));
             }
+            unpublished.0.take();
             phases.candidate_publication = Some(publication);
             if publication == Publication::Durable {
                 phases.candidate = activate_and_settle(options, candidate_comparison.as_ref());
@@ -912,6 +929,7 @@ mod unix {
                 "atomic current publication failed before rename",
             ));
         }
+        unpublished.0.take();
         phases.candidate_publication = Some(publication);
         if publication == Publication::Durable {
             phases.candidate = activate_and_settle(options, candidate_comparison.as_ref());

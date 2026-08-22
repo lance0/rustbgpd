@@ -136,7 +136,7 @@ including five bytes of protobuf overhead, remains within 4 MiB.
 
 The helper rechecks a private immutable generation, atomically renames the
 relative `current` symlink, runs one synchronous executable, and requires both
-`rbgp health` and `rbgp config diff` to settle. Equal content is a no-op. Exit 4
+`rbgp health` and `rbgp config diff` to settle. Equal content is a no-op. Exit 7
 is limited to a command that could not start: the helper restores the prior
 link without a second activation and verifies the unchanged prior runtime. Once
 the command starts, a nonzero exit, timeout, or unsettled runtime leaves
@@ -149,9 +149,9 @@ Authorize the `rustbgpd` account in sudoers for only the exact per-handle
 handle uses its own runtime/activation/UDS and service instance but the same
 host-state directory, which serializes lifecycle ownership across the host.
 The private `activation-receipt.json` is written last; generations are retained for
-operator inspection. Exit 0 means activated or no-op, 2 refusal, 4 proven
+operator inspection. Exit 0 means activated or no-op, 2 refusal, 7 proven
 pre-effect restoration, and 5 means recovery or receipt durability is
-unproven. A receipt may
+unproven (the full table is under [Exit codes](#exit-codes)). A receipt may
 therefore be absent or stale after exit 5. The helper does not deploy services,
 prune generations, retry indefinitely, or call IXP Manager. These examples use
 package paths; release archives install the three binaries under `/usr/local/bin`.
@@ -199,7 +199,7 @@ body ceiling, and 4 MiB configuration ceiling.
 
 Lifecycle intent is written and synced before every upstream request. Exit 0
 means `updated` was delivered. Exit 2 means no lock was acquired or a definite
-pre-activation refusal was released. Exit 4 means the activation command never
+pre-activation refusal was released. Exit 7 means the activation command never
 started, exact prior runtime was proven, and release was delivered. Exit 5
 does not issue a callback because lock acquisition or an activation effect is
 uncertain. Exit 6 leaves one durable `updated` or release callback pending.
@@ -301,17 +301,30 @@ daemon's own reload seam guarantees a bad swap can never evict working
 policy either. Alert on the age of `render-receipt.json` — a pipeline
 stuck for more than a couple of refresh intervals should page, not rot.
 
-## Failure policy
+## Exit codes
 
-Distinct exit codes, so the cron wrapper can tell "fix the renderer"
-from "fix the data":
+One table for every subcommand (`render`, `--input-format ixp-manager-*`,
+`activate`, `ixp-manager-lifecycle run|resume`): each code has exactly one
+meaning, so a cron or systemd wrapper can branch on the code alone without
+knowing which subcommand ran. The mapping is asserted by
+`tests/exit_codes.rs` against this table and its mirror in
+`docs/deployment.md`.
 
 | Exit | Meaning |
 |---|---|
-| 1 | unreadable/unparseable context |
-| 2 | **refused** — the context uses a knob the renderer will not silently drop |
-| 3 | **aborted** — a generated set is empty or under the plausibility floor |
-| 4 | **shape mismatch** — the context's top-level structure (document keys or report sections) drifted from the pinned fingerprint |
+| 0 | **success** — rendered, candidate validated, activated or no-op, or `updated` delivered |
+| 1 | **invalid input** — the context or IXP Manager document is unreadable, unparseable, or carries an unknown field, or a site-local file is unreadable (also the generic failure when the final stdout line cannot be written) |
+| 2 | **refused** — an unsupported knob, an invalid option combination, an unmet precondition (including an unavailable strict checker), no upstream lock acquired, or a definite pre-activation refusal released; nothing is published or activated and no generation, receipt, or journal is left behind (the lifecycle folds a strict-check rejection into this code and leaves that candidate, receipt-less, in its candidate directory for inspection) |
+| 3 | **aborted** — a generated set is empty or under the plausibility floor (arouteserver mode) |
+| 4 | **shape drift** — the context's top-level structure drifted from the pinned fingerprint; pass `--allow-shape-drift` to proceed (arouteserver mode) |
+| 5 | **manual recovery** — the activation effect is uncertain: `current` stays on the candidate, retained state and any upstream lock are kept, and no callback is issued; inspect before acting |
+| 6 | **callback pending** — one durable `updated` or release callback is undelivered; run `ixp-manager-lifecycle resume` |
+| 7 | **rolled back** — the activation command never started; the prior generation is restored and proven and the lock is released; retrying is safe |
+| 8 | **output unusable** — the candidate directory is not an absent or empty private directory (IXP Manager mode) or could not be created or written (arouteserver mode) |
+| 9 | **strict check failed** — `rustbgpd --check --strict` ran and rejected the rendered IXP Manager candidate (the only path to this code); its files stay in the candidate directory without a receipt |
+
+Codes 1–4 and 8–9 leave the previous configuration running untouched
+(fail-stale); 5 and 6 need an operator; 7 is safe to retry.
 
 Refused knobs: RTT-based communities and `rtt_thresholds` (the daemon
 has no RTT source; permanent), configured

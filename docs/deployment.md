@@ -129,30 +129,38 @@ rs-config-render --version
 in the archive either way, so install it now rather than discovering it is
 missing from a cron refresh later.
 
-For an IXP Manager candidate, point the service at a stable activation symlink,
-then let the renderer publish and settle an immutable generation:
+For an IXP Manager candidate, run the per-handle
+[`rustbgpd@.service`](#systemd) instance (its `ExecStart` reads
+`/var/lib/rustbgpd/<handle>/activation/current/config.toml`), then let the
+renderer publish and settle an immutable generation under that handle:
 
 ```console
 sudo -u rustbgpd /usr/local/bin/rs-config-render activate \
+  --router-handle rs1-ipv4 \
   --candidate /var/lib/rustbgpd/ixp-manager/candidate \
-  --state-dir /var/lib/rustbgpd/ixp-manager/activation \
+  --runtime-state-dir /var/lib/rustbgpd/rs1-ipv4 \
+  --state-dir /var/lib/rustbgpd/rs1-ipv4/activation \
+  --host-state-dir /var/lib/rustbgpd/ixp-manager-host \
   --check-with /usr/local/bin/rustbgpd --rbgp /usr/local/bin/rbgp \
-  --rbgp-addr unix:///var/lib/rustbgpd/grpc.sock \
+  --rbgp-addr unix:///var/lib/rustbgpd/rs1-ipv4/grpc.sock \
   --activation-command /usr/bin/sudo \
   --activation-arg=-n --activation-arg /usr/bin/systemctl \
-  --activation-arg reload-or-restart --activation-arg rustbgpd
+  --activation-arg reload-or-restart --activation-arg rustbgpd@rs1-ipv4
 ```
 
 Render and activate as the `rustbgpd` service identity; it must own the private
-candidate and activation-state parent. Configure `ExecStart` to read
-`.../activation/current/config.toml`, and authorize that account in sudoers for
-only `/usr/bin/systemctl reload-or-restart rustbgpd`. Pre-create the absolute
-state directory as a non-symlink mode-0700 directory owned by `rustbgpd`; do not
-let another process publish or reload during the call. Add `--initial` only when
+candidate, the per-handle runtime and activation directories, and the shared
+host-state directory. The runtime directory basename must equal the handle, the
+activation directory must be exactly `<runtime>/activation`, and `--rbgp-addr`
+must be that runtime's `grpc.sock`. Authorize that account in sudoers for only
+the literal `/usr/bin/systemctl reload-or-restart rustbgpd@rs1-ipv4`. Pre-create
+the absolute runtime, activation, and host-state directories as non-symlink
+mode-0700 directories owned by `rustbgpd`; do not let another process publish or
+reload during the call. Add `--initial` only when
 both no current generation and no reachable daemon exist. Normalized comparison
 TOML is limited to 4,194,299 bytes (4 MiB minus five encoded-request bytes).
 
-The activation executable must be synchronous. Exit 4 occurs only when it could
+The activation executable must be synchronous. Exit 7 occurs only when it could
 not start: the prior link is restored without another activation and the prior
 runtime is verified unchanged. Once it starts, a nonzero exit, timeout, or
 unsettled result leaves `current` on the candidate and returns exit 5. Leave
@@ -171,13 +179,15 @@ sudo -u rustbgpd /usr/local/bin/rs-config-render ixp-manager-lifecycle run \
   --ixp-origin https://ixp.example.net --router-handle rs1-ipv4 \
   --api-key-file /var/lib/rustbgpd/ixp-manager/api-key \
   --candidate-dir /var/lib/rustbgpd/ixp-manager/candidate-1 \
-  --state-dir /var/lib/rustbgpd/ixp-manager/activation \
+  --runtime-state-dir /var/lib/rustbgpd/rs1-ipv4 \
+  --state-dir /var/lib/rustbgpd/rs1-ipv4/activation \
+  --host-state-dir /var/lib/rustbgpd/ixp-manager-host \
   --max-prefix-restart-seconds 300 \
   --check-with /usr/local/bin/rustbgpd --rbgp /usr/local/bin/rbgp \
-  --rbgp-addr unix:///var/lib/rustbgpd/grpc.sock \
+  --rbgp-addr unix:///var/lib/rustbgpd/rs1-ipv4/grpc.sock \
   --activation-command /usr/bin/sudo \
   --activation-arg=-n --activation-arg /usr/bin/systemctl \
-  --activation-arg reload-or-restart --activation-arg rustbgpd
+  --activation-arg reload-or-restart --activation-arg rustbgpd@rs1-ipv4
 ```
 
 The helper uses the exact v7.4 lock, Foil configuration, updated, and release
@@ -189,6 +199,24 @@ effect. Exit 6 means one callback is pending and may be retried with
 uncertain and no callback is attempted automatically — see the
 [activation manual-recovery runbook](cookbook/activation-manual-recovery.md).
 Delivery is at-least-once.
+
+#### rs-config-render exit codes
+
+Every `rs-config-render` subcommand shares one exit-code table, mirrored from
+the [tool README](../tools/rs-config-render/README.md#exit-codes):
+
+| Exit | Meaning |
+|---|---|
+| 0 | **success** — rendered, candidate validated, activated or no-op, or `updated` delivered |
+| 1 | **invalid input** — the context or IXP Manager document is unreadable, unparseable, or carries an unknown field, or a site-local file is unreadable (also the generic failure when the final stdout line cannot be written) |
+| 2 | **refused** — an unsupported knob, an invalid option combination, an unmet precondition (including an unavailable strict checker), no upstream lock acquired, or a definite pre-activation refusal released; nothing is published or activated and no generation, receipt, or journal is left behind (the lifecycle folds a strict-check rejection into this code and leaves that candidate, receipt-less, in its candidate directory for inspection) |
+| 3 | **aborted** — a generated set is empty or under the plausibility floor (arouteserver mode) |
+| 4 | **shape drift** — the context's top-level structure drifted from the pinned fingerprint; pass `--allow-shape-drift` to proceed (arouteserver mode) |
+| 5 | **manual recovery** — the activation effect is uncertain: `current` stays on the candidate, retained state and any upstream lock are kept, and no callback is issued; inspect before acting |
+| 6 | **callback pending** — one durable `updated` or release callback is undelivered; run `ixp-manager-lifecycle resume` |
+| 7 | **rolled back** — the activation command never started; the prior generation is restored and proven and the lock is released; retrying is safe |
+| 8 | **output unusable** — the candidate directory is not an absent or empty private directory (IXP Manager mode) or could not be created or written (arouteserver mode) |
+| 9 | **strict check failed** — `rustbgpd --check --strict` ran and rejected the rendered IXP Manager candidate (the only path to this code); its files stay in the candidate directory without a receipt |
 
 ### Debian / RPM packages
 

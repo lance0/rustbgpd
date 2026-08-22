@@ -11,6 +11,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::Exit;
 use crate::ixp_manager_host::RenderBinding;
 
 #[cfg(unix)]
@@ -49,15 +50,21 @@ pub enum Error {
     Refused(&'static str),
     Input,
     Output,
+    /// The checker binary could not run (`--version` or `--check` failed to
+    /// spawn, `--version` exited nonzero or printed an unrecognised line): an
+    /// unmet precondition, not a verdict on the candidate.
+    CheckerUnavailable,
+    /// The checker ran `--check --strict` and rejected the candidate.
     Checker,
 }
 
 impl Error {
-    pub const fn exit_code(&self) -> u8 {
+    pub const fn exit_code(&self) -> Exit {
         match self {
-            Self::Input => 1,
-            Self::Refused(_) => 2,
-            Self::Output | Self::Checker => 3,
+            Self::Input => Exit::InvalidInput,
+            Self::Refused(_) | Self::CheckerUnavailable => Exit::Refused,
+            Self::Output => Exit::OutputUnusable,
+            Self::Checker => Exit::StrictCheckFailed,
         }
     }
 }
@@ -70,7 +77,12 @@ impl std::fmt::Display for Error {
             Self::Output => {
                 f.write_str("candidate output must be an absent or empty private directory")
             }
-            Self::Checker => f.write_str("strict checker failed; candidate has no receipt"),
+            Self::CheckerUnavailable => {
+                f.write_str("strict checker is unavailable; candidate has no receipt")
+            }
+            Self::Checker => {
+                f.write_str("strict checker rejected the candidate; candidate has no receipt")
+            }
         }
     }
 }
@@ -1125,20 +1137,20 @@ fn prepare_output(out: &Path) -> Result<(), Error> {
 }
 
 fn safe_version(output: &[u8]) -> Result<String, Error> {
-    let text = std::str::from_utf8(output).map_err(|_| Error::Checker)?;
+    let text = std::str::from_utf8(output).map_err(|_| Error::CheckerUnavailable)?;
     let mut words = text
         .lines()
         .next()
-        .ok_or(Error::Checker)?
+        .ok_or(Error::CheckerUnavailable)?
         .split_ascii_whitespace();
-    let name = words.next().ok_or(Error::Checker)?;
-    let version = words.next().ok_or(Error::Checker)?;
+    let name = words.next().ok_or(Error::CheckerUnavailable)?;
+    let version = words.next().ok_or(Error::CheckerUnavailable)?;
     if name != "rustbgpd"
         || !version
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b".+-_".contains(&b))
     {
-        return Err(Error::Checker);
+        return Err(Error::CheckerUnavailable);
     }
     Ok(format!("rustbgpd {version}"))
 }
@@ -1188,6 +1200,18 @@ fn write_checked_candidate_for(
     expected: SchemaVersion,
 ) -> Result<usize, Error> {
     let candidate = render_document(input, restart_seconds, binding, expected)?;
+    // Probe the checker before writing anything so an unavailable checker is a
+    // trace-free refusal.
+    let version = Command::new(checker)
+        .arg("--version")
+        .output()
+        .map_err(|_| Error::CheckerUnavailable)?;
+    if !version.status.success() {
+        return Err(Error::CheckerUnavailable);
+    }
+    let mut version_bytes = version.stdout;
+    version_bytes.extend(version.stderr);
+    let version = safe_version(&version_bytes)?;
     prepare_output(out)?;
     for (relative, contents) in &candidate.files {
         let path = out.join(relative);
@@ -1196,22 +1220,20 @@ fn write_checked_candidate_for(
         }
         write_private(&path, contents.as_bytes()).map_err(|_| Error::Output)?;
     }
-    let version = Command::new(checker)
-        .arg("--version")
-        .output()
-        .map_err(|_| Error::Checker)?;
-    if !version.status.success() {
-        return Err(Error::Checker);
-    }
-    let mut version_bytes = version.stdout;
-    version_bytes.extend(version.stderr);
-    let version = safe_version(&version_bytes)?;
-    let checked = Command::new(checker)
+    let checked = match Command::new(checker)
         .arg("--check")
         .arg("--strict")
         .arg(out.join("config.toml"))
         .output()
-        .map_err(|_| Error::Checker)?;
+    {
+        Ok(checked) => checked,
+        Err(_) => {
+            // The checker vanished between the probe and the check: take the
+            // written files back so the refusal leaves the empty directory.
+            let _ = fs::remove_dir_all(out).and_then(|()| create_private_dir(out));
+            return Err(Error::CheckerUnavailable);
+        }
+    };
     if !checked.status.success() {
         return Err(Error::Checker);
     }

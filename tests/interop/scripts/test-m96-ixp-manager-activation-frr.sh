@@ -233,7 +233,7 @@ docker exec "$RUST" bash -c \
 pid_before=$(docker exec "$RUST" pidof -s rustbgpd)
 state_before=$(neighbor)
 start_observer
-activate /var/lib/m96-restart-candidate 4 rollback "" /definitely/missing/m96-activation
+activate /var/lib/m96-restart-candidate 7 rollback "" /definitely/missing/m96-activation
 stop_observer "$WORK/rollback-observer" "$prior_link"
 receipt >"$WORK/rollback-receipt.json"
 bad_target="generations/$(jq -r .candidate_sha256 "$WORK/rollback-receipt.json")"

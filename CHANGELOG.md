@@ -132,7 +132,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   atomically publishes immutable generations, settles real health/config diff,
   no-ops on equal content, and restores the prior link without a second
   activation only when the command cannot start. Once started, failure or
-  unsettled state retains the candidate. Exit 4 proves pre-effect restoration;
+  unsettled state retains the candidate. Exit 7 proves pre-effect restoration;
   exit 5 reports that recovery or receipt durability is unproven. M96 proves the
   pre-effect path against MD5-authenticated FRR; focused tests prove the started
   failure boundary. (LAN-1105)
@@ -167,6 +167,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   successfully accepted full policy generation, and `birdwatcher-adapter`
   renders it as status `last_reconfig`; rejected loads leave the prior value
   unchanged and pre-acceptance zero remains an empty string. (LAN-1110)
+
+### Changed
+
+- `rs-config-render` now uses one exit-code table across every subcommand
+  (render, IXP Manager candidate, `activate`, `ixp-manager-lifecycle`): each
+  code has exactly one meaning. This renumbers codes that previously meant
+  different things per subcommand — `activate`/lifecycle rollback moves from
+  4 to 7, and the IXP Manager candidate-output and strict-check failures move
+  from 3 to 8 and 9 — a breaking change for wrappers that branched on the
+  old numbers. The authoritative table is the "Exit codes" section of
+  `tools/rs-config-render/README.md`, mirrored in `docs/deployment.md` and
+  asserted by a test. (LAN-1174)
 
 ### Fixed
 

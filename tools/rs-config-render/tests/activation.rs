@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -653,4 +654,75 @@ fn recovery_boundaries_refuse_before_publication_and_clean_partial_staging() {
     assert!(source.contains(
         ".and_then(|file| file.sync_all())\n            .map_err(|_| Error::RecoveryRequired)"
     ));
+}
+
+/// Relative path → kind and content (file digest or symlink target).
+fn snapshot(root: &Path) -> BTreeMap<String, String> {
+    fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.strip_prefix(root).unwrap().display().to_string();
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            if metadata.file_type().is_symlink() {
+                out.insert(
+                    name,
+                    format!("link:{}", fs::read_link(&path).unwrap().display()),
+                );
+            } else if metadata.is_dir() {
+                out.insert(name, "dir".to_owned());
+                walk(root, &path, out);
+            } else {
+                let digest: String = Sha256::digest(fs::read(&path).unwrap())
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                out.insert(name, format!("file:{digest}"));
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+#[test]
+fn refused_after_generation_copy_leaves_the_state_directory_unchanged() {
+    let rig = Rig::new();
+    let first = rig.candidate("candidate-first", 100);
+    assert_eq!(
+        rig.run(&first, true, &rig.activation),
+        Ok(Status::Activated)
+    );
+    let second = rig.candidate("candidate-second", 101);
+    let before = snapshot(&rig.state);
+
+    rig.set("checker-mode", "fail");
+    assert_eq!(
+        rig.run(&second, false, &rig.activation),
+        Err(Error::Refused("strict candidate check failed"))
+    );
+    assert_eq!(
+        snapshot(&rig.state),
+        before,
+        "strict-check refusal left a trace"
+    );
+
+    rig.set("checker-mode", "ok");
+    rig.set("health-mode", "unhealthy");
+    assert_eq!(
+        rig.run(&second, false, &rig.activation),
+        Err(Error::Refused("current runtime is not known-good"))
+    );
+    assert_eq!(
+        snapshot(&rig.state),
+        before,
+        "known-good refusal left a trace"
+    );
+
+    rig.set("health-mode", "ok");
+    assert_eq!(
+        rig.run(&second, false, &rig.activation),
+        Ok(Status::Activated)
+    );
+    assert_ne!(snapshot(&rig.state), before);
 }
