@@ -16,6 +16,12 @@ struct Daemon {
     stderr_path: PathBuf,
 }
 
+fn shutdown_timeout_message(daemon_stderr: &str, cleanup: &str) -> String {
+    format!(
+        "rustbgpd did not stop after rbgp shutdown\ncleanup: {cleanup}\ndaemon stderr:\n{daemon_stderr}"
+    )
+}
+
 impl Daemon {
     fn spawn(config_path: &Path, stderr_path: PathBuf) -> Self {
         let stderr = File::create(&stderr_path).expect("create daemon stderr log");
@@ -60,9 +66,11 @@ impl Daemon {
                 Err(_) => break,
             }
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        panic!("rustbgpd did not stop after rbgp shutdown");
+        let try_wait = self.child.try_wait();
+        let kill = self.child.kill();
+        let reap = self.child.wait();
+        let cleanup = format!("try_wait: {try_wait:?}; kill: {kill:?}; reap: {reap:?}");
+        panic!("{}", shutdown_timeout_message(&self.stderr(), &cleanup));
     }
 }
 
@@ -421,4 +429,23 @@ fn documented_passwordless_dynamic_neighbor_flow_works_for_both_starters() {
 
     run_starter("lab", &lab, &group_json, &commands);
     run_starter("minimal", &minimal, &group_json, &commands);
+}
+
+#[test]
+fn shutdown_timeout_diagnostic_is_ordered_and_preserves_evidence() {
+    let message = shutdown_timeout_message("stderr sentinel", "cleanup sentinel");
+    assert!(message.contains("stderr sentinel") && message.contains("cleanup sentinel"));
+    let source = include_str!("quickstart_dynamic_neighbor.rs");
+    let tail = source
+        .split_once("let deadline = Instant::now() + Duration::from_secs(5);")
+        .unwrap()
+        .1
+        .split_once("\n    }\n}")
+        .unwrap()
+        .0;
+    let kill = tail.find("self.child.kill()").unwrap();
+    let reap = tail.find("self.child.wait()").unwrap();
+    let panic = tail.find("panic!(").unwrap();
+    assert!(kill < reap && reap < panic);
+    assert!(tail.contains("try_wait") && tail.contains("&self.stderr()"));
 }

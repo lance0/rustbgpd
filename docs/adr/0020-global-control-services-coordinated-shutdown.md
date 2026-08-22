@@ -26,7 +26,8 @@ Options considered for shutdown coordination:
 
 ## Decision
 
-Implement both services and use two `oneshot` channels for shutdown coordination.
+Implement both services. The original two-`oneshot` design evolved into one
+tonic-stop `oneshot` plus a `watch<bool>` signal from ControlService to main.
 
 ### GlobalService
 
@@ -42,27 +43,31 @@ Implement both services and use two `oneshot` channels for shutdown coordination
   previously counted all configured peers and summed per-peer prefix counts.)
 - `GetMetrics` — gathers Prometheus text from the explicit `BgpMetrics` registry,
   reusing the same pattern as `metrics_server.rs`.
-- `Shutdown` — sends `PeerManagerCommand::Shutdown`, then fires the gRPC shutdown
-  oneshot. The shutdown sequence is spawned so the RPC can return a response before
-  the server stops.
+- `Shutdown` — after authorization and logging, synchronously sets only the
+  RPC-to-main shutdown watch. The handler neither spawns teardown nor sends
+  `PeerManagerCommand::Shutdown`; tonic remains available long enough for the
+  accepted in-flight response to complete.
 
 ### Coordinated shutdown
 
-Two oneshot channels:
-- `grpc_shutdown_tx/rx` — main fires this after PeerManager drains, stopping tonic.
-- `rpc_shutdown_tx/rx` — ControlService fires this from the Shutdown RPC.
+Two distinct channels:
+- `grpc_shutdown_tx/rx` — a oneshot main fires late in teardown to stop tonic.
+- `rpc_shutdown_tx/rx` — a `watch<bool>` ControlService sets to ask main to shut
+  down.
 
-Shutdown flow (ctrl-c path):
-1. `tokio::select!` on `ctrl_c()` and `rpc_shutdown_rx`
-2. Send `PeerManagerCommand::Shutdown` to PeerManager
-3. Await PeerManager `JoinHandle` (peers send NOTIFICATIONs, close TCP)
-4. Send `grpc_shutdown_tx` — tonic's `serve_with_shutdown` exits
-5. `run()` returns cleanly
+Signals, a true RPC watch value, and unexpected supervised component exits all
+enter main's common ordered shutdown path. Main closes admission and settles
+configuration work, fences EVPN runtime apply, and drains the EVPN originators,
+segment routes, and IMET routes while BGP sessions are still alive. It then
+sends the sole `PeerManagerCommand::Shutdown`, awaits peer teardown, drains the
+remaining local dataplane, BFD, and BMP owners, and only then fires
+`grpc_shutdown_tx` to stop tonic.
 
 Shutdown flow (RPC path):
-1. Shutdown RPC spawns: send `PeerManagerCommand::Shutdown`, then fire
-   `rpc_shutdown_tx`
-2. Main's `select!` detects `rpc_shutdown_rx`, enters the same drain sequence
+1. The authorized handler synchronously sets `rpc_shutdown_tx` and returns its
+   response; it does not spawn or directly shut down PeerManager.
+2. Main's `select!` observes the true watch value and enters the common ordered
+   path above.
 
 ## Consequences
 
@@ -70,10 +75,13 @@ Shutdown flow (RPC path):
 - All 5 proto services are now implemented — no more UNIMPLEMENTED surprises.
 - Peers receive proper Cease NOTIFICATIONs on shutdown.
 - gRPC server exits gracefully — in-flight RPCs can complete.
+- The watch-only handler removes the proven pre-signal bounded-channel stall and
+  teardown-order bypass. It does not attribute every historical quickstart
+  timeout to that path; other bounded shutdown stages remain independent.
 - No new dependencies.
 
 **Negative:**
 - `SetGlobal` returns UNIMPLEMENTED — callers must handle this. Documented as
   deferred; the proto already exists so the surface is stable.
-- `Shutdown` RPC has no authentication — any gRPC client can shut down the daemon.
-  Access control is a post-v1 concern (same as all other RPCs).
+- At adoption the `Shutdown` RPC had no authentication; current listeners
+  require mutating access before the watch-only dispatch.

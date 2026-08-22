@@ -60,7 +60,7 @@ impl ControlService {
     }
 
     /// Route health snapshots through the peer manager's read-only readiness
-    /// lane while retaining the ordinary sender for shutdown.
+    /// lane while retaining the ordinary sender as the health fallback.
     #[must_use]
     pub fn with_peer_manager_readiness(
         mut self,
@@ -149,14 +149,7 @@ impl proto::control_service_server::ControlService for ControlService {
         let reason = request.into_inner().reason;
         info!(reason = %reason, "shutdown requested via gRPC");
 
-        let peer_mgr_tx = self.peer_mgr_tx.clone();
-        let shutdown_tx = self.shutdown_tx.clone();
-
-        // Spawn the shutdown sequence so the RPC can return before we stop
-        tokio::spawn(async move {
-            let _ = peer_mgr_tx.send(PeerManagerCommand::Shutdown).await;
-            let _ = shutdown_tx.send(true);
-        });
+        let _ = self.shutdown_tx.send(true);
 
         Ok(Response::new(proto::ShutdownResponse {}))
     }
@@ -227,8 +220,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_takes_sender() {
-        let (peer_tx, _peer_rx) = mpsc::channel(16);
+    async fn shutdown_signals_watch_without_peer_manager_command() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        peer_tx.send(PeerManagerCommand::Shutdown).await.unwrap();
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let metrics = BgpMetrics::new();
@@ -242,17 +236,47 @@ mod tests {
             None,
         );
 
-        let resp = svc
-            .shutdown(Request::new(proto::ShutdownRequest {
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            svc.shutdown(Request::new(proto::ShutdownRequest {
                 reason: "test".into(),
-            }))
-            .await;
+            })),
+        )
+        .await
+        .expect("Shutdown RPC blocked on a full PeerManager channel");
         assert!(resp.is_ok());
+        assert!(
+            shutdown_rx
+                .has_changed()
+                .expect("shutdown watch sender remains open")
+        );
+        assert!(*shutdown_rx.borrow_and_update());
+        assert!(matches!(
+            peer_rx.recv().await,
+            Some(PeerManagerCommand::Shutdown)
+        ));
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            peer_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
 
-        // Give the spawned task a moment to fire
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        shutdown_rx.changed().await.unwrap();
-        assert!(*shutdown_rx.borrow());
+    #[test]
+    fn shutdown_body_is_synchronous_and_watch_only() {
+        let source = include_str!("control_service.rs");
+        let body = source
+            .split_once("    async fn shutdown(")
+            .unwrap()
+            .1
+            .split_once("    async fn trigger_mrt_dump(")
+            .unwrap()
+            .0;
+        let signal = body.find("self.shutdown_tx.send(true)").unwrap();
+        let response = body.find("Ok(Response::new").unwrap();
+        assert!(signal < response);
+        assert!(!body.contains("tokio::spawn"));
+        assert!(!body.contains("PeerManagerCommand::Shutdown"));
     }
 
     #[tokio::test]
