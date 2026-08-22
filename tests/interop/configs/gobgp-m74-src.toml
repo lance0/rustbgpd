@@ -6,8 +6,12 @@ router-id = "10.0.0.2"
 [neighbors.config]
 neighbor-address = "10.0.0.1"
 peer-as = 65001
-description = "rustbgpd-vpnv4-rr"
+description = "rustbgpd-vpn-rr"
 
 [[neighbors.afi-safis]]
 [neighbors.afi-safis.config]
 afi-safi-name = "l3vpn-ipv4-unicast"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l3vpn-ipv6-unicast"

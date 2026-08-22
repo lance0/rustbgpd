@@ -68,7 +68,7 @@ id matches the milestone. Full procedures: [`INTEROP.md`](INTEROP.md).
 | M63 | ADR-0078 inbound backpressure: hold-timer survival under a stalled RIB | FRR 10.3.1 |
 | M64 | IPv6-only peering (`disable_ipv4_unicast`) | FRR 10.3.1 |
 | M73 | BGP-LS route reflection: source → RR → sink, attributes verbatim | GoBGP 4.6.0 ×2 |
-| M74 | VPNv4 (SAFI 128) reflection: RD/label/RT/next-hop preserved verbatim | GoBGP 3.37.0 ×2 |
+| M74 | VPNv4/VPNv6 reflection: shared-RD identity, scoped API/sink views, same-path RFC 4456 attributes, ordered withdrawals, zero dataplane | GoBGP 3.37.0 ×2 |
 | M75 | RT-Constrain (RFC 4684) VPNv4 reflection filtering, widen/narrow without reset | GoBGP 3.37.0 ×3 |
 | M76 | RFC 9107 Optimal Route Reflection: divergent per-vantage best paths, topology-driven flip | GoBGP 4.6.0 ×5 |
 | M77 | GR/LLGR stale preservation for the RR families (RFC 4724 + RFC 9494) | GoBGP 4.6.0 ×3 |

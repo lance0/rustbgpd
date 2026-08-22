@@ -43,10 +43,9 @@ name: Interop
 #   - M73 (~10 s test): BGP-LS reflection (RFC 9552) — GoBGP v4
 #     source injects a Node NLRI, rustbgpd reflects it as RR, and
 #     GoBGP v4 sink validates receipt plus withdrawal.
-#   - M74 (~15 s test): VPNv4 route reflection (RFC 4364, ADR-0077
-#     §9 gate) — GoBGP source injects RD+label+RT routes, rustbgpd
-#     reflects with next-hop/label/RD/RT preserved verbatim, sink
-#     validates receipt, withdrawal, and no dataplane install.
+#   - M74 (~15 s test): dual VPNv4/VPNv6 route reflection (RFC 4364/4659,
+#     ADR-0077 §9 gate) — pinned GoBGP validates scoped receipt, RFC 4456
+#     attributes, family-isolated withdrawals, and zero dataplane install.
 #   - M75 (~30 s test): RT-Constrain (RFC 4684) VPNv4 reflection
 #     filtering — GoBGP source with two VRFs, an RTC sink that must
 #     receive only its member RT, a non-RTC sink that must receive
@@ -581,7 +580,7 @@ jobs:
 
   m74:
     needs: [grpcurl_archive, gobgp_archive, prime_dev_image]
-    name: M74 — VPNv4 route reflection (GoBGP 3.x)
+    name: M74 — VPNv4/VPNv6 reflection (GoBGP 3.x)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -615,7 +614,7 @@ jobs:
       - name: Build gobgp:interop
         run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
 
-      - name: Run M74 (deploy + test + destroy with retry)
+      - name: Run M74 dual-family reflection (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
         with:
           label: M74

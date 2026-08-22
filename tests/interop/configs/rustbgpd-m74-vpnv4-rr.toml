@@ -16,18 +16,18 @@ principal = "rustbgpd://operator/test-only"
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65001
-description = "vpnv4-source"
+description = "vpn-source"
 hold_time = 90
 route_reflector_client = true
-families = ["l3vpn_ipv4_unicast"]
+families = ["l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast"]
 
 [[neighbors]]
 address = "10.0.1.2"
 remote_asn = 65001
-description = "vpnv4-sink"
+description = "vpn-sink"
 hold_time = 90
 route_reflector_client = true
-families = ["l3vpn_ipv4_unicast"]
+families = ["l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast"]
 
 [security.grpc]
 enforcement = "tier"

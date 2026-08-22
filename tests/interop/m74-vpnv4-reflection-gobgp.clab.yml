@@ -1,11 +1,10 @@
 # Containerlab topology: GoBGP source ↔ rustbgpd RR ↔ GoBGP sink
-# (M74 — VPNv4 route reflection / withdraw receipt)
+# (M74 — dual VPNv4/VPNv6 route reflection / withdraw receipt)
 #
-# Validates: rustbgpd reflects RFC 4364 VPNv4 routes learned from one iBGP RR
-# client to another iBGP RR client with Route Distinguisher, MPLS label stack,
-# Route Target extended communities, and next-hop preserved verbatim
-# (ADR-0077 §6), withdraws them cleanly, and installs nothing into any
-# dataplane.
+# Validates: rustbgpd reflects RFC 4364/4659 VPNv4 and VPNv6 routes learned from
+# one iBGP RR client to another with Route Distinguisher, MPLS label stack,
+# Route Target, next-hop, and RFC 4456 attributes intact, withdraws them
+# independently by family, and installs nothing into any dataplane.
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
