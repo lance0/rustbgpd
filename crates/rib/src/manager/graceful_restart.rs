@@ -1,5 +1,8 @@
-use std::collections::HashSet;
+use std::borrow::Borrow;
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::net::IpAddr;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use rustbgpd_rpki::VrpTable;
@@ -12,6 +15,121 @@ use super::helpers::{
     validate_route_rpki,
 };
 use crate::route::{BgpLsFamily, BgpLsRouteKey};
+
+/// Deadline registry with a cached minimum. The actor loop probes the
+/// nearest GR / LLGR / refresh deadline on every iteration; with the cache
+/// that probe is O(1) while the registry is untouched, and the only full
+/// scan happens on the first probe after an entry whose deadline equals the
+/// cached minimum is removed or overwritten — conservative on ties: any tied
+/// entry invalidates, even when another entry still holds that deadline.
+/// Inserts fold into the cache directly.
+///
+/// Reads go through `Deref`; every mutation goes through the methods below
+/// so the cache can never be bypassed. Values are never handed out `&mut`.
+#[derive(Debug)]
+pub(super) struct DeadlineMap<K> {
+    map: HashMap<K, tokio::time::Instant>,
+    min: Option<tokio::time::Instant>,
+    /// True when `min` may be wrong and the next probe must rescan.
+    stale: bool,
+}
+
+impl<K> Default for DeadlineMap<K> {
+    fn default() -> Self {
+        Self {
+            map: HashMap::new(),
+            min: None,
+            stale: false,
+        }
+    }
+}
+
+impl<K: Eq + Hash> DeadlineMap<K> {
+    pub(super) fn insert(
+        &mut self,
+        key: K,
+        deadline: tokio::time::Instant,
+    ) -> Option<tokio::time::Instant> {
+        let prev = self.map.insert(key, deadline);
+        if let Some(prev) = prev {
+            self.note_removed(prev);
+        }
+        if !self.stale {
+            self.min = Some(self.min.map_or(deadline, |min| min.min(deadline)));
+        }
+        prev
+    }
+
+    pub(super) fn remove<Q>(&mut self, key: &Q) -> Option<tokio::time::Instant>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let prev = self.map.remove(key);
+        if let Some(prev) = prev {
+            self.note_removed(prev);
+        }
+        prev
+    }
+
+    /// Keep only the entries whose key satisfies `keep`.
+    pub(super) fn retain(&mut self, mut keep: impl FnMut(&K) -> bool) {
+        let before = self.map.len();
+        self.map.retain(|key, _| keep(key));
+        if self.map.len() != before {
+            // The dropped entries are not known here; rescan lazily.
+            self.stale = !self.map.is_empty();
+            if self.map.is_empty() {
+                self.min = None;
+            }
+        }
+    }
+
+    /// Nearest deadline, or `None` when the registry is empty. O(1) unless
+    /// the cached minimum was invalidated since the last probe.
+    pub(super) fn min(&mut self) -> Option<tokio::time::Instant> {
+        if self.stale {
+            self.min = self.map.values().copied().min();
+            self.stale = false;
+        }
+        self.min
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_stale(&self) -> bool {
+        self.stale
+    }
+
+    /// Account for a removed or overwritten deadline. Invalidates on value
+    /// equality with the cached minimum, so with tied minima removing any one
+    /// of them forces a rescan (the cache never returns a stale answer, it
+    /// just rescans more often than strictly necessary).
+    fn note_removed(&mut self, removed: tokio::time::Instant) {
+        if self.map.is_empty() {
+            self.min = None;
+            self.stale = false;
+        } else if self.min == Some(removed) {
+            self.stale = true;
+        }
+    }
+}
+
+impl<K> Deref for DeadlineMap<K> {
+    type Target = HashMap<K, tokio::time::Instant>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.map
+    }
+}
+
+impl<'a, K> IntoIterator for &'a DeadlineMap<K> {
+    type Item = (&'a K, &'a tokio::time::Instant);
+    type IntoIter = std::collections::hash_map::Iter<'a, K, tokio::time::Instant>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.map.iter()
+    }
+}
 
 impl RibManager {
     #[expect(
@@ -654,9 +772,12 @@ impl RibManager {
                     .min()
                     .unwrap_or(llgr_config.local_llgr_stale_time);
                 let effective = peer_family_stale.min(llgr_config.local_llgr_stale_time);
-                self.llgr_stale_deadlines
-                    .entry((peer, afi, safi))
-                    .or_insert(now + std::time::Duration::from_secs(u64::from(effective)));
+                if !self.llgr_stale_deadlines.contains_key(&(peer, afi, safi)) {
+                    self.llgr_stale_deadlines.insert(
+                        (peer, afi, safi),
+                        now + std::time::Duration::from_secs(u64::from(effective)),
+                    );
+                }
             }
             self.llgr_peers
                 .insert(peer, llgr_families.into_iter().collect());
@@ -970,18 +1091,18 @@ impl RibManager {
     }
 
     /// Find the nearest GR stale deadline, if any.
-    pub(super) fn next_gr_deadline(&self) -> Option<tokio::time::Instant> {
-        self.gr_stale_deadlines.values().copied().min()
+    pub(super) fn next_gr_deadline(&mut self) -> Option<tokio::time::Instant> {
+        self.gr_stale_deadlines.min()
     }
 
     /// Find the nearest LLGR stale deadline, if any.
-    pub(super) fn next_llgr_deadline(&self) -> Option<tokio::time::Instant> {
-        self.llgr_stale_deadlines.values().copied().min()
+    pub(super) fn next_llgr_deadline(&mut self) -> Option<tokio::time::Instant> {
+        self.llgr_stale_deadlines.min()
     }
 
     /// Find the nearest enhanced route refresh deadline, if any.
-    pub(super) fn next_refresh_deadline(&self) -> Option<tokio::time::Instant> {
-        self.refresh_deadlines.values().copied().min()
+    pub(super) fn next_refresh_deadline(&mut self) -> Option<tokio::time::Instant> {
+        self.refresh_deadlines.min()
     }
 
     /// Sweep any inbound enhanced route refresh windows whose deadline has

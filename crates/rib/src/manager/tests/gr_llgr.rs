@@ -2118,3 +2118,77 @@ async fn evpn_gr_stale_routes_keep_exporting_during_gr_window() {
     drop(tx);
     handle.await.unwrap();
 }
+
+mod deadline_map {
+    use std::time::Duration;
+
+    use crate::manager::graceful_restart::DeadlineMap;
+
+    fn at(secs: u64) -> tokio::time::Instant {
+        tokio::time::Instant::now() + Duration::from_secs(secs)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn min_tracks_inserts_without_rescanning() {
+        let mut map = DeadlineMap::default();
+        assert_eq!(map.min(), None);
+        map.insert("b", at(30));
+        map.insert("a", at(10));
+        map.insert("c", at(20));
+        assert!(!map.is_stale());
+        assert_eq!(map.min(), Some(at(10)));
+        assert_eq!(map.len(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn removing_the_minimum_invalidates_and_rescans() {
+        let mut map = DeadlineMap::default();
+        map.insert("a", at(10));
+        map.insert("b", at(20));
+        map.insert("c", at(30));
+        assert_eq!(map.remove("b"), Some(at(20)));
+        assert!(
+            !map.is_stale(),
+            "dropping a non-minimum entry keeps the cache"
+        );
+        assert_eq!(map.remove("a"), Some(at(10)));
+        assert!(map.is_stale());
+        assert_eq!(map.min(), Some(at(30)));
+        assert!(!map.is_stale());
+        assert_eq!(map.remove("missing"), None);
+        assert_eq!(map.min(), Some(at(30)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn overwriting_the_minimum_rescans_to_the_new_value() {
+        let mut map = DeadlineMap::default();
+        map.insert("a", at(10));
+        map.insert("b", at(20));
+        assert_eq!(map.insert("a", at(40)), Some(at(10)));
+        assert_eq!(map.min(), Some(at(20)));
+        assert_eq!(map.insert("b", at(5)), Some(at(20)));
+        assert_eq!(map.min(), Some(at(5)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retain_and_drain_to_empty_report_none() {
+        let mut map = DeadlineMap::default();
+        map.insert(("p1", 1), at(10));
+        map.insert(("p1", 2), at(20));
+        map.insert(("p2", 1), at(15));
+        map.retain(|&(peer, _)| peer != "p1");
+        assert_eq!(map.min(), Some(at(15)));
+        assert_eq!(map.len(), 1);
+        map.retain(|_| true);
+        assert!(!map.is_stale());
+        assert_eq!(map.min(), Some(at(15)));
+        assert_eq!(map.remove(&("p2", 1)), Some(at(15)));
+        assert!(map.is_empty());
+        assert!(!map.is_stale());
+        assert_eq!(map.min(), None);
+        map.insert(("p3", 1), at(7));
+        assert_eq!(map.min(), Some(at(7)));
+        map.retain(|_| false);
+        assert_eq!(map.min(), None);
+    }
+}
