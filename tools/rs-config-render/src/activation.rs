@@ -54,6 +54,7 @@ mod unix {
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use std::collections::{BTreeMap, BTreeSet};
+    use std::ffi::OsString;
     use std::fmt::Write as _;
     use std::fs::{self, File, OpenOptions};
     use std::io::Write as _;
@@ -85,7 +86,7 @@ mod unix {
         pub(crate) digest: String,
         files: BTreeMap<String, String>,
         directories: Vec<String>,
-        checker_version: String,
+        pub(crate) checker_version: String,
         pub(crate) config: Vec<u8>,
     }
 
@@ -645,10 +646,10 @@ mod unix {
         wait_output(child, deadline).is_some_and(|output| output.status.code() == Some(0))
     }
 
-    fn settle(options: &Options<'_>, comparison: &Path, deadline: Instant) -> bool {
+    fn settle(rbgp: &Path, rbgp_addr: &str, comparison: &Path, deadline: Instant) -> bool {
         loop {
-            if health_probe(options.rbgp, options.rbgp_addr, deadline) == Health::Reachable(true)
-                && equal_runtime(options.rbgp, options.rbgp_addr, comparison, deadline)
+            if health_probe(rbgp, rbgp_addr, deadline) == Health::Reachable(true)
+                && equal_runtime(rbgp, rbgp_addr, comparison, deadline)
             {
                 return true;
             }
@@ -666,10 +667,33 @@ mod unix {
         settled: bool,
     }
 
-    fn activate_and_settle(options: &Options<'_>, comparison: &Path) -> Attempt {
-        let deadline = Instant::now() + options.settle;
-        let Ok(child) = Command::new(options.activation_command)
-            .args(options.activation_args)
+    /// The activation command, then the settlement test; everything a
+    /// re-activation needs besides the generation itself.
+    #[derive(Clone, Copy)]
+    pub(crate) struct Activation<'a> {
+        pub(crate) command: &'a Path,
+        pub(crate) args: &'a [OsString],
+        pub(crate) rbgp: &'a Path,
+        pub(crate) rbgp_addr: &'a str,
+        pub(crate) settle: Duration,
+    }
+
+    impl<'a> From<&Options<'a>> for Activation<'a> {
+        fn from(options: &Options<'a>) -> Self {
+            Self {
+                command: options.activation_command,
+                args: options.activation_args,
+                rbgp: options.rbgp,
+                rbgp_addr: options.rbgp_addr,
+                settle: options.settle,
+            }
+        }
+    }
+
+    fn activate_and_settle(activation: Activation<'_>, comparison: &Path) -> Attempt {
+        let deadline = Instant::now() + activation.settle;
+        let Ok(child) = Command::new(activation.command)
+            .args(activation.args)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -685,7 +709,7 @@ mod unix {
         Attempt {
             ran: true,
             health_checked: true,
-            settled: settle(options, comparison, deadline),
+            settled: settle(activation.rbgp, activation.rbgp_addr, comparison, deadline),
         }
     }
 
@@ -907,7 +931,8 @@ mod unix {
             unpublished.0.take();
             phases.candidate_publication = Some(publication);
             if publication == Publication::Durable {
-                phases.candidate = activate_and_settle(options, candidate_comparison.as_ref());
+                phases.candidate =
+                    activate_and_settle(options.into(), candidate_comparison.as_ref());
                 if phases.candidate.settled {
                     phases.runtime_equal = true;
                     drop(prior_comparison);
@@ -953,7 +978,7 @@ mod unix {
         unpublished.0.take();
         phases.candidate_publication = Some(publication);
         if publication == Publication::Durable {
-            phases.candidate = activate_and_settle(options, candidate_comparison.as_ref());
+            phases.candidate = activate_and_settle(options.into(), candidate_comparison.as_ref());
             phases.runtime_equal = phases.candidate.settled;
             if phases.candidate.settled {
                 drop(candidate_comparison);
@@ -964,6 +989,90 @@ mod unix {
         drop(candidate_comparison);
         finish("recovery_required", phases)?;
         Err(Error::RecoveryRequired)
+    }
+
+    /// The receipt a `recover keep-current` leaves: the exit-5 candidate stays
+    /// live (`kept`), with the probe result as `runtime_equal`.
+    pub(crate) fn write_kept_receipt(
+        state: &Path,
+        candidate: &str,
+        previous: Option<&str>,
+        runtime_equal: bool,
+        checker_version: &str,
+        binding: &Binding,
+    ) -> AResult<()> {
+        let attempt = Attempt {
+            ran: true,
+            health_checked: true,
+            settled: runtime_equal,
+        };
+        write_receipt(
+            state,
+            "kept",
+            candidate,
+            previous,
+            Phases {
+                candidate_publication: Some(Publication::Durable),
+                candidate: attempt,
+                runtime_equal,
+                ..Phases::default()
+            },
+            checker_version,
+            binding,
+        )
+    }
+
+    /// Re-point `current` at the already published generation `target` and run
+    /// the activation command through the same publish-activate-settle path a
+    /// first activation uses, then write the activation receipt for
+    /// `candidate` (the generation being rolled away from): `rolled_back` when
+    /// the daemon settled on `target`, `recovery_required` otherwise. The
+    /// caller holds the activation state lock. Returns whether it settled.
+    pub(crate) fn republish(
+        state: &Path,
+        target: &str,
+        candidate: &str,
+        activation: Activation<'_>,
+        binding: &Binding,
+    ) -> AResult<bool> {
+        let verified = verify_candidate(&state.join(target), binding)?;
+        let comparison =
+            comparison_file(&normalized_toml(&verified.config, state)?, state, "recover")?;
+        let mut phases = Phases {
+            candidate_publication: Some(Publication::Durable),
+            candidate: Attempt {
+                ran: true,
+                ..Attempt::default()
+            },
+            ..Phases::default()
+        };
+        let publication = publish_current(state, target);
+        if publication == Publication::UnchangedError {
+            return Err(Error::Refused(
+                "atomic current publication failed before rename",
+            ));
+        }
+        phases.rollback_publication = Some(publication);
+        if publication == Publication::Durable {
+            phases.rollback = activate_and_settle(activation, comparison.as_ref());
+            phases.runtime_equal = phases.rollback.settled;
+        }
+        drop(comparison);
+        let status = if phases.runtime_equal {
+            "rolled_back"
+        } else {
+            "recovery_required"
+        };
+        write_receipt(
+            state,
+            status,
+            candidate,
+            Some(target),
+            phases,
+            &verified.checker_version,
+            binding,
+        )?;
+        Ok(phases.runtime_equal)
     }
 
     fn host_error(error: ixp_manager_host::Error) -> Error {
@@ -995,6 +1104,7 @@ mod unix {
 pub use unix::activate;
 #[cfg(unix)]
 pub(crate) use unix::{
-    Comparison, Health, activate_guarded, comparison_file, current_target, equal_runtime,
-    health_probe, normalized_toml, private, state_lock, valid_digest, verify_candidate,
+    Activation, Comparison, Health, activate_guarded, comparison_file, current_target,
+    equal_runtime, health_probe, normalized_toml, private, republish, state_lock, valid_digest,
+    verify_candidate, write_kept_receipt,
 };

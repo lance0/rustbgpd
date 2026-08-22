@@ -83,6 +83,112 @@ struct StatusArgs {
     rbgp: Option<PathBuf>,
 }
 
+#[derive(Parser)]
+#[command(
+    name = "rs-config-render recover",
+    about = "Resolve manual-recovery (exit 5) state; every verb is a dry run unless --apply"
+)]
+struct RecoverArgs {
+    #[command(subcommand)]
+    command: RecoverCommand,
+}
+
+#[derive(Subcommand)]
+enum RecoverCommand {
+    /// Keep the live candidate: probe the daemon, deliver `updated`, clear fence and journal
+    KeepCurrent(KeepCurrentArgs),
+    /// Re-stage the previous generation through the activation path, deliver
+    /// `release-update-lock`, clear fence and journal
+    Rollback(RollbackArgs),
+    /// Deliver one callback standalone (retryable); the journal records delivery
+    ReleaseLock(ReleaseLockArgs),
+    /// Remove fence and journal once no upstream lock is owed
+    Clear(RecoverCommonArgs),
+}
+
+#[derive(clap::Args)]
+struct RecoverCommonArgs {
+    #[command(flatten)]
+    host: HostBindingArgs,
+    /// Perform the planned steps instead of only printing them
+    #[arg(long)]
+    apply: bool,
+    /// IXP Manager root origin; required with a lifecycle journal
+    #[arg(long, requires = "api_key_file")]
+    ixp_origin: Option<String>,
+    /// Absolute mode-0600 file containing the API key; required with a lifecycle journal
+    #[arg(long, requires = "ixp_origin")]
+    api_key_file: Option<PathBuf>,
+    /// Whole-request deadline in seconds
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=300))]
+    request_timeout_seconds: u64,
+    /// Permit plaintext HTTP only to a numeric loopback origin
+    #[arg(long)]
+    allow_http_loopback: bool,
+}
+
+impl RecoverCommonArgs {
+    fn connection(&self) -> Option<rs_config_render::recover::Connection<'_>> {
+        Some(rs_config_render::recover::Connection {
+            ixp_origin: self.ixp_origin.as_deref()?,
+            api_key_file: self.api_key_file.as_deref()?,
+            timeout: Duration::from_secs(self.request_timeout_seconds),
+            allow_http_loopback: self.allow_http_loopback,
+        })
+    }
+}
+
+#[derive(clap::Args)]
+struct KeepCurrentArgs {
+    #[command(flatten)]
+    common: RecoverCommonArgs,
+    /// Exact rbgp executable used for the health and live config probe
+    #[arg(long)]
+    rbgp: PathBuf,
+    /// Proceed although the daemon is not proven healthy and settled on current
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(clap::Args)]
+struct RollbackArgs {
+    #[command(flatten)]
+    common: RecoverCommonArgs,
+    /// Exact rbgp executable used for settlement
+    #[arg(long)]
+    rbgp: PathBuf,
+    /// Maximum seconds for the rollback settlement
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=120))]
+    settle_seconds: u64,
+    /// Exact activation executable; never evaluated by a shell
+    #[arg(long)]
+    activation_command: PathBuf,
+    /// Literal activation argument; repeatable and never shell-evaluated
+    #[arg(long, allow_hyphen_values = true)]
+    activation_arg: Vec<OsString>,
+    /// Generation to re-stage (`generations/<digest>`); defaults to the
+    /// activation receipt's previous_generation when that receipt describes
+    /// the current attempt
+    #[arg(long)]
+    to: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct ReleaseLockArgs {
+    #[command(flatten)]
+    common: RecoverCommonArgs,
+    /// The candidate stays live: deliver `updated`
+    #[arg(
+        long,
+        conflicts_with = "rolled_back",
+        required_unless_present = "rolled_back"
+    )]
+    kept: bool,
+    /// The candidate was rolled away from or never activated: deliver `release-update-lock`
+    #[arg(long)]
+    rolled_back: bool,
+}
+
 #[derive(clap::Args)]
 struct HostBindingArgs {
     #[arg(long)]
@@ -291,6 +397,55 @@ fn parse_status() -> Option<StatusArgs> {
         .then(|| StatusArgs::parse_from(std::iter::once(binary).chain(args)))
 }
 
+fn parse_recover() -> Option<RecoverArgs> {
+    let mut args = std::env::args_os();
+    let binary = args.next()?;
+    (args.next().as_deref() == Some(OsStr::new("recover")))
+        .then(|| RecoverArgs::parse_from(std::iter::once(binary).chain(args)))
+}
+
+fn recover_exit(
+    common: &RecoverCommonArgs,
+    verb: &rs_config_render::recover::Verb<'_>,
+) -> ExitCode {
+    let name = verb.name();
+    let binding = match common.host.binding() {
+        Ok(binding) => binding,
+        Err(reason) => {
+            eprintln!("rs-config-render: recover {name}: {reason}");
+            return Exit::Refused.into();
+        }
+    };
+    let options = rs_config_render::recover::Options {
+        state_dir: &common.host.state_dir,
+        binding: &binding,
+        apply: common.apply,
+        connection: common.connection(),
+    };
+    match rs_config_render::recover::recover(&options, verb) {
+        Ok(outcome) => {
+            let count = outcome.steps.len();
+            let summary = if common.apply {
+                format!("recover {name}: applied {count} step(s)")
+            } else {
+                format!(
+                    "recover {name}: dry run — {count} step(s) planned; pass --apply to perform them"
+                )
+            };
+            stdout_exit(write_stdout(|writer| {
+                for step in &outcome.steps {
+                    writeln!(writer, "recover {name}: {step}")?;
+                }
+                writeln!(writer, "{summary}")
+            }))
+        }
+        Err(error) => {
+            eprintln!("rs-config-render: recover {name}: {error}");
+            error.exit_code().into()
+        }
+    }
+}
+
 fn parse_prune() -> Option<PruneArgs> {
     let mut args = std::env::args_os();
     let binary = args.next()?;
@@ -348,6 +503,39 @@ fn main() -> ExitCode {
                 eprintln!("rs-config-render: status: {error}");
                 error.exit_code().into()
             }
+        };
+    }
+    if let Some(args) = parse_recover() {
+        use rs_config_render::recover::{Released, RollbackActivation, Verb};
+        return match &args.command {
+            RecoverCommand::KeepCurrent(args) => recover_exit(
+                &args.common,
+                &Verb::KeepCurrent {
+                    rbgp: &args.rbgp,
+                    force: args.force,
+                },
+            ),
+            RecoverCommand::Rollback(args) => recover_exit(
+                &args.common,
+                &Verb::Rollback {
+                    activation: RollbackActivation {
+                        rbgp: &args.rbgp,
+                        settle: Duration::from_secs(args.settle_seconds),
+                        activation_command: &args.activation_command,
+                        activation_args: &args.activation_arg,
+                    },
+                    to: args.to.as_deref(),
+                },
+            ),
+            RecoverCommand::ReleaseLock(args) => recover_exit(
+                &args.common,
+                &Verb::ReleaseLock(if args.kept {
+                    Released::Kept
+                } else {
+                    Released::RolledBack
+                }),
+            ),
+            RecoverCommand::Clear(common) => recover_exit(common, &Verb::Clear),
         };
     }
     if let Some(args) = parse_prune() {

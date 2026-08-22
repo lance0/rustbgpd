@@ -166,8 +166,10 @@ runtime is verified unchanged. Once it starts, a nonzero exit, timeout, or
 unsettled result leaves `current` on the candidate and returns exit 5. Leave
 retained state untouched and inspect the current private receipt if present;
 recovery or receipt durability is unproven, and the receipt may be absent or
-stale when its final write or directory sync failed. The operator procedure for
-exit 5 is the
+stale when its final write or directory sync failed. `rs-config-render status`
+reads that state without changing it and the `rs-config-render recover` verbs
+(`keep-current`, `rollback`, `release-lock`, `clear`; dry run unless `--apply`)
+resolve it; the operator procedure for exit 5 is the
 [activation manual-recovery runbook](cookbook/activation-manual-recovery.md).
 
 To drive the same path directly from IXP Manager v7.4, create a separate

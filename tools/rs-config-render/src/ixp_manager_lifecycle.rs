@@ -171,21 +171,62 @@ mod unix {
     pub(crate) struct Journal {
         schema: String,
         ixp_manager_version: String,
-        origin: String,
-        router_handle: String,
-        host: Binding,
+        pub(crate) origin: String,
+        pub(crate) router_handle: String,
+        pub(crate) host: Binding,
         pub(crate) phase: Phase,
         pub(crate) callback: Option<Callback>,
         pub(crate) callback_attempts: u32,
         pub(crate) candidate_sha256: Option<String>,
         pub(crate) activation_outcome: Option<String>,
         pub(crate) error_class: Option<String>,
+        /// Set by a `recover` verb once its terminal callback was delivered:
+        /// the upstream lock is no longer owed and `recover clear` may run.
+        #[serde(default)]
+        pub(crate) lock_released: bool,
     }
 
-    struct Client {
+    /// What `resume` would do with a journal; `None` is manual recovery.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Pending {
+        Updated,
+        Release { rolled_back: bool },
+        ReleaseBeforeActivation,
+    }
+
+    pub(crate) fn pending(journal: &Journal) -> Option<Pending> {
+        match journal.phase {
+            Phase::UpdatedPending
+                if journal.callback == Some(Callback::Updated)
+                    && matches!(
+                        journal.activation_outcome.as_deref(),
+                        Some("activated" | "noop")
+                    ) =>
+            {
+                Some(Pending::Updated)
+            }
+            Phase::ReleasePending
+                if journal.callback == Some(Callback::Release)
+                    && matches!(
+                        journal.activation_outcome.as_deref(),
+                        Some("refused" | "rolled_back")
+                    ) =>
+            {
+                Some(Pending::Release {
+                    rolled_back: journal.activation_outcome.as_deref() == Some("rolled_back"),
+                })
+            }
+            Phase::Locked if journal.callback.is_none() && journal.activation_outcome.is_none() => {
+                Some(Pending::ReleaseBeforeActivation)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) struct Client {
         agent: Agent,
-        origin: String,
-        handle: String,
+        pub(crate) origin: String,
+        pub(crate) handle: String,
         key: Zeroizing<String>,
     }
 
@@ -195,12 +236,12 @@ mod unix {
         Ambiguous(&'static str),
     }
 
-    enum RequestError {
+    pub(crate) enum RequestError {
         Definite,
         Ambiguous(&'static str),
     }
 
-    struct StateLock {
+    pub(crate) struct StateLock {
         _file: File,
     }
 
@@ -239,7 +280,7 @@ mod unix {
             .map_err(|_| Error::ManualRecovery)
     }
 
-    fn state_lock(state: &Path) -> Result<StateLock> {
+    pub(crate) fn state_lock(state: &Path) -> Result<StateLock> {
         if !state.is_absolute() || !private(state, true, 0o700) {
             return Err(Error::Refused(
                 "state directory must be a pre-created absolute mode-0700 directory",
@@ -381,7 +422,7 @@ mod unix {
     }
 
     impl Client {
-        fn new(
+        pub(crate) fn new(
             origin: &str,
             handle: &str,
             key_file: &Path,
@@ -473,7 +514,7 @@ mod unix {
             Ok(Zeroizing::new(body))
         }
 
-        fn callback(&self, callback: Callback) -> std::result::Result<(), RequestError> {
+        pub(crate) fn callback(&self, callback: Callback) -> std::result::Result<(), RequestError> {
             self.control(match callback {
                 Callback::Updated => "updated",
                 Callback::Release => "release-update-lock",
@@ -507,7 +548,7 @@ mod unix {
         state.join(JOURNAL)
     }
 
-    fn write_journal(state: &Path, journal: &Journal) -> Result<()> {
+    pub(crate) fn write_journal(state: &Path, journal: &Journal) -> Result<()> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -590,7 +631,7 @@ mod unix {
             .map_err(|_| ())
     }
 
-    fn remove_journal(state: &Path) -> Result<()> {
+    pub(crate) fn remove_journal(state: &Path) -> Result<()> {
         fs::remove_file(journal_path(state)).map_err(|_| Error::ManualRecovery)?;
         sync_dir(state)
     }
@@ -608,6 +649,7 @@ mod unix {
             candidate_sha256: None,
             activation_outcome: None,
             error_class: None,
+            lock_released: false,
         }
     }
 
@@ -807,25 +849,12 @@ mod unix {
         let finish = |journal: &mut Journal, callback| {
             callback_pending(options.state_dir, &client, journal, callback, &guard)
         };
-        match journal.phase {
-            Phase::UpdatedPending
-                if journal.callback == Some(Callback::Updated)
-                    && matches!(
-                        journal.activation_outcome.as_deref(),
-                        Some("activated" | "noop")
-                    ) =>
-            {
+        match pending(&journal) {
+            Some(Pending::Updated) => {
                 finish(&mut journal, Callback::Updated)?;
                 Ok(Status::Updated)
             }
-            Phase::ReleasePending
-                if journal.callback == Some(Callback::Release)
-                    && matches!(
-                        journal.activation_outcome.as_deref(),
-                        Some("refused" | "rolled_back")
-                    ) =>
-            {
-                let rolled_back = journal.activation_outcome.as_deref() == Some("rolled_back");
+            Some(Pending::Release { rolled_back }) => {
                 finish(&mut journal, Callback::Release)?;
                 if rolled_back {
                     Err(Error::RolledBack)
@@ -833,21 +862,19 @@ mod unix {
                     Err(Error::Refused("lock released without activation"))
                 }
             }
-            Phase::Locked if journal.callback.is_none() && journal.activation_outcome.is_none() => {
+            Some(Pending::ReleaseBeforeActivation) => {
                 finish(&mut journal, Callback::Release)?;
                 Err(Error::Refused("lock released before activation"))
             }
-            Phase::LockRequestPending | Phase::ActivationStarted | Phase::ManualRecovery => {
-                Err(Error::ManualRecovery)
-            }
-            Phase::UpdatedPending | Phase::ReleasePending | Phase::Locked => {
-                Err(Error::ManualRecovery)
-            }
+            None => Err(Error::ManualRecovery),
         }
     }
 }
 
 #[cfg(unix)]
-pub(crate) use unix::{Journal, Phase, candidate_digest, inspect_journal, journal_candidate};
+pub(crate) use unix::{
+    Callback, Client, Journal, Phase, candidate_digest, inspect_journal, journal_candidate,
+    pending, remove_journal, state_lock, write_journal,
+};
 #[cfg(unix)]
 pub use unix::{resume, run};

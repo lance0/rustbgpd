@@ -103,32 +103,88 @@ re-point first (step 2) and diff again.
 Pick by what step 1 showed. Neither `resume` nor `activate` will do this for
 you: `resume` refuses the `manual_recovery` phase, `activate` refuses while the
 fence stands and refuses again ("current runtime is not known-good") until
-`current` and the daemon agree. Re-pointing `current` is not currently
-supported as a command; the manual procedure is an atomic symlink swap, using
-the `previous_generation` value from the receipt:
+`current` and the daemon agree. The `recover` verbs do it. Every verb takes the
+binding flags `status` takes, is a dry run unless `--apply`, prints the exact
+steps it would perform, refuses (exit 2, nothing changed) outside this state,
+and — for a lifecycle run, whose journal owes the upstream lock — needs the
+same connection `resume` takes:
 
 ```bash
-PREV=generations/55de8d9cf767c58ce9b197129f69b2a776aa54bad6542385c4e5be924d8e460a
-ln -s $PREV $STATE/.current.rollback && mv -T $STATE/.current.rollback $STATE/current && sync $STATE
-readlink $STATE/current
+BIND="--router-handle rs1-ipv4 --runtime-state-dir /var/lib/rustbgpd/rs1-ipv4 \
+  --state-dir $STATE --host-state-dir $HOST --rbgp-addr $UDS"
+IXP="--ixp-origin https://ixp.example.net --api-key-file /var/lib/rustbgpd/ixp-manager/api-key"
+```
+
+Without `$IXP` a journal-holding recovery refuses before planning (`lifecycle
+journal owes the upstream lock; pass --ixp-origin and --api-key-file`); a
+plain `activate` exit 5 has no journal and needs no connection.
+
+**Keep the candidate** (step 1 read `daemon: healthy` and
+`runtime_equals_current: yes`):
+
+```bash
+rs-config-render recover keep-current --rbgp /usr/bin/rbgp $BIND $IXP
 ```
 
 ```text
-generations/55de8d9cf767c58ce9b197129f69b2a776aa54bad6542385c4e5be924d8e460a
+recover keep-current: probe: daemon healthy, runtime equals current
+recover keep-current: write activation receipt: status kept, candidate 53fa45222b96917cac847a870e16a6a29da9195adf5db717a4bd3b305f9e1d9c, previous generations/55de8d9cf767c58ce9b197129f69b2a776aa54bad6542385c4e5be924d8e460a
+recover keep-current: deliver updated callback to https://ixp.example.net for rs1-ipv4 (attempt 1)
+recover keep-current: remove lifecycle journal
+recover keep-current: remove host fence
+recover keep-current: dry run — 5 step(s) planned; pass --apply to perform them
 ```
 
-| Step 1 said | Keep the candidate | Roll back |
-|---|---|---|
-| Live and equal | Nothing to do to the daemon. | Re-point, then run your activation command by hand (the exact `--activation-command`/`--activation-arg` line, normally `systemctl reload-or-restart rustbgpd@rs1-ipv4`). |
-| Live on the previous generation | Run your activation command by hand. | Re-point only; the daemon already runs it. |
-| Down | Run your activation command by hand (`reload-or-restart` starts a stopped unit on `current`). | Re-point, then run your activation command by hand. |
+Add `--apply` to perform exactly those steps; the last line becomes `recover
+keep-current: applied 5 step(s)` and the exit is 0. The verb is health-gated:
+when the probe does not read healthy and equal it refuses with `daemon is not
+settled on current; fix the daemon by hand or pass --force`. In the "live on
+the previous generation" and "down" rows that means either running your
+activation command by hand (`reload-or-restart` starts a stopped unit on
+`current`) and re-running `keep-current`, or rolling back. `--force` declares
+the candidate kept regardless (the probe line then ends `(overridden by
+--force)` and the receipt records `runtime_equal: false`).
 
-Then repeat `status --rbgp` until it reads `daemon: healthy` and
-`runtime_equals_current: yes` — that is the "current and daemon agree" state
-every later helper run requires.
+**Roll back** (step 1 read live-on-previous, down, or broken):
 
-Whichever you chose decides the callback in step 3: kept means `updated`,
-rolled back means `release-update-lock`.
+```bash
+rs-config-render recover rollback --rbgp /usr/bin/rbgp \
+  --activation-command /usr/bin/sudo --activation-arg=-n --activation-arg /usr/bin/systemctl \
+  --activation-arg reload-or-restart --activation-arg rustbgpd@rs1-ipv4 $BIND $IXP
+```
+
+```text
+recover rollback: re-point current generations/53fa45222b96917cac847a870e16a6a29da9195adf5db717a4bd3b305f9e1d9c -> generations/55de8d9cf767c58ce9b197129f69b2a776aa54bad6542385c4e5be924d8e460a, run `/usr/bin/sudo -n /usr/bin/systemctl reload-or-restart rustbgpd@rs1-ipv4`, settle within 30s
+recover rollback: deliver release-update-lock callback to https://ixp.example.net for rs1-ipv4 (attempt 1)
+recover rollback: remove lifecycle journal
+recover rollback: remove host fence
+recover rollback: dry run — 4 step(s) planned; pass --apply to perform them
+```
+
+The target is the receipt's `previous_generation` when step 1 read
+`advisory_receipt: matches-current`; otherwise pass `--to
+generations/<digest>` — the generation `current` pointed at before the failed
+run, confirmed by the hand diff in appendix A. Rollback goes through the same
+publish → activation command → settle path as a first activation (not a bare
+symlink swap) and writes the activation receipt as `rolled_back`. If the daemon
+does not settle on the target within `--settle-seconds`, the verb exits 5
+(`rollback did not settle`): `current` is re-pointed, the receipt reads
+`recovery_required`, fence and journal stay — run `status` again and work from
+step 1. It refuses when the journal shows no candidate was activated (the
+lock-ambiguous case: use `release-lock --rolled-back` and `clear`), when the
+target is the current generation, or when the target is not a published
+generation.
+
+In both verbs the callback is the one step that can fail on its own (step 3):
+the local work is then done, the exit is 5, and the message names the retry
+(`updated callback was not delivered; upstream lock retained — retry with
+recover release-lock --kept`, or the `--rolled-back` twin). With a
+lock-ambiguous journal `keep-current` delivers `release-update-lock` instead of
+`updated`, since nothing was updated.
+
+Then `status --rbgp` reads `daemon: healthy` and `runtime_equals_current:
+yes` — that is the "current and daemon agree" state every later helper run
+requires.
 
 ## 3. Release the retained IXP Manager update lock (lifecycle runs only)
 
@@ -141,70 +197,74 @@ you clear local state in step 5 stops at the lock:
 rs-config-render: IXP Manager lifecycle: IXP Manager update lock was not acquired
 ```
 
-(exit 2, from a 423 Locked). Releasing it is not currently supported by
-`rs-config-render`; the manual procedure is to deliver, yourself, the callback
-the helper would have sent — the same v7.4 endpoint, same handle, same API key
-in the same header. Keep the key out of argv with a mode-0600 header file:
+(exit 2, from a 423 Locked). `keep-current` and `rollback` deliver the
+callback themselves; `release-lock` is for when that delivery failed, or when
+you resolved step 2 by hand ([appendix B](#b-the-hand-procedures)). It
+delivers one callback, standalone and retryable, and touches nothing else:
 
 ```bash
-umask 077
-printf 'X-IXP-Manager-API-Key: %s\n' "$(cat /var/lib/rustbgpd/ixp-manager/api-key)" \
-  > /var/lib/rustbgpd/ixp-manager/api-key-header
-# rolled back:
-curl -sS -X POST -H @/var/lib/rustbgpd/ixp-manager/api-key-header -w '\nHTTP %{http_code}\n' \
-  https://ixp.example.net/admin/api/v4/router/release-update-lock/rs1-ipv4
-# kept the candidate instead:
-curl -sS -X POST -H @/var/lib/rustbgpd/ixp-manager/api-key-header -w '\nHTTP %{http_code}\n' \
-  https://ixp.example.net/admin/api/v4/router/updated/rs1-ipv4
+rs-config-render recover release-lock --kept $BIND $IXP          # kept the candidate
+rs-config-render recover release-lock --rolled-back $BIND $IXP   # rolled back, or nothing was activated
 ```
 
 ```text
-{"last_update_started": "2026-08-22T15:05:00+00:00", "last_update_started_unix": 1787411100, "last_updated": "2026-08-22T15:05:00+00:00", "last_updated_unix": 1787411100}
-HTTP 200
+recover release-lock: deliver updated callback to https://ixp.example.net for rs1-ipv4 (attempt 2)
+recover release-lock: mark the upstream lock released in the lifecycle journal
+recover release-lock: dry run — 2 step(s) planned; pass --apply to perform them
 ```
 
-`release-update-lock` resets `last_update_started` to `last_updated`; `updated`
-stamps a new `last_updated`. Either way the lock is free. Delivery is
-at-least-once by design, so sending one twice is harmless; sending the wrong
-one is not — `updated` tells IXP Manager a configuration is live that you
-rolled away from.
+With `--apply` the intent is journaled before the request (`status` shows
+`callback` and `callback_attempts`); a failed delivery exits 5 and the same
+command retries it. Once delivered, `status` reads `lock: released`, and
+`keep-current`/`rollback` defer to `clear`. `release-update-lock` resets
+`last_update_started` to `last_updated`; `updated` stamps a new
+`last_updated`. Either way the lock is free. Delivery is at-least-once by
+design, so sending one twice is harmless; sending the wrong one is not —
+`updated` tells IXP Manager a configuration is live that you rolled away from.
 
 ## 4. The activation receipt may be absent or stale
 
 Exit 5 also covers "the receipt's final write or directory sync failed", so
-before re-running anything check the `advisory_receipt` line of `status`.
-`matches-current` means the receipt describes this attempt (its
-`candidate_sha256` equals the generation `current` pointed at when you
-arrived). `stale` (a receipt naming an older generation, or `"status":
-"activated"` for the previous run) or `absent` means the write never landed,
-and `previous_generation` is then whatever generation `current` pointed at
-*before* the failed run — confirm it by the hand diff in appendix A rather than
-the receipt. After a rollback the receipt is stale by construction
-(it still names the candidate). Leave it alone: the helper never reads it back
-— it verifies the render receipt inside each generation instead — and the next
-successful run rewrites it.
+the `advisory_receipt` line of `status` tells you whether the receipt describes
+this attempt: `matches-current` (its `candidate_sha256` equals the generation
+`current` pointed at when you arrived) or `stale`/`absent` (the write never
+landed; `previous_generation` is then whatever generation `current` pointed at
+*before* the failed run — confirm it by the hand diff in appendix A, and pass
+it to `rollback --to`). `keep-current` and `rollback` rewrite the receipt
+(`kept`, `rolled_back`) so it describes what you decided; the helper never
+reads it back — it verifies the render receipt inside each generation
+instead.
 
 ## 5. When automation may resume
 
 The fence and the journal are the helper's own proof that a human has not yet
-decided; clearing them is not currently supported as a command. The manual
-procedure, once steps 1–4 are done and `status --rbgp` reads `daemon: healthy`
-and `runtime_equals_current: yes`:
+decided. `keep-current` and `rollback` remove both as their last steps; `clear`
+does only that, for when you released the lock with `release-lock` or did
+step 2 by hand:
 
 ```bash
-rm $STATE/ixp-manager-lifecycle.json $HOST/ixp-manager-host-fence.json && sync $STATE $HOST
-ls -la $HOST
+rs-config-render recover clear $BIND
 ```
 
 ```text
--rw------- 1 rustbgpd rustbgpd    0 Aug 22 15:01 ixp-manager-host.lock
+recover clear: remove lifecycle journal
+recover clear: remove host fence
+recover clear: dry run — 2 step(s) planned; pass --apply to perform them
 ```
 
-Remove both as a pair. The fence belongs to the handle named inside it; a
-lifecycle for another handle sharing the host-state directory is refused while
-it stands. Then fix the cause (the sudoers rule, the unit name, the settle
-budget, the crashed restart) and run the lifecycle once by hand with the
-production arguments before handing back to cron:
+`clear` accepts exactly two states: no lifecycle journal at all (a plain
+`activate` exit 5, or a journal you removed by hand), or a journal whose
+callback `release-lock` delivered (`status` reads `lock: released`). Any other
+journal means the upstream lock is still owed and it refuses (`upstream lock
+still owed; run recover keep-current, recover rollback, or recover release-lock
+first`). It does not probe the daemon: make sure step 1 reads healthy and equal
+first, because every later helper run requires `current` and the daemon to
+agree. The fence belongs to the handle named inside it; a lifecycle for another
+handle sharing the host-state directory is refused while it stands.
+
+Then fix the cause (the sudoers rule, the unit name, the settle budget, the
+crashed restart) and run the lifecycle once by hand with the production
+arguments before handing back to cron:
 
 ```text
 IXP Manager lifecycle activated
@@ -321,6 +381,69 @@ rc=1
 
 `healthy: false` from `rbgp --json health` (`daemon: unhealthy`), or a diff
 that errors on a reachable daemon, is "live and broken".
+
+## B. The hand procedures
+
+What the `recover` verbs do, by hand, for a host without the binary or a state
+the verbs refuse (an unreadable or foreign fence or journal: inspect who wrote
+them before removing anything).
+
+**Re-point `current`** (rollback) is an atomic symlink swap using the
+`previous_generation` value from the receipt, followed by your activation
+command:
+
+```bash
+PREV=generations/55de8d9cf767c58ce9b197129f69b2a776aa54bad6542385c4e5be924d8e460a
+ln -s $PREV $STATE/.current.rollback && mv -T $STATE/.current.rollback $STATE/current && sync $STATE
+readlink $STATE/current
+```
+
+```text
+generations/55de8d9cf767c58ce9b197129f69b2a776aa54bad6542385c4e5be924d8e460a
+```
+
+| Step 1 said | Keep the candidate | Roll back |
+|---|---|---|
+| Live and equal | Nothing to do to the daemon. | Re-point, then run your activation command by hand (the exact `--activation-command`/`--activation-arg` line, normally `systemctl reload-or-restart rustbgpd@rs1-ipv4`). |
+| Live on the previous generation | Run your activation command by hand. | Re-point only; the daemon already runs it. |
+| Down | Run your activation command by hand (`reload-or-restart` starts a stopped unit on `current`). | Re-point, then run your activation command by hand. |
+
+Whichever you chose decides the callback: kept means `updated`, rolled back
+means `release-update-lock`.
+
+**The callbacks** are the same v7.4 endpoints, same handle, same API key in
+the same header. Keep the key out of argv with a mode-0600 header file:
+
+```bash
+umask 077
+printf 'X-IXP-Manager-API-Key: %s\n' "$(cat /var/lib/rustbgpd/ixp-manager/api-key)" \
+  > /var/lib/rustbgpd/ixp-manager/api-key-header
+# rolled back:
+curl -sS -X POST -H @/var/lib/rustbgpd/ixp-manager/api-key-header -w '\nHTTP %{http_code}\n' \
+  https://ixp.example.net/admin/api/v4/router/release-update-lock/rs1-ipv4
+# kept the candidate instead:
+curl -sS -X POST -H @/var/lib/rustbgpd/ixp-manager/api-key-header -w '\nHTTP %{http_code}\n' \
+  https://ixp.example.net/admin/api/v4/router/updated/rs1-ipv4
+```
+
+```text
+{"last_update_started": "2026-08-22T15:05:00+00:00", "last_update_started_unix": 1787411100, "last_updated": "2026-08-22T15:05:00+00:00", "last_updated_unix": 1787411100}
+HTTP 200
+```
+
+**Clearing** is removing the fence and the journal as a pair:
+
+```bash
+rm $STATE/ixp-manager-lifecycle.json $HOST/ixp-manager-host-fence.json && sync $STATE $HOST
+ls -la $HOST
+```
+
+```text
+-rw------- 1 rustbgpd rustbgpd    0 Aug 22 15:01 ixp-manager-host.lock
+```
+
+After a hand rollback the receipt is stale by construction (it still names the
+candidate); leave it alone, the next successful run rewrites it.
 
 ## What this runbook does not cover
 
