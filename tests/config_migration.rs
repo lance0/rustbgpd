@@ -892,59 +892,77 @@ fn downgrade_dry_run_invokes_validator_and_malicious_stage_mutation_refuses() {
 #[test]
 fn both_validator_deadlines_kill_reap_sanitize_and_clean_stage() {
     for phase in ["version", "check"] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        fs::write(&path, CONFIG).unwrap();
-        let descendant_pid = dir.path().join("descendant.pid");
-        // The descendant sleeps 60s: far past every bound below, so "reaped
-        // within the poll deadline" can only mean the migrator killed it, and
-        // "returned within the hang stop" can only mean the migrator did not
-        // wait it out. The pid record is the script's first action because the
-        // whole script races the shrunk 100ms deadline kill.
-        let script = if phase == "version" {
-            format!(
-                "#!/bin/sh\nsleep 60 & echo $! > '{}'\nprintf DO_NOT_PRINT >&2\n",
-                descendant_pid.display()
-            )
-        } else {
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'rustbgpd 0.64.0\\n'; else (sleep 60; printf malicious > \"$2\") & echo $! > '{}'; printf DO_NOT_PRINT >&2; fi\n",
-                descendant_pid.display()
-            )
-        };
-        let validator = validator(dir.path(), &script);
-        let started = Instant::now();
-        let output = run_env(
-            &[&validator, &path],
-            &["downgrade-v0.64", "--offline", "--validator"],
-            &[("RUSTBGPD_TEST_MIGRATION_TIMEOUT_PHASE", phase)],
-        );
-        assert_eq!(
-            output.status.code(),
-            Some(1),
-            "{phase}: {:?}",
-            text(&output)
-        );
-        // Hang stop: waiting out the descendant instead of killing at the
-        // deadline would take 60s. Generous so scheduler load cannot trip it.
-        assert!(started.elapsed() < Duration::from_secs(30), "{phase}");
-        assert!(!text(&output).1.contains("DO_NOT_PRINT"));
-        let pid = fs::read_to_string(&descendant_pid).unwrap();
-        let proc_entry = format!("/proc/{}", pid.trim());
-        // The kill precedes the migrator's exit, but the reap can lag it under
-        // load — poll instead of asserting instant /proc non-existence. The
-        // 60s descendant sleep keeps this a kill proof, not an exit race.
+        // The migrator arms the shrunk 100ms deadline when it spawns the
+        // validator, so the script's first action, recording the descendant's
+        // pid, races the kill itself: under load the kill can land before the
+        // record exists. Such an attempt left no descendant to reason about
+        // and proves nothing either way, so it is retried (bounded) rather
+        // than read as a survivor; a pass always needs a recorded pid.
+        let mut recorded = false;
+        for _ in 0..5 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            fs::write(&path, CONFIG).unwrap();
+            let descendant_pid = dir.path().join("descendant.pid");
+            // The descendant sleeps 60s: far past every bound below, so
+            // "reaped within the poll deadline" can only mean the migrator
+            // killed it, and "returned within the hang stop" can only mean
+            // the migrator did not wait it out.
+            let script = if phase == "version" {
+                format!(
+                    "#!/bin/sh\nsleep 60 & echo $! > '{}'\nprintf DO_NOT_PRINT >&2\n",
+                    descendant_pid.display()
+                )
+            } else {
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'rustbgpd 0.64.0\\n'; else (sleep 60; printf malicious > \"$2\") & echo $! > '{}'; printf DO_NOT_PRINT >&2; fi\n",
+                    descendant_pid.display()
+                )
+            };
+            let validator = validator(dir.path(), &script);
+            let started = Instant::now();
+            let output = run_env(
+                &[&validator, &path],
+                &["downgrade-v0.64", "--offline", "--validator"],
+                &[("RUSTBGPD_TEST_MIGRATION_TIMEOUT_PHASE", phase)],
+            );
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{phase}: {:?}",
+                text(&output)
+            );
+            // Hang stop: waiting out the descendant instead of killing at the
+            // deadline would take 60s. Generous so scheduler load cannot trip it.
+            assert!(started.elapsed() < Duration::from_secs(30), "{phase}");
+            assert!(!text(&output).1.contains("DO_NOT_PRINT"));
+            assert!(!PathBuf::from(format!("{}.tmp", path.display())).exists());
+            let retry = run(&[&path], &["pin-legacy", "--offline"]);
+            assert!(
+                retry.status.success(),
+                "lock leaked after {phase}: {:?}",
+                text(&retry)
+            );
+            let pid = fs::read_to_string(&descendant_pid).unwrap_or_default();
+            let pid = pid.trim();
+            if pid.is_empty() {
+                continue;
+            }
+            let proc_entry = format!("/proc/{pid}");
+            // The kill precedes the migrator's exit, but the reap can lag it
+            // under load — poll instead of asserting instant /proc
+            // non-existence. The 60s descendant sleep keeps this a kill proof,
+            // not an exit race.
+            assert!(
+                poll_until(10, || !Path::new(&proc_entry).exists()),
+                "{phase}: descendant {pid} survived the deadline kill"
+            );
+            recorded = true;
+            break;
+        }
         assert!(
-            poll_until(10, || !Path::new(&proc_entry).exists()),
-            "{phase}: descendant {} survived the deadline kill",
-            pid.trim()
-        );
-        assert!(!PathBuf::from(format!("{}.tmp", path.display())).exists());
-        let retry = run(&[&path], &["pin-legacy", "--offline"]);
-        assert!(
-            retry.status.success(),
-            "lock leaked after {phase}: {:?}",
-            text(&retry)
+            recorded,
+            "{phase}: the validator never recorded its descendant before the deadline kill"
         );
     }
 }

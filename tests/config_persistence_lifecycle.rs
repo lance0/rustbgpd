@@ -1534,7 +1534,18 @@ async fn phase_commit_confirm_timeout(
         reverted.is_some(),
         format!("elapsed={reverted:?} window={TIMEOUT_CONFIRM_SECONDS}s"),
     );
-    let status = lab.rbgp.run(&["-j", "config", "status"]).await?;
+    // The rollback re-persists the prior config first and becomes terminal
+    // only after the revert journal's locator is unlinked and its directory
+    // synced, so the disk can read reverted while status still says
+    // `pending`: poll for the terminal record instead of reading it once.
+    let started = Instant::now();
+    let mut status = lab.rbgp.run(&["-j", "config", "status"]).await?;
+    while json_str(&status, "status").as_deref() == Some("pending")
+        && started.elapsed() < CONVERGE_TIMEOUT
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        status = lab.rbgp.run(&["-j", "config", "status"]).await?;
+    }
     checks.eq(
         "timeout.status_reports_auto_reverted",
         json_str(&status, "status").as_deref(),

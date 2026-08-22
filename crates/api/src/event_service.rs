@@ -625,6 +625,12 @@ mod tests {
     use tokio::sync::broadcast;
     use tokio_stream::StreamExt;
 
+    /// Only catches a hang: the tests below wait for an event to come back
+    /// through a `SynchronousMode::Full` (fsync per commit) event history
+    /// manager, and a commit that merely takes a few seconds under I/O
+    /// load is not a failure.
+    const DURABLE_COMMIT_HANG_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
     #[derive(Clone, Copy, Debug)]
     enum ListEventRead {
         Evpn,
@@ -1384,9 +1390,9 @@ mod tests {
             ..Default::default()
         });
 
-        let committed = tokio::time::timeout(std::time::Duration::from_secs(2), ehm_live.recv())
+        let committed = tokio::time::timeout(DURABLE_COMMIT_HANG_BOUND, ehm_live.recv())
             .await
-            .expect("committed event within 2s with no WatchEvents subscriber")
+            .expect("committed event with no WatchEvents subscriber")
             .expect("EHM broadcast still attached");
         assert_eq!(
             committed.envelope.category,
@@ -1474,16 +1480,15 @@ mod tests {
         // channel first — confirm we see it there so the test
         // distinguishes "diff didn't fire" from "EHM enqueue
         // didn't fire" if it ever regresses.
-        let _broadcast_event =
-            tokio::time::timeout(std::time::Duration::from_secs(2), watch_rx.recv())
-                .await
-                .expect("WatchEvents broadcast within 2s")
-                .expect("WatchEvents receiver still attached");
+        let _broadcast_event = tokio::time::timeout(DURABLE_COMMIT_HANG_BOUND, watch_rx.recv())
+            .await
+            .expect("WatchEvents broadcast")
+            .expect("WatchEvents receiver still attached");
 
         // EHM commits it on the next batch interval (10ms).
-        let committed = tokio::time::timeout(std::time::Duration::from_secs(2), ehm_live.recv())
+        let committed = tokio::time::timeout(DURABLE_COMMIT_HANG_BOUND, ehm_live.recv())
             .await
-            .expect("committed event within 2s")
+            .expect("committed event")
             .expect("EHM broadcast still attached");
         assert_eq!(
             committed.envelope.category,
@@ -2857,9 +2862,9 @@ mod tests {
             .expect("subscribe_from_event must succeed");
         let mut stream = response.into_inner();
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        let event = tokio::time::timeout(DURABLE_COMMIT_HANG_BOUND, stream.next())
             .await
-            .expect("first event within 2s")
+            .expect("first event")
             .expect("stream still attached")
             .expect("no status error");
 

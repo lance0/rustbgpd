@@ -5,8 +5,8 @@ use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rs_config_render::activation::{Error, Options, Status, activate};
@@ -15,6 +15,20 @@ use sha2::{Digest, Sha256};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/ixp-manager-v1-supported.json");
 const SECRET: &str = "activation-secret-must-not-escape";
+/// Settle window every `Rig::run` activation is given.
+const SETTLE: Duration = Duration::from_secs(1);
+// Serialize the binary. `Command::spawn` in any thread copies every open
+// descriptor into its child until that child execs, and flock locks live on
+// the open file description: a host lock one test just dropped stays held by
+// the ghost copy inside a sibling test's not-yet-exec'd child, and the
+// sibling's next claim is refused with "another host command is active".
+static ACTIVATION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn activation_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    ACTIVATION_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
 
 fn mode(path: &Path, mode: u32) {
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
@@ -128,7 +142,7 @@ case "$(cat "$root/activation-mode")" in
   fail-once)
     if [ ! -f "$root/failed-once" ]; then touch "$root/failed-once"; printf '{SECRET}\n'; exit 9; fi ;;
   hang-once)
-    if [ ! -f "$root/hung-once" ]; then touch "$root/hung-once"; sleep 30; fi ;;
+    if [ ! -f "$root/hung-once" ]; then touch "$root/hung-once"; exec sleep 120; fi ;;
   reject-current)
     [ -f "$root/reject" ] || printf '%s\n' "$target" > "$root/reject" ;;
 esac
@@ -212,7 +226,7 @@ exit 0
             checker: &self.checker,
             rbgp: &self.rbgp,
             rbgp_addr: self.binding(&self.state).rbgp_addr(),
-            settle: Duration::from_secs(1),
+            settle: SETTLE,
             initial,
             activation_command: command,
             activation_args: &args,
@@ -243,6 +257,7 @@ exit 0
 
 #[test]
 fn initial_activation_and_noop_are_private_exact_and_secret_free() {
+    let _serial = activation_test_guard();
     let rig = Rig::new();
     let candidate = rig.candidate("candidate-a", 100);
     fs::write(rig.root.join("version-stderr"), "").unwrap();
@@ -359,6 +374,7 @@ fn initial_activation_and_noop_are_private_exact_and_secret_free() {
 
 #[test]
 fn receipt_and_toml_runtime_bindings_are_independently_enforced() {
+    let _serial = activation_test_guard();
     let rig = Rig::new();
     let receipt_mismatch = rig.candidate("candidate-receipt-mismatch", 120);
     let receipt_path = receipt_mismatch.join("render-receipt.json");
@@ -390,6 +406,7 @@ fn receipt_and_toml_runtime_bindings_are_independently_enforced() {
 
 #[test]
 fn changed_candidate_rolls_back_exactly_and_refuses_mutable_aliases() {
+    let _serial = activation_test_guard();
     let rig = Rig::new();
     let first = rig.candidate_with_alias("candidate-a", 100, 3, 42, "10.1.0.36");
     rig.run(&first, true, &rig.activation).unwrap();
@@ -458,7 +475,12 @@ fn changed_candidate_rolls_back_exactly_and_refuses_mutable_aliases() {
 
 #[test]
 fn started_failure_timeout_and_unsettled_retain_candidate_without_rollback() {
-    let started = Instant::now();
+    let _serial = activation_test_guard();
+    // The only absolute bound, and it only catches a hang: the hang-once
+    // fixture sleeps 120 s, so an activation that is not killed at the settle
+    // deadline (or a settle loop that never gives up) overshoots this by far,
+    // while scheduler load cannot reach it.
+    const HANG_MARGIN: Duration = Duration::from_secs(30);
     for mode_name in ["fail-once", "hang-once", "reject-current"] {
         let rig = Rig::new();
         let first = rig.candidate("candidate-a", 110);
@@ -467,9 +489,24 @@ fn started_failure_timeout_and_unsettled_retain_candidate_without_rollback() {
         let prior = rig.current();
         let activations = fs::read_to_string(rig.root.join("activation.log")).unwrap();
         rig.set("activation-mode", mode_name);
+        let started = Instant::now();
         assert_eq!(
             rig.run(&candidate, false, &rig.activation),
             Err(Error::RecoveryRequired)
+        );
+        let elapsed = started.elapsed();
+        // A failed command is reported at once; a hung command is killed at
+        // the settle deadline and a never-settling runtime is polled until
+        // it, so those two are given the whole configured window and no more.
+        if mode_name != "fail-once" {
+            assert!(
+                elapsed >= SETTLE,
+                "{mode_name}: gave up before the settle window: {elapsed:?}"
+            );
+        }
+        assert!(
+            elapsed < SETTLE + HANG_MARGIN,
+            "{mode_name}: ran past the settle deadline: {elapsed:?}"
         );
         let receipt = rig.receipt();
         assert_ne!(rig.current(), prior);
@@ -481,6 +518,8 @@ fn started_failure_timeout_and_unsettled_retain_candidate_without_rollback() {
         assert_eq!(receipt["activation_runs"], 1);
         assert_eq!(receipt["phases"]["rollback_link"]["published"], false);
         assert_eq!(receipt["phases"]["rollback_activation_ran"], false);
+        assert_eq!(receipt["phases"]["candidate_activation_ran"], true);
+        assert_eq!(receipt["phases"]["runtime_equal"], false);
         assert_eq!(
             fs::read_to_string(rig.root.join("activation.log"))
                 .unwrap()
@@ -489,11 +528,11 @@ fn started_failure_timeout_and_unsettled_retain_candidate_without_rollback() {
             activations.lines().count() + 1
         );
     }
-    assert!(started.elapsed() < Duration::from_secs(4));
 }
 
 #[test]
 fn initial_failed_command_exits_five_with_last_recovery_receipt() {
+    let _serial = activation_test_guard();
     let rig = Rig::new();
     let candidate = rig.candidate("candidate-recovery", 105);
     rig.set("activation-mode", "fail-once");
@@ -533,6 +572,7 @@ fn initial_failed_command_exits_five_with_last_recovery_receipt() {
 
 #[test]
 fn cli_help_pins_the_additive_literal_command_contract() {
+    let _serial = activation_test_guard();
     let output = Command::new(env!("CARGO_BIN_EXE_rs-config-render"))
         .args(["activate", "--help"])
         .output()
@@ -554,6 +594,7 @@ fn cli_help_pins_the_additive_literal_command_contract() {
 
 #[test]
 fn recovery_boundaries_refuse_before_publication_and_clean_partial_staging() {
+    let _serial = activation_test_guard();
     let rig = Rig::new();
     let candidate = rig.candidate("candidate-boundaries", 106);
     let args = Vec::new();
@@ -687,6 +728,7 @@ fn snapshot(root: &Path) -> BTreeMap<String, String> {
 
 #[test]
 fn refused_after_generation_copy_leaves_the_state_directory_unchanged() {
+    let _serial = activation_test_guard();
     let rig = Rig::new();
     let first = rig.candidate("candidate-first", 100);
     assert_eq!(
@@ -725,6 +767,25 @@ fn refused_after_generation_copy_leaves_the_state_directory_unchanged() {
         Ok(Status::Activated)
     );
     assert_ne!(snapshot(&rig.state), before);
+}
+
+#[test]
+fn every_activation_test_acquires_the_process_guard_first() {
+    let _serial = activation_test_guard();
+    let lines: Vec<_> = include_str!("activation.rs").lines().collect();
+    let tests = lines
+        .windows(3)
+        .filter(|window| window[0].trim() == "#[test]")
+        .inspect(|window| {
+            assert_eq!(
+                window[2].trim(),
+                "let _serial = activation_test_guard();",
+                "{} must acquire the process guard before fixtures or children",
+                window[1].trim()
+            );
+        })
+        .count();
+    assert_eq!(tests, 11);
 }
 
 mod prune {
@@ -783,6 +844,7 @@ mod prune {
 
     #[test]
     fn prune_keeps_current_predecessor_receipt_and_journal_and_refuses_under_a_fence() {
+        let _serial = activation_test_guard();
         let rig = Rig::new();
         let g = rig.generations(5);
 
@@ -876,6 +938,7 @@ mod prune {
 
     #[test]
     fn prune_cli_dry_run_lists_exactly_what_apply_removes_and_is_idempotent() {
+        let _serial = activation_test_guard();
         let rig = Rig::new();
         let g = rig.generations(4);
         let run = |apply: bool| {
