@@ -229,7 +229,7 @@ pub fn spawn(
 /// — no dataplane / no binding feed — in which case no bias snapshot
 /// is published / no segment counts as bound.
 #[must_use = "drop the handle to shut down the EVPN segment orchestrator"]
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "the segment actor keeps the dataplane supervisor's dependency spine explicit"
 )]
@@ -325,7 +325,7 @@ struct SegmentState {
     esi_label: MplsLabel,
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "setup and the select loop form one ordered segment lifecycle"
 )]

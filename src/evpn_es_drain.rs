@@ -298,7 +298,7 @@ pub(crate) enum EsDrainError {
 /// mutation that only recomposed the reason set (e.g. a link failure
 /// on an already operator-drained ES) commits coordinator-side with
 /// no actor traffic — the routes are already withdrawn.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "the drain hook keeps the ADR-0084 dependency spine explicit"
 )]
