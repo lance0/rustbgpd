@@ -105,6 +105,7 @@ DOCKERFILE="$SCRIPT_DIR/Dockerfile"
 # lifecycle/readiness proofs.
 TEST_BIN="netns_bum_filter"
 EXACT_FILTER=1
+SELECTOR="${1:-all}"
 # Module-path filter for `-p rustbgpd` daemon netns tests (fib/bfd);
 # empty means the default `netns_*` evpn-linux integration binary.
 RUSTBGPD_TEST_FILTER=""
@@ -263,4 +264,11 @@ else
 fi
 
 echo "[harness] running: ${TEST_ARGS[*]}"
-exec docker run "${DOCKER_ARGS[@]}" "$IMAGE_TAG" "${TEST_ARGS[@]}"
+docker run "${DOCKER_ARGS[@]}" "$IMAGE_TAG" "${TEST_ARGS[@]}"
+
+# CI uses this append-only log to prove which inventory selectors actually
+# completed. Never record an invocation that did not return successfully.
+if [ -n "${NETNS_SELECTOR_RECEIPT:-}" ]; then
+    printf '%s\n' "$SELECTOR" >> "$NETNS_SELECTOR_RECEIPT"
+fi
+exit 0

@@ -808,6 +808,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Initialize netns selector receipt
+        run: |
+          receipt="$RUNNER_TEMP/netns-selector-receipt.log"
+          : > "$receipt"
+          printf 'NETNS_SELECTOR_RECEIPT=%s\n' "$receipt" >> "$GITHUB_ENV"
+
       # The Docker netns harness builds its own image and runs the privileged
       # tests inside `docker run --cap-add=NET_ADMIN --cap-add=SYS_ADMIN`, so the
       # netns never leaks to the host namespace. Most selectors are vrf-free and
@@ -916,6 +922,30 @@ jobs:
       - name: Route-event wake latency netns test
         if: steps.vrf.outputs.vrf-available == 'true'
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_route_event
+
+      - name: Finalize netns selector receipt
+        if: always()
+        env:
+          VRF_AVAILABLE: ${{ steps.vrf.outputs.vrf-available }}
+        run: |
+          set +e
+          python3 scripts/check_netns_selector_receipt.py \
+            --receipt "$NETNS_SELECTOR_RECEIPT" \
+            --output "$RUNNER_TEMP/netns-selector-receipt.json" \
+            --summary "$RUNNER_TEMP/netns-selector-summary.md" \
+            --vrf-available "${VRF_AVAILABLE:-false}"
+          rc=$?
+          cat "$RUNNER_TEMP/netns-selector-summary.md" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Upload netns selector receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: netns-selector-receipt
+          path: ${{ runner.temp }}/netns-selector-receipt.json
+          if-no-files-found: error
+          retention-days: 14
 
   check:
     name: check

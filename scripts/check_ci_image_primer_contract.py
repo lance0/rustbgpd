@@ -127,7 +127,7 @@ PINS = collections.Counter(
         "docker/setup-buildx-action@v4": 45,
         "docker/build-push-action@v7": 46,
         "actions/cache@v6": 7,
-        "actions/upload-artifact@v7": 8,
+        "actions/upload-artifact@v7": 9,
         "actions/download-artifact@v8": 6,
         "rustsec/audit-check@v2.0.0": 1,
         "EmbarkStudios/cargo-deny-action@v2": 1,
@@ -780,6 +780,26 @@ def check(root: Path) -> list[str]:
         )
         if gated != (selector in NETNS_VRF_SELECTORS):
             errors.append(f"kernel-dataplane.yml:netns {selector} VRF gate drifted")
+    receipt_seams = (
+        'receipt="$RUNNER_TEMP/netns-selector-receipt.log"',
+        ': > "$receipt"',
+        "printf 'NETNS_SELECTOR_RECEIPT=%s\\n' \"$receipt\" >> \"$GITHUB_ENV\"",
+        "if: always()\n        env:\n          VRF_AVAILABLE:",
+        "python3 scripts/check_netns_selector_receipt.py",
+        '--vrf-available "${VRF_AVAILABLE:-false}"',
+        'cat "$RUNNER_TEMP/netns-selector-summary.md" >> "$GITHUB_STEP_SUMMARY"',
+        "uses: actions/upload-artifact@v7",
+        "name: netns-selector-receipt",
+        "path: ${{ runner.temp }}/netns-selector-receipt.json",
+        "if-no-files-found: error",
+    )
+    for seam in receipt_seams:
+        if seam not in netns:
+            errors.append(f"kernel-dataplane.yml:netns receipt seam drifted: {seam}")
+    if netns.count("if: always()") != 2:
+        errors.append("kernel-dataplane.yml:netns receipt finalizer and upload must always run")
+    if 'printf \'%s\\n\' "$SELECTOR" >> "$NETNS_SELECTOR_RECEIPT"' not in harness:
+        errors.append("netns harness must append the successful selector receipt")
 
     action = (
         root / ".github" / "actions" / "setup-dataplane-host" / "action.yml"
