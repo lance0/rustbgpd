@@ -335,6 +335,13 @@ broader platform-diversity validation beyond the protected hosted matrix.
 
 ---
 
+The M61 adoption receipt also pins the component-level ownership counters:
+`evpn_l3_neighbor_adopted_total` and `evpn_l3_neighbor_reaped_total` cover the
+shared L3 neighbor, while `evpn_l3vxlan_fdb_adopted_total` and
+`evpn_l3vxlan_fdb_reaped_total` cover its L3VXLAN FDB resolution row. These raw
+counters distinguish restart adoption from deferred cleanup; current route and
+IP-VRF state remain the primary operational view.
+
 ## Running Interop Tests
 
 ### Prerequisites

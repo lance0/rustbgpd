@@ -1416,6 +1416,12 @@ create avoidable load and disconnected streams fail like any other RPC. After a
 lag warning, treat the stream as a live tail after a gap and refresh state with
 a snapshot or bounded history query.
 
+### RFC 7999 BLACKHOLE discards
+
+`bgp_blackhole_discard_rejected_total{reason}` counts discard candidates
+withheld before kernel installation. The bounded reason is `broad_prefix` or
+`not_ebgp`; use `rbgp rib blackholes` for current per-prefix decision details.
+
 ### General Unicast FIB
 
 These metrics are present when the daemon is built with the ADR-0061 general
@@ -1570,7 +1576,16 @@ daemon log for the peer-specific reason.
 | `evpn_duplicate_mac_first_move_timestamp_seconds{vni,mac}` | Unix timestamp of the first observed duplicate-MAC / mobility contention event for that key |
 | `evpn_duplicate_mac_threshold_exceeded_total{vni,mac,action}` | RFC 7432 §15.1 M/N threshold crossings. `action` is `detect` or `suppress_local` from the per-instance config |
 | `evpn_duplicate_mac_quarantine_active{vni,mac}` | `1` while `action = "suppress_local"` is actively suppressing local Type 2 originations for that key; returns to `0` after timed recovery |
+| `evpn_ip_vrf_observed_routes{vrf}` | Kernel routes currently eligible for Type 5 origination from each configured IP-VRF |
+| `evpn_ip_vrf_observed_routes_filtered_total{vrf,reason}` | Kernel routes rejected by the bounded IP-VRF observation classifier |
+| `evpn_ip_vrf_origination_suppressed_total{vrf,reason}` | Type 5 candidates withheld because the IP-VRF is not ready or the address family does not match |
+| `evpn_ip_vrf_originated_routes{vrf}` | Locally originated Type 5 routes currently advertised from each IP-VRF |
+| `evpn_ip_vrf_installed_routes{vrf}` | Remote Type 5 routes currently owned in each IP-VRF kernel table |
 | `evpn_ip_vrf_remote_prefix_drops{vrf,reason}` | Current remote Type 5 projection drops by bounded IP-VRF/reason labels. Overlay-index reasons include `overlay_index_no_linked_l2vni`, `unresolved_overlay_index_gateway`, and `ambiguous_overlay_index_gateway`; `vrf="_unscoped"` means the drop happened before a configured IP-VRF could be selected. |
+| `evpn_foreign_replaces_blocked_total` | Installs or replaces withheld because an exact-key foreign kernel row already exists |
+| `evpn_foreign_deletes_skipped_total` | Deletes skipped after the live kernel row ceased to be rustbgpd-owned |
+| `evpn_foreign_owned_relinquished_total` | Owned keys released after another writer replaced the live kernel row |
+| `evpn_single_active_backup_active` | Single-active groups currently retargeted to a backup PE during the post-failover window |
 
 During M37 or a synthetic MAC-churn soak, the inject and withdraw counters
 should follow the `bridge fdb add` / `bridge fdb del` cadence. Any non-zero
