@@ -2,6 +2,7 @@
 
 use std::net::IpAddr;
 use std::pin::Pin;
+use std::sync::OnceLock;
 #[cfg(feature = "bench-internals")]
 use std::time::Instant;
 
@@ -850,9 +851,27 @@ fn route_page_query_identity(afi_safi: i32, filters: &RouteFilters) -> String {
     encoded
 }
 
-/// Encode a self-contained opaque cursor. Scope binding rejects cross-RPC or
-/// cross-peer reuse; the process-local version makes mutation a visible
-/// restart instead of a silently skipped or duplicated row.
+static ROUTE_PAGE_TOKEN_SECRET: OnceLock<[u8; 16]> = OnceLock::new();
+
+fn route_page_token_signature(payload: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let secret = ROUTE_PAGE_TOKEN_SECRET.get_or_init(|| *uuid::Uuid::new_v4().as_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update(b"rustbgpd-route-page-token-v1");
+    hasher.update(secret);
+    hasher.update(payload.as_bytes());
+    hasher.update(secret);
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+/// Encode an opaque cursor whose process-local integrity tag binds every field.
+/// Tokens intentionally expire across process restarts.
 fn encode_route_page_token(
     scope: RouteQueryScope,
     query_identity: &str,
@@ -862,19 +881,34 @@ fn encode_route_page_token(
 ) -> String {
     let (prefix, peer, path_id) = key;
     let (addr, len) = prefix_parts(*prefix);
-    format!(
-        "rp4|{:016x}|{:016x}|{total}|{}|{query_identity}|{addr}/{len}|{peer}|{path_id}",
+    let payload = format!(
+        "rp5|{:016x}|{:016x}|{total}|{}|{query_identity}|{addr}/{len}|{peer}|{path_id}",
         version.epoch,
         version.generation,
         route_page_scope_token(scope)
-    )
+    );
+    let signature = route_page_token_signature(&payload);
+    format!("{payload}|{signature}")
 }
 
 fn decode_route_page_token(token: &str) -> Result<RoutePageCursor, Status> {
     let invalid = || Status::invalid_argument("invalid page_token");
-    let mut parts = token.split('|');
+    let (payload, signature) = token.rsplit_once('|').ok_or_else(invalid)?;
+    let expected_signature = route_page_token_signature(payload);
+    if signature.len() != expected_signature.len()
+        || signature
+            .bytes()
+            .zip(expected_signature.bytes())
+            .fold(0u8, |difference, (actual, expected)| {
+                difference | (actual ^ expected)
+            })
+            != 0
+    {
+        return Err(invalid());
+    }
+    let mut parts = payload.split('|');
     let (
-        Some("rp4"),
+        Some("rp5"),
         Some(epoch),
         Some(generation),
         Some(total),
@@ -4935,6 +4969,23 @@ mod tests {
         }
     }
 
+    fn encode_test_route_page_token(query_identity: &str, total: u64) -> String {
+        encode_route_page_token(
+            RouteQueryScope::Best,
+            query_identity,
+            &(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+                "192.0.2.1".parse().unwrap(),
+                0,
+            ),
+            RoutePageVersion {
+                epoch: 1,
+                generation: 2,
+            },
+            total,
+        )
+    }
+
     /// Load-bearing response proof: removing `page_version` from
     /// `route_page_to_response` makes this empty terminal-page assertion red.
     #[test]
@@ -4981,20 +5032,31 @@ mod tests {
 
     #[test]
     fn route_page_token_rejects_garbage() {
-        let short_identity = format!("rp3|1|2|best|{}|10.0.0.0/24|192.0.2.1|0", "a".repeat(63));
-        let uppercase_identity = format!("rp3|1|2|best|{}|10.0.0.0/24|192.0.2.1|0", "A".repeat(64));
-        for token in [
-            "",
-            "5",
-            "not-a-token",
-            "10.0.0.0/24|192.0.2.1",
-            "a|b|c|d",
-            &short_identity,
-            &uppercase_identity,
-        ] {
-            let err = decode_route_page_token(token).unwrap_err();
+        let mut tokens = vec![
+            String::new(),
+            "5".to_string(),
+            "not-a-token".to_string(),
+            "10.0.0.0/24|192.0.2.1".to_string(),
+            "a|b|c|d".to_string(),
+        ];
+        for identity in ["a".repeat(63), "A".repeat(64)] {
+            tokens.push(encode_test_route_page_token(&identity, 3));
+        }
+        for token in tokens {
+            let err = decode_route_page_token(&token).unwrap_err();
             assert_eq!(err.code(), tonic::Code::InvalidArgument);
         }
+    }
+
+    #[test]
+    fn route_page_token_rejects_altered_total() {
+        let identity = route_page_identity(&list_routes_request());
+        let token = encode_test_route_page_token(&identity, 37);
+        let mut fields: Vec<_> = token.split('|').collect();
+        assert_eq!(fields[3], "37");
+        fields[3] = "38";
+        let error = decode_route_page_token(&fields.join("|")).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
     }
 
     #[test]

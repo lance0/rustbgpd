@@ -1260,12 +1260,14 @@ pub struct OrderedRouteFamilyFilter(pub Afi, pub Option<u64>);
 
 static IPV4_ROUTE_FILTER: fn(&Route) -> bool = |route| matches!(route.prefix, Prefix::V4(_));
 static IPV6_ROUTE_FILTER: fn(&Route) -> bool = |route| matches!(route.prefix, Prefix::V6(_));
+static NO_ROUTE_FILTER: fn(&Route) -> bool = |_| false;
 
 impl RouteQueryPredicate for OrderedRouteFamilyFilter {
     fn as_filter(&self) -> &(dyn Fn(&Route) -> bool + Send + Sync + 'static) {
         match self.0 {
             Afi::Ipv4 => &IPV4_ROUTE_FILTER,
-            _ => &IPV6_ROUTE_FILTER,
+            Afi::Ipv6 => &IPV6_ROUTE_FILTER,
+            _ => &NO_ROUTE_FILTER,
         }
     }
 

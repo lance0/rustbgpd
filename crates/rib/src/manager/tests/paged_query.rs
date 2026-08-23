@@ -7,7 +7,27 @@ use std::net::Ipv6Addr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
-use crate::update::{RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryScope, route_query_key};
+use crate::update::{
+    RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryPredicate, RouteQueryScope,
+    route_query_key,
+};
+
+struct OrderedFamilyProbe {
+    full_scan: Box<dyn Fn(&Route) -> bool + Send + Sync>,
+    ordered_calls: Arc<AtomicUsize>,
+    total: u64,
+}
+
+impl RouteQueryPredicate for OrderedFamilyProbe {
+    fn as_filter(&self) -> &(dyn Fn(&Route) -> bool + Send + Sync + 'static) {
+        &*self.full_scan
+    }
+
+    fn ordered_family(&self) -> Option<(Afi, Option<u64>)> {
+        self.ordered_calls.fetch_add(1, Ordering::Relaxed);
+        Some((Afi::Ipv4, Some(self.total)))
+    }
+}
 
 async fn query_page(
     tx: &mpsc::Sender<RibUpdate>,
@@ -878,6 +898,58 @@ async fn canceled_paged_query_skips_the_scan() {
         0,
         "canceled query must not scan any route"
     );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn ordered_family_dispatch_resumes_without_full_scan() {
+    let (tx, _target, _out_rx, handle) = seeded_manager().await;
+    let scope = RouteQueryScope::Received { peer: None };
+    tx.send(RibUpdate::RoutesReceived {
+        peer: "2001:db8::1".parse().unwrap(),
+        session_id: 0,
+        announced: vec![make_v6_route(
+            Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48),
+            "2001:db8::1".parse().unwrap(),
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let all = query_page(&tx, scope, None, None, 100).await;
+
+    let (full_scan_calls, ordered_calls) =
+        (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let full_scan_probe = Arc::clone(&full_scan_calls);
+    let page = query_page_at(
+        &tx,
+        scope,
+        Some(Box::new(OrderedFamilyProbe {
+            full_scan: Box::new(move |_| {
+                full_scan_probe.fetch_add(1, Ordering::Relaxed);
+                true
+            }),
+            ordered_calls: Arc::clone(&ordered_calls),
+            total: 12,
+        })),
+        Some(route_query_key(&all.routes[3])),
+        Some(all.version),
+        2,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(keys(&page.routes), keys(&all.routes[4..6]));
+    assert!(page.has_more, "ordered page clones one lookahead row");
+    assert_eq!(page.total, 12);
+    assert_eq!(ordered_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(full_scan_calls.load(Ordering::Relaxed), 0);
 
     drop(tx);
     handle.await.unwrap();
