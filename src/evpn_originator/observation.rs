@@ -70,7 +70,7 @@ fn park_pending_ip_binding(
 ///
 /// See `docs/RFC_NOTES.md` for the RFC 9135 §7.2.3 framing and the
 /// FRR mailing-list bugs that motivated this model.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "the ADR-0084 drain gate shares explicit observation and actor context"
 )]
@@ -298,7 +298,7 @@ fn drop_local_mac_caches(state: &mut OriginatorState, vni: EvpnInstanceId, mac: 
     }
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "observation classification keeps its ordered checks and actor context together"
@@ -475,7 +475,7 @@ pub(super) async fn handle_learned(
     }
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "ESI-aware origination needs explicit observation and actor context"
 )]
@@ -525,7 +525,7 @@ pub(super) async fn handle_aged(
     }
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "observation withdrawal needs the complete route and actor context"
 )]
@@ -634,7 +634,7 @@ pub(super) async fn handle_ip_added(
         .insert(ip);
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "observation publication needs the complete route and actor context"
 )]
