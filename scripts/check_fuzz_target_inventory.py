@@ -17,7 +17,7 @@ EXPECTED_TARGETS: dict[str, tuple[str, ...]] = {
     "crates/bfd": ("decode_bfd_control",),
     "crates/evpn": ("parse_rt",),
     "crates/mrt": ("snapshot_reader_drain", "warm_bundle_manifest"),
-    "crates/policy": ("dataset_parse", "rpol_compile"),
+    "crates/policy": ("compile_chain", "dataset_parse", "explain_walk", "rpol_compile"),
     "crates/rpki": ("decode_rtr_pdu",),
     "crates/wire": (
         "decode_bgpls",
@@ -34,7 +34,7 @@ EXPECTED_TARGETS: dict[str, tuple[str, ...]] = {
         "parse_rd",
     ),
 }
-EXPECTED_COUNT = 19
+EXPECTED_COUNT = 21
 CAMPAIGN_BOUNDS: dict[str, tuple[str, int]] = {
     "crates/bfd": ("decode_bfd_control", 256),
     "crates/rpki": ("decode_rtr_pdu", 65_535),

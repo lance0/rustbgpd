@@ -8,10 +8,13 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = "0.4"
+libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
 
 [dependencies.rustbgpd-policy]
 path = ".."
+
+[dependencies.rustbgpd-wire]
+path = "../../wire"
 
 [[bin]]
 name = "rpol_compile"
@@ -24,5 +27,17 @@ doc = false
 [[bin]]
 name = "dataset_parse"
 path = "fuzz_targets/dataset_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "compile_chain"
+path = "fuzz_targets/compile_chain.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "explain_walk"
+path = "fuzz_targets/explain_walk.rs"
 test = false
 doc = false
