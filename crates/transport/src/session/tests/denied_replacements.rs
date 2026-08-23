@@ -15,6 +15,7 @@ async fn query_received_routes(
                 filter: None,
                 after,
                 expected_version,
+                // Keep the migrated caller exercising continuation fencing.
                 page_size: 2,
                 reply,
             })
@@ -22,10 +23,7 @@ async fn query_received_routes(
             .unwrap();
         let page = response.await.unwrap().unwrap();
         expected_version = Some(page.version);
-        after = page
-            .routes
-            .last()
-            .map(|route| (route.prefix, route.peer, route.path_id));
+        after = page.routes.last().map(rustbgpd_rib::route_query_key);
         routes.extend(page.routes);
         if !page.has_more {
             return routes;

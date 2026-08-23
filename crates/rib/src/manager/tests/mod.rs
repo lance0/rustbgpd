@@ -343,6 +343,7 @@ async fn collect_query_routes(tx: &mpsc::Sender<RibUpdate>, scope: RouteQuerySco
             filter: None,
             after,
             expected_version,
+            // Keep migrated callers exercising continuation/version fencing.
             page_size: 2,
             reply,
         })
