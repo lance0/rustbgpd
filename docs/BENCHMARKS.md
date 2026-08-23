@@ -388,19 +388,26 @@ measured shape gives a tighter or wider figure, pass
 > investigation.
 
 `bench/compare-criterion.sh --fail-on-regression` codifies the confident
-regression branch for unattended use. The nightly release-baseline workflow
-enables it with the default `--verdict-min-attempts 3` and
-`--regression-threshold-pct 3` plus `--regression-max-stddev-pct 10`: rows
-whose `min..max` straddles zero remain advisory/noise, high-stddev rows remain
-inconclusive, all-positive rows whose last-run 95% CI straddles zero stay
-advisory (`ci-straddles-zero`), and a confirmed row at or above the threshold
-whose last-run 95% CI is entirely above zero makes the workflow fail for human
-review. On scheduled nightly runs one further filter applies: a confident row
-fails the workflow only when the same row was also confident on the previous
-nightly. With ~53 rows per run on the VPS a single all-positive row clears the
-per-row bar by chance roughly nightly and is contradicted the next night,
-while real regressions repeat identically; first-night rows are surfaced as
-advisory in the run summary instead of failing the run.
+regression branch for unattended use. It exits non-zero only for a confirmed
+row: at least `--verdict-min-attempts` (default 3) completed attempts,
+`min..max` entirely above zero, `stddev` below `--regression-max-stddev-pct`
+(default 10), a mean delta at or above `--regression-threshold-pct`
+(default 3), and a last-run 95% CI entirely above zero. Rows whose `min..max`
+straddles zero stay advisory/noise, high-stddev rows stay inconclusive, and
+all-positive rows that clear the delta but whose last-run 95% CI straddles
+zero stay advisory (`ci-straddles-zero`).
+
+Nothing runs those flags on a schedule any more. The removed nightly
+release-baseline workflow layered one further filter on top of the per-row
+bar: a confident row failed the run only when the same row was also confident
+on the previous night. That filter was load-bearing — at ~53 rows per run a
+single all-positive row cleared the per-row bar by chance roughly nightly and
+was contradicted the next night, while real regressions repeated identically;
+first-night rows were surfaced as advisory in the run summary instead of
+failing the run. Until a replacement runner exists, accumulated regressions
+are caught only when someone runs `bench/compare-criterion.sh` by hand, and
+any replacement should re-add an equivalent repeat-confirmation filter before
+it is trusted unattended.
 
 **Worked example** — the first multi-attempt comparison on the VPS
 runner (`rib_ops`, `v0.30.0` → `main`, 3 attempts; the span includes

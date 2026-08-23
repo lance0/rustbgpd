@@ -98,10 +98,15 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M70: ADR-0089 VLAN-aware bridge FDB attribution against FRR.
 - M71: RFC 9136 §4.3 ESI overlay-index Type 5 single-active receive against GoBGP.
 - M72: RFC 9136 §4.3 ESI overlay-index Type 5 all-active receive against GoBGP.
-- Docker netns selectors: `fdb_nhg`, `fib_runtime`, `bfd_runtime`,
-  `dataplane_vlan_fdb`, `macip_vlan_attribution`, `svd_fdb_vni`,
-  `managed_bridge`, `managed_vxlan`, `managed_svd_vxlan`, `managed_vlan_upper`, `managed_ready`,
-  `managed_ip_vrf_ready`, `l3_multipath`, and `l3_all_active_writer`.
+- Docker netns selectors, in job order — `fdb_nhg`, `fib_runtime`,
+  `bfd_runtime`, `dataplane_vlan_fdb`, `macip_vlan_attribution`,
+  `svd_fdb_vni`, `managed_bridge`, `managed_vxlan`, `managed_svd_vxlan`,
+  `managed_vlan_upper`, `managed_ready`, `link_carrier`, `ac_gate`,
+  `nexthop_raw`, `foreign_state_l2`, and `foreign_state_nhid`. Five further
+  L3 selectors run only when the job's `vrf-available` probe loads the `vrf`
+  kernel module, and skip otherwise: `l3_multipath`,
+  `managed_ip_vrf_ready`, `l3_all_active_writer`, `foreign_state_l3`, and
+  `l3_route_event`.
 
 The `Privileged Interop (netns)` workflow (`privileged-interop.yml`) is a
 manual (`workflow_dispatch`) on-demand harness for the non-docker direct-`cargo

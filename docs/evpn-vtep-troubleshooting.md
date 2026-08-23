@@ -501,14 +501,26 @@ or installs remote prefixes.
 **Triage**:
 
 1. `rbgp evpn vrfs <name>` and read the `not_ready_reasons`
-   list. Common entries:
-   - `vrf_device_missing` / `not_up` — the VRF master device must
-     exist and be UP before the probe runs.
-   - `vrf_table_id_mismatch` — the kernel's VRF `table` must
-     match the configured `table_id`.
-   - `l3vxlan_device_missing` / `not_up` / `vni_mismatch` /
-     `local_ip_mismatch` / `not_enslaved_to_vrf` /
-     `router_mac_mismatch` — covers the L3VXLAN device side.
+   list. The entries are short English lines, one per failing
+   ADR-0058 §3 predicate:
+   - `vrf device missing` / `vrf device down` — the VRF master
+     device must exist and be UP before the probe runs.
+   - `vrf table_id mismatch (observed N, configured M)` — the
+     kernel's VRF `table` must match the configured `table_id`.
+   - `l3vxlan device missing` / `l3vxlan device down` /
+     `l3vxlan vni mismatch (observed N, configured M)` /
+     `l3vxlan local mismatch (observed X, configured Y)` (or
+     `l3vxlan local missing (configured Y)`) /
+     `l3vxlan not in vrf (observed master ifindex N, expected M)`
+     (or `l3vxlan unenslaved (expected master ifindex M)`) /
+     `router_mac mismatch (observed X, configured Y)` (or
+     `router_mac missing (configured Y)`) — covers the L3VXLAN
+     device side.
+
+   These lines are for humans and are not a stable machine
+   interface. A structured consumer should match the proto
+   `readiness_state` variants and their field values instead of
+   parsing the strings.
 2. `ip link show type vrf` + `ip -d link show type vxlan` to
    confirm the kernel side matches the rustbgpd config.
 3. If the probe is `Ready` but `originated_routes_count == 0`,
