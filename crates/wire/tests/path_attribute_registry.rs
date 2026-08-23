@@ -171,6 +171,7 @@ fn assigned_and_unknown_behavior_fences_are_explicit() {
         &[],
     )
     .unwrap();
+    assert_eq!(wrong_bgpls.malformed.len(), 1);
     assert_eq!(
         wrong_bgpls.malformed[0].disposition,
         ErrorDisposition::TreatAsWithdraw
