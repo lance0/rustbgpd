@@ -313,7 +313,7 @@ fn rbgp(grpc_addr: &str, args: &[&str]) -> std::process::Output {
     .expect("failed to spawn rbgp subprocess")
 }
 
-fn run_bgp_ingress_fault(mode: &str, connect: bool) -> (ExitStatus, String) {
+fn run_bgp_ingress_fault(mode: &str, connect: bool) -> (ExitStatus, String, Vec<String>) {
     let temp = private_tempdir();
     let config_path = write_rib_fault_config(temp.path());
     let mut daemon = spawn_daemon_with_env(
@@ -326,7 +326,16 @@ fn run_bgp_ingress_fault(mode: &str, connect: bool) -> (ExitStatus, String) {
         TcpStream::connect(("127.0.0.1", port)).expect("connect to real bound BGP listener")
     });
     let status = daemon.wait_within(Duration::from_secs(30));
-    (status, daemon.logs())
+    let logs = daemon.logs();
+    let reports = match std::fs::read_dir(temp.path().join("runtime/crash")) {
+        Ok(entries) => entries
+            .map(|entry| entry.expect("read panic report directory entry"))
+            .map(|entry| std::fs::read_to_string(entry.path()).expect("read panic report"))
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("read panic report directory: {error}"),
+    };
+    (status, logs, reports)
 }
 
 #[test]
@@ -643,7 +652,7 @@ fn bgp_ingress_tasks_are_retained_unconditionally_supervised_and_torn_down() {
 
 #[test]
 fn bound_bgp_listener_panic_uses_common_shutdown_and_exits_nonzero() {
-    let (status, logs) = run_bgp_ingress_fault("listener_panic", false);
+    let (status, logs, _reports) = run_bgp_ingress_fault("listener_panic", false);
     assert_eq!(
         status.code(),
         Some(1),
@@ -665,7 +674,7 @@ fn bound_bgp_listener_panic_uses_common_shutdown_and_exits_nonzero() {
 
 #[test]
 fn accepted_connection_forwarder_return_uses_common_shutdown_and_exits_nonzero() {
-    let (status, logs) = run_bgp_ingress_fault("forwarder_return", true);
+    let (status, logs, reports) = run_bgp_ingress_fault("forwarder_return", true);
     assert_eq!(
         status.code(),
         Some(1),
@@ -679,6 +688,53 @@ fn accepted_connection_forwarder_return_uses_common_shutdown_and_exits_nonzero()
         logs.contains("initiating shutdown due to BGP accept-forwarding task failure"),
         "{logs}"
     );
+    assert_eq!(logs.matches("shutdown requested").count(), 1, "{logs}");
+    assert!(reports.is_empty(), "unexpected panic reports: {reports:?}");
+}
+
+#[test]
+fn accepted_connection_forwarder_panic_drains_half_admitted_candidate_and_exits_nonzero() {
+    let (status, logs, reports) = run_bgp_ingress_fault("forwarder_panic", true);
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "forwarder panic must exit 1\n{logs}"
+    );
+    assert_eq!(reports.len(), 1, "one durable panic report: {reports:?}");
+    assert!(
+        reports[0].contains("injected BGP accept-forwarding task panic after inbound dispatch"),
+        "{reports:?}"
+    );
+    for message in [
+        "BGP accept-forwarding task exited unexpectedly",
+        "initiating shutdown due to BGP accept-forwarding task failure",
+        "initiating coordinated shutdown",
+        "peer manager shutting down 1 peers",
+        "rustbgpd exiting",
+    ] {
+        assert!(logs.contains(message), "missing {message:?}\n{logs}");
+    }
+    let peer_shutdown = logs.find("peer manager shutting down 1 peers").unwrap();
+    let exit = logs.find("rustbgpd exiting").unwrap();
+    let shutdowns = logs
+        .match_indices("shutdown requested")
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert_eq!(shutdowns.len(), 2, "{logs}");
+    assert!(
+        shutdowns
+            .iter()
+            .all(|index| peer_shutdown < *index && *index < exit),
+        "{logs}"
+    );
+    for absent in [
+        "rustbgpd did not exit within timeout",
+        "JoinHandle polled after completion",
+        "peer shutdown timed out",
+        "peer task join error during shutdown",
+    ] {
+        assert!(!logs.contains(absent), "unexpected {absent:?}\n{logs}");
+    }
 }
 
 #[test]
