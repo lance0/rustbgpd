@@ -475,7 +475,7 @@ impl Oracle {
 
     // Mirrors the production PeerUp event so schedules can state every
     // grouping input and the session generation at the call site.
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "mirrors every grouping input in the production PeerUp event"
     )]
@@ -502,7 +502,7 @@ impl Oracle {
         .await;
     }
 
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "fault oracle mirrors PeerUp plus negotiated feature changes at a stamped session boundary"
     )]
