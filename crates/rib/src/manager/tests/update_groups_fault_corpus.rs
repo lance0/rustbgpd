@@ -1006,7 +1006,7 @@ fn announced_paths(messages: &[NormMsg], prefix: Ipv4Prefix) -> HashSet<(u32, Ip
         .collect()
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the exhaustive fault-script interpreter keeps every operation's behavior in one auditable match"
 )]
