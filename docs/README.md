@@ -50,6 +50,7 @@ Start here if you have never run the daemon.
 | [CONFIGURATION.md](CONFIGURATION.md) | Every TOML config key, with examples |
 | [rustbgpd.schema.json](rustbgpd.schema.json) | JSON Schema for the TOML config (editor integration; regenerated via `--dump-config-schema`) |
 | [reload-matrix.md](reload-matrix.md) | Per-field reload classification: live, reload-applied, restart-required, rejected |
+| [stability.md](stability.md) | Authoritative navigation for the narrow daemon contract, crate SemVer, authorization tiers, and adapter compatibility |
 | [API.md](API.md) | gRPC API reference with examples for every RPC |
 | [grpc-method-inventory.md](grpc-method-inventory.md) | Authorization tier of every gRPC method (machine-readable twin: [grpc-method-inventory.json](grpc-method-inventory.json)) |
 | [rpol-language.md](rpol-language.md) | The `.rpol` typed policy language, ADR-0096 |

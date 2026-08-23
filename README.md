@@ -74,6 +74,8 @@ fabric use.
 
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.
 > Breaking changes are possible between minor versions. The supported daemon
+> exception and separate compatibility boundaries are mapped in
+> [Stability and compatibility](docs/stability.md). The supported daemon
 > targets are Linux x86_64 and aarch64; see the canonical
 > [platform support contract](SUPPORT.md#platform-support) and
 > [Project Status](#project-status) for details.
@@ -512,6 +514,7 @@ evolving API.**
 | [docs/gobgp-parity.md](docs/gobgp-parity.md) | rustbgpd vs GoBGP feature parity by use case |
 | [docs/adr/](docs/adr/) | Architecture decision records — one per protocol and design choice |
 | [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) | Pre-release smoke matrix and release steps |
+| [docs/stability.md](docs/stability.md) | Stability map: narrow daemon inventory, crate SemVer, authorization tiers, and adapter compatibility |
 | [docs/v1-stable-contract.md](docs/v1-stable-contract.md) | Narrow machine-pinned v1 compatibility contract for proven route-server / route-reflector roles |
 | [ROADMAP.md](ROADMAP.md) | Remaining gaps and planned work |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
