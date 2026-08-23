@@ -238,13 +238,15 @@ memory-safe-language row refers to.
     ADR-0069 / M53).
 
 [^fuzz]: Every entry in this row means in-tree fuzz targets; the scope
-    differs. rustbgpd carries 19 libFuzzer targets across six crates — the
-    wire decoder among them — run nightly by `fuzz.yml`. GoBGP `v4.8.0`
-    carries 15 Go-native fuzz targets covering the BGP, BMP, MRT, RTR, and
-    ZAPI decoders plus two policy community matchers, with run instructions
-    in its `CONTRIBUTING.md`; Go fuzz targets replay their seed corpus under
-    the ordinary `go test` CI run and extend only under an explicit `-fuzz`
-    invocation. FRR documents libFuzzer and AFL targets for the bgpd packet
+    differs. rustbgpd carries libFuzzer targets in
+    `crates/*/fuzz/fuzz_targets` covering the wire decoder along with the
+    RPKI, MRT, BFD, EVPN, and policy crates, run nightly by `fuzz.yml`.
+    GoBGP `v4.8.0` carries Go-native fuzz targets covering the BGP, BMP,
+    MRT, RTR, and ZAPI decoders plus policy community matchers
+    (`pkg/packet/*`, `pkg/zebra/`, `internal/pkg/table/`), with run
+    instructions in its `CONTRIBUTING.md`; Go fuzz targets replay their
+    seed corpus under the ordinary `go test` CI run and extend only under
+    an explicit `-fuzz` invocation. FRR documents libFuzzer and AFL targets for the bgpd packet
     parser (and for ospfd, pimd, vrrpd, zebra) in
     [`doc/developer/fuzzing.rst`](https://github.com/FRRouting/frr/blob/frr-10.7.0/doc/developer/fuzzing.rst),
     but keeps the target patches on a separate
@@ -259,12 +261,13 @@ memory-safe-language row refers to.
     ExaBGP, and OpenBGPD, gated on every pull request by `interop.yml`. GoBGP
     `v4.8.0` ships
     [`test/scenario_test/`](https://github.com/osrg/gobgp/tree/v4.8.0/test/scenario_test)
-    — 30 docker-driven scenario modules with foreign-daemon drivers in
+    — docker-driven scenario modules with foreign-daemon drivers in
     [`test/lib/`](https://github.com/osrg/gobgp/tree/v4.8.0/test/lib) (ExaBGP,
     Quagga, YABGP, BIRD, bagpipe) — and its `ci.yml` runs each module as its
     own job on every push and pull request. FRR's `tests/topotests` drives
-    bgpd against ExaBGP peers in 18 of its topologies; ExaBGP is the only
-    foreign speaker there. OpenBGPD's equivalent is OpenBSD's
+    bgpd against ExaBGP peers through `exabgp.env` / `exabgp.cfg` fixtures
+    in a subset of its `bgp_*` topologies; ExaBGP is the only foreign
+    speaker there. OpenBGPD's equivalent is OpenBSD's
     `regress/usr.sbin/bgpd/integrationtests`, which drives ExaBGP through an
     `api-exabgp` helper and is not part of the portable distribution. BIRD
     3.3.1 ships the `birdtest` unit framework only.
