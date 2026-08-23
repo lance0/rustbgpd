@@ -601,6 +601,17 @@ docker run --rm --entrypoint rbgp rustbgpd:dev --help
 
 ### Daemon release
 
+Before rolling any versions:
+
+- [ ] Create a dedicated `### Upgrade notes` group in the new `CHANGELOG.md`
+      release section for consumer- and operator-visible semantic changes.
+- [ ] Review the complete `<prev-tag>..HEAD` range for that group.
+      `**Operator-visible:**` entries are inputs, not an exhaustive index;
+      also capture unmarked changes such as silent semantic reinterpretations
+      and removed metric-label series.
+- [ ] Preview the release workflow's extracted and reflowed GitHub release body
+      and confirm it preserves the `### Upgrade notes` heading and its entries.
+
 1. Update `CHANGELOG.md` with the new version section
 2. **Verify changelog completeness**: run `git log <prev-tag>..HEAD --oneline`
    and confirm every user-visible change (features, fixes, interop suites) is
