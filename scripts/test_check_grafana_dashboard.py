@@ -4,7 +4,7 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 
@@ -137,6 +137,15 @@ let families = self.allocated.collect();'''
             try:
                 with redirect_stdout(io.StringIO()):
                     CHECK.main()
+                orr = next(panel for panel in dashboard["panels"]
+                           if panel["title"] == "ORR SPF activity and topology")
+                for field in ("expr", "legendFormat"):
+                    saved = orr["targets"][0][field]
+                    orr["targets"][0][field] = "broken"
+                    copy.write_text(json.dumps(dashboard))
+                    with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                        CHECK.main()
+                    orr["targets"][0][field] = saved
             finally:
                 CHECK.DASHBOARD = original
 

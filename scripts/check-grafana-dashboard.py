@@ -130,6 +130,16 @@ TARGETS = {
         "rate(bgp_dynamic_neighbor_limit_rejections_total"
         '{instance=~"$instance"}[$__rate_interval]) > 0'
     ),
+    ("ORR SPF activity and topology", "A"): (
+        "sum by (instance) (rate(bgp_orr_spf_runs_total"
+        '{instance=~"$instance"}[$__rate_interval]))'
+    ),
+    ("ORR SPF activity and topology", "B"): (
+        'bgp_orr_topology_nodes{instance=~"$instance"}'
+    ),
+    ("ORR SPF activity and topology", "C"): (
+        'bgp_orr_topology_links{instance=~"$instance"}'
+    ),
 }
 
 REQUIRED_LEGENDS = {
@@ -159,6 +169,9 @@ REQUIRED_LEGENDS = {
     ("Dynamic-neighbor admission rejections", "A"): "{{instance}} rejected",
     ("RIB ingest pressure", "B"): "inbound safely parked {{peer}}",
     ("RIB ingest pressure", "C"): "outbound work lost {{peer}}",
+    ("ORR SPF activity and topology", "A"): "{{instance}} SPF runs/s",
+    ("ORR SPF activity and topology", "B"): "{{instance}} nodes",
+    ("ORR SPF activity and topology", "C"): "{{instance}} usable links",
 }
 
 ROUTE_SAFETY_PANELS = {
@@ -552,6 +565,13 @@ def main() -> None:
     )
     if dynamic_rejection_defaults != {"unit": "ops", "min": 0}:
         fail("dynamic-neighbor rejection rate must render as nonnegative operations")
+
+    orr_panel = next(
+        panel for panel in panels if panel.get("title") == "ORR SPF activity and topology"
+    )
+    orr_refs = [target.get("refId") for target in orr_panel.get("targets", [])]
+    if orr_panel.get("type") != "timeseries" or orr_refs != ["A", "B", "C"]:
+        fail("ORR activity panel must be a timeseries with exactly targets A through C")
 
     try:
         references = dashboard_metric_references(dashboard)
