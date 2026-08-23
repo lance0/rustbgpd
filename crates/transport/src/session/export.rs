@@ -1028,10 +1028,6 @@ impl SessionExportProfile {
         result
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "enumerates every supported export family"
-    )]
     pub(crate) fn probe_announcement(
         &self,
         candidate: ExportCandidate<'_>,
