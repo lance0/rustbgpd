@@ -633,14 +633,15 @@ tests:
                 advertised view is intentionally below group intent.
 
   # ── BgpBlackholeDiscardInstallActivity ────────────────────────
-  # Load-bearing: the older increment pins the 10m lookback, the reset then
+  # Load-bearing: the increment at 2m evaluated at 10m30s pins the exact 10m
+  # lookback, the reset then
   # increment pins reset-safe increase, and the same-evaluation increment pins
   # for: 0m. Flat install history and withdrawal activity stay quiet; the late
   # evaluation pins recovery. Each firing increase is 1, pinning the > 0 floor.
   - interval: 1m
     input_series:
       - series: 'bgp_blackhole_discard_installed_total{instance="edge1:9179"}'
-        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+        values: "0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
       - series: 'bgp_blackhole_discard_installed_total{instance="edge2:9179"}'
         values: "10 10 10 10 10 10 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
       - series: 'bgp_blackhole_discard_installed_total{instance="edge3:9179"}'
@@ -650,10 +651,10 @@ tests:
       - series: 'bgp_blackhole_discard_withdrawn_total{instance="edge5:9179"}'
         values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
     alert_rule_test:
-      - eval_time: 2m
+      - eval_time: 0m
         alertname: BgpBlackholeDiscardInstallActivity
         exp_alerts: []
-      - eval_time: 10m
+      - eval_time: 10m30s
         alertname: BgpBlackholeDiscardInstallActivity
         exp_alerts:
           - exp_labels:
