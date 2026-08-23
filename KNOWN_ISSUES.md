@@ -245,11 +245,12 @@ byte counts.
   tail demotion rule fires only on EBGP peers. The current EBGP gate
   is a simple `neighbor.remote_asn != self.global.asn` comparison.
   This is correct for traditional EBGP/iBGP topologies (which is all
-  rustbgpd supports today). RFC 5065 support is rejected under the current
-  roadmap. If a future recorded decision revives confederations, support must
-  include an explicit `is_external_neighbor()` helper that understands sub-AS
-  topology as a prerequisite. The conditional requirement remains
-  tracked under "RFC 8326 confederation gating" in `ROADMAP.md`.
+  rustbgpd supports today). RFC 5065 support is rejected under the
+  current roadmap. If a future recorded decision revives confederations,
+  support must include an explicit `is_external_neighbor()` helper that
+  understands sub-AS topology as a prerequisite. The conditional
+  requirement remains tracked under "RFC 8326 confederation gating" in
+  `ROADMAP.md`.
 
 - **RFC 8326 initiator toggle does not persist across daemon restart.**
   `rbgp gshut --peer X` flips a runtime bool on `ManagedPeer`
