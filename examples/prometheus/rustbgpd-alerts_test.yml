@@ -1442,6 +1442,54 @@ tests:
         alertname: BmpSourceDrops
         exp_alerts: []
 
+  # ── BmpStreamDiverged / BmpControlEventDrops ──────────────
+  - interval: 1m
+    input_series:
+      - series: 'bmp_stream_diverged{peer="192.0.2.60", instance="edge1:9179"}'
+        values: "0 1 1 1 1 1 1 0 0 0 0 0"
+      - series: 'bmp_control_event_drops_total{collector="192.0.2.10:11019", kind="collector_connected", reason="channel_full", instance="edge1:9179"}'
+        values: "0 0 0 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BmpStreamDiverged
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: BmpStreamDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.60
+              instance: edge1:9179
+            exp_annotations:
+              summary: "BMP stream remains diverged for 192.0.2.60"
+              description: >-
+                bmp_stream_diverged for peer 192.0.2.60 on edge1:9179 has
+                remained 1 for five minutes. The session has not completed
+                its synthetic PeerDown/PeerUp repair; inspect BMP channel
+                pressure and collector health.
+      - eval_time: 7m
+        alertname: BmpStreamDiverged
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BmpControlEventDrops
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              collector: 192.0.2.10:11019
+              kind: collector_connected
+              reason: channel_full
+              instance: edge1:9179
+            exp_annotations:
+              summary: >-
+                BMP control event dropped for 192.0.2.10:11019
+                (collector_connected)
+              description: >-
+                bmp_control_event_drops_total for collector
+                192.0.2.10:11019 on edge1:9179 increased by 1 in the last 10
+                minutes (kind=collector_connected, reason=channel_full). The
+                BMP manager missed a collector lifecycle transition; inspect
+                manager channel pressure and reconnect state.
+
   # ── BmpLocRibSourceDrops ──────────────────────────────────
   # Process-global series keyed by event/reason only. The per-peer source
   # counter must not satisfy the Loc-RIB rule.

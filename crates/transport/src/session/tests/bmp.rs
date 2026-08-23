@@ -574,6 +574,7 @@ async fn rib_out_tap_full_channel_increments_source_drop_counter() {
         session.bmp_stream_diverged,
         "a dropped rib-out RouteMonitoring must latch the divergence"
     );
+    assert_eq!(session.metrics.bmp_stream_diverged(&session.peer_label), 1);
     assert!(
         session.bmp_repair_timer.is_some(),
         "the bounded-latency repair timer must be armed"
@@ -672,6 +673,7 @@ async fn bmp_channel_full_after_wire_send_forces_peer_state_reset() {
     update.next_hop_override = vec![None].into();
     session.send_route_update(update);
     assert!(!session.bmp_stream_diverged, "repair must clear the latch");
+    assert_eq!(session.metrics.bmp_stream_diverged(&session.peer_label), 0);
     assert!(session.bmp_repair_timer.is_none());
     match bmp_rx.try_recv().unwrap() {
         BmpEvent::PeerDown { reason, .. } => assert!(

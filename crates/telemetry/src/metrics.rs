@@ -212,6 +212,7 @@ struct BgpMetricsInner {
     // ── Outbound queue (per-peer writer back-pressure) ─────────────
     peer_outbound_queue_depth: IntGaugeVec,
     peer_slow: IntGaugeVec,
+    bmp_stream_diverged: IntGaugeVec,
     rejected_routes_retained: IntGaugeVec,
     rejected_route_retention_evictions: IntCounterVec,
     rfc8212_missing_import_policy: IntGaugeVec,
@@ -664,6 +665,15 @@ impl BgpMetrics {
                  persistently not draining its outbound queue (backlog above \
                  the configured threshold for the configured duration). \
                  Cleared on drain and on session teardown.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let bmp_stream_diverged = IntGaugeVec::new(
+            Opts::new(
+                "bmp_stream_diverged",
+                "1 while a peer's BMP RouteMonitoring stream is known to have diverged and is awaiting a peer-state reset.",
             ),
             &["peer"],
         )
@@ -2078,6 +2088,9 @@ impl BgpMetrics {
             .register(Box::new(peer_slow.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(bmp_stream_diverged.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rejected_routes_retained.clone()))
             .expect("metric not already registered");
         registry
@@ -2558,6 +2571,7 @@ impl BgpMetrics {
             messages_received,
             peer_outbound_queue_depth,
             peer_slow,
+            bmp_stream_diverged,
             rejected_routes_retained,
             rejected_route_retention_evictions,
             rfc8212_missing_import_policy,
@@ -2782,6 +2796,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.messages_received, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_outbound_queue_depth, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_slow, peer);
+        Self::reap_peer_series_from_vec(&self.0.bmp_stream_diverged, peer);
         Self::reap_peer_series_from_vec(&self.0.rejected_routes_retained, peer);
         Self::reap_peer_series_from_vec(&self.0.rejected_route_retention_evictions, peer);
         Self::reap_peer_series_from_vec(&self.0.rfc8212_missing_import_policy, peer);
@@ -3090,6 +3105,20 @@ impl BgpMetrics {
     #[must_use]
     pub fn peer_slow(&self, peer: &str) -> i64 {
         self.0.peer_slow.with_label_values(&[peer]).get()
+    }
+
+    /// Publish whether a peer's BMP stream is awaiting divergence repair.
+    pub fn set_bmp_stream_diverged(&self, peer: &str, diverged: bool) {
+        self.0
+            .bmp_stream_diverged
+            .with_label_values(&[peer])
+            .set(i64::from(diverged));
+    }
+
+    /// Read a peer's BMP divergence latch. Test/diagnostic helper.
+    #[must_use]
+    pub fn bmp_stream_diverged(&self, peer: &str) -> i64 {
+        self.0.bmp_stream_diverged.with_label_values(&[peer]).get()
     }
 
     /// Set a peer's retained rejected-route count
@@ -6958,6 +6987,7 @@ mod tests {
         m.set_adj_rib_out_prefixes(peer, "ipv4_unicast", 7);
         m.set_peer_outbound_queue_depth(peer, 3);
         m.set_peer_slow(peer, true);
+        m.set_bmp_stream_diverged(peer, true);
         m.set_rejected_routes_retained(peer, 4);
         m.record_rejected_route_eviction(peer);
         m.set_rfc8212_missing_policy(peer, true, true);
@@ -7284,7 +7314,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 52] = [
+    const PEER_LABELED_FAMILIES: [&str; 53] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -7337,6 +7367,7 @@ mod tests {
         "bgp_session_state_transitions_total",
         "bgp_update_malformed_total",
         "bmp_source_drops_total",
+        "bmp_stream_diverged",
     ];
 
     #[test]

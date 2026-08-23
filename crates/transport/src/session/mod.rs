@@ -1475,6 +1475,8 @@ impl PeerSession {
         };
         if matches!(event, BmpEvent::PeerDown { .. }) {
             self.bmp_stream_diverged = false;
+            self.metrics
+                .set_bmp_stream_diverged(&self.peer_label, false);
             self.bmp_repair_timer = None;
         }
         if tx.send(event).await.is_err() {
@@ -1496,6 +1498,7 @@ impl PeerSession {
             );
         }
         self.bmp_stream_diverged = true;
+        self.metrics.set_bmp_stream_diverged(&self.peer_label, true);
         self.bmp_repair_timer = Some(Box::pin(tokio::time::sleep(BMP_STREAM_REPAIR_RETRY)));
     }
 
@@ -1520,6 +1523,8 @@ impl PeerSession {
             return false;
         }
         self.bmp_stream_diverged = false;
+        self.metrics
+            .set_bmp_stream_diverged(&self.peer_label, false);
         self.bmp_repair_timer = None;
         info!(
             peer = %self.peer_label,

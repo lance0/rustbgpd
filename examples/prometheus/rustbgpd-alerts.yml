@@ -554,6 +554,36 @@ groups:
             Find the slow collector via bmp_collector_drops_total and the
             bmp_loc_rib_dump_live_buffer_* gauges.
 
+      - alert: BmpStreamDiverged
+        expr: bmp_stream_diverged == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BMP stream remains diverged for {{ $labels.peer }}"
+          description: >-
+            bmp_stream_diverged for peer {{ $labels.peer }} on
+            {{ $labels.instance }} has remained 1 for five minutes. The
+            session has not completed its synthetic PeerDown/PeerUp repair;
+            inspect BMP channel pressure and collector health.
+
+      - alert: BmpControlEventDrops
+        expr: increase(bmp_control_event_drops_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            BMP control event dropped for {{ $labels.collector }}
+            ({{ $labels.kind }})
+          description: >-
+            bmp_control_event_drops_total for collector
+            {{ $labels.collector }} on {{ $labels.instance }} increased by
+            {{ $value | printf "%.0f" }} in the last 10 minutes
+            (kind={{ $labels.kind }}, reason={{ $labels.reason }}). The BMP
+            manager missed a collector lifecycle transition; inspect manager
+            channel pressure and reconnect state.
+
       - alert: BmpLocRibSourceDrops
         # RFC 9069 Loc-RIB events lost at the RIB/PeerManager→BmpManager
         # channel. A dropped route_monitoring event diverges every Loc-RIB
