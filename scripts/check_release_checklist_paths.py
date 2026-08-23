@@ -20,7 +20,7 @@ ROOTS = (
     r"(?:src|crates|tests|docs|scripts|bench|examples|proto|tools|share|"
     r"\.cargo|\.github|fuzz)"
 )
-GENERATED_PATH_SOURCES = {"share/systemd/": "examples/systemd/"}
+GENERATED_PATH_PREFIX_SOURCES = {"share/systemd/": "examples/systemd/"}
 BACKTICKED = re.compile(r"`([^`\s]+)`")
 BARE = re.compile(rf"(?<![\w/`.-])({ROOTS}/[\w./-]*[\w/])")
 IS_PATH = re.compile(rf"^{ROOTS}/")
@@ -41,7 +41,14 @@ def named_paths(document: str) -> dict[str, list[int]]:
             tokens += [match.group(1) for match in BARE.finditer(line)]
         for token in tokens:
             if IS_PATH.match(token):
-                source = GENERATED_PATH_SOURCES.get(token, token)
+                source = token
+                for (
+                    generated,
+                    repository_source,
+                ) in GENERATED_PATH_PREFIX_SOURCES.items():
+                    if token.startswith(generated):
+                        source = repository_source + token.removeprefix(generated)
+                        break
                 found.setdefault(source, []).append(number)
     return found
 

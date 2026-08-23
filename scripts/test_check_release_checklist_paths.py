@@ -18,8 +18,8 @@ originator (`src/evpn_originator/`), run M-01:
 
 Review the API (`proto/rustbgpd.proto`), renderer
 (`tools/rs-config-render/`), and Rust configuration (`.cargo/config.toml`).
-The release archive stages `share/systemd/`; repository-owned share paths such
-as `share/repository-data/` remain repository paths.
+The release archive stages `share/systemd/`, including
+`share/systemd/rustbgpd.service`.
 
 ```sh
 containerlab deploy -t tests/interop/m01.clab.yml
@@ -42,7 +42,7 @@ FIXTURE_PATHS = (
     "tools/rs-config-render/",
     ".cargo/config.toml",
     "examples/systemd/",
-    "share/repository-data/",
+    "examples/systemd/rustbgpd.service",
 )
 
 
@@ -114,12 +114,18 @@ class ReleaseChecklistPathTests(unittest.TestCase):
                 self.assert_fails(remaining, missing)
 
     def test_generated_share_path_checks_its_repository_source(self) -> None:
-        """The archive-only share token resolves to its checked source tree."""
+        """Archive-only share paths resolve by prefix to checked sources."""
         self.assertNotIn("share/systemd/", FIXTURE_PATHS)
-        remaining = tuple(p for p in FIXTURE_PATHS if p != "share/repository-data/")
-        self.assert_fails(remaining, "share/repository-data/")
-        remaining = tuple(p for p in FIXTURE_PATHS if p != "examples/systemd/")
+        remaining = tuple(
+            p for p in FIXTURE_PATHS if not p.startswith("examples/systemd/")
+        )
         self.assert_fails(remaining, "examples/systemd/")
+
+    def test_other_share_paths_remain_repository_paths(self) -> None:
+        """A non-generated share path is still checked directly."""
+        result = self.run_checker("`share/repository-data/`\n", ())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("share/repository-data/", result.stderr)
 
     def test_fails_when_no_paths_are_extracted(self) -> None:
         """Fails when the parse yields nothing: an inert gate is broken."""
