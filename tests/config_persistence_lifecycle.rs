@@ -34,6 +34,9 @@
 //! test fails at the end if any check failed, so one failure does not hide the
 //! rest of the picture.
 
+#[allow(dead_code)]
+mod support;
+
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -792,39 +795,25 @@ fn sum_samples(scrape: &str, name: &str, labels: &[(&str, &str)]) -> Option<f64>
     total
 }
 
-/// `rbgp` against the spawned daemon. `CARGO_BIN_EXE_rbgp` is not set for a
-/// dev-dependency's binary, so fall back to `cargo run -p rustbgpctl`.
+/// `rbgp` against the spawned daemon.
 struct Rbgp {
-    argv: Vec<String>,
+    bin: PathBuf,
     addr: String,
 }
 
 impl Rbgp {
     fn new(addr: String) -> Self {
-        let argv = if let Ok(path) = std::env::var("CARGO_BIN_EXE_rbgp") {
-            vec![path]
-        } else {
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-            vec![
-                cargo,
-                "run".into(),
-                "--quiet".into(),
-                "-p".into(),
-                "rustbgpctl".into(),
-                "--bin".into(),
-                "rbgp".into(),
-                "--".into(),
-            ]
-        };
-        Self { argv, addr }
+        Self {
+            bin: support::rbgp_binary().to_path_buf(),
+            addr,
+        }
     }
 
     /// Exit status plus both streams. `config plan` and `config diff` use
     /// terraform-style exits (2 = changes present), so a nonzero status is not
     /// automatically a failure.
     async fn try_run(&self, args: &[&str]) -> Result<(i32, String, String), String> {
-        let out = tokio::process::Command::new(&self.argv[0])
-            .args(&self.argv[1..])
+        let out = tokio::process::Command::new(&self.bin)
             .arg("--addr")
             .arg(&self.addr)
             .args(args)
