@@ -420,7 +420,7 @@ impl RibManager {
         rx
     }
 
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "the bench seam keeps each production PeerUp grouping dimension explicit"
     )]
