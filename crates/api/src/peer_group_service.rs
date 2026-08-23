@@ -65,7 +65,7 @@ fn input_statement_to_proto(statement: &PolicyStatementDefinition) -> proto::Pol
     }
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "peer-group conversion mirrors the complete protobuf definition"
 )]
