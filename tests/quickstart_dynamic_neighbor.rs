@@ -139,7 +139,7 @@ fn rbgp(grpc_addr: &str, cwd: &Path, args: &[&str]) -> Output {
     .expect("run rbgp")
 }
 
-fn wait_until_serving(grpc_addr: &str, cwd: &Path, daemon: &mut Daemon) {
+fn wait_until_serving(label: &str, grpc_addr: &str, cwd: &Path, daemon: &mut Daemon) {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut last = None;
     while Instant::now() < deadline {
@@ -153,7 +153,7 @@ fn wait_until_serving(grpc_addr: &str, cwd: &Path, daemon: &mut Daemon) {
     }
     let last = last.expect("rbgp readiness probe ran");
     panic!(
-        "rustbgpd gRPC never became ready\nstatus: {}\nstdout:\n{}\nstderr:\n{}\ndaemon stderr:\n{}",
+        "{label}: rustbgpd gRPC never became ready\nstatus: {}\nstdout:\n{}\nstderr:\n{}\ndaemon stderr:\n{}",
         last.status,
         String::from_utf8_lossy(&last.stdout),
         String::from_utf8_lossy(&last.stderr),
@@ -286,7 +286,7 @@ fn run_starter(label: &str, source: &str, group_json: &str, commands: &[String])
 
     let grpc_addr = format!("unix://{}", runtime_dir.join("grpc.sock").display());
     let mut daemon = Daemon::spawn(&config_path, temp.path().join("rustbgpd.stderr.log"));
-    wait_until_serving(&grpc_addr, temp.path(), &mut daemon);
+    wait_until_serving(label, &grpc_addr, temp.path(), &mut daemon);
 
     let missing = rbgp(
         &grpc_addr,
@@ -492,6 +492,7 @@ fn shutdown_timeout_diagnostic_is_ordered_and_preserves_evidence() {
         "last completed teardown stage: Shutdown RPC completed; daemon teardown completion not observed"
     ));
     let source = include_str!("quickstart_dynamic_neighbor.rs");
+    assert!(source.contains("{label}: rustbgpd gRPC never became ready"));
     let tail = source
         .split_once("let deadline = Instant::now() + Duration::from_secs(5);")
         .unwrap()
