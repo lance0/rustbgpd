@@ -150,7 +150,7 @@ pub struct RibService {
 
 impl RibService {
     /// Create a new RIB service backed by the given RIB channel.
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub fn new(rib_tx: mpsc::Sender<RibUpdate>) -> Self {
         Self {
             rib_tx,

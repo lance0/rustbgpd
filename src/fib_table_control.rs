@@ -923,7 +923,8 @@ mod tests {
             config_history_dir: None,
         });
         let (rib_tx, _rib_rx) = mpsc::channel(1);
-        RibService::new(rib_tx).with_fib_table_control(AccessMode::ReadWrite, Some(control))
+        RibService::with_status_snapshots(rib_tx, Arc::new(Vec::new), Arc::new(Vec::new))
+            .with_fib_table_control(AccessMode::ReadWrite, Some(control))
     }
 
     #[tokio::test]
@@ -1010,11 +1011,12 @@ mod tests {
             })
         });
         let (rib_tx, _rib_rx) = mpsc::channel(1);
-        let status = RibService::new(rib_tx)
-            .with_fib_table_control(AccessMode::ReadWrite, Some(control))
-            .list_fib_tables(Request::new(proto::ListFibTablesRequest {}))
-            .await
-            .unwrap_err();
+        let status =
+            RibService::with_status_snapshots(rib_tx, Arc::new(Vec::new), Arc::new(Vec::new))
+                .with_fib_table_control(AccessMode::ReadWrite, Some(control))
+                .list_fib_tables(Request::new(proto::ListFibTablesRequest {}))
+                .await
+                .unwrap_err();
         assert_eq!(status.code(), Code::Internal);
         assert_eq!(status.message(), "sentinel hook failure");
     }
