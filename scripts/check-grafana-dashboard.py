@@ -140,6 +140,14 @@ TARGETS = {
     ("ORR SPF activity and topology", "C"): (
         'bgp_orr_topology_links{instance=~"$instance"}'
     ),
+    ("BLACKHOLE discard activity", "A"): (
+        "rate(bgp_blackhole_discard_installed_total"
+        '{instance=~"$instance"}[$__rate_interval])'
+    ),
+    ("BLACKHOLE discard activity", "B"): (
+        "rate(bgp_blackhole_discard_withdrawn_total"
+        '{instance=~"$instance"}[$__rate_interval])'
+    ),
 }
 
 REQUIRED_LEGENDS = {
@@ -172,6 +180,8 @@ REQUIRED_LEGENDS = {
     ("ORR SPF activity and topology", "A"): "{{instance}} SPF runs/s",
     ("ORR SPF activity and topology", "B"): "{{instance}} nodes",
     ("ORR SPF activity and topology", "C"): "{{instance}} usable links",
+    ("BLACKHOLE discard activity", "A"): "{{instance}} installed/s",
+    ("BLACKHOLE discard activity", "B"): "{{instance}} withdrawn/s",
 }
 
 ROUTE_SAFETY_PANELS = {
@@ -572,6 +582,22 @@ def main() -> None:
     orr_refs = [target.get("refId") for target in orr_panel.get("targets", [])]
     if orr_panel.get("type") != "timeseries" or orr_refs != ["A", "B", "C"]:
         fail("ORR activity panel must be a timeseries with exactly targets A through C")
+
+    blackhole_panel = next(
+        (
+            panel
+            for panel in panels
+            if panel.get("title") == "BLACKHOLE discard activity"
+        ),
+        None,
+    )
+    if blackhole_panel is None:
+        fail("BLACKHOLE discard activity panel must exist")
+    blackhole_refs = [target.get("refId") for target in blackhole_panel.get("targets", [])]
+    if blackhole_panel.get("type") != "timeseries" or blackhole_refs != ["A", "B"]:
+        fail("BLACKHOLE discard activity must be a timeseries with exactly targets A and B")
+    if blackhole_panel.get("gridPos") != {"h": 8, "w": 24, "x": 0, "y": 192}:
+        fail("BLACKHOLE discard activity must retain its full-width layout")
 
     try:
         references = dashboard_metric_references(dashboard)

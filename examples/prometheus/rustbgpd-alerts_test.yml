@@ -632,6 +632,64 @@ tests:
                 (ipv4_unicast) on edge1:9179 has remained 1 for 5 minutes; its
                 advertised view is intentionally below group intent.
 
+  # ── BgpBlackholeDiscardInstallActivity ────────────────────────
+  # Load-bearing: the older increment pins the 10m lookback, the reset then
+  # increment pins reset-safe increase, and the same-evaluation increment pins
+  # for: 0m. Flat install history and withdrawal activity stay quiet; the late
+  # evaluation pins recovery. Each firing increase is 1, pinning the > 0 floor.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_blackhole_discard_installed_total{instance="edge1:9179"}'
+        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_blackhole_discard_installed_total{instance="edge2:9179"}'
+        values: "10 10 10 10 10 10 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_blackhole_discard_installed_total{instance="edge3:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_blackhole_discard_installed_total{instance="edge4:9179"}'
+        values: "7x22"
+      - series: 'bgp_blackhole_discard_withdrawn_total{instance="edge5:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BgpBlackholeDiscardInstallActivity
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BgpBlackholeDiscardInstallActivity
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: edge1:9179
+            exp_annotations:
+              summary: "BLACKHOLE discard install activity on edge1:9179"
+              description: >-
+                rustbgpd successfully installed 1 RFC 7999 kernel discard
+                route(s) on edge1:9179 in the last 10 minutes. Confirm the
+                activity matches expected policy and inspect current kernel
+                discard state.
+          - exp_labels:
+              severity: warning
+              instance: edge2:9179
+            exp_annotations:
+              summary: "BLACKHOLE discard install activity on edge2:9179"
+              description: >-
+                rustbgpd successfully installed 1 RFC 7999 kernel discard
+                route(s) on edge2:9179 in the last 10 minutes. Confirm the
+                activity matches expected policy and inspect current kernel
+                discard state.
+          - exp_labels:
+              severity: warning
+              instance: edge3:9179
+            exp_annotations:
+              summary: "BLACKHOLE discard install activity on edge3:9179"
+              description: >-
+                rustbgpd successfully installed 1 RFC 7999 kernel discard
+                route(s) on edge3:9179 in the last 10 minutes. Confirm the
+                activity matches expected policy and inspect current kernel
+                discard state.
+      - eval_time: 21m
+        alertname: BgpBlackholeDiscardInstallActivity
+        exp_alerts: []
+
   # ── RpkiVrpTableEmpty ─────────────────────────────────────────
   - interval: 1m
     input_series:
