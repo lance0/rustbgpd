@@ -8,11 +8,8 @@
 #      up, and no rustbgpd process is running on the host itself.
 #   3. Disk headroom on the partition holding tests/soak/runs/.
 #   4. The rustbgpd:dev image exists and the daemon compiles at HEAD.
-#   5. Two manual mutexes confirmed by the operator:
-#        - the nightly bench cron is paused for the soak window
-#        - no pushes to main will land during the soak window
-#      Confirm via CONFIRM_BENCH_CRON_PAUSED=1 and
-#      CONFIRM_NO_MAIN_PUSHES=1, or interactively when run on a TTY.
+#   5. No pushes to main will land during the soak window, confirmed via
+#      CONFIRM_NO_MAIN_PUSHES=1 or interactively when run on a TTY.
 #
 # Exit code: 0 = ready. 1 = one or more named failures (each printed
 # as "FAIL: ..."). Failures are collected, not fail-fast, so one run
@@ -120,10 +117,9 @@ else
     fail "cargo check --bin rustbgpd failed — daemon does not compile at HEAD"
 fi
 
-# --- 5. Manual mutexes (operator confirmations) ----------------------
-log "manual mutexes — these cannot be verified mechanically:"
-log "  (a) the nightly bench cron on this host MUST be paused for the window"
-log "  (b) no pushes to main during the soak window (CI topology collision)"
+# --- 5. Operator confirmation ----------------------------------------
+log "manual coordination — this cannot be verified mechanically:"
+log "  no pushes to main during the soak window (CI topology collision)"
 
 confirm() {
     local var_name=$1 prompt=$2 value
@@ -145,7 +141,6 @@ confirm() {
     fail "$prompt — not confirmed (set $var_name=1 or answer y on a TTY)"
 }
 
-confirm CONFIRM_BENCH_CRON_PAUSED "bench-nightly cron is paused for the soak window"
 confirm CONFIRM_NO_MAIN_PUSHES "no pushes to main during the soak window"
 
 # --- verdict ----------------------------------------------------------

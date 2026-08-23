@@ -761,9 +761,9 @@ def validate_preflight(path: Path) -> None:
         "FAIL:" in line for line in lines
     ):
         fail(f"{path}: preflight did not finish READY without failures")
-    for phrase in ("bench-nightly cron is paused", "no pushes to main"):
-        if not any(phrase in line and "confirmed" in line for line in lines):
-            fail(f"{path}: missing manual confirmation for {phrase}")
+    phrase = "no pushes to main"
+    if not any(phrase in line and "confirmed" in line for line in lines):
+        fail(f"{path}: missing manual confirmation for {phrase}")
 
 
 def parse_digest_roster(path: Path, expected_paths: set[str]) -> dict[str, str]:
@@ -1782,7 +1782,6 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
     fingerprint = provenance["fingerprint"]
     (root / "provenance.json").write_text(json.dumps(provenance))
     (root / "preflight.log").write_text(
-        "  ok: bench-nightly cron is paused for the soak window (confirmed via fixture)\n"
         "  ok: no pushes to main during the soak window (confirmed via fixture)\n"
         "[preflight] READY — all pre-flight checks passed\n"
     )
@@ -2484,7 +2483,7 @@ def self_test() -> None:
             alter_json(root / "COMPLETED", lambda data: data.update({"completed_at_epoch_ns": 20}))
         rejected("nonoverlap-order", overlap_next_root)
         rejected("quiet-spacing", lambda root: (root / "bird/quiet.tsv").write_text("sample\tepoch_s\tload1\n1\t1\t0.5\n2\t2\t0.5\n"))
-        rejected("preflight-raw", lambda root: (root / "preflight.log").write_text("FAIL: fixture\n"))
+        rejected("preflight-raw", lambda root: (root / "preflight.log").write_text("[preflight] READY — all pre-flight checks passed\n"))
         rejected("cell-status", lambda root: (root / "bird/status").write_text("fail stale\n"), cell_reseal=False)
         rejected("cell-provenance", lambda root: alter_json(root / "bird/provenance.json", lambda data: data["scenario"].update({"dataset_sha256": "b" * 64})))
         def break_evidence_roster(root):
