@@ -117,7 +117,7 @@ releases rather than carried forward from older measurements.
 
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
-| Total RPCs | ~55 | 105 | 101 `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs |
+| Native gRPC management API | Yes | Yes | Compare GoBGP v4.8.0 [API definitions](https://github.com/osrg/gobgp/tree/v4.8.0/api) with rustbgpd's [native API](../proto/rustbgpd.proto) and [vendored gNMI](../proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto) definitions; the rows below state supported operator scope rather than volatile RPC totals |
 | Peer CRUD | Yes | Yes | Add/Delete/List/Enable/Disable |
 | Peer groups | Yes | Yes | `PeerGroupService` + neighbor membership RPCs |
 | Dynamic neighbors (prefix-based) | Yes | Yes | `[[dynamic_neighbors]]` config plus runtime `AddDynamicNeighbor` / `DeleteDynamicNeighbor` / `ListDynamicNeighbors` (add/delete tier `mutating`, persisted to TOML); overlapping ranges resolve by longest-prefix-match |
@@ -201,34 +201,19 @@ releases rather than carried forward from older measurements.
 | AIGP | Yes | No | |
 | Multipath/ECMP | Yes | Yes | Classic unicast FIB ECMP ships via ADR-0066: `[[fib_tables]].maximum_paths`, per-class `maximum_paths_ebgp` / `maximum_paths_ibgp`, homogeneous eBGP or iBGP groups, and kernel `RTA_MULTIPATH` install. `[global].multipath_relax` provides FRR-style AS_PATH-length grouping; ADR-0068 adds Link Bandwidth weighted multipath. Add-Path multi-path send and EVPN aliasing ECMP also ship |
 
-## Summary
+## Use-Case Scope
 
-Counting rule: a cell counts toward a category's tally only if it is exactly
-"Yes". Partial / Receive / Receive-only / Experimental / N/A / No do not
-count. (Exception: the "gRPC RPCs" row reports the literal RPC counts from
-the gRPC API table's "Total RPCs" row, not a Yes-tally.)
+The detailed `Yes` / `Partial` / `No` tables are the authoritative comparison;
+their notes define the scope behind each verdict.
 
-| Category | GoBGP | rustbgpd | Parity |
-|----------|:-----:|:--------:|:------:|
-| Address families | 15 | 4 | ~27% |
-| Core protocol | 16 | 16 | 100% |
-| Path attributes | 13 | 11 | ~85% |
-| Policy engine | 18 | 21 | 100%+ (`.rpol` language, live-RIB dry run, per-term hit counters are rustbgpd-only) |
-| gRPC RPCs | ~55 | 105 | 100%+ (101 `rustbgpd.v1` RPCs plus gNMI) |
-| Monitoring | 5 | 9 | 100%+ |
-| Security | 5 | 6 | 100%+ |
-| Best-path steps | 12 | 12 | 100% (different single gaps: GoBGP lacks Optimal Route Reflection, rustbgpd lacks AIGP) |
-
-## Weighted Parity Estimates
-
-### IX Route Server Use Case (~100% parity)
+### IX Route Server Use Case
 
 A first-class target deployment. Weighted toward what matters:
 
-- **Address families:** only need IPv4+IPv6 unicast + FlowSpec = 100% parity
-- **Best-path:** 100% for the IX path; AIGP remains the only missing listed best-path step and is rarely used at IXes
-- **Core protocol:** 100% — GR helper + restarting speaker, LLGR, Notification GR, Enhanced RR, Add-Path, Extended Nexthop all landed
-- **Policy:** 100%; covers peer-aware matching (neighbor sets, route type, MED/`LOCAL_PREF` comparison, exact next-hop match), community match/set, and AS_PATH regex/prepend
+- **Address families:** IPv4+IPv6 unicast and FlowSpec cover this deployment scope
+- **Best-path:** AIGP remains the only missing listed step and is rarely used at IXes
+- **Core protocol:** GR helper + restarting speaker, LLGR, Notification GR, Enhanced RR, Add-Path, and Extended Nexthop all landed
+- **Policy:** covers peer-aware matching (neighbor sets, route type, MED/`LOCAL_PREF` comparison, exact next-hop match), community match/set, and AS_PATH regex/prepend
 - **Add-Path send:** critical for route servers, fully implemented with multi-path
 - **Route server client mode:** transparent eBGP with unicast NEXT_HOP preservation and FlowSpec AS_PATH transparency
 - **BMP exporter:** the full RFC 7854 + 8671 + 9069 trio streaming to collectors, reconnect replay with Loc-RIB table sync, periodic Stats Report, optional BMPv4
@@ -239,7 +224,7 @@ A first-class target deployment. Weighted toward what matters:
 
 **Remaining gaps for IX RS parity:** no material control-plane gaps remain for the target deployment. Remaining work is operator polish: CLI integration tests and other non-protocol hardening.
 
-### General-Purpose BGP Speaker (~87% parity)
+### General-Purpose BGP Speaker
 
 Competing head-to-head with GoBGP for all use cases:
 
@@ -270,7 +255,7 @@ Competing head-to-head with GoBGP for all use cases:
 
 ## Top Gaps by Use Case
 
-### IX Route Server (~99% parity)
+### IX Route Server
 
 The IX route-server ORF gap is closed for the receive-side shape operators
 normally need: a client can push an Address-Prefix ORF filter and rustbgpd
@@ -284,7 +269,7 @@ remaining work is operator polish: CLI integration tests, bulk policy-edit
 ergonomics, and production packaging hardening rather than missing protocol
 capability.
 
-### DC Fabric / Whitebox BGP Speaker (~95% parity)
+### DC Fabric / Whitebox BGP Speaker
 
 BGP unnumbered, scoped link-local FIB installs, ECMP / weighted multipath, BFD,
 gNMI / OpenConfig, and EVPN RR / VTEP work make this a first-class deployment
@@ -303,7 +288,7 @@ target. Remaining gaps are narrower:
    carries the post-incident debugging story; gNMI `ON_CHANGE` v1 for
    neighbor `session-state` consumes the same in-process broadcast.
 
-### General-Purpose BGP Speaker (~87% parity)
+### General-Purpose BGP Speaker
 
 The remaining broad-market gaps are mostly service-provider or full-router
 scope:
