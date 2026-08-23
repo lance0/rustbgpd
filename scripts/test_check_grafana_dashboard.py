@@ -15,6 +15,15 @@ SPEC.loader.exec_module(CHECK)
 
 
 class DashboardMetricLinkTests(unittest.TestCase):
+    def remove_panel(self, panels, panel_id):
+        for index, panel in enumerate(panels):
+            if panel.get("id") == panel_id:
+                panels.pop(index)
+                return True
+            if self.remove_panel(panel.get("panels", []), panel_id):
+                return True
+        return False
+
     def rust(self, kind="IntGauge", name="bgp_ready", registered=True):
         registration = (
             "registry.register(Box::new(ready.clone())).unwrap();" if registered else ""
@@ -128,8 +137,26 @@ let families = self.allocated.collect();'''
     def test_live_dashboard_presentation_mutations_pass_full_check(self):
         dashboard = json.loads(CHECK.DASHBOARD.read_text())
         for index, panel in enumerate(CHECK.all_panels(dashboard["panels"])):
-            panel.update(description="changed", collapsed=not panel.get("collapsed", False),
-                         gridPos={"x": index % 24}, id=panel["id"] + 1000)
+            changes = {"description": "changed",
+                       "collapsed": not panel.get("collapsed", False),
+                       "id": panel["id"] + 1000}
+            if panel["title"] == "BLACKHOLE discard activity":
+                changes["gridPos"] = {**panel["gridPos"], "h": 9, "y": 17}
+            else:
+                changes["gridPos"] = {"x": index % 24}
+            panel.update(changes)
+        blackhole = next(
+            panel
+            for panel in dashboard["panels"]
+            if panel["title"] == "BLACKHOLE discard activity"
+        )
+        blackhole_row = next(
+            panel
+            for panel in dashboard["panels"]
+            if panel["title"] == "Kernel discard routes"
+        )
+        dashboard["panels"].remove(blackhole)
+        blackhole_row["panels"].append(blackhole)
         with tempfile.TemporaryDirectory() as directory:
             copy = Path(directory) / "dashboard.json"
             copy.write_text(json.dumps(dashboard))
@@ -146,6 +173,45 @@ let families = self.allocated.collect();'''
                     with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
                         CHECK.main()
                     orr["targets"][0][field] = saved
+                blackhole = next(
+                    panel
+                    for panel in CHECK.all_panels(dashboard["panels"])
+                    if panel["title"] == "BLACKHOLE discard activity"
+                )
+                mutations = ((blackhole["targets"][0], "expr", "broken"),
+                             (blackhole["targets"][0], "legendFormat", "broken"),
+                             (blackhole, "gridPos", {"x": 0}))
+                for subject, field, replacement in mutations:
+                    saved = subject[field]
+                    subject[field] = replacement
+                    copy.write_text(json.dumps(dashboard))
+                    with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                        CHECK.main()
+                    subject[field] = saved
+                self.assertTrue(self.remove_panel(dashboard["panels"], blackhole["id"]))
+                copy.write_text(json.dumps(dashboard))
+                stderr = io.StringIO()
+                targets = CHECK.TARGETS
+                legends = CHECK.REQUIRED_LEGENDS
+                CHECK.TARGETS = {
+                    key: value
+                    for key, value in targets.items()
+                    if key[0] != "BLACKHOLE discard activity"
+                }
+                CHECK.REQUIRED_LEGENDS = {
+                    key: value
+                    for key, value in legends.items()
+                    if key[0] != "BLACKHOLE discard activity"
+                }
+                try:
+                    with self.assertRaises(SystemExit), redirect_stderr(stderr):
+                        CHECK.main()
+                finally:
+                    CHECK.TARGETS = targets
+                    CHECK.REQUIRED_LEGENDS = legends
+                self.assertIn(
+                    "BLACKHOLE discard activity panel must exist", stderr.getvalue()
+                )
             finally:
                 CHECK.DASHBOARD = original
 

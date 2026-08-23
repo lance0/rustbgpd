@@ -267,6 +267,23 @@ groups:
             for 5 minutes; its advertised view is intentionally below group
             intent.
 
+      - alert: BgpBlackholeDiscardInstallActivity
+        # Use a zero-activity baseline so every successful discard install is
+        # correlated with intended policy. This follows the established
+        # reset-safe event-counter convention without inventing a
+        # deployment-specific volume threshold.
+        expr: increase(bgp_blackhole_discard_installed_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BLACKHOLE discard install activity on {{ $labels.instance }}"
+          description: >-
+            rustbgpd successfully installed {{ $value | printf "%.0f" }} RFC
+            7999 kernel discard route(s) on {{ $labels.instance }} in the last
+            10 minutes. Confirm the activity matches expected policy and
+            inspect current kernel discard state.
+
       - alert: RpkiVrpTableEmpty
         # Series only exist once an RTR cache has delivered data, so
         # this cannot fire on deployments without RPKI configured. An
