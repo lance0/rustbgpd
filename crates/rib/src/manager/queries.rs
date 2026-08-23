@@ -22,7 +22,7 @@ use crate::update::{
     ExplainBestPath, MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, NeighborRibSnapshot,
     NeighborRibSnapshotResponse, RibRowFilter, RoutePage, RoutePageError, RoutePageVersion,
     RouteQueryFilter, RouteQueryKey, RouteQueryScope, UpdateGroupPeerComparison,
-    WarmMrtSnapshotBudget, WarmMrtSnapshotView, route_query_key,
+    WarmMrtSnapshotBudget, WarmMrtSnapshotView, ordered_route_query, route_query_key,
 };
 
 /// Copy the rows of one non-unicast Loc-RIB table that match the caller's
@@ -540,7 +540,7 @@ impl RibManager {
         // lookahead row. A grouped advertised view may inspect extra index rows
         // while applying member-local split horizon and exact-rejection filters.
         let ordered_family = filter
-            .and_then(|filter| filter.ordered_family())
+            .and_then(ordered_route_query)
             .and_then(|(family, total)| total.map(|total| (family, total)));
         let page = if filter.is_some() && ordered_family.is_none() {
             match scope {

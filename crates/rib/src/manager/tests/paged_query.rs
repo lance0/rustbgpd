@@ -8,19 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::update::{
-    OrderedAllRoutesFilter, OrderedRouteFamilyFilter, RoutePage, RouteQueryFilter, RouteQueryKey,
-    RouteQueryPredicate, RouteQueryScope, route_query_key,
+    RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryScope, ordered_route_query_filter,
+    route_query_key,
 };
-
-struct CustomPredicateProbe {
-    full_scan: Box<dyn Fn(&Route) -> bool + Send + Sync>,
-}
-
-impl RouteQueryPredicate for CustomPredicateProbe {
-    fn as_filter(&self) -> &(dyn Fn(&Route) -> bool + Send + Sync + 'static) {
-        &*self.full_scan
-    }
-}
 
 async fn query_page(
     tx: &mpsc::Sender<RibUpdate>,
@@ -54,6 +44,20 @@ async fn query_page_at(
     .await
     .unwrap();
     reply_rx.await.unwrap()
+}
+
+#[test]
+fn public_route_query_filter_and_command_remain_closure_compatible() {
+    let f: RouteQueryFilter = Box::new(|_: &Route| true);
+    let (reply, _receiver) = oneshot::channel();
+    let _query = RibUpdate::QueryRoutesPage {
+        scope: RouteQueryScope::Best,
+        filter: Some(f),
+        after: None,
+        expected_version: None,
+        page_size: 1,
+        reply,
+    };
 }
 
 /// Drive the resumable loop: follow `has_more` + last-key cursors until
@@ -930,11 +934,9 @@ async fn custom_predicate_continuation_preserves_filter_semantics() {
     let page = query_page_at(
         &tx,
         scope,
-        Some(Box::new(CustomPredicateProbe {
-            full_scan: Box::new(move |route| {
-                full_scan_probe.fetch_add(1, Ordering::Relaxed);
-                route.peer == wanted_peer
-            }),
+        Some(Box::new(move |route: &Route| {
+            full_scan_probe.fetch_add(1, Ordering::Relaxed);
+            route.peer == wanted_peer
         })),
         Some(cursor),
         Some(all.version),
@@ -1078,7 +1080,7 @@ fn grouped_family_and_unfiltered_continuations_reuse_total_without_count_walk() 
         .grouped_advertised_count_calls
         .store(0, Ordering::Relaxed);
 
-    let filter: RouteQueryFilter = Box::new(OrderedRouteFamilyFilter(Afi::Ipv4, Some(first.total)));
+    let filter = ordered_route_query_filter(Some(Afi::Ipv4), Some(first.total));
     let (reply, mut response) = oneshot::channel();
     manager.handle_query_routes_page_versioned(
         scope,
@@ -1100,7 +1102,7 @@ fn grouped_family_and_unfiltered_continuations_reuse_total_without_count_walk() 
         0
     );
 
-    let filter: RouteQueryFilter = Box::new(OrderedAllRoutesFilter(first.total));
+    let filter = ordered_route_query_filter(None, Some(first.total));
     let (reply, mut response) = oneshot::channel();
     manager.handle_query_routes_page_versioned(
         scope,

@@ -12,7 +12,7 @@ use tonic::{Request, Response, Status};
 
 use crate::actor_read::rib_manager_read;
 use crate::proto;
-use rustbgpd_rib::update::{OrderedAllRoutesFilter, OrderedRouteFamilyFilter};
+use rustbgpd_rib::update::ordered_route_query_filter;
 use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
     ExplainBestPath, ExplainDecision, ExportGateVerdict, FlowSpecRoute, LabeledRibRoute,
@@ -967,8 +967,7 @@ fn build_route_query_filter(
     known_total: Option<u64>,
 ) -> Option<RouteQueryFilter> {
     if filters.is_empty() && family_filter_is_noop(afi_safi) {
-        return known_total
-            .map(|total| Box::new(OrderedAllRoutesFilter(total)) as RouteQueryFilter);
+        return known_total.map(|total| ordered_route_query_filter(None, Some(total)));
     }
     if filters.is_empty() {
         let family = if afi_safi == proto::AddressFamily::Ipv4Unicast as i32 {
@@ -976,7 +975,7 @@ fn build_route_query_filter(
         } else {
             Afi::Ipv6
         };
-        return Some(Box::new(OrderedRouteFamilyFilter(family, known_total)));
+        return Some(ordered_route_query_filter(Some(family), known_total));
     }
     Some(Box::new(move |route: &Route| {
         route_matches_family(route, afi_safi) && filters.matches(route)
@@ -4014,9 +4013,14 @@ mod tests {
     #[test]
     fn unspecified_continuation_preserves_signed_known_total_marker() {
         let request = list_routes_request();
+        let first_filters = RouteFilters::from_request(&request).unwrap();
+        assert!(build_route_query_filter(request.afi_safi, first_filters, None).is_none());
         let filters = RouteFilters::from_request(&request).unwrap();
         let filter = build_route_query_filter(request.afi_safi, filters, Some(23)).unwrap();
-        assert_eq!(filter.ordered_family(), Some((None, Some(23))));
+        assert!(filter(&test_route(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            vec![],
+        )));
     }
 
     #[tokio::test]
@@ -5335,10 +5339,15 @@ mod tests {
             }) = rx.recv().await
             {
                 assert_eq!(actual_scope, scope);
-                assert_eq!(
-                    filter.and_then(|filter| filter.ordered_family()),
-                    Some((Some(Afi::Ipv4), Some(1)))
-                );
+                let filter = filter.expect("family continuation carries a filter");
+                assert!(filter(&test_route(
+                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+                    vec![],
+                )));
+                assert!(!filter(&test_route(
+                    Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
+                    vec![],
+                )));
                 assert_eq!(after, Some(key));
                 assert_eq!(expected_version, Some(version));
                 let _ = reply.send(Ok(RoutePage {
