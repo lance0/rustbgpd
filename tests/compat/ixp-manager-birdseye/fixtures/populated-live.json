@@ -10,7 +10,43 @@
           "result_from_cache": false,
           "version": "rustbgpd <version>"
         },
-        "routes": []
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                "64497"
+              ],
+              "communities": [
+                [
+                  64497,
+                  100
+                ]
+              ],
+              "large_communities": [
+                [
+                  64497,
+                  1,
+                  1
+                ]
+              ],
+              "local_pref": "100",
+              "next_hop": "198.51.100.4",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb_as64497",
+            "gateway": "198.51.100.4",
+            "interface": "",
+            "learnt_from": "198.51.100.4",
+            "metric": 0,
+            "network": "192.0.2.0/24",
+            "primary": true,
+            "type": [
+              "BGP",
+              "univ"
+            ]
+          }
+        ]
       }
     },
     "lookup_export_exact": {
@@ -123,7 +159,55 @@
           "result_from_cache": false,
           "version": "rustbgpd <version>"
         },
-        "routes": []
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                "64496",
+                "64510",
+                "64520"
+              ],
+              "communities": [
+                [
+                  64496,
+                  100
+                ],
+                [
+                  64496,
+                  200
+                ]
+              ],
+              "large_communities": [
+                [
+                  64496,
+                  1,
+                  1
+                ],
+                [
+                  64496,
+                  1,
+                  2
+                ]
+              ],
+              "local_pref": "100",
+              "med": 10,
+              "next_hop": "198.51.100.2",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb_as64496",
+            "gateway": "198.51.100.2",
+            "interface": "",
+            "learnt_from": "198.51.100.2",
+            "metric": 0,
+            "network": "203.0.113.0/24",
+            "primary": true,
+            "type": [
+              "BGP",
+              "univ"
+            ]
+          }
+        ]
       }
     },
     "lookup_protocol_exact": {
@@ -197,7 +281,55 @@
           "result_from_cache": false,
           "version": "rustbgpd <version>"
         },
-        "routes": []
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                "64496",
+                "64510",
+                "64520"
+              ],
+              "communities": [
+                [
+                  64496,
+                  100
+                ],
+                [
+                  64496,
+                  200
+                ]
+              ],
+              "large_communities": [
+                [
+                  64496,
+                  1,
+                  1
+                ],
+                [
+                  64496,
+                  1,
+                  2
+                ]
+              ],
+              "local_pref": "100",
+              "med": 10,
+              "next_hop": "198.51.100.2",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb_as64496",
+            "gateway": "198.51.100.2",
+            "interface": "",
+            "learnt_from": "198.51.100.2",
+            "metric": 0,
+            "network": "203.0.113.0/24",
+            "primary": true,
+            "type": [
+              "BGP",
+              "univ"
+            ]
+          }
+        ]
       }
     },
     "lookup_protocol_v6": {
@@ -351,7 +483,16 @@
     },
     "lookup_table_unaligned": {
       "endpoint": "api/route/{net}/table/{table}",
-      "response": ""
+      "response": {
+        "api": {
+          "Version": "rustbgpd <version>",
+          "from_cache": false,
+          "max_routes": 100,
+          "result_from_cache": false,
+          "version": "rustbgpd <version>"
+        },
+        "routes": []
+      }
     },
     "lookup_table_v6": {
       "endpoint": "api/route/{net}/table/{table}",

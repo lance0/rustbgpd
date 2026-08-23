@@ -29,7 +29,7 @@ and body are all part of the reviewed fixture. Composer validation is strict;
 the harness permits only IXP Manager's pinned deprecated `GPL-2.0` identifier
 warning and rejects any additional warning.
 
-The live-adapter leg intentionally uses a configured, down peer, so the exact
+The live-adapter leg intentionally uses a configured, down peer, so the route
 lookups, table longest-prefix match, and filtered-prefix query return honest
 empty route arrays. The pinned protocol-detail consumer also proves its
 unconditional `connection` field is the empty string while `source_address`,
@@ -143,7 +143,10 @@ diff -u tests/compat/ixp-manager-birdseye/fixtures/birdseye-contract.json \
 
 `contract.json` deliberately keeps the unsupported runtime matrix executable.
 Exact protocol-route, exact export-route, filtered-prefix wildcard, bounded
-less-specific lookup, and atomic full-table journeys are runtime-supported. The LPM lookup
+less-specific lookup, and atomic full-table journeys are runtime-supported;
+the protocol and export lookups follow Bird's Eye's `show route for`
+longest-match semantics, answering a covering-only prefix or host address
+with the view's most-specific covering prefix. The LPM lookup
 returns one matched prefix atomically with its installed winner first and every
 same-prefix Add-Path alternative. The full-table view joins Received and Best
 under one generation, caps before truncation, and does not add counts. All ten
@@ -204,8 +207,8 @@ the adapter serves at `/` where Bird's Eye serves under `/api/` (IXP Manager's
 | `GET /api/routes/count/export/{protocol}` | — | — | not served | out of scope (same note as protocol count) |
 | `GET /api/routes/lc-zwild/protocol/{protocol}/{x}/{y}` | `routesProtocolLargeCommunityWildXYRoutes()` | `routes_protocol_large_community_wild_xy` | served, divergent | answers only `{daemon ASN}:1101:*` from retained rejects, empty for any other `(x, y)`; adds `retention.*`; `api.max_routes` is the retention capacity |
 | `GET /api/route/{net}` (default table `master`) | — | — | not served | out of scope |
-| `GET /api/route/{net}/table/{table}` | `protocolTable()` | `route_table` | served, divergent | requires a network-aligned `addr/len` (host or unmasked input is HTTP 400; Bird's Eye accepts `192.0.2.1` and runs `show route for`); returns the installed winner first plus same-prefix Add-Path alternatives; no per-minute throttle |
-| `GET /api/route/{net}/protocol/{protocol}` | `protocolRoute()` | `route_protocol` | served, divergent | **exact** prefix match where Bird's Eye's `show route for` is longest-match; network-aligned input only; all Add-Path candidates |
+| `GET /api/route/{net}/table/{table}` | `protocolTable()` | `route_table` | served, divergent | longest-prefix match; host-bit input is HTTP 200 with no routes (BIRD rejects the literal), genuinely malformed or unmasked input is HTTP 400 (Bird's Eye accepts a bare `192.0.2.1`); returns the installed winner first plus same-prefix Add-Path alternatives; no per-minute throttle |
+| `GET /api/route/{net}/protocol/{protocol}` | `protocolRoute()` | `route_protocol` | served, divergent | longest-prefix match like Bird's Eye's `show route for`: the exact entry when present, else the view's most-specific covering prefix; host-bit input is HTTP 200 with no routes; all Add-Path candidates |
 | `GET /api/route/{net}/export/{protocol}` | `exportRoute()` | `route_export` | served, divergent | same as the protocol lookup |
 | `GET /test`, `GET /`, `/lg/*` | — | — | not served | out of scope (non-API: hello-world, HTML index, HTML looking glass) |
 
@@ -274,12 +277,12 @@ refuses any `runtime_compatibility` value other than `false` while any entry
 is classified `must_match`. The flag therefore flips only when zero
 `must_match` entries remain, and the post-flip claim language is "verified
 IXP Manager 7.4 Bird's Eye API compatibility with documented BIRD-internal
-divergences". The open `must_match` entries are the two lookup-semantics
-entries (exact-versus-longest protocol/export match and the table lookup's
-HTTP 400 for host-bit input) and the ordinary-`(x, y)` lc-zwild scope; the
-route-shape cluster (`bgp.as_path` element type, `bgp.local_pref`,
-`bgp.med` emitted when absent, `primary` outside the table view, the `type`
-triple) converged on the oracle and its entries are removed.
+divergences". The one open `must_match` entry is the ordinary-`(x, y)`
+lc-zwild scope; the route-shape cluster (`bgp.as_path` element type,
+`bgp.local_pref`, `bgp.med` emitted when absent, `primary` outside the table
+view, the `type` triple) and the two lookup-semantics entries
+(exact-versus-longest protocol/export match and the table lookup's HTTP 400
+for host-bit input) converged on the oracle and their entries are removed.
 
 ### Work list
 
@@ -368,13 +371,16 @@ predicted eight more that the diff did not show, listed after the table.
    symbols` reports configuration keywords there) the adapter never emits.
    Decided: both are `intentional`; the daemon has no BIRD symbol table to
    reproduce.
-10. Exact versus longest match: observed on `route/{net}/protocol` and
+10. Done. Exact versus longest match: observed on `route/{net}/protocol` and
     `route/{net}/export` (a covering-only prefix and a host address return the
     covering route upstream, `routes: []` from the adapter) and on
     `route/{net}/table` for host-bit input (HTTP 200 `routes: []` upstream
     because BIRD rejects the lookup, HTTP 400 from the adapter, which the
-    consumer collapses to `""`). Decided: both entries are `must_match`; the
-    lookups converge on the oracle behavior before the flip.
+    consumer collapses to `""`). Were `must_match`; the protocol and export
+    lookups now fall back to the view's most-specific covering prefix when
+    the queried prefix has no entry, and host-bit input answers HTTP 200
+    with an empty route array on all three lookups. Both entries are
+    removed.
 11. `lc-zwild`: observed for a foreign `(x, y)` (the route carrying that large
     community upstream, `routes: []` from the adapter) plus the adapter's extra
     `retention.*` and `api.max_routes` as the retention capacity for the daemon

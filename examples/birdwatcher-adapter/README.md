@@ -87,8 +87,8 @@ listener beyond loopback only with the mTLS controls in `docs/SECURITY.md`.
 | `GET /routes/protocol/{id}`  | `RibService.ListReceivedRoutes` (paged, all unicast families) + `ListBestRoutes` identity join for truthful `primary` |
 | `GET /routes/export/{id}`    | `RibService.ListAdvertisedRoutes` (paged, all unicast families) + `ListBestRoutes` identity join for truthful `primary` |
 | `GET /routes/table/{table}`  | One `NeighborService.ListNeighbors` snapshot, then global `RibService.ListReceivedRoutes` + `ListBestRoutes` paged under one generation |
-| `GET /route/{prefix}/protocol/{id}` | `RibService.ListReceivedRoutes` (paged, exact IPv4/IPv6 unicast prefix) + prefix-filtered `ListBestRoutes` for truthful `primary` |
-| `GET /route/{prefix}/export/{id}` | `RibService.ListAdvertisedRoutes` (paged, exact IPv4/IPv6 unicast prefix) + prefix-filtered `ListBestRoutes` for truthful `primary` |
+| `GET /route/{prefix}/protocol/{id}` | `RibService.ListReceivedRoutes` (paged; exact prefix, else the view's most-specific covering prefix) + prefix-filtered `ListBestRoutes` for truthful `primary` |
+| `GET /route/{prefix}/export/{id}` | `RibService.ListAdvertisedRoutes` (paged; exact prefix, else the view's most-specific covering prefix) + prefix-filtered `ListBestRoutes` for truthful `primary` |
 | `GET /route/{prefix}/table/{table}` | `RibService.LookupBestPath` (bounded longest-prefix match with one matched-prefix candidate set) |
 | `GET /routes/peer/{peer}`    | `RibService.ListReceivedRoutes` (paged, all unicast families) + `ListBestRoutes` identity join for truthful `primary` |
 | `GET /routes/filtered/{id}`  | `PolicyService.ListRejectedRoutes` (unpaged — the store is bounded at the `[policy.reject_retention]` capacity, default 1024/peer) |
@@ -169,13 +169,19 @@ IXP Manager's `protocolRoute()`, `exportRoute()`, and `protocolTable()` journeys
 use `/route/<prefix>%2F<mask>/protocol/{id}`,
 `/route/<prefix>%2F<mask>/export/{id}`, and
 `/route/<prefix>%2F<mask>/table/{table}`.
-The protocol and export views request an exact prefix on every gRPC page,
-retain every Add-Path candidate in daemon order, and apply `--max-routes` only
-after exact filtering.
+The protocol and export views are longest-match, like Bird's Eye's
+`show route for`: they request an exact prefix on every gRPC page, retain
+every Add-Path candidate in daemon order, and when the queried prefix has no
+entry they answer with the view's most-specific covering prefix (a linear
+scan over that member's paged view — there is no covering-prefix RPC filter);
+`--max-routes` applies only to the routes of the one matched prefix.
 The table view instead performs one bounded longest-prefix lookup and atomically
 returns the installed winner first followed by every same-prefix alternative;
-it applies `--max-routes` before rendering. Malformed prefixes return HTTP 400,
-unknown identities return 404, and daemon failures return a sanitized 502.
+it applies `--max-routes` before rendering. Syntactically valid input with
+host bits set — which BIRD rejects, so Bird's Eye answers with no routes —
+returns HTTP 200 with an empty route array on all three lookups. Genuinely
+malformed prefixes return HTTP 400, unknown identities return 404, and daemon
+failures return a sanitized 502.
 
 This is deliberately partial IXP Manager support: status, live BGP inventory
 and detail, protocol symbols, member received routes, and member exported
@@ -187,7 +193,7 @@ silently:
 
 | Contract capability | Status | Adapter surface |
 |---|---|---|
-| `exact-protocol-route` | supported | `/route/{prefix}/protocol/{id}`: exact prefix on every gRPC page, every Add-Path candidate in daemon order |
+| `exact-protocol-route` | supported | `/route/{prefix}/protocol/{id}`: exact prefix on every gRPC page, falling back to the view's most-specific covering prefix (`show route for` semantics), every Add-Path candidate in daemon order |
 | `exact-export-route` | supported | `/route/{prefix}/export/{id}`: the same discipline over the Adj-RIB-Out |
 | `filtered-prefix-wildcard` | supported | `/routes/lc-zwild/protocol/{id}/{daemon ASN}/1101`, answered from the session's retained rejects only |
 | `less-specific-longest-prefix-match` | supported | `/route/{prefix}/table/{table}`: one bounded longest-prefix lookup |

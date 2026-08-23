@@ -14,8 +14,8 @@
 //! - `GET /symbols` — sorted live protocol identities
 //! - `GET /routes/protocol/{id}` — received routes by neighbor address
 //! - `GET /routes/export/{id}` — routes advertised to a neighbor
-//! - `GET /route/{prefix}/protocol/{id}` — exact received-route candidates
-//! - `GET /route/{prefix}/export/{id}` — exact advertised-route candidates
+//! - `GET /route/{prefix}/protocol/{id}` — received-route candidates, longest match
+//! - `GET /route/{prefix}/export/{id}` — advertised-route candidates, longest match
 //! - `GET /route/{prefix}/table/{table}` — global Loc-RIB LPM winner and alternatives
 //! - `GET /routes/peer/{peer}` — received routes by peer IP
 //! - `GET /routes/filtered/{id}` — rejected routes retained by the peer's
@@ -1227,8 +1227,8 @@ async fn routes_export(
 }
 
 // ---------------------------------------------------------------------------
-// GET /route/{prefix}/protocol/{id} — exact received-route candidates
-// GET /route/{prefix}/export/{id}   — exact advertised-route candidates
+// GET /route/{prefix}/protocol/{id} — received-route candidates, longest match
+// GET /route/{prefix}/export/{id}   — advertised-route candidates, longest match
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1244,7 +1244,12 @@ struct ExactPrefix {
 }
 
 impl ExactPrefix {
-    fn parse(value: &str) -> Result<Self, HttpError> {
+    /// `Ok(Some)` is a network-aligned prefix. `Ok(None)` is a well-formed
+    /// address/length whose host bits are set: BIRD rejects that literal in
+    /// `show route for`, so Bird's Eye answers HTTP 200 with no routes and
+    /// the lookup handlers do the same. Anything else is HTTP 400, matching
+    /// Bird's Eye's own parameter validation.
+    fn parse(value: &str) -> Result<Option<Self>, HttpError> {
         let invalid = || json_error(StatusCode::BAD_REQUEST, "Invalid route prefix");
         let (address, length) = value.split_once('/').ok_or_else(invalid)?;
         if address.is_empty() || length.is_empty() || length.contains('/') {
@@ -1253,10 +1258,10 @@ impl ExactPrefix {
         let address: IpAddr = address.parse().map_err(|_| invalid())?;
         let length: u32 = length.parse().map_err(|_| invalid())?;
         let width = if address.is_ipv4() { 32 } else { 128 };
-        if length > width || !network_aligned(address, length) {
+        if length > width {
             return Err(invalid());
         }
-        Ok(Self { address, length })
+        Ok(network_aligned(address, length).then_some(Self { address, length }))
     }
 
     fn from_route(address: &str, length: u32) -> Option<Self> {
@@ -1310,6 +1315,18 @@ fn network_aligned(address: IpAddr, length: u32) -> bool {
     }
 }
 
+/// Most-specific network among `routes` that covers `query` — the selection
+/// Bird's Eye's `show route for` makes when the query has no exact entry.
+/// The RPC surface offers exact and longer-prefix filters only, so covering
+/// prefixes come from a linear scan over one member's paged view.
+fn longest_match(routes: &[proto::Route], query: ExactPrefix) -> Option<ExactPrefix> {
+    routes
+        .iter()
+        .filter_map(|route| ExactPrefix::from_route(&route.prefix, route.prefix_length))
+        .filter(|network| network.covers(query))
+        .max_by_key(|network| network.length)
+}
+
 #[allow(
     clippy::match_same_arms,
     reason = "separate arms keep each exact IXP consumer journey mutation-testable"
@@ -1360,6 +1377,43 @@ async fn route_export(
     serve_exact_route(&state, &prefix, &id, ExactRouteSource::Advertised).await
 }
 
+/// One member's complete received or advertised view, paged unfiltered.
+/// Backs the longest-match fallback of the exact-route lookups.
+async fn view_routes(
+    client: &mut proto::rib_service_client::RibServiceClient<Upstream>,
+    peer: IpAddr,
+    source: ExactRouteSource,
+) -> Result<Vec<proto::Route>, HttpError> {
+    let mut view = Vec::new();
+    let mut page_token = String::new();
+    loop {
+        let request = proto::ListRoutesRequest {
+            neighbor_address: peer.to_string(),
+            afi_safi: proto::AddressFamily::Unspecified as i32,
+            page_size: 1000,
+            page_token,
+            ..Default::default()
+        };
+        let response = match source {
+            ExactRouteSource::Received => client
+                .list_received_routes(request)
+                .await
+                .map_err(|error| bad_gateway("ListReceivedRoutes", &error))?,
+            ExactRouteSource::Advertised => client
+                .list_advertised_routes(request)
+                .await
+                .map_err(|error| bad_gateway("ListAdvertisedRoutes", &error))?,
+        }
+        .into_inner();
+        view.extend(response.routes);
+        if response.next_page_token.is_empty() {
+            break;
+        }
+        page_token = response.next_page_token;
+    }
+    Ok(view)
+}
+
 async fn serve_exact_route(
     state: &AppState,
     raw_prefix: &str,
@@ -1368,6 +1422,9 @@ async fn serve_exact_route(
 ) -> Result<Json<Value>, HttpError> {
     let prefix = ExactPrefix::parse(raw_prefix)?;
     let peer = state.identities.resolve(id)?;
+    let Some(prefix) = prefix else {
+        return Ok(Json(empty_routes_body(state.max_routes)));
+    };
     let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
     let mut routes = Vec::new();
     let mut page_token = String::new();
@@ -1391,7 +1448,26 @@ async fn serve_exact_route(
         page_token = response.next_page_token;
     }
 
-    let best = best_route_keys(state, Some(prefix)).await?;
+    // Bird's Eye's `show route for` is longest-match: with no exact entry it
+    // answers with the view's most-specific covering prefix, and with no
+    // covering prefix it answers with no routes. The cap applies to the one
+    // matched prefix's candidates, not to the scanned view.
+    let mut matched = prefix;
+    if routes.is_empty() {
+        let view = view_routes(&mut client, peer, source).await?;
+        if let Some(covering) = longest_match(&view, prefix) {
+            routes = view
+                .into_iter()
+                .filter(|route| {
+                    ExactPrefix::from_route(&route.prefix, route.prefix_length) == Some(covering)
+                })
+                .collect();
+            enforce_max(routes.len() as u64, state.max_routes)?;
+            matched = covering;
+        }
+    }
+
+    let best = best_route_keys(state, Some(matched)).await?;
     Ok(Json(serde_json::json!({
         "api": api_block(state.max_routes),
         "routes": routes
@@ -1421,6 +1497,9 @@ async fn route_table(
     if tables.binary_search(&table).is_err() {
         return Err(json_error(StatusCode::NOT_FOUND, "Table not found"));
     }
+    let Some(prefix) = prefix else {
+        return Ok(Json(empty_routes_body(state.max_routes)));
+    };
 
     let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
     let response = match client
@@ -3357,16 +3436,21 @@ mod tests {
     }
 
     #[test]
-    fn exact_prefix_parser_accepts_networks_and_rejects_malformed_or_host_values() {
+    fn exact_prefix_parser_distinguishes_networks_host_bit_input_and_malformed_input() {
         for (input, address, length) in [
             ("192.0.2.0/24", "192.0.2.0", 24),
             ("0.0.0.0/0", "0.0.0.0", 0),
             ("2001:db8::/32", "2001:db8::", 32),
             ("::/0", "::", 0),
         ] {
-            let parsed = ExactPrefix::parse(input).unwrap();
+            let parsed = ExactPrefix::parse(input).unwrap().unwrap();
             assert_eq!(parsed.address.to_string(), address);
             assert_eq!(parsed.length, length);
+        }
+        // Well-formed but with host bits set: BIRD rejects the literal, so
+        // the lookups answer HTTP 200 with no routes rather than HTTP 400.
+        for input in ["192.0.2.1/24", "2001:db8::1/64"] {
+            assert_eq!(ExactPrefix::parse(input).unwrap(), None, "{input}");
         }
         for input in [
             "192.0.2.0",
@@ -3375,9 +3459,7 @@ mod tests {
             "not-an-ip/24",
             "192.0.2.0/nope",
             "192.0.2.0/33",
-            "192.0.2.1/24",
             "2001:db8::/129",
-            "2001:db8::1/64",
         ] {
             let (status, Json(body)) = ExactPrefix::parse(input).unwrap_err();
             assert_eq!(status, StatusCode::BAD_REQUEST, "{input}");
@@ -3387,9 +3469,91 @@ mod tests {
     }
 
     #[test]
+    fn longest_match_selects_the_most_specific_covering_view_prefix() {
+        let route = |prefix: &str, length: u32| proto::Route {
+            prefix: prefix.to_string(),
+            prefix_length: length,
+            ..Default::default()
+        };
+        let view = vec![
+            route("203.0.113.0", 24),
+            route("203.0.113.128", 25),
+            route("203.0.113.64", 26),
+            route("2001:db8:a::", 48),
+        ];
+        let query = |value: &str| ExactPrefix::parse(value).unwrap().unwrap();
+        // An exact entry is its own longest match.
+        assert_eq!(
+            longest_match(&view, query("203.0.113.128/25")),
+            Some(query("203.0.113.128/25"))
+        );
+        // A covering-only prefix and a host address fall back to the cover.
+        assert_eq!(
+            longest_match(&view, query("203.0.113.0/25")),
+            Some(query("203.0.113.0/24"))
+        );
+        assert_eq!(
+            longest_match(&view, query("203.0.113.1/32")),
+            Some(query("203.0.113.0/24"))
+        );
+        // The most specific covering entry wins over a shorter one.
+        assert_eq!(
+            longest_match(&view, query("203.0.113.192/26")),
+            Some(query("203.0.113.128/25"))
+        );
+        // Nothing covering, and never across address families.
+        assert_eq!(longest_match(&view, query("198.51.100.0/24")), None);
+        assert_eq!(longest_match(&view, query("2001:db8:c::/48")), None);
+    }
+
+    #[tokio::test]
+    async fn host_bit_lookups_answer_empty_success_without_an_upstream_call() {
+        let store = Arc::new(ResolverStore::new(
+            IdentityResolver::parse(&["pb_as64496=192.0.2.1@master4".to_string()]).unwrap(),
+        ));
+        let state = AppState {
+            upstream: InterceptedService::new(
+                Endpoint::from_static("http://127.0.0.1:50051").connect_lazy(),
+                BearerInterceptor::default(),
+            ),
+            identities: store.snapshot(),
+            identity_store: store,
+            max_routes: 7,
+            arouteserver_reject_communities: None,
+        };
+        for source in [ExactRouteSource::Received, ExactRouteSource::Advertised] {
+            let Json(body) = serve_exact_route(&state, "192.0.2.1/24", "pb_as64496", source)
+                .await
+                .unwrap();
+            assert_eq!(body["routes"], serde_json::json!([]), "{source:?}");
+            assert_eq!(body["api"]["max_routes"], 7, "{source:?}");
+        }
+        // Identity resolution still precedes the host-bit answer, and
+        // genuinely malformed input is still rejected.
+        let (status, _) = serve_exact_route(
+            &state,
+            "192.0.2.1/24",
+            "missing",
+            ExactRouteSource::Received,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = serve_exact_route(
+            &state,
+            "not-an-ip/24",
+            "pb_as64496",
+            ExactRouteSource::Received,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
     fn exact_route_requests_pin_every_filter_on_every_page_and_unknown_id_is_404() {
         let peer: IpAddr = "192.0.2.1".parse().unwrap();
-        let prefix = ExactPrefix::parse("2001:db8::/32").unwrap();
+        let prefix = ExactPrefix::parse("2001:db8::/32").unwrap().unwrap();
         for source in [ExactRouteSource::Received, ExactRouteSource::Advertised] {
             for token in ["", "opaque-page-2"] {
                 let request = exact_route_request(peer, prefix, token.to_string(), source);
@@ -3413,7 +3577,7 @@ mod tests {
 
     #[test]
     fn exact_route_pages_preserve_add_path_order_and_cap_only_exact_candidates() {
-        let prefix = ExactPrefix::parse("192.0.2.0/24").unwrap();
+        let prefix = ExactPrefix::parse("192.0.2.0/24").unwrap().unwrap();
         let route = |network: &str, path_id: u32, med: u32| proto::Route {
             prefix: network.to_string(),
             prefix_length: 24,
@@ -3471,7 +3635,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let query = ExactPrefix::parse("192.0.2.128/25").unwrap();
+        let query = ExactPrefix::parse("192.0.2.128/25").unwrap().unwrap();
         let body = table_lookup_body(&response, query, &IdentityResolver::default(), 2).unwrap();
         assert_eq!(body["routes"][0]["bgp"]["med"], 10);
         assert_eq!(body["routes"][1]["bgp"]["med"], 20);
@@ -3507,7 +3671,11 @@ mod tests {
             .prefix
             .clone_from(&unrelated.prefix);
         rejects(&unrelated, query, 2);
-        rejects(&response, ExactPrefix::parse("192.0.2.0/23").unwrap(), 2);
+        rejects(
+            &response,
+            ExactPrefix::parse("192.0.2.0/23").unwrap().unwrap(),
+            2,
+        );
         let mut missing = response.clone();
         missing.best_route = None;
         rejects(&missing, query, 2);
