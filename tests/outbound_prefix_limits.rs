@@ -927,7 +927,7 @@ fn log_gates(checks: &mut Checks, log: &str) {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::too_many_lines, reason = "one linear behavior arc")]
+#[expect(clippy::too_many_lines, reason = "one linear behavior arc")]
 async fn outbound_prefix_limits_bound_the_wire_and_survive_reload_edits() {
     let rundir = RunDir::new("oplim");
     let bgp_port = free_port();
