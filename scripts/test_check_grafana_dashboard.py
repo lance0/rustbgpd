@@ -131,7 +131,9 @@ let families = self.allocated.collect();'''
             changes = {"description": "changed",
                        "collapsed": not panel.get("collapsed", False),
                        "id": panel["id"] + 1000}
-            if panel["title"] != "BLACKHOLE discard activity":
+            if panel["title"] == "BLACKHOLE discard activity":
+                changes["gridPos"] = {**panel["gridPos"], "h": 9, "y": 17}
+            else:
                 changes["gridPos"] = {"x": index % 24}
             panel.update(changes)
         with tempfile.TemporaryDirectory() as directory:

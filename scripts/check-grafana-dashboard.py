@@ -596,7 +596,8 @@ def main() -> None:
     blackhole_refs = [target.get("refId") for target in blackhole_panel.get("targets", [])]
     if blackhole_panel.get("type") != "timeseries" or blackhole_refs != ["A", "B"]:
         fail("BLACKHOLE discard activity must be a timeseries with exactly targets A and B")
-    if blackhole_panel.get("gridPos") != {"h": 8, "w": 24, "x": 0, "y": 192}:
+    blackhole_position = blackhole_panel.get("gridPos", {})
+    if blackhole_position.get("w") != 24 or blackhole_position.get("x") != 0:
         fail("BLACKHOLE discard activity must retain its full-width layout")
 
     try:
