@@ -1,5 +1,7 @@
 # L3VPN route reflector (VPNv4/VPNv6 + RT-Constrain)
 
+This recipe builds a control-plane-only VPNv4/VPNv6 route reflector.
+
 **When this is you:** you have a PE fleet exchanging VPNv4/VPNv6
 routes (SAFI 128) and want the reflector out of the vendor-appliance
 business — reflect with RD, MPLS label stack, next-hop, and Route
