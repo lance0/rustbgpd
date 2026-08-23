@@ -9,6 +9,9 @@
 //!
 //! Stub mechanics follow `tests/outbound_prefix_limits.rs`.
 
+#[allow(dead_code)]
+mod support;
+
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -265,36 +268,22 @@ async fn establish(ctx: Arc<Ctx>, i: usize) -> Result<mpsc::Sender<Message>, Str
     Ok(tx)
 }
 
-/// `rbgp` against the spawned daemon. `CARGO_BIN_EXE_rbgp` is not set for a
-/// dev-dependency's binary, so fall back to `cargo run -p rustbgpctl`.
+/// `rbgp` against the spawned daemon.
 struct Rbgp {
-    argv: Vec<String>,
+    bin: PathBuf,
     addr: String,
 }
 
 impl Rbgp {
     fn new(addr: String) -> Self {
-        let argv = if let Ok(path) = std::env::var("CARGO_BIN_EXE_rbgp") {
-            vec![path]
-        } else {
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-            vec![
-                cargo,
-                "run".into(),
-                "--quiet".into(),
-                "-p".into(),
-                "rustbgpctl".into(),
-                "--bin".into(),
-                "rbgp".into(),
-                "--".into(),
-            ]
-        };
-        Self { argv, addr }
+        Self {
+            bin: support::rbgp_binary().to_path_buf(),
+            addr,
+        }
     }
 
     async fn run(&self, args: &[&str]) -> Result<String, String> {
-        let out = tokio::process::Command::new(&self.argv[0])
-            .args(&self.argv[1..])
+        let out = tokio::process::Command::new(&self.bin)
             .arg("--addr")
             .arg(&self.addr)
             .args(args)
