@@ -106,7 +106,7 @@ service NeighborService {
   rpc RefreshOutbound(RefreshOutboundRequest) returns (RefreshOutboundResponse);
 }
 
-// RIB queries — paginated unary for point-in-time, streaming for live watch
+// Paginated point-in-time RIB queries; EventService owns live route streams
 service RibService {
   rpc ListReceivedRoutes(ListRoutesRequest)   returns (ListRoutesResponse);
   rpc ListBestRoutes(ListRoutesRequest)       returns (ListRoutesResponse);

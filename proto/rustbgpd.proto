@@ -1807,7 +1807,7 @@ message TestPolicyResponse {
 }
 
 // ---------------------------------------------------------------------------
-// RibService — RIB queries (paginated + streaming)
+// RibService — paginated point-in-time RIB queries; EventService owns live streams
 // ---------------------------------------------------------------------------
 
 service RibService {
