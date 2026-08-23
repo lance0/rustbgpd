@@ -16,9 +16,9 @@ struct Daemon {
     stderr_path: PathBuf,
 }
 
-fn shutdown_timeout_message(daemon_stderr: &str, cleanup: &str) -> String {
+fn shutdown_timeout_message(label: &str, daemon_stderr: &str, cleanup: &str) -> String {
     format!(
-        "rustbgpd did not stop after rbgp shutdown\ncleanup: {cleanup}\ndaemon stderr:\n{daemon_stderr}"
+        "{label}: rustbgpd did not stop after rbgp shutdown\nlast completed teardown stage: Shutdown RPC completed; daemon teardown completion not observed\ncleanup: {cleanup}\ndaemon stderr:\n{daemon_stderr}"
     )
 }
 
@@ -50,11 +50,11 @@ impl Daemon {
             .unwrap_or_else(|error| format!("<failed to read daemon stderr: {error}>"))
     }
 
-    fn shutdown(mut self, grpc_addr: &str, cwd: &Path) {
+    fn shutdown(mut self, label: &str, grpc_addr: &str, cwd: &Path) {
         let output = rbgp(grpc_addr, cwd, &["shutdown", "--reason", "quickstart test"]);
         assert!(
             output.status.success(),
-            "rbgp shutdown failed\nstdout:\n{}\nstderr:\n{}",
+            "{label}: rbgp shutdown failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
@@ -65,7 +65,7 @@ impl Daemon {
                     assert_eq!(
                         status.code(),
                         Some(0),
-                        "rbgp shutdown must exit the daemon cleanly, got {status}\nstderr:\n{}",
+                        "{label}: rbgp shutdown must exit the daemon cleanly, got {status}\nstderr:\n{}",
                         self.stderr()
                     );
                     return;
@@ -78,7 +78,10 @@ impl Daemon {
         let kill = self.child.kill();
         let reap = self.child.wait();
         let cleanup = format!("try_wait: {try_wait:?}; kill: {kill:?}; reap: {reap:?}");
-        panic!("{}", shutdown_timeout_message(&self.stderr(), &cleanup));
+        panic!(
+            "{}",
+            shutdown_timeout_message(label, &self.stderr(), &cleanup)
+        );
     }
 }
 
@@ -136,7 +139,7 @@ fn rbgp(grpc_addr: &str, cwd: &Path, args: &[&str]) -> Output {
     .expect("run rbgp")
 }
 
-fn wait_until_serving(grpc_addr: &str, cwd: &Path, daemon: &mut Daemon) {
+fn wait_until_serving(label: &str, grpc_addr: &str, cwd: &Path, daemon: &mut Daemon) {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut last = None;
     while Instant::now() < deadline {
@@ -150,7 +153,7 @@ fn wait_until_serving(grpc_addr: &str, cwd: &Path, daemon: &mut Daemon) {
     }
     let last = last.expect("rbgp readiness probe ran");
     panic!(
-        "rustbgpd gRPC never became ready\nstatus: {}\nstdout:\n{}\nstderr:\n{}\ndaemon stderr:\n{}",
+        "{label}: rustbgpd gRPC never became ready\nstatus: {}\nstdout:\n{}\nstderr:\n{}\ndaemon stderr:\n{}",
         last.status,
         String::from_utf8_lossy(&last.stdout),
         String::from_utf8_lossy(&last.stderr),
@@ -283,7 +286,7 @@ fn run_starter(label: &str, source: &str, group_json: &str, commands: &[String])
 
     let grpc_addr = format!("unix://{}", runtime_dir.join("grpc.sock").display());
     let mut daemon = Daemon::spawn(&config_path, temp.path().join("rustbgpd.stderr.log"));
-    wait_until_serving(&grpc_addr, temp.path(), &mut daemon);
+    wait_until_serving(label, &grpc_addr, temp.path(), &mut daemon);
 
     let missing = rbgp(
         &grpc_addr,
@@ -395,7 +398,7 @@ fn run_starter(label: &str, source: &str, group_json: &str, commands: &[String])
         Some("ix-members")
     );
 
-    daemon.shutdown(&grpc_addr, temp.path());
+    daemon.shutdown(label, &grpc_addr, temp.path());
 
     let mut strict_probe = persisted_toml.clone();
     let policy = strict_probe["policy"]
@@ -440,10 +443,56 @@ fn documented_passwordless_dynamic_neighbor_flow_works_for_both_starters() {
 }
 
 #[test]
+#[ignore = "bounded up-to-24-lifecycle shutdown recurrence proof; invoke explicitly"]
+fn documented_starter_shutdown_recurrence_is_bounded_and_isolated() {
+    const LANES: usize = 4;
+    const ROUNDS: usize = 3;
+
+    let (group_json, commands) = documented_flow();
+    let lab = lab_profile();
+    let minimal = std::fs::read_to_string(repo_root().join("examples/minimal/config.toml"))
+        .expect("read examples/minimal config");
+
+    thread::scope(|scope| {
+        for lane in 0..LANES {
+            let group_json = &group_json;
+            let commands = &commands;
+            let lab = &lab;
+            let minimal = &minimal;
+            scope.spawn(move || {
+                for round in 0..ROUNDS {
+                    run_starter(
+                        &format!("lane-{lane}-round-{round}-lab"),
+                        lab,
+                        group_json,
+                        commands,
+                    );
+                    run_starter(
+                        &format!("lane-{lane}-round-{round}-minimal"),
+                        minimal,
+                        group_json,
+                        commands,
+                    );
+                }
+            });
+        }
+    });
+}
+
+#[test]
 fn shutdown_timeout_diagnostic_is_ordered_and_preserves_evidence() {
-    let message = shutdown_timeout_message("stderr sentinel", "cleanup sentinel");
+    let message = shutdown_timeout_message(
+        "lane-2-round-1-minimal",
+        "stderr sentinel",
+        "cleanup sentinel",
+    );
+    assert!(message.starts_with("lane-2-round-1-minimal:"));
     assert!(message.contains("stderr sentinel") && message.contains("cleanup sentinel"));
+    assert!(message.contains(
+        "last completed teardown stage: Shutdown RPC completed; daemon teardown completion not observed"
+    ));
     let source = include_str!("quickstart_dynamic_neighbor.rs");
+    assert!(source.contains("{label}: rustbgpd gRPC never became ready"));
     let tail = source
         .split_once("let deadline = Instant::now() + Duration::from_secs(5);")
         .unwrap()
