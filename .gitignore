@@ -1,4 +1,5 @@
 /target
+/rust_out
 /bench/scale/target
 **/*.rs.bk
 *.swp
