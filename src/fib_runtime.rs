@@ -1897,8 +1897,10 @@ struct LinuxUnicastFib {
 #[cfg(target_os = "linux")]
 impl LinuxUnicastFib {
     fn connect(metrics: BgpMetrics) -> Result<Self, String> {
-        let (handle, events) =
-            crate::kernel_route_notify::connect_with_route_notifications("general_fib", metrics)?;
+        let (handle, events) = crate::kernel_route_notify::connect_with_route_notifications(
+            rustbgpd_telemetry::metrics::NetlinkSubscriber::GeneralFib,
+            metrics,
+        )?;
         Ok(Self {
             handle,
             kernel_route_events: Some(events),

@@ -46,10 +46,10 @@ class MetricConsumerContractTests(unittest.TestCase):
 
     def test_live_inventory_and_consumer_counts_are_exact(self):
         self.assertEqual(set(self.sources), set(CHECK.EMITTER_FILES))
-        self.assertEqual(len(self.inventory), 188)
+        self.assertEqual(len(self.inventory), 189)
         self.assertEqual(
             len(CHECK.DASHBOARD_CHECK.rust_metric_inventory(self.sources[CHECK.TELEMETRY])),
-            177,
+            178,
         )
         self.assertEqual(
             len(CHECK.settlement_metric_inventory(self.sources[CHECK.SETTLEMENT])), 4
@@ -57,9 +57,9 @@ class MetricConsumerContractTests(unittest.TestCase):
         self.assertEqual(len(CHECK.PROCESS_FAMILIES), 7)
         self.assertEqual(len(self.dashboard_refs), 93)
         self.assertEqual(len(self.rule_refs), 39)
-        self.assertEqual(len(self.doc_refs), 175)
+        self.assertEqual(len(self.doc_refs), 176)
         consumers = self.dashboard_refs | self.rule_refs | self.doc_refs
-        self.assertEqual(len(consumers), 182)
+        self.assertEqual(len(consumers), 183)
         self.assertEqual(set(self.inventory) - consumers, set(CHECK.ALLOWLIST))
         self.assertEqual(
             set(CHECK.ALLOWLIST), CHECK.PROCESS_FAMILIES - {"process_start_time_seconds"}
@@ -70,8 +70,8 @@ class MetricConsumerContractTests(unittest.TestCase):
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             self.assertEqual(CHECK.main(), 0)
-        self.assertIn("188 emitted families", stdout.getvalue())
-        self.assertIn("182 consumed, 6 justified raw diagnostics", stdout.getvalue())
+        self.assertIn("189 emitted families", stdout.getvalue())
+        self.assertIn("183 consumed, 6 justified raw diagnostics", stdout.getvalue())
 
     def test_comments_literals_and_test_modules_are_not_definitions(self):
         source = r'''

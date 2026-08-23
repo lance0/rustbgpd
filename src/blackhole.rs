@@ -1114,7 +1114,7 @@ struct LinuxBlackholeFib {
 impl LinuxBlackholeFib {
     fn connect(metrics: BgpMetrics) -> Result<Self, String> {
         let (handle, events) = crate::kernel_route_notify::connect_with_route_notifications(
-            "blackhole_discard",
+            rustbgpd_telemetry::metrics::NetlinkSubscriber::BlackholeDiscard,
             metrics,
         )?;
         Ok(Self {

@@ -27,6 +27,8 @@
 //! is exactly the pre-eventing behavior.
 
 use rustbgpd_telemetry::BgpMetrics;
+#[cfg(target_os = "linux")]
+use rustbgpd_telemetry::metrics::NetlinkSubscriber;
 use rustbgpd_wire::Prefix;
 use tokio::sync::mpsc;
 
@@ -124,11 +126,12 @@ pub(crate) async fn recv_kernel_route_event(
 /// falls back to periodic-only kernel-drift repair.
 #[cfg(target_os = "linux")]
 pub(crate) fn connect_with_route_notifications(
-    actor: &'static str,
+    subscriber: NetlinkSubscriber,
     metrics: BgpMetrics,
 ) -> Result<(rtnetlink::Handle, mpsc::Receiver<KernelRouteEvent>), String> {
     use rtnetlink::sys::AsyncSocket;
 
+    let actor = subscriber.as_str();
     let (mut connection, handle, messages) =
         rtnetlink::new_connection().map_err(|e| format!("open NETLINK_ROUTE: {e}"))?;
     for (group, name, label) in [
@@ -149,7 +152,7 @@ pub(crate) fn connect_with_route_notifications(
     tokio::spawn(connection);
     let (event_tx, event_rx) = mpsc::channel(KERNEL_ROUTE_EVENT_BUFFER);
     tokio::spawn(forward_route_notifications(
-        messages, event_tx, actor, metrics,
+        messages, event_tx, subscriber, metrics,
     ));
     Ok((handle, event_rx))
 }
@@ -165,7 +168,7 @@ async fn forward_route_notifications(
         rtnetlink::sys::SocketAddr,
     )>,
     event_tx: mpsc::Sender<KernelRouteEvent>,
-    actor: &'static str,
+    subscriber: NetlinkSubscriber,
     metrics: BgpMetrics,
 ) {
     use futures::StreamExt;
@@ -173,12 +176,28 @@ async fn forward_route_notifications(
     use netlink_packet_route::RouteNetlinkMessage;
     use rtnetlink::packet_core::NetlinkPayload;
 
+    let actor = subscriber.as_str();
+
     // Log the first drop-on-full only, so a sustained storm doesn't
     // spam the log; the periodic backstop repairs whatever was dropped.
     let mut warned_full = false;
+    let mut warned_overrun = false;
     while let Some((message, _addr)) = messages.next().await {
-        let NetlinkPayload::InnerMessage(inner) = message.payload else {
-            continue;
+        let inner = match message.payload {
+            NetlinkPayload::Overrun(_) => {
+                metrics.record_netlink_subscription_overrun(subscriber);
+                if !warned_overrun {
+                    warned_overrun = true;
+                    tracing::warn!(
+                        actor,
+                        "kernel route netlink subscription overran; one or more events may have \
+                         been lost, leaving the periodic reconcile as the repair backstop"
+                    );
+                }
+                continue;
+            }
+            NetlinkPayload::InnerMessage(inner) => inner,
+            _ => continue,
         };
         let event = match inner {
             RouteNetlinkMessage::NewRoute(msg) => {
@@ -280,6 +299,76 @@ mod tests {
     fn route_group_ids_are_rtnetlink_enum_values() {
         assert_eq!(RTNLGRP_IPV4_ROUTE, 7);
         assert_eq!(RTNLGRP_IPV6_ROUTE, 11);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn each_route_subscriber_counts_overruns_without_fabricating_events() {
+        use rtnetlink::packet_core::{NetlinkMessage, NetlinkPayload};
+
+        for subscriber in [
+            NetlinkSubscriber::GeneralFib,
+            NetlinkSubscriber::BlackholeDiscard,
+        ] {
+            let metrics = BgpMetrics::new();
+            let (messages_tx, messages_rx) = futures::channel::mpsc::unbounded();
+            let (event_tx, mut event_rx) = mpsc::channel(1);
+            for _ in 0..2 {
+                let message = NetlinkMessage::new(
+                    rtnetlink::packet_core::NetlinkHeader::default(),
+                    NetlinkPayload::<netlink_packet_route::RouteNetlinkMessage>::Overrun(Vec::new()),
+                );
+                messages_tx
+                    .unbounded_send((message, rtnetlink::sys::SocketAddr::new(0, 0)))
+                    .expect("synthetic overrun queued");
+            }
+            drop(messages_tx);
+
+            forward_route_notifications(messages_rx, event_tx, subscriber, metrics.clone()).await;
+
+            assert!(
+                event_rx.recv().await.is_none(),
+                "overrun is not a route event for {}",
+                subscriber.as_str()
+            );
+            let family = metrics
+                .registry()
+                .gather()
+                .into_iter()
+                .find(|family| family.name() == "bgp_netlink_subscription_overruns_total")
+                .expect("netlink overrun metric registered");
+            let observed: std::collections::BTreeMap<_, _> = family
+                .metric
+                .iter()
+                .map(|metric| {
+                    assert_eq!(metric.get_label().len(), 1, "only subscriber label");
+                    assert_eq!(metric.get_label()[0].name(), "subscriber");
+                    (
+                        metric.get_label()[0].value().to_owned(),
+                        metric.get_counter().value(),
+                    )
+                })
+                .collect();
+            let expected: std::collections::BTreeMap<_, _> = [
+                NetlinkSubscriber::LinkCarrier,
+                NetlinkSubscriber::GeneralFib,
+                NetlinkSubscriber::BlackholeDiscard,
+            ]
+            .into_iter()
+            .map(|candidate| {
+                (
+                    candidate.as_str().to_owned(),
+                    if candidate == subscriber { 2.0 } else { 0.0 },
+                )
+            })
+            .collect();
+            assert_eq!(
+                observed,
+                expected,
+                "{} receive loop must account exactly and continue after the first overrun",
+                subscriber.as_str()
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]

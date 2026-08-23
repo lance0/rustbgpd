@@ -150,6 +150,26 @@ impl LinkCarrierHandle {
 pub async fn spawn_link_carrier_monitor(
     watched: BTreeSet<String>,
 ) -> Result<LinkCarrierHandle, DataplaneError> {
+    spawn_link_carrier_monitor_with_overrun_hook(watched, || {}).await
+}
+
+/// Open the link-carrier monitor with a daemon-owned callback for observed
+/// netlink receive-buffer overruns.
+///
+/// The callback runs once for each overrun notification before the monitor
+/// retains its last projection and waits for the periodic walk to repair any
+/// resulting drift. Keeping this hook generic preserves this crate's
+/// telemetry-independent dataplane boundary.
+///
+/// # Errors
+/// Returns the same errors as [`spawn_link_carrier_monitor`].
+pub async fn spawn_link_carrier_monitor_with_overrun_hook<F>(
+    watched: BTreeSet<String>,
+    on_overrun: F,
+) -> Result<LinkCarrierHandle, DataplaneError>
+where
+    F: Fn() + Send + Sync + 'static,
+{
     let (mut connection, handle, messages) =
         rtnetlink::new_connection().map_err(DataplaneError::Io)?;
 
@@ -190,7 +210,12 @@ pub async fn spawn_link_carrier_monitor(
     // config transactions), never bursty.
     let (cmd_tx, cmd_rx) = mpsc::channel(8);
     tokio::spawn(monitor_loop(
-        handle, messages, carrier_tx, cmd_rx, projection,
+        handle,
+        messages,
+        carrier_tx,
+        cmd_rx,
+        projection,
+        Arc::new(on_overrun),
     ));
 
     Ok(LinkCarrierHandle { carrier_rx, cmd_tx })
@@ -207,6 +232,7 @@ async fn monitor_loop(
     carrier_tx: watch::Sender<LinkCarrierMap>,
     mut cmd_rx: mpsc::Receiver<BTreeSet<String>>,
     mut projection: CarrierProjection,
+    on_overrun: Arc<dyn Fn() + Send + Sync>,
 ) {
     // First tick one full cadence out — spawn already walked.
     let mut tick = tokio::time::interval_at(
@@ -214,6 +240,7 @@ async fn monitor_loop(
         POLL_BACKSTOP_INTERVAL,
     );
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut warned_overrun = false;
 
     loop {
         let changed = tokio::select! {
@@ -222,23 +249,7 @@ async fn monitor_loop(
                     warn!("rtnetlink connection closed; link carrier monitor exiting");
                     return;
                 };
-                let NetlinkPayload::InnerMessage(payload) = msg.payload else {
-                    continue;
-                };
-                match payload {
-                    RouteNetlinkMessage::NewLink(link) => link_name_and_carrier(&link)
-                        .is_some_and(|(name, carrier)| {
-                            projection.apply_event(&name, Some(carrier))
-                        }),
-                    // Link deleted → down (fail-closed). A *rename*
-                    // emits only RTM_NEWLINK under the new name, so
-                    // the old watched name goes stale until the next
-                    // backstop walk marks it down — exactly the gap
-                    // the poll exists to heal.
-                    RouteNetlinkMessage::DelLink(link) => link_name_and_carrier(&link)
-                        .is_some_and(|(name, _)| projection.apply_event(&name, None)),
-                    _ => false,
-                }
+                apply_notification(msg, &mut projection, on_overrun.as_ref(), &mut warned_overrun)
             }
             _ = tick.tick() => {
                 match dump_link_carrier(&handle).await {
@@ -281,6 +292,43 @@ async fn monitor_loop(
             // channel closing exits the loop on the next iteration.
             let _ = carrier_tx.send(projection.snapshot());
         }
+    }
+}
+
+/// Apply one unsolicited link notification. An overrun is evidence that at
+/// least one event may have been lost; retain the last projection and leave
+/// repair to the existing periodic walk rather than claiming recovery here.
+fn apply_notification(
+    msg: NetlinkMessage<RouteNetlinkMessage>,
+    projection: &mut CarrierProjection,
+    on_overrun: &dyn Fn(),
+    warned_overrun: &mut bool,
+) -> bool {
+    let payload = match msg.payload {
+        NetlinkPayload::Overrun(_) => {
+            on_overrun();
+            if !*warned_overrun {
+                *warned_overrun = true;
+                warn!(
+                    "link-carrier netlink subscription overran; one or more events may have \
+                     been lost, retaining the last projection until the periodic poll"
+                );
+            }
+            return false;
+        }
+        NetlinkPayload::InnerMessage(payload) => payload,
+        _ => return false,
+    };
+    match payload {
+        RouteNetlinkMessage::NewLink(link) => link_name_and_carrier(&link)
+            .is_some_and(|(name, carrier)| projection.apply_event(&name, Some(carrier))),
+        // Link deleted → down (fail-closed). A *rename* emits only
+        // RTM_NEWLINK under the new name, so the old watched name
+        // goes stale until the next backstop walk marks it down —
+        // exactly the gap the poll exists to heal.
+        RouteNetlinkMessage::DelLink(link) => link_name_and_carrier(&link)
+            .is_some_and(|(name, _)| projection.apply_event(&name, None)),
+        _ => false,
     }
 }
 
@@ -416,6 +464,44 @@ mod tests {
             msg.attributes.push(LinkAttribute::IfName(name.to_string()));
         }
         msg
+    }
+
+    fn overrun_msg() -> NetlinkMessage<RouteNetlinkMessage> {
+        NetlinkMessage::new(
+            rtnetlink::packet_core::NetlinkHeader::default(),
+            NetlinkPayload::Overrun(Vec::new()),
+        )
+    }
+
+    #[test]
+    fn overrun_counts_without_changing_the_carrier_projection() {
+        use std::cell::Cell;
+
+        let overruns = Cell::new(0_u64);
+        let on_overrun = || overruns.set(overruns.get() + 1);
+        let mut projection = CarrierProjection::new(names(&["es0"]));
+        assert!(projection.apply_event("es0", Some(true)));
+        let before = projection.snapshot();
+        let mut warned = false;
+
+        assert!(!apply_notification(
+            overrun_msg(),
+            &mut projection,
+            &on_overrun,
+            &mut warned
+        ));
+        assert!(warned);
+        assert_eq!(projection.snapshot(), before);
+        assert_eq!(overruns.get(), 1);
+
+        assert!(!apply_notification(
+            overrun_msg(),
+            &mut projection,
+            &on_overrun,
+            &mut warned
+        ));
+        assert_eq!(projection.snapshot(), before);
+        assert_eq!(overruns.get(), 2);
     }
 
     #[test]

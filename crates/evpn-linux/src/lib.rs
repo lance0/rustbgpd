@@ -96,7 +96,10 @@ pub mod linux;
 pub use linux::LinuxDataplane;
 
 #[cfg(target_os = "linux")]
-pub use linux::link_carrier::{LinkCarrierHandle, LinkCarrierMap, spawn_link_carrier_monitor};
+pub use linux::link_carrier::{
+    LinkCarrierHandle, LinkCarrierMap, spawn_link_carrier_monitor,
+    spawn_link_carrier_monitor_with_overrun_hook,
+};
 
 #[cfg(target_os = "linux")]
 pub use linux::nexthop_raw::{

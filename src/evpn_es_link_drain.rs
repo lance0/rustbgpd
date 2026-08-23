@@ -44,6 +44,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
+use rustbgpd_telemetry::BgpMetrics;
+#[cfg(target_os = "linux")]
+use rustbgpd_telemetry::metrics::NetlinkSubscriber;
 use rustbgpd_wire::EthernetSegmentIdentifier;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -76,6 +79,7 @@ pub(crate) struct EsLinkDrainDeps {
     pub drain_state: EvpnEsDrainState,
     pub segment: Option<EvpnSegmentRuntimeControl>,
     pub originator: Option<EvpnOriginatorRuntimeControl>,
+    pub metrics: BgpMetrics,
 }
 
 /// Where carrier state comes from.
@@ -116,7 +120,8 @@ async fn run(
     // First probe: evaluate the initial bindings against the feed's
     // initial projection directly — no hold-off (decision 3 startup).
     let initial = bindings_rx.borrow_and_update().clone();
-    feed.sync(watched_links(&initial), &fallback_tx).await;
+    feed.sync(watched_links(&initial), &fallback_tx, &deps.metrics)
+        .await;
     let carrier = feed.carrier_rx.borrow_and_update().clone();
     let actions = planner.replace_bindings(initial, &carrier, Instant::now());
     apply_actions(actions, &deps, &mut planner).await;
@@ -131,7 +136,7 @@ async fn run(
                     return;
                 }
                 let next = bindings_rx.borrow_and_update().clone();
-                feed.sync(watched_links(&next), &fallback_tx).await;
+                feed.sync(watched_links(&next), &fallback_tx, &deps.metrics).await;
                 let carrier = feed.carrier_rx.borrow_and_update().clone();
                 planner.replace_bindings(next, &carrier, Instant::now())
             }
@@ -278,7 +283,14 @@ impl FeedState {
     /// spawn the kernel monitor when the first binding appears,
     /// replace its watched set on change, drop it (drop-to-stop) when
     /// the last binding goes.
-    async fn sync(&mut self, watched: BTreeSet<String>, fallback_tx: &watch::Sender<CarrierMap>) {
+    async fn sync(
+        &mut self,
+        watched: BTreeSet<String>,
+        fallback_tx: &watch::Sender<CarrierMap>,
+        metrics: &BgpMetrics,
+    ) {
+        #[cfg(not(target_os = "linux"))]
+        let _ = metrics;
         if self.injected {
             return;
         }
@@ -304,7 +316,16 @@ impl FeedState {
                 warn!("link carrier monitor exited; respawning");
                 self.handle = None;
             }
-            match rustbgpd_evpn_linux::spawn_link_carrier_monitor(watched.clone()).await {
+            let overrun_metrics = BgpMetrics::clone(metrics);
+            match rustbgpd_evpn_linux::spawn_link_carrier_monitor_with_overrun_hook(
+                watched.clone(),
+                move || {
+                    overrun_metrics
+                        .record_netlink_subscription_overrun(NetlinkSubscriber::LinkCarrier);
+                },
+            )
+            .await
+            {
                 Ok(handle) => {
                     info!(
                         links = %watched.iter().cloned().collect::<Vec<_>>().join(","),
@@ -718,6 +739,7 @@ mod tests {
                 drain_state: drain_state.clone(),
                 segment: Some(probe.control.clone()),
                 originator: None,
+                metrics: BgpMetrics::new(),
             },
             shutdown.clone(),
         );
@@ -878,10 +900,8 @@ mod tests {
     /// and an AC gate row of `Blocked` — with no further stimulus.
     #[tokio::test]
     async fn down_at_boot_converges_segment_bias_and_gate_to_drained() {
-        use rustbgpd_rib::RibUpdate;
-        use rustbgpd_telemetry::BgpMetrics;
-
         use crate::test_support::{evpn_instance, vni};
+        use rustbgpd_rib::RibUpdate;
 
         let id = esi(1);
         let mut table = rustbgpd_evpn::EvpnInstanceTable::new();
@@ -948,6 +968,7 @@ mod tests {
                 drain_state: drain_state.clone(),
                 segment: Some(segment_handle.runtime_control()),
                 originator: None,
+                metrics: BgpMetrics::new(),
             },
             shutdown.clone(),
         );
