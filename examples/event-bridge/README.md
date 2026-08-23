@@ -63,8 +63,8 @@ Each line of stdout is one JSON object:
 
 - **`FAILED_PRECONDITION` on subscribe**: the daemon was started
   with `[event_history].enabled = false`, or EHM dropped into
-  pass-through mode at runtime. Legacy `WatchEvents` /
-  `WatchRoutes` still work; durable cursor replay does not.
+  pass-through mode at runtime. Live `WatchEvents` still works;
+  durable cursor replay does not.
 
 - **Cursor older than retention floor**: the stream's first frame
   is a `StreamLagEvent` with `missed_count` over the global

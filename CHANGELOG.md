@@ -9,6 +9,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking:** `RibService.WatchRoutes` and `RibService.WatchRouteEvents`
+  are removed, together with the `WatchRoutesRequest` message and the
+  `ROUTE_EVENT_TYPE_STREAM_LAGGED` enum value (number 5 and the name are
+  reserved). Live route deltas stream through `EventService.WatchEvents` with
+  `EVENT_CATEGORY_ROUTE`; durable cursor replay goes through
+  `EventService.SubscribeFromEvent`. Both surfaces carry the same
+  `RouteEvent` payload and signal subscriber lag with
+  `BGP_EVENT_TYPE_STREAM_LAGGED`. The RibService row of
+  `docs/v1-stable-surface.json` is narrowed accordingly before the v1 freeze,
+  and the authorization inventory drops the two `sensitive_read` rows.
+  `rbgp watch` now reads `WatchEvents` with identical output and flags.
+  `bgp_event_stream_lagged_total` / `bgp_event_stream_subscribers` no longer
+  emit the `watch_routes` / `watch_route_events` service labels. (LAN-1203)
+
 ## [0.66.0] — 2026-08-22
 
 ### Added

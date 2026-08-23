@@ -5561,10 +5561,10 @@ mod tests {
         let m = BgpMetrics::new();
 
         {
-            let _guard = m.event_stream_subscriber_guard("watch_routes", "route");
+            let _guard = m.event_stream_subscriber_guard("watch_events", "route");
             assert_eq!(
                 m.0.event_stream_subscribers
-                    .with_label_values(&["watch_routes", "route"])
+                    .with_label_values(&["watch_events", "route"])
                     .get(),
                 1
             );
@@ -5572,7 +5572,7 @@ mod tests {
 
         assert_eq!(
             m.0.event_stream_subscribers
-                .with_label_values(&["watch_routes", "route"])
+                .with_label_values(&["watch_events", "route"])
                 .get(),
             0
         );

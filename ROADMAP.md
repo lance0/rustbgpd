@@ -1694,7 +1694,7 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   sandboxing a scripting layer there would be clean — more expressive than FRR
   route-maps, simpler than BIRD's filter DSL. Post-v1 per Non-goals.
 - **Observability future extensions.** Richer per-MAC EVPN dataplane event
-  categories; WatchRoutes missed-event signaling if it gains an envelope;
+  categories;
   precomputed dataplane summary counters / watch channels if status-snapshot
   polling becomes expensive; subscription-side indexing or a dedicated event bus
   if subscriber count / event rate makes post-broadcast filtering expensive;

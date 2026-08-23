@@ -160,7 +160,7 @@ shape itself does not raise the tier.
 | `SetNeighborPeerGroup` | `mutating` | Single-neighbor reassignment. |
 | `ClearNeighborPeerGroup` | `mutating` | Single-neighbor. |
 
-### RibService (23 RPCs)
+### RibService (21 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -176,8 +176,6 @@ shape itself does not raise the tier.
 | `DeleteFibTable` | `mutating` | Remove a `[[fib_tables]]` entry by name; withdraws its kernel rows. |
 | `ListFibTables` | `sensitive_read` | Configured FIB table set + runtime availability. |
 | `ListRouteEvents` | `sensitive_read` | Bounded route-event history. |
-| `WatchRoutes` (stream) | `sensitive_read` | Live route-event stream. Streaming shape; same data as `ListRouteEvents`. |
-| `WatchRouteEvents` (stream) | `sensitive_read` | Enveloped live route-event stream with explicit `stream_lagged` signals. |
 | `ListFlowSpecRoutes` | `sensitive_read` | RFC 5575 flow-spec routes — discloses traffic filter installations. |
 | `ListEvpnRoutes` | `sensitive_read` | EVPN Type 1/2/3/4/5 routes — MAC/IP topology, multi-homing ES layout. |
 | `ListBgpLsRoutes` | `sensitive_read` | RFC 9552 BGP-LS / BGP-LS VPN routes — controller-facing topology graph objects exposed as opaque NLRI/TLV bytes. |
@@ -253,13 +251,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 61 | 58.1% |
-| `mutating` | 20 | 19.0% |
-| `operator_only` | 24 | 22.9% |
-| **Total** | **105** | **100%** |
+| `sensitive_read` | 59 | 57.3% |
+| `mutating` | 20 | 19.4% |
+| `operator_only` | 24 | 23.3% |
+| **Total** | **103** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 105
-total is 101 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 103
+total is 99 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 
@@ -290,7 +288,7 @@ specific method if the model warrants it.
    dedicated listener — operators rarely use it for automation, and
    when they do it should be a deliberate channel.
 4. **Streaming methods need session-establishment authorization, not
-   per-message.** `WatchEvents`, `WatchRouteEvents`, and `WatchRoutes` open once and live
+   per-message.** `WatchEvents` and `SubscribeFromEvent` open once and live
    for the connection lifetime. The enforcement model needs to
    reject at handshake, not pretend to filter per-event.
 5. **Credential ingress is narrow but not `AddNeighbor`.** The
@@ -338,7 +336,7 @@ specific method if the model warrants it.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 105-method classification
+`crates/api/src/authz.rs` contains the same 103-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added

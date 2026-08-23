@@ -6,7 +6,7 @@ use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddressFamily, BgpEvent, BgpEventType, EventCategory, EvpnRouteEntry, ListEvpnEventsRequest,
     ListPolicyEventsRequest, ListRouteEventsRequest, ListSessionEventsRequest, RouteEvent,
-    RouteEventType, StreamLagEvent, WatchEventsRequest, WatchRoutesRequest,
+    RouteEventType, StreamLagEvent, WatchEventsRequest,
 };
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
@@ -608,8 +608,8 @@ fn format_bgp_event_line(event: &BgpEvent) -> String {
     // Envelope-level `event_id` (ADR-0072) takes precedence — it
     // exists for every category on the SubscribeFromEvent path and
     // is the durable cursor source. Fall back to the nested
-    // `RouteEvent.event_id` for legacy `WatchEvents` / `WatchRoutes`
-    // route events that don't carry an envelope id.
+    // `RouteEvent.event_id` for live `WatchEvents` route events that
+    // don't carry an envelope id.
     let event_id = event
         .event_id
         .or_else(|| route_event_id(event).filter(|id| *id > 0))
@@ -950,11 +950,13 @@ pub async fn run(
     json: bool,
 ) -> Result<(), CliError> {
     let mut client =
-        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+        EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let mut stream = client
-        .watch_route_events(WatchRoutesRequest {
+        .watch_events(WatchEventsRequest {
+            categories: vec![EventCategory::Route as i32],
             neighbor_address: neighbor.unwrap_or_default(),
             afi_safi: family.unwrap_or(0),
+            ..Default::default()
         })
         .await?
         .into_inner();

@@ -2664,7 +2664,7 @@ impl RibManager {
         // legacy broadcast send. The legacy broadcast consumes
         // `event`, so the sink call has to happen first; ADR-0072
         // explicitly does NOT claim "no-live-without-durable" for
-        // the legacy live surface (`WatchEvents`, `WatchRoutes`),
+        // the live surface (`WatchEvents`),
         // only for the EHM-owned broadcast that backs
         // `SubscribeFromEvent`. The order at this site is therefore
         // not load-bearing for correctness; pick the order that

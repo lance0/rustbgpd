@@ -124,7 +124,7 @@ releases rather than carried forward from older measurements.
 | Path add/delete | Yes | Yes | IPv4 + IPv6 |
 | Streaming path injection | Yes | No | AddPathStream |
 | List paths (Adj-In/Loc/Adj-Out) | Yes | Yes | |
-| Watch events (streaming) | Yes | Yes | WatchRoutes |
+| Watch events (streaming) | Yes | Yes | WatchEvents |
 | gNMI / OpenConfig telemetry | No | Partial | `Capabilities` / `Get` / `Subscribe` (ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE v1 for neighbor `session-state` when `[event_history]` is enabled) on a strict OpenConfig BGP state subset; `Set` commits a transaction-backed OpenConfig subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `Unimplemented`). ADR-0070 / M54; ON_CHANGE wired in ADR-0072 / M56. |
 | Table statistics | Yes | Partial | Health endpoint |
 | VRF management | Yes | No | |
@@ -149,7 +149,7 @@ releases rather than carried forward from older measurements.
 | BMP Adj-RIB-Out (RFC 8671) | No | **Yes** | Post-policy, byte-exact wire PDUs; with RFC 9069 Loc-RIB (collector-connect dump + EoR) this completes the trio no other open-source daemon ships (ADR-0097, M81) |
 | BMPv4 + Path Marking (drafts, pre-IANA) | No | **Yes** | Per-collector `version = 4` opt-in (draft-ietf-grow-bmp-tlv-20 framing + Path Marking TLV on Loc-RIB); no other router-side implementation found (ADR-0097) |
 | MRT dump (RFC 6396) | Yes | Yes | `TABLE_DUMP_V2` periodic + on-demand; gzip optional (ADR-0044) |
-| WatchEvent streaming | Yes | Yes | `WatchRoutes` + `WatchEvents` (legacy broadcast) plus `SubscribeFromEvent` with a durable monotonic-`event_id` cursor that survives daemon restart and post-incident reconnect; backed by the SQLite-WAL event outbox (ADR-0072). `rbgp events watch --from-event-id N` and the `examples/event-bridge` reference binary consume the cursor. |
+| WatchEvent streaming | Yes | Yes | `WatchEvents` (live broadcast) plus `SubscribeFromEvent` with a durable monotonic-`event_id` cursor that survives daemon restart and post-incident reconnect; backed by the SQLite-WAL event outbox (ADR-0072). `rbgp events watch --from-event-id N` and the `examples/event-bridge` reference binary consume the cursor. |
 | Durable event history / cursor replay | No | Yes | ADR-0072: producers across RIB, EVPN, PeerManager session lifecycle, policy, BFD, and dataplane FIB / blackhole all enqueue durable events; the `[event_history]` config block controls retention by count + bytes. `bgp_event_outbox_cursor_gap_total` counts subscribe requests where the requested cursor was older than the retention floor. |
 | gNMI / OpenConfig telemetry | No | Yes | Native `gnmi.gNMI` target for a strict OpenConfig BGP state subset (`Capabilities`, `Get`, `Subscribe` ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE v1 for neighbor `session-state` when `[event_history]` is enabled). `Set` commits a transaction-backed OpenConfig subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `Unimplemented`). Served on mTLS TCP or local UDS; M54 + M56 validate with `gnmic` |
 | Sentry integration | Yes | No | |

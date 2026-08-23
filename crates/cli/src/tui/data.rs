@@ -1193,8 +1193,8 @@ mod tests {
         wait_for(|| server.state.watch_events_active.load(Ordering::SeqCst) == 0).await;
     }
 
-    /// Red proof: restoring the admission fallback calls WatchRoutes, while
-    /// suppressing the primary error loses the exact visible status.
+    /// Red proof: suppressing the admission error loses the exact visible
+    /// status.
     #[tokio::test]
     async fn primary_admission_errors_are_visible_without_fallback() {
         for code in [
@@ -1212,11 +1212,6 @@ mod tests {
 
             wait_for(|| server.state.watch_events_calls.load(Ordering::SeqCst) == 1).await;
             settle_tasks().await;
-            assert_eq!(
-                server.state.watch_routes_calls.load(Ordering::SeqCst),
-                0,
-                "admission status {code:?}"
-            );
             let RouteEventUpdate::StreamStatus(Some(status)) = event_rx.recv().await.unwrap()
             else {
                 panic!("stream admission must publish visible status");
@@ -1230,9 +1225,8 @@ mod tests {
         }
     }
 
-    /// Red proof: switching the primary RPC back to WatchRoutes, accepting a
-    /// non-route event type by numeric coincidence, or reading lag from the
-    /// conflicting summary breaks these assertions.
+    /// Red proof: accepting a non-route event type by numeric coincidence or
+    /// reading lag from the conflicting summary breaks these assertions.
     #[tokio::test]
     async fn primary_stream_preserves_policy_context_and_exact_lag_count() {
         let server = spawn_mock_server(None).await;
@@ -1251,7 +1245,6 @@ mod tests {
         let policy = next_event(&mut event_rx).await;
         let lag = next_event(&mut event_rx).await;
         assert_eq!(server.state.watch_events_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(server.state.watch_routes_calls.load(Ordering::SeqCst), 0);
         let request = server.state.last_watch_events.lock().await.clone().unwrap();
         assert_eq!(request.categories, vec![EventCategory::Route as i32]);
         assert!(request.event_types.is_empty());
@@ -1297,7 +1290,6 @@ mod tests {
             panic!("stream failure must publish visible status");
         };
         assert!(visible_error.contains("stream item failed"));
-        assert_eq!(server.state.watch_routes_calls.load(Ordering::SeqCst), 0);
         tokio::time::advance(ROUTE_STREAM_RECONNECT_BACKOFF - Duration::from_millis(1)).await;
         assert_eq!(server.state.watch_events_calls.load(Ordering::SeqCst), 1);
         tokio::time::advance(Duration::from_millis(1)).await;
@@ -1334,7 +1326,6 @@ mod tests {
         assert_eq!(server.state.watch_events_calls.load(Ordering::SeqCst), 1);
         tokio::time::advance(Duration::from_millis(1)).await;
         wait_for(|| server.state.watch_events_calls.load(Ordering::SeqCst) == 2).await;
-        assert_eq!(server.state.watch_routes_calls.load(Ordering::SeqCst), 0);
         task.abort();
         let _ = task.await;
     }

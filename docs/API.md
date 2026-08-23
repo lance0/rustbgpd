@@ -54,7 +54,7 @@ not by itself make it v1-stable.
 | `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, single-peer outbound re-advertisement, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `ListNeighborSets`, `GetNeighborSet`, `SetNeighborSet`, `DeleteNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, import-policy decision explain (per-term traces for `.rpol` members), retained rejected-route views with reject reasons, read-only candidate-policy dry runs over the live RIB, and live per-term hit counters |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
-| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents`, `WatchRoutes`, `WatchRouteEvents` | RIB queries (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, recent route-event history with per-prefix drilldown, and streaming |
+| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | RIB queries (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, recent route-event history with per-prefix drilldown, and streaming |
 | `BfdService` | `GetBfdSessions` | Single-hop BFD session inspection for configured static neighbors |
 | `EventService` | `WatchEvents`, `SubscribeFromEvent`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; durable cursor replay via `SubscribeFromEvent` when `[event_history].enabled = true`; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
@@ -1191,8 +1191,6 @@ Query the routing information base and subscribe to real-time route changes.
 | `SetFibTable` | Create-or-replace a `[[fib_tables]]` entry by name (upsert; full definition, not a patch) at runtime; hot-applies through the reconciler and persists. Requires the reconciler running (≥1 table at startup) else `FAILED_PRECONDITION` (`mutating`) |
 | `DeleteFibTable` | Remove a `[[fib_tables]]` entry by name at runtime; `NOT_FOUND` if absent (`mutating`) |
 | `ListRouteEvents` | Recent unicast route add / withdraw / best-change / export-policy-filtered event history from the bounded in-memory RIB ring |
-| `WatchRoutes` | Server-streaming: real-time route add / withdraw / best-change / export-policy-filtered events |
-| `WatchRouteEvents` | Server-streaming: real-time route add / withdraw / best-change / export-policy-filtered events wrapped as `BgpEvent`, including explicit lag warnings |
 
 The three unicast route-listing RPCs return raw ordered
 `extended_communities`, the ASPA verification string in `aspa_state`, and
@@ -1209,7 +1207,7 @@ through one RPC shape.
 
 | Need | Surface | Shape | Retention / loss behavior |
 |------|---------|-------|---------------------------|
-| Live unicast route deltas | `WatchRoutes`, `WatchRouteEvents`, or `EventService.WatchEvents` with `EVENT_CATEGORY_ROUTE` | Streaming event feed | Live-only; `WatchRouteEvents` / `WatchEvents` emit `stream_lagged` when slow subscribers miss events |
+| Live unicast route deltas | `EventService.WatchEvents` with `EVENT_CATEGORY_ROUTE` | Streaming event feed | Live-only; `WatchEvents` emits `stream_lagged` when slow subscribers miss events |
 | Recent unicast route timeline | `ListRouteEvents` / `rbgp events` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
 | Live session lifecycle | `EventService.WatchEvents` with `EVENT_CATEGORY_SESSION` | Streaming event feed | Live-only; no replay after reconnect |
 | Recent session lifecycle | `EventService.ListSessionEvents` / `rbgp events sessions` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
@@ -1309,9 +1307,9 @@ statement/term traces for matched policies.
 
 ### Address family filtering
 
-Route-listing RPCs and route-event streams (`ListReceivedRoutes`,
-`ListBestRoutes`, `ListAdvertisedRoutes`, `WatchRoutes`, and
-`WatchRouteEvents`) accept an
+Route-listing RPCs and the route-event surfaces (`ListReceivedRoutes`,
+`ListBestRoutes`, `ListAdvertisedRoutes`, `ListRouteEvents`, and
+`EventService.WatchEvents`) accept an
 `afi_safi` field to filter by address family. Supported values are
 `IPV4_UNICAST` (1), `IPV6_UNICAST` (2), or unspecified (0, returns both
 unicast families). Route watch events include the address family of each route
@@ -1371,25 +1369,24 @@ page and read only `total_count`.
 
 ### Watch route changes (streaming)
 
+Live route deltas stream through `EventService.WatchEvents` with
+`EVENT_CATEGORY_ROUTE` (see [Watch unified events](#watch-unified-events));
+durable cursor replay goes through `EventService.SubscribeFromEvent`.
+
 ```bash
-# Legacy bare RouteEvent stream (streams until interrupted)
+# Live route stream (streams until interrupted)
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
-  localhost:50051 rustbgpd.v1.RibService/WatchRoutes
+  -d '{"categories": ["EVENT_CATEGORY_ROUTE"]}' \
+  localhost:50051 rustbgpd.v1.EventService/WatchEvents
 
-# Watch changes for a specific peer
+# Watch changes for a specific peer and family
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
-  -d '{"neighbor_address": "10.0.0.2"}' \
-  localhost:50051 rustbgpd.v1.RibService/WatchRoutes
-
-# Lag-aware BgpEvent route stream
-grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
-  localhost:50051 rustbgpd.v1.RibService/WatchRouteEvents
+  -d '{"categories": ["EVENT_CATEGORY_ROUTE"], "neighbor_address": "10.0.0.2", "afi_safi": "IPV4_UNICAST"}' \
+  localhost:50051 rustbgpd.v1.EventService/WatchEvents
 ```
 
-Both `WatchRoutes` and `WatchRouteEvents` use `WatchRoutesRequest`, which
-accepts an `afi_safi` field to filter the stream by address family.
-
-Event types: `ROUTE_EVENT_TYPE_ADDED`, `ROUTE_EVENT_TYPE_WITHDRAWN`,
+Each route event arrives as a `BgpEvent` whose `route` payload is the same
+`RouteEvent` message that `ListRouteEvents` returns. Event types: `ROUTE_EVENT_TYPE_ADDED`, `ROUTE_EVENT_TYPE_WITHDRAWN`,
 `ROUTE_EVENT_TYPE_BEST_CHANGED`, and `ROUTE_EVENT_TYPE_POLICY_FILTERED`.
 Policy-filtered events are route-level export-policy denials: `peer_address`
 is the source route peer, `target_peer_address` is the outbound peer whose
@@ -1400,15 +1397,12 @@ is assigned before the event is written to history and broadcast to live
 subscribers. The cursor resets on daemon restart and is not reused within one
 process.
 
-`WatchRoutes` and `WatchRouteEvents` do not backfill recent events for new
-subscribers. Clients that need both context and a live tail should call
-`ListRouteEvents` first, then open a live stream for subsequent deltas.
-`WatchRoutes` preserves its legacy bare `RouteEvent` response shape and does
-not emit explicit lag warnings. `WatchRouteEvents` returns the same route
-deltas wrapped in `BgpEvent` and emits `BGP_EVENT_TYPE_STREAM_LAGGED` with a
-`StreamLagEvent` payload when this subscriber falls behind the bounded route
-broadcast. `EventService.WatchEvents` provides the same lag-aware route events
-alongside session, policy, and dataplane categories.
+`WatchEvents` does not backfill recent events for new subscribers. Clients
+that need both context and a live tail should call `ListRouteEvents` first,
+then open a live stream for subsequent deltas (`rbgp events watch --backfill`
+does exactly this), or use `SubscribeFromEvent` when event history is enabled.
+`WatchEvents` emits `BGP_EVENT_TYPE_STREAM_LAGGED` with a `StreamLagEvent`
+payload when a subscriber falls behind the bounded route broadcast.
 
 ### List recent route events
 
@@ -1430,7 +1424,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ```
 
 `ListRouteEvents` reads the same unicast route events that feed
-`WatchRoutes`, but from a bounded 4096-event in-memory ring. Peer filters
+`WatchEvents`, but from a bounded 4096-event in-memory ring. Peer filters
 match `peer_address`, `previous_peer_address`, and `target_peer_address`, so a
 peer-scoped query includes withdraws, best-path moves away from that peer, and
 routes filtered by that peer's export policy. Prefix filters are exact-match
@@ -1725,7 +1719,7 @@ Durable `SubscribeFromEvent` compatibility:
 
 `OTC_ROUTE_BLOCKED` is durable Policy only. Durable `STREAM_LAGGED` describes a
 global committed-stream gap and is therefore compatible with every category.
-Route events are sourced from the same structured RIB broadcast as `WatchRoutes`,
+Route events are sourced from the structured RIB broadcast,
 including export-policy denial events (`route_policy_filtered`) for unicast
 routes present in Loc-RIB but filtered from an outbound peer;
 session events are sourced from the peer manager's session broadcast and cover
@@ -1805,12 +1799,11 @@ types 1 through 5, and `rd_filter` uses the same display format as
 `ListEvpnRoutes`. The history ring holds at most 4096 events, is process-local,
 and resets on daemon restart.
 
-Slow live-stream consumers do not block the daemon. If a `WatchEvents`,
-`WatchRouteEvents`, or `WatchRoutes` subscriber falls behind the bounded
-broadcast channel, missed events are skipped and
-`bgp_event_stream_lagged_total{service,source}` records the missed count.
-`WatchRouteEvents` emits an in-band `stream_lagged` warning; `WatchEvents`
-emits one for route, session, per-route dataplane, EVPN, and BFD sources.
+Slow live-stream consumers do not block the daemon. If a `WatchEvents`
+subscriber falls behind the bounded broadcast channel, missed events are
+skipped and `bgp_event_stream_lagged_total{service,source}` records the missed
+count. `WatchEvents` emits an in-band `stream_lagged` warning for route,
+session, per-route dataplane, EVPN, and BFD sources.
 Policy and peerless dataplane lag is metric-only and discarded without an
 in-band warning. Use
 `bgp_event_stream_subscribers{service,source}` to see active stream readers and

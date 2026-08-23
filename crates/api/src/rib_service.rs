@@ -1,4 +1,4 @@
-//! gRPC RIB service — route listing, filtering, and streaming.
+//! gRPC RIB service — route listing, filtering, and bounded event history.
 
 use std::net::IpAddr;
 use std::pin::Pin;
@@ -7,13 +7,9 @@ use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-use tokio_stream::{Stream, StreamExt, wrappers::BroadcastStream};
 use tonic::{Request, Response, Status};
-use tracing::debug;
 
 use crate::actor_read::rib_manager_read;
-use crate::event_service::{route_event_to_bgp_event, stream_lag_bgp_event};
 use crate::proto;
 use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
@@ -23,7 +19,6 @@ use rustbgpd_rib::{
     RouteQueryFilter, RouteQueryKey, RouteQueryScope, RouteSourceIdentity, RtcRibRoute,
     VpnRibRoute, route_query_key,
 };
-use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
     Afi, AsPathSegment, EvpnRoute, LargeCommunity, PathAttribute, Prefix, bgpls::BgpLsNlriType,
 };
@@ -140,7 +135,6 @@ pub struct RibService {
     rib_tx: mpsc::Sender<RibUpdate>,
     blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
     fib_route_snapshot: FibRouteSnapshotFn,
-    metrics: BgpMetrics,
     /// Per-listener access mode; gates the mutating FIB-table RPCs as
     /// defense-in-depth behind the authz interceptor's `Mutating` tier.
     access_mode: crate::server::AccessMode,
@@ -160,7 +154,6 @@ impl RibService {
             rib_tx,
             blackhole_discard_snapshot: std::sync::Arc::new(Vec::new),
             fib_route_snapshot: std::sync::Arc::new(Vec::new),
-            metrics: BgpMetrics::new(),
             // Fail closed: callers opt into mutations via `with_fib_table_control`.
             access_mode: crate::server::AccessMode::ReadOnly,
             fib_table_control: None,
@@ -170,33 +163,15 @@ impl RibService {
     }
 
     /// Create a RIB service with live kernel route status snapshots.
-    #[allow(dead_code)]
     pub fn with_status_snapshots(
         rib_tx: mpsc::Sender<RibUpdate>,
         blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
         fib_route_snapshot: FibRouteSnapshotFn,
     ) -> Self {
-        Self::with_status_snapshots_and_metrics(
-            rib_tx,
-            blackhole_discard_snapshot,
-            fib_route_snapshot,
-            BgpMetrics::new(),
-        )
-    }
-
-    /// Create a RIB service with live kernel route status snapshots and
-    /// shared metrics.
-    pub fn with_status_snapshots_and_metrics(
-        rib_tx: mpsc::Sender<RibUpdate>,
-        blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
-        fib_route_snapshot: FibRouteSnapshotFn,
-        metrics: BgpMetrics,
-    ) -> Self {
         Self {
             rib_tx,
             blackhole_discard_snapshot,
             fib_route_snapshot,
-            metrics,
             access_mode: crate::server::AccessMode::ReadOnly,
             fib_table_control: None,
             #[cfg(feature = "bench-internals")]
@@ -1314,44 +1289,6 @@ pub(crate) fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::Ro
     }
 }
 
-/// Synthetic in-band lag marker for `WatchRoutes`, mirroring the
-/// `BGP_EVENT_TYPE_STREAM_LAGGED` contract on the `BgpEvent` streams: a
-/// subscriber that fell behind the broadcast buffer sees the gap instead of a
-/// silent skip. Prefix/peer fields stay empty; `reason` carries the count.
-fn stream_lag_route_event(missed: u64) -> proto::RouteEvent {
-    proto::RouteEvent {
-        event_type: proto::RouteEventType::StreamLagged.into(),
-        timestamp: rustbgpd_rib::event::unix_timestamp_now(),
-        reason: format!("route event stream lagged; missed {missed} event(s)"),
-        ..Default::default()
-    }
-}
-
-fn route_event_matches_watch_filter(
-    event: &rustbgpd_rib::RouteEvent,
-    afi_safi_filter: i32,
-    peer_filter: Option<IpAddr>,
-) -> bool {
-    if afi_safi_filter != 0 {
-        let is_v4 = matches!(event.prefix, Prefix::V4(_));
-        let want_v4 = afi_safi_filter == proto::AddressFamily::Ipv4Unicast as i32;
-        if is_v4 != want_v4 {
-            return false;
-        }
-    }
-
-    if let Some(filter_addr) = peer_filter {
-        let matches_current = event.peer == Some(filter_addr);
-        let matches_previous = event.previous_peer == Some(filter_addr);
-        let matches_target = event.target_peer == Some(filter_addr);
-        if !matches_current && !matches_previous && !matches_target {
-            return false;
-        }
-    }
-
-    true
-}
-
 pub(crate) fn route_event_afi_filter(afi_safi: i32) -> Result<Option<Afi>, Status> {
     match afi_safi {
         0 => Ok(None),
@@ -1365,11 +1302,6 @@ pub(crate) fn route_event_afi_filter(afi_safi: i32) -> Result<Option<Afi>, Statu
 
 #[tonic::async_trait]
 impl proto::rib_service_server::RibService for RibService {
-    type WatchRoutesStream =
-        Pin<Box<dyn Stream<Item = Result<proto::RouteEvent, Status>> + Send + 'static>>;
-    type WatchRouteEventsStream =
-        Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send + 'static>>;
-
     async fn list_received_routes(
         &self,
         request: Request<proto::ListRoutesRequest>,
@@ -1637,99 +1569,6 @@ impl proto::rib_service_server::RibService for RibService {
         Ok(Response::new(proto::ListRouteEventsResponse {
             events: events.into_iter().map(route_event_to_proto).collect(),
         }))
-    }
-
-    async fn watch_routes(
-        &self,
-        request: Request<proto::WatchRoutesRequest>,
-    ) -> Result<Response<Self::WatchRoutesStream>, Status> {
-        let req = request.into_inner();
-        validate_unicast_afi_safi(req.afi_safi)?;
-
-        let afi_safi_filter = req.afi_safi;
-        let peer_filter: Option<IpAddr> = if req.neighbor_address.is_empty() {
-            None
-        } else {
-            Some(
-                req.neighbor_address
-                    .parse()
-                    .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?,
-            )
-        };
-
-        let broadcast_rx = rib_manager_read(&self.rib_tx, |reply| {
-            RibUpdate::SubscribeRouteEvents { reply }
-        })
-        .await?;
-
-        let metrics = self.metrics.clone();
-        let subscriber_guard = metrics.event_stream_subscriber_guard("watch_routes", "route");
-        let stream = BroadcastStream::new(broadcast_rx).filter_map(move |result| match result {
-            Ok(event) => {
-                let _subscriber_guard = &subscriber_guard;
-                route_event_matches_watch_filter(&event, afi_safi_filter, peer_filter)
-                    .then(|| Ok(route_event_to_proto(event.as_ref().clone())))
-            }
-            Err(BroadcastStreamRecvError::Lagged(missed)) => {
-                let _subscriber_guard = &subscriber_guard;
-                metrics.record_event_stream_lagged("watch_routes", "route", missed);
-                debug!(
-                    missed,
-                    "WatchRoutes subscriber lagged, emitting missed-event signal"
-                );
-                Some(Ok(stream_lag_route_event(missed)))
-            }
-        });
-
-        Ok(Response::new(Box::pin(stream)))
-    }
-
-    async fn watch_route_events(
-        &self,
-        request: Request<proto::WatchRoutesRequest>,
-    ) -> Result<Response<Self::WatchRouteEventsStream>, Status> {
-        let req = request.into_inner();
-        validate_unicast_afi_safi(req.afi_safi)?;
-
-        let afi_safi_filter = req.afi_safi;
-        let peer_filter: Option<IpAddr> = if req.neighbor_address.is_empty() {
-            None
-        } else {
-            Some(
-                req.neighbor_address
-                    .parse()
-                    .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?,
-            )
-        };
-
-        let broadcast_rx = rib_manager_read(&self.rib_tx, |reply| {
-            RibUpdate::SubscribeRouteEvents { reply }
-        })
-        .await?;
-
-        let metrics = self.metrics.clone();
-        let subscriber_guard = metrics.event_stream_subscriber_guard("watch_route_events", "route");
-        let stream = BroadcastStream::new(broadcast_rx).filter_map(move |result| match result {
-            Ok(event) => {
-                let _subscriber_guard = &subscriber_guard;
-                route_event_matches_watch_filter(&event, afi_safi_filter, peer_filter)
-                    .then(|| Ok(route_event_to_bgp_event(event.as_ref().clone())))
-            }
-            Err(BroadcastStreamRecvError::Lagged(missed)) => {
-                let _subscriber_guard = &subscriber_guard;
-                metrics.record_event_stream_lagged("watch_route_events", "route", missed);
-                debug!(
-                    missed,
-                    "WatchRouteEvents subscriber lagged, emitting missed-event signal"
-                );
-                Some(Ok(stream_lag_bgp_event(
-                    proto::EventCategory::Route,
-                    missed,
-                )))
-            }
-        });
-
-        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn list_flow_spec_routes(
@@ -2762,15 +2601,12 @@ mod tests {
     use std::time::Instant;
 
     use bytes::Bytes;
-    use tokio::sync::broadcast;
-    use tokio_stream::StreamExt;
 
     use rustbgpd_wire::{
         AsPath, Ipv4Prefix, Ipv6Prefix, RawAttribute, bgpls::decode_bgpls_vpn_nlri,
     };
 
     use super::*;
-    use crate::test_support::metrics_text as gather_text;
     use proto::rib_service_server::RibService as _;
 
     fn make_service() -> RibService {
@@ -2816,38 +2652,6 @@ mod tests {
         UnaryRibRead::ListTopologyLinks,
         UnaryRibRead::ListOrrStatus,
     ];
-
-    #[derive(Clone, Copy, Debug)]
-    enum RibWatchAdmission {
-        WatchRoutes,
-        WatchRouteEvents,
-    }
-
-    const RIB_WATCH_ADMISSIONS: [RibWatchAdmission; 2] = [
-        RibWatchAdmission::WatchRoutes,
-        RibWatchAdmission::WatchRouteEvents,
-    ];
-
-    async fn invoke_rib_watch_admission(
-        service: &RibService,
-        rpc: RibWatchAdmission,
-    ) -> Result<(), Status> {
-        let request = proto::WatchRoutesRequest::default();
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            match rpc {
-                RibWatchAdmission::WatchRoutes => service
-                    .watch_routes(Request::new(request))
-                    .await
-                    .map(|_| ()),
-                RibWatchAdmission::WatchRouteEvents => service
-                    .watch_route_events(Request::new(request))
-                    .await
-                    .map(|_| ()),
-            }
-        })
-        .await
-        .expect("RIB watch admission timed out")
-    }
 
     async fn invoke_unary_rib_read(svc: &RibService, rpc: UnaryRibRead) -> Result<(), Status> {
         match rpc {
@@ -2954,42 +2758,6 @@ mod tests {
                 .await
                 .unwrap_err();
             actor.await.unwrap();
-            assert_eq!(error.code(), tonic::Code::Unavailable, "{rpc:?}");
-            assert_eq!(error.message(), "RIB manager dropped reply", "{rpc:?}");
-        }
-    }
-
-    /// Load-bearing: restoring either watch admission's actor-send mapping to
-    /// `INTERNAL` makes its actual-handler row red.
-    #[tokio::test]
-    async fn rib_watch_admission_send_failures_are_unavailable() {
-        for rpc in RIB_WATCH_ADMISSIONS {
-            let (tx, rx) = mpsc::channel(1);
-            drop(rx);
-            let error = invoke_rib_watch_admission(&RibService::new(tx), rpc)
-                .await
-                .unwrap_err();
-            assert_eq!(error.code(), tonic::Code::Unavailable, "{rpc:?}");
-            assert_eq!(error.message(), "RIB manager unavailable", "{rpc:?}");
-        }
-    }
-
-    /// Load-bearing: restoring either watch admission's reply-await mapping to
-    /// `INTERNAL` makes its accepted-then-dropped actual-handler row red.
-    #[tokio::test]
-    async fn rib_watch_admission_reply_drops_are_unavailable() {
-        for rpc in RIB_WATCH_ADMISSIONS {
-            let (tx, mut rx) = mpsc::channel(1);
-            let actor = tokio::spawn(async move {
-                drop(rx.recv().await.expect("RIB watch admission"));
-            });
-            let error = invoke_rib_watch_admission(&RibService::new(tx), rpc)
-                .await
-                .unwrap_err();
-            tokio::time::timeout(std::time::Duration::from_secs(1), actor)
-                .await
-                .expect("RIB actor join timed out")
-                .unwrap();
             assert_eq!(error.code(), tonic::Code::Unavailable, "{rpc:?}");
             assert_eq!(error.message(), "RIB manager dropped reply", "{rpc:?}");
         }
@@ -4023,20 +3791,6 @@ mod tests {
         route_page_query_identity(req.afi_safi, &filters)
     }
 
-    fn route_event(prefix: Prefix, peer: IpAddr) -> rustbgpd_rib::RouteEvent {
-        rustbgpd_rib::RouteEvent {
-            event_id: 0,
-            event_type: RouteEventType::Added,
-            prefix,
-            peer: Some(peer),
-            previous_peer: None,
-            target_peer: None,
-            timestamp: "123".to_string(),
-            path_id: 0,
-            reason: String::new(),
-        }
-    }
-
     fn fib_status(
         table_name: &str,
         prefix: &str,
@@ -4057,244 +3811,6 @@ mod tests {
             reason: reason.to_string(),
             ..Default::default()
         }
-    }
-
-    fn make_watch_routes_service(
-        metrics: BgpMetrics,
-    ) -> (RibService, broadcast::Sender<Arc<rustbgpd_rib::RouteEvent>>) {
-        let (tx, mut rx) = mpsc::channel(16);
-        let (events_tx, _) = broadcast::channel(16);
-        let events_tx_for_task = events_tx.clone();
-        tokio::spawn(async move {
-            while let Some(update) = rx.recv().await {
-                if let RibUpdate::SubscribeRouteEvents { reply } = update {
-                    let _ = reply.send(events_tx_for_task.subscribe());
-                }
-            }
-        });
-        (
-            RibService::with_status_snapshots_and_metrics(
-                tx,
-                Arc::new(Vec::new),
-                Arc::new(Vec::new),
-                metrics,
-            ),
-            events_tx,
-        )
-    }
-
-    #[tokio::test]
-    async fn watch_routes_subscriber_gauge_tracks_stream_lifecycle() {
-        let metrics = BgpMetrics::new();
-        let (svc, _events_tx) = make_watch_routes_service(metrics.clone());
-
-        let response = svc
-            .watch_routes(Request::new(proto::WatchRoutesRequest::default()))
-            .await
-            .unwrap();
-
-        let text = gather_text(&metrics);
-        assert!(
-            text.contains(
-                "bgp_event_stream_subscribers{service=\"watch_routes\",source=\"route\"} 1"
-            )
-        );
-
-        drop(response);
-        tokio::task::yield_now().await;
-
-        let text = gather_text(&metrics);
-        assert!(
-            text.contains(
-                "bgp_event_stream_subscribers{service=\"watch_routes\",source=\"route\"} 0"
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn watch_routes_lagged_subscriber_emits_marker_and_increments_metric() {
-        let metrics = BgpMetrics::new();
-        let (svc, events_tx) = make_watch_routes_service(metrics.clone());
-
-        let response = svc
-            .watch_routes(Request::new(proto::WatchRoutesRequest::default()))
-            .await
-            .unwrap();
-        let mut stream = response.into_inner();
-
-        for index in 0..20 {
-            events_tx
-                .send(Arc::new(route_event(
-                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, index), 32)),
-                    IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-                )))
-                .unwrap();
-        }
-
-        // The gap must be visible in-band: first item is the lag marker, then
-        // the surviving events resume.
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(event.event_type, proto::RouteEventType::StreamLagged as i32);
-        assert!(event.prefix.is_empty());
-        assert!(event.peer_address.is_empty());
-        assert_eq!(event.reason, "route event stream lagged; missed 4 event(s)");
-
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(event.event_type, proto::RouteEventType::Added as i32);
-
-        let text = gather_text(&metrics);
-        assert!(text.contains(
-            "bgp_event_stream_lagged_total{service=\"watch_routes\",source=\"route\"} 4"
-        ));
-    }
-
-    #[tokio::test]
-    async fn watch_route_events_emits_bgp_route_event_and_applies_filters() {
-        let metrics = BgpMetrics::new();
-        let (svc, events_tx) = make_watch_routes_service(metrics);
-
-        let response = svc
-            .watch_route_events(Request::new(proto::WatchRoutesRequest {
-                neighbor_address: "192.0.2.1".to_string(),
-                afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
-            }))
-            .await
-            .unwrap();
-        let mut stream = response.into_inner();
-
-        events_tx
-            .send(Arc::new(route_event(
-                Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 64)),
-                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-            )))
-            .unwrap();
-        events_tx
-            .send(Arc::new(route_event(
-                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24)),
-                IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
-            )))
-            .unwrap();
-        events_tx
-            .send(Arc::new(route_event(
-                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 2, 0, 0), 24)),
-                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-            )))
-            .unwrap();
-
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(event.category, proto::EventCategory::Route as i32);
-        assert_eq!(event.event_type, proto::BgpEventType::RouteAdded as i32);
-        assert_eq!(event.peer_address, "192.0.2.1");
-        assert_eq!(event.prefix, "10.2.0.0");
-        assert_eq!(event.prefix_length, 24);
-        assert_eq!(event.summary, "route added 10.2.0.0/24");
-        assert!(matches!(
-            event.payload,
-            Some(proto::bgp_event::Payload::Route(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn watch_route_events_filter_matches_policy_filtered_target_peer() {
-        let metrics = BgpMetrics::new();
-        let (svc, events_tx) = make_watch_routes_service(metrics);
-
-        let response = svc
-            .watch_route_events(Request::new(proto::WatchRoutesRequest {
-                neighbor_address: "192.0.2.1".to_string(),
-                afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
-            }))
-            .await
-            .unwrap();
-        let mut stream = response.into_inner();
-
-        events_tx
-            .send(Arc::new(rustbgpd_rib::RouteEvent {
-                event_id: 0,
-                event_type: RouteEventType::PolicyFiltered,
-                prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 3, 0, 0), 24)),
-                peer: Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))),
-                previous_peer: None,
-                target_peer: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
-                timestamp: "123".to_string(),
-                path_id: 0,
-                reason: "policy_denied".to_string(),
-            }))
-            .unwrap();
-
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            event.event_type,
-            proto::BgpEventType::RoutePolicyFiltered as i32
-        );
-        assert_eq!(event.peer_address, "198.51.100.1");
-        assert_eq!(event.target_peer_address, "192.0.2.1");
-        match event.payload {
-            Some(proto::bgp_event::Payload::Route(route)) => {
-                assert_eq!(route.reason, "policy_denied");
-            }
-            other => panic!("expected route payload, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn watch_route_events_lagged_subscriber_emits_signal() {
-        let metrics = BgpMetrics::new();
-        let (svc, events_tx) = make_watch_routes_service(metrics.clone());
-
-        let response = svc
-            .watch_route_events(Request::new(proto::WatchRoutesRequest::default()))
-            .await
-            .unwrap();
-        let mut stream = response.into_inner();
-
-        for index in 0..20 {
-            events_tx
-                .send(Arc::new(route_event(
-                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 3, 0, index), 32)),
-                    IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-                )))
-                .unwrap();
-        }
-
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(event.category, proto::EventCategory::Route as i32);
-        assert_eq!(event.event_type, proto::BgpEventType::StreamLagged as i32);
-        assert_eq!(event.severity, proto::EventSeverity::Warning as i32);
-        match event.payload {
-            Some(proto::bgp_event::Payload::StreamLag(lag)) => {
-                assert_eq!(lag.source_category, proto::EventCategory::Route as i32);
-                assert_eq!(lag.missed_count, 4);
-            }
-            other => panic!("expected stream lag payload, got {other:?}"),
-        }
-
-        let text = gather_text(&metrics);
-        assert!(text.contains(
-            "bgp_event_stream_lagged_total{service=\"watch_route_events\",source=\"route\"} 4"
-        ));
     }
 
     #[tokio::test]
