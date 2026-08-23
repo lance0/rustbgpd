@@ -2907,6 +2907,44 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 69,
+      "type": "row",
+      "title": "ORR",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 182 },
+      "panels": []
+    },
+    {
+      "id": 70,
+      "type": "timeseries",
+      "title": "ORR SPF activity and topology",
+      "description": "Per-instance RFC 9107 ORR SPF computation rate with the current cached topology node and usable directed-link counts for context. All three series remain zero while ORR has no configured vantage.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 183 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (instance) (rate(bgp_orr_spf_runs_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} SPF runs/s",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_orr_topology_nodes{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} nodes",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_orr_topology_links{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} usable links",
+          "refId": "C"
+        }
+      ]
     }
   ]
 }
