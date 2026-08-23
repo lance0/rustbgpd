@@ -196,8 +196,8 @@ the adapter serves at `/` where Bird's Eye serves under `/api/` (IXP Manager's
 | `GET /api/symbols` | `symbols()` | `symbols` | served, divergent | only `protocol` and `routing table` classes; Bird's Eye emits every `show symbols` class |
 | `GET /api/symbols/tables` | — | — | not served | out of scope |
 | `GET /api/symbols/protocols` | — | — | not served | out of scope |
-| `GET /api/routes/protocol/{protocol}` | `routesForProtocol()` | `routes_protocol` | served, divergent | route shape: `bgp.as_path` integers (strings upstream), `bgp.local_pref` number (string upstream), `gateway` = next hop, `interface` `""`, `metric` `0`, `primary` `false`, `learnt_from` = peer address, `age` from receive time |
-| `GET /api/routes/table/{table}` | `routesForTable()` | `routes_table` | served, divergent | route shape as above but `primary` is real; table is a validated alias over one global Loc-RIB, not a BIRD table |
+| `GET /api/routes/protocol/{protocol}` | `routesForProtocol()` | `routes_protocol` | served, divergent | route shape: `gateway` = next hop, `interface` `""`, `metric` `0`, `learnt_from` = peer address, `age` from receive time |
+| `GET /api/routes/table/{table}` | `routesForTable()` | `routes_table` | served, divergent | route shape as above; table is a validated alias over one global Loc-RIB, not a BIRD table |
 | `GET /api/routes/export/{protocol}` | `routesForExport()` | `routes_export` | served, divergent | route shape as above |
 | `GET /api/routes/count/protocol/{protocol}` | — | — | not served | out of scope (`total_count` exists on the first RIB page, so it is a cheap add if scope grows) |
 | `GET /api/routes/count/table/{table}` | — | — | not served | out of scope; standing `full-table-count` blocker |
@@ -274,18 +274,18 @@ refuses any `runtime_compatibility` value other than `false` while any entry
 is classified `must_match`. The flag therefore flips only when zero
 `must_match` entries remain, and the post-flip claim language is "verified
 IXP Manager 7.4 Bird's Eye API compatibility with documented BIRD-internal
-divergences". The eight open `must_match` entries are the route-shape
-cluster (`bgp.as_path` element type, `bgp.local_pref`, `bgp.med` emitted
-when absent, `primary` outside the table view, the `type` triple), the two
-lookup-semantics entries (exact-versus-longest protocol/export match and the
-table lookup's HTTP 400 for host-bit input), and the ordinary-`(x, y)`
-lc-zwild scope.
+divergences". The open `must_match` entries are the two lookup-semantics
+entries (exact-versus-longest protocol/export match and the table lookup's
+HTTP 400 for host-bit input) and the ordinary-`(x, y)` lc-zwild scope; the
+route-shape cluster (`bgp.as_path` element type, `bgp.local_pref`,
+`bgp.med` emitted when absent, `primary` outside the table view, the `type`
+triple) converged on the oracle and its entries are removed.
 
 ### Work list
 
-Each line names the gap and the evidence that closes it. Items 1, 2, 6, 15,
+Each line names the gap and the evidence that closes it. Items 1 to 6, 15,
 and 16 are done; items 3 to 14 record what the oracle diff showed, with the
-observed JSON paths, and now carry their decisions: `must_match` entries
+observed JSON paths, and carry their decisions: `must_match` entries
 stay open and gate the flip, while `intentional`, `unsupported`, and
 `extension` entries are closed decisions that stay on the allow-list. Every
 observed
@@ -302,16 +302,19 @@ predicted eight more that the diff did not show, listed after the table.
    adapter shape, rationale, `consumer_visible`), pinned to a constant in
    `verify_capture.py`; the gate fails on an unlisted difference and on a stale
    entry, and re-proves both on every run.
-3. `bgp.as_path` element type: observed on every route view,
+3. Done. `bgp.as_path` element type: observed on every route view,
    `routes.*.bgp.as_path.*` strings upstream, integers from the adapter.
-   Decided: classified `must_match`; the adapter converges on the oracle's
-   element type and the entry is then removed.
-4. `bgp.local_pref`: observed as a type and meaning difference,
+   Was `must_match`; the adapter now emits string elements (the split
+   `BGP.as_path` text shape) and the entry is removed.
+4. Done. `bgp.local_pref`: observed as a type and meaning difference,
    `routes.*.bgp.local_pref` is the string `"100"` upstream (BIRD's default
    local preference assigned at import, also for the route announced with
    LOCAL_PREF 200, which both route servers ignore on the eBGP session) and the
-   number `0` from the adapter (the received attribute). Decided:
-   classified `must_match`.
+   number `0` from the adapter (the received attribute). Was `must_match`;
+   the gRPC projection now serves the effective local preference — the
+   attribute when present, otherwise the default 100 best-path selection
+   applies, with wire presence on `Route.local_pref_attr` — and the adapter
+   prints it as Bird's Eye's string; the entry is removed.
 5. Route sentinels: observed `routes.*.interface` (`"eth0"` vs `""`),
    `routes.*.metric` (BIRD preference `100` vs `0`), `routes.*.primary`
    (`true` for the best route in every upstream view, `false` from the adapter
@@ -324,8 +327,13 @@ predicted eight more that the diff did not show, listed after the table.
    `fixtures/birdseye-contract.json` come from `fake-birdc`'s BIRD 1 line
    format, not from BIRD 2. Decided: `interface`, `learnt_from`, and `metric`
    are `intentional` (BIRD-internal kernel and preference values a route
-   server cannot honestly fabricate); `primary` and the `type` triple are
-   `must_match`, as is the always-emitted `bgp.med`.
+   server cannot honestly fabricate); `primary`, the `type` triple, and the
+   always-emitted `bgp.med` were `must_match` and are done: `primary` now
+   reports the Loc-RIB selection in every view (the received, export, and
+   exact-route views join a `ListBestRoutes` identity set; the table views
+   already read it), `type` is the BIRD 2 `["BGP", "univ"]` pair, and
+   `bgp.med` is emitted only when the route carries the attribute
+   (`Route.med_attr` presence). Their entries are removed.
 6. Done. `bgp.aggregator` and `bgp.atomic_aggr`: the gRPC route detail
    carries the stored AGGREGATOR and ATOMIC_AGGREGATE path attributes
    (`Route.aggregator`, `Route.atomic_aggregate`) and the adapter renders

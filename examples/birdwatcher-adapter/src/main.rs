@@ -901,6 +901,54 @@ fn symbol_names(
 //                            →  RibService.ListReceivedRoutes
 // ---------------------------------------------------------------------------
 
+/// Identity key of one route row across the paged route scopes:
+/// (prefix, prefix length, source peer, Add-Path id). Advertised rows
+/// keep their source identity, so the same key joins every scope.
+fn route_key(route: &proto::Route) -> (String, u32, String, u32) {
+    (
+        route.prefix.clone(),
+        route.prefix_length,
+        route.peer_address.clone(),
+        route.path_id,
+    )
+}
+
+/// Loc-RIB best-route identity keys, used to report `primary` truthfully
+/// in the received and export views (Bird's Eye marks the selected route
+/// in every view). `prefix` narrows the walk to one exact prefix for the
+/// exact-route lookups; `None` walks the whole table — the same
+/// per-request full-table read the atomic table view already performs.
+async fn best_route_keys(
+    state: &AppState,
+    prefix: Option<ExactPrefix>,
+) -> Result<HashSet<(String, u32, String, u32)>, HttpError> {
+    let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
+    let mut keys = HashSet::new();
+    let mut page_token = String::new();
+    loop {
+        let response = client
+            .list_best_routes(proto::ListRoutesRequest {
+                afi_safi: proto::AddressFamily::Unspecified as i32,
+                page_size: 1000,
+                page_token,
+                prefix_filter: prefix.map(|p| p.address.to_string()).unwrap_or_default(),
+                prefix_filter_length: prefix.map_or(0, |p| p.length),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| bad_gateway("ListBestRoutes", &error))?
+            .into_inner();
+        // Marker set, not a served view: the max-routes cap applies to
+        // the view being rendered, not to this lookup.
+        keys.extend(response.routes.iter().map(route_key));
+        if response.next_page_token.is_empty() {
+            break;
+        }
+        page_token = response.next_page_token;
+    }
+    Ok(keys)
+}
+
 async fn routes_protocol(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -920,6 +968,7 @@ async fn routes_peer(
 }
 
 async fn serve_routes_for_peer(state: &AppState, peer: IpAddr) -> Result<Json<Value>, HttpError> {
+    let best = best_route_keys(state, None).await?;
     let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
     let mut routes: Vec<Value> = Vec::new();
     let mut page_token = String::new();
@@ -940,11 +989,13 @@ async fn serve_routes_for_peer(state: &AppState, peer: IpAddr) -> Result<Json<Va
         if page_token.is_empty() {
             enforce_max(resp.total_count, state.max_routes)?;
         }
-        routes.extend(
-            resp.routes
-                .iter()
-                .map(|route| route_to_birdwatcher(route, &state.identities)),
-        );
+        routes.extend(resp.routes.iter().map(|route| {
+            route_to_birdwatcher_with_primary(
+                route,
+                &state.identities,
+                best.contains(&route_key(route)),
+            )
+        }));
         enforce_max(routes.len() as u64, state.max_routes)?;
         if resp.next_page_token.is_empty() {
             break;
@@ -1137,6 +1188,7 @@ async fn routes_export(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpError> {
     let peer = state.identities.resolve(&id)?;
+    let best = best_route_keys(&state, None).await?;
     let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
     let mut routes = Vec::new();
     let mut page_token = String::new();
@@ -1155,11 +1207,13 @@ async fn routes_export(
         if page_token.is_empty() {
             enforce_max(resp.total_count, state.max_routes)?;
         }
-        routes.extend(
-            resp.routes
-                .iter()
-                .map(|route| route_to_birdwatcher(route, &state.identities)),
-        );
+        routes.extend(resp.routes.iter().map(|route| {
+            route_to_birdwatcher_with_primary(
+                route,
+                &state.identities,
+                best.contains(&route_key(route)),
+            )
+        }));
         enforce_max(routes.len() as u64, state.max_routes)?;
         if resp.next_page_token.is_empty() {
             break;
@@ -1337,11 +1391,18 @@ async fn serve_exact_route(
         page_token = response.next_page_token;
     }
 
+    let best = best_route_keys(state, Some(prefix)).await?;
     Ok(Json(serde_json::json!({
         "api": api_block(state.max_routes),
         "routes": routes
             .iter()
-            .map(|route| route_to_birdwatcher(route, &state.identities))
+            .map(|route| {
+                route_to_birdwatcher_with_primary(
+                    route,
+                    &state.identities,
+                    best.contains(&route_key(route)),
+                )
+            })
             .collect::<Vec<_>>(),
     })))
 }
@@ -1796,12 +1857,14 @@ fn render_rejected_route(
 
     // The retained AS_PATH is a lossless display string ("65001 {65002
     // 65003}"); birdwatcher wants an ASN array, so flatten it (AS_SET
-    // members included) best-effort.
-    let as_path: Vec<u32> = route
+    // members included) best-effort. Elements are strings, the same
+    // Bird's Eye shape the accepted-route views emit.
+    let as_path: Vec<String> = route
         .as_path
         .split(|c: char| !c.is_ascii_digit())
         .filter(|p| !p.is_empty())
-        .filter_map(|p| p.parse().ok())
+        .filter_map(|p| p.parse::<u32>().ok())
+        .map(|asn| asn.to_string())
         .collect();
 
     let from_protocol = identities.identity(peer).protocol;
@@ -1818,7 +1881,7 @@ fn render_rejected_route(
         "interface": "",
         "metric": 0,
         "age": age,
-        "type": ["BGP", "unicast", "univ"],
+        "type": ["BGP", "univ"],
         "primary": false,
         "learnt_from": peer.to_string(),
         "reject_reason": route.reason,
@@ -1831,8 +1894,11 @@ fn render_rejected_route(
             "origin": "",
             "as_path": as_path,
             "next_hop": route.next_hop,
-            "local_pref": 0,
-            "med": 0,
+            // Retention keeps no LOCAL_PREF/MED: render the effective
+            // default local preference (the same rule as the accepted
+            // views on a route without the attribute) and omit `med`,
+            // matching BIRD's absence semantics.
+            "local_pref": "100",
             "communities": communities,
             "large_communities": large_communities,
         }
@@ -2069,8 +2135,12 @@ fn format_connection(state: i32) -> &'static str {
 /// `metric`, `age`, `type`, `primary`, `learnt_from`, and `bgp` sub-object
 /// with `origin`, `as_path`, `next_hop`, `local_pref`, `med`, `communities`,
 /// `large_communities`.
+///
+/// `primary` reports what the response itself carries (`Route.best`);
+/// views whose upstream scope never marks best-ness pass an explicit
+/// value from a Loc-RIB lookup instead.
 fn route_to_birdwatcher(route: &proto::Route, identities: &IdentityResolver) -> Value {
-    route_to_birdwatcher_with_primary(route, identities, false)
+    route_to_birdwatcher_with_primary(route, identities, route.best)
 }
 
 fn route_to_birdwatcher_with_primary(
@@ -2117,15 +2187,26 @@ fn route_to_birdwatcher_with_primary(
         String::new()
     };
 
+    // Bird's Eye splits BIRD's `BGP.as_path` text, so path elements are
+    // strings, and BIRD assigns its default local preference at import,
+    // so a (string) `local_pref` prints for every route — the gRPC field
+    // carries the same effective value (default 100 when the attribute
+    // is absent). Both shapes are pinned by the populated oracle leg.
+    let as_path: Vec<String> = route.as_path.iter().map(u32::to_string).collect();
     let mut bgp = serde_json::json!({
         "origin": origin,
-        "as_path": route.as_path,
+        "as_path": as_path,
         "next_hop": route.next_hop,
-        "local_pref": route.local_pref,
-        "med": route.med,
+        "local_pref": route.local_pref.to_string(),
         "communities": communities,
         "large_communities": large_communities,
     });
+    // BIRD omits `BGP.med` entirely when the route carries no MED
+    // attribute; mirror that presence semantics from the wire-presence
+    // field (the bare `med` encodes absent as 0).
+    if let Some(med) = route.med_attr {
+        bgp["med"] = med.into();
+    }
     // Bird's Eye prints AGGREGATOR as "<address> AS<asn>" and
     // ATOMIC_AGGREGATE as a bare key (empty value), each only when the
     // route carries the attribute; mirror that presence semantics.
@@ -2143,7 +2224,8 @@ fn route_to_birdwatcher_with_primary(
         "interface": "",
         "metric": 0,
         "age": age,
-        "type": ["BGP", "unicast", "univ"],
+        // BIRD 2's `Type: BGP univ` pair, as Bird's Eye splits it.
+        "type": ["BGP", "univ"],
         "primary": primary,
         "learnt_from": route.peer_address,
         "bgp": bgp
@@ -2491,6 +2573,7 @@ mod tests {
             as_path: vec![65010, 65020],
             local_pref: 200,
             med: 50,
+            med_attr: Some(50),
             communities: vec![(65001 << 16) | 100],
             large_communities: vec!["65001:1:2".to_string()],
             // 2026-01-02 03:04:05 UTC
@@ -2510,11 +2593,14 @@ mod tests {
         assert_eq!(json["learnt_from"], "192.0.2.1");
         assert_eq!(json["age"], "2026-01-02 03:04:05");
         assert_eq!(json["primary"], false);
-        assert_eq!(json["type"], serde_json::json!(["BGP", "unicast", "univ"]));
+        assert_eq!(json["type"], serde_json::json!(["BGP", "univ"]));
         assert_eq!(json["bgp"]["origin"], "Incomplete");
-        assert_eq!(json["bgp"]["as_path"], serde_json::json!([65010, 65020]));
+        assert_eq!(
+            json["bgp"]["as_path"],
+            serde_json::json!(["65010", "65020"])
+        );
         assert_eq!(json["bgp"]["next_hop"], "192.0.2.1");
-        assert_eq!(json["bgp"]["local_pref"], 200);
+        assert_eq!(json["bgp"]["local_pref"], "200");
         assert_eq!(json["bgp"]["med"], 50);
         assert_eq!(
             json["bgp"]["communities"],
@@ -2536,10 +2622,18 @@ mod tests {
             prefix_length: 32,
             next_hop: "2001:db8::1".to_string(),
             peer_address: "2001:db8::1".to_string(),
+            local_pref: 100,
+            best: true,
             ..Default::default()
         };
         let json = route_to_birdwatcher(&route, &IdentityResolver::default());
         assert_eq!(json["network"], "2001:db8::/32");
+        // The response's own best flag is the primary marker.
+        assert_eq!(json["primary"], true);
+        // Effective local preference prints for every route; an absent
+        // MED attribute omits the key, matching BIRD.
+        assert_eq!(json["bgp"]["local_pref"], "100");
+        assert!(json["bgp"].get("med").is_none());
         // No receive timestamp → empty age (Alice-LG zero-time fallback).
         assert_eq!(json["age"], "");
         assert_eq!(json["from_protocol"], "bgp_2001_db8__1");
@@ -2606,8 +2700,13 @@ mod tests {
         assert_eq!(json["aspa_validation"], "unverified");
         assert_eq!(
             json["bgp"]["as_path"],
-            serde_json::json!([65020, 65030, 65031])
+            serde_json::json!(["65020", "65030", "65031"])
         );
+        // Retained rejects render the effective default local preference
+        // and omit the unretained MED, in the BIRD 2 type pair.
+        assert_eq!(json["bgp"]["local_pref"], "100");
+        assert!(json["bgp"].get("med").is_none());
+        assert_eq!(json["type"], serde_json::json!(["BGP", "univ"]));
         assert_eq!(
             json["bgp"]["communities"],
             serde_json::json!([[65001, 666]])
@@ -3041,8 +3140,8 @@ mod tests {
         assert_eq!(json["network"], "10.1.0.0/24");
         assert_eq!(json["gateway"], "192.0.2.9");
         assert_eq!(json["learnt_from"], "192.0.2.9");
-        assert_eq!(json["bgp"]["as_path"], serde_json::json!([65010]));
-        assert_eq!(json["bgp"]["local_pref"], 100);
+        assert_eq!(json["bgp"]["as_path"], serde_json::json!(["65010"]));
+        assert_eq!(json["bgp"]["local_pref"], "100");
         // …the stopping gate is surfaced as the reason…
         assert_eq!(json["noexport_reason"], "export_policy");
         assert_eq!(json["noexport_reason_detail"], "denied by term no-transit");
@@ -3320,6 +3419,7 @@ mod tests {
             prefix_length: 24,
             path_id,
             med,
+            med_attr: Some(med),
             ..Default::default()
         };
         for source in [ExactRouteSource::Received, ExactRouteSource::Advertised] {
@@ -3358,6 +3458,7 @@ mod tests {
             prefix_length: 24,
             peer_address: peer.to_string(),
             med,
+            med_attr: Some(med),
             ..Default::default()
         };
         let response = proto::ExplainBestPathResponse {

@@ -1182,7 +1182,11 @@ fn explain_best_path_to_proto(explain: ExplainBestPath) -> proto::ExplainBestPat
 fn route_to_proto(route: &Route, best: bool) -> proto::Route {
     let mut origin = 0u32;
     let mut as_path = Vec::new();
-    let mut local_pref = 0u32;
+    // Effective LOCAL_PREF: the attribute value when present, otherwise
+    // the default 100 the RIB applies (`Route::local_pref()`), which is
+    // what best-path selection actually compares. Wire-level presence is
+    // `local_pref_attr` below.
+    let mut local_pref = 100u32;
     let mut med = 0u32;
     let mut communities = Vec::new();
     let mut extended_communities = Vec::new();
@@ -4619,6 +4623,33 @@ mod tests {
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         }
+    }
+
+    #[test]
+    fn route_to_proto_serves_effective_local_pref_with_presence_marker() {
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+
+        // No LOCAL_PREF attribute (the eBGP wire): the effective default
+        // 100 is served, and the presence marker stays absent.
+        let absent = route_to_proto(&test_route(prefix, vec![]), false);
+        assert_eq!(absent.local_pref, 100);
+        assert_eq!(absent.local_pref_attr, None);
+
+        // Explicit LOCAL_PREF 0 (e.g. RFC 8326 demotion) must not be
+        // conflated with the default.
+        let zero = route_to_proto(
+            &test_route(prefix, vec![PathAttribute::LocalPref(0)]),
+            false,
+        );
+        assert_eq!(zero.local_pref, 0);
+        assert_eq!(zero.local_pref_attr, Some(0));
+
+        let explicit = route_to_proto(
+            &test_route(prefix, vec![PathAttribute::LocalPref(200)]),
+            false,
+        );
+        assert_eq!(explicit.local_pref, 200);
+        assert_eq!(explicit.local_pref_attr, Some(200));
     }
 
     #[test]

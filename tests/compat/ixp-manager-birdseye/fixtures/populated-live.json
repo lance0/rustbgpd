@@ -28,7 +28,7 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64497
+                "64497"
               ],
               "communities": [
                 [
@@ -43,8 +43,7 @@
                   1
                 ]
               ],
-              "local_pref": 0,
-              "med": 0,
+              "local_pref": "100",
               "next_hop": "198.51.100.4",
               "origin": "IGP"
             },
@@ -54,10 +53,9 @@
             "learnt_from": "198.51.100.4",
             "metric": 0,
             "network": "192.0.2.0/24",
-            "primary": false,
+            "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           }
@@ -79,8 +77,8 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64497,
-                64530
+                "64497",
+                "64530"
               ],
               "communities": [
                 [
@@ -95,7 +93,7 @@
                   1
                 ]
               ],
-              "local_pref": 0,
+              "local_pref": "100",
               "med": 5,
               "next_hop": "2001:db8:5100::4",
               "origin": "IGP"
@@ -106,10 +104,9 @@
             "learnt_from": "2001:db8:5100::4",
             "metric": 0,
             "network": "2001:db8:c::/48",
-            "primary": false,
+            "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           }
@@ -144,9 +141,9 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64496,
-                64510,
-                64520
+                "64496",
+                "64510",
+                "64520"
               ],
               "communities": [
                 [
@@ -170,7 +167,7 @@
                   2
                 ]
               ],
-              "local_pref": 0,
+              "local_pref": "100",
               "med": 10,
               "next_hop": "198.51.100.2",
               "origin": "IGP"
@@ -181,10 +178,9 @@
             "learnt_from": "198.51.100.2",
             "metric": 0,
             "network": "203.0.113.0/24",
-            "primary": false,
+            "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           }
@@ -219,8 +215,8 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64496,
-                64510
+                "64496",
+                "64510"
               ],
               "communities": [
                 [
@@ -235,7 +231,7 @@
                   1
                 ]
               ],
-              "local_pref": 0,
+              "local_pref": "100",
               "med": 20,
               "next_hop": "2001:db8:5100::2",
               "origin": "IGP"
@@ -246,10 +242,9 @@
             "learnt_from": "2001:db8:5100::2",
             "metric": 0,
             "network": "2001:db8:a::/48",
-            "primary": false,
+            "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           }
@@ -271,7 +266,7 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64496
+                "64496"
               ],
               "communities": [
                 [
@@ -286,8 +281,7 @@
                   1
                 ]
               ],
-              "local_pref": 0,
-              "med": 0,
+              "local_pref": "100",
               "next_hop": "198.51.100.2",
               "origin": "IGP"
             },
@@ -300,7 +294,6 @@
             "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           }
@@ -322,7 +315,7 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64496
+                "64496"
               ],
               "communities": [
                 [
@@ -337,8 +330,7 @@
                   1
                 ]
               ],
-              "local_pref": 0,
-              "med": 0,
+              "local_pref": "100",
               "next_hop": "198.51.100.2",
               "origin": "IGP"
             },
@@ -351,7 +343,6 @@
             "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           }
@@ -377,8 +368,8 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64497,
-                64530
+                "64497",
+                "64530"
               ],
               "communities": [
                 [
@@ -393,7 +384,7 @@
                   1
                 ]
               ],
-              "local_pref": 0,
+              "local_pref": "100",
               "med": 5,
               "next_hop": "2001:db8:5100::4",
               "origin": "IGP"
@@ -407,7 +398,6 @@
             "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           }
@@ -647,7 +637,7 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64497
+                "64497"
               ],
               "communities": [
                 [
@@ -662,8 +652,7 @@
                   1
                 ]
               ],
-              "local_pref": 0,
-              "med": 0,
+              "local_pref": "100",
               "next_hop": "198.51.100.4",
               "origin": "IGP"
             },
@@ -673,10 +662,9 @@
             "learnt_from": "198.51.100.4",
             "metric": 0,
             "network": "192.0.2.0/24",
-            "primary": false,
+            "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           }
@@ -698,8 +686,8 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64497,
-                64530
+                "64497",
+                "64530"
               ],
               "communities": [
                 [
@@ -714,7 +702,7 @@
                   1
                 ]
               ],
-              "local_pref": 0,
+              "local_pref": "100",
               "med": 5,
               "next_hop": "2001:db8:5100::4",
               "origin": "IGP"
@@ -725,10 +713,9 @@
             "learnt_from": "2001:db8:5100::4",
             "metric": 0,
             "network": "2001:db8:c::/48",
-            "primary": false,
+            "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           }
@@ -750,9 +737,9 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64496,
-                64510,
-                64520
+                "64496",
+                "64510",
+                "64520"
               ],
               "communities": [
                 [
@@ -776,7 +763,7 @@
                   2
                 ]
               ],
-              "local_pref": 0,
+              "local_pref": "100",
               "med": 10,
               "next_hop": "198.51.100.2",
               "origin": "IGP"
@@ -787,10 +774,9 @@
             "learnt_from": "198.51.100.2",
             "metric": 0,
             "network": "203.0.113.0/24",
-            "primary": false,
+            "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           },
@@ -798,7 +784,7 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64496
+                "64496"
               ],
               "communities": [
                 [
@@ -813,8 +799,7 @@
                   1
                 ]
               ],
-              "local_pref": 0,
-              "med": 0,
+              "local_pref": "100",
               "next_hop": "198.51.100.2",
               "origin": "IGP"
             },
@@ -824,10 +809,9 @@
             "learnt_from": "198.51.100.2",
             "metric": 0,
             "network": "203.0.113.128/25",
-            "primary": false,
+            "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           },
@@ -836,12 +820,12 @@
             "bgp": {
               "aggregator": "203.0.113.1 AS64496",
               "as_path": [
-                64496
+                "64496"
               ],
               "atomic_aggr": "",
               "communities": [],
               "large_communities": [],
-              "local_pref": 0,
+              "local_pref": "100",
               "med": 30,
               "next_hop": "198.51.100.2",
               "origin": "Incomplete"
@@ -852,10 +836,9 @@
             "learnt_from": "198.51.100.2",
             "metric": 0,
             "network": "203.0.113.64/26",
-            "primary": false,
+            "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           }
@@ -877,8 +860,8 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64496,
-                64510
+                "64496",
+                "64510"
               ],
               "communities": [
                 [
@@ -893,7 +876,7 @@
                   1
                 ]
               ],
-              "local_pref": 0,
+              "local_pref": "100",
               "med": 20,
               "next_hop": "2001:db8:5100::2",
               "origin": "IGP"
@@ -904,10 +887,9 @@
             "learnt_from": "2001:db8:5100::2",
             "metric": 0,
             "network": "2001:db8:a::/48",
-            "primary": false,
+            "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           },
@@ -915,7 +897,7 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64496
+                "64496"
               ],
               "communities": [
                 [
@@ -930,8 +912,7 @@
                   2
                 ]
               ],
-              "local_pref": 0,
-              "med": 0,
+              "local_pref": "100",
               "next_hop": "2001:db8:5100::2",
               "origin": "EGP"
             },
@@ -941,10 +922,9 @@
             "learnt_from": "2001:db8:5100::2",
             "metric": 0,
             "network": "2001:db8:b::/48",
-            "primary": false,
+            "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           }
@@ -966,7 +946,7 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64497
+                "64497"
               ],
               "communities": [
                 [
@@ -981,8 +961,7 @@
                   1
                 ]
               ],
-              "local_pref": 0,
-              "med": 0,
+              "local_pref": "100",
               "next_hop": "198.51.100.4",
               "origin": "IGP"
             },
@@ -995,7 +974,6 @@
             "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           },
@@ -1003,9 +981,9 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64496,
-                64510,
-                64520
+                "64496",
+                "64510",
+                "64520"
               ],
               "communities": [
                 [
@@ -1029,7 +1007,7 @@
                   2
                 ]
               ],
-              "local_pref": 0,
+              "local_pref": "100",
               "med": 10,
               "next_hop": "198.51.100.2",
               "origin": "IGP"
@@ -1043,7 +1021,6 @@
             "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           },
@@ -1051,7 +1028,7 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64496
+                "64496"
               ],
               "communities": [
                 [
@@ -1066,8 +1043,7 @@
                   1
                 ]
               ],
-              "local_pref": 0,
-              "med": 0,
+              "local_pref": "100",
               "next_hop": "198.51.100.2",
               "origin": "IGP"
             },
@@ -1080,7 +1056,6 @@
             "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           },
@@ -1089,12 +1064,12 @@
             "bgp": {
               "aggregator": "203.0.113.1 AS64496",
               "as_path": [
-                64496
+                "64496"
               ],
               "atomic_aggr": "",
               "communities": [],
               "large_communities": [],
-              "local_pref": 0,
+              "local_pref": "100",
               "med": 30,
               "next_hop": "198.51.100.2",
               "origin": "Incomplete"
@@ -1108,7 +1083,6 @@
             "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           }
@@ -1130,8 +1104,8 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64496,
-                64510
+                "64496",
+                "64510"
               ],
               "communities": [
                 [
@@ -1146,7 +1120,7 @@
                   1
                 ]
               ],
-              "local_pref": 0,
+              "local_pref": "100",
               "med": 20,
               "next_hop": "2001:db8:5100::2",
               "origin": "IGP"
@@ -1160,7 +1134,6 @@
             "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           },
@@ -1168,7 +1141,7 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64496
+                "64496"
               ],
               "communities": [
                 [
@@ -1183,8 +1156,7 @@
                   2
                 ]
               ],
-              "local_pref": 0,
-              "med": 0,
+              "local_pref": "100",
               "next_hop": "2001:db8:5100::2",
               "origin": "EGP"
             },
@@ -1197,7 +1169,6 @@
             "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           },
@@ -1205,8 +1176,8 @@
             "age": "<timestamp>",
             "bgp": {
               "as_path": [
-                64497,
-                64530
+                "64497",
+                "64530"
               ],
               "communities": [
                 [
@@ -1221,7 +1192,7 @@
                   1
                 ]
               ],
-              "local_pref": 0,
+              "local_pref": "100",
               "med": 5,
               "next_hop": "2001:db8:5100::4",
               "origin": "IGP"
@@ -1235,7 +1206,6 @@
             "primary": true,
             "type": [
               "BGP",
-              "unicast",
               "univ"
             ]
           }

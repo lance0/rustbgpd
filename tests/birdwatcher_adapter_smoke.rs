@@ -1064,7 +1064,6 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     for route in live["routes"].as_array().unwrap() {
         assert_eq!(route["network"], "10.99.0.0/24", "{live}");
         assert_eq!(route["from_protocol"], "pb_0001_as65020", "{live}");
-        assert_eq!(route["primary"], false, "received views stay non-primary");
     }
     assert_eq!(
         live["routes"]
@@ -1075,6 +1074,16 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
             .collect::<Vec<_>>(),
         [10, 20],
         "Add-Path candidates must remain in daemon order: {live}"
+    );
+    assert_eq!(
+        live["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|route| route["primary"].as_bool().unwrap())
+            .collect::<Vec<_>>(),
+        [true, false],
+        "received view must mark the Loc-RIB winner primary: {live}"
     );
     let aliased_live = get_json(adapter_port, "/routes/protocol/pb_0001_as65020", "adapter");
     assert_eq!(

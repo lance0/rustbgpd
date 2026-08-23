@@ -2433,6 +2433,9 @@ message Route {
   string peer_address = 4;
   uint32 origin = 5;
   repeated uint32 as_path = 6;
+  // Effective local preference: the LOCAL_PREF attribute value when the
+  // route carries one, otherwise the default 100 the RIB applies during
+  // best-path selection. Wire-level presence is `local_pref_attr`.
   uint32 local_pref = 7;
   // Deprecated for absence-sensitive consumers: a bare integer cannot
   // distinguish "no MED attribute" from "MED 0" (absent encodes as 0).
