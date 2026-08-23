@@ -24,6 +24,22 @@ pub(super) const BGP_PORT: u16 = 179;
 pub(super) static PERSISTENCE_PROBE_DIRECT_MAPS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+fn serialize_hash_map_sorted<K, V, S>(map: &HashMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    K: Ord + Serialize,
+    V: Serialize,
+    S: Serializer,
+{
+    let mut entries: Vec<_> = map.iter().collect();
+    entries.sort_unstable_by_key(|(key, _)| *key);
+    let mut map_out = serializer.serialize_map(Some(entries.len()))?;
+    for (key, value) in entries {
+        map_out.serialize_entry(key, value)?;
+    }
+    map_out.end()
+}
+
+#[cfg(not(test))]
 pub(super) fn serialize_sorted_hash_map<K, V, S>(
     map: &HashMap<K, V>,
     serializer: S,
@@ -33,7 +49,19 @@ where
     V: Serialize,
     S: Serializer,
 {
-    #[cfg(test)]
+    serialize_hash_map_sorted(map, serializer)
+}
+
+#[cfg(test)]
+pub(super) fn serialize_sorted_hash_map<K, V, S>(
+    map: &HashMap<K, V>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    K: Ord + Serialize,
+    V: Serialize,
+    S: Serializer,
+{
     if matches!(
         std::env::var("RUSTBGPD_PERSISTENCE_PROBE_ARM").as_deref(),
         Ok("direct")
@@ -45,13 +73,7 @@ where
         }
         return map_out.end();
     }
-    let mut entries: Vec<_> = map.iter().collect();
-    entries.sort_unstable_by_key(|(key, _)| *key);
-    let mut map_out = serializer.serialize_map(Some(entries.len()))?;
-    for (key, value) in entries {
-        map_out.serialize_entry(key, value)?;
-    }
-    map_out.end()
+    serialize_hash_map_sorted(map, serializer)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
