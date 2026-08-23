@@ -15,8 +15,8 @@ log redirection in each runner.
 Before opening a soak window, run `bash tests/soak/preflight.sh` —
 it checks tools, competing workloads (including this lock), disk
 headroom, that the daemon builds and the `rustbgpd:dev` image exists,
-and requires explicit operator confirmation of the two manual
-mutexes (bench cron paused; no pushes to main during the window).
+and requires explicit operator confirmation that no pushes to main will land
+during the window.
 Exit 0 means ready; nonzero prints each failed check as `FAIL:`.
 Precommitted per-scenario acceptance gates and abort criteria live in
 `docs/soaks/soak-acceptance-gates.md`; receipts follow

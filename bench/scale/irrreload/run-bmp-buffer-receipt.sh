@@ -49,7 +49,6 @@ HEAD=$(git rev-parse HEAD)
 }
 [ ! -e "$ART" ] || { echo "artifact root already exists: $ART" >&2; exit 2; }
 
-CONFIRM_BENCH_CRON_PAUSED="${CONFIRM_BENCH_CRON_PAUSED:-}" \
 CONFIRM_NO_MAIN_PUSHES="${CONFIRM_NO_MAIN_PUSHES:-}" \
 SKIP_BUILD_CHECK=1 tests/soak/preflight.sh
 HOST_LOCK="${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}"

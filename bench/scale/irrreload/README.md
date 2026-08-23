@@ -179,7 +179,7 @@ general collector capacity or throughput.
 The full run requires clean `origin/main`, quiet-host mutexes, and unused ports:
 
 ```bash
-CONFIRM_BENCH_CRON_PAUSED=1 CONFIRM_NO_MAIN_PUSHES=1 ARTIFACTS_DIR=/tmp/bmp-buffer-receipt \
+CONFIRM_NO_MAIN_PUSHES=1 ARTIFACTS_DIR=/tmp/bmp-buffer-receipt \
   bench/scale/irrreload/run-bmp-buffer-receipt.sh
 ```
 
