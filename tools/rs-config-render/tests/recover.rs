@@ -1047,6 +1047,42 @@ fn dry_runs_change_nothing_and_apply_performs_exactly_the_printed_steps() {
 }
 
 #[test]
+fn keep_current_callback_failure_prints_only_completed_steps() {
+    let _guard = test_guard();
+    let rig = Rig::new();
+    let server = rig.induce_exit_5("load-then-fail", vec![Response::json(500)]);
+    let candidate = rig.current();
+    let (code, lines, stderr) =
+        rig.recover_cli(&strs(&keep_args(&rig)), true, Some(&server.origin));
+
+    assert_eq!(code, 5);
+    assert_eq!(
+        lines,
+        vec![
+            "probe: daemon healthy, runtime equals current".to_owned(),
+            format!(
+                "write activation receipt: status kept, candidate {}, previous {}",
+                candidate.strip_prefix("generations/").unwrap(),
+                rig.receipt_value()["previous_generation"].as_str().unwrap()
+            ),
+        ],
+        "the failing callback and applied summary must be absent"
+    );
+    assert_eq!(
+        stderr,
+        "rs-config-render: recover keep-current: updated callback was not delivered; upstream lock retained — retry with recover release-lock --kept\n"
+    );
+    assert!(rig.fence().exists() && rig.journal().exists());
+    let journal = rig.journal_value();
+    assert_eq!(journal["callback"], "updated");
+    assert_eq!(journal["callback_attempts"], 1);
+    assert_eq!(journal["lock_released"], false);
+    assert_eq!(journal["phase"], "manual_recovery");
+    assert_eq!(rig.receipt_value()["status"], "kept");
+    assert_eq!(server.finish().len(), 3);
+}
+
+#[test]
 fn keep_current_is_health_gated_unless_forced() {
     let _guard = test_guard();
     let rig = Rig::new();

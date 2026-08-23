@@ -412,6 +412,22 @@ pub struct Outcome {
     pub steps: Vec<String>,
 }
 
+/// A recovery failure plus the exact prefix of steps that completed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Failure {
+    pub error: Error,
+    pub completed: Outcome,
+}
+
+impl From<Error> for Failure {
+    fn from(error: Error) -> Self {
+        Self {
+            error,
+            completed: Outcome::default(),
+        }
+    }
+}
+
 enum Step {
     Probe(String),
     Receipt {
@@ -542,11 +558,11 @@ fn probe(rbgp: &Path, binding: &Binding, state: &Path, current: &str) -> (bool, 
 /// Plan and, with `apply`, perform one recovery verb. Every verb refuses
 /// (exit 2, nothing changed) unless this binding's fence stands and the
 /// lifecycle journal, if any, is in manual recovery rather than resumable.
-pub fn recover(options: &Options<'_>, verb: &Verb<'_>) -> Result<Outcome, Error> {
+pub fn recover(options: &Options<'_>, verb: &Verb<'_>) -> Result<Outcome, Failure> {
     let binding = options.binding;
     let state = options.state_dir;
     if state != binding.activation_state_dir {
-        return Err(Error::Refused("state directory must match host binding"));
+        return Err(Error::Refused("state directory must match host binding").into());
     }
     let guard = Guard::claim_existing(binding).map_err(host_refusal)?;
     let _activation_lock = activation::state_lock(state).map_err(activation_refusal)?;
@@ -556,12 +572,13 @@ pub fn recover(options: &Options<'_>, verb: &Verb<'_>) -> Result<Outcome, Error>
     })?;
     if let Some(journal) = &journal {
         if journal.host != *binding {
-            return Err(Error::Refused("lifecycle journal identity does not match"));
+            return Err(Error::Refused("lifecycle journal identity does not match").into());
         }
         if lifecycle::pending(journal).is_some() {
             return Err(Error::Refused(
                 "lifecycle state is resumable, not manual recovery; run ixp-manager-lifecycle resume",
-            ));
+            )
+            .into());
         }
     }
     // A callback needs the connection; validate it (origin, key file) before
@@ -577,14 +594,15 @@ pub fn recover(options: &Options<'_>, verb: &Verb<'_>) -> Result<Outcome, Error>
             )
             .map_err(lifecycle_refusal)?;
             if journal.origin != client.origin || journal.router_handle != client.handle {
-                return Err(Error::Refused("lifecycle journal identity does not match"));
+                return Err(Error::Refused("lifecycle journal identity does not match").into());
             }
             Some(client)
         }
         (Some(_), None) if !matches!(verb, Verb::Clear) => {
             return Err(Error::Refused(
                 "lifecycle journal owes the upstream lock; pass --ixp-origin and --api-key-file",
-            ));
+            )
+            .into());
         }
         _ => None,
     };
@@ -618,18 +636,19 @@ pub fn recover(options: &Options<'_>, verb: &Verb<'_>) -> Result<Outcome, Error>
     match verb {
         Verb::KeepCurrent { rbgp, force } => {
             if lock_released {
-                return Err(Error::Refused(
-                    "upstream lock already released; run recover clear",
-                ));
+                return Err(
+                    Error::Refused("upstream lock already released; run recover clear").into(),
+                );
             }
             let Some(current) = current.as_deref() else {
-                return Err(Error::Refused("no current generation to keep"));
+                return Err(Error::Refused("no current generation to keep").into());
             };
             let (equal, detail) = probe(rbgp, binding, state, current);
             if !equal && !*force {
                 return Err(Error::Refused(
                     "daemon is not settled on current; fix the daemon by hand or pass --force",
-                ));
+                )
+                .into());
             }
             plan.push(Step::Probe(if equal {
                 detail
@@ -660,17 +679,18 @@ pub fn recover(options: &Options<'_>, verb: &Verb<'_>) -> Result<Outcome, Error>
         }
         Verb::Rollback { activation, to } => {
             if lock_released {
-                return Err(Error::Refused(
-                    "upstream lock already released; run recover clear",
-                ));
+                return Err(
+                    Error::Refused("upstream lock already released; run recover clear").into(),
+                );
             }
             if !activated {
                 return Err(Error::Refused(
                     "no candidate was activated (the lock request was ambiguous); run recover release-lock --rolled-back, then recover clear",
-                ));
+                )
+                .into());
             }
             let Some(current) = current.as_deref() else {
-                return Err(Error::Refused("no current generation to roll back from"));
+                return Err(Error::Refused("no current generation to roll back from").into());
             };
             let target = match to {
                 Some(to) => to.to_string(),
@@ -681,16 +701,15 @@ pub fn recover(options: &Options<'_>, verb: &Verb<'_>) -> Result<Outcome, Error>
             if target == current {
                 return Err(Error::Refused(
                     "rollback target is the current generation; run recover keep-current",
-                ));
+                )
+                .into());
             }
             if !target
                 .strip_prefix("generations/")
                 .is_some_and(activation::valid_digest)
                 || activation::verify_candidate(&state.join(&target), binding).is_err()
             {
-                return Err(Error::Refused(
-                    "rollback target is not a published generation",
-                ));
+                return Err(Error::Refused("rollback target is not a published generation").into());
             }
             session.activation = Some(*activation);
             plan.push(Step::Republish {
@@ -705,9 +724,9 @@ pub fn recover(options: &Options<'_>, verb: &Verb<'_>) -> Result<Outcome, Error>
         }
         Verb::ReleaseLock(released) => {
             if journal.is_none() {
-                return Err(Error::Refused(
-                    "no lifecycle journal; no upstream lock is owed",
-                ));
+                return Err(
+                    Error::Refused("no lifecycle journal; no upstream lock is owed").into(),
+                );
             }
             plan.push(Step::Callback(match released {
                 Released::Kept => Callback::Updated,
@@ -719,7 +738,8 @@ pub fn recover(options: &Options<'_>, verb: &Verb<'_>) -> Result<Outcome, Error>
             if journal.is_some() && !lock_released {
                 return Err(Error::Refused(
                     "upstream lock still owed; run recover keep-current, recover rollback, or recover release-lock first",
-                ));
+                )
+                .into());
             }
             if journal.is_some() {
                 plan.push(Step::RemoveJournal);
@@ -730,8 +750,13 @@ pub fn recover(options: &Options<'_>, verb: &Verb<'_>) -> Result<Outcome, Error>
     let mut outcome = Outcome::default();
     for step in &plan {
         let line = step.describe(&session);
-        if options.apply {
-            session.perform(step)?;
+        if options.apply
+            && let Err(error) = session.perform(step)
+        {
+            return Err(Failure {
+                error,
+                completed: outcome,
+            });
         }
         outcome.steps.push(line);
     }

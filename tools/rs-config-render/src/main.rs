@@ -439,9 +439,15 @@ fn recover_exit(
                 writeln!(writer, "{summary}")
             }))
         }
-        Err(error) => {
-            eprintln!("rs-config-render: recover {name}: {error}");
-            error.exit_code().into()
+        Err(failure) => {
+            let _ = write_stdout(|writer| {
+                for step in &failure.completed.steps {
+                    writeln!(writer, "recover {name}: {step}")?;
+                }
+                Ok(())
+            });
+            eprintln!("rs-config-render: recover {name}: {}", failure.error);
+            failure.error.exit_code().into()
         }
     }
 }
