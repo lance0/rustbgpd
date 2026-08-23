@@ -175,7 +175,7 @@ pub fn check_local(
     )
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "thin CLI plumbing mirroring the flag surface; a struct would only relabel it"
 )]
