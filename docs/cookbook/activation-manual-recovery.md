@@ -80,17 +80,19 @@ generation tree are the state; the receipt is not.
 
 ## 1. Is the candidate live and healthy, live and broken, or down?
 
-The last two `status` lines are the helper's own settlement test — `rbgp
-health`, then `rbgp config diff` against the `current` generation with its
-policy paths rewritten to the live `current/` prefix (exactly what the helper
-compares). Read them together:
+The last two `status` lines are the helper's own settlement test. It runs
+`rbgp health` first and only when that explicitly reports healthy does it stage
+and run `rbgp config diff` against the `current` generation, with policy paths
+rewritten to the live `current/` prefix (exactly what the helper compares).
+Read them together:
 
 | `daemon` | `runtime_equals_current` | Meaning |
 |---|---|---|
 | `healthy` | `yes` | **Live and equal**: the reload landed; the helper only ran out of settle budget, or the receipt write failed afterwards. |
 | `healthy` | `no` | **Live but still on the previous generation**: the activation command ran and failed without reloading (a sudoers denial, a wrong unit name) or the daemon rejected the reload. The daemon log has no `config reload complete` line for the attempt. |
-| `unreachable` | `unknown` | **Down**: a restart took the old process out and the new one never came up. |
-| `unhealthy`, or `invalid` | any | **Live and broken**: treat it as the down case and prefer the previous generation. |
+| `healthy` | `unknown` | **Comparison inconclusive**: staging failed, or `config diff` could not start, timed out, exited 1, or returned another unexpected status. Do not infer equal or different, or that the diff completed. |
+| `unreachable` | `unknown` | **Down**: a restart took the old process out and the new one never came up. The helper did not run `config diff`. |
+| `unhealthy`, or `invalid` | `unknown` | **Live and broken or an invalid health response**: the helper did not run `config diff`; treat it as the down case and prefer the previous generation. |
 
 To see *what* the daemon is missing in the second row, or to confirm it runs
 the previous generation, run the diff by hand

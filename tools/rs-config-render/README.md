@@ -307,8 +307,9 @@ year unpruned, and `--keep 48` bounds it to about 110 MiB.
 fence, the lifecycle journal, and the generation tree with its `current` link —
 plus the advisory activation receipt, and prints one `key: value` line per
 field in a fixed order. It takes the same binding flags as `activate` and
-changes nothing; with `--rbgp` it also runs the settle path's own probe
-(`rbgp health`, then `rbgp config diff` against the `current` generation):
+changes nothing; with `--rbgp` it first runs `rbgp health` and only for a
+healthy daemon stages and runs `rbgp config diff` against the `current`
+generation:
 
 ```console
 sudo -u rustbgpd /usr/bin/rs-config-render status \
@@ -332,7 +333,7 @@ sudo -u rustbgpd /usr/bin/rs-config-render status \
 | `advisory_receipt` | `matches-current` (its `candidate_sha256` is the `current` target), `stale`, `absent`, `unreadable`; the receipt is advisory and may be absent or stale after an exit 5 |
 | `advisory_receipt_status`, `advisory_receipt_previous_generation` | the receipt's values or `none` |
 | `daemon` | `not-probed` (no `--rbgp`), `healthy`, `unhealthy`, `unreachable`, `invalid` |
-| `runtime_equals_current` | `yes`, `no`, `unknown` (not probed, unreachable, or no valid `current`) |
+| `runtime_equals_current` | `yes` only when a healthy daemon's `config diff` exits 0; `no` only when it exits 2; `unknown` when not probed, no valid `current` exists, health is unhealthy/unreachable/invalid, comparison staging fails, or `config diff` cannot start, times out, exits 1, or returns any other status |
 
 Exit 0 whenever the state could be read — manual recovery is a report, not an
 error — and 1 only when the state directory is unreadable. `status` takes no
@@ -354,7 +355,7 @@ connection `resume` takes); a plain `activate` exit 5 needs neither.
 
 | Verb | Does | Refuses when |
 |---|---|---|
-| `keep-current --rbgp <PATH> [--force]` | probes the daemon (`rbgp health` + `config diff` against `current`), writes the receipt as `kept`, delivers `updated` (or `release-update-lock` when the journal shows nothing was activated), removes journal and fence | the probe is not healthy and equal (unless `--force`); the lock was already released |
+| `keep-current --rbgp <PATH> [--force]` | probes health and, only when healthy, runs `config diff` against `current`; then writes the receipt as `kept`, delivers `updated` (or `release-update-lock` when the journal shows nothing was activated), and removes journal and fence | the comparison is `Different` or `Unknown` (unless `--force`); the lock was already released |
 | `rollback --rbgp <PATH> --activation-command … [--activation-arg …] [--settle-seconds N] [--to generations/<digest>]` | re-points `current` at the previous generation and runs the activation command through the same publish-activate-settle path as a first activation, writes the receipt as `rolled_back`, delivers `release-update-lock`, removes journal and fence | the previous generation is unknown (receipt absent or stale) and `--to` is not given; the target is `current` or not a published generation; the journal shows nothing was activated; the lock was already released |
 | `release-lock --kept\|--rolled-back` | delivers that one callback and marks the journal `lock_released`; retryable | there is no journal |
 | `clear` | removes journal and fence | a journal exists whose callback no verb delivered |

@@ -22,7 +22,7 @@ use serde_json::Value;
 use crate::Exit;
 use crate::ixp_manager_host::{self, Binding, Guard};
 use crate::ixp_manager_lifecycle::{self as lifecycle, Callback, Journal, Phase};
-use crate::{activation, activation::Health};
+use crate::{activation, activation::Health, activation::RuntimeDiff};
 
 const ACTIVATION_RECEIPT: &str = "activation-receipt.json";
 /// rbgp gets this long per probe before `status` reports it as invalid.
@@ -175,6 +175,62 @@ fn comparison(
     activation::comparison_file(&bytes, state, "status")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeProbe {
+    daemon: &'static str,
+    comparison: RuntimeDiff,
+}
+
+impl RuntimeProbe {
+    const fn report(self) -> &'static str {
+        match self.comparison {
+            RuntimeDiff::Equal => "yes",
+            RuntimeDiff::Different => "no",
+            RuntimeDiff::Unknown => "unknown",
+        }
+    }
+
+    fn detail(self) -> String {
+        match self.comparison {
+            RuntimeDiff::Equal => format!("daemon {}, runtime equals current", self.daemon),
+            RuntimeDiff::Different => {
+                format!("daemon {}, runtime differs from current", self.daemon)
+            }
+            RuntimeDiff::Unknown => {
+                format!("daemon {}, runtime comparison unknown", self.daemon)
+            }
+        }
+    }
+}
+
+fn runtime_probe(
+    rbgp: &Path,
+    binding: &Binding,
+    state: &Path,
+    current: Option<&str>,
+) -> RuntimeProbe {
+    let health = activation::health_probe(rbgp, binding.rbgp_addr(), Instant::now() + PROBE);
+    let daemon = match health {
+        Health::Reachable(true) => "healthy",
+        Health::Reachable(false) => "unhealthy",
+        Health::Unreachable => "unreachable",
+        Health::Invalid => "invalid",
+    };
+    let comparison = match (health, current) {
+        (Health::Reachable(true), Some(current)) => match comparison(state, current, binding) {
+            Ok(file) => activation::runtime_diff(
+                rbgp,
+                binding.rbgp_addr(),
+                file.as_ref(),
+                Instant::now() + PROBE,
+            ),
+            Err(_) => RuntimeDiff::Unknown,
+        },
+        _ => RuntimeDiff::Unknown,
+    };
+    RuntimeProbe { daemon, comparison }
+}
+
 /// Report the activation and lifecycle state of one handle without changing
 /// it. Manual-recovery state is a successful report; only an unreadable
 /// state directory is an error.
@@ -300,38 +356,10 @@ pub fn status(options: &StatusOptions<'_>) -> Result<Report, Error> {
         "advisory_receipt_previous_generation",
         previous.unwrap_or("none"),
     );
-    let (daemon, equal) = match options.rbgp {
-        None => ("not-probed", "unknown"),
-        Some(rbgp) => {
-            let addr = binding.rbgp_addr();
-            let health = activation::health_probe(rbgp, addr, Instant::now() + PROBE);
-            let daemon = match health {
-                Health::Reachable(true) => "healthy",
-                Health::Reachable(false) => "unhealthy",
-                Health::Unreachable => "unreachable",
-                Health::Invalid => "invalid",
-            };
-            let equal = match (health, &current) {
-                (Health::Reachable(_), Some(target)) => match comparison(state, target, binding) {
-                    Ok(file) => {
-                        if activation::equal_runtime(
-                            rbgp,
-                            addr,
-                            file.as_ref(),
-                            Instant::now() + PROBE,
-                        ) {
-                            "yes"
-                        } else {
-                            "no"
-                        }
-                    }
-                    Err(_) => "unknown",
-                },
-                _ => "unknown",
-            };
-            (daemon, equal)
-        }
-    };
+    let (daemon, equal) = options.rbgp.map_or(("not-probed", "unknown"), |rbgp| {
+        let probe = runtime_probe(rbgp, binding, state, current.as_deref());
+        (probe.daemon, probe.report())
+    });
     report.push("daemon", daemon);
     report.push("runtime_equals_current", equal);
     Ok(report)
@@ -529,32 +557,6 @@ fn lifecycle_refusal(error: lifecycle::Error) -> Error {
     }
 }
 
-fn probe(rbgp: &Path, binding: &Binding, state: &Path, current: &str) -> (bool, String) {
-    let health = activation::health_probe(rbgp, binding.rbgp_addr(), Instant::now() + PROBE);
-    let daemon = match health {
-        Health::Reachable(true) => "healthy",
-        Health::Reachable(false) => "unhealthy",
-        Health::Unreachable => "unreachable",
-        Health::Invalid => "invalid",
-    };
-    let equal = health == Health::Reachable(true)
-        && comparison(state, current, binding).is_ok_and(|file| {
-            activation::equal_runtime(
-                rbgp,
-                binding.rbgp_addr(),
-                file.as_ref(),
-                Instant::now() + PROBE,
-            )
-        });
-    (
-        equal,
-        format!(
-            "daemon {daemon}, runtime {} current",
-            if equal { "equals" } else { "differs from" }
-        ),
-    )
-}
-
 /// Plan and, with `apply`, perform one recovery verb. Every verb refuses
 /// (exit 2, nothing changed) unless this binding's fence stands and the
 /// lifecycle journal, if any, is in manual recovery rather than resumable.
@@ -643,7 +645,8 @@ pub fn recover(options: &Options<'_>, verb: &Verb<'_>) -> Result<Outcome, Failur
             let Some(current) = current.as_deref() else {
                 return Err(Error::Refused("no current generation to keep").into());
             };
-            let (equal, detail) = probe(rbgp, binding, state, current);
+            let probe = runtime_probe(rbgp, binding, state, Some(current));
+            let equal = probe.comparison == RuntimeDiff::Equal;
             if !equal && !*force {
                 return Err(Error::Refused(
                     "daemon is not settled on current; fix the daemon by hand or pass --force",
@@ -651,9 +654,9 @@ pub fn recover(options: &Options<'_>, verb: &Verb<'_>) -> Result<Outcome, Failur
                 .into());
             }
             plan.push(Step::Probe(if equal {
-                detail
+                probe.detail()
             } else {
-                format!("{detail} (overridden by --force)")
+                format!("{} (overridden by --force)", probe.detail())
             }));
             session.checker_version = activation::verify_candidate(&state.join(current), binding)
                 .map_err(activation_refusal)?

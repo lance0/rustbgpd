@@ -186,6 +186,7 @@ impl Rig {
         fs::write(&key, format!("{API_KEY}\n")).unwrap();
         mode(&key, 0o600);
         fs::write(root.join("health-mode"), "ok").unwrap();
+        fs::write(root.join("diff-mode"), "contract").unwrap();
         fs::write(root.join("activation-mode"), "ok").unwrap();
         let checker = root.join("rustbgpd");
         executable(
@@ -194,7 +195,8 @@ impl Rig {
         );
         // The fake daemon "runs" whatever generation the activation command
         // last loaded (`runtime`); `config diff` is equal iff that is what
-        // `current` points at now. `health-mode` is ok | unhealthy | down.
+        // `current` points at now. `health-mode` is ok | unhealthy | down |
+        // invalid.
         let rbgp = root.join("rbgp");
         executable(
             &rbgp,
@@ -209,11 +211,16 @@ case "$*" in
       printf 'Error: cannot reach rustbgpd at test (connection refused)\n' >&2
       exit 1
     fi
+    if [ "$health_mode" = invalid ]; then
+      printf 'not-json\n'
+      exit 0
+    fi
     [ "$health_mode" = unhealthy ] && healthy=false || healthy=true
     printf '{{"healthy":%s}}\n' "$healthy"
     exit 0
     ;;
 esac
+[ "$(cat "$root/diff-mode")" = error ] && exit 1
 [ "$(cat "$root/runtime" 2>/dev/null)" = "$(readlink "$root/{HANDLE}/activation/current")" ] && exit 0
 exit 2
 "#
@@ -293,6 +300,14 @@ esac
 
     fn set(&self, name: &str, value: &str) {
         fs::write(self.root.join(name), value).unwrap();
+    }
+
+    fn rbgp_calls(&self) -> Vec<String> {
+        fs::read_to_string(self.root.join("rbgp.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
     }
 
     fn current(&self) -> String {
@@ -522,8 +537,28 @@ esac
     /// `status` through the binary, asserting it changed nothing: the state,
     /// runtime, and host-state trees are byte-for-byte identical afterwards.
     fn status_cli(&self, probe: bool) -> (i32, BTreeMap<String, String>, String) {
+        self.status_cli_with_limit(probe, false)
+    }
+
+    fn status_cli_unwritable(&self) -> (i32, BTreeMap<String, String>, String) {
+        self.status_cli_with_limit(true, true)
+    }
+
+    fn status_cli_with_limit(
+        &self,
+        probe: bool,
+        unwritable: bool,
+    ) -> (i32, BTreeMap<String, String>, String) {
         let before = snapshot(&self.root);
-        let mut command = Command::new(env!("CARGO_BIN_EXE_rs-config-render"));
+        let mut command = if unwritable {
+            let mut shell = Command::new("/bin/sh");
+            shell
+                .args(["-c", "trap '' XFSZ; ulimit -f 0; exec \"$@\"", "sh"])
+                .arg(env!("CARGO_BIN_EXE_rs-config-render"));
+            shell
+        } else {
+            Command::new(env!("CARGO_BIN_EXE_rs-config-render"))
+        };
         command.arg("status");
         self.binding_args(&mut command);
         if probe {
@@ -744,7 +779,10 @@ fn status_reports_manual_recovery_with_the_candidate_not_live() {
     let (_, fields, _) = rig.status_cli(true);
     assert_fields(
         &fields,
-        &[("daemon", "unhealthy"), ("runtime_equals_current", "no")],
+        &[
+            ("daemon", "unhealthy"),
+            ("runtime_equals_current", "unknown"),
+        ],
     );
     rig.set("health-mode", "down");
     let (_, fields, _) = rig.status_cli(true);
@@ -755,6 +793,94 @@ fn status_reports_manual_recovery_with_the_candidate_not_live() {
             ("runtime_equals_current", "unknown"),
         ],
     );
+}
+
+#[test]
+fn unknown_runtime_comparisons_are_fail_closed_and_force_still_applies() {
+    let _guard = test_guard();
+    for (health_mode, diff_mode, daemon, runs_diff) in [
+        ("unhealthy", "contract", "unhealthy", false),
+        ("down", "contract", "unreachable", false),
+        ("invalid", "contract", "invalid", false),
+        ("ok", "error", "healthy", true),
+    ] {
+        let rig = Rig::new();
+        let server = rig.induce_exit_5("load-then-fail", vec![Response::json(200)]);
+        rig.set("health-mode", health_mode);
+        rig.set("diff-mode", diff_mode);
+        let before = rig.rbgp_calls().len();
+
+        let (code, fields, stderr) = rig.status_cli(true);
+        assert_eq!(code, 0, "{health_mode}: {stderr}");
+        assert_fields(
+            &fields,
+            &[("daemon", daemon), ("runtime_equals_current", "unknown")],
+        );
+
+        let keep = keep_args(&rig);
+        let (code, lines, stderr) = rig.recover_cli(&strs(&keep), false, Some(&server.origin));
+        assert_eq!(code, 2, "{health_mode}: {stderr}");
+        assert!(lines.is_empty());
+        assert!(stderr.contains("daemon is not settled on current"));
+
+        let mut forced = keep;
+        forced.push("--force".into());
+        let (code, lines, stderr) = rig.recover_cli(&strs(&forced), true, Some(&server.origin));
+        assert_eq!(code, 0, "{health_mode}: {stderr}");
+        assert_eq!(
+            lines[0],
+            format!("probe: daemon {daemon}, runtime comparison unknown (overridden by --force)")
+        );
+        assert_eq!(rig.receipt_value()["phases"]["runtime_equal"], false);
+
+        let calls = rig.rbgp_calls();
+        let new_calls = &calls[before..];
+        assert_eq!(
+            new_calls
+                .iter()
+                .filter(|call| call.ends_with(" health"))
+                .count(),
+            3,
+            "{health_mode}/{diff_mode}: {new_calls:?}"
+        );
+        assert_eq!(
+            new_calls
+                .iter()
+                .filter(|call| call.contains(" config diff "))
+                .count(),
+            if runs_diff { 3 } else { 0 },
+            "{health_mode}/{diff_mode}: {new_calls:?}"
+        );
+        assert_eq!(server.finish().len(), 3);
+    }
+}
+
+#[test]
+fn comparison_staging_failure_is_unknown_on_both_surfaces() {
+    let _guard = test_guard();
+    let rig = Rig::new();
+    let server = rig.induce_exit_5("load-then-fail", vec![]);
+    let before = snapshot(&rig.root);
+
+    // RLIMIT_FSIZE 0 lets the read-only probes and existing locks run but
+    // refuses the fresh private comparison file's first byte.
+    let (status_code, fields, status_stderr) = rig.status_cli_unwritable();
+    let (recover_code, lines, recover_stderr) =
+        rig.recover_cli_unwritable(&strs(&keep_args(&rig)), Some(&server.origin));
+
+    assert_eq!(status_code, 0, "{status_stderr}");
+    assert_fields(
+        &fields,
+        &[("daemon", "healthy"), ("runtime_equals_current", "unknown")],
+    );
+    assert_eq!(recover_code, 2, "{recover_stderr}");
+    assert!(lines.is_empty());
+    assert!(
+        recover_stderr.contains("daemon is not settled on current"),
+        "{recover_stderr}"
+    );
+    assert_eq!(snapshot(&rig.root), before, "failed probes changed state");
+    assert_eq!(server.finish().len(), 2);
 }
 
 #[test]
