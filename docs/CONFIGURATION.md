@@ -1,6 +1,7 @@
 # Configuration Reference
 
-rustbgpd is configured via a single TOML file, passed as the first argument to the daemon:
+This reference documents rustbgpd's TOML configuration.
+Pass one TOML file as the first argument to the daemon:
 
 ```
 rustbgpd /etc/rustbgpd/config.toml

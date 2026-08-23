@@ -1,5 +1,6 @@
 # gRPC API Reference
 
+This reference documents rustbgpd's gRPC API.
 rustbgpd exposes eleven native `rustbgpd.v1` gRPC services (Global, Config,
 Neighbor, Policy, PeerGroup, Rib, BFD, Event, Injection, Control, Evpn) plus the
 `gnmi.gNMI` OpenConfig service over one or more configured listeners. The
