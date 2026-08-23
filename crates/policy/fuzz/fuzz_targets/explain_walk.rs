@@ -1,5 +1,5 @@
 #![no_main]
-//! Bounded explain-walk agreement fuzzing over valid TOML policy chains.
+//! Bounded explain-walk agreement fuzzing over valid mixed policy chains.
 
 // The shared support module also contains the mixed-chain compiler recipe
 // used by the sibling target.
@@ -9,7 +9,7 @@ mod support;
 
 use libfuzzer_sys::fuzz_target;
 use rustbgpd_policy::{evaluate_chain, explain_chain_statements};
-use support::{ChainRecipe, OwnedRoute, RouteRecipe, mixed_chain};
+use support::{mixed_chain, ChainRecipe, OwnedRoute, RouteRecipe};
 
 fuzz_target!(|bytes: [u8; 8]| {
     let chain_recipe = ChainRecipe {
@@ -34,9 +34,7 @@ fuzz_target!(|bytes: [u8; 8]| {
         local_pref: u16::from_be_bytes([bytes[0], bytes[6]]),
         med: u16::from_be_bytes([bytes[1], bytes[7]]),
     };
-    let Some(chain) = mixed_chain(&chain_recipe) else {
-        return;
-    };
+    let chain = mixed_chain(&chain_recipe);
     let route = OwnedRoute::from_recipe(&route_recipe);
     let context = route.context();
     let trace = explain_chain_statements(Some(&chain), &context);

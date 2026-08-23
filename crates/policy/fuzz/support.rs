@@ -2,13 +2,14 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use libfuzzer_sys::arbitrary::{self, Arbitrary};
+use rustbgpd_policy::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
 use rustbgpd_policy::engine::{
     CommunityMatch, NamedPolicy, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteContext,
     RouteModifications,
 };
 use rustbgpd_policy::ir::MatchExpr;
-use rustbgpd_policy::rpol::compile_rpol;
-use rustbgpd_policy::sets::SetStore;
+use rustbgpd_policy::rpol::RpolFile;
+use rustbgpd_policy::sets::{AsnSet, SetStore};
 use rustbgpd_wire::{AspaValidation, Ipv4Prefix, Prefix, RpkiValidation};
 
 pub const MAX_POLICIES: usize = 8;
@@ -87,7 +88,7 @@ pub fn toml_chain(recipe: &ChainRecipe) -> PolicyChain {
     chain
 }
 
-pub fn mixed_chain(recipe: &ChainRecipe) -> Option<PolicyChain> {
+pub fn mixed_chain(recipe: &ChainRecipe) -> PolicyChain {
     let source = r#"
 prefix-set p { 10.0.0.0/8 ge 16 le 28 }
 community-set c { 65000:1, 65000:2 }
@@ -101,7 +102,17 @@ policy donor {
   term fallback { accept }
 }
 "#;
-    let donor = compile_rpol(source, &mut SetStore::new()).ok()?;
+    let file = RpolFile::parse(source).expect("fixed donor source must parse");
+    let mut bindings = DatasetBindings::new();
+    bindings.insert(Arc::new(DatasetHandle::new(
+        "external_asns",
+        DatasetKind::Asn,
+        DatasetData::Asn(AsnSet::new([64_512, 64_513])),
+    )));
+    let donor = file
+        .compile_policy_bound("donor", &[], &mut SetStore::new(), &bindings)
+        .expect("fixed donor policy must exist")
+        .expect("fixed donor dataset must be bound");
     assert_ids_resolve(&donor);
     let mut chain = toml_chain(recipe);
     let count = usize::from(recipe.policies).min(3) + 1;
@@ -111,7 +122,7 @@ policy donor {
             Arc::new(donor.clone()),
         ));
     }
-    Some(chain)
+    chain
 }
 
 pub fn assert_ids_resolve(compiled: &rustbgpd_policy::ir::CompiledChain) {

@@ -10,12 +10,10 @@ mod support;
 use libfuzzer_sys::fuzz_target;
 use rustbgpd_policy::compile::compile_chain;
 use rustbgpd_policy::sets::SetStore;
-use support::{ChainRecipe, assert_ids_resolve, mixed_chain};
+use support::{assert_ids_resolve, mixed_chain, ChainRecipe};
 
 fuzz_target!(|recipe: ChainRecipe| {
-    let Some(chain) = mixed_chain(&recipe) else {
-        return;
-    };
+    let chain = mixed_chain(&recipe);
     let compiled = compile_chain(&chain, &mut SetStore::new());
     assert_ids_resolve(&compiled);
 });
