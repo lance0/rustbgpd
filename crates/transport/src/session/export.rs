@@ -369,7 +369,7 @@ impl SessionExportProfile {
 
     /// Prepare the classic unicast attribute set using only this immutable
     /// profile and the post-policy route candidate.
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "keeps the ordered outbound attribute transformation in one auditable pass"
     )]
@@ -2666,7 +2666,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "one cache-key matrix keeps scalar equivalence and every memo dimension together"
     )]

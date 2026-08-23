@@ -1518,7 +1518,7 @@ impl PeerSession {
     /// default rewrite) is deliberately inert for this family — rewriting it
     /// would break the remote PE's transport-label resolution toward the
     /// originating PE.
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "the MP_REACH chunker receives each wire component explicitly"
     )]
@@ -1624,7 +1624,7 @@ impl PeerSession {
     /// `MP_REACH_NLRI` UPDATEs, splitting so each encoded message fits
     /// `max_len` bytes. Mirrors the VPN sender minus the RD-prefixed
     /// next-hop (RFC 8277 uses the ordinary host next-hop forms).
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "the MP_REACH chunker receives each wire component explicitly"
     )]
