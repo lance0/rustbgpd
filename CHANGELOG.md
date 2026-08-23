@@ -14,6 +14,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The shipped Grafana overview now pairs the RFC 9107 ORR SPF computation
   rate with current topology node and usable-link counts. (LAN-1205)
 
+- gNMI dial-out now exposes `gnmi_dialout_resync_total{target}` so repeated
+  established-session loss and fresh-snapshot resyncs are visible even while
+  the binary connection gauge otherwise looks healthy. (LAN-1190)
+
 - BMP divergence repair is now operator-visible through the lifecycle-correct
   `bmp_stream_diverged{peer}` gauge, a sustained-divergence alert, a control
   event-drop alert, and a focused Grafana panel. The gauge clears after repair

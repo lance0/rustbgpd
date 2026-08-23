@@ -18,7 +18,7 @@
 //! Each target runs an independent reconnect loop with capped exponential
 //! backoff, logs at `warn` only on state transitions (first failure after
 //! a success, disconnect) and at `debug` for repeated retries, and surfaces
-//! its state as the `gnmi_dialout_connected{target}` gauge.
+//! connection state and established-session loss as per-target metrics.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -44,7 +44,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// connection across SIGHUP; any field edit tears down and redials.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DialoutTarget {
-    /// Unique name — the `gnmi_dialout_connected{target}` label and log key.
+    /// Unique name — the dial-out metric label and log key.
     pub name: String,
     /// Full endpoint URI (`http://host:port` or `https://host:port`).
     pub endpoint: String,
@@ -257,7 +257,7 @@ impl DialoutManager {
     }
 
     /// Reconcile the running dial-out tasks with `targets`: stop removed
-    /// targets (reaping their `gnmi_dialout_connected` series), restart
+    /// targets (reaping their connection and resync series), restart
     /// changed ones, start added ones, and leave unchanged targets — and
     /// their live collector connections — untouched.
     pub fn apply(&mut self, targets: &[DialoutTarget]) {
@@ -290,8 +290,8 @@ impl DialoutManager {
 /// One target's connect / stream / reconnect loop. Never returns under
 /// normal operation; the manager aborts it on removal or shutdown.
 async fn run_target(service: GnmiService, metrics: BgpMetrics, target: DialoutTarget) {
-    // Materialize the series at 0 immediately so a collector that is down
-    // at daemon startup is visible on /metrics before the first success.
+    // Materialize both target series at 0 immediately so a collector that is
+    // down at daemon startup is visible on /metrics before the first success.
     metrics.set_gnmi_dialout_connected(&target.name, false);
     let mut backoff = target.backoff_initial.max(Duration::from_millis(1));
     let mut failure_announced = false;
@@ -299,6 +299,7 @@ async fn run_target(service: GnmiService, metrics: BgpMetrics, target: DialoutTa
         match publish_session(&service, &metrics, &target).await {
             Ok(()) => {
                 // Connected and then cleanly/abruptly disconnected.
+                metrics.record_gnmi_dialout_resync(&target.name);
                 metrics.set_gnmi_dialout_connected(&target.name, false);
                 warn!(
                     target = %target.name,
@@ -756,6 +757,23 @@ mod tests {
             .map(|metric| metric.get_gauge().value() as i64)
     }
 
+    fn counter_value(metrics: &BgpMetrics, target: &str) -> Option<f64> {
+        metrics
+            .registry()
+            .gather()
+            .iter()
+            .find(|family| family.name() == "gnmi_dialout_resync_total")?
+            .get_metric()
+            .iter()
+            .find(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "target" && label.value() == target)
+            })
+            .map(|metric| metric.get_counter().value())
+    }
+
     async fn wait_for_gauge(metrics: &BgpMetrics, target: &str, expected: i64) {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -937,6 +955,7 @@ mod tests {
         expect_update_with_as(&mut received).await;
         expect_sync(&mut received).await;
         wait_for_gauge(&metrics, "collector-silent", 1).await;
+        assert_eq!(counter_value(&metrics, "collector-silent"), Some(0.0));
 
         // Fail the next sample tick. The subscription errors and the
         // outbound stream ends; since the collector stays silent forever,
@@ -947,13 +966,14 @@ mod tests {
         expect_update_with_as(&mut received).await;
         expect_sync(&mut received).await;
         wait_for_gauge(&metrics, "collector-silent", 1).await;
+        assert_eq!(counter_value(&metrics, "collector-silent"), Some(1.0));
 
         server.abort();
         manager.apply(&[]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn manager_reaps_gauge_series_on_target_removal() {
+    async fn manager_reaps_target_series_on_target_removal() {
         let metrics = BgpMetrics::new();
         let (reservation, addr) = reserve_port(None);
         let (server, mut received) = spawn_stub_collector(reservation);
@@ -961,11 +981,13 @@ mod tests {
         manager.apply(&[test_target("collector-reap", addr)]);
         expect_update_with_as(&mut received).await;
         wait_for_gauge(&metrics, "collector-reap", 1).await;
+        assert_eq!(counter_value(&metrics, "collector-reap"), Some(0.0));
 
-        // Removing the target from config reaps the series entirely —
-        // not just sets it to 0 — so /metrics stops exporting it.
+        // Removing the target from config reaps both series entirely rather
+        // than retaining stale per-target labels in /metrics.
         manager.apply(&[]);
         assert_eq!(gauge_value(&metrics, "collector-reap"), None);
+        assert_eq!(counter_value(&metrics, "collector-reap"), None);
         server.abort();
     }
 
@@ -984,6 +1006,7 @@ mod tests {
         wait_for_gauge(&metrics, "collector-late", 0).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(gauge_value(&metrics, "collector-late"), Some(0));
+        assert_eq!(counter_value(&metrics, "collector-late"), Some(0.0));
 
         // The collector comes up later; the retry loop finds it.
         let (server, mut received) = spawn_stub_collector(reservation);
