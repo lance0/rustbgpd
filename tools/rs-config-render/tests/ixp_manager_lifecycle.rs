@@ -888,6 +888,66 @@ fn killed_run_retains_owner_fence_and_foreign_resume_cannot_bypass_it() {
 }
 
 #[test]
+fn journal_write_failure_after_lock_acquisition_fences_without_activation() {
+    let _lifecycle_guard = lifecycle_test_guard();
+    let rig = Rig::new();
+    let journal_path = rig.state.join("ixp-manager-lifecycle.json");
+    let fence_path = rig.host.join("ixp-manager-host-fence.json");
+    let activation_marker = rig.root.join("activation-ran");
+    let current = fs::read_link(rig.state.join("current")).unwrap();
+    executable(
+        &rig.activation,
+        "#!/bin/sh\nprintf activated > \"$ACTIVATION_MARKER\"\n",
+    );
+    let server = Server::start(vec![
+        Response::json(200)
+            .after_state_contains(journal_path.clone(), "lock_request_pending")
+            .after_chmod(rig.state.clone(), 0o500),
+    ]);
+    let origin = server.origin.clone();
+    let output = run_cli(&rig, &origin)
+        .env("ACTIVATION_MARKER", &activation_marker)
+        .output()
+        .unwrap();
+    mode(&rig.state, 0o700);
+
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"rs-config-render: IXP Manager lifecycle: manual recovery required; upstream lock retained\n"
+    );
+    let requests = server.finish();
+    assert_eq!(requests.len(), 1, "must stop before fetch or callback");
+    assert_request(&requests[0], "POST", "get-update-lock");
+
+    let fence: Binding = serde_json::from_slice(&fs::read(fence_path).unwrap()).unwrap();
+    assert_eq!(&fence, rig.binding());
+    let journal_bytes = fs::read(&journal_path).unwrap();
+    let journal: serde_json::Value = serde_json::from_slice(&journal_bytes).unwrap();
+    assert_eq!(journal["phase"], "lock_request_pending");
+    assert!(journal["candidate_sha256"].is_null());
+    assert!(journal["activation_outcome"].is_null());
+    assert!(journal["callback"].is_null());
+    assert!(fs::read_dir(&rig.state).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".ixp-manager-lifecycle.json.")
+    }));
+    assert_eq!(fs::read_link(rig.state.join("current")).unwrap(), current);
+    assert!(!activation_marker.exists());
+    assert!(!rig.candidate.join("render-receipt.json").exists());
+
+    assert_eq!(
+        lifecycle::resume(&rig.resume_options(&origin)),
+        Err(Error::ManualRecovery)
+    );
+    assert_eq!(fs::read(&journal_path).unwrap(), journal_bytes);
+}
+
+#[test]
 fn callback_cleanup_failure_retains_fence_until_matching_resume() {
     let _lifecycle_guard = lifecycle_test_guard();
     let rig = Rig::new();
@@ -1147,6 +1207,6 @@ fn every_lifecycle_test_acquires_the_process_guard_first() {
         .collect::<Vec<_>>();
     assert_eq!(
         tests.join(","),
-        "noop_lifecycle_uses_exact_authenticated_order_and_acknowledges,definite_lock_and_render_failures_have_bounded_release_semantics,failed_callback_is_durable_and_resume_never_refetches_or_activates,started_activation_uncertainty_retains_remote_lock_for_manual_recovery,redirects_and_unsafe_origins_or_key_files_are_refused_without_key_forwarding,control_and_configuration_body_caps_fail_closed,in_memory_renderer_is_byte_identical_to_private_file_entry_point,host_lock_is_exclusive_before_any_network_request,guard_clear_is_bound_to_the_claimed_host,per_handle_state_lock_refuses_before_publishing_host_fence,topology_mismatches_are_refused_before_network_effects,killed_run_retains_owner_fence_and_foreign_resume_cannot_bypass_it,callback_cleanup_failure_retains_fence_until_matching_resume,additive_cli_help_pins_run_and_callback_only_resume,poisoned_proxy_is_ignored_and_cli_reports_the_exact_terminal_status,only_the_pinned_definite_lock_statuses_clear_the_intent,corrupt_or_contradictory_durable_state_never_sends_a_callback,release_resume_preserves_the_original_refusal_or_rollback_exit,every_lifecycle_test_acquires_the_process_guard_first"
+        "noop_lifecycle_uses_exact_authenticated_order_and_acknowledges,definite_lock_and_render_failures_have_bounded_release_semantics,failed_callback_is_durable_and_resume_never_refetches_or_activates,started_activation_uncertainty_retains_remote_lock_for_manual_recovery,redirects_and_unsafe_origins_or_key_files_are_refused_without_key_forwarding,control_and_configuration_body_caps_fail_closed,in_memory_renderer_is_byte_identical_to_private_file_entry_point,host_lock_is_exclusive_before_any_network_request,guard_clear_is_bound_to_the_claimed_host,per_handle_state_lock_refuses_before_publishing_host_fence,topology_mismatches_are_refused_before_network_effects,killed_run_retains_owner_fence_and_foreign_resume_cannot_bypass_it,journal_write_failure_after_lock_acquisition_fences_without_activation,callback_cleanup_failure_retains_fence_until_matching_resume,additive_cli_help_pins_run_and_callback_only_resume,poisoned_proxy_is_ignored_and_cli_reports_the_exact_terminal_status,only_the_pinned_definite_lock_statuses_clear_the_intent,corrupt_or_contradictory_durable_state_never_sends_a_callback,release_resume_preserves_the_original_refusal_or_rollback_exit,every_lifecycle_test_acquires_the_process_guard_first"
     );
 }
