@@ -66,7 +66,9 @@ pub fn journal_path(runtime_state_dir: &Path) -> PathBuf {
 }
 
 /// Refuse a retired locator-free v1/v2 authority without opening, changing, or
-/// removing it. Its terminal state cannot be proven by the v0.65 daemon.
+/// removing it. Its terminal state cannot be proven by v0.65.0 or any later
+/// release, so every one of them refuses boot untouched; finish or recover the
+/// transaction before upgrading past v0.64.0.
 pub fn refuse_retired_journal(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
