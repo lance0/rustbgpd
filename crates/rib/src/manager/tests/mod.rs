@@ -19,7 +19,7 @@ use crate::route::{
     VpnRibRoute,
 };
 use crate::test_support::{make_flowspec_route, make_route, make_route_with_lp, make_v6_route};
-use crate::update::EffectiveDistributionMode;
+use crate::update::{EffectiveDistributionMode, RouteQueryScope, route_query_key};
 
 fn evpn_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::L2Vpn, Safi::Evpn)]
@@ -325,14 +325,37 @@ async fn query_fib_install_candidates_opts(
 }
 
 async fn query_received_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Vec<Route> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryReceivedRoutes {
-        peer: Some(peer),
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    reply_rx.await.unwrap()
+    collect_query_routes(tx, RouteQueryScope::Received { peer: Some(peer) }).await
+}
+
+async fn collect_advertised_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Vec<Route> {
+    collect_query_routes(tx, RouteQueryScope::Advertised { peer }).await
+}
+
+async fn collect_query_routes(tx: &mpsc::Sender<RibUpdate>, scope: RouteQueryScope) -> Vec<Route> {
+    let mut routes = Vec::new();
+    let mut after = None;
+    let mut expected_version = None;
+    loop {
+        let (reply, response) = oneshot::channel();
+        tx.send(RibUpdate::QueryRoutesPage {
+            scope,
+            filter: None,
+            after,
+            expected_version,
+            page_size: 2,
+            reply,
+        })
+        .await
+        .unwrap();
+        let page = response.await.unwrap().unwrap();
+        expected_version = Some(page.version);
+        after = page.routes.last().map(route_query_key);
+        routes.extend(page.routes);
+        if !page.has_more {
+            return routes;
+        }
+    }
 }
 
 async fn query_evpn_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<EvpnRibRoute> {

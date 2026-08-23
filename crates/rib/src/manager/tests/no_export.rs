@@ -226,11 +226,8 @@ async fn no_export_suppresses_honor_ebgp_only_and_splits_update_groups() {
                 .expect("tagged replacement re-announced to non-suppressed peers");
             assert_eq!(update.announce.len(), 1, "{peer}");
             assert!(update.withdraw.is_empty(), "{peer}");
-            let (reply, response) = oneshot::channel();
-            tx.send(RibUpdate::QueryAdvertisedRoutes { peer, reply })
-                .await
-                .unwrap();
-            assert_eq!(response.await.unwrap().len(), 1, "{peer}");
+            let response = collect_advertised_routes(&tx, peer).await;
+            assert_eq!(response.len(), 1, "{peer}");
         }
 
         // Restore the plain route for the next community round.

@@ -363,14 +363,7 @@ async fn no_advertise_candidate_is_removed_before_add_path_rank_compaction() {
         "one compact delta is sufficient"
     );
 
-    let (reply, response) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: target,
-        reply,
-    })
-    .await
-    .unwrap();
-    let advertised = response.await.unwrap();
+    let advertised = collect_advertised_routes(&tx, target).await;
     assert_eq!(advertised.len(), 1);
     assert_eq!(advertised[0].peer, IpAddr::V4(source_b));
     assert_eq!(advertised[0].path_id, 1);
@@ -404,14 +397,8 @@ async fn no_advertise_candidate_is_removed_before_add_path_rank_compaction() {
         .expect("policy-added NO_ADVERTISE withdraws the remaining rank");
     assert!(update.announce.is_empty());
     assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 1)]);
-    let (reply, response) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: target,
-        reply,
-    })
-    .await
-    .unwrap();
-    assert!(response.await.unwrap().is_empty());
+    let response = collect_advertised_routes(&tx, target).await;
+    assert!(response.is_empty());
 
     let explain = query_explain_best_path_for_peer(&tx, Prefix::V4(prefix), target)
         .await

@@ -188,26 +188,15 @@ async fn best_denied_single_best_hides_per_client_best_sends_runner_up() {
     drain_eor(&mut mitigated_rx).await;
 
     // Adj-RIB-Out / ListAdvertisedRoutes present the same shape.
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: mitigated,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let advertised = reply_rx.await.unwrap();
+    let advertised = collect_advertised_routes(&tx, mitigated).await;
     assert_eq!(advertised.len(), 1);
     assert_eq!(advertised[0].peer, IpAddr::V4(SOURCE_B));
     assert_eq!(advertised[0].path_id, 0);
 
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: hidden,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    assert!(reply_rx.await.unwrap().is_empty(), "path hiding pinned");
+    assert!(
+        collect_advertised_routes(&tx, hidden).await.is_empty(),
+        "path hiding pinned"
+    );
 
     drop(tx);
     handle.await.unwrap();
@@ -267,14 +256,7 @@ async fn no_advertise_winner_is_replaced_by_per_client_runner_up_before_policy()
     );
     assert!(out_rx.try_recv().is_err());
 
-    let (reply, response) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: target,
-        reply,
-    })
-    .await
-    .unwrap();
-    let advertised = response.await.unwrap();
+    let advertised = collect_advertised_routes(&tx, target).await;
     assert_eq!(advertised.len(), 1);
     assert_eq!(advertised[0].peer, IpAddr::V4(SOURCE_B));
     assert_eq!(advertised[0].path_id, 0);
@@ -295,14 +277,8 @@ async fn no_advertise_winner_is_replaced_by_per_client_runner_up_before_policy()
         .expect("policy-added NO_ADVERTISE withdraws the per-client winner");
     assert!(update.announce.is_empty());
     assert_eq!(update.withdraw, vec![(Prefix::V4(prefix()), 0)]);
-    let (reply, response) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: target,
-        reply,
-    })
-    .await
-    .unwrap();
-    assert!(response.await.unwrap().is_empty());
+    let response = collect_advertised_routes(&tx, target).await;
+    assert!(response.is_empty());
 
     let explain = query_explain_advertised_route(&tx, target, Prefix::V4(prefix())).await;
     assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);

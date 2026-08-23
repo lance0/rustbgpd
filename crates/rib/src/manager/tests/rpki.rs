@@ -630,14 +630,7 @@ async fn routes_validated_on_insert_with_vrp_table() {
     .unwrap();
 
     // Query received routes — should have Valid validation state
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryReceivedRoutes {
-        peer: Some(peer),
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let routes = reply_rx.await.unwrap();
+    let routes = query_received_routes(&tx, peer).await;
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].validation_state, RpkiValidation::Valid);
 
@@ -674,14 +667,7 @@ async fn rpki_cache_update_revalidates_existing_routes() {
     .unwrap();
 
     // Verify it's NotFound
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryReceivedRoutes {
-        peer: Some(peer),
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let routes = reply_rx.await.unwrap();
+    let routes = query_received_routes(&tx, peer).await;
     assert_eq!(routes[0].validation_state, RpkiValidation::NotFound);
 
     // Now send VRP table that covers the route
@@ -696,14 +682,7 @@ async fn rpki_cache_update_revalidates_existing_routes() {
         .unwrap();
 
     // Query again — should be Valid now
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryReceivedRoutes {
-        peer: Some(peer),
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let routes = reply_rx.await.unwrap();
+    let routes = query_received_routes(&tx, peer).await;
     assert_eq!(routes[0].validation_state, RpkiValidation::Valid);
 
     drop(tx);
@@ -876,14 +855,7 @@ async fn rpki_no_table_all_not_found() {
     .await
     .unwrap();
 
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryReceivedRoutes {
-        peer: Some(peer),
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let routes = reply_rx.await.unwrap();
+    let routes = query_received_routes(&tx, peer).await;
     assert_eq!(routes[0].validation_state, RpkiValidation::NotFound);
 
     drop(tx);
@@ -936,16 +908,7 @@ async fn ibgp_aspa_stays_unknown_on_insert_and_cache_revalidation() {
     .await
     .unwrap();
 
-    let query = async |tx: &mpsc::Sender<RibUpdate>| {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        tx.send(RibUpdate::QueryReceivedRoutes {
-            peer: Some(peer),
-            reply: reply_tx,
-        })
-        .await
-        .unwrap();
-        reply_rx.await.unwrap()
-    };
+    let query = async |tx: &mpsc::Sender<RibUpdate>| query_received_routes(tx, peer).await;
     let inserted = query(&tx).await;
     assert_eq!(
         inserted[0].aspa_state,
@@ -1026,14 +989,7 @@ async fn aspa_cache_update_revalidates_with_stored_downstream_context() {
     .await
     .unwrap();
 
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryReceivedRoutes {
-        peer: Some(peer),
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let routes = reply_rx.await.unwrap();
+    let routes = query_received_routes(&tx, peer).await;
     assert_eq!(routes[0].aspa_state, rustbgpd_wire::AspaValidation::Valid);
 
     drop(tx);
@@ -1105,14 +1061,7 @@ async fn rpki_cache_update_no_change_no_redistribution() {
         .unwrap();
 
     // Verify route stays NotFound — no VRP covers 10.0.0.0/24
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryReceivedRoutes {
-        peer: Some(peer),
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let routes = reply_rx.await.unwrap();
+    let routes = query_received_routes(&tx, peer).await;
     assert_eq!(routes[0].validation_state, RpkiValidation::NotFound);
 
     drop(tx);
