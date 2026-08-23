@@ -71,8 +71,8 @@ input from the network. It runs under continuous fuzzing in CI.
   locator unlink plus parent `fsync` is terminal; only later verified exact
   metadata/raw cleanup and pending-directory `fsync` can fail warning-only.
   Locator absence carries no v3 authority. A retired v2 locator or locator-free
-  v1/v2 journal makes v0.65 refuse boot before candidate mutation and remains
-  untouched for recovery with rustbgpd v0.64.0.
+  v1/v2 journal makes v0.65.0 and every later release refuse boot before
+  candidate mutation, and remains untouched for recovery with rustbgpd v0.64.0.
 - **No `unsafe` code in shipped paths, with two scoped exceptions.** Every
   workspace crate root carries `#![deny(unsafe_code)]`, so `unsafe` cannot enter
   a crate without a visible, reviewed opt-out. There are two:

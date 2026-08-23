@@ -279,13 +279,23 @@ Daemon identity and configuration.
 
 | RPC | Description |
 |-----|-------------|
-| `GetGlobal` | Returns ASN, router ID, listen port, and host TCP-AO capability probe status |
+| `GetGlobal` | Returns ASN, router ID, listen port, host TCP-AO capability probe status and detail, and the Unix-epoch-seconds timestamp of the last successfully accepted full policy generation |
 
 ```bash
 # Get daemon identity
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.GlobalService/GetGlobal
 ```
+
+`policy_generation_loaded_timestamp_seconds` is the Unix epoch second at which
+the daemon last accepted a complete policy generation — initial load, SIGHUP, or
+a config transaction. It is `0` until the first generation is accepted, and a
+rejected load never advances it (the prior generation stays live and the
+timestamp freezes), so a caller can prove a reload was *accepted* rather than
+merely attempted. It is the same value the
+`bgp_policy_generation_loaded_timestamp_seconds` Prometheus gauge exports; see
+"Policy artifact freshness" in [`OPERATIONS.md`](OPERATIONS.md) for the staleness
+alert expressions.
 
 `tcp_ao_support` is a read-only Linux capability probe for RFC 5925 TCP-AO. It
 reports whether the host kernel accepts the TCP-AO socket primitive that
@@ -296,6 +306,9 @@ attempt without falling back to unauthenticated TCP. Dynamic-range keys are
 config-file-only: runtime range CRUD rejects protected ranges and overlaps.
 SIGHUP can append a non-preferred successor generation; selection,
 deprecation, deletion, and protected-owner CRUD are not exposed.
+`tcp_ao_detail` carries human-readable probe detail alongside it, populated only
+when `tcp_ao_support` is `TCP_AO_SUPPORT_UNSUPPORTED` or
+`TCP_AO_SUPPORT_PROBE_FAILED`, and empty otherwise.
 
 `NeighborState.authentication` reports the effective protected transport as
 `PLAINTEXT`, `MD5`, or `TCP_AO`. For direct dynamic-prefix TCP-AO sessions,
@@ -612,8 +625,9 @@ parent-directory `fsync`. Subsequent verified exact metadata/raw cleanup and
 pending-directory `fsync` are warning-only; locator-free residue cannot re-arm
 the transaction.
 Production reads and writes v3 authority only. A v2 locator or locator-free
-v1/v2 journal makes v0.65 refuse untouched. Recover with rustbgpd v0.64.0, or delete only
-after proving it terminal and intended. Status reports pending/terminal state.
+v1/v2 journal makes v0.65.0 and every later release refuse untouched. Recover
+with rustbgpd v0.64.0, or delete only after proving it terminal and intended.
+Status reports pending/terminal state.
 A failed abort/auto-revert rollback is not terminal: the transaction stays
 pending with an `ABORT_FAILED`/`AUTO_REVERT_FAILED` status and the mutation
 fence stays closed until the abort is retried successfully, the candidate is
