@@ -53,10 +53,6 @@ async fn gshut_toggle_times_out_when_rib_reply_wedges() {
     );
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the timeout regression keeps its full transaction and recovery receipt together"
-)]
 #[tokio::test(start_paused = true)]
 async fn export_policy_apply_times_out_when_rib_reply_wedges() {
     use rustbgpd_transport::PeerCommand;
@@ -255,7 +251,7 @@ async fn gshut_not_found_preserves_scoped_peer_label() {
     assert_eq!(err.to_string(), "peer fe80::2%eth1 not found");
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the hot-apply regression keeps all eBGP and iBGP peer assertions together"
 )]
@@ -430,7 +426,7 @@ async fn honor_graceful_shutdown_hot_apply_targets_ebgp_only() {
 /// the production race: the session task can drop a reply
 /// mid-shutdown while the FSM is still reporting Established
 /// for one more poll.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the failure regression keeps the rejected import and no-refresh receipt together"
 )]
@@ -627,7 +623,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
 /// `pending_refresh = true`, leave `managed.import_policy` at
 /// the prior value, and (because peer is Idle) NOT fire Route
 /// Refresh.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the idle-peer failure regression keeps pending-refresh state and wire assertions together"
 )]
@@ -802,7 +798,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
 /// holds. Failure must propagate, the bookkeeping must not
 /// advance, and `pending_export_apply` must be set so the next
 /// call retries.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the export failure regression keeps bookkeeping and wire assertions together"
 )]
@@ -1018,7 +1014,7 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
 ///
 /// Asserts: first call returns Err with both flags set; second
 /// call returns Ok with `route_refresh_calls > 0`.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the retry regression keeps import, export failure, and refresh receipt together"
 )]
@@ -1260,7 +1256,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
 /// import-side intent independently re-arms `pending_refresh`. A
 /// content-equal retry must therefore revisit the RIB, then refresh
 /// Adj-RIB-In and clear both intents after success.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the RIB failure regression keeps transaction and retry state together"
 )]
@@ -1487,7 +1483,7 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
 /// small (Route Refresh against an empty `AdjRibIn` is a no-op
 /// on the wire) and is the right tradeoff against silent
 /// stale-routes.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the stale-query regression keeps fencing and retry assertions together"
 )]

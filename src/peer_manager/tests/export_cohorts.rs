@@ -59,7 +59,7 @@ fn import_ack_loss_policy_handle(
 /// whose chains didn't change) — and no RIB `ReplacePeerExportPolicy`.
 /// The peer whose content moved gets exactly the prior behavior:
 /// session installs, RIB replace, and a Route Refresh.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the fanout regression keeps affected and unaffected peer assertions together"
 )]

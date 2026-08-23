@@ -130,7 +130,7 @@ fn collision_remote_wins() {
     assert!(local_id < remote_id, "remote should win collision");
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the active-open regression keeps both candidate paths and fencing assertions together"
 )]
