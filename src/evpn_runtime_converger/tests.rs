@@ -1,9 +1,86 @@
 use std::time::{Duration, Instant as StdInstant};
 
+use rustbgpd_evpn::runtime_plan_shape::{
+    is_additive_build_up_plan, is_ip_vrf_relink_plan, is_l2vni_mixed_plan, is_l2vni_swap_plan,
+    is_tenant_teardown_plan, validate_additive_build_up,
+    validate_ethernet_segment_member_vnis_present, validate_ip_vrf_relink, validate_l2vni_mixed,
+    validate_l2vni_swap, validate_no_unexpected_relink, validate_single_ethernet_segment_add,
+    validate_single_ethernet_segment_delete, validate_single_ethernet_segment_redefine,
+    validate_single_ip_vrf_delete, validate_single_ip_vrf_redefine, validate_single_l2vni_delete,
+    validate_single_l2vni_redefine, validate_tenant_teardown,
+};
 use rustbgpd_rib::RibCommandError;
 use tokio::sync::{broadcast, watch};
 
 use super::*;
+
+impl EvpnRuntimeReloadApply {
+    pub(crate) async fn apply_config(
+        &self,
+        config: &Config,
+    ) -> Result<EvpnRuntimeReloadApplyResult, GrpcEvpnRuntimeApplyError> {
+        let response = self.apply_candidate_config(config, false).await?;
+        let outcome = response_to_reload_outcome(response.outcome)?;
+        Ok(EvpnRuntimeReloadApplyResult {
+            outcome,
+            message: response.message,
+        })
+    }
+}
+
+fn evpn_runtime_candidate_from_toml(
+    candidate_toml: &str,
+) -> Result<rustbgpd_evpn::EvpnRuntimeCandidate, GrpcEvpnRuntimeApplyError> {
+    if candidate_toml.trim().is_empty() {
+        return Err(GrpcEvpnRuntimeApplyError::InvalidArgument(
+            "candidate_toml must contain a full rustbgpd config".to_string(),
+        ));
+    }
+    let candidate_toml = crate::test_support::tier_authorized_uds_test_config(candidate_toml);
+    let candidate =
+        Config::load_toml_with_diagnostics(&candidate_toml, "candidate EVPN runtime config")
+            .map_err(GrpcEvpnRuntimeApplyError::InvalidArgument)?;
+    crate::test_support::assert_tier_authorized_test_config(&candidate);
+    evpn_runtime_candidate_from_config(&candidate)
+}
+
+pub(crate) async fn apply_evpn_runtime_request(
+    request: &proto::ApplyEvpnRuntimeRequest,
+    coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
+    apply_lock: &tokio::sync::Mutex<()>,
+    converger: &dyn DaemonEvpnRuntimeConverger,
+) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
+    apply_evpn_runtime_request_with_metrics(
+        request,
+        coordinator,
+        apply_lock,
+        converger,
+        &BgpMetrics::new(),
+    )
+    .await
+}
+
+/// Same as [`apply_evpn_runtime_request`] but with a caller-owned metrics
+/// handle, so a test can assert the fail-stop counter moved.
+pub(crate) async fn apply_evpn_runtime_request_with_metrics(
+    request: &proto::ApplyEvpnRuntimeRequest,
+    coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
+    apply_lock: &tokio::sync::Mutex<()>,
+    converger: &dyn DaemonEvpnRuntimeConverger,
+    metrics: &BgpMetrics,
+) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
+    let candidate = evpn_runtime_candidate_from_toml(&request.candidate_toml)?;
+    let _apply_guard = apply_lock.lock().await;
+    apply_evpn_runtime_candidate_locked(
+        candidate,
+        request.validate_only,
+        coordinator,
+        converger,
+        metrics,
+        || {},
+    )
+    .await
+}
 
 #[derive(Clone)]
 struct TestRuntimeConverger {
