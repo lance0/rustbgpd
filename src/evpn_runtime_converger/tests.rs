@@ -1872,7 +1872,7 @@ local_vtep_ip = "10.0.0.1"
 
 #[test]
 fn converge_dispatch_consumes_one_routed_validation_result() {
-    let source = include_str!("evpn_runtime_converger.rs");
+    let source = include_str!("../evpn_runtime_converger.rs");
     let dispatch = source
         .split_once("impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger")
         .unwrap()
@@ -3172,10 +3172,6 @@ async fn runtime_actor_converger_l2vni_add_publishes_imet_and_actor_models() {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "full dataplane-handle + segment-actor wiring per the sibling converger proofs"
-)]
 async fn runtime_actor_converger_l2vni_add_updates_segment_instance_view() {
     let current = runtime_model_from_candidate_toml(l2vni_one_es_runtime_candidate_toml());
     let l2_candidate = runtime_candidate_from_toml(two_l2vni_one_es_runtime_candidate_toml());
@@ -5303,11 +5299,11 @@ fn m47_interop_configs_describe_a_tenant_teardown() {
     // Segment). Guards the smoke against drift in either the configs or
     // the teardown classifier.
     let current = pre_authorized_runtime_model_from_toml(&materialize_shared_test_only_grpc_token(
-        include_str!("../tests/interop/configs/rustbgpd-m47-pe1.toml"),
+        include_str!("../../tests/interop/configs/rustbgpd-m47-pe1.toml"),
     ));
     let candidate =
         pre_authorized_runtime_candidate_from_toml(&materialize_shared_test_only_grpc_token(
-            include_str!("../tests/interop/configs/rustbgpd-m47-teardown.toml"),
+            include_str!("../../tests/interop/configs/rustbgpd-m47-teardown.toml"),
         ));
     let plan = current.plan_candidate(&candidate);
 
@@ -5332,11 +5328,11 @@ fn m48_interop_configs_describe_a_linked_ip_vrf_teardown() {
     // path rather than a standalone IP-VRF delete). Guards the smoke
     // against drift in either the configs or the teardown classifier.
     let current = pre_authorized_runtime_model_from_toml(&materialize_shared_test_only_grpc_token(
-        include_str!("../tests/interop/configs/rustbgpd-m48-pe1.toml"),
+        include_str!("../../tests/interop/configs/rustbgpd-m48-pe1.toml"),
     ));
     let candidate =
         pre_authorized_runtime_candidate_from_toml(&materialize_shared_test_only_grpc_token(
-            include_str!("../tests/interop/configs/rustbgpd-m48-teardown.toml"),
+            include_str!("../../tests/interop/configs/rustbgpd-m48-teardown.toml"),
         ));
     let plan = current.plan_candidate(&candidate);
 
