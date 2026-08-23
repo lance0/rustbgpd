@@ -10,7 +10,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 ### Runtime Snapshot
 
 ```bash
-rbgp global       # ASN, router ID, families, TCP-AO support
+rbgp global       # ASN, router ID, listen port, TCP-AO support
 rbgp health       # daemon health check
 rbgp doctor       # triage checks + redacted support bundle (tar.gz)
 rbgp metrics      # Prometheus metrics snapshot

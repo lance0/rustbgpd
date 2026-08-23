@@ -89,6 +89,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   panic enters the same coordinated peer teardown and exits 1; live bound-listener
   and accepted-connection fault proofs preserve signal and Shutdown RPC exit 0.
   This does not add PeerManager supervision or in-process respawn. (LAN-1207)
+- `rs-config-render` now renders an effective ARouteServer `reject_policy:
+  tag_and_reject` instead of refusing it: each client policy emits ordered
+  IRRDB origin- and prefix-reject terms, and the candidate gains a startup
+  `birdwatcher-reject-communities.json` artifact carrying the resolved
+  reject-cause communities. `birdwatcher-adapter` consumes that artifact
+  through `--arouteserver-reject-communities-file`, validating its schema,
+  peer ordering, and community shape strictly and refusing a file over 1 MiB
+  or over 4096 peers rather than starting on a downgraded view. `tag` stays
+  refused, as do `communities.reject_cause.ext` and
+  `rejected_route_announced_by`. (LAN-1178)
 - BLACKHOLE kernel ownership now survives crashes through a private,
   descriptor-relative `blackhole-owned.json` exact-prefix receipt. Adoption
   and deletion require both receipt authority and the kernel marker; install
