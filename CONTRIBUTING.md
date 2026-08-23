@@ -39,6 +39,17 @@ Markdown. Published docs name the thing directly, link the ADR, or cite the
 GitHub PR number — never a private issue-tracker ID an external reader
 cannot resolve.
 
+### Comparison documentation
+
+Describe every project by capability and scope, pin the compared release, and
+cite the primary in-tree or upstream source. Do not publish hand-maintained
+counts of external tests, targets, features, or RFCs. Apply the same rule to
+rustbgpd: a current project count is acceptable only when a machine check keeps
+it current.
+RFC-defined enumerations, immutable dated receipts, and historical milestones
+are not volatile census claims. Keep `Yes` / `Partial` / `No` verdicts, with
+notes or footnotes that state the exact scope behind each verdict.
+
 ### Replaying update-group faults
 
 The PR-sized parameterized fixed-scenario corpus compares the grouped manager
