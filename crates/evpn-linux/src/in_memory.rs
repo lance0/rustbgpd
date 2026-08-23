@@ -364,7 +364,7 @@ impl InMemoryDataplane {
     /// Synchronous half of `apply` — does the fail-injection lookup
     /// and the kernel-state mutation under the same lock so the test
     /// can't observe a partially-applied op.
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "one arm per operation shape keeps the in-memory dispatch mirror readable"
     )]

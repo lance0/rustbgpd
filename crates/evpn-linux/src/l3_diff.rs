@@ -442,7 +442,7 @@ impl Candidate {
 /// `desired_*` to have been seen during the `want` build. Both
 /// `.expect(...)` sites prove a programmer error, not a runtime
 /// condition.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the L3 diff keeps all dependent kernel object comparisons in order"
 )]
