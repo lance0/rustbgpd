@@ -142,13 +142,17 @@ pub struct EventHistoryConfig {
     pub batch_interval: Duration,
     /// Per-subscriber broadcast capacity.
     pub broadcast_capacity: usize,
-    /// Count-cap retention.
+    /// Count retention target. Each scheduled pass evicts at most 5,000
+    /// oldest events above the target before evaluating the byte target.
+    /// This is not a hard retained-event cap.
     pub max_events: u64,
-    /// Byte-cap retention (combined events.db + WAL).
+    /// Byte retention target (combined events.db + WAL).
     ///
-    /// This is a retention trigger/target, not a strict filesystem cap:
-    /// SQLite DELETE frees pages for reuse but does not guarantee the
-    /// main DB file shrinks without vacuum/compaction.
+    /// After the count phase, each pass removes up to ten 5,000-event batches
+    /// while oversized. Sustained production above that bounded eviction
+    /// throughput can keep the store growing. SQLite DELETE frees pages for
+    /// reuse but does not guarantee the main DB file shrinks without
+    /// vacuum/compaction.
     pub max_bytes: u64,
     /// SQLite synchronous mode.
     pub synchronous: SynchronousMode,

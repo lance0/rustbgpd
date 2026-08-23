@@ -390,8 +390,8 @@ what's deferred.
 | `enabled` | restart-required | Off ⇒ EHM does not open `events.db`; live event broadcast paths remain possible, but no durable outbox/replay state is created. (See ADR-0072 for the pass-through contract on `required = false` recovery failures, which is a runtime degraded state distinct from `enabled = false`.) |
 | `required` | restart-required | If `true`, the daemon fails to start when the events DB cannot be opened or recovered. Default `false`: degrade to pass-through with `bgp_event_outbox_degraded = 1`. |
 | `path` | restart-required | Relative to `runtime_state_dir`. Empty ⇒ `<runtime_state_dir>/events.db`. |
-| `max_events` | restart-required | Hard count cap; default 100,000. Retention sweeps every 60s evict oldest `event_id` first. |
-| `max_bytes` | restart-required | Byte retention target on `events.db` + WAL combined; default 256 MB. SQLite may reuse freed pages rather than shrink the main DB immediately, so this is not a strict filesystem cap in v1. |
+| `max_events` | restart-required | Count retention target; default 100,000. Each 60s pass evaluates this first and evicts at most 5,000 oldest events above the target. |
+| `max_bytes` | restart-required | Byte retention target on `events.db` + WAL combined; default 256 MB. After the count phase, a pass removes up to ten additional 5,000-event batches while oversized. A busy or heavily oversized store can remain above either target after a bounded pass, and SQLite may reuse freed pages rather than shrink the main DB immediately. |
 | `synchronous` | restart-required | SQLite `PRAGMA synchronous` mode. `full` (default) fsyncs per commit; `normal` checkpoints periodically and trades a small crash window for throughput. |
 | `overflow` | restart-required | v1 only supports `drop`; `block` is reserved for a future ADR. |
 | `queue_capacity` | restart-required | Per-producer mpsc capacity. |

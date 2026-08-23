@@ -1202,7 +1202,7 @@ any `WatchEvents` subscriber is alive.
 | `bgp_event_outbox_committed_total{category}` | Events durably committed to the local outbox, per category. Increments inside EHM after the SQLite transaction commits — not on producer enqueue. |
 | `bgp_event_outbox_dropped_total{category, reason}` | Events lost before durable storage, or committed events skipped during durable cursor delivery. `reason` is `queue_full`, `closed`, `db_error`, `shutdown_timeout`, `decode_failure`, `opaque_codec`, or `source_lagged`. `shutdown_timeout` means the actor observed an accepted event still queued when the coordinated shutdown deadline expired. `source_lagged` fires when an upstream broadcast receiver (FIB or BFD bridge) reports `Lagged(missed)` — those missed events never reached the bridge body and therefore never reached EHM; the counter increments by `missed`. `queue_full`, `db_error`, `shutdown_timeout`, decode/codec failures, and `source_lagged` flip `bgp_event_outbox_degraded` to `1`; shutdown-time `closed` drops do not. |
 | `bgp_event_outbox_queue_depth{category}` | Pending events in the EHM producer queue by category. Climbs before drops start — early-warning signal. |
-| `bgp_event_outbox_db_size_bytes` | Combined size of `events.db` + WAL on disk, refreshed after commits and retention passes. `[event_history].max_bytes` is the soft retention trigger. |
+| `bgp_event_outbox_db_size_bytes` | Combined size of `events.db` + WAL on disk, refreshed after commits and retention passes. `[event_history].max_bytes` is the scheduled size-retention target; a bounded pass can finish while the store remains above it. |
 | `bgp_event_outbox_retention_evicted_total{reason}` | Events evicted by the retention pass. `reason` is `count_cap` or `byte_cap`. |
 | `bgp_event_outbox_latest_event_id` | The latest committed `event_id`. Forward progress indicator. |
 | `bgp_event_outbox_open_failures_total` | DB-open failures across the process lifetime. Typically 0 or 1; non-zero means EHM went into recovery or pass-through at startup. |
@@ -1226,16 +1226,21 @@ any `WatchEvents` subscriber is alive.
    `.stale-<ts>` quarantine file with no sidecar fallback). Same
    recovery: check log, fix the underlying I/O issue, restart.
 
-**Sizing retention** — `max_events` and `max_bytes` are *both* hard
-caps; whichever fires first wins. Default `100_000` events /
+**Sizing retention** — `max_events` and `max_bytes` are retention targets
+evaluated during each scheduled pass. The count target is evaluated first and
+removes at most 5,000 oldest events above the target; the byte target then
+removes up to ten 5,000-event batches while the database remains oversized.
+Default `100_000` events /
 `256_000_000` bytes covers a few minutes of even a busy daemon's
 event stream. Operators with longer collector-reconnect tolerance
 should raise both proportionally; collectors should alert on
 `bgp_event_outbox_cursor_gap_total > 0` to know when retention is
-too small for their SLA. Note that `bgp_event_outbox_db_size_bytes`
-can briefly exceed `max_bytes` between retention passes — `max_bytes`
-is the trigger, not a strict cap. SQLite may also hold onto freed
-pages rather than immediately shrink the main DB.
+too small for their SLA. A busy or heavily oversized store can remain
+above either target between passes or after one bounded pass. If sustained
+event production exceeds the maximum per-pass eviction throughput, the store
+can continue growing without a hard ceiling; alert on
+`bgp_event_outbox_db_size_bytes`. SQLite may also hold onto freed pages rather
+than immediately shrink the main DB.
 
 **External-bus integration** — see `examples/event-bridge/` for the
 reference skeleton. The pattern is:

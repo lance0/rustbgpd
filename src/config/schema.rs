@@ -412,11 +412,13 @@ pub struct EventHistoryConfig {
     /// Empty string ⇒ `<runtime_state_dir>/events.db`.
     #[serde(default = "default_event_history_path")]
     pub path: String,
-    /// Hard count cap on retained events.
+    /// Count retention target. Each scheduled pass evicts at most 5,000
+    /// oldest events above the target before evaluating the byte target.
     #[serde(default = "default_event_history_max_events")]
     pub max_events: u64,
-    /// Byte retention trigger on `events.db` + WAL combined. `SQLite`
-    /// may reuse freed pages rather than shrink the main DB immediately.
+    /// Byte retention target on `events.db` + WAL combined. After the count
+    /// phase, each pass removes up to ten 5,000-event batches while oversized.
+    /// `SQLite` may reuse freed pages rather than shrink the main DB immediately.
     #[serde(default = "default_event_history_max_bytes")]
     pub max_bytes: u64,
     /// `SQLite` `PRAGMA synchronous` mode. `full` (default) fsyncs
