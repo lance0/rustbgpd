@@ -834,9 +834,11 @@
           {
             "age": "<timestamp>",
             "bgp": {
+              "aggregator": "203.0.113.1 AS64496",
               "as_path": [
                 64496
               ],
+              "atomic_aggr": "",
               "communities": [],
               "large_communities": [],
               "local_pref": 0,
@@ -1085,9 +1087,11 @@
           {
             "age": "<timestamp>",
             "bgp": {
+              "aggregator": "203.0.113.1 AS64496",
               "as_path": [
                 64496
               ],
+              "atomic_aggr": "",
               "communities": [],
               "large_communities": [],
               "local_pref": 0,

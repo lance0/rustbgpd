@@ -1187,6 +1187,8 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
     let mut communities = Vec::new();
     let mut extended_communities = Vec::new();
     let mut large_communities = Vec::new();
+    let mut aggregator = None;
+    let mut atomic_aggregate = false;
 
     for attr in route.attributes.iter() {
         match attr {
@@ -1208,6 +1210,13 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
             PathAttribute::LargeCommunities(lc) => {
                 large_communities.extend(lc.iter().map(ToString::to_string));
             }
+            PathAttribute::Aggregator(a) => {
+                aggregator = Some(proto::RouteAggregator {
+                    asn: a.asn,
+                    router_id: a.router_id.to_string(),
+                });
+            }
+            PathAttribute::AtomicAggregate => atomic_aggregate = true,
             _ => {}
         }
     }
@@ -1242,6 +1251,10 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
         // Distinguishes "explicit MED attribute" from "no attribute" —
         // the bare `med` field encodes absent as 0 (LAN-313).
         med_attr: route.med_attr(),
+        // RFC 4271 AGGREGATOR / ATOMIC_AGGREGATE, straight from the
+        // stored path attributes; an absent attribute stays None / false.
+        aggregator,
+        atomic_aggregate,
         // Receive wall time recovered from the monotonic receive
         // instant, the same recovery the BMP Loc-RIB dump uses for its
         // RFC 9069 per-peer header timestamp. Approximation: `now()` and
@@ -2603,7 +2616,7 @@ mod tests {
     use bytes::Bytes;
 
     use rustbgpd_wire::{
-        AsPath, Ipv4Prefix, Ipv6Prefix, RawAttribute, bgpls::decode_bgpls_vpn_nlri,
+        Aggregator, AsPath, Ipv4Prefix, Ipv6Prefix, RawAttribute, bgpls::decode_bgpls_vpn_nlri,
     };
 
     use super::*;
@@ -4606,6 +4619,42 @@ mod tests {
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         }
+    }
+
+    #[test]
+    fn route_to_proto_carries_aggregator_and_atomic_aggregate() {
+        let with = route_to_proto(
+            &test_route(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+                vec![
+                    PathAttribute::AtomicAggregate,
+                    PathAttribute::Aggregator(Aggregator {
+                        asn: 64496,
+                        router_id: Ipv4Addr::new(203, 0, 113, 1),
+                        partial: false,
+                    }),
+                ],
+            ),
+            false,
+        );
+        assert_eq!(
+            with.aggregator,
+            Some(proto::RouteAggregator {
+                asn: 64496,
+                router_id: "203.0.113.1".to_string(),
+            })
+        );
+        assert!(with.atomic_aggregate);
+
+        let without = route_to_proto(
+            &test_route(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24)),
+                vec![],
+            ),
+            false,
+        );
+        assert_eq!(without.aggregator, None);
+        assert!(!without.atomic_aggregate);
     }
 
     #[test]

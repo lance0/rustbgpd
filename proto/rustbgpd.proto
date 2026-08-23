@@ -2416,6 +2416,16 @@ message ListRouteEventsResponse {
   repeated RouteEvent events = 1;
 }
 
+// RFC 4271 / RFC 6793 AGGREGATOR path attribute in canonical 4-octet
+// form (a received AS4_AGGREGATOR pair is already reconstructed at decode).
+message RouteAggregator {
+  // AS number of the speaker that formed the aggregate.
+  uint32 asn = 1;
+  // BGP identifier of the speaker that formed the aggregate (IPv4
+  // dotted quad).
+  string router_id = 2;
+}
+
 message Route {
   string prefix = 1;
   uint32 prefix_length = 2;
@@ -2464,6 +2474,11 @@ message Route {
   // True while this route is in the RFC 9494 long-lived graceful
   // restart stale phase.
   bool llgr_stale = 20;
+  // RFC 4271 AGGREGATOR path attribute. Absent when the route does not
+  // carry the attribute.
+  RouteAggregator aggregator = 21;
+  // True when the route carries the RFC 4271 ATOMIC_AGGREGATE attribute.
+  bool atomic_aggregate = 22;
 }
 
 enum RouteEventType {
