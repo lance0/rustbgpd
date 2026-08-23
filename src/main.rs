@@ -2971,8 +2971,8 @@ const RIB_CHANNEL_CAPACITY: usize = 4096;
 const TEST_RIB_CHANNEL_CAPACITY_ENV: &str = "RUSTBGPD_TEST_RIB_CHANNEL_CAPACITY";
 
 /// Test-only fault injection; never set this in production. The only accepted
-/// values are `listener_panic` and `forwarder_return`; all others are ignored
-/// with a sanitized warning.
+/// values are `listener_panic`, `forwarder_return`, and `forwarder_panic`; all
+/// others are ignored with a sanitized warning.
 const TEST_BGP_INGRESS_EXIT_ENV: &str = "RUSTBGPD_TEST_BGP_INGRESS_EXIT";
 
 /// Test-only one-based configured-peer ordinal that forces the real
@@ -2999,6 +2999,7 @@ fn resolve_test_peer_manager_panic() -> bool {
 enum TestBgpIngressExit {
     ListenerPanic,
     ForwarderReturn,
+    ForwarderPanic,
 }
 
 fn parse_test_bgp_ingress_exit(raw: Option<&str>) -> Result<Option<TestBgpIngressExit>, ()> {
@@ -3006,6 +3007,7 @@ fn parse_test_bgp_ingress_exit(raw: Option<&str>) -> Result<Option<TestBgpIngres
         None => Ok(None),
         Some("listener_panic") => Ok(Some(TestBgpIngressExit::ListenerPanic)),
         Some("forwarder_return") => Ok(Some(TestBgpIngressExit::ForwarderReturn)),
+        Some("forwarder_panic") => Ok(Some(TestBgpIngressExit::ForwarderPanic)),
         Some(_) => Err(()),
     }
 }
@@ -3016,13 +3018,13 @@ fn resolve_test_bgp_ingress_exit() -> Option<TestBgpIngressExit> {
         Err(std::env::VarError::NotPresent) => None,
         Err(std::env::VarError::NotUnicode(_)) => {
             warn!(
-                "ignoring invalid {TEST_BGP_INGRESS_EXIT_ENV}; expected listener_panic or forwarder_return"
+                "ignoring invalid {TEST_BGP_INGRESS_EXIT_ENV}; expected listener_panic, forwarder_return, or forwarder_panic"
             );
             return None;
         }
     };
     parse_test_bgp_ingress_exit(raw.as_deref()).unwrap_or_else(|()| {
-        warn!("ignoring invalid {TEST_BGP_INGRESS_EXIT_ENV}; expected listener_panic or forwarder_return");
+        warn!("ignoring invalid {TEST_BGP_INGRESS_EXIT_ENV}; expected listener_panic, forwarder_return, or forwarder_panic");
         None
     })
 }
@@ -5070,16 +5072,22 @@ async fn run<T>(
             if test_bgp_ingress_exit == Some(TestBgpIngressExit::ForwarderReturn) {
                 return;
             }
-            if let Err(e) = listener_peer_mgr_tx
+            let result = listener_peer_mgr_tx
                 .send(PeerManagerCommand::AcceptInbound {
                     stream: conn.stream,
                     peer_addr: conn.peer_addr,
                     tcp_ao_info: conn.tcp_ao_info,
                     tcp_ao_generation: conn.tcp_ao_generation,
                 })
-                .await
-            {
+                .await;
+            if let Err(e) = result {
                 warn!(error = %e, "failed to forward inbound connection to peer manager");
+            } else {
+                assert_ne!(
+                    test_bgp_ingress_exit,
+                    Some(TestBgpIngressExit::ForwarderPanic),
+                    "injected BGP accept-forwarding task panic after inbound dispatch"
+                );
             }
         }
     });
@@ -5961,7 +5969,17 @@ mod tests {
             parse_test_bgp_ingress_exit(Some("forwarder_return")),
             Ok(Some(TestBgpIngressExit::ForwarderReturn))
         );
-        for raw in ["", "listener", " listener_panic", "forwarder_return "] {
+        assert_eq!(
+            parse_test_bgp_ingress_exit(Some("forwarder_panic")),
+            Ok(Some(TestBgpIngressExit::ForwarderPanic))
+        );
+        for raw in [
+            "",
+            "listener",
+            " listener_panic",
+            "forwarder_return ",
+            "forwarder_panic ",
+        ] {
             assert_eq!(parse_test_bgp_ingress_exit(Some(raw)), Err(()));
         }
         assert_eq!(parse_test_initial_peer_rejection_at(None), Ok(None));

@@ -20,6 +20,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Runtime behavior is unchanged; the supervised-shutdown proof now injects a
+  BGP accept-forwarder panic after inbound dispatch and verifies bounded
+  teardown of both the configured peer and its half-admitted candidate before
+  the daemon exits non-zero. (LAN-1258)
+
 - The IXP Manager Bird's Eye compatibility contract
   (`tests/compat/ixp-manager-birdseye/contract.json`) flips
   `runtime_compatibility` to `true`: verified IXP Manager 7.4 Bird's Eye API
