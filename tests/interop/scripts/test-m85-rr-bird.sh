@@ -77,7 +77,7 @@ wait_bird_established() {
     log "Waiting for $label BGP session to reach Established..."
     for i in $(seq 1 45); do
         if docker exec "$container" birdc show protocols reflector 2>/dev/null \
-            | grep -q "Established"; then
+            | grep "Established" >/dev/null; then
             ok "$label session Established (attempt $i)"
             return 0
         fi
@@ -124,7 +124,7 @@ poll() {
 
 # True if BIRD has a BGP-sourced path for the prefix.
 bird_has_bgp_route() {
-    birdc_route_all "${1:?}" "${2:?}" | grep -q "BGP.as_path"
+    birdc_route_all "${1:?}" "${2:?}" | grep "BGP.as_path" >/dev/null
 }
 
 bird_lacks_bgp_route() { ! bird_has_bgp_route "$1" "$2"; }
