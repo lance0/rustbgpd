@@ -27,12 +27,9 @@
 //! state sticks. The privileged round-trip proof lives in
 //! `tests/netns_ac_gate.rs` (`EVPN_LINUX_NETNS=1`).
 //!
-//! The `IFLA_PROTINFO` attribute is hand-built via [`DefaultNla`]:
-//! netlink-packet-route 0.32.1's typed `LinkAttribute::ProtoInfoBridge`
-//! emits `IFLA_PROTINFO` *without* `NLA_F_NESTED`, which the kernel's
-//! `br_setlink` would interpret through its legacy non-nested
-//! "binary compatibility with old RSTP" branch — reading the first
-//! byte of the nested blob as the state value. The raw encode keeps
+//! netlink-packet-route 0.33's typed `LinkAttribute::ProtoInfoBridge`
+//! emits the required nested outer envelope; the untyped inner state stays in
+//! `LinkProtoInfoBridge::Other(DefaultNla)` and keeps
 //! the message byte-exact (pinned by a unit test below).
 //!
 //! Only the state attribute rides in the message, so the Gate 8b
@@ -51,7 +48,7 @@
 
 use netlink_packet_core::DefaultNla;
 use netlink_packet_route::AddressFamily;
-use netlink_packet_route::link::{LinkAttribute, LinkMessage};
+use netlink_packet_route::link::{LinkAttribute, LinkMessage, LinkProtoInfoBridge};
 use rtnetlink::Handle;
 
 use crate::ac_gate::{BR_STATE_DISABLED, BR_STATE_FORWARDING};
@@ -59,27 +56,19 @@ use crate::error::DataplaneError;
 
 /// `IFLA_PROTINFO` — the per-family protocol-info attribute on link
 /// messages; for `AF_BRIDGE` it nests the `IFLA_BRPORT_*` set.
+#[cfg(test)]
 const IFLA_PROTINFO: u16 = 12;
 /// `NLA_F_NESTED` — must be set on `IFLA_PROTINFO` or `br_setlink`
 /// takes the legacy non-nested branch (see module docs).
+#[cfg(test)]
 const NLA_F_NESTED: u16 = 1 << 15;
 /// `IFLA_BRPORT_STATE` nested attribute type.
 const IFLA_BRPORT_STATE: u16 = 1;
 
-/// Build the nested `IFLA_PROTINFO` payload: one `IFLA_BRPORT_STATE`
-/// attribute carrying the `BR_STATE_*` scalar, padded to the 4-byte
-/// netlink attribute alignment.
-fn protinfo_state_payload(state: u8) -> Vec<u8> {
-    // NLA headers are NATIVE-endian (struct nlattr is host byte
-    // order on the wire) — not little-endian.
-    let [len_a, len_b] = 5u16.to_ne_bytes(); // NLA_HDRLEN (4) + 1 value byte
-    let [type_a, type_b] = IFLA_BRPORT_STATE.to_ne_bytes();
-    vec![
-        len_a, len_b, // nla_len
-        type_a, type_b, // nla_type = IFLA_BRPORT_STATE
-        state,  // BR_STATE_* scalar
-        0, 0, 0, // NLA_ALIGNTO padding
-    ]
+/// Build the inner `IFLA_BRPORT_STATE` attribute carrying the
+/// `BR_STATE_*` scalar. `DefaultNla` emits its header and alignment padding.
+fn protinfo_state_attribute(state: u8) -> DefaultNla {
+    DefaultNla::new(IFLA_BRPORT_STATE, vec![state])
 }
 
 /// Build the full `RTM_SETLINK` link message for one gate transition.
@@ -94,12 +83,9 @@ fn build_ac_port_state_message(ifindex: u32, blocked: bool) -> LinkMessage {
     let mut message = LinkMessage::default();
     message.header.interface_family = AddressFamily::Bridge;
     message.header.index = ifindex;
-    message
-        .attributes
-        .push(LinkAttribute::Other(DefaultNla::new(
-            IFLA_PROTINFO | NLA_F_NESTED,
-            protinfo_state_payload(state),
-        )));
+    message.attributes.push(LinkAttribute::ProtoInfoBridge(vec![
+        LinkProtoInfoBridge::Other(protinfo_state_attribute(state)),
+    ]));
     message
 }
 
