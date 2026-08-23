@@ -16,7 +16,11 @@ import sys
 from pathlib import Path
 
 
-ROOTS = r"(?:src|crates|tests|docs|scripts|bench|examples|\.github|fuzz)"
+ROOTS = (
+    r"(?:src|crates|tests|docs|scripts|bench|examples|proto|tools|share|"
+    r"\.cargo|\.github|fuzz)"
+)
+GENERATED_PATH_SOURCES = {"share/systemd/": "examples/systemd/"}
 BACKTICKED = re.compile(r"`([^`\s]+)`")
 BARE = re.compile(rf"(?<![\w/`.-])({ROOTS}/[\w./-]*[\w/])")
 IS_PATH = re.compile(rf"^{ROOTS}/")
@@ -25,7 +29,7 @@ DOCUMENT = Path("docs") / "RELEASE_CHECKLIST.md"
 
 
 def named_paths(document: str) -> dict[str, list[int]]:
-    """Map each path-shaped token in `document` to the lines naming it."""
+    """Map each recognized repository-source path to its document lines."""
     found: dict[str, list[int]] = {}
     in_fence = False
     for number, line in enumerate(document.splitlines(), start=1):
@@ -37,7 +41,8 @@ def named_paths(document: str) -> dict[str, list[int]]:
             tokens += [match.group(1) for match in BARE.finditer(line)]
         for token in tokens:
             if IS_PATH.match(token):
-                found.setdefault(token, []).append(number)
+                source = GENERATED_PATH_SOURCES.get(token, token)
+                found.setdefault(source, []).append(number)
     return found
 
 
@@ -55,7 +60,7 @@ def check(root: Path) -> tuple[int, list[str]]:
         if not (root / token.rstrip("/")).exists():
             where = ",".join(str(number) for number in lines)
             errors.append(
-                f"{DOCUMENT.as_posix()}:{where} names `{token}`, which does "
+                f"{DOCUMENT.as_posix()}:{where} resolves to `{token}`, which does "
                 "not exist in the tree; the gate it triggers can never fire"
             )
     return len(found), errors
@@ -71,8 +76,8 @@ def main() -> int:
         print("\n".join(errors), file=sys.stderr)
         return 1
     print(
-        f"release checklist path check passed: all {checked} named "
-        "trigger paths exist"
+        f"release checklist path check passed: validated {checked} recognized "
+        "repository-source path tokens"
     )
     return 0
 
