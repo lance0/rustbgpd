@@ -350,7 +350,7 @@ impl EvpnDataplaneHandle {
 ///
 /// Quarantined `(VNI, MAC)` keys are excluded from remote-FDB intent while
 /// preserving RIB and route-reflector visibility.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "the spawn API keeps each explicit actor dependency visible"
 )]
@@ -448,7 +448,7 @@ where
 
 /// Test/production helper that injects a dataplane implementation and an
 /// external duplicate-MAC quarantine feed.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "the generic dataplane spawn API keeps each explicit actor dependency visible"
 )]
@@ -709,7 +709,7 @@ impl SupervisorIntentState {
     }
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "intent publication needs the actor handles and shared generation state"
 )]
@@ -849,7 +849,7 @@ fn publish_cached_dataplane_intent(
 /// tables. A future coordinator commit can publish a complete effective
 /// L2VNI/IP-VRF snapshot, and the supervisor will re-project
 /// immediately without waiting for the next poll interval.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "the supervisor keeps actor dependencies and its ordered lifecycle handling explicit"

@@ -503,7 +503,7 @@ struct AdditiveBuildUpActors<'a> {
 }
 
 impl EvpnRuntimeActorConverger {
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "one optional control per EVPN actor plus shared drain state is explicit wiring"
     )]
