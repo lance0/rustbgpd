@@ -912,7 +912,27 @@ class PrimerContractTests(unittest.TestCase):
             (root / harness).unlink()
             workflow_path = root / workflow
             workflow_path.write_text(workflow_path.read_text().replace("        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh link_carrier", "        run: true"))
-            self.assertEqual(["netns harness is missing", "kernel-dataplane.yml:netns must invoke link_carrier once"], check(root))
+            self.assertEqual(
+                [
+                    "netns harness is missing",
+                    "kernel-dataplane.yml:netns must invoke link_carrier once",
+                    "netns harness must append the successful selector receipt",
+                ],
+                check(root),
+            )
+
+    def test_kernel_netns_receipt_contract_is_load_bearing(self):
+        workflow = ".github/workflows/kernel-dataplane.yml"
+        harness = "crates/evpn-linux/tests/docker/run-netns-tests.sh"
+        cases = (
+            (workflow, "name: netns-selector-receipt", "name: incomplete-receipt"),
+            (workflow, 'cat "$RUNNER_TEMP/netns-selector-summary.md" >> "$GITHUB_STEP_SUMMARY"', "true"),
+            (workflow, "--vrf-available \"${VRF_AVAILABLE:-false}\"", "--vrf-available true"),
+            (harness, "printf '%s\\n' \"$SELECTOR\" >> \"$NETNS_SELECTOR_RECEIPT\"", "true"),
+        )
+        for relative, old, new in cases:
+            with self.subTest(seam=old):
+                self.mutate(relative, old, new)
 
     def test_destructive_workflow_seams(self):
         cases = (

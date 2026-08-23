@@ -108,6 +108,13 @@ issue #187) so reviewers can distinguish real stability from flake masking.
   `managed_ip_vrf_ready`, `l3_all_active_writer`, `foreign_state_l3`, and
   `l3_route_event`.
 
+The job always publishes a stable `netns-selector-receipt` JSON artifact and a
+concise job summary. A selector is recorded only after its harness invocation
+succeeds. The finalizer requires all 21 selectors when VRF is available; when
+VRF is unavailable it requires the 16 unconditional selectors and records the
+five L3 omissions with reason `vrf_unavailable`. Missing, duplicate, or
+unexpected required selectors fail the job.
+
 The `Privileged Interop (netns)` workflow (`privileged-interop.yml`) is a
 manual (`workflow_dispatch`) on-demand harness for the non-docker direct-`cargo
 test` netns binaries (`netns_dataplane` / `netns_fdb_nhg` / `netns_l3_install` /
