@@ -20,6 +20,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The Linux EVPN dataplane now resolves the netlink stack as one coherent
+  family: `rtnetlink 0.23`, `netlink-packet-route 0.33`,
+  `netlink-packet-core 0.9`, `netlink-sys 0.9`, and transitive
+  `netlink-proto 0.13`. The obsolete direct `netlink-packet-utils`
+  dependency is removed; runtime behavior and raw-netlink escape hatches are
+  unchanged. Dependabot now groups future netlink-family updates. (LAN-1159)
+
 - The IXP Manager Bird's Eye compatibility contract
   (`tests/compat/ixp-manager-birdseye/contract.json`) flips
   `runtime_compatibility` to `true`: verified IXP Manager 7.4 Bird's Eye API

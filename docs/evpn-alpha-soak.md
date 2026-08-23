@@ -241,7 +241,7 @@ landing, tracked here for visibility)
   (PRs #84 / #86 / #87 / #88) plus the M40 hosted
   smoke (PR #89): slice 1 added `RemoteMacEntry::alias_group_key`
   + same-AF projection invariant; slice 2 added the
-  `nexthop_raw` raw-netlink primitive (rtnetlink 0.22 still has
+  `nexthop_raw` raw-netlink primitive (rtnetlink 0.23 still has
   no nexthop API); slice 3a added the state types, apply
   primitive, and CVE-2025-39851 inline guard; slice 3b is the
   operational-behavior-change slice that wires the FDB nexthop

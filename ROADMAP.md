@@ -2142,6 +2142,15 @@ branch is between features.
   `IFLA_PROTINFO` escape hatches remain because 0.32.1 still does not expose the
   required typed kernel encodings. LAN-643 records the completion; closed
   Dependabot PR #452 remains the historical duplicate-version proof.
+- [x] **Coordinate the next netlink-family upgrade.** Done: LAN-1159 moves the
+  workspace coherently to `rtnetlink 0.23`, `netlink-packet-route 0.33`,
+  `netlink-packet-core 0.9`, `netlink-sys 0.9`, and transitive
+  `netlink-proto 0.13`, removes the obsolete direct `netlink-packet-utils`
+  dependency, and groups future Dependabot netlink updates. Runtime behavior
+  and the raw `NDA_NH_ID`, `RT_TABLE_COMPAT`, and nested `IFLA_PROTINFO`
+  escape hatches are unchanged because the released family still has no typed
+  nexthop API. Locked workspace validation and the privileged netns selector
+  suite provide the upgrade proof.
 - [x] **Workspace `cargo doc` warning posture.** `.github/workflows/ci.yml` runs
   `cargo doc --workspace --lib --no-deps` with
   `RUSTDOCFLAGS="-D warnings"`; keep that as the standing local pre-flight

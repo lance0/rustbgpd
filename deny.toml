@@ -16,10 +16,8 @@
 
 [advisories]
 ignore = [
-    # `paste` unmaintained (informational). Transitive:
-    # netlink-packet-utils → rtnetlink → rustbgpd-evpn-linux. Pure
-    # proc-macro (nla_get_*/nla_put_* generators), no runtime
-    # surface. Clears when netlink-packet-utils swaps to `pastey`.
+    # `paste` unmaintained (informational). The sole remaining chain is
+    # tikv-jemalloc-ctl → paste; this is a build-time proc-macro surface.
     # Tracked in ROADMAP.md.
     "RUSTSEC-2024-0436",
 ]
