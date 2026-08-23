@@ -5890,9 +5890,20 @@ mod tests {
         };
 
         let manager = event_history_manager().await;
-        let service =
-            GnmiService::with_peer_snapshot(65001, "192.0.2.1", || async { Ok(Vec::new()) })
-                .with_event_history(Some(manager.handle()));
+        // Heartbeat renders block on this gate. Without it, any wall-clock
+        // stall that leaves a heartbeat due while the peer is Present lets
+        // the render reconcile presence against the always-empty snapshot
+        // and interleave a delete ahead of the awaited update.
+        let render_permits = Arc::new(tokio::sync::Semaphore::new(0));
+        let render_gate = Arc::clone(&render_permits);
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            let gate = Arc::clone(&render_gate);
+            async move {
+                gate.acquire_owned().await.unwrap().forget();
+                Ok(Vec::new())
+            }
+        })
+        .with_event_history(Some(manager.handle()));
         let path = neighbor_session_state_path("10.0.0.2");
         let mut list = stream_on_change_list(path.clone());
         list.updates_only = true;
@@ -5938,6 +5949,7 @@ mod tests {
             manager.handle().sender().try_send(envelope).unwrap();
         }
         let updates = subscribe_updates(next_bounded(&mut stream).await.unwrap().unwrap());
+        assert_eq!(updates.len(), 1);
         let gnmi::typed_value::Value::JsonIetfVal(value) =
             updates[0].val.as_ref().unwrap().value.as_ref().unwrap()
         else {
@@ -5954,6 +5966,8 @@ mod tests {
             subscribe_deletes(next_bounded(&mut stream).await.unwrap().unwrap()),
             vec![path.clone()]
         );
+        // One permit: the absent-phase heartbeat this sleep proves silent.
+        render_permits.add_permits(1);
         tokio::time::sleep(Duration::from_millis(1_100)).await;
         manager
             .handle()
@@ -5966,6 +5980,9 @@ mod tests {
         );
         drop(stream);
 
+        // The second stream's initial snapshot renders once; a straggling
+        // first-stream heartbeat pending at drop can consume at most one.
+        render_permits.add_permits(2);
         let mut stream = harness
             .client
             .subscribe(tokio_stream::iter(vec![subscribe_msg(
@@ -6090,6 +6107,7 @@ mod tests {
 
         let heartbeat = next_bounded(&mut stream).await.unwrap().unwrap();
         let replacement = subscribe_updates(heartbeat);
+        assert_eq!(replacement.len(), 1);
         let gnmi::typed_value::Value::JsonIetfVal(value) =
             replacement[0].val.as_ref().unwrap().value.as_ref().unwrap()
         else {
