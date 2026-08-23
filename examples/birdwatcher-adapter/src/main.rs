@@ -22,7 +22,9 @@
 //!   session (`PolicyService.ListRejectedRoutes`), tagged with a synthesized
 //!   reject-reason large community (see the README mapping table)
 //! - `GET /routes/lc-zwild/protocol/{id}/{x}/{y}` — the IXP Manager v7.4
-//!   filtered-prefix query for this daemon's `{asn}:1101:*` reason namespace
+//!   filtered-prefix query for this daemon's `{asn}:1101:*` reason namespace;
+//!   any other `(x, y)` follows Bird's Eye wildcard semantics over the
+//!   member's accepted routes carrying `(x, y, *)`
 //! - `GET /routes/noexport/{id}` — Loc-RIB best routes NOT advertised to the
 //!   peer (`ListBestRoutes` minus `ListAdvertisedRoutes`), each explained by
 //!   the live export gate ladder (`RibService.ExplainAdvertisedRoute`) and
@@ -954,7 +956,7 @@ async fn routes_protocol(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpError> {
     let peer_addr = state.identities.resolve(&id)?;
-    serve_routes_for_peer(&state, peer_addr).await
+    serve_routes_for_peer(&state, peer_addr, None).await
 }
 
 async fn routes_peer(
@@ -964,10 +966,17 @@ async fn routes_peer(
     let peer_addr: IpAddr = peer
         .parse()
         .map_err(|_| json_error(StatusCode::BAD_REQUEST, "Invalid peer address"))?;
-    serve_routes_for_peer(&state, peer_addr).await
+    serve_routes_for_peer(&state, peer_addr, None).await
 }
 
-async fn serve_routes_for_peer(state: &AppState, peer: IpAddr) -> Result<Json<Value>, HttpError> {
+/// One member's accepted-route view; with `wildcard: Some((x, y))` only the
+/// routes carrying a large community `(x, y, *)` are rendered (Bird's Eye's
+/// `lc-zwild` semantics, an O(n) scan over the member's paged view).
+async fn serve_routes_for_peer(
+    state: &AppState,
+    peer: IpAddr,
+    wildcard: Option<(u64, u64)>,
+) -> Result<Json<Value>, HttpError> {
     let best = best_route_keys(state, None).await?;
     let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
     let mut routes: Vec<Value> = Vec::new();
@@ -986,16 +995,24 @@ async fn serve_routes_for_peer(state: &AppState, peer: IpAddr) -> Result<Json<Va
             .await
             .map_err(|e| bad_gateway("ListReceivedRoutes", &e))?
             .into_inner();
-        if page_token.is_empty() {
+        // The generic cap applies to the rows this view renders: the whole
+        // received view, or only the wildcard matches (Bird's Eye's
+        // MAX_ROUTES likewise counts parsed result rows).
+        if page_token.is_empty() && wildcard.is_none() {
             enforce_max(resp.total_count, state.max_routes)?;
         }
-        routes.extend(resp.routes.iter().map(|route| {
-            route_to_birdwatcher_with_primary(
-                route,
-                &state.identities,
-                best.contains(&route_key(route)),
-            )
-        }));
+        routes.extend(
+            resp.routes
+                .iter()
+                .filter(|route| wildcard.is_none_or(|(x, y)| carries_large_community(route, x, y)))
+                .map(|route| {
+                    route_to_birdwatcher_with_primary(
+                        route,
+                        &state.identities,
+                        best.contains(&route_key(route)),
+                    )
+                }),
+        );
         enforce_max(routes.len() as u64, state.max_routes)?;
         if resp.next_page_token.is_empty() {
             break;
@@ -1612,17 +1629,16 @@ async fn routes_filtered(
 
 const IXP_MANAGER_REJECT_FUNCTION: u64 = 1101;
 
-/// IXP Manager v7.4's member-facing filtered-prefix query. Only the daemon's
-/// own rejection namespace is meaningful; a different `(x, y)` is a valid
-/// query with no matches.
+/// IXP Manager v7.4's member-facing filtered-prefix query, with Bird's Eye
+/// wildcard semantics for every ordinary pair: the daemon's own rejection
+/// namespace `({daemon ASN}, 1101)` serves the session's retained rejects,
+/// and any other `(x, y)` returns the member's accepted routes carrying a
+/// large community `(x, y, *)`.
 async fn routes_protocol_large_community_wild_xy(
     State(state): State<AppState>,
     Path((id, x, y)): Path<(String, u64, u64)>,
 ) -> Result<Json<Value>, HttpError> {
     let peer = state.identities.resolve(&id)?;
-    if y != IXP_MANAGER_REJECT_FUNCTION {
-        return Ok(Json(empty_filtered_routes_body(state.max_routes)));
-    }
     let mut global = proto::global_service_client::GlobalServiceClient::new(state.upstream.clone());
     let daemon_asn = u64::from(
         global
@@ -1632,8 +1648,10 @@ async fn routes_protocol_large_community_wild_xy(
             .into_inner()
             .asn,
     );
+    // Hybrid dispatch: only the daemon's own rejection namespace reads the
+    // retained rejects; every other pair is an accepted-route wildcard scan.
     if !ixp_manager_reason_namespace_matches(daemon_asn, x, y) {
-        return Ok(Json(empty_filtered_routes_body(state.max_routes)));
+        return serve_routes_for_peer(&state, peer, Some((x, y))).await;
     }
     let mut policy = proto::policy_service_client::PolicyServiceClient::new(state.upstream.clone());
     let response = match policy
@@ -1686,6 +1704,16 @@ fn retention_metadata(resp: Option<&proto::ListRejectedRoutesResponse>) -> Value
 
 fn ixp_manager_reason_namespace_matches(daemon_asn: u64, x: u64, y: u64) -> bool {
     x == daemon_asn && y == IXP_MANAGER_REJECT_FUNCTION
+}
+
+/// True when the route carries a large community `(x, y, *)` — the Bird's
+/// Eye `lc-zwild` wildcard. gRPC encodes each large community as
+/// `"global_admin:data1:data2"`; anything else never matches.
+fn carries_large_community(route: &proto::Route, x: u64, y: u64) -> bool {
+    route.large_communities.iter().any(|lc| {
+        let parts: Vec<u64> = lc.split(':').filter_map(|p| p.parse().ok()).collect();
+        parts.len() == 3 && parts[0] == x && parts[1] == y
+    })
 }
 
 /// Build the filtered-view response body from a `ListRejectedRoutes`
@@ -3036,7 +3064,7 @@ mod tests {
     }
 
     #[test]
-    fn ixp_manager_filtered_handler_uses_only_retained_rejects() {
+    fn ixp_manager_filtered_handler_dispatches_rejects_and_wildcard_scan() {
         let source = include_str!("main.rs");
         assert!(source.contains(".route(\n            \"/routes/lc-zwild/protocol/{id}/{x}/{y}\""));
         let body = source
@@ -3046,10 +3074,22 @@ mod tests {
             .split_once("fn empty_routes_body(")
             .unwrap()
             .0;
-        assert!(body.contains(".list_rejected_routes("), "{body}");
-        assert!(!body.contains("list_received_routes"), "{body}");
-        assert!(!body.contains("list_best_routes"), "{body}");
-        assert!(!body.contains("serve_routes_for_peer"), "{body}");
+        // The daemon ASN is read before the dispatch, and an ordinary pair
+        // hands off to the accepted-route wildcard scan before any
+        // rejected-route sourcing happens.
+        assert!(
+            body.find(".get_global(").unwrap()
+                < body.find("ixp_manager_reason_namespace_matches").unwrap(),
+            "{body}"
+        );
+        assert!(
+            body.find("serve_routes_for_peer(&state, peer, Some((x, y)))")
+                .unwrap()
+                < body.find(".list_rejected_routes(").unwrap(),
+            "{body}"
+        );
+        // The retained-rejects tail keeps its capacity-based api block and
+        // never trips the generic RIB cap.
         assert!(!body.contains("enforce_max("), "{body}");
         assert!(
             body.contains("api_block(u64::from(response.capacity))"),
@@ -3063,14 +3103,30 @@ mod tests {
             .unwrap()
             .0;
         assert!(!ordinary.contains("enforce_max("), "{ordinary}");
-        assert!(
-            body.find("if y != IXP_MANAGER_REJECT_FUNCTION").unwrap()
-                < body.find(".get_global(").unwrap(),
-            "{body}"
-        );
         assert!(ixp_manager_reason_namespace_matches(65001, 65001, 1101));
         assert!(!ixp_manager_reason_namespace_matches(65001, 65002, 1101));
         assert!(!ixp_manager_reason_namespace_matches(65001, 65001, 1102));
+    }
+
+    #[test]
+    fn wildcard_scan_matches_only_x_y_star_large_communities() {
+        let route = |lcs: &[&str]| proto::Route {
+            large_communities: lcs.iter().map(|lc| lc.to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(carries_large_community(&route(&["64496:1:1"]), 64496, 1));
+        assert!(carries_large_community(
+            &route(&["65001:999:7", "64496:1:2"]),
+            64496,
+            1
+        ));
+        // A different admin or function, short encodings, and malformed
+        // parts never match.
+        assert!(!carries_large_community(&route(&["64497:1:1"]), 64496, 1));
+        assert!(!carries_large_community(&route(&["64496:2:1"]), 64496, 1));
+        assert!(!carries_large_community(&route(&["64496:1"]), 64496, 1));
+        assert!(!carries_large_community(&route(&["64496:one:1"]), 64496, 1));
+        assert!(!carries_large_community(&route(&[]), 64496, 1));
     }
 
     /// Retention disabled and enabled-but-empty both produce the full

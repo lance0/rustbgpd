@@ -113,7 +113,12 @@ large communities, an aggregate carrying ATOMIC_AGGREGATE and AGGREGATOR, and
 a more-specific inside a covering prefix. `oracle-consumer.php` drives the pinned IXP Manager `BirdsEye`
 consumer through all eleven in-scope endpoints (24 journeys, including a
 covering-only prefix, a host address, host-bit input, and a foreign
-large-community wildcard) against each leg, and `verify_capture.py
+large-community wildcard) against each leg. The harness then appends a 25th,
+deterministic backend-failure journey captured directly with status and body
+(the pinned consumer collapses every non-2xx to an empty string): rustbgpd is
+stopped under the still-running adapter and BIRD under the still-running
+Bird's Eye, and one `api/status` probe per leg records the adapter's HTTP 502
+against Bird's Eye's own HTTP 503. `verify_capture.py
 --populated` normalizes both captures (timestamps, the rustbgpd version,
 countdowns, each leg's own route-server addresses, BIRD's `route_changes`
 counters, route and symbol order),
@@ -205,7 +210,7 @@ the adapter serves at `/` where Bird's Eye serves under `/api/` (IXP Manager's
 | `GET /api/routes/count/protocol/{protocol}` | — | — | not served | out of scope (`total_count` exists on the first RIB page, so it is a cheap add if scope grows) |
 | `GET /api/routes/count/table/{table}` | — | — | not served | out of scope; standing `full-table-count` blocker |
 | `GET /api/routes/count/export/{protocol}` | — | — | not served | out of scope (same note as protocol count) |
-| `GET /api/routes/lc-zwild/protocol/{protocol}/{x}/{y}` | `routesProtocolLargeCommunityWildXYRoutes()` | `routes_protocol_large_community_wild_xy` | served, divergent | answers only `{daemon ASN}:1101:*` from retained rejects, empty for any other `(x, y)`; adds `retention.*`; `api.max_routes` is the retention capacity |
+| `GET /api/routes/lc-zwild/protocol/{protocol}/{x}/{y}` | `routesProtocolLargeCommunityWildXYRoutes()` | `routes_protocol_large_community_wild_xy` | served, divergent | the daemon's rejection namespace `{daemon ASN}:1101:*` answers from retained rejects (adds `retention.*`; `api.max_routes` is the retention capacity); any other `(x, y)` scans the member's accepted routes for `(x, y, *)` with Bird's Eye's wildcard semantics |
 | `GET /api/route/{net}` (default table `master`) | — | — | not served | out of scope |
 | `GET /api/route/{net}/table/{table}` | `protocolTable()` | `route_table` | served, divergent | longest-prefix match; host-bit input is HTTP 200 with no routes (BIRD rejects the literal), genuinely malformed or unmasked input is HTTP 400 (Bird's Eye accepts a bare `192.0.2.1`); returns the installed winner first plus same-prefix Add-Path alternatives; no per-minute throttle |
 | `GET /api/route/{net}/protocol/{protocol}` | `protocolRoute()` | `route_protocol` | served, divergent | longest-prefix match like Bird's Eye's `show route for`: the exact entry when present, else the view's most-specific covering prefix; host-bit input is HTTP 200 with no routes; all Add-Path candidates |
@@ -223,7 +228,8 @@ Cross-cutting differences that belong on the allow-list once: the `api` block
 adds Birdwatcher's `Version` and `result_from_cache` and never emits
 `ttl_mins`; `from_cache` is always `false` because there is no cache to skip
 (`use_cache` is ignored); upstream failure is HTTP 502 where Bird's Eye
-returns 503 `Error querying bird`; the `/api/route/*` per-minute throttle
+returns 503 `Error querying bird` (captured by the backend-failure journey
+and allow-listed `intentional`); the `/api/route/*` per-minute throttle
 (`THROTTLE_PER_MIN`, HTTP 429) has no adapter equivalent; error bodies are
 always JSON `{"message": ...}` (Bird's Eye's error body format follows
 Lumen's default handler and the request's `Accept` header, which is why the
@@ -277,18 +283,19 @@ refuses any `runtime_compatibility` value other than `false` while any entry
 is classified `must_match`. The flag therefore flips only when zero
 `must_match` entries remain, and the post-flip claim language is "verified
 IXP Manager 7.4 Bird's Eye API compatibility with documented BIRD-internal
-divergences". The one open `must_match` entry is the ordinary-`(x, y)`
-lc-zwild scope; the route-shape cluster (`bgp.as_path` element type,
+divergences". Zero `must_match` entries remain open: the ordinary-`(x, y)`
+lc-zwild scope, the route-shape cluster (`bgp.as_path` element type,
 `bgp.local_pref`, `bgp.med` emitted when absent, `primary` outside the table
-view, the `type` triple) and the two lookup-semantics entries
+view, the `type` triple), and the two lookup-semantics entries
 (exact-versus-longest protocol/export match and the table lookup's HTTP 400
-for host-bit input) converged on the oracle and their entries are removed.
+for host-bit input) all converged on the oracle and their entries are
+removed.
 
 ### Work list
 
-Each line names the gap and the evidence that closes it. Items 1 to 6, 15,
-and 16 are done; items 3 to 14 record what the oracle diff showed, with the
-observed JSON paths, and carry their decisions: `must_match` entries
+Each line names the gap and the evidence that closes it. Items 1 to 6, 10 to
+12, 15, and 16 are done; items 3 to 14 record what the oracle diff showed,
+with the observed JSON paths, and carry their decisions: `must_match` entries
 stay open and gate the flip, while `intentional`, `unsupported`, and
 `extension` entries are closed decisions that stay on the allow-list. Every
 observed
@@ -381,15 +388,24 @@ predicted eight more that the diff did not show, listed after the table.
     the queried prefix has no entry, and host-bit input answers HTTP 200
     with an empty route array on all three lookups. Both entries are
     removed.
-11. `lc-zwild`: observed for a foreign `(x, y)` (the route carrying that large
-    community upstream, `routes: []` from the adapter) plus the adapter's extra
-    `retention.*` and `api.max_routes` as the retention capacity for the daemon
-    `(x, y)`; both legs return `routes: []` for the daemon `(x, y)`.
-    Decided: the ordinary-`(x, y)` scope is `must_match`; `retention.*` and
-    `api.max_routes` are `extension`.
-12. 502 versus 503: not observed; the populated leg has no upstream-failure
-    case (the existing `bird_failure` case stays on the `fake-birdc`
-    oracle); no allow-list entry exists, so there is nothing to classify.
+11. Done. `lc-zwild`: observed for a foreign `(x, y)` (the route carrying
+    that large community upstream, `routes: []` from the adapter). Was
+    `must_match`; the endpoint now dispatches on the pair — the daemon's own
+    rejection namespace keeps serving retained rejects, and every other
+    `(x, y)` scans the member's accepted routes for `(x, y, *)` with Bird's
+    Eye's wildcard semantics — and the entry is removed. The adapter's extra
+    `retention.*` and capacity-as-`api.max_routes` on the namespace pair
+    stay `extension`; both legs return `routes: []` for the daemon `(x, y)`.
+12. Done. 502 versus 503: the populated leg now ends with the deterministic
+    backend-failure journey described above (rustbgpd stopped under the
+    still-running adapter, BIRD stopped under Bird's Eye, one `api/status`
+    probe per leg captured with status and body since the pinned consumer
+    collapses every non-2xx to `""`). Observed: HTTP 503
+    `Error querying bird` upstream, HTTP 502 `Upstream daemon request
+    failed` from the adapter; the difference is one `intentional` allow-list
+    entry — a gateway honestly reports 502 where Bird's Eye reports its own
+    backend as 503. The existing `bird_failure` case stays on the
+    `fake-birdc` oracle.
 13. Throttle and cache: not observed as a body difference; `ttl_mins` is
     absent on both sides because `CACHE_DRIVER=array` strips it upstream and
     `from_cache` is `false` on both; the per-minute throttle is not hit by

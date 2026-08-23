@@ -231,6 +231,14 @@ RUNTIME_DIVERGENCES = [
         "consumer_visible": False,
     },
     {
+        "endpoint": "api/status", "path": ["http_status", "body.message"], "kind": "value",
+        "classification": "intentional",
+        "birdseye": "HTTP 503 {\"message\": \"Error querying bird\"} when birdc cannot reach BIRD",
+        "adapter": "HTTP 502 {\"message\": \"Upstream daemon request failed\"} when the gRPC backend is down",
+        "rationale": "backend-failure journey: Bird's Eye reports its own backend error as 503 while the adapter is a gateway and honestly reports 502; the pinned consumer collapses every non-2xx to \"\" either way",
+        "consumer_visible": False,
+    },
+    {
         "endpoint": ROW, "path": row("connection"), "kind": "value",
         "classification": "intentional",
         "birdseye": "BIRD 2 info column with its padding (\"  Established   \")",
@@ -307,14 +315,6 @@ RUNTIME_DIVERGENCES = [
         "classification": "intentional",
         "birdseye": "BIRD route preference (100)", "adapter": "0",
         "rationale": "BIRD-internal preference; the pinned route view prints metric",
-        "consumer_visible": True,
-    },
-    {
-        "endpoint": LC_ZWILD, "path": "routes", "kind": "semantics",
-        "classification": "must_match",
-        "birdseye": "every route carrying (x, y, *) in the protocol's table",
-        "adapter": "retained rejects tagged <daemon asn>:1101:* only; [] for any other (x, y)",
-        "rationale": "the filtered-prefix view is the only pinned use; accepted routes are never scanned",
         "consumer_visible": True,
     },
     {
@@ -607,6 +607,24 @@ def verify_populated(capture_dir: Path, web_php: Path) -> None:
         for name, journey in document["journeys"].items():
             if journey["response"] == "":
                 fail(f"populated {leg} capture: {name} returned a collapsed non-2xx response")
+    # The deterministic backend-failure journey is captured directly (the
+    # pinned consumer collapses every non-2xx to ""), so status and body are
+    # asserted here rather than only pinned by the fixture bytes.
+    for leg, expected in (
+        ("live", {"http_status": 502, "body": {"message": "Upstream daemon request failed"}}),
+        ("oracle", {"http_status": 503, "body": {"message": "Error querying bird"}}),
+    ):
+        observed = docs[leg]["journeys"].get("backend_failure", {}).get("response")
+        if observed != expected:
+            fail(
+                f"backend-failure journey ({leg}): expected {expected}, "
+                f"captured {observed}"
+            )
+    print(
+        "backend failure proof: with both backends stopped the adapter answered "
+        "HTTP 502 and Bird's Eye HTTP 503, each with its pinned JSON error body",
+        file=sys.stderr,
+    )
     for leg, document in docs.items():
         text = json.dumps(document, indent=2, sort_keys=True) + "\n"
         fixture = root / "fixtures" / f"populated-{leg}.json"

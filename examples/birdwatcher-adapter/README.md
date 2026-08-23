@@ -92,7 +92,7 @@ listener beyond loopback only with the mTLS controls in `docs/SECURITY.md`.
 | `GET /route/{prefix}/table/{table}` | `RibService.LookupBestPath` (bounded longest-prefix match with one matched-prefix candidate set) |
 | `GET /routes/peer/{peer}`    | `RibService.ListReceivedRoutes` (paged, all unicast families) + `ListBestRoutes` identity join for truthful `primary` |
 | `GET /routes/filtered/{id}`  | `PolicyService.ListRejectedRoutes` (unpaged — the store is bounded at the `[policy.reject_retention]` capacity, default 1024/peer) |
-| `GET /routes/lc-zwild/protocol/{id}/{x}/{y}` | `GlobalService.GetGlobal` + `PolicyService.ListRejectedRoutes` for IXP Manager's `{daemon ASN}:1101:*` filtered-prefix query |
+| `GET /routes/lc-zwild/protocol/{id}/{x}/{y}` | `GlobalService.GetGlobal` to dispatch: `PolicyService.ListRejectedRoutes` for IXP Manager's `{daemon ASN}:1101:*` filtered-prefix query, or the paged `RibService.ListReceivedRoutes` + `ListBestRoutes` accepted-route scan for any other `(x, y)` wildcard |
 | `GET /routes/noexport/{id}`  | `RibService.ListBestRoutes` − `RibService.ListAdvertisedRoutes` (both paged), each missing prefix explained by `RibService.ExplainAdvertisedRoute` |
 
 There are no placeholder 501 responses. Route `age` is served from the
@@ -195,7 +195,7 @@ silently:
 |---|---|---|
 | `exact-protocol-route` | supported | `/route/{prefix}/protocol/{id}`: exact prefix on every gRPC page, falling back to the view's most-specific covering prefix (`show route for` semantics), every Add-Path candidate in daemon order |
 | `exact-export-route` | supported | `/route/{prefix}/export/{id}`: the same discipline over the Adj-RIB-Out |
-| `filtered-prefix-wildcard` | supported | `/routes/lc-zwild/protocol/{id}/{daemon ASN}/1101`, answered from the session's retained rejects only |
+| `filtered-prefix-wildcard` | supported | `/routes/lc-zwild/protocol/{id}/{daemon ASN}/1101`, answered from the session's retained rejects; ordinary `(x, y)` pairs scan the member's accepted routes instead (Bird's Eye wildcard semantics) |
 | `less-specific-longest-prefix-match` | supported | `/route/{prefix}/table/{table}`: one bounded longest-prefix lookup |
 | `atomic-full-table-snapshot` | supported | `/routes/table/{table}`: accepted candidates joined with installed winners under one Received/Best generation; refuses rather than truncates |
 | `atomic-all-candidate-prefix-snapshot` | supported | the table lookup returns the installed winner first and every same-prefix alternative in one response |
@@ -208,17 +208,19 @@ silently:
 | `defined-only-rejected-route-reason-emission` | unsupported | the five display-only reason ids are never emitted; such causes fall back to `0` |
 | `full-ixp-manager-ui-filter-policy-engine` | unsupported | only the bounded `rs-config-render` manual-export subset exists |
 
-Other large-community wildcard queries return an empty route array. The table
+The table
 name validates the live routing-table identity over rustbgpd's one global
 Loc-RIB; it is not an independent table selector. The adapter does not claim
 full Bird's Eye compatibility.
 
 IXP Manager v7.4 queries member-filtered prefixes through
-`/routes/lc-zwild/protocol/{id}/{daemon ASN}/1101`. The adapter answers only
-that exact daemon-owned namespace and returns an empty route array for other
-`x` or `y` values. It never scans accepted routes: the response comes only from
-the selected session's retained rejects and preserves the usual no-session
-empty answer. Successful filtered replies use the daemon-reported retention
+`/routes/lc-zwild/protocol/{id}/{daemon ASN}/1101`. The daemon-owned
+namespace is answered only from the selected session's retained rejects and
+preserves the usual no-session empty answer. Any other `(x, y)` pair follows
+Bird's Eye's wildcard semantics instead: the member's accepted routes
+carrying a large community `(x, y, *)`, served in the accepted-route shape
+(no retention envelope) with the generic route cap applied to the matched
+rows. Successful filtered replies use the daemon-reported retention
 capacity as `api.max_routes` and are exempt from the generic RIB-derived cap.
 Both add `retention.enabled`, `capacity`, `evictions_since_reset`, and
 `may_be_incomplete`; the last two are `null` against an older daemon, while a

@@ -47,7 +47,8 @@ partial runtime support: the ten reasons active in the pinned v7.4 route-server
 templates are mapped, while IDs 2, 4, 11, 12, and 15 are display-only and
 remain fallback 0 rather than gaining invented semantics. The full-table view
 and longest-prefix table search are served; full-table counts are not, other
-wildcard-community pairs return empty, and the contract's
+wildcard-community pairs follow Bird's Eye's accepted-route wildcard
+semantics (every member route carrying `(x, y, *)`), and the contract's
 `runtime_compatibility` stays `false` — every allow-listed oracle divergence
 carries a classification, and the gate refuses the flip while any
 `must_match` entry remains open. The adapter's table identity is a

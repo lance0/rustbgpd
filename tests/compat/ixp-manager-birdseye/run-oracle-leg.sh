@@ -192,4 +192,47 @@ run_consumer() {
 }
 run_consumer "$oracle_api" "$capture_output/populated-oracle.raw.json"
 run_consumer "$live_api" "$capture_output/populated-live.raw.json"
+
+# Deterministic backend-failure journey, captured last so every journey above
+# read a healthy backend: stop rustbgpd under the still-running adapter (its
+# next gRPC call fails, HTTP 502) and BIRD under the still-running Bird's Eye
+# (birdc fails, its own HTTP 503), then record one api/status probe per leg
+# directly — the pinned consumer collapses every non-2xx to "". Nothing after
+# this point reads either backend; teardown follows.
+kill "$daemon_pid"
+wait "$daemon_pid" 2>/dev/null || true
+daemon_pid=
+docker exec "$oracle" birdc -s /run/bird/bird.ctl down >/dev/null 2>&1 || true
+docker exec "$oracle" sh -c \
+  'for _ in $(seq 1 100); do [ ! -S /run/bird/bird.ctl ] && exit 0; sleep 0.1; done; exit 1'
+probe_failure() {
+  curl --silent --max-time 10 --header 'Accept: application/json' \
+    --output "$2" --write-out '%{http_code}' "$1/status"
+}
+live_failure_status=$(probe_failure "$live_api" "$tmp/live-failure-body.json")
+oracle_failure_status=$(probe_failure "$oracle_api" "$tmp/oracle-failure-body.json")
+merge_backend_failure() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json
+import sys
+
+path, status, body_path = sys.argv[1:4]
+with open(path) as handle:
+    document = json.load(handle)
+with open(body_path) as handle:
+    body = json.load(handle)
+document["journeys"]["backend_failure"] = {
+    "endpoint": "api/status",
+    "response": json.dumps({"http_status": int(status), "body": body}),
+}
+with open(path, "w") as handle:
+    json.dump(document, handle, indent=4)
+    handle.write("\n")
+PY
+}
+merge_backend_failure "$capture_output/populated-live.raw.json" \
+  "$live_failure_status" "$tmp/live-failure-body.json"
+merge_backend_failure "$capture_output/populated-oracle.raw.json" \
+  "$oracle_failure_status" "$tmp/oracle-failure-body.json"
+echo "backend failure journey: live adapter answered HTTP $live_failure_status, oracle Bird's Eye answered HTTP $oracle_failure_status" >&2
 chmod 600 "$capture_output/populated-oracle.raw.json" "$capture_output/populated-live.raw.json"
