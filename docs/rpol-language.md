@@ -1,5 +1,6 @@
-# The rustbgpd policy language (`.rpol`) — reference
+# `.rpol` language reference
 
+The `.rpol` language defines typed routing policy for rustbgpd.
 Status: **shipped** (ADR-0096, complete). The frontend — lexer,
 parser, typechecker, in-language tests, and `rbgp policy check` — the
 daemon integration — `[policy] rpol_files` config references, mixed
@@ -440,7 +441,7 @@ prefix-set precedent).
 
 `==` on u32 fields lowers to `>= v && <= v`; `!=` is its negation.
 
-### Value expressions — checked u32 arithmetic
+### Checked u32 value expressions
 
 u32 value positions — either side of a u32 comparison, and the
 `set local-pref` / `set med` arguments — accept **value expressions**
@@ -917,7 +918,7 @@ policy peer-in {
 }
 ```
 
-### `route.family` — one chain, many families
+### Route-family branching
 
 `route.family` is the route's **typed** AFI/SAFI family, carried by the
 evaluation context itself — never inferred from the shape of the
@@ -1415,7 +1416,7 @@ arity-checked at load). Editing a referenced file + SIGHUP hot-applies
 the change to exactly the peers whose resolved chains moved, with
 Route Refresh for materially changed import policy.
 
-### `rbgp policy test` — dry-run against the live RIB
+### Live-RIB policy dry runs
 
 `rbgp policy check` runs a file's own `test` blocks locally (CI-able,
 no daemon). `rbgp policy test` goes further: it sends the candidate
@@ -1489,7 +1490,7 @@ surfaces (ADR-0073 / ADR-0096 Decision 3.3):
   `export policy "customer-in(200):transit-guard" denied this route`.
   TOML members render unchanged.
 
-### `rbgp policy stats` — live per-term hit counters
+### Live per-term policy counters
 
 Where `policy test` counts hits over a one-shot dry run, `rbgp policy
 stats` reads the **live** counters of the chains actually installed on
@@ -1542,7 +1543,10 @@ $ rbgp policy stats --neighbor 10.0.0.2 --direction both
 - `--json` emits the rows structurally (`eval_errors`, `last_error`
   included).
 
-## Positioning — how `.rpol` differs from BIRD filters and route-maps
+## Comparison with other policy languages
+
+This section compares `.rpol` with route maps, BIRD filters, and
+GoBGP/OpenConfig statements.
 
 - **vs FRR/Cisco route-maps:** a route-map is an ordered list of
   numbered entries over external prefix-lists / community-lists /
