@@ -1,5 +1,7 @@
 # EVPN fabric route reflector (control-plane only)
 
+This recipe builds a control-plane-only VXLAN-EVPN fabric route reflector.
+
 **When this is you:** a VXLAN-EVPN leaf/spine fabric where the VTEPs
 (FRR, SR Linux, GoBGP, or rustbgpd leaves) do the dataplane and you
 want a lean, API-first reflector distributing the RFC 7432 routes
