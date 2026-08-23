@@ -45,7 +45,7 @@ an RPC signature or behavior as stable.
 
 Published Rust crates follow their own SemVer boundary, independently of the
 daemon's narrow v1 contract. Use the versions and upgrade guidance in
-[`EMBEDDING.md`](EMBEDDING.md#published-crate-release-boundary), including the
+[`EMBEDDING.md`](EMBEDDING.md#7-published-crate-release-boundary), including the
 per-release compatibility notes and coordinated dependency guidance. A daemon
 release or an inventoried daemon surface does not make an internal workspace
 crate a supported library API.
@@ -69,6 +69,6 @@ for the tested boundary, upstream pins, and unsupported behavior.
   [v1 compatibility rules](v1-stable-contract.md#compatibility-rules), and the
   [deployment upgrade procedure](deployment.md#upgrade).
 - Rust embedders: follow the
-  [published-crate release boundary](EMBEDDING.md#published-crate-release-boundary).
+  [published-crate release boundary](EMBEDDING.md#7-published-crate-release-boundary).
 - Adapter operators: follow the pinned
   [Bird's Eye contract oracle](INTEROP.md#ixp-looking-glass-contract-oracle).
