@@ -180,8 +180,8 @@ releases rather than carried forward from older measurements.
 | Rustc-style config errors | No | Yes | Source-line spans with column markers on validation errors |
 | Docker image | Yes | Yes | |
 | Route server client mode | Yes | Yes | Transparent eBGP export for unicast plus FlowSpec AS_PATH transparency |
-| Fuzz testing | No | Yes | Wire decoder fuzzing |
-| Interop test suite | No | Yes | Containerlab + FRR/BIRD |
+| Fuzz testing | Yes | Yes | Both ship in-tree targets. GoBGP v4.8.0 has 15 Go-native fuzz targets covering the BGP, BMP, MRT, RTR, and ZAPI decoders plus two policy community matchers, with run instructions in `CONTRIBUTING.md`; Go fuzz targets replay their seed corpus under the ordinary `go test` CI run and extend only under an explicit `-fuzz` invocation. rustbgpd has 19 libFuzzer targets across six crates (`wire`, `rpki`, `mrt`, `bfd`, `evpn`, `policy`), run nightly by `fuzz.yml` |
+| Interop test suite | Yes | Yes | Both ship one. GoBGP v4.8.0 has `test/scenario_test/` — 30 docker-driven scenario modules with foreign-daemon drivers in `test/lib/` (ExaBGP, Quagga, YABGP, BIRD, bagpipe) — and `ci.yml` runs each module as its own job on every push and pull request. rustbgpd has containerlab topologies in `tests/interop/` against FRR, GoBGP, BIRD, ExaBGP, and OpenBGPD, gated per pull request by `interop.yml` |
 
 ## Best-Path Selection
 
@@ -252,8 +252,7 @@ Competing head-to-head with GoBGP for all use cases:
 ## Advantages Over GoBGP
 
 - **Zero unsafe in application logic** — `deny(unsafe_code)` per-crate
-- **Fuzz testing + property testing** — GoBGP has neither
-- **Interop test suite** — Containerlab + FRR/BIRD shipped; GoBGP doesn't ship one
+- **Property testing** — `proptest` suites in the wire, FSM, RIB, and BFD crates; GoBGP's tests are table-driven and its `go.mod` pulls in no property-testing library
 - **Structured logging** — tracing-subscriber JSON vs GoBGP's unstructured logs
 - **RPKI integrated into best-path** — clean architecture vs GoBGP's bolt-on
 - **ASPA path verification** — RTR v2, BGP-Role-selected upstream/downstream
