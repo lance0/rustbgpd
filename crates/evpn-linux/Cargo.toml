@@ -18,15 +18,13 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing.workspace = true
 
 # Linux-only real netlink; cfg-gating preserves portable trait/test surfaces
-# without promising non-Linux daemon support. The four netlink crates form a coherent ecosystem
-# released together; bump them as a set or transitive resolution
-# pulls in two copies of `netlink-packet-utils`.
+# without promising non-Linux daemon support. The netlink crates form a coherent ecosystem
+# released together; bump them as a set to avoid duplicate major-version families.
 [target.'cfg(target_os = "linux")'.dependencies]
-rtnetlink = "0.22"
-netlink-packet-route = "0.32.1"
-netlink-packet-core = "0.8"
-netlink-packet-utils = "0.6"
-netlink-sys = { version = "0.8", features = ["tokio_socket"] }
+rtnetlink = "0.23"
+netlink-packet-route = "0.33"
+netlink-packet-core = "0.9"
+netlink-sys = { version = "0.9", features = ["tokio_socket"] }
 futures = "0.3"
 libc.workspace = true
 
