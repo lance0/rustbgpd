@@ -277,10 +277,8 @@ async fn gr_eor_sweep_scopes_to_family() {
     handle.await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn gr_timer_sweeps_stale_routes() {
-    tokio::time::pause();
-
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
@@ -460,10 +458,8 @@ async fn gr_peer_up_defers_stale_to_eor() {
     handle.await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn gr_peer_up_timer_expires_sweeps_stale() {
-    tokio::time::pause();
-
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
@@ -692,10 +688,8 @@ async fn gr_withdraws_non_gr_family_routes() {
 
 // --- LLGR (RFC 9494) tests ---
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn llgr_gr_timer_promotes_to_llgr_stale() {
-    tokio::time::pause();
-
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
@@ -755,10 +749,8 @@ async fn llgr_gr_timer_promotes_to_llgr_stale() {
     handle.await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn llgr_timer_sweeps_llgr_stale_routes() {
-    tokio::time::pause();
-
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
@@ -822,14 +814,8 @@ async fn llgr_timer_sweeps_llgr_stale_routes() {
     handle.await.unwrap();
 }
 
-#[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one scenario walks promotion, retention, and EoR sweep end to end"
-)]
+#[tokio::test(start_paused = true)]
 async fn llgr_eor_clears_llgr_stale() {
-    tokio::time::pause();
-
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
@@ -949,10 +935,8 @@ async fn llgr_eor_clears_llgr_stale() {
     handle.await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn llgr_peer_down_aborts_llgr() {
-    tokio::time::pause();
-
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
@@ -1020,10 +1004,8 @@ async fn llgr_peer_down_aborts_llgr() {
     handle.await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn llgr_without_peer_capability_falls_through_to_sweep() {
-    tokio::time::pause();
-
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
@@ -1673,10 +1655,8 @@ async fn send_eor(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr, afi: Afi, safi: Sa
 /// different peer-advertised stale times must be swept on their OWN
 /// deadlines — the shorter one first, the longer one retained until its
 /// own timer expires (the old peer-wide min purged both at the shorter).
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn llgr_mixed_stale_times_sweep_per_family() {
-    tokio::time::pause();
-
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
@@ -1766,10 +1746,8 @@ async fn llgr_mixed_stale_times_sweep_per_family() {
 /// A peer that re-establishes during LLGR and goes down again must not
 /// restart the timer — the surviving deadline is re-used, and the
 /// LLGR-stale routes are retained (not purged) across the second reset.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn llgr_reconnect_and_second_down_preserve_original_deadline() {
-    tokio::time::pause();
-
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
@@ -1837,10 +1815,8 @@ async fn llgr_reconnect_and_second_down_preserve_original_deadline() {
 /// LLGR-stale (flag + community) through the new session until End-of-RIB,
 /// which retires both the staleness and the family's surviving original
 /// deadline — a refreshed table must NOT be swept at the old LLST horizon.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn llgr_reestablish_carries_llgr_stale_until_eor() {
-    tokio::time::pause();
-
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
@@ -1930,10 +1906,8 @@ async fn llgr_reestablish_carries_llgr_stale_until_eor() {
     clippy::too_many_lines,
     reason = "announce + assert across five address families"
 )]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn llgr_reconnect_before_expiry_across_families() {
-    tokio::time::pause();
-
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
