@@ -310,23 +310,6 @@ RUNTIME_DIVERGENCES = [
         "consumer_visible": True,
     },
     {
-        "endpoint": ["api/route/{net}/protocol/{protocol}", "api/route/{net}/export/{protocol}"],
-        "path": "routes", "kind": "semantics",
-        "classification": "must_match",
-        "birdseye": "show route for: longest match, so a covering-only prefix or a host address returns the covering route",
-        "adapter": "exact prefix match: the same inputs return []",
-        "rationale": "IXP Manager passes listed exact networks; the exact-vs-longest choice is recorded, not hidden",
-        "consumer_visible": True,
-    },
-    {
-        "endpoint": "api/route/{net}/table/{table}", "path": "<response>", "kind": "semantics",
-        "classification": "must_match",
-        "birdseye": "HTTP 200 with routes: [] for host-bit input (BIRD rejects the lookup)",
-        "adapter": "HTTP 400, which the pinned consumer collapses to \"\"",
-        "rationale": "network-aligned input only; IXP Manager renders an empty page either way",
-        "consumer_visible": True,
-    },
-    {
         "endpoint": LC_ZWILD, "path": "routes", "kind": "semantics",
         "classification": "must_match",
         "birdseye": "every route carrying (x, y, *) in the protocol's table",
@@ -622,7 +605,7 @@ def verify_populated(capture_dir: Path, web_php: Path) -> None:
         )
     for leg, document in docs.items():
         for name, journey in document["journeys"].items():
-            if journey["response"] == "" and name != "lookup_table_unaligned":
+            if journey["response"] == "":
                 fail(f"populated {leg} capture: {name} returned a collapsed non-2xx response")
     for leg, document in docs.items():
         text = json.dumps(document, indent=2, sort_keys=True) + "\n"

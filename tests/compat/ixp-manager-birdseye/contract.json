@@ -392,29 +392,6 @@
       "consumer_visible": true
     },
     {
-      "endpoint": [
-        "api/route/{net}/protocol/{protocol}",
-        "api/route/{net}/export/{protocol}"
-      ],
-      "path": "routes",
-      "kind": "semantics",
-      "classification": "must_match",
-      "birdseye": "show route for: longest match, so a covering-only prefix or a host address returns the covering route",
-      "adapter": "exact prefix match: the same inputs return []",
-      "rationale": "IXP Manager passes listed exact networks; the exact-vs-longest choice is recorded, not hidden",
-      "consumer_visible": true
-    },
-    {
-      "endpoint": "api/route/{net}/table/{table}",
-      "path": "<response>",
-      "kind": "semantics",
-      "classification": "must_match",
-      "birdseye": "HTTP 200 with routes: [] for host-bit input (BIRD rejects the lookup)",
-      "adapter": "HTTP 400, which the pinned consumer collapses to \"\"",
-      "rationale": "network-aligned input only; IXP Manager renders an empty page either way",
-      "consumer_visible": true
-    },
-    {
       "endpoint": "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}",
       "path": "routes",
       "kind": "semantics",

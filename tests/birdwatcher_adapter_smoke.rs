@@ -1099,6 +1099,27 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         exact_received, live,
         "exact protocol route must preserve every candidate and its order"
     );
+    let covering_received = get_json(
+        adapter_port,
+        "/route/10.99.0.1%2F32/protocol/pb_0001_as65020",
+        "adapter",
+    );
+    assert_eq!(
+        covering_received, live,
+        "a lookup without an exact entry must answer with the view's most-specific covering prefix"
+    );
+    for path in [
+        "/route/10.99.0.1%2F24/protocol/pb_0001_as65020",
+        "/route/10.99.0.1%2F24/export/pb_0002_as65030",
+        "/route/10.99.0.1%2F24/table/master4",
+    ] {
+        let host_bits = get_json(adapter_port, path, "adapter");
+        assert_eq!(
+            host_bits["routes"],
+            serde_json::json!([]),
+            "host-bit input must be an empty successful lookup: {path}"
+        );
+    }
     let table_lookup = get_json(
         adapter_port,
         "/route/10.99.0.128%2F25/table/master4",

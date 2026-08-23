@@ -37,6 +37,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and exact-route views (joined against `ListBestRoutes`; the table views
   already read it). The five matching `must_match` runtime-divergence
   allow-list entries are removed. (LAN-1232)
+- The Bird's Eye adapter's route lookups converge on the pinned oracle's
+  lookup semantics: `route/{net}/protocol/{protocol}` and
+  `route/{net}/export/{protocol}` are longest-match (`show route for`) — a
+  covering-only prefix or a host address answers with the view's
+  most-specific covering prefix instead of an empty array — and
+  syntactically valid input with host bits set, which BIRD rejects, returns
+  HTTP 200 with an empty route array on all three `route/{net}` lookups
+  instead of the table variant's HTTP 400. Genuinely malformed input remains
+  HTTP 400. The two matching `must_match` runtime-divergence allow-list
+  entries are removed. (LAN-1232)
 
 ### Removed
 
