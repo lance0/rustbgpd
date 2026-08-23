@@ -30,9 +30,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   re-advertised; unknown optional transitive attributes remain preserved with
   the Partial bit. (LAN-1265)
 
-- `rs-config-render recover` now reports the restore steps that completed
+- `rs-config-render recover` now reports the recovery steps that completed
   before a later step failed while preserving the non-zero exit status and
-  error output; steps that were not reached are not claimed as restored.
+  error output; steps that were not reached are not reported.
   (LAN-1251)
 
 - Genuine BFD Down transitions now tear established BGP sessions down with
