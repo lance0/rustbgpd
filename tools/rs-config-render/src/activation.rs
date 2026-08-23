@@ -723,6 +723,38 @@ mod unix {
         runtime_equal: bool,
     }
 
+    struct TemporaryReceipt(Option<PathBuf>);
+
+    impl Drop for TemporaryReceipt {
+        fn drop(&mut self) {
+            if let Some(path) = self.0.take() {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    fn replace_receipt_with(
+        state: &Path,
+        bytes: &[u8],
+        write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+    ) -> AResult<()> {
+        let temporary = state.join(unique_name(&format!(".{ACTIVATION_RECEIPT}")));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(|_| Error::RecoveryRequired)?;
+        let mut cleanup = TemporaryReceipt(Some(temporary.clone()));
+        write(&mut file, bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|_| Error::RecoveryRequired)?;
+        fs::rename(&temporary, state.join(ACTIVATION_RECEIPT))
+            .map_err(|_| Error::RecoveryRequired)?;
+        cleanup.0.take();
+        sync_dir(state)
+    }
+
     fn write_receipt(
         state: &Path,
         status: &str,
@@ -751,21 +783,9 @@ mod unix {
                 "runtime_equal": phases.runtime_equal
             }
         });
-        let temporary = state.join(unique_name(&format!(".{ACTIVATION_RECEIPT}")));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)
-            .map_err(|_| Error::RecoveryRequired)?;
         let mut bytes = serde_json::to_vec_pretty(&receipt).expect("receipt serializes");
         bytes.push(b'\n');
-        file.write_all(&bytes)
-            .and_then(|_| file.sync_all())
-            .map_err(|_| Error::RecoveryRequired)?;
-        fs::rename(&temporary, state.join(ACTIVATION_RECEIPT))
-            .map_err(|_| Error::RecoveryRequired)?;
-        sync_dir(state)
+        replace_receipt_with(state, &bytes, |file, bytes| file.write_all(bytes))
     }
 
     fn disjoint(candidate: &Path, state: &Path) -> bool {
@@ -1097,6 +1117,38 @@ mod unix {
         }
         guard.clear().map_err(host_error)?;
         result
+    }
+
+    #[cfg(test)]
+    mod receipt_tests {
+        use super::*;
+
+        #[test]
+        fn write_receipt_removes_temporary_file_after_write_failure() {
+            let state = tempfile::tempdir().expect("temporary state");
+            let final_path = state.path().join(ACTIVATION_RECEIPT);
+            fs::write(&final_path, b"existing receipt").expect("seed final receipt");
+
+            let result = replace_receipt_with(state.path(), b"replacement", |file, _| {
+                file.write_all(b"partial")?;
+                Err(std::io::Error::other("injected write failure"))
+            });
+
+            assert_eq!(result, Err(Error::RecoveryRequired));
+            assert_eq!(
+                fs::read(final_path).expect("read final"),
+                b"existing receipt"
+            );
+            assert!(
+                fs::read_dir(state.path())
+                    .expect("read state")
+                    .all(|entry| !entry
+                        .expect("state entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(&format!(".{ACTIVATION_RECEIPT}.")))
+            );
+        }
     }
 }
 
