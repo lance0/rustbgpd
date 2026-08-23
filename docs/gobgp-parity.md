@@ -117,7 +117,7 @@ releases rather than carried forward from older measurements.
 
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
-| Native gRPC management API | Yes | Yes | Compare GoBGP v4.8.0 [API definitions](https://github.com/osrg/gobgp/tree/v4.8.0/api) with rustbgpd's [in-tree service definitions](../proto/rustbgpd.proto); the rows below state supported operator scope rather than volatile RPC totals |
+| Native gRPC management API | Yes | Yes | Compare GoBGP v4.8.0 [API definitions](https://github.com/osrg/gobgp/tree/v4.8.0/api) with rustbgpd's [native API](../proto/rustbgpd.proto) and [vendored gNMI](../proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto) definitions; the rows below state supported operator scope rather than volatile RPC totals |
 | Peer CRUD | Yes | Yes | Add/Delete/List/Enable/Disable |
 | Peer groups | Yes | Yes | `PeerGroupService` + neighbor membership RPCs |
 | Dynamic neighbors (prefix-based) | Yes | Yes | `[[dynamic_neighbors]]` config plus runtime `AddDynamicNeighbor` / `DeleteDynamicNeighbor` / `ListDynamicNeighbors` (add/delete tier `mutating`, persisted to TOML); overlapping ranges resolve by longest-prefix-match |
