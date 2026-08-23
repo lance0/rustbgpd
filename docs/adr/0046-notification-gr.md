@@ -59,14 +59,23 @@ if neg.peer_gr_capable
 
 If either hard reset flag is set, the session falls through to `PeerDown` (routes purged immediately) instead of `PeerGracefulRestart`.
 
-### No New Config
+### Automatic BFD hard reset
 
-N-bit advertisement is unconditional. Hard Reset sending is not automated in this change — it's primarily a reactive feature (honoring peer's Hard Reset). Future work could add a `hard_reset` flag to the `DisablePeer` gRPC command.
+N-bit advertisement is unconditional. When BFD drives a local BGP teardown,
+the typed `BfdDown` FSM event first creates Cease/BFD Down (6/10). If
+Notification GR was negotiated, the transport wraps that exact notification
+as Cease/Hard Reset (6/9) with the original 6/10 code and subcode in the data,
+as required by RFC 8538. Other local administrative teardown paths do not send
+Hard Reset automatically; a future change could expose that separately.
+
+This behavior adds no configuration knob or gRPC field.
 
 ## Consequences
 
 - Peers that support RFC 8538 will see the N-bit in our GR capability.
 - Cease/Hard Reset from a peer now correctly bypasses GR, preventing stale route preservation when the peer explicitly requests a hard teardown.
+- A BFD-triggered local teardown sends Cease/BFD Down, wrapped in Cease/Hard
+  Reset when Notification GR was negotiated.
 - No new configuration knobs or gRPC fields.
 - The `HARD_RESET` constant (Cease subcode 9) was already defined in the wire crate.
 - Backward compatible: peers without N-bit support ignore the bit per RFC.
