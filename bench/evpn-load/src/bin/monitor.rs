@@ -9,7 +9,7 @@
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
-#![allow(
+#![expect(
     clippy::too_many_lines,
     reason = "the monitor binary keeps its command wiring and reporting flow in one entrypoint"
 )]
