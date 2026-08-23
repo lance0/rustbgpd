@@ -813,6 +813,7 @@ async fn tcp_disconnect_clears_bmp_repair_latch() {
         update_pdu: Bytes::from_static(&[0xde, 0xad]),
     });
     assert!(session.bmp_stream_diverged);
+    assert_eq!(session.metrics.bmp_stream_diverged(&session.peer_label), 1);
     assert!(session.bmp_repair_timer.is_some());
     // Drain so a stray repair *could* succeed if it fired.
     for _ in 0..16 {
@@ -825,6 +826,7 @@ async fn tcp_disconnect_clears_bmp_repair_latch() {
         !session.bmp_stream_diverged,
         "disconnect clears the divergence latch"
     );
+    assert_eq!(session.metrics.bmp_stream_diverged(&session.peer_label), 0);
     assert!(
         session.bmp_repair_timer.is_none(),
         "disconnect disarms the repair timer"
