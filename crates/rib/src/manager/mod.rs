@@ -269,6 +269,8 @@ pub struct RibManager {
     /// group table; for private peers it suppresses repeated diagnostics and
     /// withdrawals for routes that were never advertised.
     peer_unexportable: HashMap<IpAddr, HashSet<ExactExportKey>>,
+    #[cfg(test)]
+    grouped_advertised_count_calls: std::sync::atomic::AtomicUsize,
     export_policy: Option<PolicyChain>,
     peer_export_policies: HashMap<IpAddr, Option<PolicyChain>>,
     /// Families the transport can actually serialize per peer.
@@ -1121,6 +1123,8 @@ impl RibManager {
             pending_peer_gr_context: HashMap::new(),
             peer_export_encoders: HashMap::new(),
             peer_unexportable: HashMap::new(),
+            #[cfg(test)]
+            grouped_advertised_count_calls: std::sync::atomic::AtomicUsize::new(0),
             export_policy,
             peer_export_policies: HashMap::new(),
             peer_sendable_families: HashMap::new(),

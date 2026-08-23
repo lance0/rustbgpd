@@ -2,8 +2,8 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::NonZeroU32;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use rustbgpd_policy::PolicyChain;
@@ -1240,6 +1240,117 @@ pub fn route_query_key(route: &Route) -> RouteQueryKey {
 
 /// Row filter evaluated inside the RIB task during a paged route query.
 pub type RouteQueryFilter = Box<dyn Fn(&Route) -> bool + Send + Sync>;
+
+type OrderedRouteQuery = (Option<Afi>, Option<u64>);
+
+static ORDERED_ROUTE_QUERIES: OnceLock<Mutex<HashMap<usize, OrderedRouteQuery>>> = OnceLock::new();
+
+struct OrderedRouteQueryRegistration {
+    filter_identity: AtomicUsize,
+}
+
+impl Drop for OrderedRouteQueryRegistration {
+    fn drop(&mut self) {
+        let identity = self.filter_identity.load(Ordering::Relaxed);
+        if let Some(registry) = ORDERED_ROUTE_QUERIES.get() {
+            registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&identity);
+        }
+    }
+}
+
+fn route_query_filter_identity(filter: &RouteQueryFilter) -> usize {
+    let pointer: *const (dyn Fn(&Route) -> bool + Send + Sync) = &**filter;
+    pointer.cast::<()>() as usize
+}
+
+/// Build the trusted family-only closure used by the API's ordered continuations.
+#[doc(hidden)]
+#[must_use]
+pub fn ordered_route_query_filter(
+    family: Option<Afi>,
+    known_total: Option<u64>,
+) -> RouteQueryFilter {
+    let registration = Arc::new(OrderedRouteQueryRegistration {
+        filter_identity: AtomicUsize::new(0),
+    });
+    let keep_registered = Arc::clone(&registration);
+    let filter: RouteQueryFilter = Box::new(move |route| {
+        let _ = &keep_registered;
+        family.is_none_or(|family| match family {
+            Afi::Ipv4 => matches!(route.prefix, Prefix::V4(_)),
+            Afi::Ipv6 => matches!(route.prefix, Prefix::V6(_)),
+            _ => false,
+        })
+    });
+    let identity = route_query_filter_identity(&filter);
+    registration
+        .filter_identity
+        .store(identity, Ordering::Relaxed);
+    let replaced = ORDERED_ROUTE_QUERIES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(identity, (family, known_total));
+    debug_assert!(
+        replaced.is_none(),
+        "live route-query filter identity reused"
+    );
+    filter
+}
+
+pub(crate) fn ordered_route_query(filter: &RouteQueryFilter) -> Option<OrderedRouteQuery> {
+    ORDERED_ROUTE_QUERIES
+        .get()?
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&route_query_filter_identity(filter))
+        .copied()
+}
+
+#[cfg(test)]
+mod ordered_route_query_filter_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_is_factory_only_and_scoped_to_each_live_closure() {
+        let filter = ordered_route_query_filter(Some(Afi::Ipv4), Some(7));
+        let all_routes = ordered_route_query_filter(None, Some(11));
+        assert_eq!(
+            ordered_route_query(&filter),
+            Some((Some(Afi::Ipv4), Some(7)))
+        );
+        assert_eq!(ordered_route_query(&all_routes), Some((None, Some(11))));
+        drop(filter);
+        assert_eq!(ordered_route_query(&all_routes), Some((None, Some(11))));
+
+        let ordinary: RouteQueryFilter = Box::new(|_: &Route| true);
+        assert_eq!(ordered_route_query(&ordinary), None);
+    }
+
+    #[test]
+    fn registration_drop_removes_its_registry_entry() {
+        let identity = usize::MAX;
+        let registry = ORDERED_ROUTE_QUERIES.get_or_init(|| Mutex::new(HashMap::new()));
+        let replaced = registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(identity, (None, Some(1)));
+        assert_eq!(replaced, None);
+
+        drop(OrderedRouteQueryRegistration {
+            filter_identity: AtomicUsize::new(identity),
+        });
+        assert!(
+            !registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&identity)
+        );
+    }
+}
 
 /// Row filter evaluated inside the RIB task while copying one non-unicast
 /// Loc-RIB table (EVPN, BGP-LS, VPN, labeled-unicast, RT-Constrain,

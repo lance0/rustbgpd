@@ -110,6 +110,15 @@ struct Args {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     max_routes: u64,
+
+    /// Maximum route rows scanned by a longest-match fallback.
+    #[arg(
+        long,
+        env = "BIRDWATCHER_ADAPTER_MAX_LPM_SCAN_ROUTES",
+        default_value_t = 10_000,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    max_lpm_scan_routes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -548,6 +557,7 @@ struct AppState {
     identities: Arc<IdentityResolver>,
     identity_store: Arc<ResolverStore>,
     max_routes: u64,
+    max_lpm_scan_routes: u64,
     arouteserver_reject_communities: Option<Arc<ArsRejectCommunities>>,
 }
 
@@ -558,6 +568,7 @@ impl Clone for AppState {
             identities: self.identity_store.snapshot(),
             identity_store: Arc::clone(&self.identity_store),
             max_routes: self.max_routes,
+            max_lpm_scan_routes: self.max_lpm_scan_routes,
             arouteserver_reject_communities: self.arouteserver_reject_communities.clone(),
         }
     }
@@ -597,6 +608,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         identities: identity_store.snapshot(),
         identity_store,
         max_routes: args.max_routes,
+        max_lpm_scan_routes: args.max_lpm_scan_routes,
         arouteserver_reject_communities: args
             .arouteserver_reject_communities_file
             .as_deref()
@@ -1287,6 +1299,13 @@ impl ExactPrefix {
         (length <= width && network_aligned(address, length)).then_some(Self { address, length })
     }
 
+    fn family(self) -> i32 {
+        match self.address {
+            IpAddr::V4(_) => proto::AddressFamily::Ipv4Unicast as i32,
+            IpAddr::V6(_) => proto::AddressFamily::Ipv6Unicast as i32,
+        }
+    }
+
     fn covers(self, query: Self) -> bool {
         if self.length > query.length {
             return false;
@@ -1360,7 +1379,7 @@ fn exact_route_request(
     };
     proto::ListRoutesRequest {
         neighbor_address: peer.to_string(),
-        afi_safi: proto::AddressFamily::Unspecified as i32,
+        afi_safi: prefix.family(),
         page_size: 1000,
         page_token,
         prefix_filter,
@@ -1368,6 +1387,48 @@ fn exact_route_request(
         longer_prefixes: false,
         ..Default::default()
     }
+}
+
+fn view_route_request(
+    peer: IpAddr,
+    prefix: ExactPrefix,
+    page_token: String,
+    remaining: u64,
+) -> proto::ListRoutesRequest {
+    proto::ListRoutesRequest {
+        neighbor_address: peer.to_string(),
+        afi_safi: prefix.family(),
+        page_size: remaining.min(1000) as u32,
+        page_token,
+        ..Default::default()
+    }
+}
+
+fn lpm_scan_limit(max_scan_routes: u64) -> HttpError {
+    json_error(
+        StatusCode::FORBIDDEN,
+        format!(
+            "Longest-match scan limit reached before the peer view was exhausted ({max_scan_routes}/{max_scan_routes} routes)"
+        ),
+    )
+}
+
+fn append_view_page(
+    view: &mut Vec<proto::Route>,
+    page: Vec<proto::Route>,
+    next_page_token: &str,
+    max_scan_routes: u64,
+) -> Result<(), HttpError> {
+    let remaining = max_scan_routes.saturating_sub(view.len() as u64);
+    if page.len() as u64 > remaining {
+        return Err(lpm_scan_limit(max_scan_routes));
+    }
+    let accumulated = view.len() as u64 + page.len() as u64;
+    if accumulated == max_scan_routes && !next_page_token.is_empty() {
+        return Err(lpm_scan_limit(max_scan_routes));
+    }
+    view.extend(page);
+    Ok(())
 }
 
 fn append_exact_routes(
@@ -1399,18 +1460,15 @@ async fn route_export(
 async fn view_routes(
     client: &mut proto::rib_service_client::RibServiceClient<Upstream>,
     peer: IpAddr,
+    prefix: ExactPrefix,
     source: ExactRouteSource,
+    max_scan_routes: u64,
 ) -> Result<Vec<proto::Route>, HttpError> {
     let mut view = Vec::new();
     let mut page_token = String::new();
     loop {
-        let request = proto::ListRoutesRequest {
-            neighbor_address: peer.to_string(),
-            afi_safi: proto::AddressFamily::Unspecified as i32,
-            page_size: 1000,
-            page_token,
-            ..Default::default()
-        };
+        let remaining = max_scan_routes.saturating_sub(view.len() as u64);
+        let request = view_route_request(peer, prefix, page_token, remaining);
         let response = match source {
             ExactRouteSource::Received => client
                 .list_received_routes(request)
@@ -1422,11 +1480,17 @@ async fn view_routes(
                 .map_err(|error| bad_gateway("ListAdvertisedRoutes", &error))?,
         }
         .into_inner();
-        view.extend(response.routes);
-        if response.next_page_token.is_empty() {
+        let next_page_token = response.next_page_token;
+        append_view_page(
+            &mut view,
+            response.routes,
+            &next_page_token,
+            max_scan_routes,
+        )?;
+        if next_page_token.is_empty() {
             break;
         }
-        page_token = response.next_page_token;
+        page_token = next_page_token;
     }
     Ok(view)
 }
@@ -1471,7 +1535,8 @@ async fn serve_exact_route(
     // matched prefix's candidates, not to the scanned view.
     let mut matched = prefix;
     if routes.is_empty() {
-        let view = view_routes(&mut client, peer, source).await?;
+        let view =
+            view_routes(&mut client, peer, prefix, source, state.max_lpm_scan_routes).await?;
         if let Some(covering) = longest_match(&view, prefix) {
             routes = view
                 .into_iter()
@@ -2578,6 +2643,7 @@ mod tests {
             identities: store.snapshot(),
             identity_store: store,
             max_routes: 1,
+            max_lpm_scan_routes: 10_000,
             arouteserver_reject_communities: None,
         };
         let mut neighbor = proto::NeighborState {
@@ -3437,6 +3503,7 @@ mod tests {
             identities: store.snapshot(),
             identity_store: Arc::clone(&store),
             max_routes: 1,
+            max_lpm_scan_routes: 10_000,
             arouteserver_reject_communities: None,
         };
         let request_a = state.clone();
@@ -3479,16 +3546,26 @@ mod tests {
         assert_eq!(api["Version"], api["version"]);
         assert!(api["version"].as_str().unwrap().starts_with("rustbgpd "));
 
-        assert!(
-            Args::try_parse_from([
-                "birdwatcher-adapter",
-                "--grpc-addr",
-                "http://127.0.0.1:50051",
-                "--max-routes",
-                "0",
-            ])
-            .is_err()
-        );
+        let defaults = Args::try_parse_from([
+            "birdwatcher-adapter",
+            "--grpc-addr",
+            "http://127.0.0.1:50051",
+        ])
+        .unwrap();
+        assert_eq!(defaults.max_lpm_scan_routes, 10_000);
+
+        for flag in ["--max-routes", "--max-lpm-scan-routes"] {
+            assert!(
+                Args::try_parse_from([
+                    "birdwatcher-adapter",
+                    "--grpc-addr",
+                    "http://127.0.0.1:50051",
+                    flag,
+                    "0",
+                ])
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -3575,6 +3652,7 @@ mod tests {
             identities: store.snapshot(),
             identity_store: store,
             max_routes: 7,
+            max_lpm_scan_routes: 10_000,
             arouteserver_reject_communities: None,
         };
         for source in [ExactRouteSource::Received, ExactRouteSource::Advertised] {
@@ -3609,19 +3687,33 @@ mod tests {
     #[test]
     fn exact_route_requests_pin_every_filter_on_every_page_and_unknown_id_is_404() {
         let peer: IpAddr = "192.0.2.1".parse().unwrap();
-        let prefix = ExactPrefix::parse("2001:db8::/32").unwrap().unwrap();
-        for source in [ExactRouteSource::Received, ExactRouteSource::Advertised] {
-            for token in ["", "opaque-page-2"] {
+        for (value, address, length, family) in [
+            (
+                "192.0.2.0/24",
+                "192.0.2.0",
+                24,
+                proto::AddressFamily::Ipv4Unicast,
+            ),
+            (
+                "2001:db8::/32",
+                "2001:db8::",
+                32,
+                proto::AddressFamily::Ipv6Unicast,
+            ),
+        ] {
+            let prefix = ExactPrefix::parse(value).unwrap().unwrap();
+            for (source, token) in [
+                (ExactRouteSource::Received, ""),
+                (ExactRouteSource::Received, "opaque-page-2"),
+                (ExactRouteSource::Advertised, ""),
+                (ExactRouteSource::Advertised, "opaque-page-2"),
+            ] {
                 let request = exact_route_request(peer, prefix, token.to_string(), source);
                 assert_eq!(request.neighbor_address, peer.to_string(), "{source:?}");
-                assert_eq!(request.prefix_filter, "2001:db8::", "{source:?}");
-                assert_eq!(request.prefix_filter_length, 32, "{source:?}");
+                assert_eq!(request.prefix_filter, address, "{source:?}");
+                assert_eq!(request.prefix_filter_length, length, "{source:?}");
                 assert!(!request.longer_prefixes, "{source:?}");
-                assert_eq!(
-                    request.afi_safi,
-                    proto::AddressFamily::Unspecified as i32,
-                    "{source:?}"
-                );
+                assert_eq!(request.afi_safi, family as i32, "{source:?}");
                 assert_eq!(request.page_token, token, "{source:?}");
             }
         }
@@ -3629,6 +3721,59 @@ mod tests {
         let (status, Json(body)) = resolver.resolve("missing-alias").unwrap_err();
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body, serde_json::json!({"message":"Protocol not found"}));
+    }
+
+    #[test]
+    fn fallback_pages_pin_family_token_shrinking_budget_and_complete_view() {
+        let peer: IpAddr = "192.0.2.1".parse().unwrap();
+        for (value, family) in [
+            ("192.0.2.1/32", proto::AddressFamily::Ipv4Unicast),
+            ("2001:db8::1/128", proto::AddressFamily::Ipv6Unicast),
+        ] {
+            let prefix = ExactPrefix::parse(value).unwrap().unwrap();
+            for (token, remaining, page_size) in [("", 10_000, 1000), ("opaque-page-2", 999, 999)] {
+                let request = view_route_request(peer, prefix, token.to_string(), remaining);
+                assert_eq!(request.neighbor_address, peer.to_string());
+                assert_eq!(request.afi_safi, family as i32);
+                assert_eq!(request.page_token, token);
+                assert_eq!(request.page_size, page_size);
+            }
+        }
+
+        let route = || proto::Route::default();
+        let mut below = Vec::new();
+        append_view_page(&mut below, vec![route()], "next", 3).unwrap();
+        append_view_page(&mut below, vec![route()], "", 3).unwrap();
+        assert_eq!(below.len(), 2);
+
+        let mut exact = vec![route(), route()];
+        append_view_page(&mut exact, vec![route()], "", 3).unwrap();
+        assert_eq!(exact.len(), 3);
+
+        for (mut view, page, token) in [
+            (vec![route(), route()], vec![route()], "next"),
+            (vec![route(), route()], vec![route(), route()], ""),
+        ] {
+            let before = view.len();
+            let (status, Json(body)) = append_view_page(&mut view, page, token, 3).unwrap_err();
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "message": "Longest-match scan limit reached before the peer view was exhausted (3/3 routes)"
+                })
+            );
+            assert_eq!(view.len(), before, "a refused page must not be evaluated");
+        }
+
+        let (status, Json(body)) = lpm_scan_limit(10_000);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "message": "Longest-match scan limit reached before the peer view was exhausted (10000/10000 routes)"
+            })
+        );
     }
 
     #[test]
