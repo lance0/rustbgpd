@@ -12,7 +12,9 @@
 #      the selected successor, authenticated traffic, session, and the route at
 #      every sample from a 100ms polling oracle.
 #   6. BIRD advertises a route without a session flap throughout every phase.
-#   7. A mismatch in the selected key fails closed and does not re-establish.
+#   7. An unsigned peer cannot establish while its static MKT remains installed,
+#      and the kernel accounts the matching unsigned traffic as TCPAORequired.
+#   8. A mismatch in the selected key fails closed and does not re-establish.
 #
 # Prerequisites:
 #   - BIRD image built:
@@ -36,6 +38,7 @@ source "$SCRIPT_DIR/test-lib.sh"
 BIRD="clab-${TOPO}-bird"
 GOOD_CONF="/etc/bird/bird.conf"
 BAD_CONF="/etc/bird/bird-bad.conf"
+UNSIGNED_CONF="/etc/bird/bird-unsigned.conf"
 TEST_PREFIX="203.0.113.43"
 POST_DELETE_PROBE_PREFIX="203.0.113.44"
 ROUTE_CONTINUITY_PID=""
@@ -141,6 +144,68 @@ wait_route_present() {
     fail "$TEST_PREFIX/32 not received over TCP-AO session"
     dump_diagnostics
     return 1
+}
+
+tcp_ao_required() {
+    docker exec "$RUSTBGPD" awk '
+        $1 == "TcpExt:" {
+            if (column > 0) {
+                print $column
+                found = 1
+                exit
+            }
+            for (i = 2; i <= NF; i++) {
+                if ($i == "TCPAORequired") column = i
+            }
+        }
+        END { if (!found) exit 1 }
+    ' /proc/net/netstat
+}
+
+prove_unsigned_peer_requires_ao() {
+    local before
+    if ! before=$(tcp_ao_required); then
+        fail "Linux did not expose the TCPAORequired accounting oracle"
+        return 1
+    fi
+
+    log "Starting a bounded unsigned BIRD attempt from the MKT-matched address..."
+    start_bird "$UNSIGNED_CONF"
+    local after=$before
+    local state
+    for _ in $(seq 1 10); do
+        if ! state=$(bird_state_strict); then
+            fail "unsigned BIRD protocol state became unavailable"
+            dump_diagnostics
+            return 1
+        fi
+        if ! awk '$1 == "rustbgpd" { found = 1 } END { exit found ? 0 : 1 }' \
+            <<<"$state"; then
+            fail "unsigned BIRD protocol row disappeared"
+            return 1
+        fi
+        if [[ "$state" == *Established* ]]; then
+            fail "unsigned BIRD reached Established against the TCP-AO listener"
+            dump_diagnostics
+            return 1
+        fi
+        if ! after=$(tcp_ao_required); then
+            fail "TCPAORequired accounting disappeared during the unsigned attempt"
+            return 1
+        fi
+        sleep 1
+    done
+    if [ "$after" -le "$before" ]; then
+        fail "unsigned traffic did not increase TCPAORequired ($before -> $after)"
+        dump_diagnostics
+        return 1
+    fi
+    ok "unsigned BIRD stayed non-Established and TCPAORequired increased $before -> $after"
+
+    start_bird "/etc/bird/bird-successor.conf"
+    wait_bird_established
+    wait_route_present
+    ok "authenticated BIRD re-established normally after the unsigned receipt"
 }
 
 start_route_continuity_oracle() {
@@ -903,6 +968,8 @@ main_uninterrupted() {
         dump_diagnostics
         return 1
     fi
+
+    prove_unsigned_peer_requires_ao
 
     log "Restarting BIRD with a mismatched preferred TCP-AO secret"
     start_bird "$BAD_CONF"
