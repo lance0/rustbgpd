@@ -18,6 +18,13 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
   `RIB_IPV4_UNICAST` / `RIB_IPV6_UNICAST` records into
   `SnapshotEntry` / `SnapshotNlri`, with gzip auto-detection
   (`decompress_if_gzip`)
+- **Dump health metrics** — `MrtManager` records `mrt_dump_interval_seconds`,
+  `mrt_last_dump_success_timestamp_seconds`,
+  `mrt_last_dump_duration_milliseconds`, `mrt_dump_bytes_written_total`, and
+  `mrt_dump_failures_total{stage}` (`preflight` / `snapshot` / `encode` /
+  `write`; a caller-canceled on-demand dump is not counted). The shipped alert
+  pack's `MrtDumpStale` guards on a non-zero `mrt_dump_interval_seconds` and
+  fires once the newest dump is older than twice it
 
 ## Warm bundle
 

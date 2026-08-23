@@ -43,12 +43,14 @@ docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 \
 docker compose exec rustbgpd cat /var/lib/rustbgpd/config.toml
 ```
 
-`rustbgpd.toml` in this directory is a **template**. The daemon copies it into
-its writable state volume on first start and runs from
+`rustbgpd.toml` in this directory is a **template**. The service's start
+command copies it into the writable state volume on first start (`cp -n`, see
+`command:` in `docker-compose.yml`) and the daemon then runs from
 `/var/lib/rustbgpd/config.toml` — a read-only bind mount cannot accept the
 temp-file + rename write that config persistence uses, and every mutating
-command would fail. Edit the template and `docker compose down -v` to start
-over from it.
+command would fail. The daemon itself has no template-seeding behavior, so a
+port of this pattern to another supervisor has to carry the copy. Edit the
+template and `docker compose down -v` to start over from it.
 
 The service has a 32-minute stop grace so an explicit Compose stop does not
 kill a runtime-config owner before its fixed 30-minute settlement watchdog.
