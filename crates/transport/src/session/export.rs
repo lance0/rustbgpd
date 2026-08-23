@@ -2948,7 +2948,8 @@ mod tests {
         );
         let mut attrs = route.attributes.as_ref().clone();
         attrs.push(PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
-            flags: rustbgpd_wire::constants::attr_flags::OPTIONAL,
+            flags: rustbgpd_wire::constants::attr_flags::OPTIONAL
+                | rustbgpd_wire::constants::attr_flags::TRANSITIVE,
             type_code: 99,
             data: bytes::Bytes::from(vec![0; 4_040]),
         }));

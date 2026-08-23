@@ -169,6 +169,38 @@ async fn rfc7606_attribute_discard_keeps_announcement_and_session() {
     assert_single_malformed_disposition(&session, "attribute_discard");
 }
 
+/// RFC 4271 section 5: an unrecognized optional non-transitive attribute is
+/// ignored while its reachable NLRI and the Established session survive.
+#[tokio::test]
+async fn unknown_optional_non_transitive_is_absent_from_delivered_route() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 99), 32);
+
+    session
+        .process_update(rfc7606_update(
+            rfc7606_attr_bytes(&[0x80, 99, 2, 0xaa, 0xbb]),
+            &[prefix],
+        ))
+        .await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected the announcement to survive");
+    };
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].prefix, Prefix::V4(prefix));
+    assert!(
+        announced[0]
+            .attributes
+            .iter()
+            .all(|attribute| attribute.type_code() != 99)
+    );
+    assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
 /// RFC 6793 / RFC 7606: a malformed `AS4_PATH` is discarded without losing
 /// reachable NLRI or the valid ordinary path on a legacy session.
 ///
