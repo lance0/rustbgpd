@@ -264,17 +264,22 @@ fn matches_ordered_family(route: &crate::route::Route, family: Option<Afi>) -> b
     family.is_none_or(|family| prefix_family(&route.prefix).0 == family)
 }
 
+fn ordered_family_routes<'a>(
+    routes: impl Iterator<Item = &'a crate::route::Route>,
+    family: Option<Afi>,
+) -> impl Iterator<Item = &'a crate::route::Route> {
+    routes
+        .skip_while(move |route| !matches_ordered_family(route, family))
+        .take_while(move |route| matches_ordered_family(route, family))
+}
+
 fn page_ordered_family<'a>(
     routes: impl Iterator<Item = &'a crate::route::Route>,
     family: Option<Afi>,
     total: u64,
     page_size: usize,
 ) -> RoutePage {
-    page_ordered_routes(
-        routes.take_while(move |route| matches_ordered_family(route, family)),
-        total,
-        page_size,
-    )
+    page_ordered_routes(ordered_family_routes(routes, family), total, page_size)
 }
 
 /// Merge multiple individually ordered Adj-RIB-In iterators into one route
@@ -591,19 +596,14 @@ impl RibManager {
                     let iterators = self
                         .ribs
                         .values()
-                        .map(|rib| {
-                            rib.iter_ordered_from(after)
-                                .take_while(move |route| matches_ordered_family(route, family))
-                        })
+                        .map(|rib| ordered_family_routes(rib.iter_ordered_from(after), family))
                         .collect();
                     page_merged_ordered_routes(iterators, route_total, page_size)
                 }
                 RouteQueryScope::Best => {
                     let route_total = total(self.loc_rib.len());
                     page_ordered_routes(
-                        self.loc_rib
-                            .iter_ordered_from(after)
-                            .take_while(move |route| matches_ordered_family(route, family)),
+                        ordered_family_routes(self.loc_rib.iter_ordered_from(after), family),
                         route_total,
                         page_size,
                     )
@@ -625,8 +625,7 @@ impl RibManager {
                                 |(_, total)| total,
                             );
                             page_ordered_routes(
-                                routes
-                                    .take_while(move |route| matches_ordered_family(route, family)),
+                                ordered_family_routes(routes, family),
                                 route_total,
                                 page_size,
                             )
@@ -2303,6 +2302,64 @@ mod cancellation_tests {
             2,
         );
         assert_eq!((scanned.get(), page.routes.len(), page.total), (3, 2, 6));
+    }
+
+    #[test]
+    fn ipv6_family_first_page_and_continuation_are_lazy_and_complete() {
+        let peer = Ipv4Addr::new(192, 0, 2, 1);
+        let mut rib = AdjRibIn::new(peer.into());
+        for octet in 0..4 {
+            rib.insert(crate::test_support::make_route(
+                rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::new(10, 0, octet, 0), 24),
+                peer,
+            ));
+        }
+        let next_hop = "2001:db8::1".parse().unwrap();
+        let mut expected = Vec::new();
+        for segment in 0..5 {
+            let route = crate::test_support::make_v6_route(
+                rustbgpd_wire::Ipv6Prefix::new(
+                    std::net::Ipv6Addr::new(0x2001, 0xdb8, segment, 0, 0, 0, 0, 0),
+                    48,
+                ),
+                next_hop,
+            );
+            expected.push(route_query_key(&route));
+            rib.insert(route);
+        }
+        expected.sort_unstable();
+
+        let scanned = std::cell::Cell::new(0);
+        let first = page_ordered_family(
+            rib.iter_ordered_from(None)
+                .inspect(|_| scanned.set(scanned.get() + 1)),
+            Some(Afi::Ipv6),
+            5,
+            2,
+        );
+        assert_eq!(
+            first.routes.iter().map(route_query_key).collect::<Vec<_>>(),
+            expected[..2]
+        );
+        assert_eq!((scanned.get(), first.has_more, first.total), (7, true, 5));
+
+        scanned.set(0);
+        let second = page_ordered_family(
+            rib.iter_ordered_from(first.routes.last().map(route_query_key))
+                .inspect(|_| scanned.set(scanned.get() + 1)),
+            Some(Afi::Ipv6),
+            5,
+            2,
+        );
+        assert_eq!(
+            second
+                .routes
+                .iter()
+                .map(route_query_key)
+                .collect::<Vec<_>>(),
+            expected[2..4]
+        );
+        assert_eq!((scanned.get(), second.has_more, second.total), (3, true, 5));
     }
 
     #[test]
