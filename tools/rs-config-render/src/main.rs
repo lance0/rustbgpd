@@ -440,14 +440,16 @@ fn recover_exit(
             }))
         }
         Err(failure) => {
-            let written = write_stdout(|writer| {
-                for step in &failure.completed.steps {
-                    writeln!(writer, "recover {name}: {step}")?;
+            if !failure.completed.steps.is_empty() {
+                let written = write_stdout(|writer| {
+                    for step in &failure.completed.steps {
+                        writeln!(writer, "recover {name}: {step}")?;
+                    }
+                    Ok(())
+                });
+                if let Err(error) = written {
+                    return stdout_exit(Err(error));
                 }
-                Ok(())
-            });
-            if let Err(error) = written {
-                return stdout_exit(Err(error));
             }
             eprintln!("rs-config-render: recover {name}: {}", failure.error);
             failure.error.exit_code().into()
