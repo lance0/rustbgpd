@@ -780,8 +780,10 @@ impl PathAttribute {
 }
 /// Raw attribute preserved for pass-through (RFC 4271 §5).
 ///
-/// On re-advertisement, the Partial bit (0x20) is OR'd into `flags`.
-/// All other flags and bytes are preserved unchanged.
+/// Unknown optional transitive attributes are preserved and gain the Partial
+/// bit (0x20) on re-advertisement. Unknown optional non-transitive attributes
+/// are ignored by the decoders and defensive encoder; known non-transitive
+/// attributes use their typed variants.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RawAttribute {
     /// Attribute flags byte (optional, transitive, partial, extended-length).
@@ -826,6 +828,9 @@ pub fn decode_path_attributes_counted(
     let mut bgpls_discarded = 0_u32;
     while !buf.is_empty() {
         let (flags, type_code, value) = split_next_attribute(&mut buf)?;
+        if is_unknown_optional_non_transitive(flags, type_code) {
+            continue;
+        }
         let attr = decode_attribute_value(
             flags,
             type_code,
@@ -1029,6 +1034,9 @@ pub fn decode_path_attributes_revised(
             });
             continue;
         }
+        if is_unknown_optional_non_transitive(flags, type_code) {
+            continue;
+        }
         // RFC 7606 §7.6/§7.7 length checks, classified attribute-discard
         // before `decode_attribute_value` (whose length errors the legacy
         // decoder surfaces as `DecodeError`). The attribute-discard
@@ -1099,6 +1107,14 @@ pub fn decode_path_attributes_revised(
         bgpls_nlri_discarded: bgpls_discarded,
         malformed,
     })
+}
+
+/// RFC 4271 section 5 requires unrecognized optional non-transitive
+/// attributes to be quietly ignored rather than stored or propagated.
+fn is_unknown_optional_non_transitive(flags: u8, type_code: u8) -> bool {
+    expected_flags(type_code).is_none()
+        && (flags & attr_flags::OPTIONAL) != 0
+        && (flags & attr_flags::TRANSITIVE) == 0
 }
 
 /// Consume RFC 6793 compatibility attributes and leave one canonical path and
@@ -2588,9 +2604,10 @@ fn encode_path_attributes_with_scratch(
             attr,
             PathAttribute::Unknown(raw)
                 if matches!(raw.type_code, attr_type::AS4_PATH | attr_type::AS4_AGGREGATOR)
+                    || is_unknown_optional_non_transitive(raw.flags, raw.type_code)
         ) {
-            // Compatibility sidecars are derived from canonical attributes;
-            // never reflect stale received copies.
+            // Compatibility sidecars are derived from canonical attributes,
+            // while unknown optional non-transitive attributes are local-only.
             continue;
         }
         value_scratch.clear();
@@ -4165,6 +4182,11 @@ mod tests {
         );
     }
     #[test]
+    fn decode_unknown_optional_non_transitive_attribute_is_ignored() {
+        let attrs = decode_path_attributes(&[0x80, 99, 2, 1, 2], true, &[]).unwrap();
+        assert!(attrs.is_empty());
+    }
+    #[test]
     fn decode_atomic_aggregate_typed_and_roundtrips() {
         // ATOMIC_AGGREGATE: flags=0x40, type=6, len=0
         let buf = [0x40, 0x06, 0x00];
@@ -4656,7 +4678,7 @@ mod tests {
         assert_eq!(buf[0], attr_flags::TRANSITIVE);
     }
     #[test]
-    fn encode_unknown_nontransitive_no_partial() {
+    fn encode_unknown_optional_non_transitive_is_ignored() {
         let attr = PathAttribute::Unknown(RawAttribute {
             flags: attr_flags::OPTIONAL, // 0x80, no Transitive
             type_code: 99,
@@ -4664,8 +4686,7 @@ mod tests {
         });
         let mut buf = Vec::new();
         encode_path_attributes(&[attr], &mut buf, true, false).unwrap();
-        // First byte is flags — should NOT have PARTIAL bit
-        assert_eq!(buf[0], attr_flags::OPTIONAL);
+        assert!(buf.is_empty());
     }
     // --- MP_REACH_NLRI / MP_UNREACH_NLRI tests ---
     /// Helper to create a `NlriEntry` with `path_id=0`.
@@ -6475,6 +6496,31 @@ mod tests {
         ));
     }
     #[test]
+    fn revised_unknown_optional_non_transitive_is_ignored_without_malformation() {
+        let decoded = decode_path_attributes_revised(
+            &attr_bytes(attr_flags::OPTIONAL, 99, &[1, 2]),
+            true,
+            false,
+            &[],
+        )
+        .unwrap();
+        assert!(decoded.attributes.is_empty());
+        assert!(decoded.malformed.is_empty());
+    }
+    #[test]
+    fn revised_duplicate_unknown_optional_non_transitive_stores_neither() {
+        let mut buf = attr_bytes(attr_flags::OPTIONAL, 99, &[1]);
+        buf.extend(attr_bytes(attr_flags::OPTIONAL, 99, &[2]));
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert!(decoded.attributes.is_empty());
+        assert_eq!(decoded.malformed.len(), 1);
+        assert_eq!(decoded.malformed[0].type_code, 99);
+        assert_eq!(
+            decoded.malformed[0].disposition,
+            ErrorDisposition::AttributeDiscard
+        );
+    }
+    #[test]
     fn revised_duplicate_mp_unreach_is_session_reset() {
         // RFC 7606 §3 (g): duplicate MP_REACH_NLRI / MP_UNREACH_NLRI is a
         // Malformed Attribute List NOTIFICATION.
@@ -7169,7 +7215,7 @@ mod tests {
     #[test]
     fn encoder_preserves_opaque_extended_length_header() {
         let attribute = PathAttribute::Unknown(RawAttribute {
-            flags: attr_flags::OPTIONAL | attr_flags::EXTENDED_LENGTH,
+            flags: attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::EXTENDED_LENGTH,
             type_code: 99,
             data: Bytes::from_static(&[1, 2, 3]),
         });
@@ -7178,7 +7224,10 @@ mod tests {
         assert_eq!(
             encoded,
             [
-                attr_flags::OPTIONAL | attr_flags::EXTENDED_LENGTH,
+                attr_flags::OPTIONAL
+                    | attr_flags::TRANSITIVE
+                    | attr_flags::PARTIAL
+                    | attr_flags::EXTENDED_LENGTH,
                 99,
                 0,
                 3,
