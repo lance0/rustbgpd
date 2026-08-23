@@ -47,6 +47,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instead of the table variant's HTTP 400. Genuinely malformed input remains
   HTTP 400. The two matching `must_match` runtime-divergence allow-list
   entries are removed. (LAN-1232)
+- The Bird's Eye adapter's `lc-zwild` endpoint follows Bird's Eye's wildcard
+  semantics for ordinary `(x, y)` pairs: the member's accepted routes
+  carrying a large community `(x, y, *)`, scanned from the paged received
+  view with truthful `primary` and the generic route cap applied to the
+  matched rows. The daemon's own rejection namespace (`{daemon ASN}:1101:*`)
+  keeps serving the session's retained rejects with the retention envelope,
+  unchanged. The last `must_match` runtime-divergence allow-list entry is
+  removed, and the populated compat gate gains a deterministic
+  backend-failure journey pinning the adapter's HTTP 502 against Bird's
+  Eye's HTTP 503, allow-listed as `intentional`. (LAN-1232)
 
 ### Removed
 

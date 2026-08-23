@@ -1,5 +1,14 @@
 {
   "journeys": {
+    "backend_failure": {
+      "endpoint": "api/status",
+      "response": {
+        "body": {
+          "message": "Error querying bird"
+        },
+        "http_status": 503
+      }
+    },
     "lookup_export_covering": {
       "endpoint": "api/route/{net}/export/{protocol}",
       "response": {

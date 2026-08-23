@@ -206,6 +206,19 @@
       "consumer_visible": false
     },
     {
+      "endpoint": "api/status",
+      "path": [
+        "http_status",
+        "body.message"
+      ],
+      "kind": "value",
+      "classification": "intentional",
+      "birdseye": "HTTP 503 {\"message\": \"Error querying bird\"} when birdc cannot reach BIRD",
+      "adapter": "HTTP 502 {\"message\": \"Upstream daemon request failed\"} when the gRPC backend is down",
+      "rationale": "backend-failure journey: Bird's Eye reports its own backend error as 503 while the adapter is a gateway and honestly reports 502; the pinned consumer collapses every non-2xx to \"\" either way",
+      "consumer_visible": false
+    },
+    {
       "endpoint": [
         "api/protocols/bgp",
         "api/protocol/{protocol}"
@@ -389,16 +402,6 @@
       "birdseye": "BIRD route preference (100)",
       "adapter": "0",
       "rationale": "BIRD-internal preference; the pinned route view prints metric",
-      "consumer_visible": true
-    },
-    {
-      "endpoint": "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}",
-      "path": "routes",
-      "kind": "semantics",
-      "classification": "must_match",
-      "birdseye": "every route carrying (x, y, *) in the protocol's table",
-      "adapter": "retained rejects tagged <daemon asn>:1101:* only; [] for any other (x, y)",
-      "rationale": "the filtered-prefix view is the only pinned use; accepted routes are never scanned",
       "consumer_visible": true
     },
     {

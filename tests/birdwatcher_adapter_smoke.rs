@@ -509,6 +509,7 @@ fn establish_bgp_and_announce(bgp_port: u16) -> TcpStream {
 }
 
 fn announce_additional_route(stream: &mut TcpStream) {
+    use rustbgpd_wire::LargeCommunity;
     use rustbgpd_wire::attribute::{AsPath, AsPathSegment, Origin, PathAttribute};
     use rustbgpd_wire::message::{Message, encode_message};
     use rustbgpd_wire::update::UpdateMessage;
@@ -522,6 +523,9 @@ fn announce_additional_route(stream: &mut TcpStream) {
             }),
             PathAttribute::NextHop("192.0.2.99".parse().unwrap()),
             PathAttribute::Med(31),
+            // An ordinary (non-reserved) large community, so the accepted
+            // route is visible to the lc-zwild wildcard scan.
+            PathAttribute::LargeCommunities(vec![LargeCommunity::new(65020, 100, 1)]),
         ],
         &mut attrs,
         true,
@@ -1204,10 +1208,11 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         "ARouteServer presentation must scrub both configured namespaces: {filtered}"
     );
 
-    // IXP Manager v7.4 asks for `{daemon ASN}:1101:*`. This view uses only
-    // retained rejects, strips the peer's forged value in that reserved
-    // namespace, preserves unrelated communities, and synthesizes one
-    // conservative reason (as_path_loop is deliberately generic here).
+    // IXP Manager v7.4 asks for `{daemon ASN}:1101:*`. The daemon's own
+    // rejection namespace uses only retained rejects, strips the peer's
+    // forged value in that reserved namespace, preserves unrelated
+    // communities, and synthesizes one conservative reason (as_path_loop
+    // is deliberately generic here).
     let ixp_filtered = get_json(
         adapter_port,
         "/routes/lc-zwild/protocol/pb_0001_as65020/65001/1101",
@@ -1228,14 +1233,16 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
             .collect::<Vec<_>>(),
         [&serde_json::json!([65001, 1101, 0])]
     );
+    // An ordinary pair follows Bird's Eye wildcard semantics: the member's
+    // accepted routes carrying (x, y, *). Nothing accepted carries these
+    // pairs, and the accepted-route shape has no retention envelope.
     for path in [
         "/routes/lc-zwild/protocol/pb_0001_as65020/65002/1101",
         "/routes/lc-zwild/protocol/pb_0001_as65020/65001/1102",
     ] {
-        assert_eq!(
-            get_json(adapter_port, path, "adapter")["routes"],
-            serde_json::json!([])
-        );
+        let ordinary = get_json(adapter_port, path, "adapter");
+        assert_eq!(ordinary["routes"], serde_json::json!([]), "{ordinary}");
+        assert!(ordinary.get("retention").is_none(), "{ordinary}");
     }
 
     // /protocols/bgp — the neighbor summary serves the real filtered
@@ -1413,6 +1420,23 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         403,
         over_limit,
     );
+    // Ordinary-pair wildcard scan: the accepted 10.97.0.0/24 carries
+    // 65020:100:1, and nonmatching routes are filtered before the cap, so
+    // the scan answers 200 while the full received view is over limit.
+    let wildcard = get_json(
+        adapter_port,
+        "/routes/lc-zwild/protocol/pb_0001_as65020/65020/100",
+        "adapter",
+    );
+    let wildcard_routes = wildcard["routes"].as_array().unwrap();
+    assert_eq!(wildcard_routes.len(), 1, "{wildcard}");
+    assert_eq!(wildcard_routes[0]["network"], "10.97.0.0/24", "{wildcard}");
+    assert_eq!(
+        wildcard_routes[0]["bgp"]["large_communities"],
+        serde_json::json!([[65020, 100, 1]]),
+        "{wildcard}"
+    );
+    assert!(wildcard.get("retention").is_none(), "{wildcard}");
     announce_additional_rejected_route(&mut bgp_session);
     let deadline = Instant::now() + Duration::from_secs(60);
     let overflow = loop {

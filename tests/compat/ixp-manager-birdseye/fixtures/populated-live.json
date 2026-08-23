@@ -1,5 +1,14 @@
 {
   "journeys": {
+    "backend_failure": {
+      "endpoint": "api/status",
+      "response": {
+        "body": {
+          "message": "Upstream daemon request failed"
+        },
+        "http_status": 502
+      }
+    },
     "lookup_export_covering": {
       "endpoint": "api/route/{net}/export/{protocol}",
       "response": {
@@ -1427,13 +1436,55 @@
           "result_from_cache": false,
           "version": "rustbgpd <version>"
         },
-        "retention": {
-          "capacity": null,
-          "enabled": null,
-          "evictions_since_reset": null,
-          "may_be_incomplete": null
-        },
-        "routes": []
+        "routes": [
+          {
+            "age": "<timestamp>",
+            "bgp": {
+              "as_path": [
+                "64496",
+                "64510",
+                "64520"
+              ],
+              "communities": [
+                [
+                  64496,
+                  100
+                ],
+                [
+                  64496,
+                  200
+                ]
+              ],
+              "large_communities": [
+                [
+                  64496,
+                  1,
+                  1
+                ],
+                [
+                  64496,
+                  1,
+                  2
+                ]
+              ],
+              "local_pref": "100",
+              "med": 10,
+              "next_hop": "198.51.100.2",
+              "origin": "IGP"
+            },
+            "from_protocol": "pb_as64496",
+            "gateway": "198.51.100.2",
+            "interface": "",
+            "learnt_from": "198.51.100.2",
+            "metric": 0,
+            "network": "203.0.113.0/24",
+            "primary": true,
+            "type": [
+              "BGP",
+              "univ"
+            ]
+          }
+        ]
       }
     }
   },
