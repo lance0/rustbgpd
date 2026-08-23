@@ -522,6 +522,8 @@ impl PeerSession {
     /// would then stack a real `PeerUp` on top of).
     fn clear_bmp_stream_repair(&mut self) {
         self.bmp_stream_diverged = false;
+        self.metrics
+            .set_bmp_stream_diverged(&self.peer_label, false);
         self.bmp_repair_timer = None;
     }
 

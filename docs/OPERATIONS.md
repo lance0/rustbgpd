@@ -1122,16 +1122,20 @@ query with a new live watch.
 
 | Metric | What it tells you |
 |--------|-------------------|
+| `bmp_stream_diverged{peer}` | 1 while a dropped per-peer RouteMonitoring event has left collectors' live view incomplete and the session is awaiting its bounded synthetic PeerDown/PeerUp repair. It clears after a successful reset or genuine session teardown and is reaped when the peer is deleted |
 | `bmp_loc_rib_source_drops_total{event,reason}` | RFC 9069 Loc-RIB events dropped before they reached the BMP manager, at the internal RIB/PeerManager→BmpManager channel. `event` is `route_monitoring` (a Loc-RIB route install/withdraw that will never reach any collector's Loc-RIB view) or `stats` (one periodic Loc-RIB statistics report skipped; the next tick reports current totals). `reason` is `channel_full` (the BMP manager is not draining as fast as RIB churn produces events) or `channel_closed` (BMP teardown). Both label sets are bounded; the series is process-global, not per-collector. A dropped `route_monitoring` event silently diverges every connected Loc-RIB collector until its next reconnect-triggered table dump, so alert on any sustained `channel_full` increase and correlate with the per-collector `bmp_collector_drops_total` and the `bmp_loc_rib_dump_live_buffer_*` gauges to find the slow consumer; each increment also emits a warn log line |
+| `bmp_control_event_drops_total{collector,kind,reason}` | Collector lifecycle transitions that failed to reach the BMP manager. `kind` identifies connected, bootstrap-complete, or disconnected; `reason` is the bounded channel failure. Any increase means manager state may not match the collector connection lifecycle |
 
 The sibling `bmp_source_drops_total{peer,reason}` counts the same kind of
 loss on the per-peer PeerSession→BmpManager path (RFC 7854 Adj-RIB
 monitoring) with the same `reason` vocabulary.
 The shipped alert pack
 ([`examples/prometheus/rustbgpd-alerts.yml`](../examples/prometheus/rustbgpd-alerts.yml))
-fires `BmpSourceDrops`, `BmpLocRibSourceDrops`, and `BmpCollectorDrops` on
-any 10-minute increase of these two counters and of
-`bmp_collector_drops_total`.
+fires `BmpSourceDrops`, `BmpLocRibSourceDrops`, `BmpCollectorDrops`, and
+`BmpControlEventDrops` on any 10-minute increase of the corresponding loss
+counters. `BmpStreamDiverged` fires when the new gauge remains 1 for five
+minutes, identifying a repair that has not completed rather than a historical
+drop that already recovered.
 
 ### MRT
 

@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- BMP divergence repair is now operator-visible through the lifecycle-correct
+  `bmp_stream_diverged{peer}` gauge, a sustained-divergence alert, a control
+  event-drop alert, and a focused Grafana panel. The gauge clears after repair
+  or genuine teardown and is reaped with the peer. (LAN-1241)
+
 - `RibService` route detail now carries the RFC 4271 AGGREGATOR and
   ATOMIC_AGGREGATE path attributes (`Route.aggregator` with AS number and
   router ID, `Route.atomic_aggregate`), and the Bird's Eye adapter renders

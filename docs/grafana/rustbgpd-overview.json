@@ -1885,7 +1885,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
+        "w": 6,
         "x": 0,
         "y": 97
       },
@@ -1953,8 +1953,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 8,
+        "w": 6,
+        "x": 6,
         "y": 97
       },
       "fieldConfig": {
@@ -1993,6 +1993,58 @@
       ]
     },
     {
+      "id": 68,
+      "type": "timeseries",
+      "title": "BMP divergence repair",
+      "description": "Peers whose BMP RouteMonitoring stream is awaiting a synthetic PeerDown/PeerUp repair. A value pinned at 1 means the collector view remains incomplete.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 97
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 15,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "bmp_stream_diverged{instance=~\"$instance\",peer=~\"$peer\"}",
+          "legendFormat": "{{peer}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "id": 31,
       "type": "timeseries",
       "title": "Event outbox (ADR-0072)",
@@ -2003,8 +2055,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 16,
+        "w": 6,
+        "x": 18,
         "y": 97
       },
       "fieldConfig": {
