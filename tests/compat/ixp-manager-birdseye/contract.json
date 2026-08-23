@@ -445,7 +445,7 @@
       "consumer_visible": false
     }
   ],
-  "runtime_compatibility": false,
+  "runtime_compatibility": true,
   "manual_config_export": {
     "schema": "rustbgpd.ixp-manager.router-config/v2",
     "ixp_manager_version": "7.4.0",

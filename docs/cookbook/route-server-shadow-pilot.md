@@ -494,17 +494,21 @@ the facts rather than discovering them mid-pilot:
   receive-only knob in the Foil export. The pilot for an IXP Manager site
   is hand-written (or arouteserver-rendered); the IXP Manager path
   contributes the dry run.
-- **Full looking-glass compatibility.** The
+- **A divergence-free looking glass.** The
   [pinned contract](../../tests/compat/ixp-manager-birdseye/contract.json)
-  keeps `runtime_compatibility: false`: the birdwatcher adapter serves
-  Alice-LG's documented
+  records verified IXP Manager 7.4 Bird's Eye API compatibility with
+  documented BIRD-internal divergences (`runtime_compatibility: true`):
+  the birdwatcher adapter serves Alice-LG's documented
   [Birdwatcher subset](ixp-filter-pipeline.md#6-looking-glass-alice-lg-via-the-birdwatcher-adapter)
   (status, peers, accepted, filtered, noexport — enough to show
-  volunteers their own shadow view) and the pinned IXP Manager v7.4
-  journeys listed in the [IXP Manager recipe's boundary](ixp-manager-route-server.md#the-boundary).
-  Full-table counts, other large-community wildcard queries, live
-  hold/keepalive countdowns, and any other Bird's Eye client are outside
-  what is proven. A pilot should not promise members a drop-in looking
+  volunteers their own shadow view) and the Bird's Eye surface IXP Manager
+  v7.4.0 consumes, with the divergences documented in the
+  [IXP Manager recipe's boundary](ixp-manager-route-server.md#the-boundary).
+  Full-table counts, live hold/keepalive countdowns, and any Bird's Eye
+  client other than the pinned IXP Manager consumer are outside what is
+  proven, and protocol aliases reload only on an operator `SIGHUP` (or a
+  sidecar restart for direct aliases) when a member is added. A pilot
+  should not promise members a drop-in looking
   glass.
 - **Anything beyond the local host from the activation tooling.**
   `rs-config-render activate` and `ixp-manager-lifecycle` act on one

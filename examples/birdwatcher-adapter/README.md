@@ -183,11 +183,13 @@ returns HTTP 200 with an empty route array on all three lookups. Genuinely
 malformed prefixes return HTTP 400, unknown identities return 404, and daemon
 failures return a sanitized 502.
 
-This is deliberately partial IXP Manager support: status, live BGP inventory
+This is verified IXP Manager 7.4 Bird's Eye API compatibility with
+documented BIRD-internal divergences: status, live BGP inventory
 and detail, protocol symbols, member received routes, and member exported
 routes are available, and the boundary is the executable contract in
 [`tests/compat/ixp-manager-birdseye/contract.json`](../../tests/compat/ixp-manager-birdseye/contract.json)
-(`runtime_supported` / `unsupported`). The table below is checked against that
+(`runtime_supported` / `unsupported` / `runtime_divergences`, with
+`runtime_compatibility: true`). The table below is checked against that
 contract by `scripts/check_ixp_manager_docs.py`, so the two cannot drift
 silently:
 
@@ -210,8 +212,12 @@ silently:
 
 The table
 name validates the live routing-table identity over rustbgpd's one global
-Loc-RIB; it is not an independent table selector. The adapter does not claim
-full Bird's Eye compatibility.
+Loc-RIB; it is not an independent table selector. The claim stops at the
+documented divergences: BIRD-internal values stay divergent, the countdown
+timers and route-change counters are unsupported, and the product identifies
+as rustbgpd. Aliases are read at startup or from the alias file on an
+explicit `SIGHUP`, never automatically, so adding a member requires
+republishing the file and signaling (or restarting) the adapter.
 
 IXP Manager v7.4 queries member-filtered prefixes through
 `/routes/lc-zwild/protocol/{id}/{daemon ASN}/1101`. The daemon-owned
@@ -320,8 +326,8 @@ because the retained rustbgpd reason cannot prove ARouteServer's first cause.
 This presentation applies only to the ordinary filtered endpoint. The IXP
 Manager `{daemon ASN}:1101:*` wildcard keeps its separate scrub and mapping
 rules, so configuring ARouteServer data does not change that consumer surface.
-This remains an adapter presentation feature; no full runtime compatibility
-claim is made.
+This remains an adapter presentation feature inside the documented
+compatibility boundary; it adds no claim of its own.
 
 The IXP Manager wildcard uses its separate `{daemon ASN}:1101:<id>` namespace.
 For the pinned v7.4 route-server templates the adapter maps the ten active IDs

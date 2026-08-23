@@ -20,6 +20,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The IXP Manager Bird's Eye compatibility contract
+  (`tests/compat/ixp-manager-birdseye/contract.json`) flips
+  `runtime_compatibility` to `true`: verified IXP Manager 7.4 Bird's Eye API
+  compatibility with documented BIRD-internal divergences. Every `must_match`
+  divergence converged and was removed from the allow-list, and
+  `verify_capture.py` keeps refusing `true` while any `must_match` entry
+  exists, so a re-opened gap withdraws the claim. (LAN-1232)
 - **Operator-visible:** `Route.local_pref` in the gRPC route projection
   (`ListReceivedRoutes` / `ListBestRoutes` / `ListAdvertisedRoutes` rows and
   the explain/lookup responses) now carries the effective local preference —

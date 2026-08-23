@@ -31,8 +31,11 @@ table-search, atomic full-table, and member filtered-prefix methods against a li
 `birdwatcher-adapter` before and after a file-backed alias `SIGHUP`, then after
 a malformed reload retains the last-good resolver, all at one PID.
 
-This oracle is intentionally **not** a runtime compatibility claim. The
-example adapter now provides startup-only direct aliases and atomic Unix
+This oracle backs a bounded runtime claim: verified IXP Manager 7.4 Bird's
+Eye API compatibility with documented BIRD-internal divergences, pinned as
+`runtime_compatibility: true` in
+[`tests/compat/ixp-manager-birdseye/contract.json`](../tests/compat/ixp-manager-birdseye/contract.json). The
+example adapter provides startup-only direct aliases and atomic Unix
 `SIGHUP` replacement of a bounded file-backed alias resolver plus the current
 consumer's status, BGP inventory/detail, symbols, member received-route, and
 member export-route seam with an enforced response maximum. Exact protocol and
@@ -49,12 +52,18 @@ remain fallback 0 rather than gaining invented semantics. The full-table view
 and longest-prefix table search are served; full-table counts are not, other
 wildcard-community pairs follow Bird's Eye's accepted-route wildcard
 semantics (every member route carrying `(x, y, *)`), and the contract's
-`runtime_compatibility` stays `false` — every allow-listed oracle divergence
-carries a classification, and the gate refuses the flip while any
-`must_match` entry remains open. The adapter's table identity is a
-validated view over one global Loc-RIB, and `api.version` is rustbgpd product
-identity, not a Bird's Eye version claim; the adapter is not described as fully
-IXP Manager / Bird's Eye compatible.
+`runtime_compatibility` is `true` — every allow-listed oracle divergence
+carries a classification, the allow-list is the documented boundary
+(BIRD-internal values stay divergent, the countdown timers and route-change
+counters are unsupported, and the product identifies as rustbgpd), and the
+gate withdraws the claim if a `must_match` entry re-opens. The adapter's
+table identity is a validated view over one global Loc-RIB, and
+`api.version` is rustbgpd product identity, not a Bird's Eye version claim;
+the claim is the documented-divergence sentence above, never unqualified
+Bird's Eye compatibility. Protocol aliases are read at sidecar startup or
+from the alias file on an explicit `SIGHUP`; nothing signals the sidecar
+automatically, so adding a member means republishing the alias file and
+signaling it (or restarting it when direct aliases are used).
 
 ### IXP Manager v7.4 manual configuration oracle
 

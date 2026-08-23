@@ -708,8 +708,8 @@ if manifest.get("runtime_compatibility") is not False and open_must_match:
         f"runtime_compatibility cannot be promoted with {len(open_must_match)} "
         "open must_match divergence(s): " + "; ".join(open_must_match)
     )
-if manifest.get("runtime_compatibility") is not False:
-    fail("contract oracle must not promote a runtime compatibility claim")
+if manifest.get("runtime_compatibility") not in (True, False):
+    fail("runtime_compatibility must be an explicit true or false")
 if set(manifest.get("unsupported", [])) != UNSUPPORTED:
     fail("unsupported compatibility matrix drifted")
 if set(manifest.get("runtime_supported", [])) != RUNTIME_SUPPORTED:

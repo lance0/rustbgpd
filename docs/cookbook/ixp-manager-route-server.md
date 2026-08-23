@@ -601,14 +601,17 @@ Stated plainly, verified against the pinned contract
 ([`contract.json`](../../tests/compat/ixp-manager-birdseye/contract.json))
 and the adapter at this commit:
 
-- **`runtime_compatibility` is `false`.** The adapter serves exactly the
-  pinned IXP Manager v7.4 journeys listed in section 6 (`runtime_supported`
-  in the contract: exact protocol/export route, filtered-prefix wildcard,
+- **`runtime_compatibility` is `true`: verified IXP Manager 7.4 Bird's Eye
+  API compatibility with documented BIRD-internal divergences.** The claim
+  covers the Bird's Eye surface IXP Manager v7.4.0 consumes, driven by the
+  pinned oracle — the journeys listed in section 6 (`runtime_supported` in
+  the contract: exact protocol/export route, filtered-prefix wildcard,
   less-specific longest-prefix match, atomic full-table and all-candidate
   snapshots, file-backed alias reconfiguration, active reject-reason
-  inventory, live session transport detail). `api.version` is rustbgpd
+  inventory, live session transport detail) — and the contract's divergence
+  allow-list is the documented boundary. `api.version` is rustbgpd
   product identity, not a Bird's Eye version claim. Full-table *counts*,
-  other large-community wildcard queries, live hold/keepalive countdowns,
+  live hold/keepalive countdowns,
   and the complete IXP Manager UI-filter policy engine are unsupported;
   any Bird's Eye client other than the pinned IXP Manager consumer, and
   Alice-LG beyond the separately documented

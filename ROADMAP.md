@@ -579,8 +579,10 @@ proof on the activated cell in hosted CI.
   (status/peer/accepted/filtered/noexport views; reject reasons via
   `PolicyService.ListRejectedRoutes`, noexport via the export-explain
   surface), and its pinned IXP Manager slice includes an atomic, capped global
-  table view reconstructed from one Received/Best generation. Full-table
-  counts and a general compatibility claim remain excluded. The
+  table view reconstructed from one Received/Best generation. The pinned
+  contract records verified IXP Manager 7.4 Bird's Eye API compatibility
+  with documented BIRD-internal divergences; full-table counts remain
+  excluded. The
   [1,000-peer route-server receipt](docs/perf/route-server-1000-2026-07.md)
   now retains real-daemon 400k-route/reload/readiness evidence. The
   shadow-pilot cookbook (#1331) is shipped; remaining demand-shaped work is
@@ -654,9 +656,9 @@ The remaining IDs 2, 4, 11, 12, and 15 are defined by the upstream display but
 inactive in those templates and deliberately fall back to 0 rather than
 claiming policy semantics. Its bounded table search now returns
 the installed winner first plus every alternative for one longest matched
-prefix in a single actor turn. Remaining Bird's Eye work is full table
-snapshots/counts and other wildcard-community searches;
-no full compatibility claim is made.
+prefix in a single actor turn. Remaining Bird's Eye work is the count
+endpoints; the pinned contract records verified IXP Manager 7.4 Bird's Eye
+API compatibility with documented BIRD-internal divergences.
 Protocol detail now projects the established session's cached local source,
 negotiated keepalive cadence (including zero), exact leading-space connection
 label, and route-server/negotiated-AS4 tags from that same one-call inventory
