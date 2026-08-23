@@ -81,11 +81,12 @@ demotion per iBGP hop would clobber values set legitimately at the
 upstream EBGP edge — that's why the gate is `neighbor.remote_asn !=
 self.global.asn`.
 
-When confederations land the gate needs to key off an explicit
-`is_external_neighbor()` helper that knows about confederation sub-AS
-topology rather than the simple ASN comparison. This is tracked in
-ROADMAP under "RFC 8326 confederation gating" and is a documented
-known-limitation in `KNOWN_ISSUES.md`.
+If a future recorded decision revives confederations, the gate must
+first key off an explicit `is_external_neighbor()` helper that knows
+about confederation sub-AS topology rather than the simple ASN
+comparison. This prerequisite is tracked in `ROADMAP.md` under "RFC 8326
+confederation gating" and is a documented known limitation in
+`KNOWN_ISSUES.md`.
 
 **Opt-in by default.** RFC 8326 §4 says receivers SHOULD apply the
 demotion, not MUST. Operators who deliberately don't want the

@@ -1798,7 +1798,8 @@ an ADR "Deferred" section that points back here. Tightened, not dropped.
   `ASCII` encodings, multicast / VPN AFIs, full OpenConfig coverage; BFD / FIB /
   EVPN OpenConfig-adjacent surfaces; YANG / NETCONF / RESTCONF (deprioritized).
 
-- **RFC 8326 confederation gating.** When confederations land, the EBGP gate
+- **RFC 8326 confederation gating.** If a future recorded decision revives
+  confederations, the EBGP gate
   inside `effective_policy_chains_for_neighbor` (currently
   `remote_asn != self.global.asn`) needs an explicit `is_external_neighbor()`
   helper aware of confederation sub-AS topology. The current gate is correct for

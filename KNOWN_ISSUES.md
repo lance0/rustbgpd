@@ -240,19 +240,17 @@ byte counts.
   discards all state and replays Peer Up; a configured Loc-RIB view then gets a
   new EoR-closed dump. Alert on that counter.
 
-- **RFC 8326 receiver gating doesn't yet know about confederations.**
+- **RFC 8326 receiver gating is scoped to non-confederation topologies.**
   When `[global] honor_graceful_shutdown = true`, the implicit chain-
   tail demotion rule fires only on EBGP peers. The current EBGP gate
   is a simple `neighbor.remote_asn != self.global.asn` comparison.
   This is correct for traditional EBGP/iBGP topologies (which is all
-  rustbgpd supports today) but will be wrong once confederation
-  support lands: confederation-EBGP peers have a different sub-AS
-  but are still inside the same routing domain for `LOCAL_PREF`
-  preservation purposes. When confederations land, the gate should
-  key off an explicit `is_external_neighbor()` helper that knows
-  about the sub-AS topology. Tracked under "RFC 8326 confederation
-  gating" in `ROADMAP.md`. No-op for the current release because
-  rustbgpd doesn't support confederations yet.
+  rustbgpd supports today). RFC 5065 support is rejected under the
+  current roadmap. If a future recorded decision revives confederations,
+  support must include an explicit `is_external_neighbor()` helper that
+  understands sub-AS topology as a prerequisite. The conditional
+  requirement remains tracked under "RFC 8326 confederation gating" in
+  `ROADMAP.md`.
 
 - **RFC 8326 initiator toggle does not persist across daemon restart.**
   `rbgp gshut --peer X` flips a runtime bool on `ManagedPeer`
