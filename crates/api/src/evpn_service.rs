@@ -296,7 +296,7 @@ impl EvpnService {
 
     /// Construct a service exposing the full EVPN surface plus the
     /// optional duplicate-MAC manual-clear control hook.
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "constructor wires independent EVPN status/control hooks explicitly"
     )]
@@ -329,7 +329,7 @@ impl EvpnService {
     /// Construct a service exposing the full EVPN surface with an
     /// explicit ADR-0063 runtime model provider and optional apply
     /// hook.
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "constructor wires the full EVPN runtime surface without hiding optional hooks"
     )]

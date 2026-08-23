@@ -701,7 +701,7 @@ impl GnmiService {
     /// Broadcast lag or producer-side loss closes with `DataLoss` so the
     /// collector reconnects without `updates_only` and resyncs from a full
     /// initial snapshot.
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "presence-aware live events and heartbeat reconciliation share one select loop"
     )]
