@@ -1009,14 +1009,17 @@ therefore own the graceful stop and the verification that follows it.
    This check validates candidate config bytes only: it does **not** inspect
    `runtime_state_dir` or config-adjacent commit-confirm authority.
 
-   Before installing v0.65, use the still-running v0.64.0 daemon to run
-   `rbgp config status` and confirm or abort every pending transaction. A
-   locator-free `commit-confirm-journal.json` or a retired v2
+   Before any upgrade, use the still-running daemon to run
+   `rbgp config status` and confirm or abort every pending transaction.
+
+   When the installed release is v0.64.0 or earlier, also clear retired
+   commit-confirm authority first: a locator-free
+   `commit-confirm-journal.json` or a retired v2
    `*.commit-confirm-locator.json` must be recovered with exactly rustbgpd
    v0.64.0. Do not proceed while either artifact is present or inaccessible;
    delete one only after proving the transaction terminal and the current
-   config intended. v0.65 otherwise refuses boot and leaves the authority
-   untouched.
+   config intended. v0.65.0 and every later release otherwise refuse boot and
+   leave the authority untouched.
 3. Stop the running daemon cleanly, then confirm it is down:
 
    ```sh
@@ -1111,7 +1114,7 @@ processes is unsupported even when their configuration files differ.
 |---|---|---|
 | `gr-restart.toml` | Graceful Restart coordination marker. Written on clean shutdown, read on startup to set the R-bit in OPEN. | Yes |
 | `warm-bundle-v1/` | Optional owner-private shutdown checkpoint (`manifest.json` plus a content-addressed MRT artifact). Published only when `warm_cache_checkpoint_on_shutdown = true`; not restored on startup. | Yes |
-| `<runtime_state_dir>/commit-confirm-journal.json` | Retired locator-free v1/v2 authority; secret-bearing normalized TOML. Its presence makes v0.65 refuse boot untouched. | Until recovery with rustbgpd v0.64.0 or operator-proven terminal deletion |
+| `<runtime_state_dir>/commit-confirm-journal.json` | Retired locator-free v1/v2 authority; secret-bearing normalized TOML. Its presence makes v0.65.0 and every later release refuse boot untouched. | Until recovery with rustbgpd v0.64.0 or operator-proven terminal deletion |
 | `<runtime_state_dir>/commit-confirm-v3-prior.toml` | Fixed v3 raw accepted prior; secret-bearing normalized TOML. Published first. | Until terminal cleanup; safe residue may remain |
 | `<runtime_state_dir>/commit-confirm-v3-metadata.json` | Fixed confidential provenance, digest, and file-identity metadata; no raw TOML. Published after the raw prior. | Until terminal cleanup; safe residue may remain |
 | `<absolute lexical config path>.commit-confirm-locator.json` | Confidential paths/digests and sole v3 pending boot authority; no raw TOML. Published last and checked before candidate contents. | Until durable unlink and parent sync make the transaction terminal |
@@ -1211,13 +1214,30 @@ short version for first deployment:
 | EVPN-specific issues | [`evpn-vtep-troubleshooting.md`](evpn-vtep-troubleshooting.md) |
 | Anything not above | [`OPERATIONS.md`](OPERATIONS.md) "Debugging" section |
 
-For deeper investigation, raise the daemon log level globally via
-`[global.telemetry] log_format = "json"` and per-peer via
-`[[neighbors]] log_level = "debug"`. Restart required for the global
-setting; per-peer log_level is **live** — re-applied on SIGHUP via a
-tracing reload handle that rebuilds the filter (base level plus every
-per-peer directive), so a level edit takes effect without a restart (see
-the [reload matrix](reload-matrix.md)).
+For deeper investigation, raise the daemon log level globally with the
+`RUST_LOG` environment variable — there is no log-level key in
+`[global.telemetry]`; `log_format` selects the output format, not the
+verbosity. Under systemd, set it in the unit's `[Service]` section:
+
+```ini
+[Service]
+Environment=RUST_LOG=debug
+```
+
+`RUST_LOG` accepts the usual `tracing` filter syntax, so a targeted
+directive beats a daemon-wide `debug` — including the per-peer span form
+documented in
+[`OPERATIONS.md`](OPERATIONS.md#per-peer-log-filtering):
+
+```ini
+Environment=RUST_LOG=info,peer{peer_addr=10.0.0.1}=debug
+```
+
+Per-peer verbosity also comes from `[[neighbors]] log_level = "debug"`.
+Restart required for the global setting; per-peer log_level is **live** —
+re-applied on SIGHUP via a tracing reload handle that rebuilds the filter
+(base level plus every per-peer directive), so a level edit takes effect
+without a restart (see the [reload matrix](reload-matrix.md)).
 
 ## Related
 

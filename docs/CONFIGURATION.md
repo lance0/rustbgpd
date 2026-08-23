@@ -190,7 +190,7 @@ Required. Defines the local BGP speaker identity.
 | `asn`               | u32    | yes      | --                   | Local autonomous system number; AS 0 is rejected at startup |
 | `router_id`         | string | yes      | --                   | Non-zero BGP Identifier in IPv4 dotted-quad form; `0.0.0.0` is rejected at startup |
 | `listen_port`       | u16    | yes      | --                   | TCP port to listen on (typically 179). When `listen_addresses` is absent, the daemon uses `0.0.0.0` and `[::]`; an unavailable family is skipped while the other keeps serving, and startup fails only when neither binds. Explicit endpoints instead bind atomically |
-| `listen_addresses`  | array of IP strings | no | -- | Exact local BGP endpoints and active-open source addresses. Omission preserves the tolerant dual-wildcard listener. When present, the list must be nonempty with at most one address per family; every configured peer and dynamic range must use a listed family, and every bind is atomic. **Restart-required.** |
+| `listen_addresses`  | array of IP strings | no | -- | Exact local BGP endpoints and active-open source addresses. Omission preserves the tolerant dual-wildcard listener. When present, the list must be nonempty with at most one address per family; every listed address must be a usable unicast endpoint (unspecified, multicast, IPv4 broadcast, IPv4-mapped IPv6, and IPv6 link-local are rejected); every configured peer and dynamic range must use a listed family; and every bind is atomic. Scoped IPv6 link-local `[[neighbors]]` and `[[dynamic_neighbors]]` entries are not supported alongside an explicit list — keep those deployments on the default dual-wildcard listener. **Restart-required.** |
 | `dynamic_neighbor_limit` | u32 | no     | `100`                | Maximum number of auto-accepted dynamic peers (must be > 0) |
 | `worker_threads`    | usize  | no       | `min(cores, 8)`      | Tokio runtime worker threads. Unset caps to `min(CPU parallelism, 8)` to avoid over-provisioning the async runtime (one worker + stack reservation per core) on a high-core host for this I/O-bound daemon — reduces virtual-address reservation and scheduler footprint (RSS-neutral in benchmarks). `0` means unset. `RUSTBGPD_WORKER_THREADS` overrides. **Restart-required** (runtime built once at startup). |
 | `runtime_state_dir` | string | no       | `"/var/lib/rustbgpd"` | Directory for daemon-owned runtime state (GR restart marker, optional warm checkpoint, FIB and BLACKHOLE ownership receipts, and gRPC socket) |
@@ -3381,9 +3381,10 @@ daemon-owned real parents that are not group- or world-writable. Locator
 absence carries no authority and does not impose this storage policy on an
 ordinary launch path.
 
-Production reads and writes v3 authority only. Before v0.65, finish every v1/v2
-transaction. Retired authority makes boot refuse untouched; recover with rustbgpd v0.64.0
-or delete only after proving it terminal/intended. Retired TOML history is
+Production reads and writes v3 authority only. Finish every v1/v2 transaction
+before upgrading past v0.64.0: from v0.65.0 on, retired authority makes boot
+refuse untouched; recover with rustbgpd v0.64.0 or delete only after proving it
+terminal/intended. Retired TOML history is
 ignored/retained; v2 JSON remains listable and restorable.
 See `docs/OPERATIONS.md` (config transactions) for the boot-revert and storage
 semantics.
@@ -4204,6 +4205,8 @@ starting:
 |------|-------|
 | Local `asn` must not be AS 0 | `invalid local ASN` |
 | `router_id` must be a valid IPv4 dotted quad and must not be `0.0.0.0` | `invalid router_id` |
+| `listen_addresses`, when present, must be non-empty, carry at most one address per family, and list only usable unicast endpoints (unspecified, multicast, IPv4 broadcast, IPv4-mapped IPv6, and IPv6 link-local are rejected) | `invalid global.listen_addresses` |
+| With explicit `listen_addresses`, every `[[neighbors]]` address and `[[dynamic_neighbors]]` prefix must use a listed family, and scoped IPv6 link-local peers and ranges are not supported | `invalid global.listen_addresses` |
 | Each `address` in `[[neighbors]]` must be a valid IP address (IPv4 or IPv6) | `invalid neighbor address` |
 | IPv6 link-local `[[neighbors]]` must set `interface`; numbered neighbors must not | `invalid neighbor config` |
 | `[[neighbors]]` identity must be unique by address for numbered peers and by `(address, interface)` for IPv6 link-local peers | `duplicate neighbor address/interface` |

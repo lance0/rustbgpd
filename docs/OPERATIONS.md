@@ -337,9 +337,10 @@ paths; failure there is a warning and locator-free residue cannot re-arm the
 transaction. A later confirmed apply removes only verified residue at those
 two fixed v3 names.
 
-Production reads and writes v3 only. Retired authority makes v0.65 refuse
-untouched. Finish before upgrade, recover with rustbgpd v0.64.0, or delete only after
-proving it terminal/intended. Never delete a live v3 locator.
+Production reads and writes v3 only. Retired authority makes v0.65.0 and every
+later release refuse boot untouched. Finish before upgrading past v0.64.0,
+recover with rustbgpd v0.64.0, or delete only after proving it
+terminal/intended. Never delete a live v3 locator.
 
 The boot-revert save-aside moves the unconfirmed candidate to
 `<config>.unconfirmed` with an atomic hard-link + unlink, so it never clobbers
@@ -655,12 +656,13 @@ the stop, stops rustbgpd cleanly so the restart marker is written, checks the
 package manager's preserved-config files, and verifies the restarted daemon.
 The package hooks do not stop or restart a running service.
 
-Before installing v0.65, finish any pending confirmed transaction and clear
-retired v1/v2 authority. The candidate binary's `--check` validates the config
-only; it cannot inspect `runtime_state_dir` or config-adjacent commit-confirm
-authority. If retired authority remains or is inaccessible, recover it with
-exactly rustbgpd v0.64.0. Delete it only after proving the transaction is
-terminal and the current config is intended.
+Finish any pending confirmed transaction before any upgrade. Before upgrading
+past v0.64.0, also clear retired v1/v2 authority — v0.65.0 and every later
+release refuse to boot while it is present. The candidate binary's `--check`
+validates the config only; it cannot inspect `runtime_state_dir` or
+config-adjacent commit-confirm authority. If retired authority remains or is
+inaccessible, recover it with exactly rustbgpd v0.64.0. Delete it only after
+proving the transaction is terminal and the current config is intended.
 
 Moving a config between RFC 8212 epochs is a separate, offline step:
 `rustbgpd --migrate-config pin-legacy|prepare-secure|downgrade-v0.64 --offline
