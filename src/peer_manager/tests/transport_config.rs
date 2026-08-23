@@ -194,7 +194,7 @@ fn build_transport_config_preserves_local_role_for_otc() {
 ///    default would pass a weaker test even with the copy missing, so the
 ///    sentinels are chosen to differ from those defaults.
 #[test]
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the inventory test keeps every transport field in one exact assertion"
 )]

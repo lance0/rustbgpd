@@ -364,7 +364,7 @@ enum NonEstablishedRollbackRibOutcome {
     Internal,
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the rollback helper keeps all peer and RIB outcome assertions together"
 )]
@@ -1091,7 +1091,7 @@ async fn apply_resolved_policy_snapshot_rearms_refresh_on_compound_rollback_fail
     rib_drainer.abort();
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the regression drives both updates through one complete pending-refresh receipt"
 )]
