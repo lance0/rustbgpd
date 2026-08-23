@@ -348,6 +348,8 @@ pub enum PeerCommand {
         /// Shutdown communication reason (pre-encoded), or None.
         reason: Option<Bytes>,
     },
+    /// Tear down an established session because BFD transitioned to Down.
+    BfdDown,
     /// Shut down the task entirely.
     Shutdown,
     /// Query the current session state.
@@ -1319,6 +1321,17 @@ impl PeerHandle {
         deadline: Duration,
     ) -> Result<(), PeerCommandError> {
         self.send_simple_command_timeout(PeerCommand::Stop { reason }, "stop", deadline)
+            .await
+    }
+
+    /// Send a typed BFD-down command with a bounded deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session task has exited or the command is not
+    /// accepted before `deadline`.
+    pub async fn bfd_down_timeout(&self, deadline: Duration) -> Result<(), PeerCommandError> {
+        self.send_simple_command_timeout(PeerCommand::BfdDown, "BFD down", deadline)
             .await
     }
 

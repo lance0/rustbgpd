@@ -143,6 +143,8 @@ pub mod cease_subcode {
     pub const CONNECTION_COLLISION_RESOLUTION: u8 = 7;
     /// RFC 8538
     pub const HARD_RESET: u8 = 9;
+    /// Subcode 10: BFD Down (RFC 9384).
+    pub const BFD_DOWN: u8 = 10;
 }
 
 /// Encode a shutdown communication reason string (RFC 9003).
@@ -315,6 +317,7 @@ pub fn description(code: NotificationCode, subcode: u8) -> &'static str {
         (NotificationCode::Cease, 8) => "Out of Resources",
         (NotificationCode::Cease, 7) => "Connection Collision Resolution",
         (NotificationCode::Cease, 9) => "Hard Reset",
+        (NotificationCode::Cease, 10) => "BFD Down",
         // Unknown code
         (NotificationCode::Unknown(_), _) => "Unknown Error Code",
         // Fallback for known code with unknown subcode
@@ -345,6 +348,25 @@ mod tests {
         );
         // Raw byte survives roundtrip
         assert_eq!(NotificationCode::from_u8(42).as_u8(), 42);
+    }
+
+    #[test]
+    fn bfd_down_cease_round_trips_and_displays() {
+        let notification = crate::NotificationMessage::new(
+            NotificationCode::Cease,
+            cease_subcode::BFD_DOWN,
+            bytes::Bytes::new(),
+        );
+        let mut encoded = crate::encode_message(&crate::Message::Notification(notification))
+            .unwrap()
+            .freeze();
+        let decoded = crate::decode_message(&mut encoded, 4096).unwrap();
+        let crate::Message::Notification(decoded) = decoded else {
+            panic!("expected notification");
+        };
+        assert_eq!(decoded.code, NotificationCode::Cease);
+        assert_eq!(decoded.subcode, cease_subcode::BFD_DOWN);
+        assert_eq!(description(decoded.code, decoded.subcode), "BFD Down");
     }
 
     #[test]

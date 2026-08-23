@@ -1566,11 +1566,7 @@ impl PeerSession {
             direction,
             code: notification.code.as_u8(),
             subcode: notification.subcode,
-            description: rustbgpd_wire::notification::description(
-                notification.code,
-                notification.subcode,
-            )
-            .to_string(),
+            description: fsm::notification_description(notification),
             shutdown_reason,
             failure_cause: (direction == SessionNotificationDirection::Sent
                 && notification.code == NotificationCode::Cease

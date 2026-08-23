@@ -290,10 +290,9 @@ impl PeerManager {
                     info!(%peer, "BFD down — shut down pending inbound collision candidate");
                 }
                 if let Some(managed) = peer_key.as_ref().and_then(|key| self.peers.get(key)) {
-                    let reason = bytes::Bytes::from_static(b"BFD session down");
                     if let Err(e) = managed
                         .handle
-                        .stop_timeout(Some(reason), PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                        .bfd_down_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
                         .await
                     {
                         warn!(%peer, error = %e, "BFD down: failed to stop BGP session");

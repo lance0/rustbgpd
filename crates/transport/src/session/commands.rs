@@ -1119,6 +1119,12 @@ impl PeerSession {
                 self.drive_fsm(Event::ManualStop { reason }).await;
                 ControlFlow::Continue(())
             }
+            PeerCommand::BfdDown => {
+                self.stop_requested = true;
+                self.reconnect_timer = None;
+                self.drive_fsm(Event::BfdDown).await;
+                ControlFlow::Continue(())
+            }
             PeerCommand::Shutdown => {
                 self.stop_requested = true;
                 self.reconnect_timer = None;

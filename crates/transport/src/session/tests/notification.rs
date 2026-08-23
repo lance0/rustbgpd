@@ -261,6 +261,52 @@ async fn stop_command_sends_and_reports_exact_shutdown_communication() {
     assert_eq!(notification.data, encoded_reason);
 }
 
+#[tokio::test]
+async fn bfd_down_command_sends_direct_or_hard_reset_and_retains_inner_cause() {
+    for notification_gr in [false, true] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        while rib_rx.try_recv().is_ok() {}
+        Arc::make_mut(session.negotiated.as_mut().expect("negotiated")).peer_notification_gr =
+            notification_gr;
+        let (event_tx, mut event_rx) = mpsc::channel(2);
+        session.session_event_tx = Some(event_tx);
+
+        assert_eq!(
+            session.handle_command(PeerCommand::BfdDown).await,
+            ControlFlow::Continue(())
+        );
+
+        let notification = read_until_notification(&mut server).await;
+        assert_eq!(notification.code, NotificationCode::Cease);
+        let event = event_rx.try_recv().expect("one sent notification event");
+        if notification_gr {
+            assert_eq!(notification.subcode, cease_subcode::HARD_RESET);
+            assert_eq!(
+                notification.data,
+                Bytes::from(vec![
+                    NotificationCode::Cease.as_u8(),
+                    cease_subcode::BFD_DOWN,
+                ])
+            );
+            assert_eq!(event.description, "Hard Reset: BFD Down");
+            assert_eq!(
+                session.last_error,
+                "sent NOTIFICATION 6/9 (Hard Reset: BFD Down)"
+            );
+        } else {
+            assert_eq!(notification.subcode, cease_subcode::BFD_DOWN);
+            assert!(notification.data.is_empty());
+            assert_eq!(event.description, "BFD Down");
+            assert_eq!(session.last_error, "sent NOTIFICATION 6/10 (BFD Down)");
+        }
+        assert!(matches!(rib_rx.try_recv(), Ok(RibUpdate::PeerDown { .. })));
+        assert_eq!(session.fsm.state(), SessionState::Idle);
+    }
+}
+
 /// Mutant: removing the sent-admin guard mislabels intentional local maintenance.
 #[test]
 fn administrative_notifications_keep_directional_maintenance_semantics() {
