@@ -12,6 +12,8 @@ This crate is the wire-protocol foundation of
 use in any Rust project that needs to parse or build BGP messages — monitors,
 analyzers, test harnesses, MRT readers, etc.
 
+Requires Rust 1.95 or newer.
+
 ## Supported RFCs
 
 | RFC | Feature |

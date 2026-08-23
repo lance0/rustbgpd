@@ -6,6 +6,8 @@ in-place `SessionState`.
 
 Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
+Requires Rust 1.95 or newer.
+
 ## Design
 
 The FSM is intentionally isolated from all I/O concerns. The transport
