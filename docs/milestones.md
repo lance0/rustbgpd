@@ -909,7 +909,8 @@ to the plain capability they delivered.
   EBGP gate inside `effective_policy_chains_for_neighbor` remains a follow-up
   (the current `remote_asn != self.global.asn` gate is correct for the
   traditional EBGP/iBGP topology rustbgpd supports today and becomes load-bearing
-  only when confederations land — tracked in `KNOWN_ISSUES.md`).
+  only if a future recorded decision revives confederations — tracked in
+  `KNOWN_ISSUES.md`).
 - **RFC 7999 BLACKHOLE receiver + opt-in FIB discard** (v0.21.0) — natural
   sibling to RFC 8326. Well-known `BLACKHOLE` community (`65535:666`) signals
   "drop traffic to this prefix" for DDoS mitigation; receiver behavior is
