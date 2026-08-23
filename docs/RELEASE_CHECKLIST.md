@@ -406,7 +406,7 @@ If the release includes EVPN changes (any commit touching
 `crates/wire/src/evpn.rs`, `crates/wire/src/pmsi.rs`, EVPN paths in
 `crates/rib/src/`, the EVPN gRPC surface, `crates/evpn-linux/src/`,
 `crates/evpn/src/origination.rs`, `src/evpn_dataplane.rs`,
-`src/evpn_originator.rs`, or `src/evpn_imet.rs`), run at least one of
+`src/evpn_originator/`, or `src/evpn_imet.rs`), run at least one of
 M29 (capability sanity) or M30 (real Type 2 reflection). Run M33
 (scale) before any release that claims new performance numbers:
 
@@ -429,7 +429,7 @@ containerlab destroy -t tests/interop/m33-evpn-scale.clab.yml --cleanup
 
 If the release touches the **VTEP dataplane** (`crates/evpn-linux/`)
 or **local-MAC origination** (`crates/evpn/src/origination.rs`,
-`src/evpn_originator.rs`, `src/evpn_imet.rs`,
+`src/evpn_originator/`, `src/evpn_imet.rs`,
 `crates/wire/src/pmsi.rs`), additionally run M36 (downward, Gate 7b)
 and M37 (upward, Gate 7b+1) before tagging. If it touches the
 **ADR-0079 adoption/reap sweep** (`crates/evpn-linux/src/reconcile.rs`),

@@ -901,6 +901,20 @@ Be honest about where rustbgpd isn't the right tool:
   full SP PE.
 - **CLI-first operations** — The CLI is a thin gRPC wrapper, not a full
   interactive shell. If you want IOS-style CLI, use FRR.
-- **BIRD replacement at established IXPs** — BIRD + ARouteServer + IXP Manager
-  is a deep ecosystem. Migrating away requires tooling integration, not just
-  a better daemon.
+- **Drop-in BIRD replacement at established IXPs — bounded.** BIRD +
+  ARouteServer + IXP Manager is a deep ecosystem, and the integration work is
+  now partly done rather than absent: an IXP Manager v7.4 native target
+  (Foil render → atomic activate → lock/update lifecycle, see
+  [cookbook/ixp-manager-route-server.md](cookbook/ixp-manager-route-server.md)),
+  the `birdwatcher-adapter` looking-glass binary, ARouteServer-shaped
+  reject-reason tagging, and `rs-config-render` for member data that lives in
+  arouteserver's `general.yml`/`clients.yml`. The boundary is pinned rather
+  than claimed: `runtime_compatibility` in
+  [`tests/compat/ixp-manager-birdseye/contract.json`](../tests/compat/ixp-manager-birdseye/contract.json)
+  is still `false`, and the adapter covers only the enumerated IXP Manager
+  v7.4 journeys — the route-count endpoints, the table-less
+  `api/route/{net}` lookup, and the whole `lg/` looking-glass surface are out
+  of scope, and arbitrary Alice-LG clients are not a target. No external
+  production pilot has run. Treat it as a shadow-pilot path
+  ([cookbook/route-server-shadow-pilot.md](cookbook/route-server-shadow-pilot.md)),
+  not a swap-in.

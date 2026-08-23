@@ -173,7 +173,7 @@ Response carries one of eight outcomes:
 |---|---|
 | `PERMIT` | Cached entry, route was permitted |
 | `DENY` | Cached entry, route was denied (the load-bearing case) |
-| `NOT_SEEN` | Peer has never sent this prefix (or it has been withdrawn — distinguished from `WITHDRAWN` below) |
+| `NOT_SEEN` | Peer has never sent this prefix — no entry was ever recorded under this key. A prefix that was seen and then withdrawn returns `WITHDRAWN`, not `NOT_SEEN` |
 | `WITHDRAWN` | Was permitted, withdrawn after; entry retained for visibility |
 | `EVICTED` | Was in the cache; pushed out by the per-peer bound |
 | `STALE` | Cached entry's `policy_generation` is older than current; result no longer represents current policy |
