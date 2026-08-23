@@ -211,8 +211,8 @@ memory-safe-language row refers to.
 | Live TUI dashboard | Yes | No | No | No | No |
 | Config error diagnostics | Yes | No | No | No | No |
 | Docker image | Yes | Yes | Yes | Yes | No |
-| Fuzz testing | Yes | No | No | No | No |
-| Interop test suite | Yes | No | No | No | No |
+| Fuzz testing | Yes[^fuzz] | Partial[^fuzz] | No | Yes[^fuzz] | No |
+| Interop test suite | Yes[^interop] | Partial[^interop] | No | Yes[^interop] | Partial[^interop] |
 | FIB/kernel integration | Partial[^fib] | Yes | Yes | Yes | Yes |
 | Route server mode | Yes | Yes | Yes | Yes | Yes |
 | Dynamic neighbors | Yes | Yes | Yes | Yes | Yes[^dyn-openbgpd] |
@@ -236,6 +236,41 @@ memory-safe-language row refers to.
     BFD tracking, dynamic-neighbor BFD, hardware / offload, and BFD over
     IPv6 link-local / unnumbered peers → v1.1 (BGP unnumbered itself shipped —
     ADR-0069 / M53).
+
+[^fuzz]: Every entry in this row means in-tree fuzz targets; the scope
+    differs. rustbgpd carries libFuzzer targets in
+    `crates/*/fuzz/fuzz_targets` covering the wire decoder along with the
+    RPKI, MRT, BFD, EVPN, and policy crates, run nightly by `fuzz.yml`.
+    GoBGP `v4.8.0` carries Go-native fuzz targets covering the BGP, BMP,
+    MRT, RTR, and ZAPI decoders plus policy community matchers
+    (`pkg/packet/*`, `pkg/zebra/`, `internal/pkg/table/`), with run
+    instructions in its `CONTRIBUTING.md`; Go fuzz targets replay their
+    seed corpus under the ordinary `go test` CI run and extend only under
+    an explicit `-fuzz` invocation. FRR documents libFuzzer and AFL targets for the bgpd packet
+    parser (and for ospfd, pimd, vrrpd, zebra) in
+    [`doc/developer/fuzzing.rst`](https://github.com/FRRouting/frr/blob/frr-10.7.0/doc/developer/fuzzing.rst),
+    but keeps the target patches on a separate
+    [`fuzz` branch](https://github.com/FRRouting/frr/tree/fuzz) rather than in
+    the release tree — at `frr-10.7.0` that tree carries fuzz harnesses only
+    for `zlog` and the isisd TLV parser, not for bgpd. BIRD 3.3.1 and
+    OpenBGPD 9.1 ship no fuzz targets.
+
+[^interop]: Every entry in this row means a suite that runs the daemon
+    against a foreign BGP speaker; the breadth differs. rustbgpd runs
+    containerlab topologies in `tests/interop/` against FRR, GoBGP, BIRD,
+    ExaBGP, and OpenBGPD, gated on every pull request by `interop.yml`. GoBGP
+    `v4.8.0` ships
+    [`test/scenario_test/`](https://github.com/osrg/gobgp/tree/v4.8.0/test/scenario_test)
+    — docker-driven scenario modules with foreign-daemon drivers in
+    [`test/lib/`](https://github.com/osrg/gobgp/tree/v4.8.0/test/lib) (ExaBGP,
+    Quagga, YABGP, BIRD, bagpipe) — and its `ci.yml` runs each module as its
+    own job on every push and pull request. FRR's `tests/topotests` drives
+    bgpd against ExaBGP peers through `exabgp.env` / `exabgp.cfg` fixtures
+    in a subset of its `bgp_*` topologies; ExaBGP is the only foreign
+    speaker there. OpenBGPD's equivalent is OpenBSD's
+    `regress/usr.sbin/bgpd/integrationtests`, which drives ExaBGP through an
+    `api-exabgp` helper and is not part of the portable distribution. BIRD
+    3.3.1 ships the `birdtest` unit framework only.
 
 [^fib]: rustbgpd's FIB integration is intentionally opt-in and scoped: RFC 7999
     BLACKHOLE discard install plus explicit `[[fib_tables]]` unicast table
