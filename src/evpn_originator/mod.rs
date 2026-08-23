@@ -396,7 +396,7 @@ pub(crate) fn vni_is_drained(
 
 /// Test helper that spawns the originator with an empty duplicate-MAC quarantine.
 /// Returns `None` for RR-only deployments (empty `evpn_instances`).
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "originator spawn keeps each explicit actor dependency visible"
 )]
@@ -427,7 +427,7 @@ pub fn spawn(
     )
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "quarantine-aware spawn keeps each explicit actor dependency visible"
 )]
@@ -615,7 +615,7 @@ impl OriginatorState {
     }
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the actor select keeps shutdown, observations, RIB events, and recovery ordered"
 )]

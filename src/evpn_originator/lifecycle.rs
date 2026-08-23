@@ -10,7 +10,7 @@ use crate::evpn_originator::duplicate_mac::{
 use crate::evpn_originator::rib_polling::repoll_rib;
 use crate::evpn_originator::rib_write::drain_vni_to_withdraws;
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "classification, drain, and replay are one ordered lifecycle sequence"
 )]
