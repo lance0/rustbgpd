@@ -4003,11 +4003,16 @@ double the peak CPU at 2p/100k); a routing daemon should be lean by
 default. While disabled, `SubscribeFromEvent` and gNMI `Subscribe
 ON_CHANGE` return `FAILED_PRECONDITION`; the live `WatchEvents` /
 `List*Events` surfaces are unaffected. When enabled, the
-outbox is bounded by a hard `max_events` count cap plus a `max_bytes`
-retention trigger. SQLite reuses freed pages after DELETE and does not
-guarantee that the main database file immediately shrinks without a
-future compaction pass, so `max_bytes` is an operational target rather
-than a strict filesystem ceiling in v1.
+outbox applies scheduled, bounded retention passes against a `max_events`
+count target and a `max_bytes` size target. Each pass first removes at most
+5,000 oldest events above the count target, then removes up to ten additional
+5,000-event batches while the database remains above the size target. A busy
+or heavily oversized store can therefore remain above either target between
+passes or after one pass. Sustained event production above the maximum
+per-pass eviction throughput can make the store continue growing without a
+hard ceiling. SQLite reuses freed pages after DELETE and does not guarantee
+that the main database file immediately shrinks without a future compaction
+pass.
 
 All fields are restart-required; see
 [reload-matrix.md](reload-matrix.md#event_history-adr-0072) for
@@ -4018,7 +4023,7 @@ the per-field classification.
 enabled = false                 # default (v0.32.0); set true for durable event replay
 required = false                # if true, daemon fails to start when DB unrecoverable
 path = ""                       # relative to runtime_state_dir; "" = events.db
-max_events = 100_000            # hard count cap
+max_events = 100_000            # count retention target; bounded work per pass
 max_bytes = 256_000_000         # byte retention target (events.db + WAL)
 synchronous = "full"            # full = fsync per commit; normal trades crash window for throughput
 overflow = "drop"               # v1 only supports "drop"; "block" reserved for a future ADR

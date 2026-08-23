@@ -476,25 +476,32 @@ The RPC baselines EHM's loss generation before delivery; later loss wins replay
 or blocked-delivery races and terminates with `DATA_LOSS`. Unlike a retention
 gap, pre-commit loss requires authoritative reconciliation before resuming.
 
-### Retention — small, hard-capped, two dimensions
+### Retention — small, bounded-pass, two dimensions
 
 Defaults are **deliberately small** so that when an operator enables
 the outbox it keeps local retention pressure bounded (the outbox is
 opt-in / default-off as of v0.32.0 — see *Status*):
 
-- `max_events = 100_000` — hard count cap.
-- `max_bytes = 256_000_000` (~256 MB) — byte retention trigger
-  measured against `events.db` + WAL combined. SQLite DELETE frees
-  pages for reuse and does not guarantee the main DB file immediately
-  shrinks without a compaction/vacuum step, so this is a soft
-  filesystem-size target in v1.
+- `max_events = 100_000` — count retention target. Each pass evicts
+  at most 5,000 oldest events above this target.
+- `max_bytes = 256_000_000` (~256 MB) — byte retention target
+  measured against `events.db` + WAL combined. After the count phase,
+  each pass removes up to ten additional 5,000-event batches while the
+  store remains oversized. SQLite DELETE frees pages for reuse and does
+  not guarantee the main DB file immediately shrinks without a
+  compaction/vacuum step.
 
-Both retention triggers run. No time-based retention dimension in v1
-— operators wanting >hours of history push to their bus, not grow the
-local file. Retention runs every 60 s on EHM and
+Both retention targets run in that order during each scheduled pass. A busy
+or heavily oversized store can remain above either target between passes or
+after one bounded pass. If sustained event production exceeds the maximum
+per-pass eviction throughput, the store can continue growing without a hard
+ceiling. No time-based retention dimension in v1 — operators wanting >hours
+of history push to their bus, not grow the local file. Retention runs every
+60 s on EHM and
 **always evicts in `event_id` ascending order** (oldest first).
 SQLite's `DELETE … LIMIT` without an explicit `ORDER BY` is
-implementation-defined, so each pass uses the explicit shape:
+implementation-defined, so each individual eviction batch uses these ordered
+deletes:
 
 ```sql
 DELETE FROM event_peers
@@ -505,13 +512,13 @@ DELETE FROM events
   WHERE event_id IN (
     SELECT event_id FROM events ORDER BY event_id ASC LIMIT 5000
   );
-PRAGMA wal_checkpoint(PASSIVE);
 ```
 
 Both `DELETE`s happen inside one transaction so the join table
 never lags the main table (foreign keys are off; the cleanup is
-explicit by design). Sharded DB files are deferred to a future
-ADR if disk size becomes a real problem.
+explicit by design). After all count- and byte-target batches in the pass,
+EHM issues `PRAGMA wal_checkpoint(PASSIVE);` once. Sharded DB files are
+deferred to a future ADR if disk size becomes a real problem.
 
 ### Config (`src/config/schema.rs`)
 
@@ -520,7 +527,7 @@ ADR if disk size becomes a real problem.
 enabled = false                 # default-off (opt-in since v0.32.0); set true for durable replay
 required = false                # if true, daemon fails to start when DB unavailable
 path = ""                       # relative to runtime_state_dir; "" = events.db
-max_events = 100_000            # count retention bound
+max_events = 100_000            # count retention target; bounded work per pass
 max_bytes = 256_000_000         # byte retention target (~256 MB)
 synchronous = "full"            # full|normal — "full" = fsync per commit
 overflow = "drop"               # "drop" only in v1; "block" reserved for future
@@ -849,8 +856,9 @@ reference bridge at `examples/event-bridge/`:
 - New on-disk file (`events.db` + WAL) under `runtime_state_dir`,
   **only when an operator opts in** (`enabled = true`). As of v0.32.0
   the outbox is default-off, so the common deployment has zero on-disk
-  footprint. v1 has a hard event-count cap and a byte retention target,
-  but SQLite may reuse freed pages rather than shrink the main DB file
+  footprint. v1 has event-count and byte retention targets with bounded work
+  per pass; a busy or heavily oversized store can remain above them after a
+  pass, and SQLite may reuse freed pages rather than shrink the main DB file
   immediately.
 - New crate (`rustbgpd-event-history`) and a small dependency
   footprint addition: `rusqlite` (bundled libsqlite) plus `uuid`.

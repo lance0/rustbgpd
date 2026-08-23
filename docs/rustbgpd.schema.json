@@ -618,14 +618,14 @@
           "default": false
         },
         "max_bytes": {
-          "description": "Byte retention trigger on `events.db` + WAL combined. `SQLite`\nmay reuse freed pages rather than shrink the main DB immediately.",
+          "description": "Byte retention target on `events.db` + WAL combined. After the count\nphase, each pass removes up to ten 5,000-event batches while oversized.\n`SQLite` may reuse freed pages rather than shrink the main DB immediately.",
           "type": "integer",
           "format": "uint64",
           "default": 256000000,
           "minimum": 0
         },
         "max_events": {
-          "description": "Hard count cap on retained events.",
+          "description": "Count retention target. Each scheduled pass evicts at most 5,000\noldest events above the target before evaluating the byte target.",
           "type": "integer",
           "format": "uint64",
           "default": 100000,
