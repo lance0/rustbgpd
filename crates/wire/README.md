@@ -184,6 +184,10 @@ later registry additions land without a breaking release.
 
 Decode a single BGP message from raw bytes:
 
+For a deterministic interoperability check, run the standalone captured UPDATE
+decoder in `examples/decode_update.rs` with
+`cargo run -p rustbgpd-wire --example decode_update`.
+
 ```rust
 use bytes::Bytes;
 use rustbgpd_wire::{decode_message, Message, MAX_MESSAGE_LEN};
