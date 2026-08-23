@@ -38,6 +38,7 @@ topology:
       binds:
         - ./configs/bird-m43-tcp-ao.conf:/etc/bird/bird.conf:ro
         - ./configs/bird-m43-tcp-ao-bad.conf:/etc/bird/bird-bad.conf:ro
+        - ./configs/bird-m43-unsigned.conf:/etc/bird/bird-unsigned.conf:ro
         - ./configs/bird-m43-tcp-ao-successor.conf:/etc/bird/bird-successor.conf:ro
       exec:
         - ip addr add 10.0.43.2/24 dev eth1
