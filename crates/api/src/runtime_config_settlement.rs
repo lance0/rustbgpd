@@ -36,7 +36,10 @@ pub mod settlement_test_control {
     const RECEIPT: &str = "receipt.v1";
     const RELEASE: &str = "release.v1";
     const MIN_BUDGET_MS: u64 = 250;
-    const MAX_BUDGET_MS: u64 = 10_000;
+    // Wide enough that a test can grant its un-armed setup mutations a
+    // budget its own harness timeouts always undercut, while the armed
+    // settlement keeps a tight one (see `registration_budget`).
+    const MAX_BUDGET_MS: u64 = 60_000;
     const MIN_GRACE_MS: u64 = 100;
     const MAX_GRACE_MS: u64 = 5_000;
     const MAX_CONTROL_FILE_BYTES: usize = 1_024;
@@ -227,6 +230,19 @@ pub mod settlement_test_control {
         ControlDirectory::from_environment(true)
             .unwrap_or_else(|error| panic!("settlement_test_control setup error: {error}"))
             .map(|control| (control.settings.budget, control.settings.grace))
+    }
+
+    /// Budget for a settlement registered right now, re-read from the
+    /// control directory. Tests rewrite `settings.v1` between their setup
+    /// mutations and the armed checkpoint so that only the armed settlement
+    /// runs under the tight budget; a loaded box therefore cannot fail-stop
+    /// an un-held setup mutation. Grace is intentionally not re-read: it
+    /// stays fixed at watchdog start.
+    #[must_use]
+    pub fn registration_budget() -> Option<Duration> {
+        ControlDirectory::from_environment(false)
+            .unwrap_or_else(|error| panic!("settlement_test_control error: {error}"))
+            .map(|control| control.settings.budget)
     }
 
     pub async fn hold(checkpoint: Checkpoint) {
@@ -455,6 +471,7 @@ pub mod settlement_test_control {
             for invalid in [
                 "version=wrong\nbudget_ms=250\ngrace_ms=100\n",
                 &format!("version={CONTROL_VERSION}\nbudget_ms=249\ngrace_ms=100\n"),
+                &format!("version={CONTROL_VERSION}\nbudget_ms=60001\ngrace_ms=100\n"),
                 &format!("version={CONTROL_VERSION}\nbudget_ms=250\ngrace_ms=5001\n"),
                 &format!("version={CONTROL_VERSION}\nbudget_ms=250\nbudget_ms=251\ngrace_ms=100\n"),
             ] {
@@ -810,6 +827,14 @@ impl OperationInner {
         fence_reason_from_state(self.state.load(Ordering::Acquire))
     }
 
+    /// Budget granted at registration, derived from the immutable deadline.
+    /// Debug builds may register under a control-directory budget that
+    /// differs from the watchdog default, so display sites must not read
+    /// the registry value.
+    fn budget(&self) -> Duration {
+        self.deadline.saturating_duration_since(self.registered_at)
+    }
+
     /// Elapsed ownership time, derived on every call from the stored
     /// `registered_at` instant. Nothing stores an elapsed value at phase
     /// transitions, so a wedged owner still reads a growing elapsed on a
@@ -1034,7 +1059,7 @@ impl Collector for RuntimeConfigSettlementCollector {
             .set(operation.elapsed().as_secs_f64());
         self.budget
             .with_label_values(&labels)
-            .set(self.registry.budget.as_secs_f64());
+            .set(operation.budget().as_secs_f64());
         // The sole recovery-fenced owner cannot settle, and its fatal clock
         // exits this process. The process-lifetime counter therefore moves
         // only from 0 to 1; a fence-reason label change is a distinct series.
@@ -1114,6 +1139,18 @@ impl RuntimeConfigSettlementWatchdog {
             .expect("runtime-config settlement metric definitions must be unique");
     }
 
+    /// Budget for a settlement registered right now. Debug builds re-read
+    /// the settlement-test control directory so a test can tighten the
+    /// budget for exactly the settlement it arms; everything else uses the
+    /// fixed watchdog budget.
+    fn registration_budget(&self) -> Duration {
+        #[cfg(all(debug_assertions, not(test)))]
+        if let Some(budget) = settlement_test_control::registration_budget() {
+            return budget;
+        }
+        self.registry.budget
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "the closed ownership registration lists every retained fail-stop resource explicitly"
@@ -1134,7 +1171,7 @@ impl RuntimeConfigSettlementWatchdog {
         response_attached: Arc<AtomicBool>,
     ) -> (OwnedRuntimeConfigOperation, RuntimeConfigExecutorGuard) {
         let registered_at = Instant::now();
-        let deadline = registered_at + self.registry.budget;
+        let deadline = registered_at + self.registration_budget();
         let id = self.registry.next_id.fetch_add(1, Ordering::Relaxed);
         let operation = Arc::new(OperationInner {
             id,
@@ -1172,7 +1209,7 @@ impl RuntimeConfigSettlementWatchdog {
             kind = operation.kind.as_str(),
             phase = operation.phase().as_str(),
             elapsed_seconds = operation.elapsed().as_secs(),
-            budget_seconds = self.registry.budget.as_secs(),
+            budget_seconds = operation.budget().as_secs(),
             "runtime config settlement ownership registered"
         );
         self.registry.wake.notify_one();
@@ -1382,7 +1419,7 @@ impl OwnedRuntimeConfigOperation {
                         kind = self.inner.kind.as_str(),
                         phase = phase.as_str(),
                         elapsed_seconds = self.inner.elapsed().as_secs(),
-                        budget_seconds = self.inner.registry.budget.as_secs(),
+                        budget_seconds = self.inner.budget().as_secs(),
                         "runtime config settlement phase advanced"
                     );
                     return;
@@ -1436,7 +1473,7 @@ impl OwnedRuntimeConfigOperation {
             kind = self.inner.kind.as_str(),
             phase = self.inner.phase().as_str(),
             elapsed_seconds = self.inner.elapsed().as_secs(),
-            budget_seconds = self.inner.registry.budget.as_secs(),
+            budget_seconds = self.inner.budget().as_secs(),
             "runtime config settlement settled"
         );
         self.inner.registry.current.store(None);
@@ -1538,7 +1575,7 @@ fn propagate_fence(operation: &OperationInner) {
         kind = operation.kind.as_str(),
         phase = operation.phase().as_str(),
         elapsed_seconds = operation.elapsed().as_secs(),
-        budget_seconds = operation.registry.budget.as_secs(),
+        budget_seconds = operation.budget().as_secs(),
         response_attached = if operation.response_attached.load(Ordering::Acquire) {
             "attached"
         } else {
@@ -1607,7 +1644,7 @@ fn emit_due_warnings(operation: &OperationInner, now: Instant) {
                 kind = operation.kind.as_str(),
                 phase = operation.phase().as_str(),
                 elapsed_seconds = elapsed.as_secs(),
-                budget_seconds = operation.registry.budget.as_secs(),
+                budget_seconds = operation.budget().as_secs(),
                 response_attached = if operation.response_attached.load(Ordering::Acquire) {
                     "attached"
                 } else {
