@@ -15,6 +15,15 @@ SPEC.loader.exec_module(CHECK)
 
 
 class DashboardMetricLinkTests(unittest.TestCase):
+    def remove_panel(self, panels, panel_id):
+        for index, panel in enumerate(panels):
+            if panel.get("id") == panel_id:
+                panels.pop(index)
+                return True
+            if self.remove_panel(panel.get("panels", []), panel_id):
+                return True
+        return False
+
     def rust(self, kind="IntGauge", name="bgp_ready", registered=True):
         registration = (
             "registry.register(Box::new(ready.clone())).unwrap();" if registered else ""
@@ -136,6 +145,18 @@ let families = self.allocated.collect();'''
             else:
                 changes["gridPos"] = {"x": index % 24}
             panel.update(changes)
+        blackhole = next(
+            panel
+            for panel in dashboard["panels"]
+            if panel["title"] == "BLACKHOLE discard activity"
+        )
+        blackhole_row = next(
+            panel
+            for panel in dashboard["panels"]
+            if panel["title"] == "Kernel discard routes"
+        )
+        dashboard["panels"].remove(blackhole)
+        blackhole_row["panels"].append(blackhole)
         with tempfile.TemporaryDirectory() as directory:
             copy = Path(directory) / "dashboard.json"
             copy.write_text(json.dumps(dashboard))
@@ -152,8 +173,11 @@ let families = self.allocated.collect();'''
                     with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
                         CHECK.main()
                     orr["targets"][0][field] = saved
-                blackhole = next(panel for panel in dashboard["panels"]
-                                 if panel["title"] == "BLACKHOLE discard activity")
+                blackhole = next(
+                    panel
+                    for panel in CHECK.all_panels(dashboard["panels"])
+                    if panel["title"] == "BLACKHOLE discard activity"
+                )
                 mutations = ((blackhole["targets"][0], "expr", "broken"),
                              (blackhole["targets"][0], "legendFormat", "broken"),
                              (blackhole, "gridPos", {"x": 0}))
@@ -164,7 +188,7 @@ let families = self.allocated.collect();'''
                     with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
                         CHECK.main()
                     subject[field] = saved
-                dashboard["panels"].remove(blackhole)
+                self.assertTrue(self.remove_panel(dashboard["panels"], blackhole["id"]))
                 copy.write_text(json.dumps(dashboard))
                 stderr = io.StringIO()
                 targets = CHECK.TARGETS
