@@ -2297,6 +2297,22 @@ statements. The same named definitions and chain attachments can also be
 managed at runtime through the gRPC `PolicyService`; successful mutations are
 persisted back to TOML.
 
+#### Choosing TOML or `.rpol`
+
+Choose TOML named definitions for an ordered, first-match
+list where each statement is a flat conjunction of its populated match fields
+(with field-local behavior such as OR within `match_community`), followed by a
+`permit` or `deny` decision and optional route modifications. See
+[Policy entries](#policy-entries) for the complete statement surface.
+
+Choose [`.rpol`](rpol-language.md) for arbitrary Boolean expressions (`&&`,
+`||`, `!`), language-declared typed prefix, community, and ASN sets, pure
+functions, external dataset probes, or tests embedded beside the policy. TOML
+and `.rpol` compile to the same typed policy IR, use the same evaluator, share
+one named-policy namespace, and may coexist in a chain. See
+[`.rpol` policy files](#rpol-policy-files-rpol_files-adr-0096) for loading and
+mixed-chain rules.
+
 ```toml
 [policy.definitions.reject-bogons]
 default_action = "deny"
