@@ -400,6 +400,9 @@ impl RibManager {
     /// Synthesized advertised-route count for a grouped peer; `None`
     /// for ungrouped peers.
     pub(in crate::manager) fn grouped_advertised_count(&self, peer: IpAddr) -> Option<usize> {
+        #[cfg(test)]
+        self.grouped_advertised_count_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         if self.outbound_prefix_limits.contains_key(&peer) {
             // A limited member advertises its admitted projection, and that

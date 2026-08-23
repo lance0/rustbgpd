@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::update::{
-    RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryPredicate, RouteQueryScope,
-    route_query_key,
+    OrderedRouteFamilyFilter, RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryPredicate,
+    RouteQueryScope, route_query_key,
 };
 
 struct OrderedFamilyProbe {
@@ -1036,6 +1036,69 @@ fn grouped_pages_match_snapshot_with_split_horizon_and_exact_rejection() {
         }
         assert_eq!(actual, expected, "grouped page size {page_size}");
     }
+}
+
+#[test]
+fn grouped_family_continuation_reuses_total_without_count_walk() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let sibling = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = Ipv4Addr::new(192, 0, 2, 1);
+    let _target_rx = peer_up_direct(&mut manager, target);
+    let _sibling_rx = peer_up_direct(&mut manager, sibling);
+    let routes: Vec<_> = (1..=4)
+        .map(|octet| {
+            make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, octet), 32),
+                source,
+            )
+        })
+        .collect();
+    receive_direct(&mut manager, source.into(), routes.clone(), vec![]);
+    manager
+        .peer_unexportable
+        .entry(target)
+        .or_default()
+        .insert(ExactExportKey::Unicast(routes[1].prefix, routes[1].path_id));
+
+    let scope = RouteQueryScope::Advertised { peer: target };
+    manager
+        .grouped_advertised_count_calls
+        .store(0, Ordering::Relaxed);
+    let first = direct_page(&mut manager, scope, None, 1);
+    assert_eq!((first.total, first.has_more), (3, true));
+    assert_eq!(
+        manager
+            .grouped_advertised_count_calls
+            .load(Ordering::Relaxed),
+        1
+    );
+    manager
+        .grouped_advertised_count_calls
+        .store(0, Ordering::Relaxed);
+
+    let filter: RouteQueryFilter = Box::new(OrderedRouteFamilyFilter(Afi::Ipv4, Some(first.total)));
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_query_routes_page_versioned(
+        scope,
+        Some(&filter),
+        first.routes.last().map(route_query_key),
+        Some(first.version),
+        1,
+        reply,
+    );
+    let page = response
+        .try_recv()
+        .expect("route page handler replies synchronously")
+        .unwrap();
+    assert_eq!(page.total, first.total);
+    assert_eq!(
+        manager
+            .grouped_advertised_count_calls
+            .load(Ordering::Relaxed),
+        0
+    );
 }
 
 #[test]

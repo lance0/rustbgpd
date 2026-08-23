@@ -613,13 +613,24 @@ impl RibManager {
                     // its view is group table − own-sourced − exact-export
                     // rejections. Both branches resume through their table's
                     // compact prefix index without materializing the scope.
-                    let grouped_total = self.grouped_advertised_count(peer);
                     match self.grouped_advertised_routes_ordered_iter(peer, after) {
-                        Some(routes) => page_ordered_routes(
-                            routes.take_while(move |route| matches_ordered_family(route, family)),
-                            total(grouped_total.unwrap_or_default()),
-                            page_size,
-                        ),
+                        Some(routes) => {
+                            let route_total = ordered_family.map_or_else(
+                                || {
+                                    u64::try_from(
+                                        self.grouped_advertised_count(peer).unwrap_or_default(),
+                                    )
+                                    .unwrap_or(u64::MAX)
+                                },
+                                |(_, total)| total,
+                            );
+                            page_ordered_routes(
+                                routes
+                                    .take_while(move |route| matches_ordered_family(route, family)),
+                                route_total,
+                                page_size,
+                            )
+                        }
                         None => {
                             self.adj_ribs_out
                                 .get(&peer)
