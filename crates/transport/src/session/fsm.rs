@@ -5,6 +5,20 @@ use super::{
     cease_subcode, debug, info, mpsc, warn,
 };
 
+pub(super) fn notification_description(
+    notification: &rustbgpd_wire::NotificationMessage,
+) -> String {
+    if notification.code == NotificationCode::Cease
+        && notification.subcode == cease_subcode::HARD_RESET
+        && notification
+            .data
+            .starts_with(&[NotificationCode::Cease.as_u8(), cease_subcode::BFD_DOWN])
+    {
+        return "Hard Reset: BFD Down".to_string();
+    }
+    rustbgpd_wire::notification::description(notification.code, notification.subcode).to_string()
+}
+
 impl PeerSession {
     /// Retain a bounded, secret-free reset cause for snapshots, without
     /// replacing an actionable error during intentional local maintenance.
@@ -30,7 +44,7 @@ impl PeerSession {
             "{direction} NOTIFICATION {}/{} ({})",
             notification.code.as_u8(),
             notification.subcode,
-            rustbgpd_wire::notification::description(notification.code, notification.subcode)
+            notification_description(notification)
         );
     }
 
@@ -145,7 +159,30 @@ impl PeerSession {
                 event = event.name(),
                 "FSM event"
             );
-            let actions = self.fsm.handle_event(event.clone());
+            let bfd_notification_gr = matches!(event, Event::BfdDown)
+                && self
+                    .negotiated
+                    .as_deref()
+                    .or(self.fsm.negotiated())
+                    .is_some_and(|negotiated| negotiated.peer_notification_gr);
+            let mut actions = self.fsm.handle_event(event.clone());
+            if bfd_notification_gr {
+                for action in &mut actions {
+                    if let Action::SendNotification(notification) = action
+                        && notification.code == NotificationCode::Cease
+                        && notification.subcode == cease_subcode::BFD_DOWN
+                    {
+                        *notification = rustbgpd_wire::NotificationMessage::new(
+                            NotificationCode::Cease,
+                            cease_subcode::HARD_RESET,
+                            Bytes::from(vec![
+                                NotificationCode::Cease.as_u8(),
+                                cease_subcode::BFD_DOWN,
+                            ]),
+                        );
+                    }
+                }
+            }
             if notification_teardown_event(&event, &actions) {
                 self.notification_teardown = true;
             }

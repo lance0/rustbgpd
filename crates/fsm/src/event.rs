@@ -16,6 +16,8 @@ pub enum Event {
         /// Optional shutdown reason for RFC 8203 Cease NOTIFICATION.
         reason: Option<Bytes>,
     },
+    /// A genuine BFD Down transition requests session teardown (RFC 9384).
+    BfdDown,
 
     // ── Timer ─────────────────────────────────────────
     /// The connect-retry timer has expired.
@@ -62,6 +64,7 @@ impl Event {
         match self {
             Self::ManualStart => "ManualStart",
             Self::ManualStop { .. } => "ManualStop",
+            Self::BfdDown => "BfdDown",
             Self::ConnectRetryTimerExpires => "ConnectRetryTimerExpires",
             Self::HoldTimerExpires => "HoldTimerExpires",
             Self::KeepaliveTimerExpires => "KeepaliveTimerExpires",

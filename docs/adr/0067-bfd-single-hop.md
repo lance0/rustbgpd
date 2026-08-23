@@ -139,9 +139,12 @@ actor consumes) and consumes `BfdStateChange` events; the actor never learns BGP
 internals. This keeps the actor as the sole session owner while letting BGP
 drive which sessions should exist.
 
-- **Non-strict:** BFD **down** → `PeerHandle::stop` (FSM `ManualStop` →
-  session down), i.e. teardown **before** the hold timer expires. BFD **up**
-  clears the BFD hold and the existing reconnect path proceeds.
+- **Non-strict:** BFD **down** → `PeerCommand::BfdDown` → typed FSM
+  `Event::BfdDown` → Cease/BFD Down (RFC 9384 subcode 10) and session down,
+  i.e. teardown **before** the hold timer expires. When Notification GR was
+  negotiated, the transport sends the RFC 8538 Hard Reset envelope carrying
+  the original 6/10 notification. BFD **up** clears the BFD hold and the
+  existing reconnect path proceeds.
 - **Strict:** `add_peer` currently spawns **and immediately starts** the
   `PeerHandle`. Strict mode requires splitting that into **create managed peer →
   register BFD session → start BGP only after BFD reaches Up**. The

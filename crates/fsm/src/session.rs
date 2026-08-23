@@ -147,7 +147,9 @@ impl Session {
     )]
     fn handle_connect(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::ManualStop { .. } | Event::DecodeError(_) => self.enter_idle_silent(),
+            Event::ManualStop { .. } | Event::BfdDown | Event::DecodeError(_) => {
+                self.enter_idle_silent()
+            }
 
             Event::ConnectRetryTimerExpires => {
                 let mut actions = vec![
@@ -197,7 +199,9 @@ impl Session {
     )]
     fn handle_active(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::ManualStop { .. } | Event::DecodeError(_) => self.enter_idle_silent(),
+            Event::ManualStop { .. } | Event::BfdDown | Event::DecodeError(_) => {
+                self.enter_idle_silent()
+            }
 
             Event::ConnectRetryTimerExpires => {
                 let mut actions = vec![
@@ -247,6 +251,7 @@ impl Session {
                 cease_subcode::ADMINISTRATIVE_SHUTDOWN,
                 reason.unwrap_or_default(),
             ),
+            Event::BfdDown => self.enter_idle_bfd_down(),
 
             Event::HoldTimerExpires => self.enter_idle_with_notification(
                 NotificationCode::HoldTimerExpired,
@@ -343,6 +348,7 @@ impl Session {
                 cease_subcode::ADMINISTRATIVE_SHUTDOWN,
                 reason.unwrap_or_default(),
             ),
+            Event::BfdDown => self.enter_idle_bfd_down(),
 
             Event::HoldTimerExpires => self.enter_idle_with_notification(
                 NotificationCode::HoldTimerExpired,
@@ -414,6 +420,17 @@ impl Session {
         }
     }
 
+    fn enter_idle_bfd_down(&mut self) -> Vec<Action> {
+        let mut actions = self.enter_idle_with_notification(
+            NotificationCode::Cease,
+            cease_subcode::BFD_DOWN,
+            Bytes::new(),
+        );
+        // Cache the exact on-wire NOTIFICATION before BMP Peer Down is emitted.
+        actions.insert(1, Action::SessionDown);
+        actions
+    }
+
     fn handle_established(&mut self, event: Event) -> Vec<Action> {
         match event {
             Event::ManualStop { reason } => {
@@ -425,6 +442,7 @@ impl Session {
                 ));
                 actions
             }
+            Event::BfdDown => self.enter_idle_bfd_down(),
 
             Event::HoldTimerExpires => {
                 let mut actions = vec![Action::SessionDown];
@@ -1233,6 +1251,52 @@ mod tests {
             a,
             Action::SendNotification(n) if n.code == NotificationCode::Cease
         )));
+    }
+
+    #[test]
+    fn established_bfd_down_sends_typed_cease_and_session_down() {
+        let mut session = reach_established();
+        let actions = session.handle_event(Event::BfdDown);
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, Action::SessionDown))
+        );
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::SendNotification(notification)
+                if notification.code == NotificationCode::Cease
+                    && notification.subcode == cease_subcode::BFD_DOWN
+                    && notification.data.is_empty()
+        )));
+    }
+
+    #[test]
+    fn handshake_bfd_down_sends_typed_cease_and_session_down() {
+        let mut open_sent = Session::new(test_config());
+        open_sent.handle_event(Event::ManualStart);
+        open_sent.handle_event(Event::TcpConnectionConfirmed);
+        assert_eq!(open_sent.state(), SessionState::OpenSent);
+
+        let mut open_confirm = Session::new(test_config());
+        open_confirm.handle_event(Event::ManualStart);
+        open_confirm.handle_event(Event::TcpConnectionConfirmed);
+        open_confirm.handle_event(Event::OpenReceived(peer_open()));
+        assert_eq!(open_confirm.state(), SessionState::OpenConfirm);
+
+        for session in [&mut open_sent, &mut open_confirm] {
+            let actions = session.handle_event(Event::BfdDown);
+            assert!(has_action(&actions, |action| matches!(
+                action,
+                Action::SessionDown
+            )));
+            assert!(has_action(&actions, |action| matches!(
+                action,
+                Action::SendNotification(notification)
+                    if notification.code == NotificationCode::Cease
+                        && notification.subcode == cease_subcode::BFD_DOWN
+            )));
+        }
     }
 
     #[test]

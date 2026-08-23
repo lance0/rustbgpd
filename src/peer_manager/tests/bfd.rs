@@ -9,6 +9,7 @@ use super::*;
 #[derive(Default)]
 struct BfdCouplingCounters {
     stop: AtomicU32,
+    bfd_down: AtomicU32,
     start: AtomicU32,
 }
 
@@ -22,6 +23,10 @@ fn fake_bfd_peer_handle(counters: Arc<BfdCouplingCounters>) -> PeerHandle {
             match cmd {
                 PeerCommand::Stop { .. } => {
                     counters.stop.fetch_add(1, Ordering::SeqCst);
+                }
+                PeerCommand::BfdDown => {
+                    counters.stop.fetch_add(1, Ordering::SeqCst);
+                    counters.bfd_down.fetch_add(1, Ordering::SeqCst);
                 }
                 PeerCommand::Start => {
                     counters.start.fetch_add(1, Ordering::SeqCst);
@@ -107,6 +112,7 @@ async fn bfd_down_then_up_tears_down_and_restores_enabled_peer() {
 
     mgr.handle_bfd_state_change(down(peer)).await;
     wait_counter(&counters.stop, 1).await; // BFD down must stop BGP
+    assert_eq!(counters.bfd_down.load(Ordering::SeqCst), 1);
     // A duplicate Down while already held must not re-stop.
     mgr.handle_bfd_state_change(down(peer)).await;
     assert_eq!(counters.stop.load(Ordering::SeqCst), 1);
@@ -378,6 +384,23 @@ async fn ack_is_release_only_never_tears_down() {
     // A real Down transition still does.
     mgr.handle_bfd_state_change(down(peer)).await;
     wait_counter(&counters.stop, 1).await;
+}
+
+#[tokio::test]
+async fn genuine_init_transition_does_not_tear_bgp_down() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters.clone()));
+    mgr.handle_bfd_state_change(crate::bfd_runtime::BfdStateChange {
+        peer,
+        state: rustbgpd_bfd::SessionState::Init,
+        diagnostic: rustbgpd_bfd::Diagnostic::None,
+        remote_admin_down: false,
+        resync: false,
+    })
+    .await;
+    assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
+    assert_eq!(counters.bfd_down.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

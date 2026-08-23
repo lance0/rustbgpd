@@ -161,7 +161,11 @@ pub enum Action {
     /// Boxed: `NegotiatedSession` is by far the largest `Action` variant, so
     /// inlining it would bloat every `Action` (clippy `large_enum_variant`).
     SessionEstablished(Box<NegotiatedSession>),
-    /// The session left the Established state.
+    /// Run authoritative session-down cleanup.
+    ///
+    /// Normally emitted when leaving `Established`. A BFD-triggered teardown
+    /// in `OpenSent` or `OpenConfirm` also emits it after queuing the typed
+    /// Cease notification so transport-side notification state is cleared.
     SessionDown,
     /// A timer-expired event arrived for a timer that should not be
     /// running in the current state. The FSM ignores it instead of

@@ -69,6 +69,39 @@ async fn session_down_emits_bmp_peer_down() {
 }
 
 #[tokio::test]
+async fn bfd_down_hard_reset_bmp_reason_carries_the_full_notification_pdu() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    Arc::make_mut(session.negotiated.as_mut().expect("negotiated")).peer_notification_gr = true;
+    while bmp_rx.try_recv().is_ok() {}
+
+    assert_eq!(
+        session.handle_command(PeerCommand::BfdDown).await,
+        ControlFlow::Continue(())
+    );
+
+    match bmp_rx.recv().await.expect("BMP Peer Down") {
+        BmpEvent::PeerDown {
+            reason: PeerDownReason::LocalNotification(pdu),
+            ..
+        } => {
+            assert_eq!(
+                &pdu[19..],
+                &[
+                    NotificationCode::Cease.as_u8(),
+                    cease_subcode::HARD_RESET,
+                    NotificationCode::Cease.as_u8(),
+                    cease_subcode::BFD_DOWN,
+                ]
+            );
+        }
+        other => panic!("expected local-notification BMP Peer Down, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn inbound_update_emits_bmp_route_monitoring() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
     let negotiated = negotiated_session(65002, false);

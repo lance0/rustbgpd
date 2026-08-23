@@ -320,8 +320,11 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 - `handle_event` never returns `Result` — every (State, Event) pair
   produces a well-defined output. Invalid events in any state produce a
   NOTIFICATION (FSM Error) and transition to Idle.
-- `SessionDown` action only emitted when leaving Established state.
-  Failed handshakes are not surfaced as session-down events.
+- `SessionDown` is normally emitted when leaving Established state. A BFD
+  Down event in OpenSent or OpenConfirm also emits it after the typed Cease
+  notification so the shared transport teardown path clears cached
+  notification state; other failed handshakes are not surfaced as
+  session-down events.
 - `StateChanged` action emitted on every state transition for telemetry.
 
 ### §8.2 — Timers (transport implementation)

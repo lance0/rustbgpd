@@ -25,6 +25,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Genuine BFD Down transitions now tear established BGP sessions down with
+  RFC 9384 Cease/BFD Down; peers that negotiated Notification GR receive an
+  RFC 8538 Hard Reset carrying the original BFD Down reason. (LAN-1261)
+
 - Runtime behavior is unchanged; the supervised-shutdown proof now injects a
   BGP accept-forwarder panic after inbound dispatch and verifies bounded
   teardown of both the configured peer and its half-admitted candidate before
