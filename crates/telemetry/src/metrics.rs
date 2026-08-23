@@ -7059,8 +7059,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 53 peer-labeled series; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 53);
+        // 54 peer-labeled series; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 54);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -7070,7 +7070,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 53);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 54);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
