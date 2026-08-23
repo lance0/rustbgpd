@@ -1,5 +1,7 @@
 //! Real-daemon proof for typed config-publication failures.
 
+mod support;
+
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -11,6 +13,8 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+
+use support::{RetainOnPanic, rbgp_binary};
 
 const FIRST_NEIGHBOR: &str = "192.0.2.1";
 const SECOND_NEIGHBOR: &str = "192.0.2.2";
@@ -91,14 +95,7 @@ impl Drop for Daemon {
 }
 
 fn rbgp_command(grpc_addr: &str, args: &[&str]) -> Command {
-    let mut command = if let Ok(path) = std::env::var("CARGO_BIN_EXE_rbgp") {
-        Command::new(path)
-    } else {
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-        let mut command = Command::new(cargo);
-        command.args(["run", "--quiet", "-p", "rustbgpctl", "--bin", "rbgp", "--"]);
-        command
-    };
+    let mut command = Command::new(rbgp_binary());
     command.arg("--addr").arg(grpc_addr).args(args);
     command
 }
@@ -224,12 +221,12 @@ fn wait_until_ready(addr: SocketAddr, daemon: &mut Daemon, expected: u16) {
     );
 }
 
-fn wait_output(mut child: Child, timeout: Duration) -> Output {
+fn wait_output(mut child: Child, timeout: Duration, context: &str) -> Output {
     let deadline = Instant::now() + timeout;
     while child.try_wait().expect("query rbgp status").is_none() {
         if Instant::now() >= deadline {
             let _ = child.kill();
-            panic!("rbgp did not finish before fail-stop deadline");
+            panic!("rbgp ({context}) did not finish within {timeout:?}");
         }
         thread::sleep(Duration::from_millis(20));
     }
@@ -265,7 +262,7 @@ principal = "rustbgpd://operator/persistence-failstop-test"
 }
 
 fn exercise(fault: &str, published: bool) {
-    let dir = tempfile::tempdir().expect("create test dir");
+    let dir = RetainOnPanic::new(tempfile::tempdir().expect("create test dir"));
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let runtime_dir = dir.path().join("runtime");
     std::fs::create_dir(&runtime_dir).unwrap();
@@ -314,7 +311,11 @@ fn exercise(fault: &str, published: bool) {
     .spawn()
     .expect("start rejected mutation");
 
-    let second = wait_output(second, Duration::from_secs(2));
+    let second = wait_output(
+        second,
+        Duration::from_secs(2),
+        "grace-window rejected mutation",
+    );
     assert!(
         !second.status.success(),
         "second mutation unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
@@ -333,7 +334,15 @@ fn exercise(fault: &str, published: bool) {
         recovery_fenced_at.elapsed() <= FAILSTOP_GRACE_WITH_JITTER,
         "exit 70 exceeded the five-second grace plus test jitter"
     );
-    assert!(!wait_output(first, Duration::from_secs(2)).status.success());
+    assert!(
+        !wait_output(
+            first,
+            Duration::from_secs(10),
+            "settling mutation after fail-stop"
+        )
+        .status
+        .success()
+    );
 
     let bytes = std::fs::read(&config_path).expect("read persisted config");
     assert!(!bytes.is_empty(), "published config must never be empty");
@@ -367,7 +376,7 @@ fn post_rename_failure_fences_and_restart_loads_complete_candidate() {
 }
 
 fn exercise_sighup_ack_loss(fault: &str) {
-    let dir = tempfile::tempdir().expect("create test dir");
+    let dir = RetainOnPanic::new(tempfile::tempdir().expect("create test dir"));
     let runtime_dir = dir.path().join("runtime");
     std::fs::create_dir(&runtime_dir).unwrap();
     let config_path = dir.path().join("rustbgpd.toml");

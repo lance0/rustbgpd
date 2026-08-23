@@ -1,5 +1,7 @@
 //! Real-daemon matrix for deterministic settlement-budget fail-stop coverage.
 
+mod support;
+
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -7,7 +9,7 @@ use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::{OnceLock, mpsc};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,6 +21,8 @@ use rustbgpd_api::proto::{
 };
 use tonic::{Code, Request, Status, transport::Endpoint};
 
+use support::{RetainOnPanic, rbgp_binary};
+
 const CONTROL_ENV: &str = "RUSTBGPD_TEST_SETTLEMENT_CONTROL_DIR";
 const CONTROL_VERSION: &str = "settlement-control-v1";
 const SETTINGS: &str = "settings.v1";
@@ -27,6 +31,12 @@ const CLAIMED: &str = "claimed.v1";
 const RECEIPT: &str = "receipt.v1";
 const RELEASE: &str = "release.v1";
 const BUDGET: Duration = Duration::from_secs(2);
+// Budget in force for every settlement registered before a row arms its
+// checkpoint. Strictly larger than every harness command timeout, so the
+// watchdog can never fail-stop an un-held setup mutation on a starved box:
+// a stalled setup hits the harness's own bound (with the directory
+// retained) instead of killing the daemon mid-RPC.
+const SETUP_BUDGET: Duration = Duration::from_secs(30);
 const GRACE: Duration = Duration::from_millis(500);
 const EXIT_JITTER: Duration = Duration::from_secs(2);
 const MATRIX_LIMIT: Duration = Duration::from_secs(120);
@@ -262,20 +272,25 @@ impl Control {
         let dir = root.join("settlement-control");
         std::fs::create_dir(&dir).expect("create settlement control directory");
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let control = Self {
+            dir,
+            nonce: format!("{ordinal:032x}"),
+        };
+        control.write_settings(SETUP_BUDGET);
+        control
+    }
+
+    fn write_settings(&self, budget: Duration) {
         atomic_write(
-            &dir,
+            &self.dir,
             SETTINGS,
             format!(
                 "version={CONTROL_VERSION}\nbudget_ms={}\ngrace_ms={}\n",
-                BUDGET.as_millis(),
+                budget.as_millis(),
                 GRACE.as_millis()
             )
             .as_bytes(),
         );
-        Self {
-            dir,
-            nonce: format!("{ordinal:032x}"),
-        }
     }
 
     fn command(&self, checkpoint: &str) -> String {
@@ -289,13 +304,17 @@ impl Control {
         for forbidden in [ARM, CLAIMED, RECEIPT, RELEASE] {
             assert!(!self.dir.join(forbidden).exists());
         }
+        // The daemon re-reads the budget at every settlement registration,
+        // so tightening here scopes the 2 s budget to exactly the armed
+        // settlement; everything registered earlier ran under SETUP_BUDGET.
+        self.write_settings(BUDGET);
         atomic_write(&self.dir, ARM, self.command(checkpoint).as_bytes());
     }
 
     fn wait_for_receipt(&self, checkpoint: &str, pid: u32, daemon: &mut Daemon) {
         let expected_command = self.command(checkpoint);
         let expected_receipt = format!("{expected_command}pid={pid}\n");
-        let deadline = Instant::now() + Duration::from_secs(4);
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Ok(receipt) = std::fs::read_to_string(self.dir.join(RECEIPT)) {
                 assert_eq!(receipt, expected_receipt);
@@ -354,7 +373,7 @@ fn atomic_write(directory: &Path, name: &str, bytes: &[u8]) {
 }
 
 struct Lab {
-    _root: tempfile::TempDir,
+    root: RetainOnPanic,
     config: PathBuf,
     grpc: String,
     grpc_tcp: SocketAddr,
@@ -384,7 +403,7 @@ impl Lab {
         Self {
             grpc: format!("unix://{}", runtime.join("grpc.sock").display()),
             grpc_tcp,
-            _root: root,
+            root: RetainOnPanic::new(root),
             config,
             metrics,
             control,
@@ -395,7 +414,7 @@ impl Lab {
     fn spawn(&self, name: &str, controlled: bool) -> Daemon {
         Daemon::spawn(
             &self.config,
-            self._root.path().join(format!("{name}.log")),
+            self.root.path().join(format!("{name}.log")),
             controlled.then_some(self.control.dir.as_path()),
         )
     }
@@ -422,7 +441,7 @@ impl Lab {
     }
 
     fn candidate(&self, name: &str) -> PathBuf {
-        let path = self._root.path().join(format!("{name}.toml"));
+        let path = self.root.path().join(format!("{name}.toml"));
         std::fs::write(
             &path,
             format!(
@@ -471,27 +490,6 @@ fn rbgp_command(grpc: &str, args: &[&str]) -> Command {
     let mut command = Command::new(rbgp_binary());
     command.arg("--addr").arg(grpc).args(args);
     command
-}
-
-fn rbgp_binary() -> &'static Path {
-    static RBGP: OnceLock<PathBuf> = OnceLock::new();
-    RBGP.get_or_init(|| {
-        let path = std::env::var_os("CARGO_BIN_EXE_rbgp").map_or_else(
-            || {
-                Path::new(env!("CARGO_BIN_EXE_rustbgpd"))
-                    .parent()
-                    .expect("rustbgpd binary has a profile directory")
-                    .join("rbgp")
-            },
-            PathBuf::from,
-        );
-        assert!(
-            path.is_file(),
-            "build rbgp before this matrix; missing {}",
-            path.display()
-        );
-        path
-    })
 }
 
 fn unused_loopback_addr() -> SocketAddr {
@@ -830,7 +828,7 @@ fn apply_confirmed(lab: &Lab, candidate: &Path) {
         "--confirm-id",
         "matrix-auto-revert",
         "--confirm-timeout",
-        "2",
+        "4",
     ]);
     assert!(
         output.status.success(),
@@ -878,7 +876,7 @@ fn wait_metrics_idle(addr: SocketAddr, daemon: &mut Daemon) {
 }
 
 fn exercise_peer_group(lab: &Lab, daemon: &mut Daemon) -> RowResult {
-    let definition = lab._root.path().join("peer-group.json");
+    let definition = lab.root.path().join("peer-group.json");
     std::fs::write(
         &definition,
         r#"{"families":["ipv4_unicast"],"route_server_client":true}"#,
@@ -907,7 +905,7 @@ fn exercise_peer_group(lab: &Lab, daemon: &mut Daemon) -> RowResult {
 }
 
 fn exercise_policy(lab: &Lab, daemon: &mut Daemon) -> RowResult {
-    let definition = lab._root.path().join("policy.json");
+    let definition = lab.root.path().join("policy.json");
     std::fs::write(
         &definition,
         r#"{"default_action":"permit","statements":[]}"#,
@@ -984,7 +982,7 @@ fn finish_row(lab: &Lab, row: MatrixRow, daemon: &mut Daemon, result: RowResult)
             wait_ready_and_idle(lab.metrics, &mut restarted);
             lab.assert_disk("auto-candidate", false);
             assert!(
-                std::fs::read_to_string(lab._root.path().join("rustbgpd.toml.unconfirmed"))
+                std::fs::read_to_string(lab.root.path().join("rustbgpd.toml.unconfirmed"))
                     .unwrap()
                     .contains("auto-candidate")
             );
