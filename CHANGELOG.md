@@ -25,6 +25,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Unrecognized optional non-transitive BGP path attributes are now ignored on
+  receipt and omitted by defensive encoding instead of being retained and
+  re-advertised; unknown optional transitive attributes remain preserved with
+  the Partial bit. (LAN-1265)
+
 - Genuine BFD Down transitions now tear established BGP sessions down with
   RFC 9384 Cease/BFD Down; peers that negotiated Notification GR receive an
   RFC 8538 Hard Reset carrying the original BFD Down reason. (LAN-1261)
