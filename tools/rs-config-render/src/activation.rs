@@ -599,6 +599,13 @@ mod unix {
         Invalid,
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum RuntimeDiff {
+        Equal,
+        Different,
+        Unknown,
+    }
+
     pub(crate) fn health_probe(rbgp: &Path, rbgp_addr: &str, deadline: Instant) -> Health {
         let Ok(child) = Command::new(rbgp)
             .args(["--json", "--addr", rbgp_addr, "health"])
@@ -628,12 +635,12 @@ mod unix {
         }
     }
 
-    pub(crate) fn equal_runtime(
+    pub(crate) fn runtime_diff(
         rbgp: &Path,
         rbgp_addr: &str,
         comparison: &Path,
         deadline: Instant,
-    ) -> bool {
+    ) -> RuntimeDiff {
         let Ok(child) = Command::new(rbgp)
             .args(["--addr", rbgp_addr, "config", "diff"])
             .arg(comparison)
@@ -641,9 +648,25 @@ mod unix {
             .stderr(Stdio::null())
             .spawn()
         else {
-            return false;
+            return RuntimeDiff::Unknown;
         };
-        wait_output(child, deadline).is_some_and(|output| output.status.code() == Some(0))
+        let Some(output) = wait_output(child, deadline) else {
+            return RuntimeDiff::Unknown;
+        };
+        match output.status.code() {
+            Some(0) => RuntimeDiff::Equal,
+            Some(2) => RuntimeDiff::Different,
+            _ => RuntimeDiff::Unknown,
+        }
+    }
+
+    pub(crate) fn equal_runtime(
+        rbgp: &Path,
+        rbgp_addr: &str,
+        comparison: &Path,
+        deadline: Instant,
+    ) -> bool {
+        runtime_diff(rbgp, rbgp_addr, comparison, deadline) == RuntimeDiff::Equal
     }
 
     fn settle(rbgp: &Path, rbgp_addr: &str, comparison: &Path, deadline: Instant) -> bool {
@@ -1156,7 +1179,7 @@ mod unix {
 pub use unix::activate;
 #[cfg(unix)]
 pub(crate) use unix::{
-    Activation, Comparison, Health, activate_guarded, comparison_file, current_target,
-    equal_runtime, health_probe, normalized_toml, private, republish, state_lock, unique_name,
+    Activation, Comparison, Health, RuntimeDiff, activate_guarded, comparison_file, current_target,
+    health_probe, normalized_toml, private, republish, runtime_diff, state_lock, unique_name,
     valid_digest, verify_candidate, write_kept_receipt,
 };
