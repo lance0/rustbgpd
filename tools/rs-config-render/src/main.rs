@@ -368,19 +368,47 @@ fn stdout_exit_with(
 ) -> ExitCode {
     match result {
         Ok(()) => Exit::Success.into(),
-        Err(StdoutWriteError::BrokenPipe) => Exit::InvalidInput.into(),
-        Err(StdoutWriteError::Other(error)) => {
-            let _ = writeln!(
-                diagnostic,
-                "rs-config-render: failed to write stdout: {error}"
-            );
+        Err(error) => {
+            report_stdout_error_with(error, diagnostic);
             Exit::InvalidInput.into()
         }
+    }
+}
+fn report_stdout_error_with(error: StdoutWriteError, diagnostic: &mut dyn std::io::Write) {
+    if let StdoutWriteError::Other(error) = error {
+        let _ = writeln!(
+            diagnostic,
+            "rs-config-render: failed to write stdout: {error}"
+        );
     }
 }
 fn stdout_exit(result: Result<(), StdoutWriteError>) -> ExitCode {
     let stderr = std::io::stderr();
     stdout_exit_with(result, &mut stderr.lock())
+}
+
+fn recover_failure_exit_with(
+    name: &str,
+    failure: &rs_config_render::recover::Failure,
+    output: &mut dyn std::io::Write,
+    diagnostic: &mut dyn std::io::Write,
+) -> ExitCode {
+    if !failure.completed.steps.is_empty()
+        && let Err(error) = write_stdout_with(output, |writer| {
+            for step in &failure.completed.steps {
+                writeln!(writer, "recover {name}: {step}")?;
+            }
+            Ok(())
+        })
+    {
+        report_stdout_error_with(error, diagnostic);
+    }
+    let _ = writeln!(
+        diagnostic,
+        "rs-config-render: recover {name}: {}",
+        failure.error
+    );
+    failure.error.exit_code().into()
 }
 
 fn parse_activation() -> Option<ActivateArgs> {
@@ -440,19 +468,9 @@ fn recover_exit(
             }))
         }
         Err(failure) => {
-            if !failure.completed.steps.is_empty() {
-                let written = write_stdout(|writer| {
-                    for step in &failure.completed.steps {
-                        writeln!(writer, "recover {name}: {step}")?;
-                    }
-                    Ok(())
-                });
-                if let Err(error) = written {
-                    return stdout_exit(Err(error));
-                }
-            }
-            eprintln!("rs-config-render: recover {name}: {}", failure.error);
-            failure.error.exit_code().into()
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            recover_failure_exit_with(name, &failure, &mut stdout.lock(), &mut stderr.lock())
         }
     }
 }
@@ -863,6 +881,18 @@ mod tests {
     use super::*;
     use std::{fs::File, io::BufWriter};
 
+    struct BrokenPipeWriter;
+
+    impl std::io::Write for BrokenPipeWriter {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
     #[test]
     fn stdout_exit_distinguishes_quiet_broken_pipe_from_other_flush_error() {
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -881,5 +911,35 @@ mod tests {
         let broken = stdout_exit_with(Err(StdoutWriteError::BrokenPipe), &mut err);
         assert_eq!(broken, ExitCode::from(Exit::InvalidInput));
         assert!(err.is_empty());
+    }
+
+    #[test]
+    fn recover_failure_keeps_domain_exit_and_diagnostic_when_stdout_fails() {
+        let failure = rs_config_render::recover::Failure {
+            error: rs_config_render::recover::Error::ManualRecovery("retry the recovery"),
+            completed: rs_config_render::recover::Outcome {
+                steps: vec!["remove host fence".to_owned()],
+            },
+        };
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut output = BufWriter::new(File::open(file.path()).unwrap());
+        let mut diagnostic = Vec::new();
+        assert_eq!(
+            recover_failure_exit_with("clear", &failure, &mut output, &mut diagnostic),
+            ExitCode::from(Exit::ManualRecovery)
+        );
+        let diagnostic = String::from_utf8(diagnostic).unwrap();
+        assert!(diagnostic.contains("rs-config-render: failed to write stdout: "));
+        assert!(diagnostic.contains("rs-config-render: recover clear: retry the recovery\n"));
+
+        let mut diagnostic = Vec::new();
+        assert_eq!(
+            recover_failure_exit_with("clear", &failure, &mut BrokenPipeWriter, &mut diagnostic),
+            ExitCode::from(Exit::ManualRecovery)
+        );
+        assert_eq!(
+            String::from_utf8(diagnostic).unwrap(),
+            "rs-config-render: recover clear: retry the recovery\n"
+        );
     }
 }
