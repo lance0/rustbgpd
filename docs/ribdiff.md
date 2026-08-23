@@ -1,4 +1,4 @@
-# `rbgp diff advertised` — live Adj-RIB-Out vs incumbent snapshot
+# Compare advertised routes
 
 Compares what rustbgpd is advertising to each peer (the live Adj-RIB-Out,
 read over gRPC) against a snapshot of what an incumbent route server

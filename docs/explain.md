@@ -1,4 +1,4 @@
-# Explaining routes: "why is this route (not) here?"
+# Explain route decisions
 
 Every stage of a route's life through the daemon can explain itself,
 from the live RIB, in one command — no debug rebuild, no external
