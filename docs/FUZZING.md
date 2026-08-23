@@ -35,6 +35,8 @@ network — so it has no fuzz surface.
 | `parse_rd` | wire | Route Distinguisher `FromStr` | Display→FromStr lossless |
 | `rpol_compile` | policy | `.rpol` lexer, parser, typechecker, lowering, and the in-language `test`-block runner (eval engine on fuzzer-authored programs) | returns `Diagnostics`, never panics/aborts/hangs |
 | `dataset_parse` | policy | operator-fed prefix, ASN, and community dataset text, including comments and malformed lines | returns a result, never panics/aborts/hangs |
+| `compile_chain` | policy | bounded valid mixed TOML and `.rpol` chains with indexed sets, regexes, and datasets | compilation returns and every recursively remapped ID resolves in the merged tables |
+| `explain_walk` | policy | bounded valid mixed TOML and `.rpol` chains plus owned route recipes | trace length is bounded by the walkable policies, Deny is terminal, and the trace verdict agrees with live evaluation |
 | `parse_rt` | evpn | Route Target `FromStr` over arbitrary UTF-8 | Display→FromStr lossless |
 | `snapshot_reader_drain` | mrt | arbitrary MRT framing plus arbitrary records after a valid empty peer-index table | reader construction and full iteration never panic |
 | `warm_bundle_manifest` | mrt | real owner-checked `manifest.json` load through JSON decoding, V1 structure, boot identity, freshness, and safe snapshot lookup/error handling | loader never panics |
@@ -108,7 +110,7 @@ which cannot meet rustbgpd's fail-closed corpus-reuse rule. ClusterFuzzLite's
 Rust integration also documents AddressSanitizer as the only supported
 sanitizer, so the manual workflow does not claim unsupported coverage mode.
 
-`scripts/check_fuzz_target_inventory.py` gates the exact 19-target inventory in
+`scripts/check_fuzz_target_inventory.py` gates the exact 21-target inventory in
 the ordinary PR/push `CI / check` job, before a manual ClusterFuzzLite build,
 and again inside the shared fuzzer build path. It compares cargo metadata and
 `fuzz_targets/*.rs` against an explicit globally-unique inventory, including

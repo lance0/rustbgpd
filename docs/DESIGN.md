@@ -567,13 +567,13 @@ containerlab is the test harness — not "where feasible," but the default. Ever
 
 ### Fuzzing
 
-19 libFuzzer targets across six crates, each with its own `fuzz/` workspace:
+21 libFuzzer targets across six crates, each with its own `fuzz/` workspace:
 
 - `crates/wire/fuzz` (12) — OPEN / UPDATE / message and Route Refresh
   decoding, Route Distinguisher parsing, and per-family NLRI decoders
   (FlowSpec, EVPN, BGP-LS, MPLS-VPN, labeled-unicast, RT-Constrain) plus an
   EVPN encode target.
-- `crates/policy/fuzz` (2) — `.rpol` compilation and dataset parsing.
+- `crates/policy/fuzz` (4) — `.rpol` compilation, dataset parsing, mixed-chain compilation, and mixed-chain explain/live-walk agreement.
 - `crates/mrt/fuzz` (2) — snapshot-reader drain and warm-bundle manifest.
 - `crates/bfd/fuzz` (1) — BFD control-packet decoding.
 - `crates/rpki/fuzz` (1) — RTR PDU decoding.
