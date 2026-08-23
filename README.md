@@ -73,10 +73,10 @@ control-plane target and expanding toward cloud / AI-scale data-center
 fabric use.
 
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.
-> Breaking changes are possible between minor versions. The supported daemon
+> Breaking changes are possible between minor versions. The narrow daemon
 > exception and separate compatibility boundaries are mapped in
-> [Stability and compatibility](docs/stability.md). The supported daemon
-> targets are Linux x86_64 and aarch64; see the canonical
+> [Stability and compatibility](docs/stability.md). Supported daemon targets
+> are Linux x86_64 and aarch64; see the canonical
 > [platform support contract](SUPPORT.md#platform-support) and
 > [Project Status](#project-status) for details.
 
