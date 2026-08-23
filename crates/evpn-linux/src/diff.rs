@@ -113,7 +113,7 @@ impl Plan {
 ///
 /// See module docs for the foreign-entry preservation invariant.
 #[must_use]
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the diff keeps all dataplane object classes in dependency order"
 )]
@@ -420,7 +420,7 @@ fn desired_vlan(instances: &EvpnInstanceTable, vni: EvpnInstanceId) -> Option<u1
 
 /// Pass 1 / IPv6-fallback emission — emit `AddRemoteFdb` /
 /// `UpdateRemoteFdb` for a single-dst entry.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "the pass shares the diff accumulator and its destination context"
 )]
@@ -538,7 +538,7 @@ fn emit_single_dst_pass(
 /// aliasing, or ADR-0083 single-active with a backup — the entry's
 /// `single_active_backup_vtep_ip` rides every Install/Update so the
 /// coordinator can pre-create + pin the backup NH).
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "the FDB/NHG pass keeps its ordered object reconciliation together"
@@ -744,7 +744,7 @@ fn emit_fdb_nhg_pass(
     }
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "VLAN conversion needs the shared FDB/NHG reconciliation context"
 )]
@@ -816,7 +816,7 @@ fn emit_fdb_nhg_vlan_conversion(
 ///    the domain layer.
 /// 6. Foreign static / permanent / `self` entry — operator territory;
 ///    skip without logging at warn level.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "kernel-entry handling needs the entry, desired state, and diff context"
 )]
