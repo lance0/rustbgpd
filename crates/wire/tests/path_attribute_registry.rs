@@ -64,7 +64,7 @@ fn census_covers_every_code_exactly_once() {
     assert!(DOC.contains("691f147f5c9ef9dbde82febe339f5691a1bfc4d83f63e3ed0d224676ebe68886"));
     assert!(DOC.contains("https://www.iana.org/assignments/bgp-parameters/bgp-parameters-2.csv"));
 
-    let mut coverage = [0_u8; 256];
+    let mut coverage = [0_u16; 256];
     for row in rows(
         section(
             "<!-- registry-census:start -->",
