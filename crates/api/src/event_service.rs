@@ -72,9 +72,9 @@ pub struct EventService {
 }
 
 impl EventService {
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
         peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
     ) -> Self {
@@ -86,6 +86,7 @@ impl EventService {
         )
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn with_dataplane_snapshots(
         rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
@@ -102,6 +103,7 @@ impl EventService {
         )
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn with_dataplane_snapshots_and_broadcaster(
         rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
