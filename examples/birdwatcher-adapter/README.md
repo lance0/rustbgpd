@@ -84,13 +84,13 @@ listener beyond loopback only with the mTLS controls in `docs/SECURITY.md`.
 | `GET /protocols/bgp`         | One `NeighborService.ListNeighbors` request, including actor-authoritative per-neighbor `routes.filtered` counts |
 | `GET /protocol/{id}`         | Same live neighbor object exposed by `GET /protocols/bgp`              |
 | `GET /symbols`               | Sorted live protocol and routing-table identities from `NeighborService.ListNeighbors` |
-| `GET /routes/protocol/{id}`  | `RibService.ListReceivedRoutes` (paged, all unicast families)  |
-| `GET /routes/export/{id}`    | `RibService.ListAdvertisedRoutes` (paged, all unicast families) |
+| `GET /routes/protocol/{id}`  | `RibService.ListReceivedRoutes` (paged, all unicast families) + `ListBestRoutes` identity join for truthful `primary` |
+| `GET /routes/export/{id}`    | `RibService.ListAdvertisedRoutes` (paged, all unicast families) + `ListBestRoutes` identity join for truthful `primary` |
 | `GET /routes/table/{table}`  | One `NeighborService.ListNeighbors` snapshot, then global `RibService.ListReceivedRoutes` + `ListBestRoutes` paged under one generation |
-| `GET /route/{prefix}/protocol/{id}` | `RibService.ListReceivedRoutes` (paged, exact IPv4/IPv6 unicast prefix) |
-| `GET /route/{prefix}/export/{id}` | `RibService.ListAdvertisedRoutes` (paged, exact IPv4/IPv6 unicast prefix) |
+| `GET /route/{prefix}/protocol/{id}` | `RibService.ListReceivedRoutes` (paged, exact IPv4/IPv6 unicast prefix) + prefix-filtered `ListBestRoutes` for truthful `primary` |
+| `GET /route/{prefix}/export/{id}` | `RibService.ListAdvertisedRoutes` (paged, exact IPv4/IPv6 unicast prefix) + prefix-filtered `ListBestRoutes` for truthful `primary` |
 | `GET /route/{prefix}/table/{table}` | `RibService.LookupBestPath` (bounded longest-prefix match with one matched-prefix candidate set) |
-| `GET /routes/peer/{peer}`    | `RibService.ListReceivedRoutes` (paged, all unicast families)  |
+| `GET /routes/peer/{peer}`    | `RibService.ListReceivedRoutes` (paged, all unicast families) + `ListBestRoutes` identity join for truthful `primary` |
 | `GET /routes/filtered/{id}`  | `PolicyService.ListRejectedRoutes` (unpaged — the store is bounded at the `[policy.reject_retention]` capacity, default 1024/peer) |
 | `GET /routes/lc-zwild/protocol/{id}/{x}/{y}` | `GlobalService.GetGlobal` + `PolicyService.ListRejectedRoutes` for IXP Manager's `{daemon ASN}:1101:*` filtered-prefix query |
 | `GET /routes/noexport/{id}`  | `RibService.ListBestRoutes` − `RibService.ListAdvertisedRoutes` (both paged), each missing prefix explained by `RibService.ExplainAdvertisedRoute` |
@@ -423,9 +423,8 @@ load_on_demand = true
 | protocol `routes.preferred` | omitted | No per-peer Loc-RIB best count exists on the gRPC surface; deriving one would page the whole Loc-RIB on every poll. The field is left out rather than served as a wrong `0` — a client that defaults absent fields still reads zero, but nothing here asserts it. |
 | route `interface` | `""` | Interface identity is not exposed for these routes. |
 | route `metric` | `0` | Sentinel only; this is not an IGP metric. |
-| route `primary` | `false` | Sentinel only; primary-route status is not exposed. |
 | filtered route `bgp.origin` | `""` | ORIGIN is not retained for rejected routes. |
-| filtered route `bgp.local_pref`, `bgp.med` | `0` | Not retained for rejected routes. |
+| filtered route `bgp.local_pref`, `bgp.med` | `"100"`, omitted | Not retained for rejected routes: `local_pref` renders the effective default (the same rule the accepted views apply to a route without the attribute) and `med` is omitted. An explicit wire value on the rejected announcement is lost. |
 
 Error behavior differs only on failure: when the daemon is unreachable
 the adapter returns `502 Bad Gateway` (the in-daemon server returned

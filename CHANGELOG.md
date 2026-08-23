@@ -18,6 +18,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   BIRD 2.0.12 + Bird's Eye oracle prints them, closing the two matching
   runtime-divergence allow-list entries. (LAN-1232)
 
+### Changed
+
+- **Operator-visible:** `Route.local_pref` in the gRPC route projection
+  (`ListReceivedRoutes` / `ListBestRoutes` / `ListAdvertisedRoutes` rows and
+  the explain/lookup responses) now carries the effective local preference —
+  the LOCAL_PREF attribute when present, otherwise the default 100 best-path
+  selection applies. It previously encoded an absent attribute as 0,
+  indistinguishable from an explicit LOCAL_PREF 0. Wire-level presence stays
+  on the optional `Route.local_pref_attr` field, unchanged, and `rbgp rib`
+  (table and JSON) accordingly shows 100 instead of 0 for routes without the
+  attribute. (LAN-1232)
+- The Bird's Eye adapter route views converge on the pinned oracle's route
+  shapes: `bgp.as_path` elements are strings, `bgp.local_pref` is the
+  effective value as a string, `bgp.med` is emitted only when the route
+  carries the attribute, `type` is BIRD 2's `["BGP", "univ"]` pair, and
+  `primary` truthfully marks the Loc-RIB selection in the received, export,
+  and exact-route views (joined against `ListBestRoutes`; the table views
+  already read it). The five matching `must_match` runtime-divergence
+  allow-list entries are removed. (LAN-1232)
+
 ### Removed
 
 - **Breaking:** `RibService.WatchRoutes` and `RibService.WatchRouteEvents`

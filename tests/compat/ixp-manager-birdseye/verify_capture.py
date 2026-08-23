@@ -179,11 +179,6 @@ ROUTE_VIEWS = [
     "api/route/{net}/table/{table}", "api/route/{net}/export/{protocol}",
     "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}",
 ]
-NON_TABLE_ROUTE_VIEWS = [
-    "api/routes/protocol/{protocol}", "api/routes/export/{protocol}",
-    "api/route/{net}/protocol/{protocol}", "api/route/{net}/export/{protocol}",
-    "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}",
-]
 LC_ZWILD = "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}"
 
 
@@ -294,28 +289,6 @@ RUNTIME_DIVERGENCES = [
         "consumer_visible": True,
     },
     {
-        "endpoint": ROUTE_VIEWS, "path": "routes.*.bgp.as_path.*", "kind": "type",
-        "classification": "must_match",
-        "birdseye": "strings", "adapter": "integers",
-        "rationale": "Bird's Eye splits the BGP.as_path text; the adapter emits the numeric path; the pinned route views implode either",
-        "consumer_visible": True,
-    },
-    {
-        "endpoint": ROUTE_VIEWS, "path": "routes.*.bgp.local_pref", "kind": "type",
-        "classification": "must_match",
-        "birdseye": "string \"100\" (BIRD's default local preference assigned at import)",
-        "adapter": "number 0 (the received attribute, absent on an eBGP session)",
-        "rationale": "type and meaning differ: BIRD prints a local preference for every route, the adapter prints the attribute that arrived",
-        "consumer_visible": True,
-    },
-    {
-        "endpoint": ROUTE_VIEWS, "path": "routes.*.bgp.med", "kind": "extra",
-        "classification": "must_match",
-        "birdseye": "absent when the route carries no MED", "adapter": "0 when absent",
-        "rationale": "the adapter always emits med; equal whenever the attribute is present",
-        "consumer_visible": True,
-    },
-    {
         "endpoint": ROUTE_VIEWS, "path": "routes.*.interface", "kind": "value",
         "classification": "intentional",
         "birdseye": "BIRD egress interface (eth0)", "adapter": "\"\"",
@@ -334,20 +307,6 @@ RUNTIME_DIVERGENCES = [
         "classification": "intentional",
         "birdseye": "BIRD route preference (100)", "adapter": "0",
         "rationale": "BIRD-internal preference; the pinned route view prints metric",
-        "consumer_visible": True,
-    },
-    {
-        "endpoint": NON_TABLE_ROUTE_VIEWS, "path": "routes.*.primary", "kind": "value",
-        "classification": "must_match",
-        "birdseye": "true for the best route in every view", "adapter": "false outside the table view",
-        "rationale": "the adapter reports primary only where it reads the Loc-RIB; the pinned route view prints it",
-        "consumer_visible": True,
-    },
-    {
-        "endpoint": ROUTE_VIEWS, "path": "routes.*.type.*", "kind": "semantics",
-        "classification": "must_match",
-        "birdseye": "[\"BGP\", \"univ\"] (BIRD 2 Type: BGP univ)", "adapter": "[\"BGP\", \"unicast\", \"univ\"] (BIRD 1 shape)",
-        "rationale": "the adapter keeps the BIRD 1 type triple; the pinned route view prints the list",
         "consumer_visible": True,
     },
     {
