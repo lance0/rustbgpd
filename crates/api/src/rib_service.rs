@@ -12,7 +12,7 @@ use tonic::{Request, Response, Status};
 
 use crate::actor_read::rib_manager_read;
 use crate::proto;
-use rustbgpd_rib::update::OrderedRouteFamilyFilter;
+use rustbgpd_rib::update::{OrderedAllRoutesFilter, OrderedRouteFamilyFilter};
 use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
     ExplainBestPath, ExplainDecision, ExportGateVerdict, FlowSpecRoute, LabeledRibRoute,
@@ -967,7 +967,8 @@ fn build_route_query_filter(
     known_total: Option<u64>,
 ) -> Option<RouteQueryFilter> {
     if filters.is_empty() && family_filter_is_noop(afi_safi) {
-        return None;
+        return known_total
+            .map(|total| Box::new(OrderedAllRoutesFilter(total)) as RouteQueryFilter);
     }
     if filters.is_empty() {
         let family = if afi_safi == proto::AddressFamily::Ipv4Unicast as i32 {
@@ -4010,6 +4011,14 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn unspecified_continuation_preserves_signed_known_total_marker() {
+        let request = list_routes_request();
+        let filters = RouteFilters::from_request(&request).unwrap();
+        let filter = build_route_query_filter(request.afi_safi, filters, Some(23)).unwrap();
+        assert_eq!(filter.ordered_family(), Some((None, Some(23))));
+    }
+
     #[tokio::test]
     async fn list_received_routes_rejects_unsupported_afi() {
         let svc = make_service();
@@ -5328,7 +5337,7 @@ mod tests {
                 assert_eq!(actual_scope, scope);
                 assert_eq!(
                     filter.and_then(|filter| filter.ordered_family()),
-                    Some((Afi::Ipv4, Some(1)))
+                    Some((Some(Afi::Ipv4), Some(1)))
                 );
                 assert_eq!(after, Some(key));
                 assert_eq!(expected_version, Some(version));

@@ -573,7 +573,7 @@ impl RibManager {
                 }
             }
         } else {
-            let family = ordered_family.map(|(family, _)| family);
+            let family = ordered_family.and_then(|(family, _)| family);
             let total = |unfiltered: usize| {
                 ordered_family.map_or_else(
                     || u64::try_from(unfiltered).unwrap_or(u64::MAX),

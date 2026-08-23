@@ -8,24 +8,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::update::{
-    OrderedRouteFamilyFilter, RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryPredicate,
-    RouteQueryScope, route_query_key,
+    OrderedAllRoutesFilter, OrderedRouteFamilyFilter, RoutePage, RouteQueryFilter, RouteQueryKey,
+    RouteQueryPredicate, RouteQueryScope, route_query_key,
 };
 
-struct OrderedFamilyProbe {
+struct CustomPredicateProbe {
     full_scan: Box<dyn Fn(&Route) -> bool + Send + Sync>,
-    ordered_calls: Arc<AtomicUsize>,
-    total: u64,
 }
 
-impl RouteQueryPredicate for OrderedFamilyProbe {
+impl RouteQueryPredicate for CustomPredicateProbe {
     fn as_filter(&self) -> &(dyn Fn(&Route) -> bool + Send + Sync + 'static) {
         &*self.full_scan
-    }
-
-    fn ordered_family(&self) -> Option<(Afi, Option<u64>)> {
-        self.ordered_calls.fetch_add(1, Ordering::Relaxed);
-        Some((Afi::Ipv4, Some(self.total)))
     }
 }
 
@@ -904,7 +897,7 @@ async fn canceled_paged_query_skips_the_scan() {
 }
 
 #[tokio::test]
-async fn ordered_family_dispatch_resumes_without_full_scan() {
+async fn custom_predicate_continuation_preserves_filter_semantics() {
     let (tx, _target, _out_rx, handle) = seeded_manager().await;
     let scope = RouteQueryScope::Received { peer: None };
     tx.send(RibUpdate::RoutesReceived {
@@ -924,32 +917,39 @@ async fn ordered_family_dispatch_resumes_without_full_scan() {
     .unwrap();
     let all = query_page(&tx, scope, None, None, 100).await;
 
-    let (full_scan_calls, ordered_calls) =
-        (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let wanted_peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let expected: Vec<_> = all
+        .routes
+        .iter()
+        .filter(|route| route.peer == wanted_peer)
+        .cloned()
+        .collect();
+    let cursor = route_query_key(&expected[0]);
+    let full_scan_calls = Arc::new(AtomicUsize::new(0));
     let full_scan_probe = Arc::clone(&full_scan_calls);
     let page = query_page_at(
         &tx,
         scope,
-        Some(Box::new(OrderedFamilyProbe {
-            full_scan: Box::new(move |_| {
+        Some(Box::new(CustomPredicateProbe {
+            full_scan: Box::new(move |route| {
                 full_scan_probe.fetch_add(1, Ordering::Relaxed);
-                true
+                route.peer == wanted_peer
             }),
-            ordered_calls: Arc::clone(&ordered_calls),
-            total: 12,
         })),
-        Some(route_query_key(&all.routes[3])),
+        Some(cursor),
         Some(all.version),
         2,
     )
     .await
     .unwrap();
 
-    assert_eq!(keys(&page.routes), keys(&all.routes[4..6]));
-    assert!(page.has_more, "ordered page clones one lookahead row");
-    assert_eq!(page.total, 12);
-    assert_eq!(ordered_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(full_scan_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(keys(&page.routes), keys(&expected[1..3]));
+    assert!(page.has_more);
+    assert_eq!(page.total, 4);
+    assert_eq!(
+        full_scan_calls.load(Ordering::Relaxed),
+        usize::try_from(all.total).unwrap()
+    );
 
     drop(tx);
     handle.await.unwrap();
@@ -1039,7 +1039,7 @@ fn grouped_pages_match_snapshot_with_split_horizon_and_exact_rejection() {
 }
 
 #[test]
-fn grouped_family_continuation_reuses_total_without_count_walk() {
+fn grouped_family_and_unfiltered_continuations_reuse_total_without_count_walk() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -1079,6 +1079,28 @@ fn grouped_family_continuation_reuses_total_without_count_walk() {
         .store(0, Ordering::Relaxed);
 
     let filter: RouteQueryFilter = Box::new(OrderedRouteFamilyFilter(Afi::Ipv4, Some(first.total)));
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_query_routes_page_versioned(
+        scope,
+        Some(&filter),
+        first.routes.last().map(route_query_key),
+        Some(first.version),
+        1,
+        reply,
+    );
+    let page = response
+        .try_recv()
+        .expect("route page handler replies synchronously")
+        .unwrap();
+    assert_eq!(page.total, first.total);
+    assert_eq!(
+        manager
+            .grouped_advertised_count_calls
+            .load(Ordering::Relaxed),
+        0
+    );
+
+    let filter: RouteQueryFilter = Box::new(OrderedAllRoutesFilter(first.total));
     let (reply, mut response) = oneshot::channel();
     manager.handle_query_routes_page_versioned(
         scope,

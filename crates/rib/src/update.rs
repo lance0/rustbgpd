@@ -1239,12 +1239,8 @@ pub fn route_query_key(route: &Route) -> RouteQueryKey {
 }
 
 /// Row filter evaluated inside the RIB task during a paged route query.
-pub trait RouteQueryPredicate: Send + Sync {
+pub trait RouteQueryPredicate: Send + Sync + Any {
     fn as_filter(&self) -> &(dyn Fn(&Route) -> bool + Send + Sync + 'static);
-
-    fn ordered_family(&self) -> Option<(Afi, Option<u64>)> {
-        None
-    }
 }
 
 impl<F> RouteQueryPredicate for F
@@ -1258,9 +1254,13 @@ where
 
 pub struct OrderedRouteFamilyFilter(pub Afi, pub Option<u64>);
 
+/// Trusted marker for an unfiltered continuation carrying its signed total.
+pub struct OrderedAllRoutesFilter(pub u64);
+
 static IPV4_ROUTE_FILTER: fn(&Route) -> bool = |route| matches!(route.prefix, Prefix::V4(_));
 static IPV6_ROUTE_FILTER: fn(&Route) -> bool = |route| matches!(route.prefix, Prefix::V6(_));
 static NO_ROUTE_FILTER: fn(&Route) -> bool = |_| false;
+static ALL_ROUTE_FILTER: fn(&Route) -> bool = |_| true;
 
 impl RouteQueryPredicate for OrderedRouteFamilyFilter {
     fn as_filter(&self) -> &(dyn Fn(&Route) -> bool + Send + Sync + 'static) {
@@ -1270,9 +1270,25 @@ impl RouteQueryPredicate for OrderedRouteFamilyFilter {
             _ => &NO_ROUTE_FILTER,
         }
     }
+}
 
-    fn ordered_family(&self) -> Option<(Afi, Option<u64>)> {
-        Some((self.0, self.1))
+impl RouteQueryPredicate for OrderedAllRoutesFilter {
+    fn as_filter(&self) -> &(dyn Fn(&Route) -> bool + Send + Sync + 'static) {
+        &ALL_ROUTE_FILTER
+    }
+}
+
+impl dyn RouteQueryPredicate {
+    /// Ordered-query capability sealed to the two built-in marker types.
+    #[must_use]
+    pub fn ordered_family(&self) -> Option<(Option<Afi>, Option<u64>)> {
+        let predicate = self as &dyn Any;
+        if let Some(filter) = predicate.downcast_ref::<OrderedRouteFamilyFilter>() {
+            return Some((Some(filter.0), filter.1));
+        }
+        predicate
+            .downcast_ref::<OrderedAllRoutesFilter>()
+            .map(|filter| (None, Some(filter.0)))
     }
 }
 
