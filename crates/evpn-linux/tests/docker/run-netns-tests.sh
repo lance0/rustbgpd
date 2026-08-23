@@ -271,3 +271,4 @@ docker run "${DOCKER_ARGS[@]}" "$IMAGE_TAG" "${TEST_ARGS[@]}"
 if [ -n "${NETNS_SELECTOR_RECEIPT:-}" ]; then
     printf '%s\n' "$SELECTOR" >> "$NETNS_SELECTOR_RECEIPT"
 fi
+exit 0

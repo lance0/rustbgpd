@@ -35,7 +35,8 @@ class ReceiptTest(unittest.TestCase):
         self.assertIn(f"missing selector: {BASE[0]}", errors)
         self.assertIn(f"duplicate selector: {BASE[1]}", errors)
         self.assertIn("unexpected selector: surprise", errors)
-        self.assertEqual(payload["errors"], sorted(errors))
+        self.assertEqual(errors, sorted(errors))
+        self.assertEqual(payload["errors"], errors)
         self.assertIn("FAIL", summary)
 
 

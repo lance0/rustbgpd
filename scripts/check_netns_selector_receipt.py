@@ -29,12 +29,13 @@ def finalize(receipt: Path, output: Path, summary: Path, vrf_available: bool) ->
     errors += [f"missing selector: {item}" for item in expected if counts[item] == 0]
     errors += [f"duplicate selector: {item}" for item, count in counts.items() if count > 1]
     errors += [f"unexpected selector: {item}" for item in counts if item not in expected]
+    errors.sort()
     executed = [item for item in expected if counts[item] == 1]
     omitted = [] if vrf_available else [
         {"selector": item, "reason": "vrf_unavailable"} for item in VRF
     ]
     payload = {
-        "errors": sorted(errors),
+        "errors": errors,
         "executed_selectors": executed,
         "omitted_selectors": omitted,
         "schema_version": 1,
@@ -62,7 +63,7 @@ def main() -> int:
     )
     for error in errors:
         print(error)
-    return bool(errors)
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":
