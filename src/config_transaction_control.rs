@@ -8574,7 +8574,7 @@ remote_asn = 65010
     /// pending (mutation fence closed, second mutations rejected) and a retry
     /// of the abort must be able to resolve it.
     #[tokio::test]
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "the test proves the complete failed-abort, fence, retry, and resolution lifecycle"
     )]
