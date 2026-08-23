@@ -200,6 +200,7 @@ struct BgpMetricsInner {
 
     // ── gNMI dial-out (LAN-471) ────────────────────────────────────
     gnmi_dialout_connected: IntGaugeVec,
+    gnmi_dialout_resync_total: IntCounterVec,
 
     // ── Notifications ──────────────────────────────────────────────
     notifications_sent: IntCounterVec,
@@ -529,6 +530,15 @@ impl BgpMetrics {
                 "gnmi_dialout_connected",
                 "gNMI dial-out collector connection state per configured target \
                  (1 = Publish stream established, 0 = disconnected/retrying)",
+            ),
+            &["target"],
+        )
+        .expect("valid metric definition");
+
+        let gnmi_dialout_resync_total = IntCounterVec::new(
+            Opts::new(
+                "gnmi_dialout_resync_total",
+                "Established gNMI dial-out sessions that ended and will trigger a fresh snapshot resync, per configured target",
             ),
             &["target"],
         )
@@ -2043,6 +2053,9 @@ impl BgpMetrics {
             .register(Box::new(gnmi_dialout_connected.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(gnmi_dialout_resync_total.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(stale_timer_events.clone()))
             .expect("metric not already registered");
         registry
@@ -2565,6 +2578,7 @@ impl BgpMetrics {
             bfd_session_up,
             bfd_session_flaps_total,
             gnmi_dialout_connected,
+            gnmi_dialout_resync_total,
             notifications_sent,
             notifications_received,
             messages_sent,
@@ -2955,18 +2969,37 @@ impl BgpMetrics {
 
     /// Set the gNMI dial-out connection gauge for a configured target.
     /// Refreshed on BOTH transitions (connect and disconnect) so the series
-    /// always reflects the live Publish-stream state.
+    /// always reflects the live Publish-stream state. The first call for a
+    /// target also materializes its resync counter at zero without incrementing
+    /// it, making failed-dial targets visible on `/metrics`.
     pub fn set_gnmi_dialout_connected(&self, target: &str, connected: bool) {
+        let _resync_counter = self
+            .0
+            .gnmi_dialout_resync_total
+            .with_label_values(&[target]);
         self.0
             .gnmi_dialout_connected
             .with_label_values(&[target])
             .set(i64::from(connected));
     }
 
-    /// Reap the dial-out connection series for a target removed from the
-    /// config (SIGHUP reload), so `/metrics` stops exporting stale targets.
+    /// Count an established dial-out session ending before its fresh-snapshot
+    /// reconnect. Connection attempts that never establish do not call this.
+    pub fn record_gnmi_dialout_resync(&self, target: &str) {
+        self.0
+            .gnmi_dialout_resync_total
+            .with_label_values(&[target])
+            .inc();
+    }
+
+    /// Reap the dial-out metric series for a target removed from the config
+    /// (SIGHUP reload), so `/metrics` stops exporting stale targets.
     pub fn remove_gnmi_dialout_target(&self, target: &str) {
         let _ = self.0.gnmi_dialout_connected.remove_label_values(&[target]);
+        let _ = self
+            .0
+            .gnmi_dialout_resync_total
+            .remove_label_values(&[target]);
     }
 
     /// Record a BFD session state change: set the per-peer up gauge and count a

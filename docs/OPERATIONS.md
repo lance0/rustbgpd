@@ -752,7 +752,9 @@ affects BGP operation; telemetry for that target is simply not delivered
 while disconnected. The daemon logs one `warn` when a target becomes
 unreachable and one `info` when it (re)connects; repeated retries log at
 `debug` only. Watch `gnmi_dialout_connected{target}` (0/1) for the live
-connection state. Every (re)connection restarts the subscription, so the
+connection state and `gnmi_dialout_resync_total{target}` for established
+sessions that ended and entered the fresh-snapshot reconnect path; failed dials
+do not increment it. Every (re)connection restarts the subscription, so the
 collector resyncs from a fresh initial snapshot + `sync_response` — the
 disconnect window is not replayed (same contract as a dial-in Subscribe
 reconnect; use the durable event cursor for gap-free history).
@@ -1117,6 +1119,7 @@ query with a new live watch.
 | Metric | What it tells you |
 |--------|-------------------|
 | `gnmi_dialout_connected{target}` | 1 while the dial-out Publish stream to this `[gnmi_dialout]` target is established, 0 while disconnected/retrying. Refreshed on both transitions; the series exists (at 0) from startup even when the collector is down, and is reaped when the target is removed from config (SIGHUP) |
+| `gnmi_dialout_resync_total{target}` | Established Publish sessions that ended and entered the reconnect path, where the next connection starts a fresh initial snapshot. Failed dials do not increment it; the series exists at 0 from startup and is reaped with the target |
 
 ### BMP
 
