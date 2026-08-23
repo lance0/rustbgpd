@@ -11,6 +11,7 @@ use tonic::{Request, Response, Status};
 
 use crate::actor_read::rib_manager_read;
 use crate::proto;
+use rustbgpd_rib::update::OrderedRouteFamilyFilter;
 use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
     ExplainBestPath, ExplainDecision, ExportGateVerdict, FlowSpecRoute, LabeledRibRoute,
@@ -714,13 +715,15 @@ const DEFAULT_ROUTE_PAGE_SIZE: usize = 100;
 
 /// Decode the pagination fields of a route-listing request: the resume
 /// cursor (from the opaque `page_token`) and the requested page size.
+type ParsedRouteCursor = (Option<RouteQueryKey>, Option<RoutePageVersion>, Option<u64>);
+
 fn parse_route_page_params(
     req: &proto::ListRoutesRequest,
     scope: RouteQueryScope,
     query_identity: &str,
-) -> Result<(Option<RouteQueryKey>, Option<RoutePageVersion>, usize), Status> {
-    let (after, expected_version) = if req.page_token.is_empty() {
-        (None, None)
+) -> Result<(ParsedRouteCursor, usize), Status> {
+    let (after, expected_version, known_total) = if req.page_token.is_empty() {
+        (None, None, None)
     } else {
         let cursor = decode_route_page_token(&req.page_token)?;
         if cursor.scope != scope {
@@ -733,14 +736,14 @@ fn parse_route_page_params(
                 "page_token belongs to different route filters",
             ));
         }
-        (Some(cursor.after), Some(cursor.version))
+        (Some(cursor.after), Some(cursor.version), Some(cursor.total))
     };
     let page_size = if req.page_size == 0 {
         DEFAULT_ROUTE_PAGE_SIZE
     } else {
         req.page_size as usize
     };
-    Ok((after, expected_version, page_size))
+    Ok(((after, expected_version, known_total), page_size))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -749,6 +752,7 @@ struct RoutePageCursor {
     query_identity: String,
     after: RouteQueryKey,
     version: RoutePageVersion,
+    total: u64,
 }
 
 fn route_page_scope_token(scope: RouteQueryScope) -> String {
@@ -854,11 +858,12 @@ fn encode_route_page_token(
     query_identity: &str,
     key: &RouteQueryKey,
     version: RoutePageVersion,
+    total: u64,
 ) -> String {
     let (prefix, peer, path_id) = key;
     let (addr, len) = prefix_parts(*prefix);
     format!(
-        "rp3|{:016x}|{:016x}|{}|{query_identity}|{addr}/{len}|{peer}|{path_id}",
+        "rp4|{:016x}|{:016x}|{total}|{}|{query_identity}|{addr}/{len}|{peer}|{path_id}",
         version.epoch,
         version.generation,
         route_page_scope_token(scope)
@@ -869,9 +874,10 @@ fn decode_route_page_token(token: &str) -> Result<RoutePageCursor, Status> {
     let invalid = || Status::invalid_argument("invalid page_token");
     let mut parts = token.split('|');
     let (
-        Some("rp3"),
+        Some("rp4"),
         Some(epoch),
         Some(generation),
+        Some(total),
         Some(scope),
         Some(query_identity),
         Some(prefix),
@@ -888,12 +894,14 @@ fn decode_route_page_token(token: &str) -> Result<RoutePageCursor, Status> {
         parts.next(),
         parts.next(),
         parts.next(),
+        parts.next(),
     )
     else {
         return Err(invalid());
     };
     let epoch = u64::from_str_radix(epoch, 16).map_err(|_| invalid())?;
     let generation = u64::from_str_radix(generation, 16).map_err(|_| invalid())?;
+    let total: u64 = total.parse().map_err(|_| invalid())?;
     let scope = parse_route_page_scope_token(scope).ok_or_else(invalid)?;
     if query_identity.len() != 64
         || !query_identity
@@ -912,17 +920,30 @@ fn decode_route_page_token(token: &str) -> Result<RoutePageCursor, Status> {
         query_identity: query_identity.to_string(),
         after: (prefix, peer, path_id),
         version: RoutePageVersion { epoch, generation },
+        total,
     })
 }
 
 /// Build the row filter evaluated inside the RIB task. `None` when
 /// neither the family filter nor the route filters narrow the scope, so
 /// the actor skips per-route predicate calls entirely.
-fn build_route_query_filter(afi_safi: i32, filters: RouteFilters) -> Option<RouteQueryFilter> {
+fn build_route_query_filter(
+    afi_safi: i32,
+    filters: RouteFilters,
+    known_total: Option<u64>,
+) -> Option<RouteQueryFilter> {
     if filters.is_empty() && family_filter_is_noop(afi_safi) {
         return None;
     }
-    Some(Box::new(move |route| {
+    if filters.is_empty() {
+        let family = if afi_safi == proto::AddressFamily::Ipv4Unicast as i32 {
+            Afi::Ipv4
+        } else {
+            Afi::Ipv6
+        };
+        return Some(Box::new(OrderedRouteFamilyFilter(family, known_total)));
+    }
+    Some(Box::new(move |route: &Route| {
         route_matches_family(route, afi_safi) && filters.matches(route)
     }))
 }
@@ -942,6 +963,7 @@ fn route_page_to_response(
                     query_identity,
                     &route_query_key(route),
                     page.version,
+                    page.total,
                 )
             })
             .unwrap_or_default()
@@ -1339,12 +1361,12 @@ impl proto::rib_service_server::RibService for RibService {
         let filters = RouteFilters::from_request(&req)?;
         let query_identity = route_page_query_identity(req.afi_safi, &filters);
         let scope = RouteQueryScope::Received { peer };
-        let (after, expected_version, page_size) =
+        let ((after, expected_version, known_total), page_size) =
             parse_route_page_params(&req, scope, &query_identity)?;
         let page = self
             .query_routes_page(
                 scope,
-                build_route_query_filter(req.afi_safi, filters),
+                build_route_query_filter(req.afi_safi, filters, known_total),
                 after,
                 expected_version,
                 page_size,
@@ -1367,12 +1389,12 @@ impl proto::rib_service_server::RibService for RibService {
         let filters = RouteFilters::from_request(&req)?;
         let query_identity = route_page_query_identity(req.afi_safi, &filters);
         let scope = RouteQueryScope::Best;
-        let (after, expected_version, page_size) =
+        let ((after, expected_version, known_total), page_size) =
             parse_route_page_params(&req, scope, &query_identity)?;
         let page = self
             .query_routes_page(
                 scope,
-                build_route_query_filter(req.afi_safi, filters),
+                build_route_query_filter(req.afi_safi, filters, known_total),
                 after,
                 expected_version,
                 page_size,
@@ -1407,12 +1429,12 @@ impl proto::rib_service_server::RibService for RibService {
         let filters = RouteFilters::from_request(&req)?;
         let query_identity = route_page_query_identity(req.afi_safi, &filters);
         let scope = RouteQueryScope::Advertised { peer };
-        let (after, expected_version, page_size) =
+        let ((after, expected_version, known_total), page_size) =
             parse_route_page_params(&req, scope, &query_identity)?;
         let page = self
             .query_routes_page(
                 scope,
-                build_route_query_filter(req.afi_safi, filters),
+                build_route_query_filter(req.afi_safi, filters, known_total),
                 after,
                 expected_version,
                 page_size,
@@ -4898,14 +4920,15 @@ mod tests {
                     peer: "192.0.2.9".parse().unwrap(),
                 },
             ] {
-                let token = encode_route_page_token(scope, &query_identity, &key, version);
+                let token = encode_route_page_token(scope, &query_identity, &key, version, 37);
                 assert_eq!(
                     decode_route_page_token(&token).unwrap(),
                     RoutePageCursor {
                         scope,
                         query_identity: query_identity.clone(),
                         after: key,
-                        version
+                        version,
+                        total: 37,
                     }
                 );
             }
@@ -5004,7 +5027,7 @@ mod tests {
         };
         let base_identity = route_page_identity(&base);
         assert_eq!(base_identity.len(), 64);
-        let token = encode_route_page_token(scope, &base_identity, &key, version);
+        let token = encode_route_page_token(scope, &base_identity, &key, version, 19);
 
         // Host bits, OR-filter ordering/duplicates, invalid large-community
         // spellings, and page size do not change the query's semantics.
@@ -5024,7 +5047,7 @@ mod tests {
         assert_eq!(equivalent_identity, base_identity);
         assert_eq!(
             parse_route_page_params(&equivalent, scope, &equivalent_identity).unwrap(),
-            (Some(key), Some(version), 999)
+            ((Some(key), Some(version), Some(19)), 999)
         );
 
         let mut changed_requests = Vec::new();
@@ -5109,6 +5132,7 @@ mod tests {
                 epoch: 1,
                 generation: 2,
             },
+            0,
         );
         let error = parse_route_page_params(
             &request,
@@ -5207,7 +5231,8 @@ mod tests {
                 RoutePageVersion {
                     epoch: 7,
                     generation: 9
-                }
+                },
+                2,
             )
         );
     }
@@ -5225,10 +5250,13 @@ mod tests {
             epoch: 11,
             generation: 13,
         };
-        let query_identity = route_page_identity(&list_routes_request());
+        let mut request = list_routes_request();
+        request.afi_safi = proto::AddressFamily::Ipv4Unicast as i32;
+        let query_identity = route_page_identity(&request);
         tokio::spawn(async move {
             if let Some(RibUpdate::QueryRoutesPage {
                 scope: actual_scope,
+                filter,
                 after,
                 expected_version,
                 reply,
@@ -5236,6 +5264,10 @@ mod tests {
             }) = rx.recv().await
             {
                 assert_eq!(actual_scope, scope);
+                assert_eq!(
+                    filter.and_then(|filter| filter.ordered_family()),
+                    Some((Afi::Ipv4, Some(1)))
+                );
                 assert_eq!(after, Some(key));
                 assert_eq!(expected_version, Some(version));
                 let _ = reply.send(Ok(RoutePage {
@@ -5251,8 +5283,8 @@ mod tests {
         let response = service
             .list_received_routes(Request::new(proto::ListRoutesRequest {
                 page_size: 1,
-                page_token: encode_route_page_token(scope, &query_identity, &key, version),
-                ..list_routes_request()
+                page_token: encode_route_page_token(scope, &query_identity, &key, version, 1),
+                ..request
             }))
             .await
             .unwrap()

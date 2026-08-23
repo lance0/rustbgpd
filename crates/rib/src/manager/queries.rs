@@ -245,7 +245,7 @@ pub(super) fn page_routes<'a>(
 /// before yielding those rows.
 fn page_ordered_routes<'a>(
     routes: impl Iterator<Item = &'a crate::route::Route>,
-    total: usize,
+    total: u64,
     page_size: usize,
 ) -> RoutePage {
     let n = page_size.clamp(1, ROUTE_QUERY_MAX_PAGE_SIZE);
@@ -254,18 +254,36 @@ fn page_ordered_routes<'a>(
     routes.truncate(n);
     RoutePage {
         routes,
-        total: u64::try_from(total).unwrap_or(u64::MAX),
+        total,
         has_more,
         version: RoutePageVersion::default(),
     }
 }
+
+fn matches_ordered_family(route: &crate::route::Route, family: Option<Afi>) -> bool {
+    family.is_none_or(|family| prefix_family(&route.prefix).0 == family)
+}
+
+fn page_ordered_family<'a>(
+    routes: impl Iterator<Item = &'a crate::route::Route>,
+    family: Option<Afi>,
+    total: u64,
+    page_size: usize,
+) -> RoutePage {
+    page_ordered_routes(
+        routes.take_while(move |route| matches_ordered_family(route, family)),
+        total,
+        page_size,
+    )
+}
+
 /// Merge multiple individually ordered Adj-RIB-In iterators into one route
 /// page. The heap retains one key per peer and the output retains at most one
 /// page, so a Received(all) request is bounded by O(peers + page) rather than
 /// the route-table size.
 fn page_merged_ordered_routes<'a, I>(
     mut iterators: Vec<I>,
-    total: usize,
+    total: u64,
     page_size: usize,
 ) -> RoutePage
 where
@@ -304,7 +322,7 @@ where
     routes.truncate(n);
     RoutePage {
         routes,
-        total: u64::try_from(total).unwrap_or(u64::MAX),
+        total,
         has_more,
         version: RoutePageVersion::default(),
     }
@@ -482,6 +500,7 @@ impl RibManager {
     /// receiver — e.g. a canceled gRPC request whose page query was
     /// already enqueued) skips the scan entirely, so abandoned
     /// pagination stops costing the RIB task anything.
+    #[expect(clippy::too_many_lines, reason = "paired paging branches")]
     pub(super) fn handle_query_routes_page_versioned(
         &mut self,
         scope: RouteQueryScope,
@@ -515,7 +534,10 @@ impl RibManager {
         // through persistent ordered indices and clone only one page plus a
         // lookahead row. A grouped advertised view may inspect extra index rows
         // while applying member-local split horizon and exact-rejection filters.
-        let page = if filter.is_some() {
+        let ordered_family = filter
+            .and_then(|filter| filter.ordered_family())
+            .and_then(|(family, total)| total.map(|total| (family, total)));
+        let page = if filter.is_some() && ordered_family.is_none() {
             match scope {
                 RouteQueryScope::Received { peer: Some(peer) } => page_routes(
                     self.ribs.get(&peer).into_iter().flat_map(AdjRibIn::iter),
@@ -546,24 +568,45 @@ impl RibManager {
                 }
             }
         } else {
+            let family = ordered_family.map(|(family, _)| family);
+            let total = |unfiltered: usize| {
+                ordered_family.map_or_else(
+                    || u64::try_from(unfiltered).unwrap_or(u64::MAX),
+                    |(_, total)| total,
+                )
+            };
             match scope {
                 RouteQueryScope::Received { peer: Some(peer) } => {
                     self.ribs.get(&peer).map_or_else(RoutePage::default, |rib| {
-                        page_ordered_routes(rib.iter_ordered_from(after), rib.len(), page_size)
+                        page_ordered_family(
+                            rib.iter_ordered_from(after),
+                            family,
+                            total(rib.len()),
+                            page_size,
+                        )
                     })
                 }
                 RouteQueryScope::Received { peer: None } => {
-                    let total = self.ribs.values().map(AdjRibIn::len).sum();
+                    let route_total = total(self.ribs.values().map(AdjRibIn::len).sum());
                     let iterators = self
                         .ribs
                         .values()
-                        .map(|rib| rib.iter_ordered_from(after))
+                        .map(|rib| {
+                            rib.iter_ordered_from(after)
+                                .take_while(move |route| matches_ordered_family(route, family))
+                        })
                         .collect();
-                    page_merged_ordered_routes(iterators, total, page_size)
+                    page_merged_ordered_routes(iterators, route_total, page_size)
                 }
                 RouteQueryScope::Best => {
-                    let total = self.loc_rib.len();
-                    page_ordered_routes(self.loc_rib.iter_ordered_from(after), total, page_size)
+                    let route_total = total(self.loc_rib.len());
+                    page_ordered_routes(
+                        self.loc_rib
+                            .iter_ordered_from(after)
+                            .take_while(move |route| matches_ordered_family(route, family)),
+                        route_total,
+                        page_size,
+                    )
                 }
                 RouteQueryScope::Advertised { peer } => {
                     // A grouped member holds no per-peer unicast Adj-RIB-Out;
@@ -573,17 +616,18 @@ impl RibManager {
                     let grouped_total = self.grouped_advertised_count(peer);
                     match self.grouped_advertised_routes_ordered_iter(peer, after) {
                         Some(routes) => page_ordered_routes(
-                            routes,
-                            grouped_total.unwrap_or_default(),
+                            routes.take_while(move |route| matches_ordered_family(route, family)),
+                            total(grouped_total.unwrap_or_default()),
                             page_size,
                         ),
                         None => {
                             self.adj_ribs_out
                                 .get(&peer)
                                 .map_or_else(RoutePage::default, |rib| {
-                                    page_ordered_routes(
+                                    page_ordered_family(
                                         rib.iter_ordered_from(after),
-                                        rib.len(),
+                                        family,
+                                        total(rib.len()),
                                         page_size,
                                     )
                                 })
@@ -2227,6 +2271,28 @@ impl RibManager {
 #[cfg(test)]
 mod cancellation_tests {
     use super::*;
+
+    #[test]
+    fn family_continuation_starts_at_cursor_and_reads_one_lookahead() {
+        let peer = Ipv4Addr::new(192, 0, 2, 1);
+        let mut rib = AdjRibIn::new(peer.into());
+        for octet in 0..6 {
+            rib.insert(crate::test_support::make_route(
+                rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::new(10, 0, octet, 0), 24),
+                peer,
+            ));
+        }
+        let cursor = rib.iter_ordered_from(None).nth(1).map(route_query_key);
+        let scanned = std::cell::Cell::new(0);
+        let page = page_ordered_family(
+            rib.iter_ordered_from(cursor)
+                .inspect(|_| scanned.set(scanned.get() + 1)),
+            Some(Afi::Ipv4),
+            6,
+            2,
+        );
+        assert_eq!((scanned.get(), page.routes.len(), page.total), (3, 2, 6));
+    }
 
     #[test]
     fn canceled_materialized_rows_does_not_invoke_builder() {

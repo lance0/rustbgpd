@@ -1239,7 +1239,50 @@ pub fn route_query_key(route: &Route) -> RouteQueryKey {
 }
 
 /// Row filter evaluated inside the RIB task during a paged route query.
-pub type RouteQueryFilter = Box<dyn Fn(&Route) -> bool + Send + Sync>;
+pub trait RouteQueryPredicate: Send + Sync {
+    fn as_filter(&self) -> &(dyn Fn(&Route) -> bool + Send + Sync + 'static);
+
+    fn ordered_family(&self) -> Option<(Afi, Option<u64>)> {
+        None
+    }
+}
+
+impl<F> RouteQueryPredicate for F
+where
+    F: for<'a> Fn(&'a Route) -> bool + Send + Sync + 'static,
+{
+    fn as_filter(&self) -> &(dyn Fn(&Route) -> bool + Send + Sync + 'static) {
+        self
+    }
+}
+
+pub struct OrderedRouteFamilyFilter(pub Afi, pub Option<u64>);
+
+static IPV4_ROUTE_FILTER: fn(&Route) -> bool = |route| matches!(route.prefix, Prefix::V4(_));
+static IPV6_ROUTE_FILTER: fn(&Route) -> bool = |route| matches!(route.prefix, Prefix::V6(_));
+
+impl RouteQueryPredicate for OrderedRouteFamilyFilter {
+    fn as_filter(&self) -> &(dyn Fn(&Route) -> bool + Send + Sync + 'static) {
+        match self.0 {
+            Afi::Ipv4 => &IPV4_ROUTE_FILTER,
+            _ => &IPV6_ROUTE_FILTER,
+        }
+    }
+
+    fn ordered_family(&self) -> Option<(Afi, Option<u64>)> {
+        Some((self.0, self.1))
+    }
+}
+
+impl std::ops::Deref for dyn RouteQueryPredicate {
+    type Target = dyn Fn(&Route) -> bool + Send + Sync + 'static;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_filter()
+    }
+}
+
+pub type RouteQueryFilter = Box<dyn RouteQueryPredicate>;
 
 /// Row filter evaluated inside the RIB task while copying one non-unicast
 /// Loc-RIB table (EVPN, BGP-LS, VPN, labeled-unicast, RT-Constrain,
