@@ -638,10 +638,6 @@ fn fingerprint(metadata: &fs::Metadata, digest: [u8; 32]) -> Fingerprint {
     }
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the fence compares every pinned source, symlink, and stage identity together"
-)]
 fn verify_fence(
     spelled: &Path,
     resolved: &Path,
@@ -679,10 +675,6 @@ fn verify_source(
     Ok(())
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the I/O adapter preserves the complete atomic-fence input tuple"
-)]
 fn verify_fence_io(
     spelled: &Path,
     resolved: &Path,

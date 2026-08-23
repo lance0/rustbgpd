@@ -210,7 +210,7 @@ fn shared_test_only_operator_auth_is_tier_valid_and_wired() {
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "one frozen inventory keeps config, topology, and driver wiring atomic"
 )]
