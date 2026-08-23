@@ -159,13 +159,14 @@ impl PeerSession {
                 event = event.name(),
                 "FSM event"
             );
-            let mut actions = self.fsm.handle_event(event.clone());
-            if matches!(event, Event::BfdDown)
+            let bfd_notification_gr = matches!(event, Event::BfdDown)
                 && self
                     .negotiated
-                    .as_ref()
-                    .is_some_and(|negotiated| negotiated.peer_notification_gr)
-            {
+                    .as_deref()
+                    .or(self.fsm.negotiated())
+                    .is_some_and(|negotiated| negotiated.peer_notification_gr);
+            let mut actions = self.fsm.handle_event(event.clone());
+            if bfd_notification_gr {
                 for action in &mut actions {
                     if let Action::SendNotification(notification) = action
                         && notification.code == NotificationCode::Cease

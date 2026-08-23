@@ -307,6 +307,70 @@ async fn bfd_down_command_sends_direct_or_hard_reset_and_retains_inner_cause() {
     }
 }
 
+#[tokio::test]
+async fn open_sent_bfd_down_clears_a_stale_down_reason() {
+    let mut session = make_test_session(65001, 65002);
+    session.last_down_reason = Some(PeerDownReason::RemoteNoNotification);
+    session.fsm.handle_event(Event::ManualStart);
+    session.fsm.handle_event(Event::TcpConnectionConfirmed);
+    assert_eq!(session.fsm.state(), SessionState::OpenSent);
+
+    session.drive_fsm(Event::BfdDown).await;
+
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert!(session.last_down_reason.is_none());
+}
+
+#[tokio::test]
+async fn open_confirm_bfd_down_uses_negotiated_notification_gr() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.peer.graceful_restart = true;
+    session.fsm = Session::new(session.config.peer.clone());
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    session
+        .drive_fsm(Event::OpenReceived(rustbgpd_wire::OpenMessage {
+            version: 4,
+            my_as: 65002,
+            hold_time: 90,
+            bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+            capabilities: vec![
+                Capability::MultiProtocol {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                },
+                Capability::FourOctetAs { asn: 65002 },
+                Capability::GracefulRestart {
+                    restart_state: false,
+                    notification: true,
+                    restart_time: 120,
+                    families: vec![rustbgpd_wire::GracefulRestartFamily {
+                        afi: Afi::Ipv4,
+                        safi: Safi::Unicast,
+                        forwarding_preserved: false,
+                    }],
+                },
+            ],
+        }))
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::OpenConfirm);
+    assert!(session.negotiated.is_none());
+
+    session.drive_fsm(Event::BfdDown).await;
+
+    let notification = read_until_notification(&mut server).await;
+    assert_eq!(notification.code, NotificationCode::Cease);
+    assert_eq!(notification.subcode, cease_subcode::HARD_RESET);
+    assert_eq!(
+        notification.data,
+        Bytes::from(vec![
+            NotificationCode::Cease.as_u8(),
+            cease_subcode::BFD_DOWN,
+        ])
+    );
+}
+
 /// Mutant: removing the sent-admin guard mislabels intentional local maintenance.
 #[test]
 fn administrative_notifications_keep_directional_maintenance_semantics() {
