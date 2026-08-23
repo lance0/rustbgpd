@@ -51,7 +51,7 @@ pub(crate) fn record_v2(dir: &Path, normalized_toml: &str, manifest: Manifest) -
     record_v2_with(dir, normalized_toml, manifest, |_| Ok(()))
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "the writer keeps one ordered crash-consistency transaction visible"
 )]
