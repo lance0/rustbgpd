@@ -162,7 +162,16 @@ SUPPORTED_UI_FILTERS = [
 ]
 
 # Runtime divergence allow-list (contract.json runtime_divergences) and the
-# pinned Bird's Eye route inventory (contract.json birdseye_routes).
+# pinned Bird's Eye route inventory (contract.json birdseye_routes). Every
+# entry carries exactly one classification:
+#   must_match  - a real gap the compatibility flip is gated on; converge and
+#                 remove the entry
+#   intentional - deliberate, permanent divergence (product identity; no
+#                 fabricated BIRD internals)
+#   unsupported - capability deliberately not provided
+#   extension   - the live side provides more than the oracle; harmless to
+#                 the pinned consumers
+CLASSIFICATIONS = ("must_match", "intentional", "unsupported", "extension")
 ROW = ["api/protocols/bgp", "api/protocol/{protocol}"]
 ROUTE_VIEWS = [
     "api/routes/protocol/{protocol}", "api/routes/table/{table}",
@@ -185,6 +194,7 @@ def row(path):
 RUNTIME_DIVERGENCES = [
     {
         "endpoint": "*", "path": "api.version", "kind": "value",
+        "classification": "intentional",
         "birdseye": "Bird's Eye semantic version (2.1.0)",
         "adapter": "rustbgpd <version> product identity",
         "rationale": "api.version names the implementation, not the contract; the gate keeps asserting the rustbgpd prefix",
@@ -192,36 +202,42 @@ RUNTIME_DIVERGENCES = [
     },
     {
         "endpoint": "*", "path": "api.Version", "kind": "extra",
+        "classification": "extension",
         "birdseye": "absent", "adapter": "duplicate of api.version",
         "rationale": "Birdwatcher-shaped api block; the Alice-LG surface of the same adapter reads it",
         "consumer_visible": False,
     },
     {
         "endpoint": "*", "path": "api.result_from_cache", "kind": "extra",
+        "classification": "extension",
         "birdseye": "absent", "adapter": "always false",
         "rationale": "Birdwatcher-shaped api block; there is no cache to skip",
         "consumer_visible": False,
     },
     {
         "endpoint": "api/status", "path": "status.version", "kind": "value",
+        "classification": "intentional",
         "birdseye": "BIRD version (2.0.12)", "adapter": "rustbgpd <version>",
         "rationale": "product identity; the pinned looking-glass layout prints it as the router version",
         "consumer_visible": True,
     },
     {
         "endpoint": "api/status", "path": "status.message", "kind": "value",
+        "classification": "intentional",
         "birdseye": "last show status line (Daemon is up and running)", "adapter": "rustbgpd AS<asn>",
         "rationale": "product identity; no pinned consumer reads status.message",
         "consumer_visible": False,
     },
     {
         "endpoint": "api/status", "path": "status.current_server", "kind": "extra",
+        "classification": "extension",
         "birdseye": "absent", "adapter": "current wall-clock timestamp",
         "rationale": "Birdwatcher status field; no pinned consumer reads it",
         "consumer_visible": False,
     },
     {
         "endpoint": ROW, "path": row("connection"), "kind": "value",
+        "classification": "intentional",
         "birdseye": "BIRD 2 info column with its padding (\"  Established   \")",
         "adapter": "\" Established\" (one leading space)",
         "rationale": "whitespace only; the bgp-summary modal and the diagnostics suite read connection but HTML collapses the padding",
@@ -229,42 +245,49 @@ RUNTIME_DIVERGENCES = [
     },
     {
         "endpoint": ROW, "path": row("hold_timer_now") + row("keepalive_now"), "kind": "missing",
+        "classification": "unsupported",
         "birdseye": "live countdowns from the BIRD timers", "adapter": "absent",
         "rationale": "live-hold-keepalive-countdowns is an unsupported entry; the daemon exposes negotiated values only, and the diagnostics suite guards them with isset",
         "consumer_visible": True,
     },
     {
         "endpoint": ROW, "path": row("preference"), "kind": "missing",
+        "classification": "intentional",
         "birdseye": "BIRD protocol preference (100)", "adapter": "absent",
         "rationale": "BIRD-internal route preference with no rustbgpd equivalent; shown by the bgp-summary modal when present",
         "consumer_visible": True,
     },
     {
         "endpoint": ROW, "path": row("input_filter") + row("output_filter"), "kind": "missing",
+        "classification": "intentional",
         "birdseye": "BIRD filter names (ACCEPT)", "adapter": "absent",
         "rationale": "rustbgpd policy chains have no BIRD filter identity; shown by the bgp-summary modal when present",
         "consumer_visible": True,
     },
     {
         "endpoint": ROW, "path": row("route_changes.*.*"), "kind": "missing",
+        "classification": "unsupported",
         "birdseye": "BIRD per-channel route change statistics", "adapter": "absent",
         "rationale": "the gRPC NeighborState carries no import/export update and withdraw counters; the bgp-summary modal renders the block when present",
         "consumer_visible": True,
     },
     {
         "endpoint": ROW, "path": row("routes.preferred"), "kind": "missing",
+        "classification": "intentional",
         "birdseye": "always 0 (the pinned parser's Routes: regex drops BIRD's preferred count)", "adapter": "absent",
         "rationale": "the oracle value is a parser constant, not a best count; the adapter omits rather than fabricate one",
         "consumer_visible": True,
     },
     {
         "endpoint": ROW, "path": row("routes.filtered"), "kind": "extra",
+        "classification": "extension",
         "birdseye": "absent", "adapter": "retained-reject count",
         "rationale": "Birdwatcher protocol field backing the filtered-route views; no pinned consumer reads it",
         "consumer_visible": False,
     },
     {
         "endpoint": ROW, "path": row("neighbor_capabilities.*"), "kind": "extra",
+        "classification": "extension",
         "birdseye": "absent (BIRD 2 prints a multi-line Neighbor capabilities block the pinned Neighbor caps: regex never matches)",
         "adapter": "negotiated capability list (refresh, AS4)",
         "rationale": "the adapter keeps the BIRD 1 shape; the bgp-summary modal renders the list when present",
@@ -272,12 +295,14 @@ RUNTIME_DIVERGENCES = [
     },
     {
         "endpoint": ROUTE_VIEWS, "path": "routes.*.bgp.as_path.*", "kind": "type",
+        "classification": "must_match",
         "birdseye": "strings", "adapter": "integers",
         "rationale": "Bird's Eye splits the BGP.as_path text; the adapter emits the numeric path; the pinned route views implode either",
         "consumer_visible": True,
     },
     {
         "endpoint": ROUTE_VIEWS, "path": "routes.*.bgp.local_pref", "kind": "type",
+        "classification": "must_match",
         "birdseye": "string \"100\" (BIRD's default local preference assigned at import)",
         "adapter": "number 0 (the received attribute, absent on an eBGP session)",
         "rationale": "type and meaning differ: BIRD prints a local preference for every route, the adapter prints the attribute that arrived",
@@ -285,36 +310,42 @@ RUNTIME_DIVERGENCES = [
     },
     {
         "endpoint": ROUTE_VIEWS, "path": "routes.*.bgp.med", "kind": "extra",
+        "classification": "must_match",
         "birdseye": "absent when the route carries no MED", "adapter": "0 when absent",
         "rationale": "the adapter always emits med; equal whenever the attribute is present",
         "consumer_visible": True,
     },
     {
         "endpoint": ROUTE_VIEWS, "path": "routes.*.interface", "kind": "value",
+        "classification": "intentional",
         "birdseye": "BIRD egress interface (eth0)", "adapter": "\"\"",
         "rationale": "a route server has no kernel interface to report; no pinned consumer reads it",
         "consumer_visible": False,
     },
     {
         "endpoint": ROUTE_VIEWS, "path": "routes.*.learnt_from", "kind": "value",
+        "classification": "intentional",
         "birdseye": "\"\" (BIRD prints from <address> only when it differs from the next hop)", "adapter": "peer address",
         "rationale": "no pinned consumer reads it",
         "consumer_visible": False,
     },
     {
         "endpoint": ROUTE_VIEWS, "path": "routes.*.metric", "kind": "value",
+        "classification": "intentional",
         "birdseye": "BIRD route preference (100)", "adapter": "0",
         "rationale": "BIRD-internal preference; the pinned route view prints metric",
         "consumer_visible": True,
     },
     {
         "endpoint": NON_TABLE_ROUTE_VIEWS, "path": "routes.*.primary", "kind": "value",
+        "classification": "must_match",
         "birdseye": "true for the best route in every view", "adapter": "false outside the table view",
         "rationale": "the adapter reports primary only where it reads the Loc-RIB; the pinned route view prints it",
         "consumer_visible": True,
     },
     {
         "endpoint": ROUTE_VIEWS, "path": "routes.*.type.*", "kind": "semantics",
+        "classification": "must_match",
         "birdseye": "[\"BGP\", \"univ\"] (BIRD 2 Type: BGP univ)", "adapter": "[\"BGP\", \"unicast\", \"univ\"] (BIRD 1 shape)",
         "rationale": "the adapter keeps the BIRD 1 type triple; the pinned route view prints the list",
         "consumer_visible": True,
@@ -322,6 +353,7 @@ RUNTIME_DIVERGENCES = [
     {
         "endpoint": ["api/route/{net}/protocol/{protocol}", "api/route/{net}/export/{protocol}"],
         "path": "routes", "kind": "semantics",
+        "classification": "must_match",
         "birdseye": "show route for: longest match, so a covering-only prefix or a host address returns the covering route",
         "adapter": "exact prefix match: the same inputs return []",
         "rationale": "IXP Manager passes listed exact networks; the exact-vs-longest choice is recorded, not hidden",
@@ -329,6 +361,7 @@ RUNTIME_DIVERGENCES = [
     },
     {
         "endpoint": "api/route/{net}/table/{table}", "path": "<response>", "kind": "semantics",
+        "classification": "must_match",
         "birdseye": "HTTP 200 with routes: [] for host-bit input (BIRD rejects the lookup)",
         "adapter": "HTTP 400, which the pinned consumer collapses to \"\"",
         "rationale": "network-aligned input only; IXP Manager renders an empty page either way",
@@ -336,6 +369,7 @@ RUNTIME_DIVERGENCES = [
     },
     {
         "endpoint": LC_ZWILD, "path": "routes", "kind": "semantics",
+        "classification": "must_match",
         "birdseye": "every route carrying (x, y, *) in the protocol's table",
         "adapter": "retained rejects tagged <daemon asn>:1101:* only; [] for any other (x, y)",
         "rationale": "the filtered-prefix view is the only pinned use; accepted routes are never scanned",
@@ -343,24 +377,28 @@ RUNTIME_DIVERGENCES = [
     },
     {
         "endpoint": LC_ZWILD, "path": "retention.*", "kind": "extra",
+        "classification": "extension",
         "birdseye": "absent", "adapter": "retention completeness metadata",
         "rationale": "filtered_retention_metadata block; no pinned consumer reads it",
         "consumer_visible": False,
     },
     {
         "endpoint": LC_ZWILD, "path": "api.max_routes", "kind": "value",
+        "classification": "extension",
         "birdseye": "MAX_ROUTES", "adapter": "retention capacity for the daemon (x, y)",
         "rationale": "filtered_retention_metadata.api_max_routes; the pinned layout prints api.max_routes",
         "consumer_visible": True,
     },
     {
         "endpoint": "api/symbols", "path": "symbols.protocol.*", "kind": "semantics",
+        "classification": "intentional",
         "birdseye": "every BIRD protocol, including device1", "adapter": "BGP sessions only",
         "rationale": "the daemon has no BIRD symbol table; the pinned route-search view lists symbols.protocol",
         "consumer_visible": True,
     },
     {
         "endpoint": "api/symbols", "path": "symbols.undefined.*", "kind": "missing",
+        "classification": "intentional",
         "birdseye": "BIRD 2.0.12 show symbols reports configuration keywords under an undefined class", "adapter": "absent",
         "rationale": "Bird's Eye passes every class through; no pinned consumer reads undefined",
         "consumer_visible": False,
@@ -675,10 +713,14 @@ def verify_populated(capture_dir: Path, web_php: Path) -> None:
             f"new={sorted(routes - pinned)} gone={sorted(pinned - routes)}"
         )
     journeys = len(docs["oracle"]["journeys"])
+    breakdown = ", ".join(
+        f"{sum(1 for e in RUNTIME_DIVERGENCES if e['classification'] == c)} {c}"
+        for c in CLASSIFICATIONS
+    )
     print(
         f"populated oracle proof: {journeys} journeys over {len(BIRDSEYE_ROUTES['in_scope'])} "
         f"endpoints diffed BIRD 2.0.12 + Bird's Eye against rustbgpd + adapter; "
-        f"{len(RUNTIME_DIVERGENCES)} allow-listed divergences, 0 unlisted, 0 stale; "
+        f"{len(RUNTIME_DIVERGENCES)} allow-listed divergences ({breakdown}), 0 unlisted, 0 stale; "
         f"{len(routes)} pinned routes/web.php routes accounted for",
         file=sys.stderr,
     )
@@ -690,6 +732,22 @@ def fail(message: str) -> None:
 
 root = Path(__file__).resolve().parent
 manifest = json.loads((root / "contract.json").read_text())
+open_must_match = []
+for entry in manifest.get("runtime_divergences", []):
+    classification = entry.get("classification")
+    if classification not in CLASSIFICATIONS:
+        fail(
+            f"runtime divergence entry endpoint={entry.get('endpoint')} "
+            f"path={entry.get('path')} carries missing or unknown classification "
+            f"{classification!r}; expected one of {list(CLASSIFICATIONS)}"
+        )
+    if classification == "must_match":
+        open_must_match.append(f"{entry.get('endpoint')} {entry.get('path')}")
+if manifest.get("runtime_compatibility") is not False and open_must_match:
+    fail(
+        f"runtime_compatibility cannot be promoted with {len(open_must_match)} "
+        "open must_match divergence(s): " + "; ".join(open_must_match)
+    )
 if manifest.get("runtime_compatibility") is not False:
     fail("contract oracle must not promote a runtime compatibility claim")
 if set(manifest.get("unsupported", [])) != UNSUPPORTED:

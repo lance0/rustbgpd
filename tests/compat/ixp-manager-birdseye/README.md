@@ -254,12 +254,41 @@ refresh path as today. Everything below the first line is implemented in
 above); only the flag inversion on the first line is pending, behind the
 decisions in the work list.
 
+### Divergence classification
+
+Every `runtime_divergences` entry in `contract.json` carries exactly one
+`classification`, mirrored in the `verify_capture.py` constant:
+
+- `must_match` — a real gap the compatibility flip is gated on; the adapter
+  or daemon must converge with the oracle, and the entry is then removed
+  rather than reclassified.
+- `intentional` — a deliberate, permanent, honest divergence (product
+  identity; no fabricated BIRD internals).
+- `unsupported` — a capability deliberately not provided (the countdown
+  timers, the route-change counters).
+- `extension` — the live side provides more than the oracle (extra fields),
+  harmless to the pinned consumers.
+
+The gate fails on a missing or unknown classification, naming the entry, and
+refuses any `runtime_compatibility` value other than `false` while any entry
+is classified `must_match`. The flag therefore flips only when zero
+`must_match` entries remain, and the post-flip claim language is "verified
+IXP Manager 7.4 Bird's Eye API compatibility with documented BIRD-internal
+divergences". The eight open `must_match` entries are the route-shape
+cluster (`bgp.as_path` element type, `bgp.local_pref`, `bgp.med` emitted
+when absent, `primary` outside the table view, the `type` triple), the two
+lookup-semantics entries (exact-versus-longest protocol/export match and the
+table lookup's HTTP 400 for host-bit input), and the ordinary-`(x, y)`
+lc-zwild scope.
+
 ### Work list
 
 Each line names the gap and the evidence that closes it. Items 1, 2, 6, 15,
-and 16 are done; the remaining items of 3 to 14 record what the oracle diff
-showed, with the observed JSON paths, so the remaining decisions are
-grounded. Every observed
+and 16 are done; items 3 to 14 record what the oracle diff showed, with the
+observed JSON paths, and now carry their decisions: `must_match` entries
+stay open and gate the flip, while `intentional`, `unsupported`, and
+`extension` entries are closed decisions that stay on the allow-list. Every
+observed
 divergence is an entry in `contract.json` `runtime_divergences`; the README
 predicted eight more that the diff did not show, listed after the table.
 
@@ -274,13 +303,15 @@ predicted eight more that the diff did not show, listed after the table.
    `verify_capture.py`; the gate fails on an unlisted difference and on a stale
    entry, and re-proves both on every run.
 3. `bgp.as_path` element type: observed on every route view,
-   `routes.*.bgp.as_path.*` strings upstream, integers from the adapter. Still
-   to decide: emit strings or keep the entry.
+   `routes.*.bgp.as_path.*` strings upstream, integers from the adapter.
+   Decided: classified `must_match`; the adapter converges on the oracle's
+   element type and the entry is then removed.
 4. `bgp.local_pref`: observed as a type and meaning difference,
    `routes.*.bgp.local_pref` is the string `"100"` upstream (BIRD's default
    local preference assigned at import, also for the route announced with
    LOCAL_PREF 200, which both route servers ignore on the eBGP session) and the
-   number `0` from the adapter (the received attribute). Still to decide.
+   number `0` from the adapter (the received attribute). Decided:
+   classified `must_match`.
 5. Route sentinels: observed `routes.*.interface` (`"eth0"` vs `""`),
    `routes.*.metric` (BIRD preference `100` vs `0`), `routes.*.primary`
    (`true` for the best route in every upstream view, `false` from the adapter
@@ -291,7 +322,10 @@ predicted eight more that the diff did not show, listed after the table.
    `via` line, which equals the adapter's next hop), `age` (both carry a
    receive timestamp), `from_protocol`. The sentinel values in
    `fixtures/birdseye-contract.json` come from `fake-birdc`'s BIRD 1 line
-   format, not from BIRD 2.
+   format, not from BIRD 2. Decided: `interface`, `learnt_from`, and `metric`
+   are `intentional` (BIRD-internal kernel and preference values a route
+   server cannot honestly fabricate); `primary` and the `type` triple are
+   `must_match`, as is the always-emitted `bgp.med`.
 6. Done. `bgp.aggregator` and `bgp.atomic_aggr`: the gRPC route detail
    carries the stored AGGREGATOR and ATOMIC_AGGREGATE path attributes
    (`Route.aggregator`, `Route.atomic_aggregate`) and the adapter renders
@@ -310,32 +344,49 @@ predicted eight more that the diff did not show, listed after the table.
    preferred count), so a per-peer best count would not close that entry.
    `description_short` is not observed (Bird's Eye emits it only with
    `PARSER_PROTOCOL_BGP_DESCRIPTION`). `import_limit` and `limit_action` are
-   absent on both sides without a configured limit.
+   absent on both sides without a configured limit. Decided:
+   `preference`, `input_filter`, `output_filter`, `routes.preferred`, and the
+   `connection` padding are `intentional` (BIRD filter and preference
+   identity, a parser constant, and whitespace); `route_changes.*.*` and the
+   countdowns are `unsupported`; `routes.filtered` and
+   `neighbor_capabilities` are `extension`.
 8. `status.version`, `status.message`, extra `status.current_server`:
    observed, allow-listed as product identity; `status.router_id`,
    `last_reboot`, `last_reconfig`, and `server_time` match after timestamp
-   normalization.
+   normalization. Decided: `status.version` and `status.message` are
+   `intentional`; the extra `status.current_server` is `extension`.
 9. `symbols`: observed `symbols.protocol` carrying BIRD's `device1` next to
    the BGP sessions, and a `symbols.undefined` class (BIRD 2.0.12 `show
    symbols` reports configuration keywords there) the adapter never emits.
+   Decided: both are `intentional`; the daemon has no BIRD symbol table to
+   reproduce.
 10. Exact versus longest match: observed on `route/{net}/protocol` and
     `route/{net}/export` (a covering-only prefix and a host address return the
     covering route upstream, `routes: []` from the adapter) and on
     `route/{net}/table` for host-bit input (HTTP 200 `routes: []` upstream
     because BIRD rejects the lookup, HTTP 400 from the adapter, which the
-    consumer collapses to `""`). Still to decide.
+    consumer collapses to `""`). Decided: both entries are `must_match`; the
+    lookups converge on the oracle behavior before the flip.
 11. `lc-zwild`: observed for a foreign `(x, y)` (the route carrying that large
     community upstream, `routes: []` from the adapter) plus the adapter's extra
     `retention.*` and `api.max_routes` as the retention capacity for the daemon
     `(x, y)`; both legs return `routes: []` for the daemon `(x, y)`.
+    Decided: the ordinary-`(x, y)` scope is `must_match`; `retention.*` and
+    `api.max_routes` are `extension`.
 12. 502 versus 503: not observed; the populated leg has no upstream-failure
-    case (the existing `bird_failure` case stays on the `fake-birdc` oracle).
+    case (the existing `bird_failure` case stays on the `fake-birdc`
+    oracle); no allow-list entry exists, so there is nothing to classify.
 13. Throttle and cache: not observed as a body difference; `ttl_mins` is
     absent on both sides because `CACHE_DRIVER=array` strips it upstream and
-    `from_cache` is `false` on both; the per-minute throttle is not hit by the
-    24 journeys.
+    `from_cache` is `false` on both; the per-minute throttle is not hit by
+    the 24 journeys. Settled as documentation: cache and throttle emulation
+    are out of scope — there is no cache to emulate (`from_cache` is honestly
+    `false`), and per-minute throttling belongs at a reverse proxy in front
+    of the adapter, not in it.
 14. `/api` base path: not a body difference; IXP Manager's `Router.api` base
     URL absorbs it (`.../api` for Bird's Eye, the adapter root for rustbgpd).
+    Settled as documentation: the base path is deployment configuration, not
+    a runtime divergence.
 15. Done. The in-scope and out-of-scope route sets are `birdseye_routes` in
     `contract.json`; `verify_capture.py --populated` parses `routes/web.php`
     at `birdseye_commit` and fails on any new or removed route.
@@ -348,7 +399,8 @@ predicted eight more that the diff did not show, listed after the table.
     unchanged — evidence: `cargo test --workspace` green.
 18. The flip itself: `runtime_compatibility: true`, the `verify_capture.py`
     inversion, this README's intro sentence, `docs/INTEROP.md`, and
-    `CHANGELOG.md` — last, only after 1–17.
+    `CHANGELOG.md` — last, only after 1–17 and only when zero `must_match`
+    entries remain; the gate refuses the flip while any are open.
 
 Normalization applied to both legs before the diff (recorded in each
 fixture's `provenance.normalization`): timestamps, the rustbgpd version,
