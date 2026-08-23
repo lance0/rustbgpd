@@ -2182,7 +2182,7 @@ impl PeerManager {
         result
     }
 
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "runtime policy application keeps ordered import and export transitions together"
     )]
