@@ -477,28 +477,6 @@ impl RibManager {
             (Afi::Ipv6 as u16, Safi::MplsVpn as u8, vpnv6),
         ]);
     }
-    pub(super) fn handle_query_received_routes(
-        &mut self,
-        peer: Option<IpAddr>,
-        reply: tokio::sync::oneshot::Sender<Vec<crate::route::Route>>,
-    ) {
-        let routes: Vec<_> = match peer {
-            Some(peer_addr) => self
-                .ribs
-                .get(&peer_addr)
-                .map(|rib| rib.iter().cloned().collect())
-                .unwrap_or_default(),
-            None => self
-                .ribs
-                .values()
-                .flat_map(|rib| rib.iter().cloned())
-                .collect(),
-        };
-
-        if reply.send(routes).is_err() {
-            warn!("query caller dropped before receiving response");
-        }
-    }
     /// One bounded page of a resumable route listing. The reply channel
     /// doubles as the cancellation token: an abandoned caller (dropped
     /// receiver — e.g. a canceled gRPC request whose page query was
@@ -756,24 +734,6 @@ impl RibManager {
     ) {
         if reply.send(self.peer_group.clone()).is_err() {
             warn!("query caller dropped before receiving peer-group map");
-        }
-    }
-    pub(super) fn handle_query_advertised_routes(
-        &mut self,
-        peer: IpAddr,
-        reply: tokio::sync::oneshot::Sender<Vec<crate::route::Route>>,
-    ) {
-        // A grouped member holds no per-peer unicast Adj-RIB-Out; its
-        // advertised set is synthesized: group table − own-sourced.
-        let routes: Vec<_> = self.grouped_advertised_routes(peer).unwrap_or_else(|| {
-            self.adj_ribs_out
-                .get(&peer)
-                .map(|rib| rib.iter().cloned().collect())
-                .unwrap_or_default()
-        });
-
-        if reply.send(routes).is_err() {
-            warn!("query caller dropped before receiving response");
         }
     }
     pub(super) fn handle_explain_advertised_route(

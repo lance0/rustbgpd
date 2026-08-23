@@ -65,14 +65,7 @@ async fn channel_full_marks_dirty_and_resyncs() {
     assert_eq!(update.announce.len(), 1);
 
     // Verify AdjRibOut has the route
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: target,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let advertised = reply_rx.await.unwrap();
+    let advertised = collect_advertised_routes(&tx, target).await;
     assert_eq!(advertised.len(), 1);
 
     // Send prefix2 — fills the channel (capacity 1)
@@ -114,14 +107,7 @@ async fn channel_full_marks_dirty_and_resyncs() {
     // After channel-full failure, AdjRibOut preserves last successfully
     // sent state: both prefix1 and prefix2 were sent before the failure.
     // The withdrawal of prefix1 was lost because the channel was full.
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: target,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let advertised = reply_rx.await.unwrap();
+    let advertised = collect_advertised_routes(&tx, target).await;
     assert_eq!(
         advertised.len(),
         2,
@@ -151,14 +137,7 @@ async fn channel_full_marks_dirty_and_resyncs() {
     );
 
     // After successful resync, AdjRibOut should match Loc-RIB
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: target,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let advertised = reply_rx.await.unwrap();
+    let advertised = collect_advertised_routes(&tx, target).await;
     assert_eq!(
         advertised.len(),
         1,
@@ -361,14 +340,7 @@ async fn initial_dump_failure_leaves_adjribout_empty() {
     .unwrap();
 
     // AdjRibOut should be empty since initial dump send failed
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: target,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let advertised = reply_rx.await.unwrap();
+    let advertised = collect_advertised_routes(&tx, target).await;
     assert!(
         advertised.is_empty(),
         "AdjRibOut should be empty when initial dump send fails"
@@ -437,14 +409,7 @@ async fn initial_dump_failure_resyncs_via_timer() {
     .unwrap();
 
     // Force serialization — initial dump should have failed (channel full)
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: target,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let advertised = reply_rx.await.unwrap();
+    let advertised = collect_advertised_routes(&tx, target).await;
     assert!(
         advertised.is_empty(),
         "AdjRibOut should be empty after failed initial dump"
@@ -468,14 +433,7 @@ async fn initial_dump_failure_resyncs_via_timer() {
     assert_eq!(resync.end_of_rib, ipv4_sendable());
 
     // AdjRibOut should now reflect Loc-RIB
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: target,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let advertised = reply_rx.await.unwrap();
+    let advertised = collect_advertised_routes(&tx, target).await;
     assert_eq!(
         advertised.len(),
         1,

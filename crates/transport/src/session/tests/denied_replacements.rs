@@ -1,5 +1,36 @@
 use super::*;
 
+async fn query_received_routes(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+) -> Vec<rustbgpd_rib::Route> {
+    let mut routes = Vec::new();
+    let mut after = None;
+    let mut expected_version = None;
+    loop {
+        let (reply, response) = oneshot::channel();
+        rib_tx
+            .send(RibUpdate::QueryRoutesPage {
+                scope: rustbgpd_rib::RouteQueryScope::Received { peer: Some(peer) },
+                filter: None,
+                after,
+                expected_version,
+                // Keep the migrated caller exercising continuation fencing.
+                page_size: 2,
+                reply,
+            })
+            .await
+            .unwrap();
+        let page = response.await.unwrap().unwrap();
+        expected_version = Some(page.version);
+        after = page.routes.last().map(rustbgpd_rib::route_query_key);
+        routes.extend(page.routes);
+        if !page.has_more {
+            return routes;
+        }
+    }
+}
+
 #[tokio::test]
 async fn denied_classic_replacement_withdraws_exact_route_and_remains_explainable() {
     use super::import_decision_cache::{CachedOutcome, ImportDecisionKey, LookupResult};
@@ -554,15 +585,7 @@ async fn denied_replacement_is_removed_before_eorr_and_cannot_survive_gr() {
     );
     session.process_update(accepted.clone()).await;
     assert_eq!(session.known_prefix_count(), 1);
-    let (reply_tx, reply_rx) = oneshot::channel();
-    rib_tx
-        .send(RibUpdate::QueryReceivedRoutes {
-            peer: Some(peer),
-            reply: reply_tx,
-        })
-        .await
-        .unwrap();
-    let initially_received = reply_rx.await.unwrap();
+    let initially_received = query_received_routes(&rib_tx, peer).await;
     assert_eq!(initially_received.len(), 1);
     assert_eq!(initially_received[0].prefix, Prefix::V4(denied_prefix));
 
@@ -606,16 +629,8 @@ async fn denied_replacement_is_removed_before_eorr_and_cannot_survive_gr() {
 
     // The denial itself must remove the old accepted route. Waiting for EoRR
     // would leave a policy-rejected route usable throughout a long refresh.
-    let (reply_tx, reply_rx) = oneshot::channel();
-    rib_tx
-        .send(RibUpdate::QueryReceivedRoutes {
-            peer: Some(peer),
-            reply: reply_tx,
-        })
-        .await
-        .unwrap();
     assert!(
-        reply_rx.await.unwrap().is_empty(),
+        query_received_routes(&rib_tx, peer).await.is_empty(),
         "denied route must be absent before EoRR closes the refresh window"
     );
 
@@ -635,15 +650,7 @@ async fn denied_replacement_is_removed_before_eorr_and_cannot_survive_gr() {
 
     // A subsequent GR teardown cannot mark the already removed route stale.
     session.execute_actions(vec![Action::SessionDown]).await;
-    let (reply_tx, reply_rx) = oneshot::channel();
-    rib_tx
-        .send(RibUpdate::QueryReceivedRoutes {
-            peer: Some(peer),
-            reply: reply_tx,
-        })
-        .await
-        .unwrap();
-    assert!(reply_rx.await.unwrap().is_empty());
+    assert!(query_received_routes(&rib_tx, peer).await.is_empty());
     drop(session);
     drop(rib_tx);
     manager_handle.await.unwrap();

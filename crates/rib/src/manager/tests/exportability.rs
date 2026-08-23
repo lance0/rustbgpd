@@ -1013,11 +1013,7 @@ async fn advertised_count(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> usize {
 }
 
 async fn advertised_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Vec<Route> {
-    let (reply, result) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes { peer, reply })
-        .await
-        .unwrap();
-    result.await.unwrap()
+    collect_advertised_routes(tx, peer).await
 }
 
 async fn update_group(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> String {

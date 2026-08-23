@@ -1140,14 +1140,8 @@ async fn no_advertise_orr_winner_is_withdrawn_without_runner_up_fallback() {
     assert_eq!(update.withdraw, vec![orr_prefix_key()]);
     assert!(out_rx.try_recv().is_err());
 
-    let (reply, response) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: client_b,
-        reply,
-    })
-    .await
-    .unwrap();
-    assert!(response.await.unwrap().is_empty());
+    let response = collect_advertised_routes(&tx, client_b).await;
+    assert!(response.is_empty());
 
     let explain = query_explain_advertised_route(&tx, client_b, Prefix::V4(orr_prefix())).await;
     assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
@@ -1198,14 +1192,8 @@ async fn no_advertise_orr_winner_is_withdrawn_without_runner_up_fallback() {
     assert!(update.announce.is_empty());
     assert_eq!(update.withdraw, vec![orr_prefix_key()]);
 
-    let (reply, response) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: client_b,
-        reply,
-    })
-    .await
-    .unwrap();
-    assert!(response.await.unwrap().is_empty());
+    let response = collect_advertised_routes(&tx, client_b).await;
+    assert!(response.is_empty());
 
     let explain = query_explain_advertised_route(&tx, client_b, Prefix::V4(orr_prefix())).await;
     assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);

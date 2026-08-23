@@ -1721,13 +1721,6 @@ pub enum RibUpdate {
         /// Completion reply.
         reply: oneshot::Sender<Result<(), RibCommandError>>,
     },
-    /// Query: return all received routes, optionally filtered by peer.
-    QueryReceivedRoutes {
-        /// Optional peer filter; `None` returns all peers.
-        peer: Option<IpAddr>,
-        /// Response channel.
-        reply: oneshot::Sender<Vec<Route>>,
-    },
     /// Query: one bounded page of a resumable route listing. Filtering
     /// and pagination run inside the RIB task with per-page bounded
     /// allocation. Continuations are mutation-fenced: a change in the
@@ -1777,13 +1770,6 @@ pub enum RibUpdate {
     QueryPeerGroups {
         /// Response channel.
         reply: oneshot::Sender<HashMap<IpAddr, String>>,
-    },
-    /// Query: return routes advertised to a specific peer.
-    QueryAdvertisedRoutes {
-        /// The target peer.
-        peer: IpAddr,
-        /// Response channel.
-        reply: oneshot::Sender<Vec<Route>>,
     },
     /// Query: explain why a particular route was selected as best for a prefix.
     ExplainBestPath {

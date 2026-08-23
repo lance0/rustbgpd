@@ -149,11 +149,25 @@ fn direct_page_at(
 }
 
 fn direct_advertised_snapshot(manager: &mut RibManager, peer: IpAddr) -> Vec<Route> {
-    let (reply, mut response) = oneshot::channel();
-    manager.handle_query_advertised_routes(peer, reply);
-    response
-        .try_recv()
-        .expect("advertised snapshot handler replies synchronously")
+    let mut routes = Vec::new();
+    let mut after = None;
+    let mut version = None;
+    loop {
+        let page = direct_page_at(
+            manager,
+            RouteQueryScope::Advertised { peer },
+            after,
+            version,
+            2,
+        )
+        .unwrap();
+        after = page.routes.last().map(route_query_key);
+        version = Some(page.version);
+        routes.extend(page.routes);
+        if !page.has_more {
+            return routes;
+        }
+    }
 }
 
 fn peer_up_direct(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<OutboundRouteUpdate> {
@@ -289,44 +303,29 @@ async fn seeded_manager() -> (
 async fn paged_union_matches_single_shot_across_page_sizes() {
     let (tx, target, _out_rx, handle) = seeded_manager().await;
 
-    // Single-shot references for every scope.
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryReceivedRoutes {
-        peer: None,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let full_received = reply_rx.await.unwrap();
-    assert_eq!(full_received.len(), 12);
-
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
-    let full_best = reply_rx.await.unwrap();
-    assert_eq!(full_best.len(), 4);
-
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: target,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let full_advertised = reply_rx.await.unwrap();
-    assert_eq!(full_advertised.len(), 4);
-
+    // Build the oracle from the fixture, independently of the paging path.
+    let full_received: Vec<_> = (1..=3u8)
+        .flat_map(|peer| {
+            (0..4u8).map(move |prefix| {
+                make_route(
+                    Ipv4Prefix::new(Ipv4Addr::new(192, 168, prefix, 0), 24),
+                    Ipv4Addr::new(10, 0, 0, peer),
+                )
+            })
+        })
+        .collect();
     let one_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryReceivedRoutes {
-        peer: Some(one_peer),
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let full_one_peer = reply_rx.await.unwrap();
-    assert_eq!(full_one_peer.len(), 4);
+    let full_one_peer: Vec<_> = full_received
+        .iter()
+        .filter(|route| route.peer == one_peer)
+        .cloned()
+        .collect();
+    let full_best: Vec<_> = full_received
+        .iter()
+        .filter(|route| route.peer == IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+        .cloned()
+        .collect();
+    let full_advertised = full_best.clone();
 
     for page_size in [1, 2, 3, 5, 100] {
         let scopes: [(RouteQueryScope, &[Route]); 4] = [

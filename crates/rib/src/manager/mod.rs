@@ -2097,9 +2097,6 @@ impl RibManager {
                 self.handle_withdraw_injected(prefix, path_id, reply);
                 self.retire_exact_export_rejections([ExactExportKey::Unicast(prefix, path_id)]);
             }
-            RibUpdate::QueryReceivedRoutes { peer, reply } => {
-                self.handle_query_received_routes(peer, reply);
-            }
             RibUpdate::QueryRoutesPage {
                 scope,
                 filter,
@@ -2127,9 +2124,6 @@ impl RibManager {
                 self.handle_query_fib_install_candidates(max_paths, relax, weighted, reply);
             }
             RibUpdate::QueryPeerGroups { reply } => self.handle_query_peer_groups(reply),
-            RibUpdate::QueryAdvertisedRoutes { peer, reply } => {
-                self.handle_query_advertised_routes(peer, reply);
-            }
             RibUpdate::ExplainBestPath {
                 prefix,
                 peer,

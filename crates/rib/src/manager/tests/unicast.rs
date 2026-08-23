@@ -575,11 +575,8 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
         );
         assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 0)]);
 
-        let (reply, response) = oneshot::channel();
-        tx.send(RibUpdate::QueryAdvertisedRoutes { peer: *peer, reply })
-            .await
-            .unwrap();
-        assert!(response.await.unwrap().is_empty());
+        let response = collect_advertised_routes(&tx, *peer).await;
+        assert!(response.is_empty());
 
         let explain = query_explain_advertised_route(&tx, *peer, Prefix::V4(prefix)).await;
         assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
@@ -650,11 +647,8 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
         }
         assert!(saw_withdraw, "policy replacement must withdraw from {peer}");
 
-        let (reply, response) = oneshot::channel();
-        tx.send(RibUpdate::QueryAdvertisedRoutes { peer: *peer, reply })
-            .await
-            .unwrap();
-        assert!(response.await.unwrap().is_empty());
+        let response = collect_advertised_routes(&tx, *peer).await;
+        assert!(response.is_empty());
 
         let explain = query_explain_advertised_route(&tx, *peer, Prefix::V4(prefix)).await;
         assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
@@ -1608,15 +1602,7 @@ async fn routes_received_and_queried() {
     .await
     .unwrap();
 
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryReceivedRoutes {
-        peer: Some(peer),
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-
-    let routes = reply_rx.await.unwrap();
+    let routes = query_received_routes(&tx, peer).await;
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].prefix, Prefix::V4(prefix));
 
@@ -1847,15 +1833,7 @@ async fn peer_down_clears_routes() {
     .await
     .unwrap();
 
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryReceivedRoutes {
-        peer: Some(peer),
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-
-    let routes = reply_rx.await.unwrap();
+    let routes = query_received_routes(&tx, peer).await;
     assert!(routes.is_empty());
 
     drop(tx);
@@ -1901,15 +1879,7 @@ async fn withdrawal_removes_route() {
     .await
     .unwrap();
 
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryReceivedRoutes {
-        peer: Some(peer),
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-
-    let routes = reply_rx.await.unwrap();
+    let routes = query_received_routes(&tx, peer).await;
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].prefix, Prefix::V4(prefix2));
 
@@ -1958,15 +1928,7 @@ async fn query_all_peers() {
     .await
     .unwrap();
 
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryReceivedRoutes {
-        peer: None,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-
-    let routes = reply_rx.await.unwrap();
+    let routes = collect_query_routes(&tx, RouteQueryScope::Received { peer: None }).await;
     assert_eq!(routes.len(), 2);
 
     drop(tx);
@@ -2924,15 +2886,7 @@ async fn peer_down_cleans_up_outbound() {
     .unwrap();
 
     // Query advertised routes — should be empty after PeerDown
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-
-    let routes = reply_rx.await.unwrap();
+    let routes = collect_advertised_routes(&tx, peer).await;
     assert!(routes.is_empty());
 
     drop(tx);
@@ -3176,14 +3130,7 @@ async fn distribute_changes_filters_unsendable_families() {
     assert!(update.withdraw.is_empty());
 
     // Adj-RIB-Out should only contain IPv4
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: target,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let advertised = reply_rx.await.unwrap();
+    let advertised = collect_advertised_routes(&tx, target).await;
     assert_eq!(advertised.len(), 1);
     assert_eq!(advertised[0].prefix, Prefix::V4(v4_prefix));
 
@@ -3268,14 +3215,7 @@ async fn send_initial_table_filters_unsendable_families() {
     assert!(update.withdraw.is_empty());
 
     // Adj-RIB-Out should only contain IPv4
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: target,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let advertised = reply_rx.await.unwrap();
+    let advertised = collect_advertised_routes(&tx, target).await;
     assert_eq!(advertised.len(), 1);
     assert_eq!(advertised[0].prefix, Prefix::V4(v4_prefix));
 

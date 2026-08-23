@@ -363,15 +363,7 @@ async fn query_advertised_routes() {
     .unwrap();
 
     // Wait for distribution
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer: target,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-
-    let routes = reply_rx.await.unwrap();
+    let routes = collect_advertised_routes(&tx, target).await;
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].prefix, Prefix::V4(prefix));
 
@@ -817,16 +809,7 @@ async fn explain_advertised_route_reports_policy_deny_without_mutation() {
     assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
     assert_eq!(explain.reasons[0].code, "policy_denied");
 
-    let advertised = {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        tx.send(RibUpdate::QueryAdvertisedRoutes {
-            peer: target,
-            reply: reply_tx,
-        })
-        .await
-        .unwrap();
-        reply_rx.await.unwrap()
-    };
+    let advertised = collect_advertised_routes(&tx, target).await;
     assert!(advertised.is_empty());
 
     drop(tx);
@@ -924,16 +907,7 @@ async fn export_as_path_regex_still_filters_through_distribution() {
     .await
     .unwrap();
 
-    let advertised = {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        tx.send(RibUpdate::QueryAdvertisedRoutes {
-            peer: target,
-            reply: reply_tx,
-        })
-        .await
-        .unwrap();
-        reply_rx.await.unwrap()
-    };
+    let advertised = collect_advertised_routes(&tx, target).await;
     let prefixes: Vec<_> = advertised.iter().map(|r| r.prefix).collect();
 
     assert!(
@@ -1190,14 +1164,7 @@ async fn peer_down_cleans_up_export_policy() {
     .unwrap();
 
     // Query to confirm loop processed PeerDown
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdvertisedRoutes {
-        peer,
-        reply: reply_tx,
-    })
-    .await
-    .unwrap();
-    let routes = reply_rx.await.unwrap();
+    let routes = collect_advertised_routes(&tx, peer).await;
     assert!(routes.is_empty());
 
     drop(tx);
