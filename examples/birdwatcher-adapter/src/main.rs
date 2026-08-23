@@ -2117,6 +2117,25 @@ fn route_to_birdwatcher_with_primary(
         String::new()
     };
 
+    let mut bgp = serde_json::json!({
+        "origin": origin,
+        "as_path": route.as_path,
+        "next_hop": route.next_hop,
+        "local_pref": route.local_pref,
+        "med": route.med,
+        "communities": communities,
+        "large_communities": large_communities,
+    });
+    // Bird's Eye prints AGGREGATOR as "<address> AS<asn>" and
+    // ATOMIC_AGGREGATE as a bare key (empty value), each only when the
+    // route carries the attribute; mirror that presence semantics.
+    if let Some(aggregator) = &route.aggregator {
+        bgp["aggregator"] = Value::String(format!("{} AS{}", aggregator.router_id, aggregator.asn));
+    }
+    if route.atomic_aggregate {
+        bgp["atomic_aggr"] = Value::String(String::new());
+    }
+
     serde_json::json!({
         "network": format!("{}/{}", route.prefix, route.prefix_length),
         "gateway": route.next_hop,
@@ -2127,15 +2146,7 @@ fn route_to_birdwatcher_with_primary(
         "type": ["BGP", "unicast", "univ"],
         "primary": primary,
         "learnt_from": route.peer_address,
-        "bgp": {
-            "origin": origin,
-            "as_path": route.as_path,
-            "next_hop": route.next_hop,
-            "local_pref": route.local_pref,
-            "med": route.med,
-            "communities": communities,
-            "large_communities": large_communities,
-        }
+        "bgp": bgp
     })
 }
 
@@ -2484,6 +2495,11 @@ mod tests {
             large_communities: vec!["65001:1:2".to_string()],
             // 2026-01-02 03:04:05 UTC
             received_at_epoch_seconds: 1_767_323_045,
+            aggregator: Some(proto::RouteAggregator {
+                asn: 64496,
+                router_id: "203.0.113.1".to_string(),
+            }),
+            atomic_aggregate: true,
             ..Default::default()
         };
         let json = route_to_birdwatcher(&route, &IdentityResolver::default());
@@ -2508,6 +2524,9 @@ mod tests {
             json["bgp"]["large_communities"],
             serde_json::json!([[65001, 1, 2]])
         );
+        // Bird's Eye shapes from the populated-oracle fixture.
+        assert_eq!(json["bgp"]["aggregator"], "203.0.113.1 AS64496");
+        assert_eq!(json["bgp"]["atomic_aggr"], "");
     }
 
     #[test]
@@ -2526,6 +2545,10 @@ mod tests {
         assert_eq!(json["from_protocol"], "bgp_2001_db8__1");
         assert_eq!(json["learnt_from"], "2001:db8::1");
         assert_eq!(json["bgp"]["origin"], "IGP");
+        // No AGGREGATOR / ATOMIC_AGGREGATE on the route -> keys absent,
+        // matching the oracle's presence semantics.
+        assert!(json["bgp"].get("aggregator").is_none());
+        assert!(json["bgp"].get("atomic_aggr").is_none());
     }
 
     /// Every canonical reason token maps to its pinned triplet, and an

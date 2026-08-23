@@ -9,6 +9,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `RibService` route detail now carries the RFC 4271 AGGREGATOR and
+  ATOMIC_AGGREGATE path attributes (`Route.aggregator` with AS number and
+  router ID, `Route.atomic_aggregate`), and the Bird's Eye adapter renders
+  them as `bgp.aggregator` / `bgp.atomic_aggr` exactly as the pinned
+  BIRD 2.0.12 + Bird's Eye oracle prints them, closing the two matching
+  runtime-divergence allow-list entries. (LAN-1232)
+
 ### Removed
 
 - **Breaking:** `RibService.WatchRoutes` and `RibService.WatchRouteEvents`

@@ -384,40 +384,6 @@
         "api/route/{net}/export/{protocol}",
         "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}"
       ],
-      "path": "routes.*.bgp.atomic_aggr",
-      "kind": "missing",
-      "birdseye": "\"\" (BIRD prints the key with no value)",
-      "adapter": "absent",
-      "rationale": "the adapter does not emit ATOMIC_AGGREGATE; the pinned route view prints it when present",
-      "consumer_visible": true
-    },
-    {
-      "endpoint": [
-        "api/routes/protocol/{protocol}",
-        "api/routes/table/{table}",
-        "api/routes/export/{protocol}",
-        "api/route/{net}/protocol/{protocol}",
-        "api/route/{net}/table/{table}",
-        "api/route/{net}/export/{protocol}",
-        "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}"
-      ],
-      "path": "routes.*.bgp.aggregator",
-      "kind": "missing",
-      "birdseye": "\"<address> AS<asn>\"",
-      "adapter": "absent",
-      "rationale": "the adapter does not emit AGGREGATOR; the pinned route view prints it when present",
-      "consumer_visible": true
-    },
-    {
-      "endpoint": [
-        "api/routes/protocol/{protocol}",
-        "api/routes/table/{table}",
-        "api/routes/export/{protocol}",
-        "api/route/{net}/protocol/{protocol}",
-        "api/route/{net}/table/{table}",
-        "api/route/{net}/export/{protocol}",
-        "api/routes/lc-zwild/protocol/{protocol}/{x}/{y}"
-      ],
       "path": "routes.*.interface",
       "kind": "value",
       "birdseye": "BIRD egress interface (eth0)",

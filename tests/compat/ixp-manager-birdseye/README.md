@@ -196,7 +196,7 @@ the adapter serves at `/` where Bird's Eye serves under `/api/` (IXP Manager's
 | `GET /api/symbols` | `symbols()` | `symbols` | served, divergent | only `protocol` and `routing table` classes; Bird's Eye emits every `show symbols` class |
 | `GET /api/symbols/tables` | — | — | not served | out of scope |
 | `GET /api/symbols/protocols` | — | — | not served | out of scope |
-| `GET /api/routes/protocol/{protocol}` | `routesForProtocol()` | `routes_protocol` | served, divergent | route shape: `bgp.as_path` integers (strings upstream), `bgp.local_pref` number (string upstream), `gateway` = next hop, `interface` `""`, `metric` `0`, `primary` `false`, `learnt_from` = peer address, `age` from receive time, no `atomic_aggr`/`aggregator` |
+| `GET /api/routes/protocol/{protocol}` | `routesForProtocol()` | `routes_protocol` | served, divergent | route shape: `bgp.as_path` integers (strings upstream), `bgp.local_pref` number (string upstream), `gateway` = next hop, `interface` `""`, `metric` `0`, `primary` `false`, `learnt_from` = peer address, `age` from receive time |
 | `GET /api/routes/table/{table}` | `routesForTable()` | `routes_table` | served, divergent | route shape as above but `primary` is real; table is a validated alias over one global Loc-RIB, not a BIRD table |
 | `GET /api/routes/export/{protocol}` | `routesForExport()` | `routes_export` | served, divergent | route shape as above |
 | `GET /api/routes/count/protocol/{protocol}` | — | — | not served | out of scope (`total_count` exists on the first RIB page, so it is a cheap add if scope grows) |
@@ -256,9 +256,10 @@ decisions in the work list.
 
 ### Work list
 
-Each line names the gap and the evidence that closes it. Items 1, 2, 15, and
-16 are done; items 3 to 14 record what the oracle diff showed, with the
-observed JSON paths, so the remaining decisions are grounded. Every observed
+Each line names the gap and the evidence that closes it. Items 1, 2, 6, 15,
+and 16 are done; the remaining items of 3 to 14 record what the oracle diff
+showed, with the observed JSON paths, so the remaining decisions are
+grounded. Every observed
 divergence is an entry in `contract.json` `runtime_divergences`; the README
 predicted eight more that the diff did not show, listed after the table.
 
@@ -291,11 +292,13 @@ predicted eight more that the diff did not show, listed after the table.
    receive timestamp), `from_protocol`. The sentinel values in
    `fixtures/birdseye-contract.json` come from `fake-birdc`'s BIRD 1 line
    format, not from BIRD 2.
-6. `bgp.aggregator` and `bgp.atomic_aggr`: observed missing from the adapter
-   (`routes.*.bgp.aggregator` is `"203.0.113.1 AS64496"` upstream and
-   `routes.*.bgp.atomic_aggr` is `""`, the key BIRD prints with no value).
-   rustbgpd accepts and re-exports both attributes; the adapter's route view
-   does not render them. Still to decide: emit them or keep the entries.
+6. Done. `bgp.aggregator` and `bgp.atomic_aggr`: the gRPC route detail
+   carries the stored AGGREGATOR and ATOMIC_AGGREGATE path attributes
+   (`Route.aggregator`, `Route.atomic_aggregate`) and the adapter renders
+   them with the oracle's shapes and presence semantics
+   (`"203.0.113.1 AS64496"`; `""`, the key BIRD prints with no value; both
+   only when the route carries the attribute). The two allow-list entries
+   are removed.
 7. Protocol row: observed missing `preference`, `input_filter`,
    `output_filter`, `route_changes.*.*`, `routes.preferred`, `hold_timer_now`,
    `keepalive_now`; observed extra `routes.filtered` and
