@@ -781,8 +781,9 @@ def check(root: Path) -> list[str]:
         if gated != (selector in NETNS_VRF_SELECTORS):
             errors.append(f"kernel-dataplane.yml:netns {selector} VRF gate drifted")
     receipt_seams = (
-        "NETNS_SELECTOR_RECEIPT: ${{ runner.temp }}/netns-selector-receipt.log",
-        'run: : > "$NETNS_SELECTOR_RECEIPT"',
+        'receipt="$RUNNER_TEMP/netns-selector-receipt.log"',
+        ': > "$receipt"',
+        "printf 'NETNS_SELECTOR_RECEIPT=%s\\n' \"$receipt\" >> \"$GITHUB_ENV\"",
         "if: always()\n        env:\n          VRF_AVAILABLE:",
         "python3 scripts/check_netns_selector_receipt.py",
         '--vrf-available "${VRF_AVAILABLE:-false}"',
