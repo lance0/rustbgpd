@@ -829,6 +829,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
             .arg("--arouteserver-reject-communities-file")
             .arg(&ars_artifact)
             .args(["--max-routes", "2"])
+            .args(["--max-lpm-scan-routes", "3"])
             .stdout(Stdio::null())
             .stderr(Stdio::from(
                 std::fs::File::create(&adapter_stderr).expect("adapter stderr log"),

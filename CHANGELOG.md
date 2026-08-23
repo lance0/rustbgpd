@@ -32,6 +32,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The Bird's Eye adapter now family-scopes and separately bounds protocol and
+  export longest-match fallback scans, refusing incomplete views with HTTP 403
+  instead of evaluating partial results. (LAN-1263)
+
 - Unrecognized optional non-transitive BGP path attributes are now ignored on
   receipt and omitted by defensive encoding instead of being retained and
   re-advertised; unknown optional transitive attributes remain preserved with

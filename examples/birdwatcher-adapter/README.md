@@ -45,6 +45,7 @@ Flags (also settable via env):
 | `--protocol-alias-file PATH` | `BIRDWATCHER_ADAPTER_PROTOCOL_ALIAS_FILE` | (unset) | File-backed aliases; mutually exclusive with `--protocol-alias` |
 | `--arouteserver-reject-communities-file PATH` | `BIRDWATCHER_ADAPTER_AROUTESERVER_REJECT_COMMUNITIES_FILE` | (unset) | Startup-only artifact emitted by `rs-config-render` for effective `tag_and_reject` peers |
 | `--max-routes` | `BIRDWATCHER_ADAPTER_MAX_ROUTES` | `1000` | Maximum RIB-derived route-array response size; must be non-zero |
+| `--max-lpm-scan-routes` | `BIRDWATCHER_ADAPTER_MAX_LPM_SCAN_ROUTES` | `10000` | Maximum route rows scanned by a protocol/export longest-match fallback; must be non-zero |
 
 The command-line token path takes precedence over the environment variable.
 The adapter reads it once at startup, trims trailing whitespace, and rejects
@@ -172,9 +173,13 @@ use `/route/<prefix>%2F<mask>/protocol/{id}`,
 The protocol and export views are longest-match, like Bird's Eye's
 `show route for`: they request an exact prefix on every gRPC page, retain
 every Add-Path candidate in daemon order, and when the queried prefix has no
-entry they answer with the view's most-specific covering prefix (a linear
-scan over that member's paged view — there is no covering-prefix RPC filter);
-`--max-routes` applies only to the routes of the one matched prefix.
+entry they answer with the view's most-specific covering prefix. Exact and
+fallback pages are scoped to the queried IPv4 or IPv6 unicast family. The
+fallback is a linear scan because there is no covering-prefix RPC filter;
+`--max-lpm-scan-routes` bounds that work separately, while `--max-routes`
+applies only to the routes returned for the one matched prefix. If the scan
+budget is exhausted before the peer view is complete, the request returns a
+sanitized HTTP 403 and never evaluates the partial view.
 The table view instead performs one bounded longest-prefix lookup and atomically
 returns the installed winner first followed by every same-prefix alternative;
 it applies `--max-routes` before rendering. Syntactically valid input with
