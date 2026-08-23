@@ -907,13 +907,17 @@ Be honest about where rustbgpd isn't the right tool:
   [cookbook/ixp-manager-route-server.md](cookbook/ixp-manager-route-server.md)),
   the `birdwatcher-adapter` looking-glass binary, ARouteServer-shaped
   reject-reason tagging, and `rs-config-render` for member data that lives in
-  arouteserver's `general.yml`/`clients.yml`. The boundary is pinned rather
-  than claimed: `runtime_compatibility` in
+  arouteserver's `general.yml`/`clients.yml`. The looking-glass claim is
+  pinned, not open-ended: `runtime_compatibility` in
   [`tests/compat/ixp-manager-birdseye/contract.json`](../tests/compat/ixp-manager-birdseye/contract.json)
-  is still `false`, and the adapter covers only the enumerated IXP Manager
-  v7.4 journeys — the route-count endpoints, the table-less
-  `api/route/{net}` lookup, and the whole `lg/` looking-glass surface are out
-  of scope, and arbitrary Alice-LG clients are not a target. No external
+  is `true` — verified IXP Manager 7.4 Bird's Eye API compatibility with
+  documented BIRD-internal divergences, covering the Bird's Eye surface IXP
+  Manager v7.4.0 consumes, driven by the pinned oracle. The route-count
+  endpoints, the table-less `api/route/{net}` lookup, and the whole `lg/`
+  looking-glass surface are out of scope, and arbitrary Alice-LG clients are
+  not a target; protocol aliases are read at sidecar startup or from a file
+  on explicit `SIGHUP`, so adding a member requires republishing the alias
+  file and signaling or restarting the sidecar. No external
   production pilot has run. Treat it as a shadow-pilot path
   ([cookbook/route-server-shadow-pilot.md](cookbook/route-server-shadow-pilot.md)),
   not a swap-in.

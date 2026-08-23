@@ -1,8 +1,11 @@
 # Pinned IXP Manager / Bird's Eye contract oracle
 
 This harness captures the external HTTP contract consumed by IXP Manager's
-`IXP\Services\LookingGlass\BirdsEye` class. It is an upstream oracle, not a
-claim that rustbgpd or its example Birdwatcher adapter is Bird's Eye compatible.
+`IXP\Services\LookingGlass\BirdsEye` class. It is the gate behind the
+project's claim of verified IXP Manager 7.4 Bird's Eye API compatibility with
+documented BIRD-internal divergences: the claim covers exactly the Bird's Eye
+API surface IXP Manager v7.4.0 consumes, driven by the pinned oracle below,
+and the divergence allow-list in `contract.json` is the documented boundary.
 
 The gate clones and verifies these exact upstream commits, installs both
 projects from their committed Composer lockfiles, starts the real Bird's Eye
@@ -44,10 +47,12 @@ Add-Path alternative in the same response, plus retained-reject sourcing,
 reserved-community scrubbing, reason fallback, filtering, and source alias
 direction. `api.version` remains
 `rustbgpd <package-version>` product
-identity, not Bird's Eye semantic-version compatibility. No full compatibility
-claim is made and `runtime_compatibility` remains false; the exit criterion
-that would flip it is in
-[What would flip `runtime_compatibility`](#what-would-flip-runtime_compatibility).
+identity, not Bird's Eye semantic-version compatibility. `contract.json` says
+`runtime_compatibility: true`: verified IXP Manager 7.4 Bird's Eye API
+compatibility with documented BIRD-internal divergences, and nothing more.
+The criterion the flip was held to and the enforcement that keeps the claim
+honest are in
+[What flipped `runtime_compatibility`](#what-flipped-runtime_compatibility).
 
 The same live adapter also backs the pinned Nagios journey. IXP Manager's
 `birdseye-daemons` and `birdseye-bgp-sessions` generators filter routers on
@@ -79,8 +84,8 @@ without retaining raw config. Both strict v2 captures render and pass
 unusable-path cases. Exact row
 objects, raw repeated-render bytes, v2 completion counts,
 receipt-last publication, and v3 refusal are load-bearing. This proves only the
-bounded manual export subset; it does not make the adapter runtime-compatible
-or claim a generic IXP Manager policy engine.
+bounded manual export subset; the runtime claim rests on the populated oracle
+leg, and no generic IXP Manager policy engine is claimed.
 
 Both real v2 candidates also contain exact numeric-order Birdwatcher aliases
 at `birdwatcher-protocol-aliases.conf`; the v1 candidate pins its own exact
@@ -168,13 +173,13 @@ The manual-export matrix separately records the 256-per-client, 4096-total-row,
 and 4096 compiled receive-cell caps. Bounded pinned-v7.4 overlap is supported;
 the full IXP Manager UI-filter policy engine remains unsupported.
 
-## What would flip `runtime_compatibility`
+## What flipped `runtime_compatibility`
 
-`contract.json` says `"runtime_compatibility": false` and `verify_capture.py`
-fails the gate if that value is anything else. That is the correct claim
-today, but a standing `false` with no written definition of `true` cannot be
-worked toward, so this section is the exit criterion. Nothing here changes the
-flag; the flag flips only when the enforcement below is green. Alice-LG is not
+`contract.json` says `"runtime_compatibility": true`: verified IXP Manager 7.4
+Bird's Eye API compatibility with documented BIRD-internal divergences. This
+section is the criterion the flip was held to and the enforcement that keeps
+the claim honest in both directions; the work list at the end records how
+each gap closed. Alice-LG is not
 a party to it: its source backends are `birdwatcher`, `gobgp`, and `openbgpd`
 (upstream `pkg/sources`, unpinned), it has no Bird's Eye source, and the
 adapter's Alice-LG surface is a separate Birdwatcher contract.
@@ -238,13 +243,13 @@ to `""`).
 
 ### Enforcement shape
 
-Today `verify_capture.py` asserts exactly one thing about the flag:
-`manifest.get("runtime_compatibility") is not False` fails with
-`contract oracle must not promote a runtime compatibility claim`. No Rust test
-reads the flag. After the flip the same file asserts:
+`verify_capture.py` asserts, on every invocation (no Rust test reads the
+flag):
 
 ```text
-runtime_compatibility is not True            -> fail (claim withdrawn without a decision)
+runtime_compatibility not in (true, false)   -> fail (the flag is an explicit decision)
+runtime_compatibility is true
+  while any must_match entry is open         -> fail (claim refused, naming the entries)
 for case in SCOPE (11 endpoints):
     oracle = <case>.body from BIRD 2.0.12 + Bird's Eye 2.1.0
     live   = <case>.body from rustbgpd + birdwatcher-adapter, same announcements
@@ -258,10 +263,12 @@ route set parsed from pinned routes/web.php != SCOPE | OUT_OF_SCOPE
 
 Each `fail(...)` is the existing fail-closed style; the oracle and live
 captures are fixtures under `fixtures/` with the same `CAPTURE_FIXTURES=1`
-refresh path as today. Everything below the first line is implemented in
+refresh path as today. The scope loop and route-set check are implemented in
 `verify_capture.py --populated` (see the populated oracle leg paragraph
-above); only the flag inversion on the first line is pending, behind the
-decisions in the work list.
+above); the flag and `must_match` checks run before any mode, so a re-opened
+`must_match` entry re-blocks the flag until it converges and is removed.
+`false` stays a valid value: the claim can be withdrawn without weakening
+the gate.
 
 ### Divergence classification
 
@@ -279,11 +286,11 @@ Every `runtime_divergences` entry in `contract.json` carries exactly one
   harmless to the pinned consumers.
 
 The gate fails on a missing or unknown classification, naming the entry, and
-refuses any `runtime_compatibility` value other than `false` while any entry
-is classified `must_match`. The flag therefore flips only when zero
-`must_match` entries remain, and the post-flip claim language is "verified
-IXP Manager 7.4 Bird's Eye API compatibility with documented BIRD-internal
-divergences". Zero `must_match` entries remain open: the ordinary-`(x, y)`
+refuses `runtime_compatibility: true` while any entry is classified
+`must_match`. The flag therefore flipped only when zero `must_match` entries
+remained, and the claim language is "verified IXP Manager 7.4 Bird's Eye API
+compatibility with documented BIRD-internal divergences" — a ceiling no
+document exceeds. Zero `must_match` entries remain open: the ordinary-`(x, y)`
 lc-zwild scope, the route-shape cluster (`bgp.as_path` element type,
 `bgp.local_pref`, `bgp.med` emitted when absent, `primary` outside the table
 view, the `type` triple), and the two lookup-semantics entries
@@ -294,7 +301,7 @@ removed.
 ### Work list
 
 Each line names the gap and the evidence that closes it. Items 1 to 6, 10 to
-12, 15, and 16 are done; items 3 to 14 record what the oracle diff showed,
+12, 15, 16, and 18 are done; items 3 to 14 record what the oracle diff showed,
 with the observed JSON paths, and carry their decisions: `must_match` entries
 stay open and gate the flip, while `intentional`, `unsupported`, and
 `extension` entries are closed decisions that stay on the allow-list. Every
@@ -427,10 +434,13 @@ predicted eight more that the diff did not show, listed after the table.
     counts (`symbols()`, `protocolTable(`, `routesForTable(` exactly once
     each); the populated leg uses its own `oracle-consumer.php`, so the pin is
     unchanged — evidence: `cargo test --workspace` green.
-18. The flip itself: `runtime_compatibility: true`, the `verify_capture.py`
-    inversion, this README's intro sentence, `docs/INTEROP.md`, and
-    `CHANGELOG.md` — last, only after 1–17 and only when zero `must_match`
-    entries remain; the gate refuses the flip while any are open.
+18. Done. The flip itself: `runtime_compatibility: true`;
+    `verify_capture.py` now requires an explicit boolean and keeps the
+    `must_match` refusal as the permanent gate; this README, `docs/INTEROP.md`,
+    `docs/USE_CASES.md`, `docs/ixp-evaluation.md`, both cookbook recipes, the
+    adapter README, `ROADMAP.md`, and `CHANGELOG.md` carry the flipped claim
+    language. Landed after 1–17 with zero `must_match` entries open; the gate
+    re-blocks the flag if one re-opens.
 
 Normalization applied to both legs before the diff (recorded in each
 fixture's `provenance.normalization`): timestamps, the rustbgpd version,
