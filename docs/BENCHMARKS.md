@@ -32,7 +32,8 @@ production UPDATE parser and IPv6 MP-BGP Add-Path coverage: 2026-07-26;
 v0.61.0 release-tip real-daemon and single-revision absolute baseline:
 2026-07-26; RIB-ops prefix-fixture audit bounding the above-65,536 rows:
 2026-08; v0.64.0 release-tag bgperf2 spot-check (rustbgpd only, same host):
-2026-08-08.
+2026-08-08; v0.66.0 release-tag bgperf2 spot-check (rustbgpd only, same
+host): 2026-08-23.
 
 | Field | Value |
 |-------|-------|
@@ -1386,6 +1387,16 @@ original shapes against the release tag (image built from the public
 8.17 / 8.24 / 12.03 s and peak raw cgroup usage 37.7 / 46.7 / 203.1 MiB for
 10p × 1k / 2p × 10k / 2p × 100k. Single run, rustbgpd only; the
 four-daemon medians above remain the published comparison.*
+
+*v0.66.0 spot-check (2026-08-23, same host): a single run of the three
+original shapes against the release tag (image built from the public
+`v0.66.0` tag, commit `5873768d`) again reproduced the rustbgpd column
+within its bands — totals 8.29 / 8.31 / 12.40 s and peak container memory
+29.6 / 38.2 / 207.1 MB for 10p × 1k / 2p × 10k / 2p × 100k. Rebuilt
+support images (BIRD tester `2.19.0+branch.master`, GoBGP monitor per the
+raw rows) differ from the pinned campaign's testers, so only the rustbgpd
+totals are compared. Single run, rustbgpd only; the four-daemon medians
+above remain the published comparison.*
 
 > **rustbgpd is last on memory of all four daemons at 100p × 1k — its own
 > target deployment.** 212.0 MiB against GoBGP's 193.5 MiB (1.10×), FRR's
