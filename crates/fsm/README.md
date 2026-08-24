@@ -69,12 +69,13 @@ Upgrade both crates together so the re-exported types unify.
 `rustbgpd-fsm 0.4.1` keeps its public API backward-compatible with 0.4.0. It
 adds `Session::negotiated_shared` while preserving the existing
 `Session::negotiated` signature. Its `^0.17.1` wire requirement admits
-`rustbgpd-wire` 0.17.2, whose **decode acceptance changed**: ATOMIC_AGGREGATE
-(type 6) now decodes to `PathAttribute::AtomicAggregate` instead of
-`PathAttribute::Unknown`, so an UPDATE carrying it is no longer
-treat-as-withdrawn by unrecognized-well-known validation — see the "0.17.2
-compatibility note" in the `rustbgpd-wire` README, since the FSM surfaces wire
-decode results to its callers.
+`rustbgpd-wire` 0.17.2, whose **decode acceptance changed**: a valid zero-length
+ATOMIC_AGGREGATE (type 6) now decodes to `PathAttribute::AtomicAggregate`
+instead of `PathAttribute::Unknown`, so an UPDATE carrying that valid form is
+no longer treat-as-withdrawn by unrecognized-well-known validation. A non-zero-
+length type 6 remains an attribute-length error. See the "0.17.2 compatibility
+note" in the `rustbgpd-wire` README, since the FSM surfaces wire decode results
+to its callers.
 
 ## Key types
 
