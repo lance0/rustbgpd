@@ -658,6 +658,29 @@ hold_tme = 90
 }
 
 #[test]
+fn unknown_field_in_peer_group_rejected() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.edge]
+hold_tme = 90
+"#;
+    let err = parse(toml_str).unwrap_err();
+    let ConfigError::Parse(parse_err) = err else {
+        panic!("peer-group unknown field must be rejected by the TOML schema, got {err:?}");
+    };
+    let message = parse_err.to_string();
+    assert!(message.contains("unknown field `hold_tme`"), "{message}");
+}
+
+#[test]
 fn local_ipv6_nexthop_loopback_rejected() {
     let err = parse(&neighbor_with_nexthop("::1")).unwrap_err();
     assert!(matches!(err, ConfigError::InvalidLocalIpv6Nexthop { .. }));
