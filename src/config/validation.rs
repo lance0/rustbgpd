@@ -119,8 +119,11 @@ struct EffectivePeerModes {
 }
 
 impl EffectivePeerModes {
-    fn for_neighbor(neighbor: &Neighbor, group: Option<&PeerGroupConfig>) -> Self {
-        Self {
+    fn try_for_neighbor(
+        neighbor: &Neighbor,
+        group: Option<&PeerGroupConfig>,
+    ) -> Result<Self, String> {
+        Ok(Self {
             remote_asn: neighbor.remote_asn,
             route_reflector_client: neighbor
                 .route_reflector_client
@@ -130,7 +133,8 @@ impl EffectivePeerModes {
                 .orr_vantage
                 .as_deref()
                 .or_else(|| group.and_then(|g| g.orr_vantage.as_deref()))
-                .and_then(|raw| parse_orr_vantage(raw).ok()),
+                .map(parse_orr_vantage)
+                .transpose()?,
             route_server_client: neighbor
                 .route_server_client
                 .or_else(|| group.and_then(|g| g.route_server_client))
@@ -151,7 +155,7 @@ impl EffectivePeerModes {
                 .strict_role
                 .or_else(|| group.and_then(|g| g.strict_role))
                 .unwrap_or(false),
-        }
+        })
     }
 
     fn for_dynamic(remote_asn: u32, group: &PeerGroupConfig) -> Self {
@@ -745,21 +749,12 @@ impl Config {
                 return Err(ConfigError::InvalidSlowPeerThreshold { value });
             }
 
-            // Reject bad `orr_vantage` syntax before the mode checks, which
-            // parse leniently (`.ok()`) and would otherwise treat garbage as
-            // "no vantage configured" and skip the RR/iBGP requirements.
-            if let Some(raw) = neighbor
-                .orr_vantage
-                .as_deref()
-                .or_else(|| group.and_then(|g| g.orr_vantage.as_deref()))
-                && let Err(reason) = parse_orr_vantage(raw)
-            {
-                return Err(ConfigError::InvalidOrrVantage {
-                    reason: format!("neighbor {}: {reason}", neighbor.address),
-                });
-            }
-
-            let modes = EffectivePeerModes::for_neighbor(neighbor, group);
+            let modes =
+                EffectivePeerModes::try_for_neighbor(neighbor, group).map_err(|reason| {
+                    ConfigError::InvalidOrrVantage {
+                        reason: format!("neighbor {}: {reason}", neighbor.address),
+                    }
+                })?;
             validate_effective_peer_modes(
                 modes,
                 self.global.asn,
