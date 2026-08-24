@@ -88,7 +88,7 @@ grpc_list_evpn() {
 # ---------------------------------------------------------------------------
 
 frr_type5_routes() {
-    docker exec "$FRR" vtysh -c "show bgp l2vpn evpn route type prefix" 2>/dev/null || true
+    docker exec "$FRR" vtysh -c "show bgp l2vpn evpn route type prefix" 2>/dev/null
 }
 
 # Poll FRR's EVPN RIB until the injected prefix is present / absent.
@@ -96,9 +96,12 @@ wait_frr_type5_present() {
     local timeout=${1:-30}
     local prefix=${2:-$PREFIX}
     local attempts=$((timeout / 2))
+    local routes
     for _ in $(seq 1 "$attempts"); do
-        if frr_type5_routes | grep -q "$prefix"; then
-            return 0
+        if routes=$(frr_type5_routes); then
+            if printf '%s\n' "$routes" | grep "$prefix" >/dev/null; then
+                return 0
+            fi
         fi
         sleep 2
     done
@@ -109,9 +112,12 @@ wait_frr_type5_absent() {
     local timeout=${1:-20}
     local prefix=${2:-$PREFIX}
     local attempts=$((timeout / 2))
+    local routes
     for _ in $(seq 1 "$attempts"); do
-        if ! frr_type5_routes | grep -q "$prefix"; then
-            return 0
+        if routes=$(frr_type5_routes); then
+            if ! printf '%s\n' "$routes" | grep "$prefix" >/dev/null; then
+                return 0
+            fi
         fi
         sleep 2
     done
