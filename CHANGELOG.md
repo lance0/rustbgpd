@@ -93,6 +93,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   re-advertised; unknown optional transitive attributes remain preserved with
   the Partial bit. (LAN-1265)
 
+- The six IANA-assigned path attribute types whose payloads rustbgpd does not
+  parse (Tunnel Encapsulation, AIGP, PE Distinguisher Labels, BGPsec_Path,
+  BGP Prefix-SID, and ATTR_SET) are now checked against their registered
+  attribute class on receipt. Flags that conflict with the registered class
+  are handled under RFC 7606 instead of being silently ignored or retained
+  opaquely: AIGP carrying Transitive is discarded per RFC 7311 §3.2, and
+  every other class conflict is treat-as-withdraw. Correctly classed
+  attributes keep their existing treatment, ignored when optional
+  non-transitive and retained opaquely with the Partial bit when optional
+  transitive. (LAN-1236)
+
 - `rs-config-render recover` now reports the recovery steps that completed
   before a later step failed while preserving the non-zero exit status and
   error output; steps that were not reached are not reported.
