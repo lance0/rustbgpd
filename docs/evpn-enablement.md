@@ -935,7 +935,9 @@ did not take on:
 - VTEP mode (landed across Gates 7a/7b/7b+1/7b+2/7c)
 - DF election execution (landed in Gate 8; enforcement alpha in Gate 8b)
 - Symmetric Interface-less IRB semantics (Gate 9, v0.18.0 — end-to-end shipped)
-- Auto-derivation of Route Targets
+- Auto-derivation of Route Targets (landed later as
+  `auto_derive_route_target` for both `[[evpn_instances]]` and
+  `[[evpn_ip_vrfs]]`; see [CONFIGURATION.md](CONFIGURATION.md))
 - PBB-EVPN (RFC 7623)
 - Multicast EVPN / MVPN (including RFC 9251 IGMP/MLD proxy routes)
 - MPLS encapsulation
@@ -943,7 +945,9 @@ did not take on:
   [CONFIGURATION.md — Match conditions](CONFIGURATION.md#match-conditions))
 - `match_vni` / `match_mac` policy clauses (Phase 1.5 nicety, not
   blocking)
-- EVPN MRT dump
+- EVPN MRT dump (landed later; snapshots encode L2VPN/EVPN routes as
+  `RIB_GENERIC` subtype 6; see
+  [`crates/mrt/README.md`](../crates/mrt/README.md))
 - EVPN BMP export (wire records already pass through, but no typed
   extraction in BMP message generation)
 
