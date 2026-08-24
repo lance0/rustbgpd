@@ -434,7 +434,7 @@ docker exec "$PE1" sh -c 'kill -HUP "$(cat /var/run/rustbgpd.pid)"' \
 
 reload_applied=0
 for _ in $(seq 1 30); do
-    if pe_ctl "$PE1" evpn instances 2>/dev/null | grep -qE "vni=200( |$)"; then
+    if pe_ctl "$PE1" evpn instances 2>/dev/null | grep -E "vni=200( |$)" >/dev/null; then
         reload_applied=1
         break
     fi
