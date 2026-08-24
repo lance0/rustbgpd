@@ -85,7 +85,7 @@ wait_frr_rd_present() {
     local table
     for _ in $(seq 1 "$attempts"); do
         if table=$(frr_evpn_table) \
-            && printf '%s\n' "$table" | grep "$TENANT_RD" >/dev/null; then
+            && printf '%s\n' "$table" | grep -F "$TENANT_RD" >/dev/null; then
             return 0
         fi
         sleep 2
@@ -99,7 +99,7 @@ wait_frr_rd_absent() {
     local table
     for _ in $(seq 1 "$attempts"); do
         if table=$(frr_evpn_table) \
-            && ! printf '%s\n' "$table" | grep "$TENANT_RD" >/dev/null; then
+            && ! printf '%s\n' "$table" | grep -F "$TENANT_RD" >/dev/null; then
             return 0
         fi
         sleep 2
