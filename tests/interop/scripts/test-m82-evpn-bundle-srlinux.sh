@@ -182,7 +182,7 @@ test_sessions() {
     wait_srl_established || exit 1
     log "Waiting for the sink session..."
     for i in $(seq 1 45); do
-        if gobgp_sink neighbor 2>/dev/null | grep -F "10.0.1.1" | grep -qi establ; then
+        if gobgp_sink neighbor 2>/dev/null | grep -F "10.0.1.1" | grep -i establ >/dev/null; then
             ok "sink session established (attempt $i)"
             return 0
         fi
