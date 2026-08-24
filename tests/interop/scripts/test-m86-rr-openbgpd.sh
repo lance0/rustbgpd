@@ -78,7 +78,7 @@ wait_obgp_established() {
     log "Waiting for $label BGP session to reach Established..."
     for i in $(seq 1 45); do
         if docker exec "$container" bgpctl show neighbor "$rr_addr" 2>/dev/null \
-            | grep -q "BGP state = Established"; then
+            | grep "BGP state = Established" >/dev/null; then
             ok "$label session Established (attempt $i)"
             return 0
         fi
