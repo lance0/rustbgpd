@@ -184,6 +184,18 @@ later registry additions land without a breaking release.
 
 ## Usage
 
+Add the codec and its buffer type as direct dependencies:
+
+```toml
+[dependencies]
+rustbgpd-wire = "0.17.2"
+bytes = "1"
+```
+
+`decode_message` accepts `&mut bytes::Bytes`. The `bytes` crate is a public
+dependency of `rustbgpd-wire`, but it is not re-exported, so downstream
+projects must declare their own direct `bytes` dependency.
+
 Decode a single BGP message from raw bytes:
 
 For a deterministic interoperability check, run the standalone captured UPDATE
@@ -360,8 +372,12 @@ The enums that track IANA/RFC registries — `Capability`, `PathAttribute`,
 `Afi`/`Safi`, `Message`/`MessageType`, `NotificationCode`,
 `RouteRefreshSubtype`, the EVPN route/key enums, `BgpLsNlriType`, the
 FlowSpec component/action enums, the ORF type/entries enums, the PMSI
-tunnel enums, `BgpRole`, `AspaValidation`, and the decode/encode error
-enums — are `#[non_exhaustive]`. Match them with a wildcard arm:
+tunnel enums, `BgpRole`, and `AspaValidation` are `#[non_exhaustive]`.
+The five public error enums are also non-exhaustive: `DecodeError`,
+`EncodeError`, `RouteDistinguisherParseError`,
+`ShutdownCommunicationError`, and `BgpCodecError` (available with the
+`tokio-codec` feature). Downstream matches on any of these enums must include
+a wildcard arm:
 
 ```rust
 use rustbgpd_wire::Capability;
