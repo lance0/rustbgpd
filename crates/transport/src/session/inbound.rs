@@ -1519,6 +1519,8 @@ impl PeerSession {
             // MP EoR: UPDATE with only an empty MP_UNREACH_NLRI (IPv6 unicast, FlowSpec, etc.)
             if parsed.attributes.len() == 1
                 && let Some(PathAttribute::MpUnreachNlri(mp)) = parsed.attributes.first()
+                && self.negotiated_families().contains(&(mp.afi, mp.safi))
+                && (mp.afi, mp.safi) != (Afi::Ipv4, Safi::Unicast)
                 && mp.withdrawn.is_empty()
                 && mp.flowspec_withdrawn.is_empty()
                 && mp.evpn_withdrawn.is_empty()

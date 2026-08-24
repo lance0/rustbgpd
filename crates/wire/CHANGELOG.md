@@ -5,6 +5,13 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- **MP framing and flags:** Visible truncated MP_REACH_NLRI /
+  MP_UNREACH_NLRI attributes now return Optional Attribute Error with the exact
+  received bytes, while incomplete ordinary attributes retain RFC 7606
+  treat-as-withdraw. Partial is now rejected on both optional non-transitive MP
+  attributes, including Extended Length framing. Complete undersized MP values
+  return Attribute Length Error; other intact MP decode failures return
+  Optional Attribute Error with exact attribute data.
 - **Additive typed Partial preservation:** Added
   `PathAttribute::CommunitiesPartial`, `ExtendedCommunitiesPartial`,
   `PmsiTunnelPartial`, and `LargeCommunitiesPartial` while retaining every

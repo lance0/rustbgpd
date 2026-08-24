@@ -925,7 +925,7 @@ pub fn decode_path_attributes_counted(
     let mut attrs = Vec::new();
     let mut bgpls_discarded = 0_u32;
     while !buf.is_empty() {
-        let (flags, type_code, value) = split_next_attribute(&mut buf)?;
+        let (flags, type_code, value) = split_next_attribute_mp_aware(&mut buf)?;
         if is_unknown_optional_non_transitive(flags, type_code) {
             continue;
         }
@@ -996,6 +996,32 @@ fn split_next_attribute<'a>(buf: &mut &'a [u8]) -> Result<(u8, u8, &'a [u8]), De
     *buf = &rest[value_len..];
     Ok((flags, type_code, value))
 }
+/// Split one path attribute while preserving the RFC 7606 §5.3 exception for
+/// a visible but incompletely framed MP attribute. The low-level splitter
+/// leaves `buf` unchanged on error, so the NOTIFICATION data is exactly the
+/// received bytes within Total Path Attribute Length.
+fn split_next_attribute_mp_aware<'a>(
+    buf: &mut &'a [u8],
+) -> Result<(u8, u8, &'a [u8]), DecodeError> {
+    let received = *buf;
+    split_next_attribute(buf).map_err(|error| {
+        let type_code = if received.len() >= 2 { received[1] } else { 0 };
+        if matches!(
+            type_code,
+            attr_type::MP_REACH_NLRI | attr_type::MP_UNREACH_NLRI
+        ) {
+            DecodeError::UpdateAttributeError {
+                subcode: update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+                data: received.to_vec(),
+                detail: format!(
+                    "attribute type {type_code} framing prevents MP NLRI parsing: {error}"
+                ),
+            }
+        } else {
+            error
+        }
+    })
+}
 /// A malformed path attribute recovered during [`decode_path_attributes_revised`].
 ///
 /// Carries enough context for the session layer to log the malformation and
@@ -1039,7 +1065,9 @@ pub struct RevisedAttributeDecode {
 ///   discards the rest; duplicate `MP_REACH_NLRI`/`MP_UNREACH_NLRI` is fatal.
 /// - §4: an attribute whose length overruns the section is treat-as-withdraw
 ///   (the NLRI field was already located from the UPDATE section lengths),
-///   and attribute parsing stops.
+///   and attribute parsing stops. A visible `MP_REACH_NLRI` or
+///   `MP_UNREACH_NLRI` framing failure is instead fatal because its embedded
+///   NLRI cannot be parsed (§5.3).
 /// - §7.6/§7.7: `ATOMIC_AGGREGATE` with a non-zero length and `AGGREGATOR`
 ///   with a length other than 6/8 (by the 4-octet-AS negotiation) are
 ///   attribute-discard. The legacy decoder surfaces both length errors as
@@ -1072,15 +1100,25 @@ pub fn decode_path_attributes_revised(
     let mut malformed = Vec::new();
     let mut seen = [false; 256];
     while !buf.is_empty() {
-        let (flags, type_code, value) = match split_next_attribute(&mut buf) {
+        let (flags, type_code, value) = match split_next_attribute_mp_aware(&mut buf) {
             Ok(split) => split,
             Err(error) => {
+                let type_code = if buf.len() >= 2 { buf[1] } else { 0 };
+                if matches!(
+                    &error,
+                    DecodeError::UpdateAttributeError {
+                        subcode: update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+                        ..
+                    }
+                ) {
+                    return Err(error);
+                }
                 // RFC 7606 §4: framing overrun/underrun inside the attribute
                 // section is treat-as-withdraw — the section boundaries (and
                 // thus the NLRI field) were already fixed by the UPDATE
                 // length fields. Nothing after this point can be parsed.
                 malformed.push(MalformedAttribute {
-                    type_code: if buf.len() >= 2 { buf[1] } else { 0 },
+                    type_code,
                     disposition: ErrorDisposition::TreatAsWithdraw,
                     error,
                 });
@@ -1532,12 +1570,16 @@ fn decode_attribute_value(
 ) -> Result<PathAttribute, DecodeError> {
     // Validate the required flags for known attribute types (RFC 4271 §6.3).
     // RFC 4271 §4.3 requires Partial=0 for optional non-transitive
-    // attributes. Existing typed attributes predate strict Partial checking;
-    // include it for newly recognized Attribute 29 without broadening their
-    // error surface in this change.
+    // attributes. Enforce that bit for MP_REACH_NLRI / MP_UNREACH_NLRI,
+    // whose incorrect flags are fatal under RFC 7606 §5.3, and for the
+    // already-strict BGP-LS Attribute. Do not broaden the legacy flag surface
+    // of unrelated typed attributes here.
     let flags_mask = attr_flags::OPTIONAL
         | attr_flags::TRANSITIVE
-        | if type_code == attr_type::BGP_LS {
+        | if matches!(
+            type_code,
+            attr_type::MP_REACH_NLRI | attr_type::MP_UNREACH_NLRI | attr_type::BGP_LS
+        ) {
             attr_flags::PARTIAL
         } else {
             0
@@ -1758,9 +1800,37 @@ fn decode_attribute_value(
                 Ok(PathAttribute::LargeCommunities(communities))
             }
         }
-        attr_type::MP_REACH_NLRI => decode_mp_reach_nlri(value, add_path_families, bgpls_discarded),
+        attr_type::MP_REACH_NLRI => {
+            if value.len() < 5 {
+                return Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: format!("MP_REACH_NLRI length {} (minimum 5)", value.len()),
+                });
+            }
+            decode_mp_reach_nlri(value, add_path_families, bgpls_discarded).map_err(|error| {
+                DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: error.to_string(),
+                }
+            })
+        }
         attr_type::MP_UNREACH_NLRI => {
-            decode_mp_unreach_nlri(value, add_path_families, bgpls_discarded)
+            if value.len() < 3 {
+                return Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: format!("MP_UNREACH_NLRI length {} (minimum 3)", value.len()),
+                });
+            }
+            decode_mp_unreach_nlri(value, add_path_families, bgpls_discarded).map_err(|error| {
+                DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: error.to_string(),
+                }
+            })
         }
         attr_type::PMSI_TUNNEL => {
             let pmsi = crate::pmsi::PmsiTunnel::decode(value)?;
@@ -3208,6 +3278,26 @@ fn encode_as_path(as_path: &AsPath, buf: &mut Vec<u8>, four_octet_as: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn assert_mp_optional_attribute_error(
+        error: DecodeError,
+        expected_data: &[u8],
+        detail_fragment: &str,
+    ) {
+        let DecodeError::UpdateAttributeError {
+            subcode,
+            data,
+            detail,
+        } = error
+        else {
+            panic!("expected Optional Attribute Error, got: {error:?}");
+        };
+        assert_eq!(subcode, update_subcode::OPTIONAL_ATTRIBUTE_ERROR);
+        assert_eq!(data, expected_data);
+        assert!(
+            detail.contains(detail_fragment),
+            "expected {detail_fragment:?} in: {detail}"
+        );
+    }
     fn oversized_flowspec_rule() -> crate::flowspec::FlowSpecRule {
         use crate::flowspec::{FlowSpecComponent, FlowSpecRule, NumericMatch};
         let mut ops: Vec<NumericMatch> = (0..2_200)
@@ -3359,15 +3449,7 @@ mod tests {
         attr.extend(std::iter::repeat_n(0u8, 32)); // 32 NH bytes
         attr.push(0); // Reserved
         let err = decode_path_attributes(&attr, true, &[]).unwrap_err();
-        match err {
-            DecodeError::MalformedField { detail, .. } => {
-                assert!(
-                    detail.contains("L2VPN next-hop length 32"),
-                    "expected L2VPN NH-Len rejection, got: {detail}"
-                );
-            }
-            other => panic!("expected MalformedField, got: {other:?}"),
-        }
+        assert_mp_optional_attribute_error(err, &attr, "L2VPN next-hop length 32");
     }
     #[test]
     fn mp_unreach_evpn_attribute_roundtrip() {
@@ -3487,15 +3569,7 @@ mod tests {
         encode_path_attributes(&[attr], &mut buf, true, false).unwrap();
         let err = decode_path_attributes(&buf, true, &[(Afi::BgpLs, Safi::BgpLs)])
             .expect_err("BGP-LS Add-Path must fail closed");
-        match err {
-            DecodeError::MalformedField { detail, .. } => {
-                assert!(
-                    detail.contains("BGP-LS Add-Path is not supported"),
-                    "unexpected detail: {detail}"
-                );
-            }
-            other => panic!("expected MalformedField, got: {other:?}"),
-        }
+        assert_mp_optional_attribute_error(err, &buf, "BGP-LS Add-Path is not supported");
     }
     #[test]
     fn mp_reach_bgpls_vpn_rejects_nonzero_next_hop_rd() {
@@ -3516,15 +3590,7 @@ mod tests {
         attr.extend_from_slice(&value);
         let err = decode_path_attributes(&attr, true, &[])
             .expect_err("BGP-LS VPN next-hop RD must be all zero");
-        match err {
-            DecodeError::MalformedField { detail, .. } => {
-                assert!(
-                    detail.contains("next-hop RD must be all zero"),
-                    "unexpected detail: {detail}"
-                );
-            }
-            other => panic!("expected MalformedField, got: {other:?}"),
-        }
+        assert_mp_optional_attribute_error(err, &attr, "next-hop RD must be all zero");
     }
     #[test]
     fn mp_reach_bgpls_rejects_8_byte_next_hop() {
@@ -3544,13 +3610,7 @@ mod tests {
         attr.extend_from_slice(&value);
         let err = decode_path_attributes(&attr, true, &[])
             .expect_err("BGP-LS next-hop must be 4, 16, or 32 bytes");
-        match err {
-            DecodeError::MalformedField { detail, .. } => assert_eq!(
-                detail,
-                "MP_REACH_NLRI BGP-LS next-hop length 8 (expected 4, 16, or 32)"
-            ),
-            other => panic!("expected MalformedField, got: {other:?}"),
-        }
+        assert_mp_optional_attribute_error(err, &attr, "BGP-LS next-hop length 8");
     }
     fn vpn_rd() -> crate::evpn::RouteDistinguisher {
         crate::evpn::RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1])
@@ -3796,15 +3856,7 @@ mod tests {
         attr.extend_from_slice(&value);
         let err =
             decode_path_attributes(&attr, true, &[]).expect_err("VPN next-hop RD must be all zero");
-        match err {
-            DecodeError::MalformedField { detail, .. } => {
-                assert!(
-                    detail.contains("next-hop RD must be all zero"),
-                    "unexpected detail: {detail}"
-                );
-            }
-            other => panic!("expected MalformedField, got: {other:?}"),
-        }
+        assert_mp_optional_attribute_error(err, &attr, "next-hop RD must be all zero");
     }
     #[test]
     fn mp_reach_vpn_rejects_16_byte_next_hop() {
@@ -3823,13 +3875,7 @@ mod tests {
         attr.extend_from_slice(&value);
         let err = decode_path_attributes(&attr, true, &[])
             .expect_err("VPN next-hop must be 12, 24, or 48 bytes");
-        match err {
-            DecodeError::MalformedField { detail, .. } => assert_eq!(
-                detail,
-                "MP_REACH_NLRI VPN next-hop length 16 (expected 12, 24, or 48)"
-            ),
-            other => panic!("expected MalformedField, got: {other:?}"),
-        }
+        assert_mp_optional_attribute_error(err, &attr, "VPN next-hop length 16");
     }
     #[test]
     fn mp_reach_vpnv6_48_byte_next_hop_roundtrip() {
@@ -3928,15 +3974,7 @@ mod tests {
         encode_path_attributes(&[attr], &mut buf, true, false).unwrap();
         let err = decode_path_attributes(&buf, true, &[(Afi::Ipv4, Safi::RtConstrain)])
             .expect_err("RTC Add-Path must fail closed");
-        match err {
-            DecodeError::MalformedField { detail, .. } => {
-                assert!(
-                    detail.contains("RTC Add-Path is not supported"),
-                    "unexpected detail: {detail}"
-                );
-            }
-            other => panic!("expected MalformedField, got: {other:?}"),
-        }
+        assert_mp_optional_attribute_error(err, &buf, "RTC Add-Path is not supported");
     }
     #[test]
     fn mp_reach_ipv6_rtc_stays_rejected() {
@@ -3953,7 +3991,7 @@ mod tests {
         attr.extend_from_slice(&value);
         let err =
             decode_path_attributes(&attr, true, &[]).expect_err("(IPv6, RTC) must stay rejected");
-        assert!(matches!(err, DecodeError::MalformedField { .. }));
+        assert_mp_optional_attribute_error(err, &attr, "unsupported AFI/SAFI 2/132");
     }
     // ---- EVPN extended community typed accessors (RFC 7432 / 8365 / 9135) ---
     #[test]
@@ -5048,6 +5086,53 @@ mod tests {
         assert_eq!(attr.flags(), attr_flags::OPTIONAL);
     }
     #[test]
+    fn mp_low_flag_bits_reserved_byte_and_extended_length_canonicalize() {
+        let mut reach_value = vec![0, 2, Safi::Unicast as u8, 16];
+        reach_value.extend_from_slice(&Ipv6Addr::LOCALHOST.octets());
+        reach_value.push(0x7f); // RFC 4760 Reserved field is ignored on receive.
+        let mut reach_wire = vec![
+            attr_flags::OPTIONAL | 0x0f,
+            attr_type::MP_REACH_NLRI,
+            u8::try_from(reach_value.len()).unwrap(),
+        ];
+        reach_wire.extend_from_slice(&reach_value);
+        let reach = decode_path_attributes(&reach_wire, true, &[]).unwrap();
+        let mut canonical_reach = Vec::new();
+        encode_path_attributes(&reach, &mut canonical_reach, true, false).unwrap();
+        reach_value[20] = 0;
+        let mut expected_reach = vec![
+            attr_flags::OPTIONAL,
+            attr_type::MP_REACH_NLRI,
+            u8::try_from(reach_value.len()).unwrap(),
+        ];
+        expected_reach.extend_from_slice(&reach_value);
+        assert_eq!(canonical_reach, expected_reach);
+
+        let unreach_wire = [
+            attr_flags::OPTIONAL | attr_flags::EXTENDED_LENGTH | 0x0f,
+            attr_type::MP_UNREACH_NLRI,
+            0,
+            3,
+            0,
+            2,
+            Safi::Unicast as u8,
+        ];
+        let unreach = decode_path_attributes(&unreach_wire, true, &[]).unwrap();
+        let mut canonical_unreach = Vec::new();
+        encode_path_attributes(&unreach, &mut canonical_unreach, true, false).unwrap();
+        assert_eq!(
+            canonical_unreach,
+            [
+                attr_flags::OPTIONAL,
+                attr_type::MP_UNREACH_NLRI,
+                3,
+                0,
+                2,
+                Safi::Unicast as u8,
+            ]
+        );
+    }
+    #[test]
     fn mp_reach_nlri_empty_nlri() {
         use crate::capability::{Afi, Safi};
         let mp = MpReachNlri {
@@ -5072,7 +5157,7 @@ mod tests {
     #[test]
     fn mp_reach_nlri_bad_flags_rejected() {
         // MP_REACH_NLRI (type 14) with flags 0x40 (Transitive only)
-        // — should be 0xC0 (Optional+Transitive)
+        // — should be 0x80 (Optional, non-transitive).
         // Build minimal valid value: AFI=2, SAFI=1, NH-Len=16, NH=::1, Reserved=0
         let mut value = Vec::new();
         value.extend_from_slice(&2u16.to_be_bytes()); // AFI IPv6
@@ -5316,15 +5401,7 @@ mod tests {
         let mut attr = vec![0x80, 14, u8::try_from(value.len()).unwrap()];
         attr.extend_from_slice(value);
         let err = decode_path_attributes(&attr, true, &[]).unwrap_err();
-        match err {
-            DecodeError::MalformedField { detail, .. } => {
-                assert!(
-                    detail.contains("FlowSpec next-hop length"),
-                    "expected FlowSpec NH-Len rejection, got: {detail}"
-                );
-            }
-            other => panic!("expected MalformedField, got {other:?}"),
-        }
+        assert_mp_optional_attribute_error(err, &attr, "FlowSpec next-hop length");
     }
     /// RFC 8955 §4.2 makes a `FlowSpec` NLRI carrying an unknown component
     /// type malformed, and §10 defers to RFC 7606. Because the offending
@@ -5345,13 +5422,7 @@ mod tests {
         let mut attr = vec![0x80, 14, u8::try_from(value.len()).unwrap()];
         attr.extend_from_slice(value);
         let err = decode_path_attributes_revised(&attr, true, false, &[]).unwrap_err();
-        match err {
-            DecodeError::MalformedField { detail, .. } => assert!(
-                detail.contains("unknown FlowSpec component type 14"),
-                "expected unknown-component rejection, got: {detail}"
-            ),
-            other => panic!("expected MalformedField, got {other:?}"),
-        }
+        assert_mp_optional_attribute_error(err, &attr, "unknown FlowSpec component type 14");
     }
 
     #[test]
@@ -6983,7 +7054,174 @@ mod tests {
             attr_type::MP_REACH_NLRI,
             &[0, 1],
         ));
-        assert!(decode_path_attributes_revised(&buf, true, false, &[]).is_err());
+        let error = decode_path_attributes_revised(&buf, true, false, &[]).unwrap_err();
+        let DecodeError::UpdateAttributeError { subcode, data, .. } = error else {
+            panic!("expected MP attribute length error");
+        };
+        assert_eq!(subcode, update_subcode::ATTRIBUTE_LENGTH_ERROR);
+        assert_eq!(data, attr_bytes(attr_flags::OPTIONAL, 14, &[0, 1]));
+    }
+    #[test]
+    fn revised_mp_complete_value_errors_use_exact_notification_contract() {
+        let mut bad_reach_nlri = vec![0, 2, Safi::Unicast as u8, 16];
+        bad_reach_nlri.extend_from_slice(&Ipv6Addr::LOCALHOST.octets());
+        bad_reach_nlri.extend([0, 129]);
+        let cases = [
+            (
+                "MP_UNREACH minimum length",
+                attr_type::MP_UNREACH_NLRI,
+                &[0, 2][..],
+                update_subcode::ATTRIBUTE_LENGTH_ERROR,
+            ),
+            (
+                "MP_REACH next-hop mismatch",
+                attr_type::MP_REACH_NLRI,
+                &[0, 2, Safi::Unicast as u8, 4, 192, 0, 2, 1, 0][..],
+                update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+            ),
+            (
+                "MP_REACH embedded NLRI",
+                attr_type::MP_REACH_NLRI,
+                bad_reach_nlri.as_slice(),
+                update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+            ),
+            (
+                "MP_UNREACH embedded NLRI",
+                attr_type::MP_UNREACH_NLRI,
+                &[0, 2, Safi::Unicast as u8, 129][..],
+                update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+            ),
+        ];
+        for (name, type_code, value, expected_subcode) in cases {
+            let wire = attr_bytes(attr_flags::OPTIONAL, type_code, value);
+            let error = decode_path_attributes_revised(&wire, true, false, &[]).unwrap_err();
+            let DecodeError::UpdateAttributeError { subcode, data, .. } = error else {
+                panic!("{name}: expected UPDATE attribute error");
+            };
+            assert_eq!(subcode, expected_subcode, "{name}");
+            assert_eq!(data, wire, "{name}: exact complete attribute bytes");
+        }
+    }
+    #[test]
+    fn revised_mp_flags_matrix_is_session_reset_with_exact_error_data() {
+        let cases = [
+            (
+                attr_type::MP_REACH_NLRI,
+                &[0, 1, Safi::FlowSpec as u8, 0, 0][..],
+            ),
+            (attr_type::MP_UNREACH_NLRI, &[0, 2, Safi::Unicast as u8][..]),
+        ];
+        for (type_code, value) in cases {
+            for bad_flags in [
+                0,
+                attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                attr_flags::OPTIONAL | attr_flags::PARTIAL,
+            ] {
+                for extended in [false, true] {
+                    let flags = bad_flags
+                        | if extended {
+                            attr_flags::EXTENDED_LENGTH
+                        } else {
+                            0
+                        };
+                    let mut wire = vec![flags, type_code];
+                    if extended {
+                        wire.extend_from_slice(&u16::try_from(value.len()).unwrap().to_be_bytes());
+                    } else {
+                        wire.push(u8::try_from(value.len()).unwrap());
+                    }
+                    wire.extend_from_slice(value);
+
+                    let error =
+                        decode_path_attributes_revised(&wire, true, false, &[]).unwrap_err();
+                    let DecodeError::UpdateAttributeError { subcode, data, .. } = error else {
+                        panic!("type {type_code}, flags {flags:#04x}: expected flags error");
+                    };
+                    assert_eq!(
+                        subcode,
+                        update_subcode::ATTRIBUTE_FLAGS_ERROR,
+                        "type {type_code}, flags {flags:#04x}"
+                    );
+                    assert_eq!(
+                        data, wire,
+                        "type {type_code}, flags {flags:#04x}: exact attribute error data"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn revised_mp_attribute_framing_failures_are_optional_attribute_errors() {
+        for type_code in [attr_type::MP_REACH_NLRI, attr_type::MP_UNREACH_NLRI] {
+            let cases = [
+                vec![attr_flags::OPTIONAL, type_code],
+                vec![attr_flags::OPTIONAL, type_code, 5, 0, 2, 1],
+                vec![
+                    attr_flags::OPTIONAL | attr_flags::EXTENDED_LENGTH,
+                    type_code,
+                    0,
+                ],
+                vec![
+                    attr_flags::OPTIONAL | attr_flags::EXTENDED_LENGTH,
+                    type_code,
+                    0,
+                    5,
+                    0,
+                    2,
+                    1,
+                ],
+            ];
+            for wire in cases {
+                let error = decode_path_attributes_revised(&wire, true, false, &[]).unwrap_err();
+                let DecodeError::UpdateAttributeError { subcode, data, .. } = error else {
+                    panic!("type {type_code}: expected Optional Attribute Error");
+                };
+                assert_eq!(
+                    subcode,
+                    update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+                    "type {type_code}"
+                );
+                assert_eq!(
+                    data, wire,
+                    "type {type_code}: NOTIFICATION data must contain exactly the received bytes"
+                );
+            }
+        }
+    }
+    #[test]
+    fn strict_mp_attribute_framing_failures_are_optional_attribute_errors() {
+        for type_code in [attr_type::MP_REACH_NLRI, attr_type::MP_UNREACH_NLRI] {
+            let cases = [
+                vec![attr_flags::OPTIONAL, type_code, 5, 0, 2, 1],
+                vec![
+                    attr_flags::OPTIONAL | attr_flags::EXTENDED_LENGTH,
+                    type_code,
+                    0,
+                    5,
+                    0,
+                    2,
+                    1,
+                ],
+            ];
+            for wire in cases {
+                let error = decode_path_attributes(&wire, true, &[]).unwrap_err();
+                let DecodeError::UpdateAttributeError { subcode, data, .. } = error else {
+                    panic!("type {type_code}: expected Optional Attribute Error");
+                };
+                assert_eq!(
+                    subcode,
+                    update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+                    "type {type_code}"
+                );
+                assert_eq!(data, wire, "type {type_code}: exact received bytes");
+            }
+        }
+
+        let ordinary = [attr_flags::OPTIONAL, attr_type::MULTI_EXIT_DISC, 5, 0, 0, 1];
+        assert!(matches!(
+            decode_path_attributes(&ordinary, true, &[]),
+            Err(DecodeError::MalformedField { .. })
+        ));
     }
     #[test]
     fn revised_duplicate_attribute_keeps_first_and_discards_rest() {
@@ -7073,7 +7311,12 @@ mod tests {
         let mp_unreach = attr_bytes(attr_flags::OPTIONAL, attr_type::MP_UNREACH_NLRI, &[0, 2, 1]);
         let mut buf = mp_unreach.clone();
         buf.extend(mp_unreach);
-        assert!(decode_path_attributes_revised(&buf, true, false, &[]).is_err());
+        let error = decode_path_attributes_revised(&buf, true, false, &[]).unwrap_err();
+        let DecodeError::UpdateAttributeError { subcode, data, .. } = error else {
+            panic!("expected Malformed Attribute List");
+        };
+        assert_eq!(subcode, update_subcode::MALFORMED_ATTRIBUTE_LIST);
+        assert!(data.is_empty());
     }
     #[test]
     fn revised_attribute_overrun_is_treat_as_withdraw_and_stops() {
@@ -7093,6 +7336,20 @@ mod tests {
             decoded.malformed[0].disposition,
             ErrorDisposition::TreatAsWithdraw
         );
+    }
+    #[test]
+    fn revised_unidentifiable_attribute_header_is_treat_as_withdraw() {
+        let decoded =
+            decode_path_attributes_revised(&[attr_flags::OPTIONAL], true, false, &[]).unwrap();
+        let [malformed] = decoded.malformed.as_slice() else {
+            panic!("expected one framing malformation");
+        };
+        assert_eq!(malformed.type_code, 0);
+        assert_eq!(malformed.disposition, ErrorDisposition::TreatAsWithdraw);
+        assert!(matches!(
+            malformed.error,
+            DecodeError::MalformedField { .. }
+        ));
     }
     #[test]
     fn revised_clean_update_reports_nothing() {
