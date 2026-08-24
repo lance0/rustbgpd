@@ -1,10 +1,13 @@
 use super::*;
 
+#[path = "gr_llgr_harness.rs"]
+mod harness;
+
+use harness::{RunningManager, TimeMode, direct_manager, spawn_manager};
+
 #[tokio::test]
 async fn gr_marks_stale_and_demotes_routes() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -78,9 +81,7 @@ async fn gr_marks_stale_and_demotes_routes() {
 
 #[tokio::test]
 async fn gr_eor_clears_stale() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let kept_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -167,9 +168,7 @@ async fn gr_eor_clears_stale() {
 /// (RFC 4724 §4.1: no retention across consecutive restarts).
 #[tokio::test]
 async fn gr_consecutive_restart_deletes_stale_routes() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -216,9 +215,7 @@ async fn gr_consecutive_restart_deletes_stale_routes() {
 /// route from the same peer stays stale, awaiting its own `EoR`.
 #[tokio::test]
 async fn gr_eor_sweep_scopes_to_family() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
     let source: IpAddr = "10.0.0.1".parse().unwrap();
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -277,11 +274,9 @@ async fn gr_eor_sweep_scopes_to_family() {
     handle.await.unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn gr_timer_sweeps_stale_routes() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -342,9 +337,7 @@ async fn gr_timer_sweeps_stale_routes() {
 
 #[tokio::test]
 async fn gr_peer_up_defers_stale_to_eor() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -458,11 +451,9 @@ async fn gr_peer_up_defers_stale_to_eor() {
     handle.await.unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn gr_peer_up_timer_expires_sweeps_stale() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -549,9 +540,7 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
 
 #[tokio::test]
 async fn gr_peer_down_aborts_gr() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -608,9 +597,7 @@ async fn gr_peer_down_aborts_gr() {
 async fn gr_withdraws_non_gr_family_routes() {
     use rustbgpd_wire::Ipv6Prefix;
 
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
     let source: IpAddr = "10.0.0.1".parse().unwrap();
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -688,11 +675,9 @@ async fn gr_withdraws_non_gr_family_routes() {
 
 // --- LLGR (RFC 9494) tests ---
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn llgr_gr_timer_promotes_to_llgr_stale() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -749,11 +734,9 @@ async fn llgr_gr_timer_promotes_to_llgr_stale() {
     handle.await.unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn llgr_timer_sweeps_llgr_stale_routes() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -814,11 +797,9 @@ async fn llgr_timer_sweeps_llgr_stale_routes() {
     handle.await.unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn llgr_eor_clears_llgr_stale() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let kept_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -935,11 +916,9 @@ async fn llgr_eor_clears_llgr_stale() {
     handle.await.unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn llgr_peer_down_aborts_llgr() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -1004,11 +983,9 @@ async fn llgr_peer_down_aborts_llgr() {
     handle.await.unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn llgr_without_peer_capability_falls_through_to_sweep() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -1091,8 +1068,7 @@ fn establish_peer(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<Outb
 
 #[tokio::test]
 async fn stale_peer_policy_context_from_superseded_session_is_discarded() {
-    let (_tx, rx) = mpsc::channel(64);
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let (_tx, mut manager) = direct_manager(None);
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
 
     let _out_rx = establish_peer(&mut manager, peer);
@@ -1131,8 +1107,7 @@ async fn stale_peer_policy_context_from_superseded_session_is_discarded() {
 
 #[tokio::test]
 async fn llgr_reestablish_uses_captured_stale_routes_time() {
-    let (_tx, rx) = mpsc::channel(64);
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let (_tx, mut manager) = direct_manager(None);
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
 
     // GR with LLGR and a non-default stale_routes_time.
@@ -1168,8 +1143,7 @@ async fn llgr_reestablish_uses_captured_stale_routes_time() {
 
 #[tokio::test]
 async fn llgr_expiry_sweep_drops_llgr_peer_config() {
-    let (_tx, rx) = mpsc::channel(64);
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let (_tx, mut manager) = direct_manager(None);
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
 
     manager.handle_update(RibUpdate::PeerGracefulRestart {
@@ -1204,8 +1178,7 @@ async fn llgr_expiry_sweep_drops_llgr_peer_config() {
 
 #[tokio::test]
 async fn gr_expiry_without_reestablish_releases_peer_state() {
-    let (_tx, rx) = mpsc::channel(64);
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let (_tx, mut manager) = direct_manager(None);
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -1262,8 +1235,7 @@ async fn gr_expiry_without_reestablish_releases_peer_state() {
 
 #[tokio::test]
 async fn llgr_expiry_without_reestablish_releases_peer_state() {
-    let (_tx, rx) = mpsc::channel(64);
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let (_tx, mut manager) = direct_manager(None);
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -1326,8 +1298,7 @@ async fn llgr_expiry_without_reestablish_releases_peer_state() {
 
 #[tokio::test]
 async fn gr_expiry_sweep_spares_reestablished_peer_awaiting_eor() {
-    let (_tx, rx) = mpsc::channel(64);
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let (_tx, mut manager) = direct_manager(None);
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -1442,9 +1413,8 @@ async fn drain_unicast_initial_dump(
 
 #[tokio::test]
 async fn grouped_late_join_reflects_gr_retained_rr_client_route() {
-    let (_tx, rx) = mpsc::channel(64);
     let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 254));
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let (_tx, mut manager) = direct_manager(cluster_id);
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
@@ -1496,9 +1466,8 @@ async fn grouped_late_join_reflects_gr_retained_rr_client_route() {
 
 #[tokio::test]
 async fn ungrouped_llgr_promotion_keeps_rr_client_route_advertised() {
-    let (_tx, rx) = mpsc::channel(64);
     let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 254));
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let (_tx, mut manager) = direct_manager(cluster_id);
     manager.test_force_ungrouped = true;
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -1579,9 +1548,8 @@ async fn ungrouped_llgr_promotion_keeps_rr_client_route_advertised() {
 
 #[tokio::test]
 async fn rr_client_role_is_overwritten_when_source_reestablishes_as_nonclient() {
-    let (_tx, rx) = mpsc::channel(64);
     let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 254));
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let (_tx, mut manager) = direct_manager(cluster_id);
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
 
     let mut first_rx = establish_ibgp_peer(&mut manager, source, 51, true, Vec::new());
@@ -1655,11 +1623,9 @@ async fn send_eor(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr, afi: Afi, safi: Sa
 /// different peer-advertised stale times must be swept on their OWN
 /// deadlines — the shorter one first, the longer one retained until its
 /// own timer expires (the old peer-wide min purged both at the shorter).
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn llgr_mixed_stale_times_sweep_per_family() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -1746,11 +1712,9 @@ async fn llgr_mixed_stale_times_sweep_per_family() {
 /// A peer that re-establishes during LLGR and goes down again must not
 /// restart the timer — the surviving deadline is re-used, and the
 /// LLGR-stale routes are retained (not purged) across the second reset.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn llgr_reconnect_and_second_down_preserve_original_deadline() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -1815,11 +1779,9 @@ async fn llgr_reconnect_and_second_down_preserve_original_deadline() {
 /// LLGR-stale (flag + community) through the new session until End-of-RIB,
 /// which retires both the staleness and the family's surviving original
 /// deadline — a refreshed table must NOT be swept at the old LLST horizon.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn llgr_reestablish_carries_llgr_stale_until_eor() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -1906,11 +1868,9 @@ async fn llgr_reestablish_carries_llgr_stale_until_eor() {
     clippy::too_many_lines,
     reason = "announce + assert across five address families"
 )]
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn llgr_reconnect_before_expiry_across_families() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let src_v4 = Ipv4Addr::new(10, 0, 0, 1);
@@ -2034,9 +1994,7 @@ async fn llgr_reconnect_before_expiry_across_families() {
 /// must not withdraw the already-advertised EVPN route from other peers.
 #[tokio::test]
 async fn evpn_gr_stale_routes_keep_exporting_during_gr_window() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
     // eBGP target: iBGP targets would be split-horizon-suppressed without
     // an RR cluster-id, and GR-stale export is not eBGP-gated (only
