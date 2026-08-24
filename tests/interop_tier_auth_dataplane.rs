@@ -265,3 +265,38 @@ fn m51_remote_admin_down_uses_the_public_field_as_primary_oracle() {
     assert!(!source.contains("BFD remote AdminDown.*allowing BGP"));
     assert!(!source.contains("BFD remote AdminDown flip without local transition"));
 }
+
+/// Load-bearing restart safety proof: the same production helper exercised by
+/// M43 accepts a positive decimal PID, preserves its shell argument boundary,
+/// and rejects unsafe PID shapes before invoking the container runtime.
+#[test]
+fn m43_restart_signal_accepts_only_a_positive_decimal_pid() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = root.join("tests/interop/scripts/test-m43-tcp-ao-bird.sh");
+    let source = fs::read_to_string(&script).expect("M43 driver must be readable");
+
+    assert!(source.contains("signal_rustbgpd_pid TERM \"$old_pid\""));
+    assert!(source.contains("signal_rustbgpd_pid KILL \"$pid\""));
+    assert!(source.contains(
+        "docker exec \"$RUSTBGPD\" sh -lc 'kill \"-$1\" \"$2\"' sh \"$signal\" \"$pid\""
+    ));
+    assert!(!source.contains("sh -lc \"kill -TERM $old_pid\""));
+    assert!(!source.contains("sh -lc \"kill -KILL $pid\""));
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--self-test-pid-signal")
+        .current_dir(root)
+        .output()
+        .expect("run M43 PID signal self-test");
+    assert!(
+        output.status.success(),
+        "M43 PID signal self-test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "M43 PID signal self-test passed\n"
+    );
+}

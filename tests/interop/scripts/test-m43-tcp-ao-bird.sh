@@ -30,13 +30,19 @@
 #   bash tests/interop/scripts/test-m43-tcp-ao-bird.sh
 #   M43_MODE=crash-restart \
 #     bash tests/interop/scripts/test-m43-tcp-ao-bird.sh
+#   bash tests/interop/scripts/test-m43-tcp-ao-bird.sh --self-test-pid-signal
 
 TOPO="m43-tcp-ao-bird"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INTEROP_TEST_OPERATOR_AUTH=1
 export INTEROP_TEST_OPERATOR_AUTH
-# shellcheck source=tests/interop/scripts/test-lib.sh
-source "$SCRIPT_DIR/test-lib.sh"
+if [ "${1:-}" = "--self-test-pid-signal" ]; then
+    set -euo pipefail
+    RUSTBGPD="fixture-rustbgpd"
+else
+    # shellcheck source=tests/interop/scripts/test-lib.sh
+    source "$SCRIPT_DIR/test-lib.sh"
+fi
 BIRD="clab-${TOPO}-bird"
 GOOD_CONF="/etc/bird/bird.conf"
 BAD_CONF="/etc/bird/bird-bad.conf"
@@ -628,6 +634,88 @@ rust_pid() {
     '
 }
 
+signal_rustbgpd_pid() {
+    local signal=${1-}
+    local pid=${2-}
+
+    case "$signal" in
+        TERM | KILL) ;;
+        *) return 2 ;;
+    esac
+    case "$pid" in
+        '' | *[!0-9]*) return 2 ;;
+    esac
+    if ! [ "$pid" -gt 0 ] 2>/dev/null; then
+        return 2
+    fi
+
+    docker exec "$RUSTBGPD" sh -lc 'kill "-$1" "$2"' sh "$signal" "$pid"
+}
+
+self_test_pid_signal() {
+    local kill_calls=0
+    local expected_command="kill \"-\$1\" \"\$2\""
+    local expected_signal="TERM"
+    local expected_pid="42"
+    docker() {
+        kill_calls=$((kill_calls + 1))
+        if [ "$#" -ne 8 ] \
+            || [ "$1" != "exec" ] \
+            || [ "$2" != "fixture-rustbgpd" ] \
+            || [ "$3" != "sh" ] \
+            || [ "$4" != "-lc" ] \
+            || [ "$5" != "$expected_command" ] \
+            || [ "$6" != "sh" ] \
+            || [ "$7" != "$expected_signal" ] \
+            || [ "$8" != "$expected_pid" ]; then
+            printf 'PID signal self-test observed unsafe argument boundaries:' >&2
+            printf ' <%q>' "$@" >&2
+            printf '\n' >&2
+            return 1
+        fi
+    }
+
+    if ! signal_rustbgpd_pid TERM "42"; then
+        printf 'PID signal self-test rejected valid PID 42\n' >&2
+        return 1
+    fi
+    expected_signal="KILL"
+    expected_pid="43"
+    if ! signal_rustbgpd_pid KILL "43"; then
+        printf 'PID signal self-test rejected valid PID 43\n' >&2
+        return 1
+    fi
+    if [ "$kill_calls" -ne 2 ]; then
+        printf 'PID signal self-test expected two valid kills, observed %s\n' \
+            "$kill_calls" >&2
+        return 1
+    fi
+
+    local invalid
+    local -a invalid_pids=(
+        ""
+        "0"
+        "-1"
+        "not-a-pid"
+        "17 18"
+        '23; touch /tmp/m43-pid-injection'
+        "\$(touch /tmp/m43-pid-substitution)"
+    )
+    for invalid in "${invalid_pids[@]}"; do
+        if signal_rustbgpd_pid TERM "$invalid"; then
+            printf 'PID signal self-test accepted invalid PID %q\n' "$invalid" >&2
+            return 1
+        fi
+        if [ "$kill_calls" -ne 2 ]; then
+            printf 'PID signal self-test invoked kill for invalid PID %q\n' \
+                "$invalid" >&2
+            return 1
+        fi
+    done
+
+    printf 'M43 PID signal self-test passed\n'
+}
+
 rust_pid_gone_or_zombie() {
     local pid=${1:?}
     docker exec "$RUSTBGPD" sh -lc '
@@ -652,7 +740,7 @@ restart_rustbgpd_with_dynamic_range() {
     fi
 
     log "Restarting rustbgpd with the direct dynamic-prefix TCP-AO owner..."
-    if ! docker exec "$RUSTBGPD" sh -lc "kill -TERM $old_pid"; then
+    if ! signal_rustbgpd_pid TERM "$old_pid"; then
         fail "could not stop rustbgpd PID $old_pid for the dynamic-range proof"
         return 1
     fi
@@ -694,7 +782,7 @@ crash_rustbgpd_and_prove_disconnect() {
     fi
 
     log "$proof: SIGKILL rustbgpd PID $pid"
-    if ! docker exec "$RUSTBGPD" sh -lc "kill -KILL $pid"; then
+    if ! signal_rustbgpd_pid KILL "$pid"; then
         fail "$proof: could not SIGKILL rustbgpd PID $pid"
         return 1
     fi
@@ -1138,15 +1226,19 @@ main_crash_restart() {
     print_summary
 }
 
-case "${M43_MODE:-uninterrupted}" in
-    uninterrupted)
-        main_uninterrupted "$@"
-        ;;
-    crash-restart)
-        main_crash_restart "$@"
-        ;;
-    *)
-        echo "ERROR: M43_MODE must be 'uninterrupted' or 'crash-restart'" >&2
-        exit 2
-        ;;
-esac
+if [ "${1:-}" = "--self-test-pid-signal" ]; then
+    self_test_pid_signal
+else
+    case "${M43_MODE:-uninterrupted}" in
+        uninterrupted)
+            main_uninterrupted "$@"
+            ;;
+        crash-restart)
+            main_crash_restart "$@"
+            ;;
+        *)
+            echo "ERROR: M43_MODE must be 'uninterrupted' or 'crash-restart'" >&2
+            exit 2
+            ;;
+    esac
+fi
