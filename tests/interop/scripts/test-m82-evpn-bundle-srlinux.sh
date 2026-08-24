@@ -166,7 +166,7 @@ wait_srl_established() {
         # contains the word "established" even when nothing is (summary
         # line), so pin the state leaf exactly.
         if srl_cli "info from state network-instance default protocols bgp neighbor 10.0.0.1 session-state" \
-            | grep -q "session-state established"; then
+            | grep "session-state established" >/dev/null; then
             ok "SR Linux reports the session Established (attempt $i)"
             return 0
         fi

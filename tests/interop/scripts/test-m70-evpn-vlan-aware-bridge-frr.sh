@@ -146,7 +146,7 @@ dump_debug() {
 resolve_grpc_addr
 
 log "Verifying rustbgpd ADR-0089 VLAN-aware topology..."
-if docker exec "$RUSTBGPD" ip -d link show "$BRIDGE" | grep -q "vlan_filtering 1"; then
+if docker exec "$RUSTBGPD" ip -d link show "$BRIDGE" | grep "vlan_filtering 1" >/dev/null; then
     ok "rustbgpd bridge $BRIDGE is VLAN-aware"
 else
     fail "rustbgpd bridge $BRIDGE is missing vlan_filtering=1"
