@@ -3,7 +3,11 @@
 
 set -euo pipefail
 
-STATE=/var/lib/m96-activation
+HANDLE=b2-rs1-lan1-ipv4
+RUNTIME=/var/lib/rustbgpd/$HANDLE
+STATE=$RUNTIME/activation
+HOST_STATE=/var/lib/rustbgpd/ixp-manager-host
+ADDR=unix://$RUNTIME/grpc.sock
 MARKER='m96 literal;touch /tmp/m96-shell-eval'
 
 # This exact executable is copied into the rustbgpd container. The activation
@@ -13,7 +17,7 @@ if [ "${1:-}" = internal-activate ]; then
     if pid=$(pidof -s rustbgpd 2>/dev/null); then
         kill -HUP "$pid"
     else
-        mkdir -p /var/lib/rustbgpd
+        mkdir -p "$RUNTIME"
         nohup /usr/local/bin/rustbgpd "$STATE/current/config.toml" \
             >/dev/null 2>&1 </dev/null &
     fi
@@ -27,7 +31,6 @@ ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 TARGET=$ROOT/target/x86_64-unknown-linux-musl/debug/rs-config-render
 BIN=/usr/local/bin/rs-config-render
 ACT=/usr/local/bin/m96-activate
-ADDR=unix:///var/lib/rustbgpd/grpc.sock
 SECRET=mcWsqMdzGwTKt67g
 WORK=$(mktemp -d)
 cleanup() {
@@ -46,7 +49,7 @@ done
 
 CAPTURE_OUTPUT="$WORK/capture" \
     "$ROOT/tests/compat/ixp-manager-birdseye/run.sh" >/dev/null
-FIXTURE=$WORK/capture/ixp-manager-v7.4-rustbgpd.json
+FIXTURE=$WORK/capture/config-pch-v2.json
 cargo +1.98.0 build --locked --target x86_64-unknown-linux-musl -p rs-config-render
 docker cp "$TARGET" "$RUST:$BIN"
 docker cp "$0" "$RUST:$ACT"
@@ -57,16 +60,29 @@ for input in initial hot restart; do
     docker cp "$WORK/$input.json" "$RUST:/var/lib/m96-$input.json"
 done
 docker exec "$RUST" sh -c \
-    "chmod 700 '$BIN' '$ACT'; chmod 600 /var/lib/m96-*.json; rm -rf '$STATE'; mkdir -m 700 '$STATE'"
+    "chmod 700 '$BIN' '$ACT'; chmod 600 /var/lib/m96-*.json; \
+     rm -rf '$RUNTIME' '$HOST_STATE'; \
+     mkdir -m 700 -p '$STATE' '$HOST_STATE'; \
+     chmod 700 /var/lib/rustbgpd '$RUNTIME'"
 
 render() {
     local name=$1
     docker exec "$RUST" "$BIN" \
-        --input-format ixp-manager-v1 \
+        --input-format ixp-manager-v2 \
         --context "/var/lib/m96-$name.json" \
         --out-dir "/var/lib/m96-$name-candidate" \
+        --router-handle "$HANDLE" \
+        --runtime-state-dir "$RUNTIME" \
         --max-prefix-restart-seconds 300 \
         --check-with /usr/local/bin/rustbgpd >/dev/null
+    docker exec "$RUST" cat "/var/lib/m96-$name-candidate/render-receipt.json" \
+        | jq -e --arg handle "$HANDLE" --arg runtime "$RUNTIME" '
+            .input.router_handle == $handle
+            and .host == {
+                router_handle: $handle,
+                runtime_state_dir: $runtime
+            }
+        ' >/dev/null || fail "$name render receipt lost the exact handle binding"
 }
 
 activate() {
@@ -79,6 +95,8 @@ activate() {
     set +e
     docker exec "$RUST" "$BIN" activate \
         --candidate "$candidate" --state-dir "$STATE" \
+        --router-handle "$HANDLE" --runtime-state-dir "$RUNTIME" \
+        --host-state-dir "$HOST_STATE" \
         --check-with /usr/local/bin/rustbgpd \
         --rbgp /usr/local/bin/rbgp --rbgp-addr "$ADDR" \
         --settle-seconds 20 "${extra[@]}" \
@@ -132,7 +150,9 @@ runtime_equal() {
 
 private_state() {
     docker exec "$RUST" bash -ec \
-        "test \"\$(stat -c %a '$STATE')\" = 700 &&
+        "test \"\$(stat -c %a '$RUNTIME')\" = 700 &&
+         test \"\$(stat -c %a '$STATE')\" = 700 &&
+         test \"\$(stat -c %a '$HOST_STATE')\" = 700 &&
          test \"\$(stat -c %a '$STATE/activation.lock')\" = 600 &&
          test \"\$(stat -c %a '$STATE/activation-receipt.json')\" = 600 &&
          test -L '$STATE/current' &&
@@ -181,7 +201,16 @@ render initial
 activate /var/lib/m96-initial-candidate 0 initial --initial
 [ "$(cat "$WORK/initial.output")" = 'activation activated' ] || fail "initial output changed"
 receipt >"$WORK/initial-receipt.json"
-jq -e '.status == "activated" and .initial == true and .activation_runs == 1
+jq -e --arg handle "$HANDLE" --arg runtime "$RUNTIME" --arg state "$STATE" \
+    --arg host_state "$HOST_STATE" --arg addr "$ADDR" '
+    .status == "activated" and .initial == true and .activation_runs == 1
+    and .host == {
+        router_handle: $handle,
+        runtime_state_dir: $runtime,
+        activation_state_dir: $state,
+        host_state_dir: $host_state,
+        rbgp_addr: $addr
+    }
     and .phases.candidate_link.durable == true and .phases.runtime_equal == true' \
     "$WORK/initial-receipt.json" >/dev/null || fail "initial receipt is incomplete"
 ! grep -Fq "$SECRET" "$WORK/initial-receipt.json" || fail "initial receipt leaked MD5"
@@ -254,7 +283,16 @@ jq -n --argjson before "$state_before" --argjson after "$state_after" \
      and (($before.flap_count // 0) == ($after.flap_count // 0))
      and (($after.uptime_seconds // 0) >= ($before.uptime_seconds // 0))' \
     >/dev/null || fail "FRR session flapped or its handle was replaced"
-jq -e '.status == "rolled_back" and .activation_runs == 0
+jq -e --arg handle "$HANDLE" --arg runtime "$RUNTIME" --arg state "$STATE" \
+    --arg host_state "$HOST_STATE" --arg addr "$ADDR" '
+    .status == "rolled_back" and .activation_runs == 0
+    and .host == {
+        router_handle: $handle,
+        runtime_state_dir: $runtime,
+        activation_state_dir: $state,
+        host_state_dir: $host_state,
+        rbgp_addr: $addr
+    }
     and .phases.rollback_link.durable == true
     and .phases.candidate_activation_ran == false
     and .phases.rollback_activation_ran == false and .phases.runtime_equal == true' \

@@ -211,3 +211,32 @@ if ($skinned['unsupported']['route_server_skin_files'] !== [
 ]) {
     $fail('active BIRD skin file was not surfaced');
 }
+
+// Restore the exact single-session PCH state consumed by M96. This capture is
+// generated from the pinned v7.4 database on every run; the harness compares
+// it semantically with the checked-in v1 fixture after the schema-v2 additions.
+DB::beginTransaction();
+try {
+    DB::table('route_server_filters_prod')->update(['enabled' => 0]);
+    DB::table('vlaninterface')->update(['rsclient' => 0]);
+    DB::table('vlaninterface')->where('id', 3)->update([
+        'rsclient' => 1, 'ipv4enabled' => 1, 'ipv6enabled' => 0,
+    ]);
+    DB::table('irrdb_asn')->where('customer_id', 3)->where('protocol', 4)
+        ->where('asn', '<>', 42)->delete();
+    DB::table('irrdb_prefix')->where('customer_id', 3)->where('protocol', 4)
+        ->where('prefix', '<>', '31.135.128.0/19')->delete();
+    $pch = json_decode($render('config-pch-v2.json'), true, 512, JSON_THROW_ON_ERROR);
+} finally {
+    DB::rollBack();
+}
+if ($pch['schema'] !== 'rustbgpd.ixp-manager.router-config/v2'
+    || array_column($pch['clients'], 'vlan_interface_id') !== [3]
+    || $pch['clients'][0]['customer_id'] !== 3
+    || $pch['clients'][0]['asn'] !== 42
+    || $pch['clients'][0]['origins'] !== [42]
+    || $pch['clients'][0]['prefixes'] !== ['31.135.128.0/19']
+    || $pch['ui_filters'] !== []
+    || $pch['complete']['ui_filter_count'] !== 0) {
+    $fail('single-session PCH schema-v2 export drifted');
+}
