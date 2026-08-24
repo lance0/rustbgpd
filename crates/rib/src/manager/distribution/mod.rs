@@ -899,17 +899,19 @@ fn policy_label_with_term(
     action: PolicyAction,
     matched_policy: Option<&str>,
 ) -> String {
-    let term_suffix = (action == PolicyAction::Deny)
-        .then(|| rustbgpd_policy::explain_chain_statements(chain, ctx))
-        .and_then(|trace| {
-            trace
+    let term_suffix = if action == PolicyAction::Deny {
+        matched_policy.and_then(|matched_policy| {
+            rustbgpd_policy::explain_chain_statements(chain, ctx)
                 .steps
                 .last()
-                .filter(|step| step.policy_name.as_deref() == matched_policy)
+                .filter(|step| step.policy_name.as_deref() == Some(matched_policy))
                 .and_then(|step| step.term_name.as_deref())
                 .map(|term| format!(":{term}"))
         })
-        .unwrap_or_default();
+    } else {
+        None
+    }
+    .unwrap_or_default();
     format!("{}{term_suffix}", matched_policy.unwrap_or("inline"))
 }
 

@@ -25,7 +25,7 @@ pub use engine::{
     NextHopAction, Policy, PolicyAction, PolicyChain, PolicyEvaluation, PolicyResult,
     PolicyStatement, PrependAs, RFC8212_MISSING_EXPORT_POLICY, RFC8212_MISSING_IMPORT_POLICY,
     RouteContext, RouteExtendedCommunityAdmin, RouteExtendedCommunityKind, RouteFamily,
-    RouteModifications, RouteType, TermHitRow, apply_modifications,
+    RouteModifications, RouteType, TermHitRow, apply_modifications, chain_default_permit_label,
     encode_route_extended_community, evaluate_chain, evaluate_chain_with_attribution,
     evaluate_policy, is_rfc8212_reserved_policy_name, parse_community_match,
 };

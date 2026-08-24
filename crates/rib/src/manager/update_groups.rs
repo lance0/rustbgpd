@@ -36,8 +36,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use rustbgpd_policy::engine::chain_default_permit_label;
-use rustbgpd_policy::{NextHopAction, PolicyAction, PolicyChain};
+use rustbgpd_policy::{NextHopAction, PolicyAction, PolicyChain, chain_default_permit_label};
 use rustbgpd_wire::{
     Afi, BgpRole, LargeCommunity, PathAttribute, Prefix, Safi, VpnAddressFamily, VpnRouteKey,
 };

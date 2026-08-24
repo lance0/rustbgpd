@@ -1201,8 +1201,9 @@ async fn peer_down_cleans_up_export_policy() {
 
 /// ADR-0096 explain slice: an `.rpol` Deny names the deciding
 /// `<chain-ref>:<term>`, while a Permit retains the chain-default label even
-/// when a configured member has that literal name. Live per-term hit counters
-/// remain queryable, and explain itself does not count (side-effect-free).
+/// when a configured member has that literal name, and an anonymous Deny stays
+/// `inline`. Live per-term hit counters remain queryable, and explain itself
+/// does not count (side-effect-free).
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
@@ -1221,11 +1222,21 @@ policy chain_default_permit {
     let compiled = file
         .compile_policy("chain_default_permit", &[], &mut store)
         .expect("policy exists");
+    let compiled = Arc::new(compiled);
     let chain =
         rustbgpd_policy::PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
             "chain_default_permit".to_string(),
-            Arc::new(compiled),
+            Arc::clone(&compiled),
         )]);
+    let anonymous_chain =
+        rustbgpd_policy::PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy {
+            name: None,
+            policy: rustbgpd_policy::Policy {
+                entries: Vec::new(),
+                default_action: rustbgpd_policy::PolicyAction::Permit,
+            },
+            rpol: Some(compiled),
+        }]);
 
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
@@ -1353,6 +1364,40 @@ policy chain_default_permit {
         reply_rx.await.unwrap()
     };
     assert!(missing.is_empty());
+
+    // An anonymous `.rpol` Deny has no stable member identity. Its term must
+    // not escape into the operator label as `inline:<term>`.
+    let anonymous_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let (anonymous_out_tx, mut anonymous_out_rx) = mpsc::channel(8);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: anonymous_target,
+        peer_asn: 65003,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 3),
+        outbound_tx: anonymous_out_tx,
+        export_policy: Some(anonymous_chain),
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    // Registration also emits the already-known permitted route before EOR;
+    // keep the receiver live so initial staging cannot backpressure the actor.
+    assert!(anonymous_out_rx.recv().await.is_some());
+    let anonymous = query_explain_advertised_route(&tx, anonymous_target, prefix).await;
+    assert_eq!(anonymous.decision, crate::update::ExplainDecision::Deny);
+    assert_eq!(
+        anonymous.reasons[0].message,
+        "export policy \"inline\" denied this route"
+    );
 
     drop(tx);
     handle.await.unwrap();

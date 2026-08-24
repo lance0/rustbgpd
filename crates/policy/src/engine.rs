@@ -1261,7 +1261,6 @@ pub const CHAIN_DEFAULT_PERMIT_ATTRIBUTION: &str = "chain_default_permit";
 static CHAIN_DEFAULT_PERMIT_LABEL: OnceLock<Arc<str>> = OnceLock::new();
 
 /// Return the process-shared label used for chain default permits.
-#[doc(hidden)]
 #[must_use]
 pub fn chain_default_permit_label() -> Arc<str> {
     Arc::clone(
