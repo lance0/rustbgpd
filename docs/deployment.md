@@ -204,6 +204,28 @@ uncertain and no callback is attempted automatically — see the
 [activation manual-recovery runbook](cookbook/activation-manual-recovery.md).
 Delivery is at-least-once.
 
+#### Bound retained activation generations
+
+Every distinct activation leaves an immutable generation under
+`<state-dir>/generations/`; activation and lifecycle commands never remove
+one. Run `rs-config-render prune --keep N` separately. It reports a dry-run
+plan unless `--apply` is present.
+
+| Retention reason | Protected generation |
+|---|---|
+| `current` | The current symlink target |
+| `receipt` | The last activation receipt's candidate |
+| `predecessor` | The last activation receipt's previous generation |
+| `journal` | A generation whose render receipt is named by a pending lifecycle journal |
+| `keep-N` | The N most recently published generations; `--keep 0` keeps only referenced generations |
+
+Pruning refuses with exit 2 while a host fence or competing host command
+exists, or when retained receipt or journal state cannot be read safely. The
+host lock remains held through removal, so recovery state cannot appear between
+planning and deletion. The [tool README's pruning
+section](../tools/rs-config-render/README.md#pruning-retained-generations) is
+authoritative for the complete command, stable output, and cron-safe pattern.
+
 #### rs-config-render exit codes
 
 Every `rs-config-render` subcommand shares one exit-code table, mirrored from
