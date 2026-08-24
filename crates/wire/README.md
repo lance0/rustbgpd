@@ -14,6 +14,8 @@ analyzers, test harnesses, MRT readers, etc.
 
 Requires Rust 1.95 or newer.
 
+Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
+
 ## Supported RFCs
 
 | RFC | Feature |
