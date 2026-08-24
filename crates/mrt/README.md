@@ -6,8 +6,14 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
 ## Features
 
-- **TABLE_DUMP_V2** (type 13) — PEER_INDEX_TABLE, RIB_IPV4_UNICAST,
-  RIB_IPV6_UNICAST, plus Add-Path subtypes (RFC 8050)
+- **TABLE_DUMP_V2** (type 13) emits these six subtypes:
+  - `PEER_INDEX_TABLE` (subtype 1)
+  - `RIB_IPV4_UNICAST` (subtype 2)
+  - `RIB_IPV6_UNICAST` (subtype 4)
+  - `RIB_GENERIC` (subtype 6) for L2VPN/EVPN (AFI 25 / SAFI 70), following
+    RFC 6396 section 4.3.5
+  - `RIB_IPV4_UNICAST_ADDPATH` (subtype 8), following RFC 8050
+  - `RIB_IPV6_UNICAST_ADDPATH` (subtype 9), following RFC 8050
 - **Periodic + on-demand** — configurable dump interval or gRPC
   `TriggerMrtDump` for immediate snapshots
 - **Optional gzip** compression via flate2
