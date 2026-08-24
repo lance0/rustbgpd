@@ -20,17 +20,16 @@ ROSTER = {
 RESULTS = ("V064_VALIDATOR", "CORE", "CORE_TESTS", "SCALE_RECEIPTS")
 WORKFLOWS = tuple(
     f".github/workflows/{name}.yml"
-    for name in ("ci", "container", "kernel-dataplane", "privileged-interop",
+    for name in ("ci", "container", "kernel-dataplane",
                  "release-install-contract", "release", "update-group-fault")
 )
 EXPECTED_ROOT_COMMANDS = {
     WORKFLOWS[0]: Counter(build=1, check=6, clippy=2, doc=2, test=6),
     WORKFLOWS[1]: Counter(test=1),
     WORKFLOWS[2]: Counter(test=6),
-    WORKFLOWS[3]: Counter(test=1),
-    WORKFLOWS[4]: Counter(build=1, test=2),
-    WORKFLOWS[5]: Counter(build=2, test=1),
-    WORKFLOWS[6]: Counter(test=3),
+    WORKFLOWS[3]: Counter(build=1, test=2),
+    WORKFLOWS[4]: Counter(build=2, test=1),
+    WORKFLOWS[5]: Counter(test=3),
 }
 EXPECTED_STANDALONE_COMMANDS = (
     (WORKFLOWS[0], "cargo test --manifest-path bench/scale/rrharness/Cargo.toml --locked"),

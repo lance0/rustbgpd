@@ -99,27 +99,29 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M71: RFC 9136 §4.3 ESI overlay-index Type 5 single-active receive against GoBGP.
 - M72: RFC 9136 §4.3 ESI overlay-index Type 5 all-active receive against GoBGP.
 - Docker netns selectors, in job order — `fdb_nhg`, `fib_runtime`,
-  `bfd_runtime`, `dataplane_vlan_fdb`, `macip_vlan_attribution`,
-  `svd_fdb_vni`, `managed_bridge`, `managed_vxlan`, `managed_svd_vxlan`,
+  `bfd_runtime`, `dataplane_vlan_fdb`, `dataplane_remote_mac`,
+  `vlan_local_mac_attribution`, `macip_vlan_attribution`, `svd_fdb_vni`,
+  `managed_bridge`, `managed_vxlan`, `managed_svd_vxlan`,
   `managed_vlan_upper`, `managed_ready`, `link_carrier`, `ac_gate`,
-  `nexthop_raw`, `foreign_state_l2`, and `foreign_state_nhid`. Five further
+  `nexthop_raw`, `foreign_state_l2`, and `foreign_state_nhid`. Seven further
   L3 selectors run only when the job's `vrf-available` probe loads the `vrf`
   kernel module, and skip otherwise: `l3_multipath`,
   `managed_ip_vrf_ready`, `l3_all_active_writer`, `foreign_state_l3`, and
-  `l3_route_event`.
+  `l3_route_event`, `l3_single_path_cycle`, and `l3_foreign_route_cycle`.
 
 The job always publishes a stable `netns-selector-receipt` JSON artifact and a
 concise job summary. A selector is recorded only after its harness invocation
-succeeds. The finalizer requires all 21 selectors when VRF is available; when
-VRF is unavailable it requires the 16 unconditional selectors and records the
-five L3 omissions with reason `vrf_unavailable`. Missing, duplicate, or
+succeeds. The finalizer requires all 25 selectors when VRF is available; when
+VRF is unavailable it requires the 18 unconditional selectors and records the
+seven L3 omissions with reason `vrf_unavailable`. Missing, duplicate, or
 unexpected required selectors fail the job.
 
-The `Privileged Interop (netns)` workflow (`privileged-interop.yml`) is a
-manual (`workflow_dispatch`) on-demand harness for the non-docker direct-`cargo
-test` netns binaries (`netns_dataplane` / `netns_fdb_nhg` / `netns_l3_install` /
-`netns_nexthop_raw`); its former containerlab EVPN smokes now run
-automatically here.
+The automatic selector inventory now includes the four exact direct-netns
+proofs that were unique to the retired dispatch-only workflow: remote-MAC
+programming, VLAN-scoped local-MAC attribution, the single-path L3 lifecycle,
+and foreign-route preservation. They reuse the same Docker capability envelope,
+VRF omission policy, receipt artifact, and required aggregate as the rest of
+the kernel lane.
 
 ## Security model
 

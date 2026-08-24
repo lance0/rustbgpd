@@ -953,9 +953,17 @@ class PrimerContractTests(unittest.TestCase):
             (harness, 'nexthop_raw)        TEST_BIN="netns_nexthop_raw"', 'nexthop_raw)        TEST_BIN="netns_ac_gate"'),
             (harness, "l2_foreign_takeover_row_survives_withdrawal_and_shutdown", "wrong_l2_filter"),
             (workflow, "run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_nhid", "run: true"),
+            (harness, "linux_dataplane_programs_remote_mac_with_extern_learn", "wrong_remote_mac_filter"),
+            (workflow, "run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_remote_mac", "run: true"),
+            (harness, "linux_dataplane_attributes_vlan_local_mac_observations", "wrong_vlan_attribution_filter"),
+            (workflow, "run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh vlan_local_mac_attribution", "run: true"),
             (workflow, "        if: steps.vrf.outputs.vrf-available == 'true'\n        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l3", "        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l3"),
             (workflow, "        if: steps.vrf.outputs.vrf-available == 'true'\n        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l3", "        # if: steps.vrf.outputs.vrf-available == 'true'\n        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l3"),
             (harness, "linux_dataplane_route_event_wakes_within_2s", "wrong_route_event_filter"),
+            (harness, "linux_dataplane_installs_and_withdraws_l3_triple", "wrong_l3_cycle_filter"),
+            (workflow, "        if: steps.vrf.outputs.vrf-available == 'true'\n        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_single_path_cycle", "        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_single_path_cycle"),
+            (harness, "linux_dataplane_foreign_route_survives_l3_cycle", "wrong_foreign_route_filter"),
+            (workflow, "        if: steps.vrf.outputs.vrf-available == 'true'\n        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_foreign_route_cycle", "        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_foreign_route_cycle"),
         )
         for relative, old, new in cases:
             with self.subTest(seam=old):

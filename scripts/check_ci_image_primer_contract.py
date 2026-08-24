@@ -21,6 +21,14 @@ KERNEL = (
     "m58 m53 m51 m43 m47 m69 m70 m65 m71 m72 m66 m67 m68"
 ).split()
 NETNS_MAPPINGS = {
+    "dataplane_remote_mac": (
+        'TEST_BIN="netns_dataplane"',
+        'FILTER="linux_dataplane_programs_remote_mac_with_extern_learn"',
+    ),
+    "vlan_local_mac_attribution": (
+        'TEST_BIN="netns_dataplane"',
+        'FILTER="linux_dataplane_attributes_vlan_local_mac_observations"',
+    ),
     "link_carrier": ('TEST_BIN="netns_link_carrier"', 'FILTER=""'),
     "ac_gate": ('TEST_BIN="netns_ac_gate"', 'FILTER=""'),
     "nexthop_raw": ('TEST_BIN="netns_nexthop_raw"', 'FILTER=""'),
@@ -40,8 +48,21 @@ NETNS_MAPPINGS = {
         'TEST_BIN="netns_l3_install"',
         'FILTER="linux_dataplane_route_event_wakes_within_2s"',
     ),
+    "l3_single_path_cycle": (
+        'TEST_BIN="netns_l3_install"',
+        'FILTER="linux_dataplane_installs_and_withdraws_l3_triple"',
+    ),
+    "l3_foreign_route_cycle": (
+        'TEST_BIN="netns_l3_install"',
+        'FILTER="linux_dataplane_foreign_route_survives_l3_cycle"',
+    ),
 }
-NETNS_VRF_SELECTORS = {"foreign_state_l3", "l3_route_event"}
+NETNS_VRF_SELECTORS = {
+    "foreign_state_l3",
+    "l3_route_event",
+    "l3_single_path_cycle",
+    "l3_foreign_route_cycle",
+}
 WORKFLOWS = ("ci.yml", "audit.yml", "interop.yml", "kernel-dataplane.yml")
 GROUP = "group: ${{ github.workflow }}-${{ github.ref }}"
 PRIMER_GROUP = "group: rustbgpd-dev-image-${{ github.sha }}"

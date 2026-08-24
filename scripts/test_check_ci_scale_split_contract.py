@@ -43,6 +43,20 @@ class ScaleSplitContractTests(unittest.TestCase):
     def test_live_contract(self) -> None:
         self.assertEqual([], check(ROOT))
 
+    def test_retired_privileged_workflow_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.copy_workflows(root)
+            retired = root / ".github/workflows/privileged-interop.yml"
+            retired.write_text(
+                "jobs:\n  netns:\n    steps:\n"
+                "      - run: cargo test --locked -p rustbgpd-evpn-linux\n"
+            )
+            self.assertIn(
+                "root Cargo command inventory drifted",
+                "\n".join(check(root)),
+            )
+
     def test_comments_toolchain_selector_and_new_workflow_boundaries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

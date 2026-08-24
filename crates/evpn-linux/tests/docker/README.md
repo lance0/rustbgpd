@@ -47,9 +47,13 @@ bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_nhid # rese
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_l3 # L3 foreign takeover (VRF)
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_route_event # route-event wake (VRF)
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_vlan_fdb # ADR-0089 VLAN FDB proof
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_remote_mac # remote MAC + foreign preservation
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh vlan_local_mac_attribution # VLAN local MAC attribution
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_fdb_vni # LAN-64 SVD explicit FDB VNI proof
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_multipath # LAN-70 L3VNI multipath/FDB-NHG proof
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_all_active_writer # LAN-76 all-active Type 5 L3 writer proof
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_single_path_cycle # route/neighbor/FDB lifecycle (VRF)
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_foreign_route_cycle # foreign route preservation (VRF)
 ```
 
 `--cap-add=NET_ADMIN` is required for `bridge link set ... flood off`
@@ -82,9 +86,13 @@ caches across runs.
 | `foreign_state_l2` / `foreign_state_nhid` | exact `netns_foreign_state` L2/NHID tests | foreign takeover and reserved-NHID non-clobber |
 | `foreign_state_l3` / `l3_route_event` | exact VRF-dependent tests | L3 foreign takeover and route-event wake latency |
 | `dataplane_vlan_fdb` | `linux_dataplane_programs_vlan_scoped_remote_mac_add_remove` | ADR-0089 VLAN-scoped single-dst FDB add/remove and scoped delete |
+| `dataplane_remote_mac` | `linux_dataplane_programs_remote_mac_with_extern_learn` | Remote MAC install/remove shape plus foreign-entry preservation |
+| `vlan_local_mac_attribution` | `linux_dataplane_attributes_vlan_local_mac_observations` | Same-MAC observations attributed independently across two VLANs |
 | `svd_fdb_vni` | `svd_topology_is_ready_and_programs_vni_scoped_fdb_rows` | LAN-64 collect-metadata VXLAN Ready + explicit `src_vni` FDB programming / scoped-delete proof |
 | `l3_multipath` | `l3vxlan_all_active_multipath_kernel_shape` | LAN-70 L3VNI route multipath acceptance, same-MAC FDB collapse, and FDB-NHG lifecycle |
 | `l3_all_active_writer` | `linux_reconcile_actor_installs_and_withdraws_all_active_l3_writer` | LAN-76 production actor all-active Type 5 writer install + withdraw proof |
+| `l3_single_path_cycle` | `linux_dataplane_installs_and_withdraws_l3_triple` | Single-path route, neighbor, and FDB install/withdraw lifecycle |
+| `l3_foreign_route_cycle` | `linux_dataplane_foreign_route_survives_l3_cycle` | Foreign route preserved through an independent L3 lifecycle |
 | `all` (default) | Gate 8b BUM tests                                    | both Gate 8b BUM tests                                             |
 
 The shell spike asserts the five load-bearing invariants (DF allows,
@@ -116,7 +124,10 @@ idempotent.
   VLAN tunnel mapping, and FDB `src_vni` support for the LAN-64
   `svd_fdb_vni` selector.
 - A kernel and iproute2 with VRF, L3 VXLAN, route multipath, and FDB
-  nexthop group support for the LAN-70 `l3_multipath` selector.
+  nexthop group support for the LAN-70 `l3_multipath` selector. The
+  `l3_single_path_cycle` and `l3_foreign_route_cycle` selectors need the same
+  VRF and L3 VXLAN substrate but do not add capabilities beyond the harness's
+  existing `NET_ADMIN` + `SYS_ADMIN` envelope.
 - `CONFIG_NET_NS=y` and `CONFIG_BRIDGE=y` in the host kernel
   (universal on modern Linux).
 

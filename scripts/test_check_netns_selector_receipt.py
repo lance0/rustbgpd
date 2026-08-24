@@ -15,14 +15,51 @@ class ReceiptTest(unittest.TestCase):
             errors = finalize(receipt, output, summary, vrf)
             return errors, json.loads(output.read_text()), summary.read_text()
 
-    def test_vrf_available_requires_all_21(self):
+    def test_selector_rosters_are_exact(self):
+        self.assertEqual(
+            BASE,
+            (
+                "fdb_nhg",
+                "fib_runtime",
+                "bfd_runtime",
+                "dataplane_vlan_fdb",
+                "dataplane_remote_mac",
+                "vlan_local_mac_attribution",
+                "macip_vlan_attribution",
+                "svd_fdb_vni",
+                "managed_bridge",
+                "managed_vxlan",
+                "managed_svd_vxlan",
+                "managed_vlan_upper",
+                "managed_ready",
+                "link_carrier",
+                "ac_gate",
+                "nexthop_raw",
+                "foreign_state_l2",
+                "foreign_state_nhid",
+            ),
+        )
+        self.assertEqual(
+            VRF,
+            (
+                "l3_multipath",
+                "managed_ip_vrf_ready",
+                "l3_all_active_writer",
+                "foreign_state_l3",
+                "l3_route_event",
+                "l3_single_path_cycle",
+                "l3_foreign_route_cycle",
+            ),
+        )
+
+    def test_vrf_available_requires_all_25(self):
         errors, payload, summary = self.run_case(BASE + VRF, True)
         self.assertEqual(errors, [])
         self.assertEqual(payload["executed_selectors"], list(BASE + VRF))
         self.assertEqual(payload["omitted_selectors"], [])
         self.assertIn("PASS", summary)
 
-    def test_vrf_unavailable_requires_16_and_publishes_five_omissions(self):
+    def test_vrf_unavailable_requires_18_and_publishes_seven_omissions(self):
         errors, payload, _ = self.run_case(BASE, False)
         self.assertEqual(errors, [])
         self.assertEqual(
