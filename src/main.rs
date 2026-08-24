@@ -5869,11 +5869,13 @@ mod tests {
     }
 
     #[test]
-    fn coordinated_shutdown_preserves_peer_visible_withdraw_order() {
-        // Load-bearing shutdown-order proof. Peer-visible EVPN withdrawals
-        // must finish while the BGP sessions are still available; local-only
-        // dataplane drains deliberately follow the one PeerManager shutdown.
-        // Anchor on source constructs rather than incidental log/telemetry order.
+    fn coordinated_shutdown_attempts_peer_visible_withdrawals_before_cease() {
+        // Load-bearing shutdown-order proof. Peer-visible EVPN actor drains
+        // are initiated and given their bounded wait while BGP sessions remain
+        // available; IMET withdrawal is fully awaited before the one
+        // PeerManager shutdown. Local-only dataplane drains deliberately
+        // follow it. Anchor on source constructs rather than incidental
+        // log/telemetry order.
         let source = include_str!("main.rs");
         let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
         let find = |needle| {
@@ -5898,7 +5900,7 @@ mod tests {
             ordered_stages
                 .windows(2)
                 .all(|stages| stages[0] < stages[1]),
-            "coordinated shutdown stages must remain in peer-visible withdrawal order"
+            "coordinated shutdown must attempt peer-visible withdrawals before Cease"
         );
         assert_eq!(
             production

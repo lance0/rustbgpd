@@ -106,14 +106,16 @@ ceilings:
 - restart-marker publication or removal: 5 seconds;
 - acquiring the EVPN runtime-apply fence when the checkpoint did not retain it:
   10 seconds; and
-- local-MAC, SVI-MAC, L3, and segment actor drains: 5 seconds each.
+- local-MAC, SVI-MAC, L3, and segment actor-drain waits: 5 seconds each.
 
-Those caps can account for 65 seconds before IMET withdrawal begins. This is a
-timing decomposition, not a guarantee or a minimum session hold time: stages
-may be skipped or finish early. The subsequent IMET controller mutex, RIB
-channel handoff, sequential per-VNI withdrawal acknowledgements, and
-PeerManager shutdown enqueue and scheduling have no aggregate deadline.
-Therefore the shipped path has no finite aggregate upper bound to first Cease.
+Those caps can account for 65 seconds of main-task waiting before IMET
+withdrawal begins. This is a timing decomposition, not a completion guarantee
+or a minimum session hold time: stages may be skipped or finish early, and an
+actor that exceeds its wait is detached and can finish after Cease begins. The
+subsequent IMET controller mutex, RIB channel handoff, sequential per-VNI
+withdrawal acknowledgements, and PeerManager shutdown enqueue and scheduling
+have no aggregate deadline. Therefore the shipped path has no finite aggregate
+upper bound to first Cease.
 
 While an owner is live, the daemon logs a
 `runtime config settlement budget warning` at 15, 25, and 29 minutes

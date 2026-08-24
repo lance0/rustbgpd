@@ -292,11 +292,15 @@ is never dropped. The common path follows
    settle or reach its recovery boundary.
 2. Attempt the optional warm checkpoint and restart-marker publication, then
    fence EVPN runtime applies out of teardown.
-3. Drain the local-MAC, SVI-MAC, L3, and segment originators, then withdraw all
-   locally originated IMET routes. These peer-visible withdrawals deliberately
-   precede Administrative Shutdown and run while BGP sessions are still
-   established. Writer-owned KEEPALIVEs keep those sessions live independently
-   of a session task blocked on RIB delivery
+3. Ask the local-MAC, SVI-MAC, L3, and segment originators to drain, waiting up
+   to five seconds for each actor, then fully await withdrawal of all locally
+   originated IMET routes. These peer-visible withdrawal attempts deliberately
+   start before Administrative Shutdown while BGP sessions are still
+   established. An actor that exceeds its five-second wait is detached and can
+   finish after Cease begins, so completion before Cease is best-effort for
+   those four actors; IMET completion is required before the next step.
+   Writer-owned KEEPALIVEs keep sessions live during the bounded attempts
+   independently of a session task blocked on RIB delivery
    ([ADR-0078](adr/0078-inbound-rib-backpressure.md)).
 4. Send the sole PeerManager shutdown command, which initiates
    Cease/Administrative Shutdown (subcode 2), and await peer teardown.
