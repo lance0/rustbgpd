@@ -28,8 +28,10 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
 ## Architecture
 
-The transport layer captures raw BGP PDUs and emits `BmpEvent` variants
-(PeerUp, PeerDown, RouteMonitoring) through an `mpsc` channel.
+`BmpManager` receives every `BmpEvent` variant through an `mpsc` channel:
+`PeerUp`, `PeerDown`, `RouteMonitoring`, `StatsReport`,
+`LocRibRouteMonitoring`, and `LocRibStats`.
+
 `BmpManager` encodes events and distributes to per-collector `BmpClient`
 tasks. Zero overhead when no collectors are configured.
 
