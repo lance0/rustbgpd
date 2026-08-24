@@ -706,6 +706,57 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
         );
     }
     let adapter = include_str!("../examples/birdwatcher-adapter/src/main.rs");
+    assert_eq!(adapter.matches("let app = Router::new()").count(), 1);
+    let router = adapter
+        .split_once("let app = Router::new()")
+        .unwrap()
+        .1
+        .split_once(".with_state(state);")
+        .unwrap()
+        .0;
+    let routed_paths: Vec<_> = router
+        .split(".route(")
+        .skip(1)
+        .map(|call| {
+            call.trim_start()
+                .strip_prefix('"')
+                .and_then(|literal| literal.split('"').next())
+                .expect("router paths must remain direct string literals")
+        })
+        .collect();
+    let expected_paths: Vec<_> = concat!(
+        "/status /protocols/bgp /protocol/{id} /symbols ",
+        "/routes/protocol/{id} /routes/export/{id} /routes/table/{table} ",
+        "/route/{prefix}/protocol/{id} /route/{prefix}/export/{id} ",
+        "/route/{prefix}/table/{table} /routes/peer/{peer} /routes/filtered/{id} ",
+        "/routes/lc-zwild/protocol/{id}/{x}/{y} /routes/noexport/{id}",
+    )
+    .split_ascii_whitespace()
+    .collect();
+    assert_eq!(
+        routed_paths, expected_paths,
+        "adapter route inventory drifted"
+    );
+
+    let security = include_str!("../docs/SECURITY.md");
+    assert_eq!(security.matches("## Looking glass adapter\n").count(), 1);
+    let disclosure = security
+        .split_once("## Looking glass adapter\n")
+        .unwrap()
+        .1
+        .split_once("\n## ")
+        .expect("looking-glass disclosure must have a following section")
+        .0;
+    let documented_paths: Vec<_> = disclosure
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter_map(|code| code.strip_prefix("GET "))
+        .collect();
+    assert_eq!(
+        documented_paths, routed_paths,
+        "security disclosure must exactly track every routed GET path"
+    );
     let causes = adapter
         .split_once("fn arouteserver_reject_cause(")
         .unwrap()

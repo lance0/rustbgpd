@@ -171,27 +171,42 @@ to gRPC.
 
 The in-daemon looking glass HTTP server has been removed. The external
 `examples/birdwatcher-adapter` binary serves a Birdwatcher-shaped read-only
-status, peer, accepted-route, filtered-route, and noexport subset over the
-daemon's gRPC API.
+surface over the daemon's gRPC API. Its 14 registered HTTP routes disclose:
+
+- Daemon identity and health through `GET /status`.
+- Peer and table identities: `GET /protocols/bgp`, `GET /protocol/{id}`, and
+  `GET /symbols`.
+- Received, advertised, and Loc-RIB-selected route views through
+  `GET /routes/protocol/{id}`, `GET /routes/export/{id}`, and
+  `GET /routes/table/{table}`.
+- Exact-prefix or most-specific-covering route candidates through
+  `GET /route/{prefix}/protocol/{id}`, `GET /route/{prefix}/export/{id}`, and
+  `GET /route/{prefix}/table/{table}`.
+- The literal-peer received-route view through `GET /routes/peer/{peer}`.
+- Retained rejects, large-community-selected routes, and export-withholding
+  reasons through `GET /routes/filtered/{id}`,
+  `GET /routes/lc-zwild/protocol/{id}/{x}/{y}`, and
+  `GET /routes/noexport/{id}`.
 
 **Disclosure surface.** Beyond neighbor state, received routes, and peer
-addresses, the adapter's `GET /routes/filtered/{id}` endpoint serves
+addresses, the adapter's `/routes/filtered/{id}` endpoint serves
 rejected announcements from `PolicyService.ListRejectedRoutes`: each
 retained rejection's prefix, next hop, AS path, communities, RPKI/ASPA
 validation state, and the policy rejection reason (canonical reason token,
 human-readable detail string, and a synthesized reject-reason large
-community). `GET /protocols/bgp` carries real per-neighbor filtered counts.
-`GET /routes/noexport/{id}` additionally serves every Loc-RIB best route
+community). `/protocols/bgp` carries real per-neighbor filtered counts.
+`/routes/noexport/{id}` additionally serves every Loc-RIB best route
 withheld from that peer with the export gate that stopped it (split
 horizon, reflection rules, family, LLGR, ORF, RT membership, or export
 policy — including the deciding policy term's detail line), sourced from
 `RibService.ListBestRoutes`, `ListAdvertisedRoutes`, and
 `ExplainAdvertisedRoute`. The adapter's HTTP listener is unauthenticated
 and has no TLS; it binds `127.0.0.1:8080` by default and listens elsewhere
-only if you pass `--listen` / `BIRDWATCHER_ADAPTER_LISTEN`. Anyone who can
-reach it can enumerate what your import policy rejects, what your export
-policy withholds from each peer, and why — treat that as looking-glass
-data you are choosing to publish.
+only if you pass `--listen` / `BIRDWATCHER_ADAPTER_LISTEN`. Its optional
+gRPC bearer token authenticates the adapter to rustbgpd, not HTTP clients.
+Anyone who can reach it can enumerate daemon and peer identities, route
+candidates, policy rejects, and export-withholding reasons — treat that as
+looking-glass data you are choosing to publish.
 
 Mitigations, in preference order:
 
@@ -209,8 +224,9 @@ Mitigations, in preference order:
   is `sensitive_read`. A dedicated listener is still worth having, but for
   the network isolation and separate credentials, not for tier filtering.
 - Disable retention daemon-side with `[policy.reject_retention]
-  enabled = false`: the reject store is never populated and the filtered
-  view is served empty as a configuration fact.
+  enabled = false`: the reject store is never populated, so the filtered view
+  and reserved rejection-pair view are served empty as a configuration fact.
+  This does not disable the adapter's other route or identity disclosures.
 
 ## TCP MD5 and GTSM
 
