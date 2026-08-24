@@ -1078,204 +1078,555 @@ fn default_grpc_uds_mode() -> u32 {
     0o600
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Neighbor {
-    /// Peer IP address (IPv4 or IPv6).
-    pub address: String,
-    /// Interface name required for IPv6 link-local / BGP unnumbered peers.
-    pub interface: Option<String>,
-    /// Peer autonomous system number. Equal to `global.asn` for iBGP.
-    pub remote_asn: u32,
-    /// Free-form operator description.
-    pub description: Option<String>,
-    /// Optional peer-group reference for inherited transport/policy defaults.
-    pub peer_group: Option<String>,
-    /// Hold time in seconds: 0 disables, otherwise >= 3. Default 90.
-    pub hold_time: Option<u16>,
-    /// Minimum hold time accepted from this peer (3..=65535). When set,
-    /// the effective local `hold_time` must be non-zero and at least this
-    /// value. A peer proposal of zero is rejected.
-    #[schemars(default, range(min = 3))]
-    pub min_hold_time: Option<u16>,
-    /// Send hold time in seconds (RFC 9687): tear the session down when
-    /// the peer stops draining its TCP socket for this long. 0 disables.
-    /// Non-zero values must be greater than the effective `hold_time`
-    /// (RFC 9687 §4.4). Default: the greater of 480s (8 minutes) or 2×
-    /// the effective `hold_time` (RFC 9687 §6).
-    pub send_hold_time: Option<u32>,
-    /// Slow-peer detection: backlog threshold as a percentage (1-100)
-    /// of the outbound writer buffer. The peer is a slow-peer candidate
-    /// while its buffered outbound frames stay at or above this
-    /// fraction. Default: 50.
-    pub slow_peer_threshold_pct: Option<u8>,
-    /// Slow-peer detection: how long (seconds) the backlog must stay
-    /// above `slow_peer_threshold_pct` before the peer is flagged slow
-    /// (status flag, warn log, `bgp_peer_slow` metric). 0 disables
-    /// detection. Default: 30.
-    pub slow_peer_duration: Option<u32>,
-    /// Move a flagged-slow peer onto the per-peer (ungrouped) update
-    /// path so it stops holding back its update-group's shared encode;
-    /// it regroups when the flag clears. Requires detection
-    /// (`slow_peer_duration` > 0). Default: false (detection alone is
-    /// purely observational).
-    pub slow_peer_isolation: Option<bool>,
-    /// Maximum prefixes accepted from this peer before the session is
-    /// torn down. Unset = unlimited.
-    pub max_prefixes: Option<u32>,
-    /// Maximum unique IPv4-unicast prefixes accepted from this peer
-    /// before the session is torn down with Cease/1. Enforced
-    /// independently of `max_prefixes` (ADR-0108). Unset = unlimited.
-    pub max_prefixes_ipv4: Option<u32>,
-    /// Maximum unique IPv6-unicast prefixes accepted from this peer
-    /// before the session is torn down with Cease/1. Enforced
-    /// independently of `max_prefixes` (ADR-0108). Unset = unlimited.
-    pub max_prefixes_ipv6: Option<u32>,
-    /// Maximum distinct IPv4-unicast prefixes advertised TO this peer
-    /// (ADR-0113). Excess net-new prefixes are withheld while the session
-    /// stays established; nothing already advertised is withdrawn. Unset =
-    /// unlimited.
-    pub max_prefixes_out_ipv4: Option<NonZeroU32>,
-    /// IPv6-unicast sibling of `max_prefixes_out_ipv4` (ADR-0113).
-    pub max_prefixes_out_ipv6: Option<NonZeroU32>,
-    /// Optional hold-down before one automatic restart attempt after any
-    /// max-prefix shutdown. Unset preserves the fail-closed operator latch.
-    pub max_prefix_restart_seconds: Option<NonZeroU32>,
-    /// TCP MD5 signature password (RFC 2385).
-    pub md5_password: Option<String>,
-    /// Static-neighbor TCP-AO (RFC 5925) keyring. Installed on active-open
-    /// sockets and the passive listener when configured. Separate SIGHUP
-    /// generations can append a nonpreferred successor, observation-gate its
-    /// selection/deprecation, then delete deprecated unselected keys.
-    pub tcp_ao: Option<TcpAoKeyringConfig>,
-    /// Single-hop BFD (RFC 5880/5881) attachment, referencing a
-    /// `[[bfd_profiles]]` entry. Presence enables BFD for this neighbor.
-    pub bfd: Option<BfdConfig>,
-    /// GTSM TTL security (RFC 5082): require TTL 255 from a directly
-    /// connected peer.
-    pub ttl_security: Option<bool>,
-    /// Address families to negotiate (e.g., `["ipv4_unicast", "ipv6_unicast"]`).
-    /// Default: `["ipv4_unicast"]`. If the neighbor address is IPv6, `"ipv6_unicast"`
-    /// is also included by default.
-    #[serde(default)]
-    pub families: Vec<String>,
-    /// Families that must be negotiated before the session may establish.
-    /// Empty inherits a non-empty peer-group value; when both are empty,
-    /// partial family intersection remains allowed.
-    #[serde(default)]
-    pub required_families: Vec<String>,
-    /// Enable Graceful Restart (RFC 4724). Default: true.
-    pub graceful_restart: Option<bool>,
-    /// Restart time advertised in GR capability (seconds, max 4095). Default: 120.
-    pub gr_restart_time: Option<u16>,
-    /// Local upper bound on the peer-advertised GR Restart Time used while
-    /// retaining stale routes after a disconnect (seconds, 1..=4095).
-    /// Default: 4095 (the full RFC 4724 wire range).
-    pub gr_peer_restart_time_max: Option<u16>,
-    /// Time to retain stale routes after peer restart (seconds). Default: 360.
-    pub gr_stale_routes_time: Option<u64>,
-    /// Long-lived stale routes time (RFC 9494, seconds). Default: 0 (disabled).
-    /// When > 0, LLGR capability is advertised and routes enter a long-lived
-    /// stale phase instead of being purged when the GR timer expires.
-    /// Max: `16_777_215` (24-bit, ≈ 194 days).
-    pub llgr_stale_time: Option<u32>,
-    /// Explicit IPv6 next-hop for eBGP advertisements when the TCP session
-    /// is IPv4. If not set, the local IPv6 socket address is used (if
-    /// available); otherwise IPv6 routes are suppressed for this peer.
-    pub local_ipv6_nexthop: Option<String>,
-    /// Mark this neighbor as a route reflector client (RFC 4456).
-    /// Only valid for iBGP neighbors (`remote_asn` == `global.asn`).
-    pub route_reflector_client: Option<bool>,
-    /// Optimal Route Reflection vantage point (RFC 9107): either an IP
-    /// address identifying this client's IGP location as a BGP-LS topology
-    /// node (a link interface/neighbor address, or an address covered by a
-    /// Prefix NLRI), or the literal `"peer_address"` to use this peer's own
-    /// peering address — which gives every peer accepted from a
-    /// `[[dynamic_neighbors]]` range its own vantage. Requires
-    /// `route_reflector_client = true` (iBGP).
-    pub orr_vantage: Option<String>,
-    /// Mark this eBGP neighbor as a transparent route-server client.
-    ///
-    /// When enabled, outbound unicast advertisements preserve the original
-    /// next hop and suppress automatic local-AS prepend. Explicit export
-    /// policy next-hop rewrites still apply.
-    pub route_server_client: Option<bool>,
-    /// RFC 7947 §2.3.2 per-client best-path for this route-server
-    /// client: when the Loc-RIB best is denied by this peer's export
-    /// policy, advertise the best export-policy-permitted candidate
-    /// instead of hiding the prefix (path-hiding mitigation for clients
-    /// without Add-Path). Requires `route_server_client = true`.
-    /// Families where the session negotiates Add-Path send use Add-Path
-    /// instead — the negotiated capability outranks this fallback.
-    pub per_client_best: Option<bool>,
-    /// Pre-policy `NEXT_HOP` ownership enforcement for this route-server
-    /// client (ADR-0107, RFC 7948 §4.8). `"strict_peer"` accepts a
-    /// unicast announcement only when every address component of its
-    /// decoded wire next-hop identity is the advertising session's own
-    /// address; non-conforming announcements are rejected before import
-    /// policy runs, fail-closed and treat-as-withdraw for previously
-    /// accepted identities. Requires `route_server_client = true`.
-    /// Unset = no ownership enforcement (RFC 7947 transparency only).
-    pub next_hop_ownership: Option<NextHopOwnershipConfig>,
-    /// Honor RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` at egress: routes
-    /// received with either community are not advertised to this neighbor
-    /// when it is eBGP. Default: `true` unless `route_server_client` is
-    /// set (route servers pass communities through transparently and let
-    /// clients enforce them). Set explicitly to override either default.
-    pub interpret_rfc1997: Option<bool>,
-    /// Interpret RFC 7947 §2.3.2 route-server control communities set by
-    /// this neighbor: per-target announce suppression (`0:PEER`,
-    /// `RS:0:PEER`), announce-only (`RS:PEER` / `RS:1:PEER` overriding
-    /// `0:RS` / `RS:0:0`), and prepend toward a target
-    /// (`RS:101|102|103:PEER`, RFC 8195 large-community forms). Matched
-    /// control communities are scrubbed from this session's outbound
-    /// announcements. Default: `true` when `route_server_client` is set,
-    /// `false` otherwise. Enabled sessions stay in shared update-groups:
-    /// only routes actually carrying a control-form community pay
-    /// per-target divergence at emit; untagged routes (the overwhelming
-    /// majority) share staging and encoding fleet-wide.
-    pub rs_control_communities: Option<bool>,
-    /// Local BGP Role for RFC 9234 route-leak prevention. eBGP only.
-    pub role: Option<BgpRoleConfig>,
-    /// Require the peer to advertise a compatible BGP Role capability.
-    pub strict_role: Option<bool>,
-    /// Advertise willingness to receive Address-Prefix ORF entries from this
-    /// peer (RFC 5291/5292) and apply them to its outbound advertisements.
-    pub prefix_orf_receive: Option<bool>,
-    /// Never treat IPv4 unicast as available on this session (true
-    /// IPv6-only peering). When `true`, IPv4 unicast is excluded from our
-    /// advertised `MultiProtocol` capability and the RFC 4760 §8
-    /// implicit-IPv4 fallback is suppressed; a session whose family
-    /// intersection ends up empty is rejected with OPEN error /
-    /// Unsupported Capability. Default: `false` (RFC-default implicit
-    /// IPv4). Rejected at config load when the neighbor's effective
-    /// `families` resolve to IPv4 unicast only.
-    pub disable_ipv4_unicast: Option<bool>,
-    /// Remove private ASNs from `AS_PATH` before eBGP advertisement.
-    ///
-    /// - `"remove"` — only if the entire path consists of private ASNs
-    /// - `"all"` — unconditionally remove all private ASNs
-    /// - `"replace"` — replace each private ASN with the local ASN
-    ///
-    /// Only valid for eBGP neighbors.
-    pub remove_private_as: Option<String>,
-    /// Add-Path (RFC 7911) configuration for this neighbor.
-    pub add_path: Option<AddPathConfig>,
-    /// Override log level for this peer: `"error"`, `"warn"`, `"info"`,
-    /// `"debug"`, or `"trace"`.
-    pub log_level: Option<String>,
-    /// Inline import policy statements for this neighbor.
-    #[serde(default)]
-    pub import_policy: Vec<PolicyStatementConfig>,
-    /// Inline export policy statements for this neighbor.
-    #[serde(default)]
-    pub export_policy: Vec<PolicyStatementConfig>,
-    /// Named policy chain for import (mutually exclusive with `import_policy`).
-    #[serde(default)]
-    pub import_policy_chain: Vec<String>,
-    /// Named policy chain for export (mutually exclusive with `export_policy`).
-    #[serde(default)]
-    pub export_policy_chain: Vec<String>,
+macro_rules! define_neighbor_and_peer_group_configs {
+    (
+        before_security {
+            $(
+                $before_field:ident: $before_ty:ty {
+                    neighbor { $(#[$before_neighbor_attr:meta])* }
+                    peer_group { $(#[$before_peer_group_attr:meta])* }
+                }
+            )*
+        }
+        bfd: $bfd_ty:ty {
+            neighbor { $(#[$bfd_neighbor_attr:meta])* }
+            peer_group { $(#[$bfd_peer_group_attr:meta])* }
+        }
+        ttl_security: $ttl_security_ty:ty {
+            neighbor { $(#[$ttl_neighbor_attr:meta])* }
+            peer_group { $(#[$ttl_peer_group_attr:meta])* }
+        }
+        after_security {
+            $(
+                $after_field:ident: $after_ty:ty {
+                    neighbor { $(#[$after_neighbor_attr:meta])* }
+                    peer_group { $(#[$after_peer_group_attr:meta])* }
+                }
+            )*
+        }
+    ) => {
+        #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+        #[serde(deny_unknown_fields)]
+        pub struct Neighbor {
+            /// Peer IP address (IPv4 or IPv6).
+            pub address: String,
+            /// Interface name required for IPv6 link-local / BGP unnumbered peers.
+            pub interface: Option<String>,
+            /// Peer autonomous system number. Equal to `global.asn` for iBGP.
+            pub remote_asn: u32,
+            /// Free-form operator description.
+            pub description: Option<String>,
+            /// Optional peer-group reference for inherited transport/policy defaults.
+            pub peer_group: Option<String>,
+            $(
+                $(#[$before_neighbor_attr])*
+                pub $before_field: $before_ty,
+            )*
+            /// Static-neighbor TCP-AO (RFC 5925) keyring. Installed on active-open
+            /// sockets and the passive listener when configured. Separate SIGHUP
+            /// generations can append a nonpreferred successor, observation-gate its
+            /// selection/deprecation, then delete deprecated unselected keys.
+            pub tcp_ao: Option<TcpAoKeyringConfig>,
+            $(#[$bfd_neighbor_attr])*
+            pub bfd: $bfd_ty,
+            $(#[$ttl_neighbor_attr])*
+            pub ttl_security: $ttl_security_ty,
+            $(
+                $(#[$after_neighbor_attr])*
+                pub $after_field: $after_ty,
+            )*
+        }
+
+        #[derive(Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+        #[serde(deny_unknown_fields)]
+        pub struct PeerGroupConfig {
+            $(
+                $(#[$before_peer_group_attr])*
+                pub $before_field: $before_ty,
+            )*
+            $(#[$ttl_peer_group_attr])*
+            pub ttl_security: $ttl_security_ty,
+            $(#[$bfd_peer_group_attr])*
+            pub bfd: $bfd_ty,
+            $(
+                $(#[$after_peer_group_attr])*
+                pub $after_field: $after_ty,
+            )*
+        }
+    };
+}
+
+define_neighbor_and_peer_group_configs! {
+    before_security {
+        hold_time: Option<u16> {
+            neighbor {
+                /// Hold time in seconds: 0 disables, otherwise >= 3. Default 90.
+            }
+            peer_group {
+                /// Hold time inherited by neighbors in this group. See the
+                /// neighbor-level `hold_time`.
+            }
+        }
+        min_hold_time: Option<u16> {
+            neighbor {
+                /// Minimum hold time accepted from this peer (3..=65535). When set,
+                /// the effective local `hold_time` must be non-zero and at least this
+                /// value. A peer proposal of zero is rejected.
+                #[schemars(default, range(min = 3))]
+            }
+            peer_group {
+                /// Minimum accepted peer hold time inherited by group members. See the
+                /// neighbor-level `min_hold_time`.
+                #[schemars(default, range(min = 3))]
+            }
+        }
+        send_hold_time: Option<u32> {
+            neighbor {
+                /// Send hold time in seconds (RFC 9687): tear the session down when
+                /// the peer stops draining its TCP socket for this long. 0 disables.
+                /// Non-zero values must be greater than the effective `hold_time`
+                /// (RFC 9687 §4.4). Default: the greater of 480s (8 minutes) or 2×
+                /// the effective `hold_time` (RFC 9687 §6).
+            }
+            peer_group {
+                /// Send hold time in seconds (RFC 9687) inherited by neighbors in
+                /// this group. See the neighbor-level `send_hold_time`.
+            }
+        }
+        slow_peer_threshold_pct: Option<u8> {
+            neighbor {
+                /// Slow-peer detection: backlog threshold as a percentage (1-100)
+                /// of the outbound writer buffer. The peer is a slow-peer candidate
+                /// while its buffered outbound frames stay at or above this
+                /// fraction. Default: 50.
+            }
+            peer_group {
+                /// Slow-peer backlog threshold inherited by neighbors in this
+                /// group. See the neighbor-level `slow_peer_threshold_pct`.
+            }
+        }
+        slow_peer_duration: Option<u32> {
+            neighbor {
+                /// Slow-peer detection: how long (seconds) the backlog must stay
+                /// above `slow_peer_threshold_pct` before the peer is flagged slow
+                /// (status flag, warn log, `bgp_peer_slow` metric). 0 disables
+                /// detection. Default: 30.
+            }
+            peer_group {
+                /// Slow-peer persistence duration inherited by neighbors in this
+                /// group. See the neighbor-level `slow_peer_duration`.
+            }
+        }
+        slow_peer_isolation: Option<bool> {
+            neighbor {
+                /// Move a flagged-slow peer onto the per-peer (ungrouped) update
+                /// path so it stops holding back its update-group's shared encode;
+                /// it regroups when the flag clears. Requires detection
+                /// (`slow_peer_duration` > 0). Default: false (detection alone is
+                /// purely observational).
+            }
+            peer_group {
+                /// Slow-peer isolation inherited by neighbors in this group. See
+                /// the neighbor-level `slow_peer_isolation`.
+            }
+        }
+        max_prefixes: Option<u32> {
+            neighbor {
+                /// Maximum prefixes accepted from this peer before the session is
+                /// torn down. Unset = unlimited.
+            }
+            peer_group {
+                /// Prefix limit inherited by neighbors in this group. See the
+                /// neighbor-level `max_prefixes`.
+            }
+        }
+        max_prefixes_ipv4: Option<u32> {
+            neighbor {
+                /// Maximum unique IPv4-unicast prefixes accepted from this peer
+                /// before the session is torn down with Cease/1. Enforced
+                /// independently of `max_prefixes` (ADR-0108). Unset = unlimited.
+            }
+            peer_group {
+                /// IPv4-unicast prefix limit inherited by neighbors in this group.
+                /// See the neighbor-level `max_prefixes_ipv4`.
+            }
+        }
+        max_prefixes_ipv6: Option<u32> {
+            neighbor {
+                /// Maximum unique IPv6-unicast prefixes accepted from this peer
+                /// before the session is torn down with Cease/1. Enforced
+                /// independently of `max_prefixes` (ADR-0108). Unset = unlimited.
+            }
+            peer_group {
+                /// IPv6-unicast prefix limit inherited by neighbors in this group.
+                /// See the neighbor-level `max_prefixes_ipv6`.
+            }
+        }
+        max_prefixes_out_ipv4: Option<NonZeroU32> {
+            neighbor {
+                /// Maximum distinct IPv4-unicast prefixes advertised TO this peer
+                /// (ADR-0113). Excess net-new prefixes are withheld while the session
+                /// stays established; nothing already advertised is withdrawn. Unset =
+                /// unlimited.
+            }
+            peer_group {
+                /// Outbound IPv4-unicast prefix maximum inherited by neighbors in this
+                /// group. See the neighbor-level `max_prefixes_out_ipv4`.
+            }
+        }
+        max_prefixes_out_ipv6: Option<NonZeroU32> {
+            neighbor {
+                /// IPv6-unicast sibling of `max_prefixes_out_ipv4` (ADR-0113).
+            }
+            peer_group {
+                /// Outbound IPv6-unicast prefix maximum inherited by neighbors in this
+                /// group. See the neighbor-level `max_prefixes_out_ipv6`.
+            }
+        }
+        max_prefix_restart_seconds: Option<NonZeroU32> {
+            neighbor {
+                /// Optional hold-down before one automatic restart attempt after any
+                /// max-prefix shutdown. Unset preserves the fail-closed operator latch.
+            }
+            peer_group {
+                /// Max-prefix restart hold-down inherited by neighbors in this group.
+                /// See the neighbor-level `max_prefix_restart_seconds`.
+            }
+        }
+        md5_password: Option<String> {
+            neighbor {
+                /// TCP MD5 signature password (RFC 2385).
+            }
+            peer_group {
+                /// TCP MD5 signature password (RFC 2385) inherited by neighbors in
+                /// this group.
+            }
+        }
+    }
+    bfd: Option<BfdConfig> {
+        neighbor {
+            /// Single-hop BFD (RFC 5880/5881) attachment, referencing a
+            /// `[[bfd_profiles]]` entry. Presence enables BFD for this neighbor.
+        }
+        peer_group {
+            /// Single-hop BFD attachment inherited by neighbors in this group (unless
+            /// the neighbor sets its own `bfd`). References a `[[bfd_profiles]]` entry.
+        }
+    }
+    ttl_security: Option<bool> {
+        neighbor {
+            /// GTSM TTL security (RFC 5082): require TTL 255 from a directly
+            /// connected peer.
+        }
+        peer_group {
+            /// GTSM TTL security (RFC 5082) inherited by neighbors in this group.
+        }
+    }
+    after_security {
+        families: Vec<String> {
+            neighbor {
+                /// Address families to negotiate (e.g., `["ipv4_unicast", "ipv6_unicast"]`).
+                /// Default: `["ipv4_unicast"]`. If the neighbor address is IPv6, `"ipv6_unicast"`
+                /// is also included by default.
+                #[serde(default)]
+            }
+            peer_group {
+                /// Address families to negotiate (e.g., `["ipv4_unicast", "ipv6_unicast"]`).
+                #[serde(default)]
+            }
+        }
+        required_families: Vec<String> {
+            neighbor {
+                /// Families that must be negotiated before the session may establish.
+                /// Empty inherits a non-empty peer-group value; when both are empty,
+                /// partial family intersection remains allowed.
+                #[serde(default)]
+            }
+            peer_group {
+                /// Families every inheriting session must negotiate. Must be a subset
+                /// of each member's effective configured family set.
+                #[serde(default)]
+            }
+        }
+        graceful_restart: Option<bool> {
+            neighbor {
+                /// Enable Graceful Restart (RFC 4724). Default: true.
+            }
+            peer_group {
+                /// Enable Graceful Restart (RFC 4724). See the neighbor-level
+                /// `graceful_restart`.
+            }
+        }
+        gr_restart_time: Option<u16> {
+            neighbor {
+                /// Restart time advertised in GR capability (seconds, max 4095). Default: 120.
+            }
+            peer_group {
+                /// GR restart time (seconds). See the neighbor-level `gr_restart_time`.
+            }
+        }
+        gr_peer_restart_time_max: Option<u16> {
+            neighbor {
+                /// Local upper bound on the peer-advertised GR Restart Time used while
+                /// retaining stale routes after a disconnect (seconds, 1..=4095).
+                /// Default: 4095 (the full RFC 4724 wire range).
+            }
+            peer_group {
+                /// Maximum peer-advertised GR Restart Time used for disconnected stale
+                /// retention. See the neighbor-level `gr_peer_restart_time_max`.
+            }
+        }
+        gr_stale_routes_time: Option<u64> {
+            neighbor {
+                /// Time to retain stale routes after peer restart (seconds). Default: 360.
+            }
+            peer_group {
+                /// GR stale-routes time (seconds). See the neighbor-level
+                /// `gr_stale_routes_time`.
+            }
+        }
+        llgr_stale_time: Option<u32> {
+            neighbor {
+                /// Long-lived stale routes time (RFC 9494, seconds). Default: 0 (disabled).
+                /// When > 0, LLGR capability is advertised and routes enter a long-lived
+                /// stale phase instead of being purged when the GR timer expires.
+                /// Max: `16_777_215` (24-bit, ≈ 194 days).
+            }
+            peer_group {
+                /// LLGR stale time (RFC 9494, seconds). See the neighbor-level
+                /// `llgr_stale_time`.
+            }
+        }
+        local_ipv6_nexthop: Option<String> {
+            neighbor {
+                /// Explicit IPv6 next-hop for eBGP advertisements when the TCP session
+                /// is IPv4. If not set, the local IPv6 socket address is used (if
+                /// available); otherwise IPv6 routes are suppressed for this peer.
+            }
+            peer_group {
+                /// Explicit IPv6 next-hop. See the neighbor-level `local_ipv6_nexthop`.
+            }
+        }
+        route_reflector_client: Option<bool> {
+            neighbor {
+                /// Mark this neighbor as a route reflector client (RFC 4456).
+                /// Only valid for iBGP neighbors (`remote_asn` == `global.asn`).
+            }
+            peer_group {
+                /// Mark neighbors in this group as route reflector clients (RFC 4456).
+            }
+        }
+        orr_vantage: Option<String> {
+            neighbor {
+                /// Optimal Route Reflection vantage point (RFC 9107): either an IP
+                /// address identifying this client's IGP location as a BGP-LS topology
+                /// node (a link interface/neighbor address, or an address covered by a
+                /// Prefix NLRI), or the literal `"peer_address"` to use this peer's own
+                /// peering address — which gives every peer accepted from a
+                /// `[[dynamic_neighbors]]` range its own vantage. Requires
+                /// `route_reflector_client = true` (iBGP).
+            }
+            peer_group {
+                /// Optimal Route Reflection vantage point (RFC 9107) inherited by
+                /// neighbors in this group. See the neighbor-level `orr_vantage`;
+                /// `"peer_address"` is the value that makes a dynamic range give each
+                /// accepted peer its own vantage.
+            }
+        }
+        route_server_client: Option<bool> {
+            neighbor {
+                /// Mark this eBGP neighbor as a transparent route-server client.
+                ///
+                /// When enabled, outbound unicast advertisements preserve the original
+                /// next hop and suppress automatic local-AS prepend. Explicit export
+                /// policy next-hop rewrites still apply.
+            }
+            peer_group {
+                /// Mark neighbors in this group as transparent route-server clients.
+                /// See the neighbor-level `route_server_client`.
+            }
+        }
+        per_client_best: Option<bool> {
+            neighbor {
+                /// RFC 7947 §2.3.2 per-client best-path for this route-server
+                /// client: when the Loc-RIB best is denied by this peer's export
+                /// policy, advertise the best export-policy-permitted candidate
+                /// instead of hiding the prefix (path-hiding mitigation for clients
+                /// without Add-Path). Requires `route_server_client = true`.
+                /// Families where the session negotiates Add-Path send use Add-Path
+                /// instead — the negotiated capability outranks this fallback.
+            }
+            peer_group {
+                /// RFC 7947 §2.3.2 per-client best-path inherited by neighbors in
+                /// this group. See the neighbor-level `per_client_best`.
+            }
+        }
+        next_hop_ownership: Option<NextHopOwnershipConfig> {
+            neighbor {
+                /// Pre-policy `NEXT_HOP` ownership enforcement for this route-server
+                /// client (ADR-0107, RFC 7948 §4.8). `"strict_peer"` accepts a
+                /// unicast announcement only when every address component of its
+                /// decoded wire next-hop identity is the advertising session's own
+                /// address; non-conforming announcements are rejected before import
+                /// policy runs, fail-closed and treat-as-withdraw for previously
+                /// accepted identities. Requires `route_server_client = true`.
+                /// Unset = no ownership enforcement (RFC 7947 transparency only).
+            }
+            peer_group {
+                /// ADR-0107 `NEXT_HOP` ownership enforcement inherited by neighbors in
+                /// this group. See the neighbor-level `next_hop_ownership`.
+            }
+        }
+        interpret_rfc1997: Option<bool> {
+            neighbor {
+                /// Honor RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` at egress: routes
+                /// received with either community are not advertised to this neighbor
+                /// when it is eBGP. Default: `true` unless `route_server_client` is
+                /// set (route servers pass communities through transparently and let
+                /// clients enforce them). Set explicitly to override either default.
+            }
+            peer_group {
+                /// RFC 1997 `NO_EXPORT` egress enforcement inherited by neighbors in
+                /// this group. See the neighbor-level `interpret_rfc1997`.
+            }
+        }
+        rs_control_communities: Option<bool> {
+            neighbor {
+                /// Interpret RFC 7947 §2.3.2 route-server control communities set by
+                /// this neighbor: per-target announce suppression (`0:PEER`,
+                /// `RS:0:PEER`), announce-only (`RS:PEER` / `RS:1:PEER` overriding
+                /// `0:RS` / `RS:0:0`), and prepend toward a target
+                /// (`RS:101|102|103:PEER`, RFC 8195 large-community forms). Matched
+                /// control communities are scrubbed from this session's outbound
+                /// announcements. Default: `true` when `route_server_client` is set,
+                /// `false` otherwise. Enabled sessions stay in shared update-groups:
+                /// only routes actually carrying a control-form community pay
+                /// per-target divergence at emit; untagged routes (the overwhelming
+                /// majority) share staging and encoding fleet-wide.
+            }
+            peer_group {
+                /// RFC 7947 route-server control-community interpretation inherited
+                /// by neighbors in this group. See the neighbor-level
+                /// `rs_control_communities`.
+            }
+        }
+        role: Option<BgpRoleConfig> {
+            neighbor {
+                /// Local BGP Role for RFC 9234 route-leak prevention. eBGP only.
+            }
+            peer_group {
+                /// Local BGP Role (RFC 9234) inherited by neighbors in this group.
+            }
+        }
+        strict_role: Option<bool> {
+            neighbor {
+                /// Require the peer to advertise a compatible BGP Role capability.
+            }
+            peer_group {
+                /// Require a compatible BGP Role capability from peers in this group.
+            }
+        }
+        prefix_orf_receive: Option<bool> {
+            neighbor {
+                /// Advertise willingness to receive Address-Prefix ORF entries from this
+                /// peer (RFC 5291/5292) and apply them to its outbound advertisements.
+            }
+            peer_group {
+                /// Advertise willingness to receive Address-Prefix ORF entries (RFC
+                /// 5291/5292) from peers in this group.
+            }
+        }
+        disable_ipv4_unicast: Option<bool> {
+            neighbor {
+                /// Never treat IPv4 unicast as available on this session (true
+                /// IPv6-only peering). When `true`, IPv4 unicast is excluded from our
+                /// advertised `MultiProtocol` capability and the RFC 4760 §8
+                /// implicit-IPv4 fallback is suppressed; a session whose family
+                /// intersection ends up empty is rejected with OPEN error /
+                /// Unsupported Capability. Default: `false` (RFC-default implicit
+                /// IPv4). Rejected at config load when the neighbor's effective
+                /// `families` resolve to IPv4 unicast only.
+            }
+            peer_group {
+                /// Never treat IPv4 unicast as available for peers in this group
+                /// (true IPv6-only peering). See the neighbor-level
+                /// `disable_ipv4_unicast` for semantics.
+            }
+        }
+        remove_private_as: Option<String> {
+            neighbor {
+                /// Remove private ASNs from `AS_PATH` before eBGP advertisement.
+                ///
+                /// - `"remove"` — only if the entire path consists of private ASNs
+                /// - `"all"` — unconditionally remove all private ASNs
+                /// - `"replace"` — replace each private ASN with the local ASN
+                ///
+                /// Only valid for eBGP neighbors.
+            }
+            peer_group {
+                /// Remove private ASNs before eBGP advertisement (`"remove"`,
+                /// `"all"`, or `"replace"`). See the neighbor-level `remove_private_as`.
+            }
+        }
+        add_path: Option<AddPathConfig> {
+            neighbor {
+                /// Add-Path (RFC 7911) configuration for this neighbor.
+            }
+            peer_group {
+                /// Add-Path (RFC 7911) configuration inherited by neighbors in this
+                /// group.
+            }
+        }
+        log_level: Option<String> {
+            neighbor {
+                /// Override log level for this peer: `"error"`, `"warn"`, `"info"`,
+                /// `"debug"`, or `"trace"`.
+            }
+            peer_group {
+                /// Override log level for peers in this group.
+            }
+        }
+        import_policy: Vec<PolicyStatementConfig> {
+            neighbor {
+                /// Inline import policy statements for this neighbor.
+                #[serde(default)]
+            }
+            peer_group {
+                /// Inline import policy statements for peers in this group.
+                #[serde(default)]
+            }
+        }
+        export_policy: Vec<PolicyStatementConfig> {
+            neighbor {
+                /// Inline export policy statements for this neighbor.
+                #[serde(default)]
+            }
+            peer_group {
+                /// Inline export policy statements for peers in this group.
+                #[serde(default)]
+            }
+        }
+        import_policy_chain: Vec<String> {
+            neighbor {
+                /// Named policy chain for import (mutually exclusive with `import_policy`).
+                #[serde(default)]
+            }
+            peer_group {
+                /// Named policy chain for import (mutually exclusive with `import_policy`).
+                #[serde(default)]
+            }
+        }
+        export_policy_chain: Vec<String> {
+            neighbor {
+                /// Named policy chain for export (mutually exclusive with `export_policy`).
+                #[serde(default)]
+            }
+            peer_group {
+                /// Named policy chain for export (mutually exclusive with `export_policy`).
+                #[serde(default)]
+            }
+        }
+    }
 }
 
 // Manual Debug: never render `md5_password` (mirrors `TcpAoConfig`; the
@@ -1459,133 +1810,6 @@ impl Serialize for TcpAoKeyringConfig {
             keys => keys.serialize(serializer),
         }
     }
-}
-
-#[derive(Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PeerGroupConfig {
-    /// Hold time inherited by neighbors in this group. See the
-    /// neighbor-level `hold_time`.
-    pub hold_time: Option<u16>,
-    /// Minimum accepted peer hold time inherited by group members. See the
-    /// neighbor-level `min_hold_time`.
-    #[schemars(default, range(min = 3))]
-    pub min_hold_time: Option<u16>,
-    /// Send hold time in seconds (RFC 9687) inherited by neighbors in
-    /// this group. See the neighbor-level `send_hold_time`.
-    pub send_hold_time: Option<u32>,
-    /// Slow-peer backlog threshold inherited by neighbors in this
-    /// group. See the neighbor-level `slow_peer_threshold_pct`.
-    pub slow_peer_threshold_pct: Option<u8>,
-    /// Slow-peer persistence duration inherited by neighbors in this
-    /// group. See the neighbor-level `slow_peer_duration`.
-    pub slow_peer_duration: Option<u32>,
-    /// Slow-peer isolation inherited by neighbors in this group. See
-    /// the neighbor-level `slow_peer_isolation`.
-    pub slow_peer_isolation: Option<bool>,
-    /// Prefix limit inherited by neighbors in this group. See the
-    /// neighbor-level `max_prefixes`.
-    pub max_prefixes: Option<u32>,
-    /// IPv4-unicast prefix limit inherited by neighbors in this group.
-    /// See the neighbor-level `max_prefixes_ipv4`.
-    pub max_prefixes_ipv4: Option<u32>,
-    /// IPv6-unicast prefix limit inherited by neighbors in this group.
-    /// See the neighbor-level `max_prefixes_ipv6`.
-    pub max_prefixes_ipv6: Option<u32>,
-    /// Outbound IPv4-unicast prefix maximum inherited by neighbors in this
-    /// group. See the neighbor-level `max_prefixes_out_ipv4`.
-    pub max_prefixes_out_ipv4: Option<NonZeroU32>,
-    /// Outbound IPv6-unicast prefix maximum inherited by neighbors in this
-    /// group. See the neighbor-level `max_prefixes_out_ipv6`.
-    pub max_prefixes_out_ipv6: Option<NonZeroU32>,
-    /// Max-prefix restart hold-down inherited by neighbors in this group.
-    /// See the neighbor-level `max_prefix_restart_seconds`.
-    pub max_prefix_restart_seconds: Option<NonZeroU32>,
-    /// TCP MD5 signature password (RFC 2385) inherited by neighbors in
-    /// this group.
-    pub md5_password: Option<String>,
-    /// GTSM TTL security (RFC 5082) inherited by neighbors in this group.
-    pub ttl_security: Option<bool>,
-    /// Single-hop BFD attachment inherited by neighbors in this group (unless
-    /// the neighbor sets its own `bfd`). References a `[[bfd_profiles]]` entry.
-    pub bfd: Option<BfdConfig>,
-    /// Address families to negotiate (e.g., `["ipv4_unicast", "ipv6_unicast"]`).
-    #[serde(default)]
-    pub families: Vec<String>,
-    /// Families every inheriting session must negotiate. Must be a subset
-    /// of each member's effective configured family set.
-    #[serde(default)]
-    pub required_families: Vec<String>,
-    /// Enable Graceful Restart (RFC 4724). See the neighbor-level
-    /// `graceful_restart`.
-    pub graceful_restart: Option<bool>,
-    /// GR restart time (seconds). See the neighbor-level `gr_restart_time`.
-    pub gr_restart_time: Option<u16>,
-    /// Maximum peer-advertised GR Restart Time used for disconnected stale
-    /// retention. See the neighbor-level `gr_peer_restart_time_max`.
-    pub gr_peer_restart_time_max: Option<u16>,
-    /// GR stale-routes time (seconds). See the neighbor-level
-    /// `gr_stale_routes_time`.
-    pub gr_stale_routes_time: Option<u64>,
-    /// LLGR stale time (RFC 9494, seconds). See the neighbor-level
-    /// `llgr_stale_time`.
-    pub llgr_stale_time: Option<u32>,
-    /// Explicit IPv6 next-hop. See the neighbor-level `local_ipv6_nexthop`.
-    pub local_ipv6_nexthop: Option<String>,
-    /// Mark neighbors in this group as route reflector clients (RFC 4456).
-    pub route_reflector_client: Option<bool>,
-    /// Optimal Route Reflection vantage point (RFC 9107) inherited by
-    /// neighbors in this group. See the neighbor-level `orr_vantage`;
-    /// `"peer_address"` is the value that makes a dynamic range give each
-    /// accepted peer its own vantage.
-    pub orr_vantage: Option<String>,
-    /// Mark neighbors in this group as transparent route-server clients.
-    /// See the neighbor-level `route_server_client`.
-    pub route_server_client: Option<bool>,
-    /// RFC 7947 §2.3.2 per-client best-path inherited by neighbors in
-    /// this group. See the neighbor-level `per_client_best`.
-    pub per_client_best: Option<bool>,
-    /// ADR-0107 `NEXT_HOP` ownership enforcement inherited by neighbors in
-    /// this group. See the neighbor-level `next_hop_ownership`.
-    pub next_hop_ownership: Option<NextHopOwnershipConfig>,
-    /// RFC 1997 `NO_EXPORT` egress enforcement inherited by neighbors in
-    /// this group. See the neighbor-level `interpret_rfc1997`.
-    pub interpret_rfc1997: Option<bool>,
-    /// RFC 7947 route-server control-community interpretation inherited
-    /// by neighbors in this group. See the neighbor-level
-    /// `rs_control_communities`.
-    pub rs_control_communities: Option<bool>,
-    /// Local BGP Role (RFC 9234) inherited by neighbors in this group.
-    pub role: Option<BgpRoleConfig>,
-    /// Require a compatible BGP Role capability from peers in this group.
-    pub strict_role: Option<bool>,
-    /// Advertise willingness to receive Address-Prefix ORF entries (RFC
-    /// 5291/5292) from peers in this group.
-    pub prefix_orf_receive: Option<bool>,
-    /// Never treat IPv4 unicast as available for peers in this group
-    /// (true IPv6-only peering). See the neighbor-level
-    /// `disable_ipv4_unicast` for semantics.
-    pub disable_ipv4_unicast: Option<bool>,
-    /// Remove private ASNs before eBGP advertisement (`"remove"`,
-    /// `"all"`, or `"replace"`). See the neighbor-level `remove_private_as`.
-    pub remove_private_as: Option<String>,
-    /// Add-Path (RFC 7911) configuration inherited by neighbors in this
-    /// group.
-    pub add_path: Option<AddPathConfig>,
-    /// Override log level for peers in this group.
-    pub log_level: Option<String>,
-    /// Inline import policy statements for peers in this group.
-    #[serde(default)]
-    pub import_policy: Vec<PolicyStatementConfig>,
-    /// Inline export policy statements for peers in this group.
-    #[serde(default)]
-    pub export_policy: Vec<PolicyStatementConfig>,
-    /// Named policy chain for import (mutually exclusive with `import_policy`).
-    #[serde(default)]
-    pub import_policy_chain: Vec<String>,
-    /// Named policy chain for export (mutually exclusive with `export_policy`).
-    #[serde(default)]
-    pub export_policy_chain: Vec<String>,
 }
 
 // Manual Debug: never render `md5_password` (mirrors `TcpAoConfig`).

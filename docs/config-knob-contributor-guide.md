@@ -8,6 +8,10 @@ move with it.
 
 1. **Schema**
    - Add the field to the appropriate struct in `src/config/schema.rs`.
+   - Fields shared by `Neighbor` and `PeerGroupConfig` belong in the private
+     `define_neighbor_and_peer_group_configs!` inventory. Declare the field
+     name and type once, and provide both structs' field documentation and
+     attributes there. Keep neighbor-only fields explicit in the generator.
    - Keep `#[serde(deny_unknown_fields)]` on config structs. Do not add catch-all
      maps for convenience.
    - Choose an explicit default. Prefer a semantic default in the schema type
