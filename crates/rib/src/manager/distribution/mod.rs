@@ -896,14 +896,19 @@ fn rr_suppression_reason(
 fn policy_label_with_term(
     chain: Option<&PolicyChain>,
     ctx: &RouteContext<'_>,
+    action: PolicyAction,
     matched_policy: Option<&str>,
 ) -> String {
-    let term_suffix = rustbgpd_policy::explain_chain_statements(chain, ctx)
-        .steps
-        .last()
-        .filter(|step| step.policy_name.as_deref() == matched_policy)
-        .and_then(|step| step.term_name.as_deref())
-        .map(|term| format!(":{term}"))
+    let term_suffix = (action == PolicyAction::Deny)
+        .then(|| rustbgpd_policy::explain_chain_statements(chain, ctx))
+        .and_then(|trace| {
+            trace
+                .steps
+                .last()
+                .filter(|step| step.policy_name.as_deref() == matched_policy)
+                .and_then(|step| step.term_name.as_deref())
+                .map(|term| format!(":{term}"))
+        })
         .unwrap_or_default();
     format!("{}{term_suffix}", matched_policy.unwrap_or("inline"))
 }

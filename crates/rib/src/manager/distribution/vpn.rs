@@ -611,6 +611,7 @@ impl RibManager {
                     super::policy_label_with_term(
                         Some(chain),
                         &ctx,
+                        evaluation.action,
                         evaluation.matched_policy.as_deref(),
                     )
                 });

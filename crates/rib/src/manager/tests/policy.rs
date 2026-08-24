@@ -1199,18 +1199,18 @@ async fn peer_down_cleans_up_export_policy() {
     handle.await.unwrap();
 }
 
-/// ADR-0096 explain slice: when the deciding export-chain member is an
-/// `.rpol` policy, the explain reason labels the decision
-/// `<chain-ref>:<term>`, and the live per-term hit counters are
-/// queryable — with explain itself not counting (side-effect-free).
+/// ADR-0096 explain slice: an `.rpol` Deny names the deciding
+/// `<chain-ref>:<term>`, while a Permit retains the chain-default label even
+/// when a configured member has that literal name. Live per-term hit counters
+/// remain queryable, and explain itself does not count (side-effect-free).
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "one end-to-end walk: install, distribute, explain, query counters"
 )]
-async fn explain_names_rpol_term_and_term_hit_counters_are_queryable() {
+async fn explain_disambiguates_literal_chain_default_name_and_reports_term_hits() {
     const RPOL: &str = r"
-policy no-doc {
+policy chain_default_permit {
     term block-doc {
         if route.prefix == 203.0.113.0/24 { reject }
     }
@@ -1219,11 +1219,11 @@ policy no-doc {
     let file = rustbgpd_policy::rpol::RpolFile::parse(RPOL).expect("clean rpol");
     let mut store = rustbgpd_policy::sets::SetStore::new();
     let compiled = file
-        .compile_policy("no-doc", &[], &mut store)
+        .compile_policy("chain_default_permit", &[], &mut store)
         .expect("policy exists");
     let chain =
         rustbgpd_policy::PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
-            "no-doc".to_string(),
+            "chain_default_permit".to_string(),
             Arc::new(compiled),
         )]);
 
@@ -1283,10 +1283,25 @@ policy no-doc {
     let explain = query_explain_advertised_route(&tx, target, prefix).await;
     assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
     assert_eq!(explain.reasons[0].code, "policy_denied");
-    assert!(
-        explain.reasons[0].message.contains("no-doc:block-doc"),
-        "expected the deciding rpol term in the label, got {:?}",
-        explain.reasons[0].message
+    assert_eq!(
+        explain.reasons[0].message,
+        "export policy \"chain_default_permit:block-doc\" denied this route"
+    );
+
+    let permitted_prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+    let permitted = query_explain_advertised_route(&tx, target, permitted_prefix).await;
+    assert_eq!(
+        permitted.decision,
+        crate::update::ExplainDecision::Advertise
+    );
+    let permit_reason = permitted
+        .reasons
+        .iter()
+        .find(|reason| reason.code == "policy_permitted")
+        .expect("permitted export policy reason");
+    assert_eq!(
+        permit_reason.message, "export policy \"chain_default_permit\" permitted this route",
+        "Permit attribution must not inherit the literal member's term suffix"
     );
 
     // Live counters: the two distributed routes evaluated once each;
@@ -1306,7 +1321,10 @@ policy no-doc {
     assert_eq!(hits[0].peer, Some(target));
     assert_eq!(hits[0].evals, 2);
     assert_eq!(hits[0].terms.len(), 1);
-    assert_eq!(hits[0].terms[0].policy.as_deref(), Some("no-doc"));
+    assert_eq!(
+        hits[0].terms[0].policy.as_deref(),
+        Some("chain_default_permit")
+    );
     assert_eq!(hits[0].terms[0].term.as_deref(), Some("block-doc"));
     assert_eq!(hits[0].terms[0].hits, 1);
 

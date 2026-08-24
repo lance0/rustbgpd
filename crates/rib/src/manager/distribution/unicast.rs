@@ -526,6 +526,7 @@ impl RibManager {
                                 let label = super::policy_label_with_term(
                                     export_pol,
                                     &ctx,
+                                    evaluation.action,
                                     evaluation.matched_policy.as_deref(),
                                 );
                                 if first_no_advertise_suppression.is_none() {
@@ -551,6 +552,7 @@ impl RibManager {
                             let label = super::policy_label_with_term(
                                 export_pol,
                                 &ctx,
+                                evaluation.action,
                                 evaluation.matched_policy.as_deref(),
                             );
                             explain.reasons.push(ExplainReason {
@@ -881,8 +883,12 @@ impl RibManager {
                 },
             ),
         };
-        let policy_label =
-            super::policy_label_with_term(export_pol, &ctx, evaluation.matched_policy.as_deref());
+        let policy_label = super::policy_label_with_term(
+            export_pol,
+            &ctx,
+            evaluation.action,
+            evaluation.matched_policy.as_deref(),
+        );
         if result.action != PolicyAction::Permit {
             explain.decision = ExplainDecision::Deny;
             let (code, message) =
@@ -2110,7 +2116,12 @@ impl RibManager {
             // agree with the evaluation by the policy crate's agreement
             // tests). TOML members carry no term name.
             trace.policy_label = export_pol.map(|chain| {
-                policy_label_with_term(Some(chain), &ctx, evaluation.matched_policy.as_deref())
+                policy_label_with_term(
+                    Some(chain),
+                    &ctx,
+                    evaluation.action,
+                    evaluation.matched_policy.as_deref(),
+                )
             });
         }
         if policy_result.action != PolicyAction::Permit {
