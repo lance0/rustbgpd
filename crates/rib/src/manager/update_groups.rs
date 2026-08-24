@@ -36,6 +36,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use rustbgpd_policy::engine::chain_default_permit_label;
 use rustbgpd_policy::{NextHopAction, PolicyAction, PolicyChain};
 use rustbgpd_wire::{
     Afi, BgpRole, LargeCommunity, PathAttribute, Prefix, Safi, VpnAddressFamily, VpnRouteKey,
@@ -460,9 +461,9 @@ pub(in crate::manager) struct GroupRibOut {
     /// empty ([`Self::record_policy_filtered`] removes whole prefixes),
     /// so outer emptiness remains "no denials".
     policy_filtered: FxHashMap<Prefix, FxHashMap<(IpAddr, u32), Option<PolicyLabel>>>,
-    /// Terminal Permit label for every staged unicast and VPN entry.
+    /// Default-Permit label for every staged unicast and VPN entry.
     /// Export-chain identity is group-uniform and immutable, and a chain
-    /// Permit is always attributed to its final named policy, so retaining
+    /// Permit is always attributed to the shared chain sentinel, so retaining
     /// this once per group replaces two route-keyed label maps.
     permit_policy_label: Option<PolicyLabel>,
     /// Persistent group-verdict VPN export-policy denials: denied key →
@@ -568,9 +569,8 @@ impl GroupRibOut {
             .is_none_or(|chain| !chain.modifies_source_control_communities());
         let permit_policy_label = export_chain
             .as_ref()
-            .and_then(|chain| chain.policies.last())
-            .and_then(|policy| policy.name.as_deref())
-            .map(Arc::from);
+            .filter(|chain| !chain.policies.is_empty())
+            .map(|_| chain_default_permit_label());
         Self {
             table: AdjRibOut::with_capacity(GROUP_FILTERED_PLACEHOLDER, capacity),
             nh_overrides: FxHashMap::default(),
@@ -780,7 +780,7 @@ impl GroupRibOut {
             debug_assert_eq!(
                 delta.policy_label.as_deref(),
                 self.permit_policy_label.as_deref(),
-                "staged Permit attribution must match the immutable export-chain tail"
+                "staged Permit attribution must match the immutable chain default"
             );
             self.inc_source(route.peer, &delta.prefix);
             match nh {
@@ -872,7 +872,7 @@ impl GroupRibOut {
             debug_assert_eq!(
                 delta.policy_label.as_deref(),
                 self.permit_policy_label.as_deref(),
-                "staged VPN Permit attribution must match the immutable export-chain tail"
+                "staged VPN Permit attribution must match the immutable chain default"
             );
             self.inc_source_slot(route.peer, slot);
             self.table.insert_vpn(route.clone());

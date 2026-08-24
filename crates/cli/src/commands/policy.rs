@@ -1387,11 +1387,7 @@ pub async fn explain_import(
         };
         println!("  {}{}", outcome_label(m.outcome), path);
         if outcome_has_decision(m.outcome) {
-            if !m.matched_policy.is_empty() {
-                println!("    policy:  {}", m.matched_policy);
-            } else {
-                println!("    policy:  inline");
-            }
+            println!("    {}", decision_attribution_line(m));
             println!(
                 "    rpki:    {}    aspa: {}",
                 blank_dash(&m.rpki_validation),
@@ -1416,6 +1412,25 @@ pub async fn explain_import(
         }
     }
     Ok(())
+}
+
+fn decision_attribution_line(m: &proto::ImportExplainMatch) -> String {
+    if matches!(
+        proto::ImportExplainOutcome::try_from(m.outcome),
+        Ok(proto::ImportExplainOutcome::Permit)
+    ) && m.matched_policy == rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION
+    {
+        "decision: no policy rejected; chain default permit".to_string()
+    } else {
+        format!(
+            "policy:  {}",
+            if m.matched_policy.is_empty() {
+                "inline"
+            } else {
+                &m.matched_policy
+            }
+        )
+    }
 }
 
 /// One text row per statement-trace step:
@@ -2451,6 +2466,29 @@ mod tests {
             outcome_label(proto::ImportExplainOutcome::NoSession as i32),
             "no_session"
         );
+    }
+
+    #[test]
+    fn explain_attribution_distinguishes_chain_permit_from_policy_deny_and_inline() {
+        let mut row = proto::ImportExplainMatch {
+            outcome: proto::ImportExplainOutcome::Permit as i32,
+            matched_policy: rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION.to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            decision_attribution_line(&row),
+            "decision: no policy rejected; chain default permit"
+        );
+
+        row.outcome = proto::ImportExplainOutcome::Deny as i32;
+        assert_eq!(
+            decision_attribution_line(&row),
+            "policy:  chain_default_permit",
+            "an operator policy with the sentinel spelling stays ordinary deny attribution"
+        );
+
+        row.matched_policy.clear();
+        assert_eq!(decision_attribution_line(&row), "policy:  inline");
     }
 
     #[tokio::test]

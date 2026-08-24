@@ -1404,8 +1404,8 @@ impl BgpMetrics {
         let policy_routes = IntCounterVec::new(
             Opts::new(
                 "bgp_policy_routes_total",
-                "Routes evaluated through a policy chain, attributed to the \
-                 terminal-decision policy. Labels: peer (bounded by neighbor \
+                "Routes evaluated through a policy chain, attributed to the denying \
+                 member or nonempty-chain default Permit. Labels: peer (bounded by neighbor \
                  count), policy (configured policy name; \"inline\" for \
                  anonymous), direction ∈ {import, export}, action ∈ {permit, \
                  deny}. Cardinality is bounded by config — no per-clause \
@@ -3989,11 +3989,11 @@ impl BgpMetrics {
     }
 
     /// Record a route evaluated through a policy chain, attributed to
-    /// the terminal-decision policy.
+    /// its denying member or nonempty-chain default Permit.
     ///
     /// - `peer`: bounded by neighbor count.
-    /// - `policy`: configured policy name; `"inline"` for anonymous /
-    ///   inline policies.
+    /// - `policy`: configured denying policy, `chain_default_permit`,
+    ///   or `"inline"` for an anonymous deny / absent / empty chain.
     /// - `direction`: `"import"` or `"export"`.
     /// - `action`: `"permit"` or `"deny"`.
     ///

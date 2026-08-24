@@ -10,8 +10,8 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rustbgpd_policy::{
-    NamedPolicy, Policy, PolicyAction, PolicyChain, RouteContext, RouteModifications,
-    evaluate_chain_with_reject_term,
+    CHAIN_DEFAULT_PERMIT_ATTRIBUTION, NamedPolicy, Policy, PolicyAction, PolicyChain, RouteContext,
+    RouteModifications, evaluate_chain_with_reject_term,
 };
 use rustbgpd_wire::{AspaValidation, RpkiValidation};
 
@@ -131,8 +131,7 @@ fn named_permit_chain() -> PolicyChain {
     }])
 }
 
-/// Red proof: changing the evaluator to rebuild an owned label per verdict
-/// (for example `Arc::from(policy.name.as_deref().unwrap())`) preserves the
+/// Mutation proof: rebuilding an owned label per verdict preserves the
 /// asserted text and action but makes the allocation count non-zero.
 #[test]
 fn retained_permit_attribution_allocates_nothing_per_verdict() {
@@ -146,8 +145,8 @@ fn retained_permit_attribution_allocates_nothing_per_verdict() {
     assert_eq!(warm_term, None);
     let expected_label = warm_evaluation
         .matched_policy
-        .expect("named policy must produce attributed verdicts");
-    assert_eq!(expected_label.as_ref(), "customer-import");
+        .expect("nonempty chain must produce attributed verdicts");
+    assert_eq!(expected_label.as_ref(), CHAIN_DEFAULT_PERMIT_ATTRIBUTION);
 
     let mut attributed_verdicts = 0;
     ALLOCATOR.begin();
@@ -160,7 +159,7 @@ fn retained_permit_attribution_allocates_nothing_per_verdict() {
             && evaluation.action == PolicyAction::Permit
             && evaluation.eval_error.is_none()
             && term.is_none()
-            && label.as_ref() == "customer-import"
+            && label.as_ref() == CHAIN_DEFAULT_PERMIT_ATTRIBUTION
         {
             attributed_verdicts += 1;
         }
@@ -169,11 +168,11 @@ fn retained_permit_attribution_allocates_nothing_per_verdict() {
 
     assert_eq!(
         attributed_verdicts, VERDICTS,
-        "the fixed-operation window must exercise the named attributed path"
+        "the fixed-operation window must exercise the chain-default attributed path"
     );
     assert_eq!(
         allocations, 0,
-        "named attribution rebuilt {allocations} labels across {VERDICTS} verdicts"
+        "chain-default attribution rebuilt {allocations} labels across {VERDICTS} verdicts"
     );
 
     // Keep the public result shape explicit: the allocation gate is not

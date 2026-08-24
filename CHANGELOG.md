@@ -38,6 +38,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Policy decision attribution now distinguishes a nonempty chain that
+  completed without rejection from its final member. Import/export metrics,
+  cached import explain, grouped export replay, and JSON/protobuf explain use
+  the stable `chain_default_permit` label for that Permit outcome; Deny keeps
+  the decisive policy, while absent and genuinely empty chains remain
+  `inline`. Text import explain renders the outcome as `decision: no policy
+  rejected; chain default permit`. Decisions, modifications, term hits, and
+  scalar permit/deny totals are unchanged. (LAN-1198)
+
 - The Bird's Eye adapter now family-scopes and separately bounds protocol and
   export longest-match fallback scans, refusing incomplete views with HTTP 403
   instead of evaluating partial results. (LAN-1263)

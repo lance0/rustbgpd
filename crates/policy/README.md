@@ -40,8 +40,10 @@ compilation pipeline:
 - **`PolicyResult`** — struct of `action: PolicyAction` (`Permit` / `Deny`) plus `modifications: RouteModifications` (empty on `Deny`)
 - **`evaluate_chain()`** — top-level entry point for policy evaluation
 - **`evaluate_chain_with_attribution()`** / **`PolicyEvaluation`** —
-  evaluation plus the deciding policy/statement attribution backing
-  import explain (ADR-0073)
+  evaluation plus decision attribution backing import explain (ADR-0073):
+  a Deny names its decisive member, while a nonempty chain that completes
+  without rejection uses `chain_default_permit`; absent and genuinely empty
+  chains remain unattributed (`inline` on operator surfaces)
 - **`explain_chain_statements()`** — per-statement trace of a chain
   against one route (`ChainStatementTrace` / `StatementAttribution`)
 - **`PolicyHitCounters`** — live per-term hit counters behind

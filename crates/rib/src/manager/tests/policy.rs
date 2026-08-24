@@ -925,8 +925,13 @@ async fn export_as_path_regex_still_filters_through_distribution() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one direct-export scenario pins route, explain, metric attribution, and scalar totals"
+)]
 async fn explain_advertised_route_reports_modifications() {
     let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
     let export_policy = rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
         default_action: rustbgpd_policy::PolicyAction::Permit,
         entries: vec![rustbgpd_policy::PolicyStatement {
@@ -954,7 +959,7 @@ async fn explain_advertised_route_reports_modifications() {
             action: rustbgpd_policy::PolicyAction::Permit,
         }],
     }]);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let handle = tokio::spawn(manager.run());
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -980,6 +985,7 @@ async fn explain_advertised_route_reports_modifications() {
     })
     .await
     .unwrap();
+
     drain_eor(&mut out_rx).await;
 
     let route = make_route(
@@ -999,6 +1005,9 @@ async fn explain_advertised_route_reports_modifications() {
     .await
     .unwrap();
 
+    let update = out_rx.recv().await.expect("permitted route emitted");
+    assert_eq!(update.announce.len(), 1);
+
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
     let explain = query_explain_advertised_route(&tx, target, prefix).await;
     assert_eq!(explain.decision, crate::update::ExplainDecision::Advertise);
@@ -1010,6 +1019,25 @@ async fn explain_advertised_route_reports_modifications() {
     assert_eq!(explain.modifications.set_local_pref, Some(200));
     assert_eq!(explain.reasons[0].code, "ebgp_route");
     assert_eq!(explain.reasons[1].code, "policy_permitted");
+    assert!(
+        explain.reasons[1]
+            .message
+            .contains(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)
+    );
+    assert!(
+        (policy_metric_value(
+            &metrics,
+            "10.0.0.2",
+            rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION,
+            "export",
+            "permit"
+        ) - 1.0)
+            .abs()
+            < f64::EPSILON
+    );
+    let stats = query_neighbor_policy_stats(&tx, target).await;
+    assert_eq!(stats.export_policy_routes_permitted, 1);
+    assert_eq!(stats.export_policy_routes_denied, 0);
 
     drop(tx);
     handle.await.unwrap();

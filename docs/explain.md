@@ -173,12 +173,19 @@ enabled = true
 $ rbgp policy explain --neighbor 10.0.0.2 --prefix 10.10.1.0/24
 import policy explain — peer 10.0.0.2 prefix 10.10.1.0/24 (policy generation 3)
   permit
-    policy:  customer-in(200)
+    decision: no policy rejected; chain default permit
     statements:
       [0] policy customer-in(200) term customer-routes permit  match: guard route.prefix in customers  set: local_pref 100 -> 200
         term rpki-guard: route.rpki == invalid => reject [not matched]
         term customer-routes: route.prefix in customers => set local-pref 200; accept [matched]
 ```
+
+For a Permit, `chain_default_permit` means a nonempty chain completed without
+any member rejecting the route; it is not the name of the last member. An
+absent or genuinely empty chain remains `inline`. JSON and protobuf responses
+retain the machine-stable `matched_policy: "chain_default_permit"`; a Deny
+always keeps its actual named member (including an operator policy that happens
+to use that spelling), or `inline` for an anonymous member.
 
 Outcomes are `permit` / `deny` / `withdrawn` / `not_seen` / `evicted`
 / `stale`; a disabled cache or missing session errors distinctly

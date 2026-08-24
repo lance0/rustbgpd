@@ -127,9 +127,10 @@ pub struct CachedPolicyContext {
 #[derive(Debug, Clone)]
 pub struct CachedDecision {
     pub outcome: CachedOutcome,
-    /// Terminal-decision policy name from
+    /// Decision attribution from
     /// [`rustbgpd_policy::PolicyEvaluation::matched_policy`]. `None` =
-    /// inline / anonymous.
+    /// inline deny or absent / genuinely empty chain; a nonempty-chain
+    /// Permit carries `chain_default_permit`.
     pub matched_policy: Option<Arc<str>>,
     /// RPKI origin-validation state at evaluation time.
     pub rpki: RpkiValidation,
