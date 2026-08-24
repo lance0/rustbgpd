@@ -93,7 +93,9 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
+                ".github/actions/prepare-gobgp-artifact",
                 ".github/actions/prepare-grpcurl-artifact",
+                ".github/actions/prime-rustbgpd-dev-cache",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
@@ -137,7 +139,9 @@ class PrimerContractTests(unittest.TestCase):
             ".github/workflows",
             ".github/actions/install-gnmic-artifact",
             ".github/actions/install-grpcurl-artifact",
+            ".github/actions/prepare-gobgp-artifact",
             ".github/actions/prepare-grpcurl-artifact",
+            ".github/actions/prime-rustbgpd-dev-cache",
             ".github/actions/setup-dataplane-host",
             ".github/actions/stage-bird3-artifact",
             ".github/actions/stage-gobgp-artifact",
@@ -233,7 +237,9 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
+                ".github/actions/prepare-gobgp-artifact",
                 ".github/actions/prepare-grpcurl-artifact",
+                ".github/actions/prime-rustbgpd-dev-cache",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
@@ -261,7 +267,9 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
+                ".github/actions/prepare-gobgp-artifact",
                 ".github/actions/prepare-grpcurl-artifact",
+                ".github/actions/prime-rustbgpd-dev-cache",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
@@ -559,7 +567,7 @@ class PrimerContractTests(unittest.TestCase):
             ("actions/upload-artifact@v7", "actions/upload-artifact@main"),
         ):
             with self.subTest(seam=f"gnmic producer {seam}"):
-                self.mutate(workflow, seam, replacement, occurrence=1)
+                self.mutate(workflow, seam, replacement)
         exact_path = (
             "path: ${{ runner.temp }}/gnmic-cache/"
             "gnmic_0.46.0_Linux_x86_64.tar.gz"
@@ -603,11 +611,23 @@ class PrimerContractTests(unittest.TestCase):
         checksum = "e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522"
         for workflow in ("interop.yml", "kernel-dataplane.yml"):
             relative = f".github/workflows/{workflow}"
-            producer_occurrence = 1 if workflow == "interop.yml" else 0
             for old, new in (
                 ("  gobgp_archive:\n", "  removed_gobgp_archive:\n"),
-                (f"key: gobgp-v3.37.0-linux-amd64-{checksum}", "key: gobgp-latest"),
-                ("name: gobgp-v3.37.0-linux-amd64", "name: gobgp-latest"),
+                (
+                    "uses: ./.github/actions/prepare-gobgp-artifact",
+                    "uses: ./.github/actions/stage-gobgp-artifact",
+                ),
+                (
+                    "uses: ./.github/actions/prepare-gobgp-artifact",
+                    "uses: ./.github/actions/prepare-gobgp-artifact\n"
+                    "        with:\n"
+                    "          mode: permissive",
+                ),
+                (
+                    "uses: ./.github/actions/prepare-gobgp-artifact",
+                    "uses: ./.github/actions/prepare-gobgp-artifact\n"
+                    "      - uses: actions/cache@v6",
+                ),
                 (
                     "needs: [grpcurl_archive, gobgp_archive, prime_dev_image]",
                     "needs: [grpcurl_archive, prime_dev_image]",
@@ -619,29 +639,56 @@ class PrimerContractTests(unittest.TestCase):
             ):
                 with self.subTest(workflow=workflow, seam=old):
                     self.mutate(relative, old, new)
-            for seam, replacement in (
-                ("actions/cache@v6", "actions/cache@main"),
-                ("--prepare-archive", "--stage-archive"),
-                ("actions/upload-artifact@v7", "actions/upload-artifact@main"),
-            ):
-                with self.subTest(workflow=workflow, seam=f"gobgp producer {seam}"):
-                    self.mutate(
-                        relative, seam, replacement, occurrence=producer_occurrence
-                    )
-            exact_path = (
-                "path: ${{ runner.temp }}/gobgp-cache/"
-                "gobgp_3.37.0_linux_amd64.tar.gz"
-            )
-            for occurrence in (0, 1):
-                with self.subTest(
-                    workflow=workflow, seam="gobgp exact path", occurrence=occurrence
-                ):
-                    self.mutate(
-                        relative,
-                        exact_path,
-                        "path: ${{ runner.temp }}/gobgp-cache/wrong.tar.gz",
-                        occurrence=occurrence,
-                    )
+
+        producer = ".github/actions/prepare-gobgp-artifact/action.yml"
+        for old, new in (
+            ('using: "composite"', 'using: "docker"'),
+            ("actions/cache@v6", "actions/cache@main"),
+            (f"key: gobgp-v3.37.0-linux-amd64-{checksum}", "key: gobgp-latest"),
+            ("shell: bash", "shell: sh"),
+            ("--prepare-archive", "--stage-archive"),
+            ("actions/upload-artifact@v7", "actions/upload-artifact@main"),
+            ("name: gobgp-v3.37.0-linux-amd64", "name: gobgp-latest"),
+            ("if-no-files-found: error", "if-no-files-found: warn"),
+            ("retention-days: 1", "retention-days: 30"),
+            ("compression-level: 0", "compression-level: 6"),
+            (
+                f"key: gobgp-v3.37.0-linux-amd64-{checksum}",
+                f"key: gobgp-v3.37.0-linux-amd64-{checksum}\n"
+                "        restore-keys: gobgp-",
+            ),
+            (
+                "uses: actions/cache@v6",
+                "uses: actions/cache@v6\n      continue-on-error: true",
+            ),
+            (
+                "runs:\n",
+                "inputs:\n  mode:\n    required: false\nruns:\n",
+            ),
+            (
+                "runs:\n",
+                "outputs:\n  archive:\n    value: latest\nruns:\n",
+            ),
+            (
+                ".github/scripts/install-gobgp.sh \\",
+                "curl https://example.invalid/gobgp\n"
+                "        .github/scripts/install-gobgp.sh \\",
+            ),
+        ):
+            with self.subTest(seam=f"gobgp producer action {old}"):
+                self.mutate(producer, old, new)
+        exact_path = (
+            "path: ${{ runner.temp }}/gobgp-cache/"
+            "gobgp_3.37.0_linux_amd64.tar.gz"
+        )
+        for occurrence in (0, 1):
+            with self.subTest(seam="gobgp exact path", occurrence=occurrence):
+                self.mutate(
+                    producer,
+                    exact_path,
+                    "path: ${{ runner.temp }}/gobgp-cache/wrong.tar.gz",
+                    occurrence=occurrence,
+                )
 
         stage_then_build = (
             "      - name: Stage verified GoBGP archive\n"
@@ -716,7 +763,7 @@ class PrimerContractTests(unittest.TestCase):
             ("actions/upload-artifact@v7", "actions/upload-artifact@main"),
         ):
             with self.subTest(seam=f"bird3 producer {seam}"):
-                self.mutate(relative, seam, replacement, occurrence=1)
+                self.mutate(relative, seam, replacement)
         exact_path = (
             "path: ${{ runner.temp }}/bird3-cache/bird-3.3.1.tar.gz"
         )
@@ -783,7 +830,9 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
+                ".github/actions/prepare-gobgp-artifact",
                 ".github/actions/prepare-grpcurl-artifact",
+                ".github/actions/prime-rustbgpd-dev-cache",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
@@ -817,7 +866,9 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
+                ".github/actions/prepare-gobgp-artifact",
                 ".github/actions/prepare-grpcurl-artifact",
+                ".github/actions/prime-rustbgpd-dev-cache",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
@@ -851,7 +902,9 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
+                ".github/actions/prepare-gobgp-artifact",
                 ".github/actions/prepare-grpcurl-artifact",
+                ".github/actions/prime-rustbgpd-dev-cache",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
@@ -1046,8 +1099,8 @@ class PrimerContractTests(unittest.TestCase):
             ),
             (
                 ".github/workflows/interop.yml",
-                "cache-to: type=gha,scope=rustbgpd-dev,mode=max,ignore-error=true",
-                "cache-to: type=gha",
+                "uses: ./.github/actions/prime-rustbgpd-dev-cache",
+                "uses: docker/build-push-action@v7",
             ),
             (".github/workflows/interop.yml", "load: true", "load: false"),
             (
@@ -1097,30 +1150,58 @@ class PrimerContractTests(unittest.TestCase):
                     "group: rustbgpd-dev-image-main",
                 ),
                 ("cancel-in-progress: false", "cancel-in-progress: true"),
-                ("load: false", "load: true"),
-                ("context: .", "context: elsewhere"),
-                ("tags: rustbgpd:dev", "tags: other:dev"),
-                ("target: dev", "target: release"),
-                ("cache-from: type=gha,scope=rustbgpd-dev", "cache-from: type=gha"),
                 (
-                    "cache-to: type=gha,scope=rustbgpd-dev,mode=max,ignore-error=true",
-                    "cache-to: type=gha",
+                    "uses: ./.github/actions/prime-rustbgpd-dev-cache",
+                    "uses: docker/build-push-action@v7",
+                ),
+                (
+                    "uses: ./.github/actions/prime-rustbgpd-dev-cache",
+                    "uses: ./.github/actions/prime-rustbgpd-dev-cache\n"
+                    "      - uses: docker/build-push-action@v7",
                 ),
                 (
                     "actions/checkout@v7",
                     "actions/checkout@main",
                 ),
-                (
-                    "docker/setup-buildx-action@v4",
-                    "docker/setup-buildx-action@main",
-                ),
-                (
-                    "docker/build-push-action@v7",
-                    "docker/build-push-action@main",
-                ),
             ):
                 with self.subTest(workflow=workflow, seam=old):
                     self.mutate(relative, old, new)
+
+        primer_action = ".github/actions/prime-rustbgpd-dev-cache/action.yml"
+        for old, new in (
+            ('using: "composite"', 'using: "docker"'),
+            ("load: false", "load: true"),
+            ("context: .", "context: elsewhere"),
+            ("tags: rustbgpd:dev", "tags: other:dev"),
+            ("target: dev", "target: release"),
+            ("cache-from: type=gha,scope=rustbgpd-dev", "cache-from: type=gha"),
+            (
+                "cache-to: type=gha,scope=rustbgpd-dev,mode=max,ignore-error=true",
+                "cache-to: type=gha",
+            ),
+            (
+                "docker/setup-buildx-action@v4",
+                "docker/setup-buildx-action@main",
+            ),
+            (
+                "docker/build-push-action@v7",
+                "docker/build-push-action@main",
+            ),
+            (
+                "uses: docker/build-push-action@v7",
+                "uses: docker/build-push-action@v7\n      continue-on-error: true",
+            ),
+            (
+                "runs:\n",
+                "inputs:\n  mode:\n    required: false\nruns:\n",
+            ),
+            (
+                "runs:\n",
+                "outputs:\n  image:\n    value: latest\nruns:\n",
+            ),
+        ):
+            with self.subTest(action=primer_action, seam=old):
+                self.mutate(primer_action, old, new)
 
         for workflow in ("ci.yml", "audit.yml", "interop.yml", "kernel-dataplane.yml"):
             relative = f".github/workflows/{workflow}"
@@ -1141,7 +1222,6 @@ class PrimerContractTests(unittest.TestCase):
                 interop,
                 "cache-from: type=gha,scope=rustbgpd-dev",
                 "cache-from: type=gha",
-                occurrence=1,
             )
         with self.subTest(workflow=interop, seam="consumer export"):
             self.mutate(

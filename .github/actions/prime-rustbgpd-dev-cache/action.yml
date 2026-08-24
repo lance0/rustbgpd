@@ -1,0 +1,17 @@
+name: "Prime rustbgpd:dev build cache"
+description: "Warm the fixed heavy-lane image cache without loading a local image."
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+
+    - name: Prime rustbgpd:dev build cache
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        load: false
+        tags: rustbgpd:dev
+        target: dev
+        cache-from: type=gha,scope=rustbgpd-dev
+        cache-to: type=gha,scope=rustbgpd-dev,mode=max,ignore-error=true

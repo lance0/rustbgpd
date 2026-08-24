@@ -108,6 +108,7 @@ GNMIC_ACTION = "uses: ./.github/actions/install-gnmic-artifact"
 GOBGP_ARCHIVE = f"gobgp_{GOBGP_VERSION}_linux_amd64.tar.gz"
 GOBGP_ARTIFACT = f"gobgp-v{GOBGP_VERSION}-linux-amd64"
 GOBGP_CACHE_KEY = f"{GOBGP_ARTIFACT}-{GOBGP_CHECKSUMS['amd64']}"
+PREPARE_GOBGP_ACTION = "uses: ./.github/actions/prepare-gobgp-artifact"
 GOBGP_ACTION = "uses: ./.github/actions/stage-gobgp-artifact"
 GOBGP_BUILD = (
     "docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop"
@@ -123,6 +124,7 @@ BIRD3_CACHE_SEAMS = (
     "cache-from: type=gha,scope=bird3-tcpao",
     "cache-to: type=gha,mode=max,scope=bird3-tcpao,ignore-error=true",
 )
+PRIME_DEV_IMAGE_ACTION = "uses: ./.github/actions/prime-rustbgpd-dev-cache"
 
 TRIGGER_HASHES = {
     "ci.yml": "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8",
@@ -146,10 +148,10 @@ PINS = collections.Counter(
         "dtolnay/rust-toolchain@v1 # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@v1 # 1.95": 2,
-        "docker/setup-buildx-action@v4": 45,
-        "docker/build-push-action@v7": 46,
-        "actions/cache@v6": 6,
-        "actions/upload-artifact@v7": 8,
+        "docker/setup-buildx-action@v4": 44,
+        "docker/build-push-action@v7": 45,
+        "actions/cache@v6": 5,
+        "actions/upload-artifact@v7": 7,
         "actions/download-artifact@v8": 6,
         "rustsec/audit-check@v2.0.0": 1,
         "EmbarkStudios/cargo-deny-action@v2": 1,
@@ -527,16 +529,8 @@ def check(root: Path) -> list[str]:
             "timeout-minutes: 10",
             CHECKOUT,
             "ref: ${{ github.sha }}",
-            "uses: actions/cache@v6",
-            f"path: ${{{{ runner.temp }}}}/gobgp-cache/{GOBGP_ARCHIVE}",
-            f"key: {GOBGP_CACHE_KEY}",
-            "--prepare-archive",
-            f'"$RUNNER_TEMP/gobgp-cache/{GOBGP_ARCHIVE}"',
-            "uses: actions/upload-artifact@v7",
-            f"name: {GOBGP_ARTIFACT}",
-            "if-no-files-found: error",
-            "retention-days: 1",
-            "compression-level: 0",
+            "name: Restore, prepare, and upload exact gobgp archive",
+            PREPARE_GOBGP_ACTION,
         ):
             if seam not in gobgp_producer:
                 errors.append(f"{name}:gobgp_archive missing {seam}")
@@ -544,21 +538,28 @@ def check(root: Path) -> list[str]:
             "restore-keys:",
             "continue-on-error:",
             "actions/download-artifact@",
+            "actions/cache@",
+            "actions/upload-artifact@",
+            "--prepare-archive",
             "--stage-archive",
         ):
             if forbidden in gobgp_producer:
                 errors.append(f"{name}:gobgp_archive permits {forbidden}")
-        if gobgp_producer.count("uses: actions/cache@v6") != 1:
-            errors.append(f"{name}:gobgp_archive must restore one exact cache")
-        if gobgp_producer.count("--prepare-archive") != 1:
-            errors.append(f"{name}:gobgp_archive must prepare one archive")
-        if gobgp_producer.count("uses: actions/upload-artifact@v7") != 1:
-            errors.append(f"{name}:gobgp_archive must upload one artifact")
-        exact_gobgp_path = (
-            f"path: ${{{{ runner.temp }}}}/gobgp-cache/{GOBGP_ARCHIVE}"
+        producer_uses = re.findall(
+            r"(?m)^\s*(?:- )?uses:\s*(.+)$", gobgp_producer
         )
-        if gobgp_producer.count(exact_gobgp_path) != 2:
-            errors.append(f"{name}:gobgp_archive cache/artifact paths drifted")
+        if producer_uses != [
+            "actions/checkout@v7",
+            "./.github/actions/prepare-gobgp-artifact",
+        ]:
+            errors.append(f"{name}:gobgp_archive action inventory drifted")
+        if gobgp_producer.count(PREPARE_GOBGP_ACTION) != 1:
+            errors.append(
+                f"{name}:gobgp_archive must call one exact producer action"
+            )
+        producer_call_tail = gobgp_producer.split(PREPARE_GOBGP_ACTION, 1)[-1]
+        if "with:" in producer_call_tail:
+            errors.append(f"{name}:gobgp_archive producer call must have no inputs")
         if setup:
             bird3_producer = jobs.get("bird3_archive", "")
             for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
@@ -612,19 +613,32 @@ def check(root: Path) -> list[str]:
             "cancel-in-progress: false",
             CHECKOUT,
             "ref: ${{ github.sha }}",
-            BUILDX,
-            BUILD_PUSH,
-            "context: .",
-            "load: false",
-            "tags: rustbgpd:dev",
-            "target: dev",
-            IMPORT,
-            EXPORT,
+            "name: Prime rustbgpd:dev build cache",
+            PRIME_DEV_IMAGE_ACTION,
         ):
             if seam not in primer:
                 errors.append(f"{name}: primer missing {seam}")
-        if "load: true" in primer:
-            errors.append(f"{name}: primer must export cache, not load an image")
+        primer_uses = re.findall(r"(?m)^\s*(?:- )?uses:\s*(.+)$", primer)
+        if primer_uses != [
+            "actions/checkout@v7",
+            "./.github/actions/prime-rustbgpd-dev-cache",
+        ]:
+            errors.append(f"{name}: primer action inventory drifted")
+        if primer.count(PRIME_DEV_IMAGE_ACTION) != 1:
+            errors.append(f"{name}: primer must call one exact image-primer action")
+        primer_call_tail = primer.split(PRIME_DEV_IMAGE_ACTION, 1)[-1]
+        if "with:" in primer_call_tail:
+            errors.append(f"{name}: image-primer call must have no inputs")
+        for forbidden in (
+            "continue-on-error:",
+            "docker/setup-buildx-action@",
+            "docker/build-push-action@",
+            "cache-from:",
+            "cache-to:",
+            "load:",
+        ):
+            if forbidden in primer:
+                errors.append(f"{name}: primer bypasses shared action with {forbidden}")
         for job_name in roster:
             job = jobs.get(job_name, "")
             if not setup and job_name in ("m54", "m56"):
@@ -830,6 +844,12 @@ def check(root: Path) -> list[str]:
     prepare_grpcurl_action = (
         root / ".github" / "actions" / "prepare-grpcurl-artifact" / "action.yml"
     ).read_text()
+    prepare_gobgp_action = (
+        root / ".github" / "actions" / "prepare-gobgp-artifact" / "action.yml"
+    ).read_text()
+    prime_dev_image_action = (
+        root / ".github" / "actions" / "prime-rustbgpd-dev-cache" / "action.yml"
+    ).read_text()
     gnmic_action = (
         root / ".github" / "actions" / "install-gnmic-artifact" / "action.yml"
     ).read_text()
@@ -883,6 +903,89 @@ def check(root: Path) -> list[str]:
             errors.append(f"prepare-grpcurl-artifact permits {forbidden}")
     if re.search(r"(?m)^\s*curl\s", prepare_grpcurl_action):
         errors.append("prepare-grpcurl-artifact permits curl")
+    for seam in (
+        'using: "composite"',
+        "uses: actions/cache@v6",
+        f"path: ${{{{ runner.temp }}}}/gobgp-cache/{GOBGP_ARCHIVE}",
+        f"key: {GOBGP_CACHE_KEY}",
+        "shell: bash",
+        "--prepare-archive",
+        f'"$RUNNER_TEMP/gobgp-cache/{GOBGP_ARCHIVE}"',
+        "uses: actions/upload-artifact@v7",
+        f"name: {GOBGP_ARTIFACT}",
+        "if-no-files-found: error",
+        "retention-days: 1",
+        "compression-level: 0",
+    ):
+        if seam not in prepare_gobgp_action:
+            errors.append(f"prepare-gobgp-artifact missing {seam}")
+    if prepare_gobgp_action.count("uses: actions/cache@v6") != 1:
+        errors.append("prepare-gobgp-artifact must restore one exact cache")
+    if prepare_gobgp_action.count("--prepare-archive") != 1:
+        errors.append("prepare-gobgp-artifact must prepare one archive")
+    if prepare_gobgp_action.count("uses: actions/upload-artifact@v7") != 1:
+        errors.append("prepare-gobgp-artifact must upload one artifact")
+    exact_gobgp_path = (
+        f"path: ${{{{ runner.temp }}}}/gobgp-cache/{GOBGP_ARCHIVE}"
+    )
+    if prepare_gobgp_action.count(exact_gobgp_path) != 2:
+        errors.append("prepare-gobgp-artifact cache/artifact paths drifted")
+    if prepare_gobgp_action.count(f"key: {GOBGP_CACHE_KEY}") != 1:
+        errors.append("prepare-gobgp-artifact cache key drifted")
+    if prepare_gobgp_action.count(f"name: {GOBGP_ARTIFACT}") != 1:
+        errors.append("prepare-gobgp-artifact artifact name drifted")
+    for forbidden in (
+        "inputs:",
+        "outputs:",
+        "restore-keys:",
+        "continue-on-error:",
+        "actions/download-artifact@",
+        "--stage-archive",
+        "releases/download/",
+    ):
+        if forbidden in prepare_gobgp_action:
+            errors.append(f"prepare-gobgp-artifact permits {forbidden}")
+    if re.search(r"(?m)^\s*curl\s", prepare_gobgp_action):
+        errors.append("prepare-gobgp-artifact permits curl")
+
+    primer_action_uses = re.findall(
+        r"(?m)^\s*(?:- )?uses:\s*(.+)$", prime_dev_image_action
+    )
+    if primer_action_uses != [
+        "docker/setup-buildx-action@v4",
+        "docker/build-push-action@v7",
+    ]:
+        errors.append("prime-rustbgpd-dev-cache action inventory drifted")
+    for seam in (
+        'using: "composite"',
+        BUILDX,
+        BUILD_PUSH,
+        "context: .",
+        "load: false",
+        "tags: rustbgpd:dev",
+        "target: dev",
+        IMPORT,
+        EXPORT,
+    ):
+        if seam not in prime_dev_image_action:
+            errors.append(f"prime-rustbgpd-dev-cache missing {seam}")
+    for seam in (BUILDX, BUILD_PUSH, IMPORT, EXPORT):
+        if prime_dev_image_action.count(seam) != 1:
+            errors.append(f"prime-rustbgpd-dev-cache must contain one exact {seam}")
+    for forbidden in (
+        "inputs:",
+        "outputs:",
+        "continue-on-error:",
+        "if:",
+        "load: true",
+        "push: true",
+        "actions/checkout@",
+        "actions/cache@",
+        "actions/upload-artifact@",
+        "actions/download-artifact@",
+    ):
+        if forbidden in prime_dev_image_action:
+            errors.append(f"prime-rustbgpd-dev-cache permits {forbidden}")
     for seam in (
         "uses: actions/download-artifact@v8",
         f"name: {GRPCURL_ARTIFACT}",
@@ -1043,7 +1146,12 @@ def check(root: Path) -> list[str]:
     if texts["kernel-dataplane.yml"].count(GOBGP_ACTION) != 3:
         errors.append("kernel-dataplane.yml: gobgp stage consumer inventory drifted")
     gobgp_surfaces = "\n".join(
-        (texts["interop.yml"], texts["kernel-dataplane.yml"], gobgp_action)
+        (
+            texts["interop.yml"],
+            texts["kernel-dataplane.yml"],
+            prepare_gobgp_action,
+            gobgp_action,
+        )
     )
     if "osrg/gobgp/releases" in gobgp_surfaces:
         errors.append("gobgp release URL escaped the installer/Dockerfile")
@@ -1062,6 +1170,8 @@ def check(root: Path) -> list[str]:
         *texts.values(),
         action,
         prepare_grpcurl_action,
+        prepare_gobgp_action,
+        prime_dev_image_action,
         grpcurl_action,
         gnmic_action,
         gobgp_action,
