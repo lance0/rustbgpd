@@ -88,9 +88,11 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.14.1 - 2026-07-11
 
-- **Additive API:** Added `AsPath::asns`, `encode_message_with_limit`, and
-  per-message `encode_with_limit` methods for NOTIFICATION and ROUTE-REFRESH.
-  Existing items and the default 4096-byte encoding ceiling are unchanged.
+- **Additive API:** Added `AsPath::asns` and per-message `encode_with_limit`
+  methods for NOTIFICATION and ROUTE-REFRESH. The existing
+  `encode_message_with_limit` now applies the caller's ceiling to those message
+  types. Existing items and the default 4096-byte encoding ceiling are
+  unchanged.
 
 ## 0.14.0 - 2026-07-06
 
@@ -108,9 +110,10 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 - **Breaking API:** Added `Afi::BgpLs`, `Safi::BgpLs`, and `Safi::BgpLsVpn` to
   exhaustive enums and public BGP-LS fields to `MpReachNlri` /
   `MpUnreachNlri`. Downstream matches and struct literals must be updated.
-- Added the BGP-LS codec and made structured `MP_REACH_NLRI` /
-  `MP_UNREACH_NLRI` encoding fallible for oversized FlowSpec rule vectors.
-  `UpdateMessage::try_build` provides the fallible build path.
+- Integrated the existing BGP-LS codec into structured `MP_REACH_NLRI` /
+  `MP_UNREACH_NLRI` dispatch and made their encoding fallible for oversized
+  FlowSpec rule vectors. `UpdateMessage::try_build` provides the fallible build
+  path.
 
 ## 0.12.0 - 2026-06-17
 
