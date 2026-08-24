@@ -39,6 +39,45 @@ Markdown. Published docs name the thing directly, link the ADR, or cite the
 GitHub PR number — never a private issue-tracker ID an external reader
 cannot resolve.
 
+### Optional local task runner
+
+The repository includes an optional [`just`](https://just.systems/) task
+runner for a curated local baseline. It does not add a build dependency, and
+the recipes are not a full CI or pre-merge replica. Install it outside the
+repository if you want the shortcuts:
+
+```bash
+cargo install --locked just
+just --list
+```
+
+The recipes intentionally expose their direct commands:
+
+- `just gate` runs formatting, lightweight repository contracts, strict
+  workspace Clippy, the full workspace tests, and library docs. This is the
+  broad local baseline and can take several minutes on a cold target directory.
+- `just gate-rib` compiles the feature-gated RIB, transport, and API benchmark
+  surfaces that the default workspace build cannot see.
+- `just gate-deps` tests the four standalone scale-harness manifests. These
+  builds have separate lockfiles and can add substantial cold-build time.
+- `just gate-contract` executes every Criterion benchmark body once without
+  collecting timings. The harness is Linux/GNU-Bash oriented and requires the
+  same local toolchain and system libraries as those benches.
+- `just fix` applies safe Clippy suggestions before formatting. Cargo's normal
+  refusal to modify dirty or staged worktrees remains in force.
+
+Hosted checks remain authoritative and cover more than these recipes: the
+declared MSRV, platform and workflow contracts, receipt classifiers, and
+privileged interoperability lanes. In particular, the exact v0.64 migration
+test only runs when `RUSTBGPD_V064_VALIDATOR` points to the verified v0.64
+binary that CI prepares. Privileged network-namespace tests require Linux,
+`EVPN_LINUX_NETNS=1`, and `CAP_NET_ADMIN` plus `CAP_SYS_ADMIN`; use
+`crates/evpn-linux/tests/docker/run-netns-tests.sh` as documented in that
+harness's README. Neither prerequisite is installed or enabled by `just gate`.
+
+Treat the `justfile` as a convenient reviewed snapshot, not a single source of
+truth. Check the applicable workflows when changing CI or preparing a merge.
+
 ### Comparison documentation
 
 Describe every project by capability and scope, pin the compared release, and
@@ -130,9 +169,9 @@ maintaining a second crate list.
 We ship a `.pre-commit-config.yaml` that runs `cargo fmt` and
 `cargo clippy --workspace --all-targets -- -D warnings` on every
 commit and `cargo test --workspace --lib` on every push. The
-clippy invocation matches CI exactly so a clean commit is a clean
-PR. `cargo test` is gated to pre-push (not pre-commit) so commits
-stay fast.
+hooks are a fast local subset, not an exact CI mirror or a guarantee that a
+pull request is ready. `cargo test` is gated to pre-push (not pre-commit) so
+commits stay fast.
 
 Set it up once:
 
