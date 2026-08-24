@@ -802,6 +802,65 @@ pub enum TermAction {
     },
 }
 
+/// Borrowed, one-to-one view of [`TermAction`] used by the three policy
+/// execution walks.
+///
+/// Keeping every variant and payload in this crate-private view makes a new
+/// action a compile-time obligation for live evaluation, coverage evaluation,
+/// and statement tracing without adding allocation or dynamic dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TermActionView<'a> {
+    Permit(&'a RouteModifications),
+    Deny,
+    Continue(&'a RouteModifications),
+    Bind {
+        slot: u8,
+        name: &'a str,
+        expr: &'a ValueExpr,
+    },
+    ForEach(&'a ForEachNode),
+    Break,
+    ContinueLoop,
+    CommunityVar {
+        add: bool,
+        slot: u8,
+        name: &'a str,
+    },
+    RemoveLargeCommunityAdmin {
+        global_admin: u32,
+    },
+}
+
+impl TermAction {
+    /// Borrow this action through the exhaustive execution-walk view.
+    #[must_use]
+    pub(crate) fn view(&self) -> TermActionView<'_> {
+        match self {
+            Self::Permit(mods) => TermActionView::Permit(mods),
+            Self::Deny => TermActionView::Deny,
+            Self::Continue(mods) => TermActionView::Continue(mods),
+            Self::Bind { slot, name, expr } => TermActionView::Bind {
+                slot: *slot,
+                name,
+                expr,
+            },
+            Self::ForEach(node) => TermActionView::ForEach(node),
+            Self::Break => TermActionView::Break,
+            Self::ContinueLoop => TermActionView::ContinueLoop,
+            Self::CommunityVar { add, slot, name } => TermActionView::CommunityVar {
+                add: *add,
+                slot: *slot,
+                name,
+            },
+            Self::RemoveLargeCommunityAdmin { global_admin } => {
+                TermActionView::RemoveLargeCommunityAdmin {
+                    global_admin: *global_admin,
+                }
+            }
+        }
+    }
+}
+
 /// One guarded action inside a [`CompiledPolicy`] — the compiled form
 /// of a TOML `PolicyStatement` or (later) an `.rpol` `term` block.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1102,5 +1161,93 @@ impl CompiledChain {
             TermAction::Permit(mods) | TermAction::Continue(mods) => pred(mods),
             _ => false,
         })
+    }
+}
+
+#[cfg(test)]
+mod action_view_tests {
+    use super::*;
+
+    #[test]
+    fn decision_and_loop_action_views_preserve_payloads() {
+        let permit_mods = RouteModifications {
+            set_local_pref: Some(200),
+            ..RouteModifications::default()
+        };
+        let permit = TermAction::Permit(permit_mods);
+        let TermActionView::Permit(mods) = permit.view() else {
+            panic!("permit view changed variant");
+        };
+        assert_eq!(mods.set_local_pref, Some(200));
+
+        let continue_mods = RouteModifications {
+            set_med: Some(50),
+            ..RouteModifications::default()
+        };
+        let continued = TermAction::Continue(continue_mods);
+        let TermActionView::Continue(mods) = continued.view() else {
+            panic!("continue view changed variant");
+        };
+        assert_eq!(mods.set_med, Some(50));
+
+        assert_eq!(TermAction::Deny.view(), TermActionView::Deny);
+        assert_eq!(TermAction::Break.view(), TermActionView::Break);
+        assert_eq!(
+            TermAction::ContinueLoop.view(),
+            TermActionView::ContinueLoop
+        );
+
+        let loop_action = TermAction::ForEach(Box::new(ForEachNode {
+            source: LoopSource::Communities,
+            slot: 7,
+            var: "community".into(),
+            body: vec![Term {
+                name: Some("stop".to_string()),
+                guard: MatchExpr::True,
+                action: TermAction::Break,
+            }],
+        }));
+        let TermActionView::ForEach(node) = loop_action.view() else {
+            panic!("for-each view changed variant");
+        };
+        assert_eq!(node.source, LoopSource::Communities);
+        assert_eq!(node.slot, 7);
+        assert_eq!(node.var.as_ref(), "community");
+        assert!(matches!(node.body[0].action, TermAction::Break));
+    }
+
+    #[test]
+    fn bound_action_views_preserve_every_field() {
+        let bind = TermAction::Bind {
+            slot: 3,
+            name: "peer".into(),
+            expr: ValueExpr::Const(65_001),
+        };
+        let TermActionView::Bind { slot, name, expr } = bind.view() else {
+            panic!("bind view changed variant");
+        };
+        assert_eq!(slot, 3);
+        assert_eq!(name, "peer");
+        assert_eq!(expr, &ValueExpr::Const(65_001));
+
+        let community = TermAction::CommunityVar {
+            add: false,
+            slot: 5,
+            name: "tag".into(),
+        };
+        let TermActionView::CommunityVar { add, slot, name } = community.view() else {
+            panic!("community-variable view changed variant");
+        };
+        assert!(!add);
+        assert_eq!(slot, 5);
+        assert_eq!(name, "tag");
+
+        let remove = TermAction::RemoveLargeCommunityAdmin {
+            global_admin: 4_200_000_001,
+        };
+        let TermActionView::RemoveLargeCommunityAdmin { global_admin } = remove.view() else {
+            panic!("large-community removal view changed variant");
+        };
+        assert_eq!(global_admin, 4_200_000_001);
     }
 }

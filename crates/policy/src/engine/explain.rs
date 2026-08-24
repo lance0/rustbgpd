@@ -48,7 +48,7 @@ use super::{
     CommunityMatch, IMPLICIT_LOCAL_PREF, IMPLICIT_MED, NextHopAction, PolicyAction, PolicyChain,
     PolicyStatement, RouteContext, RouteModifications, RouteType,
 };
-use crate::ir::{Cmp, CompiledChain, CompiledPolicy, MatchExpr, Term, TermAction};
+use crate::ir::{Cmp, CompiledChain, CompiledPolicy, MatchExpr, Term, TermAction, TermActionView};
 
 /// One step of a statement-level chain trace: how a single policy in
 /// the chain disposed of the route.
@@ -451,10 +451,11 @@ fn trace_rpol_policy(
     let mut term_traces = Vec::new();
     let mut continued: Option<RouteModifications> = None;
     let mut decided: Option<(usize, &Term)> = None;
-    // LAN-303: a loop permit's resolved modifications — the deciding
-    // term's action is the ForEach node, so the verdict's payload
-    // travels here instead of through the term-action match below.
-    let mut loop_permit: Option<RouteModifications> = None;
+    // A permitting action's modifications travel with the decision so
+    // the result never needs to inspect the original action again.
+    // Loop permits are already resolved by the shared evaluator;
+    // direct permits retain their source expressions for explain.
+    let mut deciding_permit: Option<RouteModifications> = None;
     // LAN-302: the trace walk re-derives `let` bindings term by term
     // (explain may allocate/zero eagerly; the hot path never records)
     // and feeds the frame into the shared guard evaluation.
@@ -505,87 +506,94 @@ fn trace_rpol_policy(
         if !matched {
             continue;
         }
-        // LAN-302: a matched Bind evaluates its initializer eagerly,
-        // exactly like the live walk — an error fails the route
-        // closed; success writes the frame and the walk keeps going.
-        if let TermAction::Bind { slot, expr, .. } = &term.action {
-            match crate::eval::eval_value(expr, ctx, crate::eval::locals_slice(locals.as_ref())) {
-                Ok(value) => {
-                    locals.get_or_insert([0; crate::eval::LOCAL_FRAME_SLOTS])[usize::from(*slot)] =
-                        value;
-                }
-                Err(kind) => {
-                    term_traces.push(format!(
-                        "term {}: evaluation error: {kind} — fail closed => reject",
-                        term.name.as_deref().unwrap_or("<unnamed>"),
-                    ));
-                    eval_failed = true;
-                    decided = Some((index, term));
-                    break;
-                }
-            }
-            continue;
-        }
-        // LAN-303: a matched loop runs through the SAME evaluator as
-        // the live walk (`eval_for_each` — shared fuel, cap, and body
-        // semantics), rendering a bounded summary: iteration count
-        // plus the deciding iteration, never per-iteration output
-        // (ADR-0103 Decision 6).
-        if let TermAction::ForEach(node) = &term.action {
-            match tables.eval_for_each(node, ctx, &mut locals, &mut continued, fuel, pinned) {
-                Ok(outcome) => {
-                    let summary = match (&outcome.flow, outcome.decided_at) {
-                        (crate::eval::LoopFlow::Completed, _) => format!(
-                            "completed after {} iteration(s), no verdict",
-                            outcome.iterations
-                        ),
-                        (crate::eval::LoopFlow::Permit(_), Some(at)) => {
-                            format!("accept at iteration {} of {}", at + 1, outcome.iterations)
-                        }
-                        (crate::eval::LoopFlow::Deny, Some(at)) => {
-                            format!("reject at iteration {} of {}", at + 1, outcome.iterations)
-                        }
-                        _ => format!("{} iteration(s)", outcome.iterations),
-                    };
-                    term_traces.push(format!(
-                        "term {}: loop {summary}",
-                        term.name.as_deref().unwrap_or("<unnamed>"),
-                    ));
-                    match outcome.flow {
-                        crate::eval::LoopFlow::Completed => {}
-                        crate::eval::LoopFlow::Permit(mods) => {
-                            let mut merged = continued.take().unwrap_or_default();
-                            merged.merge_from(mods);
-                            loop_permit = Some(merged);
-                            decided = Some((index, term));
-                            break;
-                        }
-                        crate::eval::LoopFlow::Deny => {
-                            decided = Some((index, term));
-                            break;
-                        }
+        match term.action.view() {
+            // LAN-302: eager binding initialization, identical to the
+            // live walk. An error is terminal on the uniform rail.
+            TermActionView::Bind {
+                slot,
+                name: _name,
+                expr,
+            } => {
+                match crate::eval::eval_value(expr, ctx, crate::eval::locals_slice(locals.as_ref()))
+                {
+                    Ok(value) => {
+                        locals.get_or_insert([0; crate::eval::LOCAL_FRAME_SLOTS])
+                            [usize::from(slot)] = value;
+                    }
+                    Err(kind) => {
+                        term_traces.push(format!(
+                            "term {}: evaluation error: {kind} — fail closed => reject",
+                            term.name.as_deref().unwrap_or("<unnamed>"),
+                        ));
+                        eval_failed = true;
+                        decided = Some((index, term));
+                        break;
                     }
                 }
-                Err((kind, at)) => {
-                    term_traces.push(format!(
-                        "term {}: loop evaluation error at iteration {}: {kind} — fail \
-                         closed => reject",
-                        term.name.as_deref().unwrap_or("<unnamed>"),
-                        at + 1,
-                    ));
-                    eval_failed = true;
-                    decided = Some((index, term));
-                    break;
+            }
+            // LAN-303: run the shared loop evaluator with the same
+            // fuel, snapshot, and body semantics as the live walk.
+            TermActionView::ForEach(node) => {
+                match tables.eval_for_each(node, ctx, &mut locals, &mut continued, fuel, pinned) {
+                    Ok(outcome) => {
+                        let summary = match (&outcome.flow, outcome.decided_at) {
+                            (crate::eval::LoopFlow::Completed, _) => format!(
+                                "completed after {} iteration(s), no verdict",
+                                outcome.iterations
+                            ),
+                            (crate::eval::LoopFlow::Permit(_), Some(at)) => {
+                                format!("accept at iteration {} of {}", at + 1, outcome.iterations)
+                            }
+                            (crate::eval::LoopFlow::Deny, Some(at)) => {
+                                format!("reject at iteration {} of {}", at + 1, outcome.iterations)
+                            }
+                            (
+                                crate::eval::LoopFlow::Permit(_) | crate::eval::LoopFlow::Deny,
+                                None,
+                            ) => {
+                                format!("{} iteration(s)", outcome.iterations)
+                            }
+                        };
+                        term_traces.push(format!(
+                            "term {}: loop {summary}",
+                            term.name.as_deref().unwrap_or("<unnamed>"),
+                        ));
+                        match outcome.flow {
+                            crate::eval::LoopFlow::Completed => {}
+                            crate::eval::LoopFlow::Permit(mods) => {
+                                let mut merged = continued.take().unwrap_or_default();
+                                merged.merge_from(mods);
+                                deciding_permit = Some(merged);
+                                decided = Some((index, term));
+                                break;
+                            }
+                            crate::eval::LoopFlow::Deny => {
+                                decided = Some((index, term));
+                                break;
+                            }
+                        }
+                    }
+                    Err((kind, at)) => {
+                        term_traces.push(format!(
+                            "term {}: loop evaluation error at iteration {}: {kind} — fail \
+                             closed => reject",
+                            term.name.as_deref().unwrap_or("<unnamed>"),
+                            at + 1,
+                        ));
+                        eval_failed = true;
+                        decided = Some((index, term));
+                        break;
+                    }
                 }
             }
-            continue;
-        }
-        // LAN-303: a matched community-variable action stages the
-        // binding's value and the walk keeps going, like the live path.
-        if let TermAction::CommunityVar { add, slot, .. } = &term.action {
-            match crate::eval::exec_community_var(*add, *slot, locals.as_ref(), &mut continued) {
-                Ok(()) => {}
-                Err(kind) => {
+            TermActionView::CommunityVar {
+                add,
+                slot,
+                name: _name,
+            } => {
+                if let Err(kind) =
+                    crate::eval::exec_community_var(add, slot, locals.as_ref(), &mut continued)
+                {
                     term_traces.push(format!(
                         "term {}: evaluation error: {kind} — fail closed => reject",
                         term.name.as_deref().unwrap_or("<unnamed>"),
@@ -595,65 +603,76 @@ fn trace_rpol_policy(
                     break;
                 }
             }
-            continue;
-        }
-        if let TermAction::RemoveLargeCommunityAdmin { global_admin } = &term.action {
-            if !crate::eval::exec_remove_large_community_admin(*global_admin, ctx, &mut continued) {
-                term_traces.push(format!(
-                    "term {}: large-community input exceeds the wildcard-removal bound — fail closed => reject",
-                    term.name.as_deref().unwrap_or("<unnamed>"),
-                ));
-                decided = Some((index, term));
-                break;
+            TermActionView::RemoveLargeCommunityAdmin { global_admin } => {
+                if !crate::eval::exec_remove_large_community_admin(
+                    global_admin,
+                    ctx,
+                    &mut continued,
+                ) {
+                    term_traces.push(format!(
+                        "term {}: large-community input exceeds the wildcard-removal bound — fail closed => reject",
+                        term.name.as_deref().unwrap_or("<unnamed>"),
+                    ));
+                    decided = Some((index, term));
+                    break;
+                }
             }
-            continue;
-        }
-        // Loop control at policy level is a compiler bug: fail closed,
-        // exactly like the live walk's StrayLoopControl rail.
-        if matches!(&term.action, TermAction::Break | TermAction::ContinueLoop) {
-            term_traces.push(format!(
-                "term {}: evaluation error: {} — fail closed => reject",
-                term.name.as_deref().unwrap_or("<unnamed>"),
-                crate::eval::EvalErrorKind::StrayLoopControl,
-            ));
-            eval_failed = true;
-            decided = Some((index, term));
-            break;
-        }
-        // Mirror the live walk's action-execution resolution: an
-        // unresolvable computed operand on the matched term (Permit or
-        // Continue) decides the route as a fail-closed reject here.
-        let action_mods = match &term.action {
-            TermAction::Permit(mods) | TermAction::Continue(mods) => Some(mods),
-            _ => None,
-        };
-        let resolved = match action_mods.map(|mods| {
-            tables.resolve_computed(mods, ctx, crate::eval::locals_slice(locals.as_ref()))
-        }) {
-            Some(Err(kind)) => {
+            // Policy-level loop control is a compiler-bug rail.
+            TermActionView::Break | TermActionView::ContinueLoop => {
                 term_traces.push(format!(
-                    "term {}: evaluation error: {kind} — fail closed => reject",
+                    "term {}: evaluation error: {} — fail closed => reject",
                     term.name.as_deref().unwrap_or("<unnamed>"),
+                    crate::eval::EvalErrorKind::StrayLoopControl,
                 ));
                 eval_failed = true;
                 decided = Some((index, term));
                 break;
             }
-            Some(Ok(resolved)) => resolved,
-            None => None,
-        };
-        if let TermAction::Continue(mods) = &term.action {
-            // Merge the term-time resolution (LAN-302 live parity: a
-            // later sibling scope may reuse the frame slots this
-            // term's computed expressions read, so resolving at trace
-            // end could render a different value than the live walk
-            // applied).
-            continued
-                .get_or_insert_with(RouteModifications::default)
-                .merge_from(resolved.unwrap_or_else(|| mods.clone()));
-        } else {
-            decided = Some((index, term));
-            break;
+            TermActionView::Permit(mods) => {
+                if let Err(kind) =
+                    tables.resolve_computed(mods, ctx, crate::eval::locals_slice(locals.as_ref()))
+                {
+                    term_traces.push(format!(
+                        "term {}: evaluation error: {kind} — fail closed => reject",
+                        term.name.as_deref().unwrap_or("<unnamed>"),
+                    ));
+                    eval_failed = true;
+                    decided = Some((index, term));
+                    break;
+                }
+                let mut merged = continued.take().unwrap_or_default();
+                merged.merge_from(mods.clone());
+                deciding_permit = Some(merged);
+                decided = Some((index, term));
+                break;
+            }
+            TermActionView::Deny => {
+                decided = Some((index, term));
+                break;
+            }
+            TermActionView::Continue(mods) => {
+                let resolved = match tables.resolve_computed(
+                    mods,
+                    ctx,
+                    crate::eval::locals_slice(locals.as_ref()),
+                ) {
+                    Ok(resolved) => resolved,
+                    Err(kind) => {
+                        term_traces.push(format!(
+                            "term {}: evaluation error: {kind} — fail closed => reject",
+                            term.name.as_deref().unwrap_or("<unnamed>"),
+                        ));
+                        eval_failed = true;
+                        decided = Some((index, term));
+                        break;
+                    }
+                };
+                // Resolve at action time: later sibling scopes may
+                // reuse the frame slots this term read.
+                continued
+                    .get_or_insert_with(RouteModifications::default)
+                    .merge_from(resolved.unwrap_or_else(|| mods.clone()));
+            }
         }
     }
     if let Some((index, term)) = decided {
@@ -663,25 +682,13 @@ fn trace_rpol_policy(
         let locals_view = crate::eval::locals_slice(locals.as_ref());
         let (action, modifications) = if eval_failed {
             (PolicyAction::Deny, Vec::new())
-        } else if let Some(merged) = &loop_permit {
-            // LAN-303: a loop body's accept — modifications resolved
-            // (and merged with accumulated Continues) at loop time.
+        } else if let Some(merged) = &deciding_permit {
             (
                 PolicyAction::Permit,
                 render_modifications(merged, ctx, Some(tables), locals_view),
             )
         } else {
-            match &term.action {
-                TermAction::Permit(mods) => {
-                    let mut merged = continued.unwrap_or_default();
-                    merged.merge_from(mods.clone());
-                    (
-                        PolicyAction::Permit,
-                        render_modifications(&merged, ctx, Some(tables), locals_view),
-                    )
-                }
-                _ => (PolicyAction::Deny, Vec::new()),
-            }
+            (PolicyAction::Deny, Vec::new())
         };
         StatementAttribution {
             policy_index,
