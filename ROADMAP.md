@@ -2073,27 +2073,64 @@ branch is between features.
   lock with SIGHUP through config-persistence acknowledgement. Persistence
   rejection rolls the accepted runtime mutation back, completing the same
   lock/ack/rollback invariant used by FIB-table and dynamic-neighbor CRUD.
-- [ ] **`#[expect(clippy::too_many_lines)]` reduction.** ~326 occurrences
-  workspace-wide (2026-07-30 re-measure; ~117 outside test files and
-  top-level test modules — the non-test count is roughly flat, so recent
-  growth is concentrated in test code) — the earlier "~30" figure was stale
-  and the direction is *up*, tracking the
-  RIB-manager / policy-language / EVPN expansion of the last sprints.
+- [x] **`clippy::too_many_lines` suppressions are `expect`, not `allow`.**
+  Across the production source trees the clippy-reason ratchet covers, every
+  suppression of this lint is now `#[expect(...)]` and none is
+  `#[allow(...)]`. That is the half that matters for rot: an `expect` fails
+  the build the moment the lint stops firing, so a suppression that outlives
+  the function it was written for reports itself, while an `allow` goes
+  stale in silence. Three `#[allow(clippy::too_many_lines)]` remain outside
+  that fence by design — `bench/scale/reloadstall` and
+  `bench/scale/rrharness` (standalone harness crates, not workspace members)
+  and `tests/config_persistence_lifecycle.rs` (an integration-test target,
+  which the production-source contract deliberately excludes).
+- [ ] **Long-function reduction (`clippy::too_many_lines`).** Readings are
+  point-in-time, not targets. 2026-08-23: 356 `expect` / 0 `allow` across
+  the production source roots; 357 / 3 across the whole tree. Compare only
+  like scopes across time — the earlier "~326" (2026-07-30) counted both
+  forms tree-wide and split 279 `expect` / 47 `allow`, so most of the jump
+  in the `expect`-only series is that conversion, not new suppressions. Real
+  growth over those weeks is the tree-wide 326 → 360, and the direction is
+  still *up*, tracking the RIB-manager / policy-language / EVPN expansion
+  and test-module growth. Re-derive instead of hand-counting; this borrows
+  the ratchet's own scope and attribute parser, so it follows workspace
+  packages as they are added:
+
+  ```sh
+  python3 - <<'PY'
+  import importlib.util, pathlib, re, collections
+  s = importlib.util.spec_from_file_location("c", "scripts/check-clippy-reasons.py")
+  c = importlib.util.module_from_spec(s); s.loader.exec_module(c)
+  head, n = re.compile(r"#!?\[\s*(allow|expect)\s*\("), collections.Counter()
+  for f in c.rust_files(c.workspace_source_roots(pathlib.Path.cwd())):
+      t, off = f.read_text(), 0
+      while (m := head.search(t, off)) and (end := c.find_attribute_end(t, m.start())):
+          if "clippy::too_many_lines" in t[m.start() : end + 1]:
+              n[m.group(1)] += 1
+          off = end + 1
+  print(n)
+  PY
+  ```
+
   Concentrated in long dispatchers (FSM action loop, EVPN reconcilers,
   `manager/{mod,distribution/*}`, `rpol/{typeck,lower}`, encode/decode match
-  arms). Some are honest match-heavy dispatch; this tracks the trend, not a
-  per-PR gate. A 2026-07-29 recount of
+  arms) and in test modules. Some are honest match-heavy dispatch; this
+  tracks the trend, not a per-PR gate. A 2026-07-29 recount of
   `crates/telemetry/src/metrics.rs::BgpMetrics::with_registry` found 159 metric
   fields, 159 constructor definitions, and 159 matching explicit registry
   registrations (plus the feature-gated jemalloc collector), with no live
   registration defect. A tiny local helper would reduce boilerplate but would
   not couple those three inventories enough to prevent drift, so that refactor
   is not justified.
-- [ ] **`#[allow(clippy::too_many_arguments)]` cluster tidy-up.** ~109
-  occurrences workspace-wide (2026-07-30 re-measure) — RIB
-  distribution functions, EVPN originators, BFD socket setup. A
-  `DistributionContext` parameter struct would absorb the metric / policy
-  threading; same trick fits the EVPN originators.
+- [ ] **`clippy::too_many_arguments` cluster tidy-up.** Same derivation with
+  the lint name swapped, and the same caution about comparing scopes.
+  2026-08-23: 113 suppressions across the production source roots, all
+  `expect`, none `allow` — the earlier "~109" (2026-07-30) was a tree-wide
+  count of both forms that split 67 `expect` / 42 `allow`, so the cluster
+  grew by four, not by forty-six. RIB distribution functions, EVPN
+  originators, BFD socket setup. A `DistributionContext` parameter struct
+  would absorb the metric / policy threading; same trick fits the EVPN
+  originators.
 - [x] **`#[allow(clippy::result_large_err)]` audit.** The 2026-07-17 inventory
   found 15 suppressions spread across six files. Fourteen stale API suppressions
   have since been removed: tonic 0.14's `Status` is an 8-byte handle to an

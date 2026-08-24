@@ -150,6 +150,16 @@ pub struct RibService {
 
 impl RibService {
     /// Create a new RIB service backed by the given RIB channel.
+    ///
+    /// Test- and bench-only, and `cfg(test)` holds only inside this crate:
+    /// the daemon, other workspace crates, and this crate's own `tests/*.rs`
+    /// integration targets all link `rustbgpd-api` as an ordinary dependency
+    /// with `cfg(test)` unset, so none of them can call this even under
+    /// `cargo test --workspace`. Build it the way production does instead —
+    /// [`RibService::with_status_snapshots`], plus
+    /// [`RibService::with_fib_table_control`] for the mutating FIB-table
+    /// RPCs. Benchmarks reach this through the `bench-internals` feature
+    /// rather than through `cfg(test)`.
     #[cfg(any(test, feature = "bench-internals"))]
     pub fn new(rib_tx: mpsc::Sender<RibUpdate>) -> Self {
         Self {

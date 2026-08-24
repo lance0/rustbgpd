@@ -72,6 +72,16 @@ pub struct EventService {
 }
 
 impl EventService {
+    /// Minimal service for this crate's own unit tests.
+    ///
+    /// `cfg(test)` holds only inside this crate, so neither the daemon, nor
+    /// other workspace crates, nor this crate's `tests/*.rs` integration
+    /// targets can reach this constructor or the two
+    /// `with_dataplane_snapshots*` ones below it, even under
+    /// `cargo test --workspace`. Callers inside the crate build the service
+    /// through `with_dataplane_snapshots_broadcaster_and_metrics`, as
+    /// `server::serve` does; callers outside it drive the served gRPC
+    /// surface rather than constructing an `EventService`.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn new(
