@@ -61,7 +61,7 @@ start_bird() {
 
 wait_gobgp_established() {
     for _ in $(seq 1 45); do
-        if gobgp neighbor "$RS_SOURCE_ADDR" | grep -qi "establ"; then
+        if gobgp neighbor "$RS_SOURCE_ADDR" | grep -i "establ" >/dev/null; then
             return 0
         fi
         sleep 2
@@ -75,7 +75,7 @@ bird_protocol() {
 
 wait_bird_established() {
     for _ in $(seq 1 45); do
-        if bird_protocol | grep -q "Established"; then
+        if bird_protocol | grep "Established" >/dev/null; then
             return 0
         fi
         sleep 2
@@ -109,7 +109,7 @@ bird_route() {
 }
 
 bird_has_route() {
-    bird_route | grep -q "BGP.as_path"
+    bird_route | grep "BGP.as_path" >/dev/null
 }
 
 bird_lacks_route() {
