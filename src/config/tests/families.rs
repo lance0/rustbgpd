@@ -646,8 +646,8 @@ disable_ipv4_unicast = true
 #[test]
 fn required_families_inherit_and_neighbor_nonempty_override_is_validated() {
     // Load-bearing: changing resolution to union/group-first makes the first
-    // peer inherit IPv6 despite its non-empty IPv4 override; removing subset
-    // validation lets the second, impossible peer load.
+    // peer inherit IPv6 despite its non-empty IPv4 override; skipping inherited
+    // resolution misses the second peer's IPv6 requirement.
     let valid = r#"
 [global]
 asn = 65001
@@ -664,14 +664,20 @@ address = "10.0.0.2"
 remote_asn = 65002
 peer_group = "fabric"
 required_families = ["ipv4_unicast"]
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "fabric"
 "#;
     let config = parse(valid).unwrap();
+    let peers = config.to_peer_configs().unwrap();
     assert_eq!(
-        config.to_peer_configs().unwrap()[0]
-            .0
-            .peer
-            .required_families,
+        peers[0].0.peer.required_families,
         vec![(Afi::Ipv4, Safi::Unicast)]
+    );
+    assert_eq!(
+        peers[1].0.peer.required_families,
+        vec![(Afi::Ipv6, Safi::Unicast)]
     );
 
     let invalid = valid.replace(
