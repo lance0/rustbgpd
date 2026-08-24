@@ -24,7 +24,7 @@ WORKFLOWS = tuple(
                  "release-install-contract", "release", "update-group-fault")
 )
 EXPECTED_ROOT_COMMANDS = {
-    WORKFLOWS[0]: Counter(build=1, check=6, clippy=1, doc=1, test=5),
+    WORKFLOWS[0]: Counter(build=1, check=6, clippy=2, doc=2, test=6),
     WORKFLOWS[1]: Counter(test=1),
     WORKFLOWS[2]: Counter(test=6),
     WORKFLOWS[3]: Counter(test=1),
@@ -159,8 +159,29 @@ def check(root: Path) -> list[str]:
     ):
         if text.count(command) != 1 or command not in core_tests:
             errors.append(f"{command} must exist exactly once in core_tests")
-    if 'RUSTDOCFLAGS: "-D warnings"' not in core_tests:
+    if core_tests.count('RUSTDOCFLAGS: "-D warnings"') != 2:
         errors.append("core_tests rustdoc warnings contract drifted")
+
+    feature_commands = (
+        (
+            jobs.get("core", ""),
+            "cargo clippy --locked -p rustbgpd-wire --all-targets --features tokio-codec -- -D warnings",
+            "core",
+        ),
+        (
+            core_tests,
+            "cargo test --locked -p rustbgpd-wire --features tokio-codec",
+            "core_tests",
+        ),
+        (
+            core_tests,
+            "cargo doc --locked -p rustbgpd-wire --lib --no-deps --features tokio-codec",
+            "core_tests",
+        ),
+    )
+    for job, command, job_name in feature_commands:
+        if text.count(command) != 1 or command not in job:
+            errors.append(f"{command} must exist exactly once in {job_name}")
 
     wire_step_name = "Wire crate README freshness gate"
     wire_step = named_step(jobs.get("core", ""), wire_step_name)

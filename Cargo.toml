@@ -53,6 +53,7 @@ rustbgpd-event-history = { path = "crates/event-history", version = "0.66.0" }
 bytes = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 tonic = { version = "0.14", features = ["tls-ring"] }
@@ -175,7 +176,7 @@ uuid.workspace = true
 owo-colors.workspace = true
 axum.workspace = true
 socket2.workspace = true
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { workspace = true, features = ["rt"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = "0.23"

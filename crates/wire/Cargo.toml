@@ -18,10 +18,14 @@ exclude = ["tests/path_attribute_registry.rs"]
 # Enables allocation counters in the codec diagnostic binary. The ordinary
 # Criterion benchmark compiles without this feature and has no probe atomics.
 codec-allocation-diagnostics = []
+# Provides a `tokio_util::codec` adapter without making Tokio integration part
+# of the default, runtime-neutral wire crate dependency surface.
+tokio-codec = ["dep:tokio-util"]
 
 [dependencies]
 bytes.workspace = true
 thiserror.workspace = true
+tokio-util = { workspace = true, features = ["codec"], optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
@@ -30,3 +34,7 @@ criterion.workspace = true
 [[bench]]
 name = "codec"
 harness = false
+
+[[example]]
+name = "tokio_codec"
+required-features = ["tokio-codec"]

@@ -240,9 +240,46 @@ let open = OpenMessage {
 let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
 ```
 
+### Tokio framing (optional)
+
+Enable the default-off `tokio-codec` feature to use `rustbgpd-wire` with
+`tokio_util::codec::Framed`, `FramedRead`, or `FramedWrite`. The feature adds
+Tokio-util's codec support graph, but it does not enable Tokio runtime,
+network, or I/O-util features; the application continues to own its socket
+and runtime.
+
+Extended Messages negotiation is directional. The capability this side
+advertises controls the inbound ceiling, while the peer's capability controls
+the outbound ceiling:
+
+```rust
+use bytes::BytesMut;
+use rustbgpd_wire::{
+    BgpCodec, EXTENDED_MAX_MESSAGE_LEN, MAX_MESSAGE_LEN, Message,
+};
+use tokio_util::codec::{Decoder, Encoder};
+
+let mut codec = BgpCodec::with_max_message_lengths(
+    EXTENDED_MAX_MESSAGE_LEN, // we advertised Extended Messages
+    MAX_MESSAGE_LEN,          // the peer did not
+);
+let mut wire = BytesMut::new();
+codec.encode(Message::Keepalive, &mut wire)?;
+assert_eq!(codec.decode(&mut wire)?, Some(Message::Keepalive));
+# Ok::<(), rustbgpd_wire::BgpCodecError>(())
+```
+
+Run the standalone adapter example with:
+
+```console
+cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
+```
+
 ## Key types
 
 - **`Message`** — top-level enum: `Open`, `Update`, `Keepalive`, `Notification`, `RouteRefresh`
+- **`BgpCodec` / `BgpCodecError`** — optional Tokio `Decoder` / `Encoder`
+  adapter and typed I/O/decode/encode errors, gated by `tokio-codec`
 - **`UpdateMessage`** / **`ParsedUpdate`** — raw wire form and parsed routes + attributes
 - **`PathAttribute`** — typed variants plus `Unknown` pass-through, including `AsPath`, `Aggregator`, `AtomicAggregate`, `NextHop`, `Communities`, `MpReachNlri`, `LargeCommunities`, `PmsiTunnel` (RFC 6514), and `OnlyToCustomer` (RFC 9234)
 - **`Prefix`** — `V4(Ipv4Prefix)` / `V6(Ipv6Prefix)` enum

@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rustbgpd-wire` gains an optional, default-off `tokio-codec` feature with a
+  typed `tokio_util::codec::Decoder` / `Encoder` adapter. Inbound and outbound
+  message ceilings remain independently configurable so asymmetric RFC 8654
+  Extended Message negotiation is represented without widening the default
+  runtime-neutral dependency surface. (LAN-1212)
+
 - The shipped Grafana overview now pairs the RFC 9107 ORR SPF computation
   rate with current topology node and usable-link counts. (LAN-1205)
 

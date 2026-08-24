@@ -124,6 +124,18 @@ class ScaleSplitContractTests(unittest.TestCase):
             ("  evpn_bum_filter_kernel:\n", "  renamed_evpn:\n"),
             ("- run: cargo test --locked --workspace", "- run: true"),
             ("- run: cargo doc --locked --workspace --lib --no-deps", "- run: true"),
+            (
+                "- run: cargo clippy --locked -p rustbgpd-wire --all-targets --features tokio-codec -- -D warnings",
+                "- run: true",
+            ),
+            (
+                "- run: cargo test --locked -p rustbgpd-wire --features tokio-codec",
+                "- run: true",
+            ),
+            (
+                "- run: cargo doc --locked -p rustbgpd-wire --lib --no-deps --features tokio-codec",
+                "- run: true",
+            ),
             ('RUSTDOCFLAGS: "-D warnings"', 'RUSTDOCFLAGS: ""'),
             (
                 "- name: Wire crate README freshness gate",

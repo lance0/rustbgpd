@@ -60,8 +60,10 @@ publication candidates and the gates that would apply.
 
 The wire crate is a pure codec: encode/decode of BGP messages to/from `bytes`
 buffers. No `unsafe`, no panics on malformed input (all paths return `Result`),
-no async runtime, no sockets. Two external dependencies only: `bytes` and
-`thiserror`.
+no async runtime, no sockets. Its default build has two external dependencies:
+`bytes` and `thiserror`. The optional `tokio-codec` feature adds Tokio-util's
+framing traits and support dependencies, but does not enable Tokio runtime,
+network, or I/O-util features; the embedder still owns the socket and runtime.
 
 Public surface (re-exported at crate root — `crates/wire/src/lib.rs`):
 
@@ -69,6 +71,9 @@ Public surface (re-exported at crate root — `crates/wire/src/lib.rs`):
   `encode_message(&Message) -> Result<BytesMut, EncodeError>`,
   `peek_message_length(&[u8], max_message_len: u16) -> Result<Option<u16>, DecodeError>`
   (transport framing: `Ok(None)` means "header not yet buffered").
+- **Optional Tokio framing:** the default-off `tokio-codec` feature exports
+  `BgpCodec` and `BgpCodecError`, with independent inbound/outbound ceilings
+  for directional Extended Message negotiation.
 - **`Message`** enum: `Open`, `Update`, `Keepalive`, `Notification`, `RouteRefresh`.
 - **`OpenMessage`** — capabilities negotiation; `Capability` enum (MP-BGP,
   4-octet AS, Add-Path, experimental Paths-Limit via `PathsLimitFamily`,
@@ -435,12 +440,12 @@ To be the de facto Rust BGP codec, the concrete gaps:
    drives the FSM, and prints every received UPDATE. This is the "it works"
    receipt for consumers #1 and #3. The `event-bridge` example already proves the
    gRPC-client shape; this proves the library-embedding shape.
-2. **Add a `tokio_util::codec::Decoder/Encoder` impl.** ADR-0002 notes the
-   transport layer integrates via `decode_message`/`encode_message` inside a
-   `tokio_util::codec::Decoder`. Publish that `Decoder`/`Encoder` *in the wire
-   crate* (gated on a `tokio-codec` feature that pulls `bytes` only — no full
-   tokio) so any async consumer gets framed decode for free. This is the
-   "battery-included" ergonomic that bgp-rs/zettabgp lack.
+2. **Add a `tokio_util::codec::Decoder/Encoder` impl.** Done on main for the
+   next wire release: the default-off `tokio-codec` feature exports typed
+   `BgpCodec` / `BgpCodecError` framing with independent inbound and outbound
+   ceilings. It adds Tokio-util's codec support graph without enabling Tokio's
+   runtime, network, or I/O-util features; socket/runtime ownership remains
+   with the embedder.
 3. **Run `cargo-semver-checks` in CI** against the published crates so
    accidental breaking changes are caught before publish. Done: the
    `semver-checks` workflow checks every publishable workspace crate against
