@@ -76,14 +76,16 @@ grpc_apply_teardown() {
 # ---------------------------------------------------------------------------
 
 frr_evpn_table() {
-    docker exec "$FRR" vtysh -c "show bgp l2vpn evpn" 2>/dev/null || true
+    docker exec "$FRR" vtysh -c "show bgp l2vpn evpn" 2>/dev/null
 }
 
 wait_frr_rd_present() {
     local timeout=${1:-30}
     local attempts=$((timeout / 2))
+    local table
     for _ in $(seq 1 "$attempts"); do
-        if frr_evpn_table | grep -q "$TENANT_RD"; then
+        if table=$(frr_evpn_table) \
+            && printf '%s\n' "$table" | grep -F -- "$TENANT_RD" >/dev/null; then
             return 0
         fi
         sleep 2
@@ -94,8 +96,10 @@ wait_frr_rd_present() {
 wait_frr_rd_absent() {
     local timeout=${1:-20}
     local attempts=$((timeout / 2))
+    local table
     for _ in $(seq 1 "$attempts"); do
-        if ! frr_evpn_table | grep -q "$TENANT_RD"; then
+        if table=$(frr_evpn_table) \
+            && ! printf '%s\n' "$table" | grep -F -- "$TENANT_RD" >/dev/null; then
             return 0
         fi
         sleep 2
@@ -119,7 +123,7 @@ if wait_frr_rd_present 30; then
     ok "FRR EVPN RIB contains the tenant RD ${TENANT_RD}"
 else
     fail "FRR never received the tenant routes within 30s"
-    frr_evpn_table >&2
+    frr_evpn_table >&2 || true
 fi
 
 # Test 3: rustbgpd's own RIB holds the locally-originated Type 3 + Type 4.
@@ -171,7 +175,7 @@ if wait_frr_rd_absent 20; then
     ok "FRR dropped the tenant RD ${TENANT_RD} after teardown"
 else
     fail "FRR still shows the tenant RD ${TENANT_RD} 20s after teardown"
-    frr_evpn_table >&2
+    frr_evpn_table >&2 || true
 fi
 
 # Test 6: rustbgpd's RIB no longer holds the tenant's Type 3 / Type 4.
