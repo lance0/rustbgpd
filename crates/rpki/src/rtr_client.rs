@@ -3353,6 +3353,43 @@ mod tests {
         let _ = client_handle.await;
     }
 
+    /// The crate README keeps the operator freshness contract in its
+    /// one bounded RTR-client feature bullet, with the numeric ceiling
+    /// derived from the production protocol constant.
+    #[test]
+    fn rpki_readme_pins_operator_expire_ceiling() {
+        const README: &str = include_str!("../README.md");
+        const START: &str = "- **RTR client**";
+        const END: &str = "- **ASPA path verification**";
+
+        assert_eq!(README.matches(START).count(), 1, "unique section start");
+        assert_eq!(README.matches(END).count(), 1, "unique section end");
+        let start = README.find(START).expect("RTR client bullet");
+        let relative_end = README[start..]
+            .find(END)
+            .expect("ASPA path-verification bullet follows RTR client");
+        let section = README[start..start + relative_end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        for clause in [
+            "`RtrClientConfig::max_expire_interval` adds an optional operator freshness ceiling",
+            "it clamps both the configured `expire_interval` and a cache-advertised End of Data expire down",
+            "never raises a lower value",
+            "when unset leaves the configured interval unchanged while cache-advertised values retain the protocol ceiling",
+        ] {
+            assert!(section.contains(clause), "missing README clause: {clause}");
+        }
+        let ceiling = format!(
+            "The crate exports the RFC 8210 two-day ceiling as `RTR_EXPIRE_MAX_SECS` (`{EXPIRE_MAX_SECS}` seconds)."
+        );
+        assert!(
+            section.contains(&ceiling),
+            "missing README clause: {ceiling}"
+        );
+    }
+
     /// `max_expire_interval` caps the configured expire at construction
     /// and the cache-advertised expire at End of Data, never raises a
     /// lower one, and — being an expire like any other — drags
