@@ -20,11 +20,13 @@ one SQLite transaction, and serves cursor-based replay through the
 
 - `lib.rs` — public API. `EventHistoryManager`, `EventHistoryConfig`,
   `EventEnvelope`, `CommittedEvent`, `EventHistorySender`,
-  `Category`, `Severity`, `PayloadCodec`, `EnvelopePeers`, plus the
-  shared `EhmState` and the async actor loop (`run_actor`). It also
+  `EventHistoryHandle`, `SynchronousMode`, `Category`, `Severity`,
+  `PayloadCodec`, `EnvelopePeers`, plus the shared `EhmState` and the
+  crate-private async actor loop (`run_actor`). It also
   re-exports `EventSubscription` / `EventSubscriptionItem` /
   `SubscribeFilter` / `SubscribeRequest` / `SubscribeStats` /
-  `SubscribeStatsSnapshot` from `cursor.rs`.
+  `SubscribeStatsSnapshot` from `cursor.rs`, and `PersistedEvent` /
+  `QueryFilter` / `RetentionOutcome` from `storage.rs`.
 - `storage.rs` — the `spawn_blocking` boundary. Owns the rusqlite
   `Connection` on a dedicated thread; processes batches via an
   internal channel. Sole owner of the live `Connection`:

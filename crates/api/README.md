@@ -21,12 +21,20 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 | **EvpnService** | EVPN runtime read + L2VNI / next-hop / IP-VRF queries, duplicate-MAC quarantine clear, and the mutating `ApplyEvpnRuntime` (no longer read-only) |
 | **gnmi.gNMI** | OpenConfig gNMI: read-only telemetry (Capabilities/Get/Subscribe) plus a transaction-backed Set subset |
 
+The crate also provides the device-initiated
+`gnmi_dialout::DialoutManager`, which publishes configured gNMI subscriptions
+to external collectors and reports per-target connection state through
+`gnmi_dialout_connected{target}`.
+
 See [docs/API.md](../../docs/API.md) for the full RPC reference and examples.
 
 ## Proto
 
-Protocol buffer definitions are in [proto/rustbgpd.proto](../../proto/rustbgpd.proto).
-Code generation runs via `tonic-build` in `build.rs`.
+Protocol buffer definitions live under [proto/](../../proto/):
+`rustbgpd.proto` defines the eleven native services,
+`rustbgpd_dialout.proto` defines the gNMI dial-out publish stream, and the
+vendored OpenConfig `gnmi.proto` / `gnmi_ext.proto` define the gNMI service,
+messages, and extensions. Code generation runs from `build.rs`.
 
 ## License
 

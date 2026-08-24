@@ -26,6 +26,16 @@ Single-task ownership — `RibManager` runs as one tokio task with no
   held at the cap without withdrawing existing routes or resetting the
   session (ADR-0113)
 - **FlowSpec** — parallel storage for FlowSpec rules (SAFI 133)
+- **VPN, labeled-unicast, and RT-Constrain** — parallel storage and
+  distribution for VPNv4/VPNv6 (SAFI 128), labeled-unicast (SAFI 4), and
+  RT-Constrain membership (SAFI 132)
+- **BGP-LS and EVPN** — typed route storage, best-path selection, and outbound
+  distribution for link-state and EVPN families
+- **Optimal Route Reflection** — RFC 9107 BGP-LS topology, per-vantage SPF,
+  and vantage-scoped next-hop cost comparison
+- **Selection deferral** — RFC 4724 restarting-speaker startup gates that
+  defer per-family selection until the frozen waiter roster completes or the
+  configured timeout expires
 - **Multi-path** — Add-Path multi-candidate distribution with
   rank-based path ID assignment
 - **Graceful Restart** — stale route preservation, per-family EoR
@@ -34,7 +44,7 @@ Single-task ownership — `RibManager` runs as one tokio task with no
 ## Key types
 
 - **`RibManager`** — event loop processing `RibUpdate` messages
-- **`AdjRibIn`** — per-peer inbound route table
+- **`adj_rib_in::AdjRibIn`** — per-peer inbound route table
 - **`Route`** — prefix + attributes + metadata (path_id, validation_state, stale flags)
 - **`best_path_cmp()`** — standalone comparison function (not `Ord` on `Route`)
 
