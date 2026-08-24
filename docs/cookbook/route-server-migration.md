@@ -1,5 +1,7 @@
 # Route-server migration notes
 
+Map incumbent route-server concepts to rustbgpd.
+
 This page maps common FRR, BIRD, OpenBGPD, and ARouteServer route-server
 concepts to rustbgpd's config and verification surfaces. Structure is
 mechanical for BIRD 2/3, FRR, and GoBGP: `rbgp config import` translates their
