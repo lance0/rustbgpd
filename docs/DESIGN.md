@@ -293,12 +293,13 @@ is never dropped. The common path follows
 2. Attempt the optional warm checkpoint and restart-marker publication, then
    fence EVPN runtime applies out of teardown.
 3. Ask the local-MAC, SVI-MAC, L3, and segment originators to drain, waiting up
-   to five seconds for each actor, then fully await withdrawal of all locally
-   originated IMET routes. These peer-visible withdrawal attempts deliberately
-   start before Administrative Shutdown while BGP sessions are still
+   to five seconds for each actor, then await the complete best-effort sweep of
+   locally originated IMET routes. These peer-visible withdrawal attempts
+   deliberately start before Administrative Shutdown while BGP sessions are still
    established. An actor that exceeds its five-second wait is detached and can
    finish after Cease begins, so completion before Cease is best-effort for
-   those four actors; IMET completion is required before the next step.
+   those four actors. The IMET sweep completes before the next step, but each
+   per-route outcome may still be rejected, unavailable, or reply-unknown.
    Writer-owned KEEPALIVEs keep sessions live during the bounded attempts
    independently of a session task blocked on RIB delivery
    ([ADR-0078](adr/0078-inbound-rib-backpressure.md)).

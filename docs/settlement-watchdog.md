@@ -112,10 +112,10 @@ Those caps can account for 65 seconds of main-task waiting before IMET
 withdrawal begins. This is a timing decomposition, not a completion guarantee
 or a minimum session hold time: stages may be skipped or finish early, and an
 actor that exceeds its wait is detached and can finish after Cease begins. The
-subsequent IMET controller mutex, RIB channel handoff, sequential per-VNI
-withdrawal acknowledgements, and PeerManager shutdown enqueue and scheduling
-have no aggregate deadline. Therefore the shipped path has no finite aggregate
-upper bound to first Cease.
+subsequent IMET controller mutex, sequential per-VNI RIB channel handoffs and
+bounded acknowledgement attempts, and PeerManager shutdown enqueue and
+scheduling have no aggregate deadline. Therefore the shipped path has no
+finite aggregate upper bound to first Cease.
 
 While an owner is live, the daemon logs a
 `runtime config settlement budget warning` at 15, 25, and 29 minutes

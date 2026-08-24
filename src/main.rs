@@ -5872,23 +5872,36 @@ mod tests {
     fn coordinated_shutdown_attempts_peer_visible_withdrawals_before_cease() {
         // Load-bearing shutdown-order proof. Peer-visible EVPN actor drains
         // are initiated and given their bounded wait while BGP sessions remain
-        // available; IMET withdrawal is fully awaited before the one
-        // PeerManager shutdown. Local-only dataplane drains deliberately
+        // available; the complete best-effort IMET sweep is awaited before the
+        // one PeerManager shutdown. Local-only dataplane drains deliberately
         // follow it. Anchor on source constructs rather than incidental
         // log/telemetry order.
         let source = include_str!("main.rs");
         let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
         let find = |needle| {
+            assert_eq!(
+                production.matches(needle).count(),
+                1,
+                "coordinated shutdown anchor must remain unique: `{needle}`"
+            );
             production
                 .find(needle)
                 .unwrap_or_else(|| panic!("coordinated shutdown lost `{needle}`"))
         };
         let ordered_stages = [
             find("_evpn_apply_fence_guard = evpn_apply_fence"),
-            find("if let Some(handle) = evpn_originator_handle"),
-            find("if let Some(handle) = evpn_svi_handle"),
-            find("if let Some(handle) = evpn_l3_originator_handle"),
-            find("if let Some(handle) = evpn_segment_handle"),
+            find(
+                "if let Some(handle) = evpn_originator_handle {\n        info!(\"draining EVPN originator\");\n        handle.shutdown().await;",
+            ),
+            find(
+                "if let Some(handle) = evpn_svi_handle {\n        info!(\"draining EVPN SVI-MAC originator\");\n        handle.shutdown().await;",
+            ),
+            find(
+                "if let Some(handle) = evpn_l3_originator_handle {\n        info!(\"draining EVPN L3 originator\");\n        handle.shutdown().await;",
+            ),
+            find(
+                "if let Some(handle) = evpn_segment_handle {\n        info!(\"draining EVPN segment orchestrator\");\n        handle.shutdown().await;",
+            ),
             find("imet_controller.withdraw_all(&rib_tx).await"),
             find("peer_mgr_tx.send(PeerManagerCommand::Shutdown).await"),
             find("if let Some(handle) = blackhole_handle"),
