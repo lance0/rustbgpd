@@ -1,29 +1,16 @@
 use super::*;
 
-#[test]
-fn gr_restart_time_zero_with_gr_enabled_rejected() {
-    let err = parse(&gr_toml("gr_restart_time = 0")).unwrap_err();
-    assert!(matches!(err, ConfigError::InvalidGrConfig { .. }));
-}
-
-#[test]
-fn gr_restart_time_zero_with_gr_disabled_accepted() {
-    let toml = gr_toml("graceful_restart = false\ngr_restart_time = 0");
-    assert!(parse(&toml).is_ok());
-}
-
-#[test]
-fn gr_peer_restart_time_max_outside_wire_range_rejected() {
-    // Load-bearing: deleting either boundary validation makes one case load.
-    for value in [0, 4096] {
-        let err = parse(&gr_toml(&format!("gr_peer_restart_time_max = {value}"))).unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidGrConfig { .. }));
+fn assert_gr_reason(toml: &str, expected: &str) {
+    let err = parse(toml).unwrap_err();
+    match err {
+        ConfigError::InvalidGrConfig { reason } => assert_eq!(reason, expected),
+        other => panic!("expected InvalidGrConfig, got {other:?}"),
     }
 }
 
-#[test]
-fn gr_peer_restart_time_max_peer_group_only_bounds_rejected() {
-    let base = r#"
+fn peer_group_gr_toml(gr_fields: &str) -> String {
+    format!(
+        r#"
 [global]
 asn = 65001
 router_id = "10.0.0.1"
@@ -33,13 +20,214 @@ listen_port = 179
 log_format = "json"
 
 [peer_groups.rr]
-"#;
+{gr_fields}
+"#
+    )
+}
 
-    // Load-bearing: these groups have no members, so removing the dedicated
-    // validate_peer_group bounds branch makes both invalid configs load.
-    for value in [0, 4096] {
-        let err = parse(&format!("{base}gr_peer_restart_time_max = {value}\n")).unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidGrConfig { .. }));
+#[test]
+fn neighbor_gr_timer_failures_preserve_exact_reasons() {
+    let cases = [
+        (
+            "gr_restart_time = 4096",
+            "gr_restart_time 4096 exceeds 4095 (12-bit max)",
+        ),
+        (
+            "gr_restart_time = 0",
+            "gr_restart_time must be > 0 when graceful_restart is enabled",
+        ),
+        (
+            "gr_peer_restart_time_max = 0",
+            "gr_peer_restart_time_max must be > 0",
+        ),
+        (
+            "gr_peer_restart_time_max = 4096",
+            "gr_peer_restart_time_max 4096 exceeds 4095 (12-bit max)",
+        ),
+        (
+            "gr_stale_routes_time = 0",
+            "gr_stale_routes_time must be > 0",
+        ),
+        (
+            "gr_stale_routes_time = 3601",
+            "gr_stale_routes_time 3601 exceeds 3600 (1 hour max)",
+        ),
+        (
+            "llgr_stale_time = 16777216",
+            "llgr_stale_time 16777216 exceeds 16777215 (24-bit max)",
+        ),
+    ];
+
+    for (fields, expected) in cases {
+        assert_gr_reason(&gr_toml(fields), expected);
+    }
+}
+
+#[test]
+fn peer_group_gr_timer_failures_preserve_exact_reasons() {
+    let cases = [
+        (
+            "gr_restart_time = 4096",
+            "gr_restart_time 4096 exceeds 4095 (12-bit max)",
+        ),
+        (
+            "gr_restart_time = 0",
+            "gr_restart_time must be > 0 when graceful_restart is enabled",
+        ),
+        (
+            "gr_peer_restart_time_max = 0",
+            "gr_peer_restart_time_max must be > 0",
+        ),
+        (
+            "gr_peer_restart_time_max = 4096",
+            "gr_peer_restart_time_max 4096 exceeds 4095 (12-bit max)",
+        ),
+        (
+            "gr_stale_routes_time = 0",
+            "gr_stale_routes_time must be > 0",
+        ),
+        (
+            "gr_stale_routes_time = 3601",
+            "gr_stale_routes_time 3601 exceeds 3600 (1 hour max)",
+        ),
+        (
+            "llgr_stale_time = 16777216",
+            "llgr_stale_time 16777216 exceeds 16777215 (24-bit max)",
+        ),
+    ];
+
+    for (fields, expected) in cases {
+        assert_gr_reason(
+            &peer_group_gr_toml(fields),
+            &format!("peer_group \"rr\": {expected}"),
+        );
+    }
+}
+
+#[test]
+fn gr_timer_validation_preserves_observable_error_order() {
+    let cases = [
+        (
+            r"graceful_restart = true
+gr_restart_time = 4096
+gr_peer_restart_time_max = 0
+gr_stale_routes_time = 1
+llgr_stale_time = 0",
+            "gr_restart_time 4096 exceeds 4095 (12-bit max)",
+        ),
+        (
+            r"graceful_restart = true
+gr_restart_time = 0
+gr_peer_restart_time_max = 0
+gr_stale_routes_time = 1
+llgr_stale_time = 0",
+            "gr_restart_time must be > 0 when graceful_restart is enabled",
+        ),
+        (
+            r"graceful_restart = true
+gr_restart_time = 120
+gr_peer_restart_time_max = 0
+gr_stale_routes_time = 0
+llgr_stale_time = 0",
+            "gr_peer_restart_time_max must be > 0",
+        ),
+        (
+            r"graceful_restart = true
+gr_restart_time = 120
+gr_peer_restart_time_max = 4096
+gr_stale_routes_time = 0
+llgr_stale_time = 0",
+            "gr_peer_restart_time_max 4096 exceeds 4095 (12-bit max)",
+        ),
+        (
+            r"graceful_restart = true
+gr_restart_time = 120
+gr_peer_restart_time_max = 4095
+gr_stale_routes_time = 0
+llgr_stale_time = 16777216",
+            "gr_stale_routes_time must be > 0",
+        ),
+        (
+            r"graceful_restart = true
+gr_restart_time = 120
+gr_peer_restart_time_max = 4095
+gr_stale_routes_time = 3601
+llgr_stale_time = 16777216",
+            "gr_stale_routes_time 3601 exceeds 3600 (1 hour max)",
+        ),
+    ];
+
+    for (fields, expected) in cases {
+        assert_gr_reason(&gr_toml(fields), expected);
+    }
+}
+
+#[test]
+fn neighbor_enabled_override_rejects_disabled_group_zero_restart_time() {
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.rr]
+graceful_restart = false
+gr_restart_time = 0
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "rr"
+graceful_restart = true
+"#;
+    assert_gr_reason(
+        toml,
+        "gr_restart_time must be > 0 when graceful_restart is enabled",
+    );
+}
+
+#[test]
+fn neighbor_disabled_zero_restart_time_overrides_enabled_group() {
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.rr]
+graceful_restart = true
+gr_restart_time = 120
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "rr"
+graceful_restart = false
+gr_restart_time = 0
+"#;
+    assert!(parse(toml).is_ok());
+}
+
+#[test]
+fn gr_timer_valid_boundaries_are_accepted() {
+    let cases = [
+        "gr_restart_time = 4095",
+        "graceful_restart = false\ngr_restart_time = 0",
+        "gr_peer_restart_time_max = 1",
+        "gr_peer_restart_time_max = 4095",
+        "gr_stale_routes_time = 1",
+        "gr_stale_routes_time = 3600",
+        "llgr_stale_time = 16777215",
+    ];
+
+    for fields in cases {
+        assert!(parse(&gr_toml(fields)).is_ok(), "rejected {fields:?}");
     }
 }
 
@@ -88,17 +276,6 @@ gr_peer_restart_time_max = 300
             .gr_peer_restart_time_max,
         300
     );
-}
-
-#[test]
-fn gr_stale_routes_time_exceeds_max_rejected() {
-    let err = parse(&gr_toml("gr_stale_routes_time = 7200")).unwrap_err();
-    assert!(matches!(err, ConfigError::InvalidGrConfig { .. }));
-}
-
-#[test]
-fn gr_stale_routes_time_at_max_accepted() {
-    assert!(parse(&gr_toml("gr_stale_routes_time = 3600")).is_ok());
 }
 
 #[test]
