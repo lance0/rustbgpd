@@ -1744,12 +1744,6 @@ mod tests {
         let msg = c_rx.recv().await.unwrap();
         let stats = decode_stats(&msg);
         assert_eq!(stats.len(), 4);
-        assert_eq!(u64::from_be_bytes(stats[0].1.try_into().unwrap()), 42);
-        assert_eq!(u64::from_be_bytes(stats[1].1.try_into().unwrap()), 15);
-        assert_eq!(&stats[2].1[..3], &[0, 1, 1]);
-        assert_eq!(u64::from_be_bytes(stats[2].1[3..].try_into().unwrap()), 10);
-        assert_eq!(&stats[3].1[..3], &[0, 2, 1]);
-        assert_eq!(u64::from_be_bytes(stats[3].1[3..].try_into().unwrap()), 5);
 
         let adj_rib_in_type = stats[0].0;
         let adj_rib_out_total_type = stats[1].0;
@@ -1763,6 +1757,20 @@ mod tests {
             ),
             (7, 15, 17)
         );
+        assert_eq!(
+            stats
+                .iter()
+                .map(|(_, payload)| payload.len())
+                .collect::<Vec<_>>(),
+            vec![8, 8, 11, 11]
+        );
+
+        assert_eq!(u64::from_be_bytes(stats[0].1.try_into().unwrap()), 42);
+        assert_eq!(u64::from_be_bytes(stats[1].1.try_into().unwrap()), 15);
+        assert_eq!(&stats[2].1[..3], &[0, 1, 1]);
+        assert_eq!(u64::from_be_bytes(stats[2].1[3..].try_into().unwrap()), 10);
+        assert_eq!(&stats[3].1[..3], &[0, 2, 1]);
+        assert_eq!(u64::from_be_bytes(stats[3].1[3..].try_into().unwrap()), 5);
 
         event_tx
             .send(BmpEvent::StatsReport {
@@ -1776,6 +1784,7 @@ mod tests {
         let unavailable_stats = decode_stats(&unavailable);
         assert_eq!(unavailable_stats.len(), 1);
         assert_eq!(unavailable_stats[0].0, adj_rib_in_type);
+        assert_eq!(unavailable_stats[0].1.len(), 8);
         assert_eq!(
             u64::from_be_bytes(unavailable_stats[0].1.try_into().unwrap()),
             43
