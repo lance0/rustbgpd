@@ -9,6 +9,125 @@ async fn localhost_inbound_stream() -> (TcpStream, TcpStream) {
     (server_stream, client_stream)
 }
 
+fn dynamic_tcp_ao_test_manager(protected: bool) -> PeerManager {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut config = make_dynamic_manager_config();
+    if protected {
+        config.dynamic_neighbors[0].tcp_ao = Some(test_tcp_ao().into());
+    }
+    PeerManager::new_with_config(
+        rx,
+        mpsc::unbounded_channel().1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config,
+    )
+}
+
+fn dynamic_tcp_ao_snapshot(owner: IpAddr, prefix_len: u8) -> rustbgpd_transport::TcpAoInfoSnapshot {
+    rustbgpd_transport::TcpAoInfoSnapshot {
+        has_current_key: true,
+        has_rnext_key: true,
+        ao_required: false,
+        accept_icmps: false,
+        current_key: 1,
+        rnext_key: 1,
+        pkt_good: 1,
+        pkt_bad: 0,
+        pkt_key_not_found: 0,
+        pkt_ao_required: 0,
+        pkt_dropped_icmp: 0,
+        keys: vec![rustbgpd_transport::TcpAoKeyState {
+            peer: owner,
+            prefix_len,
+            send_id: 1,
+            recv_id: 1,
+            algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+            is_current: true,
+            is_rnext: true,
+            preferred: false,
+            deprecated: false,
+            vrf_ifindex: None,
+            pkt_good: 1,
+            pkt_bad: 0,
+        }],
+    }
+}
+
+async fn assert_dynamic_accept_discarded(
+    manager: &mut PeerManager,
+    tcp_ao_info: Option<rustbgpd_transport::TcpAoInfoSnapshot>,
+    tcp_ao_generation: Option<rustbgpd_transport::TcpAoRotationGeneration>,
+) {
+    let (server_stream, mut client_stream) = localhost_inbound_stream().await;
+    let peer = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9));
+    manager
+        .handle_inbound(server_stream, sock(peer), tcp_ao_info, tcp_ao_generation)
+        .await;
+
+    assert!(
+        manager.peers.is_empty(),
+        "rejected dynamic accept must not create a managed peer"
+    );
+    assert_eq!(
+        manager.dynamic_peer_count, 0,
+        "rejected dynamic accept must not consume an admission slot"
+    );
+    let mut byte = [0_u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(1), client_stream.read(&mut byte))
+        .await
+        .expect("rejected dynamic accept did not close its TCP stream")
+        .expect("read rejected dynamic accept");
+    assert_eq!(
+        read, 0,
+        "rejected dynamic accept must be closed, not parked"
+    );
+}
+
+/// A protected direct dynamic range must never admit a plaintext accepted
+/// child, even if the source address and peer-group policy otherwise match.
+#[tokio::test]
+async fn dynamic_tcp_ao_range_discards_plaintext_accept_observably() {
+    let mut manager = dynamic_tcp_ao_test_manager(true);
+    assert_dynamic_accept_discarded(&mut manager, None, None).await;
+}
+
+/// A plaintext dynamic range must not inherit an unrelated protected listener
+/// child. The accepted socket is discarded instead of being reclassified.
+#[tokio::test]
+async fn plaintext_dynamic_range_discards_protected_accept_observably() {
+    let mut manager = dynamic_tcp_ao_test_manager(false);
+    let accepted = dynamic_tcp_ao_snapshot("127.0.0.0".parse().unwrap(), 8);
+    assert_dynamic_accept_discarded(
+        &mut manager,
+        Some(accepted),
+        Some(rustbgpd_transport::TcpAoRotationGeneration::STARTUP),
+    )
+    .await;
+}
+
+/// Listener inspection is necessary but not sufficient: a protected child
+/// whose redacted MKT inventory cannot be reconciled to the selected dynamic
+/// owner must be closed before a peer or admission slot is created.
+#[tokio::test]
+async fn dynamic_tcp_ao_range_discards_wrong_owner_inventory_observably() {
+    let mut manager = dynamic_tcp_ao_test_manager(true);
+    let accepted = dynamic_tcp_ao_snapshot("127.0.0.0".parse().unwrap(), 24);
+    assert_dynamic_accept_discarded(
+        &mut manager,
+        Some(accepted),
+        Some(rustbgpd_transport::TcpAoRotationGeneration::STARTUP),
+    )
+    .await;
+}
+
 /// Load-bearing unconfigured-source accounting proof (ADR-0120): the
 /// pre-existing unmatched-source drop must count under the bounded
 /// drop-reason vocabulary even with the limiter disabled (the default).

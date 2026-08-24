@@ -1,0 +1,32 @@
+[global]
+asn = 65001
+router_id = "10.0.43.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[peer_groups.bird3-dynamic]
+hold_time = 90
+
+[[dynamic_neighbors]]
+prefix = "10.0.43.0/24"
+peer_group = "bird3-dynamic"
+remote_asn = 65043
+description = "bird3-dynamic-tcp-ao"
+tcp_ao = [
+  { key = "interop-old-secret-m43", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)", deprecated = true },
+  { key = "interop-next-secret-m43", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)", preferred = true },
+]
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

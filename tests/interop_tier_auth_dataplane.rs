@@ -100,7 +100,7 @@ fn active_dataplane_interop_is_tier_authenticated_end_to_end() {
         );
         configs.insert(name.to_owned());
     }
-    assert_eq!(configs.len(), 35, "classify the changed config inventory");
+    assert_eq!(configs.len(), 36, "classify the changed config inventory");
 
     let mut topologies = BTreeSet::new();
     let mut mounted = BTreeSet::new();
@@ -264,4 +264,60 @@ fn m51_remote_admin_down_uses_the_public_field_as_primary_oracle() {
     );
     assert!(!source.contains("BFD remote AdminDown.*allowing BGP"));
     assert!(!source.contains("BFD remote AdminDown flip without local transition"));
+}
+
+/// Load-bearing restart safety proof: the same production helpers exercised by
+/// M43 require an exact-one process census and a positive decimal PID, preserve
+/// shell argument boundaries, and reject ambiguity before signaling.
+#[test]
+fn m43_restart_signal_accepts_only_a_positive_decimal_pid() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = root.join("tests/interop/scripts/test-m43-tcp-ao-bird.sh");
+    let source = fs::read_to_string(&script).expect("M43 driver must be readable");
+
+    let rust_pid = source
+        .split_once("rust_pid() {")
+        .and_then(|(_, remainder)| {
+            remainder
+                .split_once("signal_rustbgpd_pid() {")
+                .map(|(body, _)| body)
+        })
+        .expect("M43 PID census function has a bounded source section");
+    assert!(rust_pid.contains("pidof rustbgpd"));
+    assert!(rust_pid.contains("if [ \"$#\" -ne 1 ]; then"));
+    let census_exit = rust_pid
+        .find("exit 1")
+        .expect("ambiguous PID census must exit nonzero");
+    let census_print = rust_pid
+        .find("printf \"%s\\n\" \"$1\"")
+        .expect("exact-one PID census must print its PID");
+    assert!(
+        census_exit < census_print,
+        "census must reject before printing"
+    );
+
+    assert!(source.contains("signal_rustbgpd_pid TERM \"$old_pid\""));
+    assert!(source.contains("signal_rustbgpd_pid KILL \"$pid\""));
+    assert!(source.contains(
+        "docker exec \"$RUSTBGPD\" sh -lc 'kill \"-$1\" \"$2\"' sh \"$signal\" \"$pid\""
+    ));
+    assert!(!source.contains("sh -lc \"kill -TERM $old_pid\""));
+    assert!(!source.contains("sh -lc \"kill -KILL $pid\""));
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--self-test-pid-signal")
+        .current_dir(root)
+        .output()
+        .expect("run M43 PID signal self-test");
+    assert!(
+        output.status.success(),
+        "M43 PID signal self-test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "M43 PID census and signal self-test passed\n"
+    );
 }
