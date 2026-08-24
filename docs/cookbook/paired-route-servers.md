@@ -1,5 +1,7 @@
 # Paired route servers — staggered updates and maintenance windows
 
+Operate a resilient pair of IXP route servers.
+
 **When this is you:** your exchange runs (or should run) two route
 servers, every member peers with both, and you want the operational
 discipline that makes the pair actually redundant: independent

@@ -1,5 +1,7 @@
 # Controller / monitoring feed (BMP trio, events, MRT)
 
+Export routing state to your monitoring stack.
+
 **When this is you:** a controller, analytics pipeline, or NOC stack
 needs to see what this daemon sees — pre-policy, post-policy, and
 Loc-RIB route streams into BMP collectors, a durable event feed your
