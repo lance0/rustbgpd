@@ -143,6 +143,22 @@ rbgp fib-table list
 rbgp fib-table set edge --table-id 1000 --metric 200 --families ipv4_unicast,ipv6_unicast
 ```
 
+`rib received <addr> --rejected` reads a bounded per-peer retention buffer, not
+a guaranteed complete history of rejected routes. Plain-text output reports
+incomplete or unknown completeness with these warnings (using three evictions
+as a concrete nonzero example):
+
+```text
+WARNING: 3 older rejected route(s) were evicted since session reset; this listing may be incomplete
+WARNING: rejected-route eviction count is unavailable from this daemon; listing completeness is unknown
+```
+
+JSON output exposes `evictions_since_reset`: zero means no eviction has occurred
+since the session reset, while a nonzero value means the listing may be
+incomplete. A `null` value means the daemon did not report completeness; it is
+compatibility evidence from an older or otherwise unreporting daemon, not the
+normal output from a current server.
+
 `policy explain` requires the daemon's import-decision cache, which is
 opt-in: set `[policy.explain] enabled = true` in the daemon config. On a
 stock daemon the command exits nonzero with that hint.
