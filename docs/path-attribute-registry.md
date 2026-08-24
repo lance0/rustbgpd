@@ -42,8 +42,8 @@ octet from 0 through 255 to appear exactly once with no blank cell.
 | 11 | DPA (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 12 | ADVERTISER (historic) (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 13 | RCID_PATH / CLUSTER_ID (Historic) (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 14 | MP_REACH_NLRI | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 15 | MP_UNREACH_NLRI | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
+| 14 | MP_REACH_NLRI | optional non-transitive; flags `0x80`; RFC 4760 §3; RFC 7606 §§5.3, 7.11 | typed per-family decode/encode; structural, flag, or embedded-NLRI failure and duplicate attributes are session-reset | wire framing matrix and transport reset proof |
+| 15 | MP_UNREACH_NLRI | optional non-transitive; flags `0x80`; RFC 4760 §4; RFC 7606 §§5.3, 7.11 | typed per-family decode/encode; structural, flag, or embedded-NLRI failure and duplicate attributes are session-reset; empty NLRI is MP End-of-RIB only for a negotiated family other than IPv4 unicast | wire framing matrix and transport reset proof |
 | 16 | EXTENDED COMMUNITIES | optional transitive; flags `0xc0`; values are eight-octet communities; RFC 4360 / RFC 7606 §7.14 | typed canonical + Partial round-trip; Extended Length and reserved low bits canonicalize; malformed length is treat-as-withdraw | typed-Partial matrix |
 | 17 | AS4_PATH | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 18 | AS4_AGGREGATOR | pending follow-up audit | pending follow-up audit | IANA CSV digest above |

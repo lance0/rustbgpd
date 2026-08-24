@@ -463,7 +463,8 @@ message (§3 (h)).
   Covers ORIGIN, AS_PATH (§7.2 — no longer a session reset), NEXT_HOP,
   MULTI_EXIT_DISC, communities of all sizes, attribute-flag conflicts
   (§3 (c)), missing mandatory attributes (§3 (d)), and attribute-section
-  framing overruns (§4).
+  framing overruns (§4), except visible MP_REACH_NLRI / MP_UNREACH_NLRI
+  framing failures whose embedded NLRI cannot be parsed (§5.3).
 - **Attribute-discard** (§2): ATOMIC_AGGREGATE with a non-zero length and
   AGGREGATOR with a length other than 6/8 (§7.6, §7.7) are dropped and the
   UPDATE proceeds. Malformed LOCAL_PREF / ORIGINATOR_ID / CLUSTER_LIST from
@@ -471,11 +472,22 @@ message (§3 (h)).
   neighbor they are treat-as-withdraw. Duplicate attributes keep the first
   occurrence and discard the rest (§3 (g)).
 - **Session-reset** is retained only where the NLRI cannot be trusted:
-  UPDATE section-length inconsistencies (§3 (b), unchanged), a malformed or
-  duplicated MP_REACH_NLRI / MP_UNREACH_NLRI (§7.11, §3 (g)), syntactically
-  incorrect NLRI or Withdrawn Routes fields (§5.3), and the §5.2 escalation
-  (a treat-as-withdraw-class error in an UPDATE that encodes no reachable
-  NLRI).
+  UPDATE section-length inconsistencies (§3 (b), unchanged), a structurally
+  unparseable or duplicated MP_REACH_NLRI / MP_UNREACH_NLRI (§7.11, §3 (g)),
+  syntactically incorrect NLRI or Withdrawn Routes fields (§5.3), and the
+  §5.2 escalation (a treat-as-withdraw-class error in an UPDATE that encodes
+  no reachable NLRI). A visible MP attribute with incomplete header/value
+  framing uses
+  UPDATE Optional Attribute Error (3/9) with exactly the received attribute
+  bytes, as recommended by RFC 4760 §7; ordinary attribute-section overruns
+  remain treat-as-withdraw. A complete MP attribute shorter than its minimum
+  value uses Attribute Length Error (3/5); other intact structural MP decode
+  failures (including AFI/SAFI decoding, next-hop length/framing, and
+  embedded-NLRI syntax) use 3/9 with the exact complete attribute bytes.
+  A byte-complete next hop that parses but fails semantic address validation
+  (for example, an unspecified IPv6 address) is treat-as-withdraw with Invalid
+  NEXT_HOP (3/8), not session-reset. Duplicate MP attributes remain 3/1 with
+  empty data, and flag conflicts remain 3/4 with exact attribute data.
 
 Interpretation decisions:
 
@@ -580,11 +592,11 @@ Wire layout:
 AFI (2 bytes) | SAFI (1) | NH-Len (1) | Next Hop (variable) | Reserved (1) | NLRI (variable)
 ```
 
-- Flags: Optional + Transitive (0xC0).
-- AFI 2 (IPv6), SAFI 1 (Unicast) is the only supported combination beyond
-  IPv4 unicast.
-- Next-hop length: 16 bytes (global IPv6 address) or 32 bytes (global +
-  link-local). When 32 bytes, rustbgpd takes the first 16 as the primary
+- Flags: Optional + Non-Transitive (`0x80`). The Extended Length bit may be
+  added for framing; Partial is invalid.
+- For IPv6 unicast, next-hop length is 16 bytes (global IPv6 address) or
+  32 bytes (global + link-local). When 32 bytes, rustbgpd takes the first 16
+  as the primary
   next-hop and preserves the trailing 16 in `link_local_next_hop`
   (round-tripped through wire / RIB / MRT since v0.11.0); ADR-0069 resolves a
   link-local next-hop as a scoped next-hop for unnumbered IPv4-over-IPv6 and
@@ -596,7 +608,7 @@ AFI (2 bytes) | SAFI (1) | NH-Len (1) | Next Hop (variable) | Reserved (1) | NLR
   `validate_update_attributes()` relaxes the NEXT_HOP mandatory check when
   `has_mp_nlri` is true.
 
-### §3 — MP_UNREACH_NLRI (Type 15)
+### §4 — MP_UNREACH_NLRI (Type 15)
 
 Wire layout:
 
@@ -606,6 +618,15 @@ AFI (2 bytes) | SAFI (1) | Withdrawn Routes (variable)
 
 - Flags: Optional + Non-Transitive (0x80).
 - Withdrawn routes use the same prefix-length encoding as announced NLRI.
+- An empty NLRI field after AFI/SAFI is End-of-RIB only when that family
+  was negotiated on the session and is not IPv4 unicast (RFC 4724 §2).
+  IPv4 unicast always uses the minimum-length empty UPDATE marker, including
+  sessions that negotiated Extended Next Hop.
+
+The current typed MP decoder supports IPv4/IPv6 unicast, IPv4/IPv6 FlowSpec,
+L2VPN EVPN, BGP-LS/BGP-LS VPN, VPNv4/VPNv6, IPv4/IPv6 labeled-unicast, and
+IPv4 RT-Constrain. This is an implementation boundary, not a claim to support
+every [IANA AFI/SAFI assignment](https://www.iana.org/assignments/address-family-numbers/address-family-numbers.xhtml).
 
 ### AFI/SAFI Negotiation
 

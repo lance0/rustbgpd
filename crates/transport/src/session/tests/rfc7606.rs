@@ -353,7 +353,7 @@ async fn bgpls_attribute_discard_keeps_nlri_and_session() {
 #[tokio::test]
 async fn rfc7606_malformed_mp_reach_still_resets_session() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
-    let (client, _server) = connected_stream_pair().await;
+    let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
     rfc7606_drain(&mut rib_rx);
@@ -378,6 +378,134 @@ async fn rfc7606_malformed_mp_reach_still_resets_session() {
         );
     }
     assert_single_malformed_disposition(&session, "session_reset");
+    let notification = read_until_notification(&mut server).await;
+    assert_eq!(
+        notification.code,
+        rustbgpd_wire::notification::NotificationCode::UpdateMessage
+    );
+    assert_eq!(
+        notification.subcode,
+        rustbgpd_wire::notification::update_subcode::ATTRIBUTE_LENGTH_ERROR
+    );
+    assert_eq!(
+        notification.data.as_ref(),
+        &[0x80, 14, 2, 0, 1],
+        "complete undersized MP value must be returned exactly"
+    );
+}
+
+/// RFC 7606 §§3(j), 4, 5.3: a visible MP attribute whose declared value
+/// overruns Total Path Attribute Length cannot expose reliably parsed MP NLRI.
+/// Body NLRI is deliberately present so the independent §5.2 no-reachable-NLRI
+/// escalation cannot make this test pass.
+#[tokio::test]
+async fn rfc7606_mp_attribute_value_overrun_sends_optional_attribute_error() {
+    for type_code in [14, 15] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        rfc7606_drain(&mut rib_rx);
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+        let malformed_mp = [0x80, type_code, 8, 0, 2, 1];
+
+        session
+            .process_update(rfc7606_update(rfc7606_attr_bytes(&malformed_mp), &[prefix]))
+            .await;
+
+        assert_ne!(
+            session.fsm.state(),
+            SessionState::Established,
+            "type {type_code}: MP framing overrun must reset even with body NLRI present"
+        );
+        while let Ok(message) = rib_rx.try_recv() {
+            assert!(
+                !matches!(message, RibUpdate::RoutesReceived { .. }),
+                "type {type_code}: no route may reach the RIB"
+            );
+        }
+        assert_single_malformed_disposition(&session, "session_reset");
+
+        let notification = read_until_notification(&mut server).await;
+        assert_eq!(
+            notification.code,
+            rustbgpd_wire::notification::NotificationCode::UpdateMessage,
+            "type {type_code}"
+        );
+        assert_eq!(
+            notification.subcode,
+            rustbgpd_wire::notification::update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+            "type {type_code}"
+        );
+        assert_eq!(
+            notification.data.as_ref(),
+            malformed_mp,
+            "type {type_code}: NOTIFICATION data must be the exact received attribute bytes"
+        );
+    }
+}
+
+/// RFC 4760 §§3-4 and RFC 7606 §5.3: MP attributes are optional
+/// non-transitive and therefore cannot carry Partial. Compact and Extended
+/// Length examples exercise the same live session-reset and exact 3/4
+/// NOTIFICATION contract; body NLRI prevents a §5.2-only pass.
+#[tokio::test]
+async fn rfc7606_mp_partial_flag_resets_with_exact_attribute_flags_error() {
+    let cases = [
+        (14, false, &[0, 1, Safi::FlowSpec as u8, 0, 0][..]),
+        (14, true, &[0, 1, Safi::FlowSpec as u8, 0, 0][..]),
+        (15, false, &[0, 2, Safi::Unicast as u8][..]),
+        (15, true, &[0, 2, Safi::Unicast as u8][..]),
+    ];
+    for (type_code, extended, value) in cases {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        rfc7606_drain(&mut rib_rx);
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+        let mut malformed_mp = vec![0x80 | 0x20 | if extended { 0x10 } else { 0 }, type_code];
+        if extended {
+            malformed_mp.extend_from_slice(&u16::try_from(value.len()).unwrap().to_be_bytes());
+        } else {
+            malformed_mp.push(u8::try_from(value.len()).unwrap());
+        }
+        malformed_mp.extend_from_slice(value);
+
+        session
+            .process_update(rfc7606_update(rfc7606_attr_bytes(&malformed_mp), &[prefix]))
+            .await;
+
+        assert_ne!(
+            session.fsm.state(),
+            SessionState::Established,
+            "type {type_code}, extended={extended}: Partial must reset the session"
+        );
+        while let Ok(message) = rib_rx.try_recv() {
+            assert!(
+                !matches!(message, RibUpdate::RoutesReceived { .. }),
+                "type {type_code}, extended={extended}: no route may reach the RIB"
+            );
+        }
+        assert_single_malformed_disposition(&session, "session_reset");
+
+        let notification = read_until_notification(&mut server).await;
+        assert_eq!(
+            notification.code,
+            rustbgpd_wire::notification::NotificationCode::UpdateMessage,
+            "type {type_code}, extended={extended}"
+        );
+        assert_eq!(
+            notification.subcode,
+            rustbgpd_wire::notification::update_subcode::ATTRIBUTE_FLAGS_ERROR,
+            "type {type_code}, extended={extended}"
+        );
+        assert_eq!(
+            notification.data.as_ref(),
+            malformed_mp,
+            "type {type_code}, extended={extended}: exact received attribute bytes"
+        );
+    }
 }
 
 /// RFC 7606 §5.2: an UPDATE carrying path attributes but no reachable NLRI
@@ -474,6 +602,63 @@ async fn rfc7606_nonempty_mp_reach_with_taw_error_stays_established() {
             );
         }
     }
+}
+
+/// RFC 7606 §7.11 reserves reset for MP syntax that prevents reliable NLRI
+/// parsing. A structurally complete `MP_REACH` with an invalid unspecified
+/// IPv6 next hop is instead treat-as-withdraw: the exact accepted replacement
+/// is withdrawn, no announcement survives, and the live session stays up.
+#[tokio::test]
+async fn rfc7606_semantic_mp_next_hop_error_withdraws_without_reset() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    install_dual_stack_session(&mut session, false);
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
+    let nlri = [32, 0x20, 0x01, 0x0d, 0xb8];
+
+    session
+        .process_update(rfc7606_update(
+            rfc7606_attr_bytes(&rfc7606_mp_reach(&nlri)),
+            &[],
+        ))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx
+        .try_recv()
+        .expect("valid IPv6 MP route must reach the RIB")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].prefix, Prefix::V6(prefix));
+
+    let mut invalid = rfc7606_mp_reach(&nlri);
+    invalid[7..23].fill(0); // Preserve complete framing; replace NH with ::.
+    session
+        .process_update(rfc7606_update(rfc7606_attr_bytes(&invalid), &[]))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("treat-as-withdraw must reach the RIB")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(withdrawn, vec![(Prefix::V6(prefix), 0)]);
+    assert!(rib_rx.try_recv().is_err());
+    assert_eq!(session.known_prefix_count(), 0);
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert!(
+        session.read_half.is_some(),
+        "the live transport must stay up"
+    );
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
 }
 
 /// An UPDATE whose only attributes were discarded as malformed must not be
@@ -590,6 +775,7 @@ async fn mp_eor_empty_mp_unreach_marks_end_of_rib() {
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
+    install_dual_stack_session(&mut session, false);
     rfc7606_drain(&mut rib_rx);
     // Hand-crafted MP_UNREACH_NLRI: flags 0x80, type 15, len 3,
     // AFI=2 (IPv6), SAFI=1 (unicast), no NLRI.
@@ -613,6 +799,102 @@ async fn mp_eor_empty_mp_unreach_marks_end_of_rib() {
         }
         _ => panic!("expected EndOfRib"),
     }
+    assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
+/// RFC 4724 §2 scopes MP End-of-RIB to an AFI/SAFI negotiated on the session.
+/// The same valid empty IPv6 `MP_UNREACH` bytes must be ignored by an IPv4-only
+/// session rather than mutating GR state or notifying the RIB.
+#[tokio::test]
+async fn mp_eor_for_unnegotiated_family_is_ignored() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+
+    session
+        .process_update(UpdateMessage {
+            withdrawn_routes: Bytes::new(),
+            path_attributes: Bytes::from_static(&[0x80, 15, 3, 0, 2, 1]),
+            nlri: Bytes::new(),
+        })
+        .await;
+
+    assert!(
+        !session
+            .received_eor_families
+            .contains(&(Afi::Ipv6, Safi::Unicast)),
+        "an unnegotiated family must not mutate received EoR state"
+    );
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "an unnegotiated family must not emit EndOfRib"
+    );
+    assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
+/// IPv4 unicast is negotiated by default, but RFC 8950 Extended Next Hop is
+/// what makes its `MP_REACH` / `MP_UNREACH` wire form eligible. Without that
+/// capability, an empty IPv4 `MP_UNREACH` must not become an MP `EoR`.
+#[tokio::test]
+async fn mp_eor_ipv4_without_extended_next_hop_is_ignored() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+
+    session
+        .process_update(UpdateMessage {
+            withdrawn_routes: Bytes::new(),
+            path_attributes: Bytes::from_static(&[0x80, 15, 3, 0, 1, 1]),
+            nlri: Bytes::new(),
+        })
+        .await;
+
+    assert!(
+        !session
+            .received_eor_families
+            .contains(&(Afi::Ipv4, Safi::Unicast)),
+        "ineligible IPv4 MP form must not mutate received EoR state"
+    );
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "ineligible IPv4 MP form must not emit EndOfRib"
+    );
+    assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
+/// RFC 8950 Extended Next Hop makes IPv4-unicast MP route encoding eligible,
+/// but does not amend RFC 4724's classic empty-UPDATE End-of-RIB marker.
+#[tokio::test]
+async fn mp_eor_ipv4_with_extended_next_hop_is_ignored() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    install_test_negotiated_session(&mut session, negotiated_session(65002, true));
+    rfc7606_drain(&mut rib_rx);
+
+    session
+        .process_update(UpdateMessage {
+            withdrawn_routes: Bytes::new(),
+            path_attributes: Bytes::from_static(&[0x80, 15, 3, 0, 1, 1]),
+            nlri: Bytes::new(),
+        })
+        .await;
+
+    assert!(
+        !session
+            .received_eor_families
+            .contains(&(Afi::Ipv4, Safi::Unicast)),
+        "Extended Next Hop must not change IPv4's EoR marker"
+    );
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "IPv4 MP_UNREACH must not emit EndOfRib even with Extended Next Hop"
+    );
     assert_eq!(session.fsm.state(), SessionState::Established);
 }
 

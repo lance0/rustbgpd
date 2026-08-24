@@ -454,6 +454,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- MP_REACH_NLRI / MP_UNREACH_NLRI framing overruns now reset the session with
+  exact Optional Attribute Error data, illegal Partial flags reset with an
+  Attribute Flags Error, and empty MP_UNREACH marks End-of-RIB only for a
+  negotiated non-IPv4-unicast family; IPv4 keeps its empty UPDATE marker.
+  (LAN-1236)
 - Recognized optional-transitive Communities, Extended Communities, PMSI
   Tunnel, and Large Communities attributes now preserve a received Partial
   bit as typed state through policy and the RIB to egress; existing read

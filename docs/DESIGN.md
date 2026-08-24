@@ -388,7 +388,7 @@ Dispositions follow RFC 7606, not RFC 4271's blanket session reset: `wire::valid
 | 4-byte ASN handling (AS_TRANS mapping) | RFC 6793 | Reconstruct valid AS4 compatibility attributes; discard or ignore inconsistent sidecars per RFC 6793 |
 | NEXT_HOP is valid IP, not 0.0.0.0, not multicast | RFC 4271 §5.1.3, RFC 7606 §7.3 | Treat-as-withdraw; subcode (3, 8) |
 | ORIGIN value is valid (IGP, EGP, INCOMPLETE) | RFC 4271 §4.3, RFC 7606 §7.1 | Treat-as-withdraw; subcode (3, 6) |
-| Attribute length does not exceed the attribute section | RFC 7606 §4 | Treat-as-withdraw; subcode (3, 1) |
+| Attribute length does not exceed the attribute section | RFC 7606 §§4, 5.3 | Treat-as-withdraw; a visible MP_REACH_NLRI / MP_UNREACH_NLRI overrun is session-reset because its embedded NLRI cannot be parsed |
 | Total path attributes length consistent with UPDATE length | RFC 7606 §3 (b) | Session-reset — NOTIFICATION (3, 1), the NLRI field boundaries cannot be trusted |
 | Unrecognized well-known attribute | RFC 4271 §5, RFC 7606 §3 (c) | Treat-as-withdraw; subcode (3, 2) |
 | Unrecognized optional non-transitive attribute | RFC 4271 §5 | Not a failure — accepted and ignored |
