@@ -1,5 +1,7 @@
 # Deploying rustbgpd
 
+Install, operate, and upgrade rustbgpd.
+
 This is the end-to-end operator runbook: install, run, validate,
 reload, observe, and upgrade. It's intentionally smaller than the M-
 series interop matrix in [`INTEROP.md`](INTEROP.md) — that document

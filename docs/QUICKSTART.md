@@ -1,5 +1,7 @@
 # Quickstart
 
+Start and verify a single rustbgpd daemon.
+
 This guide gets a single rustbgpd daemon running on a host with a starter
 config, a local gRPC socket, health probes, and the `rbgp` CLI.
 

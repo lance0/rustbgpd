@@ -1,5 +1,7 @@
 # Security Posture
 
+Protect rustbgpd's privileged management API.
+
 > For the end-to-end install + lifecycle walkthrough (systemd setup,
 > Docker, containerlab quick-start), see [`deployment.md`](deployment.md).
 
