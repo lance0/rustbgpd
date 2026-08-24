@@ -299,6 +299,24 @@ impl EffectiveGracefulRestartTimers {
     }
 }
 
+fn validate_local_ipv6_nexthop(value: &str) -> Result<(), ConfigError> {
+    let addr = value
+        .parse::<Ipv6Addr>()
+        .map_err(|error| ConfigError::InvalidLocalIpv6Nexthop {
+            value: value.to_string(),
+            reason: error.to_string(),
+        })?;
+    if !rustbgpd_wire::is_valid_ipv6_nexthop(&addr) {
+        return Err(ConfigError::InvalidLocalIpv6Nexthop {
+            value: value.to_string(),
+            reason:
+                "address is not a valid IPv6 next-hop (loopback, link-local, multicast, or unspecified)"
+                    .to_string(),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 enum PeerModeViolation {
     RouteReflector(String),
@@ -868,24 +886,12 @@ impl Config {
                 .validate()
                 .map_err(|reason| ConfigError::InvalidGrConfig { reason })?;
 
-            // Validate local_ipv6_nexthop if configured
-            if let Some(nh) = neighbor
+            if let Some(value) = neighbor
                 .local_ipv6_nexthop
-                .as_ref()
-                .or_else(|| group.and_then(|g| g.local_ipv6_nexthop.as_ref()))
+                .as_deref()
+                .or_else(|| group.and_then(|g| g.local_ipv6_nexthop.as_deref()))
             {
-                let addr =
-                    nh.parse::<Ipv6Addr>()
-                        .map_err(|e| ConfigError::InvalidLocalIpv6Nexthop {
-                            value: nh.clone(),
-                            reason: e.to_string(),
-                        })?;
-                if !rustbgpd_wire::is_valid_ipv6_nexthop(&addr) {
-                    return Err(ConfigError::InvalidLocalIpv6Nexthop {
-                        value: nh.clone(),
-                        reason: "address is not a valid IPv6 next-hop (loopback, link-local, multicast, or unspecified)".to_string(),
-                    });
-                }
+                validate_local_ipv6_nexthop(value)?;
             }
 
             let _neighbor_import = parse_policy(
@@ -2623,10 +2629,6 @@ fn validate_tcp_ao_key(address: &str, tcp_ao: &TcpAoConfig) -> Result<(), Config
 }
 
 #[expect(
-    clippy::too_many_lines,
-    reason = "peer-group validation mirrors the full inheritable neighbor surface"
-)]
-#[expect(
     clippy::too_many_arguments,
     reason = "mirrors resolve_chain's namespace threading"
 )]
@@ -2699,21 +2701,8 @@ fn validate_peer_group(
             reason: format!("peer_group {name:?}: {reason}"),
         })?;
 
-    if let Some(nh) = group.local_ipv6_nexthop.as_deref() {
-        let addr = nh
-            .parse::<Ipv6Addr>()
-            .map_err(|e| ConfigError::InvalidLocalIpv6Nexthop {
-                value: nh.to_string(),
-                reason: e.to_string(),
-            })?;
-        if !rustbgpd_wire::is_valid_ipv6_nexthop(&addr) {
-            return Err(ConfigError::InvalidLocalIpv6Nexthop {
-                value: nh.to_string(),
-                reason:
-                    "address is not a valid IPv6 next-hop (loopback, link-local, multicast, or unspecified)"
-                        .to_string(),
-            });
-        }
+    if let Some(value) = group.local_ipv6_nexthop.as_deref() {
+        validate_local_ipv6_nexthop(value)?;
     }
 
     let _group_import = parse_policy(&group.import_policy, neighbor_sets, peer_groups)?;

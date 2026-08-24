@@ -714,21 +714,62 @@ hold_tme = 90
 }
 
 #[test]
-fn local_ipv6_nexthop_loopback_rejected() {
-    let err = parse(&neighbor_with_nexthop("::1")).unwrap_err();
-    assert!(matches!(err, ConfigError::InvalidLocalIpv6Nexthop { .. }));
+fn local_ipv6_nexthop_invalid_values_preserve_typed_payloads() {
+    const SEMANTIC_REASON: &str =
+        "address is not a valid IPv6 next-hop (loopback, link-local, multicast, or unspecified)";
+    let malformed = "not-an-ipv6-address";
+    let malformed_reason = malformed
+        .parse::<std::net::Ipv6Addr>()
+        .unwrap_err()
+        .to_string();
+
+    for (value, expected_reason) in [
+        (malformed, malformed_reason.as_str()),
+        ("::", SEMANTIC_REASON),
+        ("::1", SEMANTIC_REASON),
+        ("fe80::1", SEMANTIC_REASON),
+        ("ff02::1", SEMANTIC_REASON),
+    ] {
+        let err = parse(&neighbor_with_nexthop(value)).unwrap_err();
+        match err {
+            ConfigError::InvalidLocalIpv6Nexthop {
+                value: actual_value,
+                reason,
+            } => {
+                assert_eq!(actual_value, value);
+                assert_eq!(reason, expected_reason);
+            }
+            other => panic!("expected InvalidLocalIpv6Nexthop for {value:?}, got {other}"),
+        }
+    }
 }
 
 #[test]
-fn local_ipv6_nexthop_link_local_rejected() {
-    let err = parse(&neighbor_with_nexthop("fe80::1")).unwrap_err();
-    assert!(matches!(err, ConfigError::InvalidLocalIpv6Nexthop { .. }));
-}
+fn standalone_peer_group_local_ipv6_nexthop_is_validated_without_members() {
+    let value = "::";
+    let toml_str = format!(
+        r#"
+{}
 
-#[test]
-fn local_ipv6_nexthop_multicast_rejected() {
-    let err = parse(&neighbor_with_nexthop("ff02::1")).unwrap_err();
-    assert!(matches!(err, ConfigError::InvalidLocalIpv6Nexthop { .. }));
+[peer_groups.unused]
+local_ipv6_nexthop = "{value}"
+"#,
+        valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    match err {
+        ConfigError::InvalidLocalIpv6Nexthop {
+            value: actual_value,
+            reason,
+        } => {
+            assert_eq!(actual_value, value);
+            assert_eq!(
+                reason,
+                "address is not a valid IPv6 next-hop (loopback, link-local, multicast, or unspecified)"
+            );
+        }
+        other => panic!("expected InvalidLocalIpv6Nexthop, got {other}"),
+    }
 }
 
 #[test]
@@ -738,6 +779,91 @@ fn local_ipv6_nexthop_global_accepted() {
         config.neighbors[0].local_ipv6_nexthop.as_deref(),
         Some("2001:db8::1")
     );
+}
+
+#[test]
+fn absent_local_ipv6_nexthop_stays_none_after_resolution() {
+    let config = parse(valid_toml()).unwrap();
+    let resolved = config.resolve_neighbor(&config.neighbors[0]).unwrap();
+    assert_eq!(resolved.transport_config.local_ipv6_nexthop, None);
+}
+
+#[test]
+fn peer_group_local_ipv6_nexthop_is_inherited_by_resolved_neighbor() {
+    let value = "2001:db8::10";
+    let toml_str = format!(
+        r#"
+{}
+
+[peer_groups.ipv6]
+local_ipv6_nexthop = "{value}"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "ipv6"
+"#,
+        valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    assert_eq!(config.neighbors[1].local_ipv6_nexthop, None);
+    let resolved = config.resolve_neighbor(&config.neighbors[1]).unwrap();
+    assert_eq!(
+        resolved.transport_config.local_ipv6_nexthop,
+        Some(value.parse().unwrap())
+    );
+}
+
+#[test]
+fn neighbor_local_ipv6_nexthop_overrides_peer_group_value() {
+    let group_value = "2001:db8::10";
+    let neighbor_value = "2001:db8::20";
+    let toml_str = format!(
+        r#"
+{}
+
+[peer_groups.ipv6]
+local_ipv6_nexthop = "{group_value}"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "ipv6"
+local_ipv6_nexthop = "{neighbor_value}"
+"#,
+        valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    let resolved = config.resolve_neighbor(&config.neighbors[1]).unwrap();
+    assert_eq!(
+        resolved.transport_config.local_ipv6_nexthop,
+        Some(neighbor_value.parse().unwrap())
+    );
+    assert_ne!(
+        resolved.transport_config.local_ipv6_nexthop,
+        Some(group_value.parse().unwrap())
+    );
+}
+
+#[test]
+fn local_ipv6_nexthop_validation_precedes_policy_validation() {
+    let value = "not-an-ipv6-address";
+    let toml_str = format!(
+        "{}\nimport_policy = [{{ action = \"permit\", prefix = \"not-a-prefix\" }}]\n",
+        neighbor_with_nexthop(value)
+    );
+    let expected_reason = value.parse::<std::net::Ipv6Addr>().unwrap_err().to_string();
+    let err = parse(&toml_str).unwrap_err();
+    match err {
+        ConfigError::InvalidLocalIpv6Nexthop {
+            value: actual_value,
+            reason,
+        } => {
+            assert_eq!(actual_value, value);
+            assert_eq!(reason, expected_reason);
+        }
+        other => panic!("expected InvalidLocalIpv6Nexthop, got {other}"),
+    }
 }
 
 #[test]
