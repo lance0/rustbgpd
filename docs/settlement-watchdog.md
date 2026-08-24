@@ -395,10 +395,17 @@ detached), with a few semantics of its own:
   authoritative, now fences and exits 70 instead of logging an error
   and carrying on with a runtime that may not match what any surface
   reports. And coordinated shutdown no longer races an in-flight
-  reload: it closes new admission, waits for the owned reload to
-  settle, adopts its resulting authority, and only then proceeds to
-  the warm checkpoint and actor teardown. Watchdog expiry during that
-  wait is still a fail-stop, not a successful shutdown.
+  reload: it closes new admission, then waits on the owner's registered
+  deadline and pre-armed, monotonically shortened fatal boundary. Timed
+  condition-variable waits always recheck the registry and the shutdown
+  wait returns only after the registry proves there is no owner. If the
+  owner reaches its budget, the waiter fences it as `budget_expired`,
+  preserves the five-second recovery-fence grace, and invokes the same
+  exit-70 boundary as the independent fatal clock. It never falls through
+  to checkpointing or actor teardown with an active owner. This bounds the
+  settlement wait itself; it does **not** establish a finite aggregate time
+  to the first BGP Cease because a clean owner may use its full budget and
+  later checkpoint and drain stages retain their own bounds.
 
 ## Related pages
 

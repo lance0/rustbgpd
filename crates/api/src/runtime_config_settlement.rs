@@ -1310,6 +1310,54 @@ impl RuntimeConfigSettlementWatchdog {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
     }
+
+    /// Block until every clean registration settles, bounded by the current
+    /// operation's registered deadline and pre-armed fatal boundary.
+    ///
+    /// A wait that reaches the ownership deadline fences the operation. A
+    /// recovery-fenced operation reaches the same process fail-stop used by
+    /// the independent fatal clock. This method returns only after the
+    /// registry proves that no owner remains.
+    pub fn wait_until_idle_or_fail_stop(&self) {
+        let mut idle = self
+            .registry
+            .idle_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            let Some(operation) = self.registry.current.load_full() else {
+                return;
+            };
+            let now = Instant::now();
+            let boundary = match operation.terminal() {
+                RuntimeConfigSettlementTerminal::Owned => {
+                    if now >= operation.deadline {
+                        let _ = transition_to_fenced(
+                            &operation,
+                            RuntimeConfigFenceReason::BudgetExpired,
+                        );
+                        continue;
+                    }
+                    operation.deadline
+                }
+                RuntimeConfigSettlementTerminal::RecoveryFenced
+                | RuntimeConfigSettlementTerminal::Settled => {
+                    let fatal_at = self
+                        .registry
+                        .nanos_instant(operation.fatal_at_nanos.load(Ordering::Acquire));
+                    if now >= fatal_at {
+                        run_terminal_action(&self.registry);
+                    }
+                    fatal_at
+                }
+            };
+            (idle, _) = self
+                .registry
+                .wake
+                .wait_timeout(idle, boundary.saturating_duration_since(now))
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
 }
 
 /// Typed result from an owned body; never inferred from transport status.
@@ -1747,6 +1795,30 @@ mod tests {
             )),
             receiver,
         )
+    }
+
+    fn isolated_test_watchdog(
+        budget: Duration,
+        grace: Duration,
+    ) -> (TestWatchdog, std::sync::mpsc::Receiver<i32>) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        (
+            TestWatchdog(RuntimeConfigSettlementWatchdog {
+                registry: Arc::new(Registry::new(budget, grace, sender)),
+                threads: Arc::new(Mutex::new(Vec::new())),
+            }),
+            receiver,
+        )
+    }
+
+    fn release_terminal_waiter(
+        watchdog: &RuntimeConfigSettlementWatchdog,
+        waiter: thread::JoinHandle<()>,
+    ) {
+        watchdog.registry.current.store(None);
+        watchdog.registry.wake.notify_all();
+        waiter.thread().unpark();
+        waiter.join().unwrap();
     }
 
     async fn operation(
@@ -2371,7 +2443,8 @@ mod tests {
     #[test]
     fn production_terminal_wrapper_is_an_exact_exit_only_boundary() {
         let source = include_str!("runtime_config_settlement.rs");
-        let body = source
+        let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
+        let body = production
             .split_once("fn terminate_process() -> ! {")
             .unwrap()
             .1
@@ -2391,9 +2464,19 @@ mod tests {
                 "terminal wrapper contains {forbidden}"
             );
         }
-        assert!(source.contains("current: ArcSwapOption<OperationInner>"));
-        let final_decision = source
-            .split_once("if now >= fatal_at {")
+        assert!(production.contains("current: ArcSwapOption<OperationInner>"));
+        assert_eq!(
+            production
+                .matches("run_terminal_action(&self.registry);")
+                .count(),
+            1
+        );
+        assert_eq!(
+            production.matches("run_terminal_action(registry);").count(),
+            1
+        );
+        let final_decision = production
+            .rsplit_once("if now >= fatal_at {")
             .unwrap()
             .1
             .split_once("\n                }")
@@ -2415,6 +2498,83 @@ mod tests {
         assert!(operation.try_settle());
         drop(guard);
         waiter.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_wait_returns_after_clean_settlement() {
+        let (watchdog, receiver) =
+            isolated_test_watchdog(Duration::from_secs(5), Duration::from_secs(1));
+        let (operation, guard, _, _) = operation(&watchdog, false).await;
+        let waiter = {
+            let watchdog = watchdog.clone();
+            thread::spawn(move || watchdog.wait_until_idle_or_fail_stop())
+        };
+        thread::sleep(Duration::from_millis(10));
+        assert!(!waiter.is_finished());
+        assert!(operation.try_settle());
+        drop(guard);
+        waiter.join().unwrap();
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn bounded_wait_ignores_spurious_condvar_wake() {
+        let (watchdog, receiver) =
+            isolated_test_watchdog(Duration::from_secs(5), Duration::from_secs(1));
+        let (operation, guard, _, _) = operation(&watchdog, false).await;
+        let waiter = {
+            let watchdog = watchdog.clone();
+            thread::spawn(move || watchdog.wait_until_idle_or_fail_stop())
+        };
+        thread::sleep(Duration::from_millis(10));
+        watchdog.registry.wake.notify_all();
+        thread::sleep(Duration::from_millis(10));
+        assert!(!waiter.is_finished());
+        assert!(receiver.try_recv().is_err());
+        assert!(operation.try_settle());
+        drop(guard);
+        waiter.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_wait_uses_existing_fenced_fatal_boundary() {
+        let (watchdog, receiver) =
+            isolated_test_watchdog(Duration::from_secs(5), Duration::from_millis(20));
+        let (operation, guard, _, _) = operation(&watchdog, false).await;
+        let waiter = {
+            let watchdog = watchdog.clone();
+            thread::spawn(move || watchdog.wait_until_idle_or_fail_stop())
+        };
+        assert!(operation.fence_recovery(RuntimeConfigFenceReason::KnownDivergence));
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(), 70);
+        assert_eq!(
+            operation.fence_reason(),
+            Some(RuntimeConfigFenceReason::KnownDivergence)
+        );
+        release_terminal_waiter(&watchdog, waiter);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn bounded_wait_fences_owned_timeout_then_fail_stops() {
+        let (watchdog, receiver) =
+            isolated_test_watchdog(Duration::from_millis(30), Duration::from_millis(20));
+        let (operation, guard, _, _) = operation(&watchdog, false).await;
+        let waiter = {
+            let watchdog = watchdog.clone();
+            thread::spawn(move || watchdog.wait_until_idle_or_fail_stop())
+        };
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(), 70);
+        assert_eq!(
+            operation.terminal(),
+            RuntimeConfigSettlementTerminal::RecoveryFenced
+        );
+        assert_eq!(
+            operation.fence_reason(),
+            Some(RuntimeConfigFenceReason::BudgetExpired)
+        );
+        release_terminal_waiter(&watchdog, waiter);
+        drop(guard);
     }
 
     #[tokio::test]
