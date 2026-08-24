@@ -60,7 +60,8 @@ ingress (the RFC numbers them under one heading; we list five for clarity):
   8538). Role is one more capability code following the same pattern.
 - **`PathAttribute`** is the typed-or-`Unknown` hybrid enum (`AsPath`,
   `NextHop`, `MpReachNlri`, communities, `PmsiTunnel`, …) —
-  `OnlyToCustomer { asn, partial }` is its typed OTC variant.
+  `OnlyToCustomer(u32)` and `OnlyToCustomerPartial(u32)` are its typed OTC
+  variants.
 - **FSM OPEN-error paths** already produce a `NOTIFICATION` + transition to
   Idle for things like Bad Peer AS / Unsupported Capability; Role Mismatch
   (subcode 11) plugs into the same shape.
@@ -113,10 +114,12 @@ event-history work so it can carry stable cursors/backfill semantics.
 
 ### OTC path attribute (§5)
 
-- `PathAttribute::OnlyToCustomer { asn, partial }`. **Type code 35**, canonical
-  local flags **`0xC0`** (Optional + Transitive), **length 4**, value = the
-  32-bit ASN that initially set OTC. Received `0xE0` retains Partial in the
-  typed variant; Extended Length and reserved low bits canonicalize on emit.
+- `PathAttribute::OnlyToCustomer(u32)` for canonical/local OTC and
+  `PathAttribute::OnlyToCustomerPartial(u32)` for valid received OTC carrying
+  Partial. Both use **type code 35** and **length 4**, with the value equal to
+  the 32-bit ASN that initially set OTC. Canonical local flags are **`0xC0`**
+  (Optional + Transitive); received `0xE0` retains Partial in the additive
+  typed variant. Extended Length and reserved low bits canonicalize on emit.
 - **Scope: IPv4 unicast and IPv6 unicast only.** RFC 9234 §5 explicitly
   scopes the procedures to AFI 1 / AFI 2, SAFI 1. v1 does NOT apply OTC to
   FlowSpec, EVPN, or any other AFI/SAFI. E2 is staged in the unicast RIB export
@@ -329,7 +332,8 @@ on the `local-role` line. The FRR doc reference is pinned to
   sub-buffer — no change needed.
 - **Path attribute:** `PathAttribute` enum at `crates/wire/src/attribute.rs:608`
   with `Unknown(RawAttribute)` fallback at `:637`. Add a
-  `PathAttribute::OnlyToCustomer { asn, partial }` variant + arms in
+  `PathAttribute::OnlyToCustomer(u32)` and
+  `PathAttribute::OnlyToCustomerPartial(u32)` variants + arms in
   `decode_attribute_value` (`:773`, match at `:797`), `encode_path_attributes`
   (`:1405`), `type_code()` (`:643`), `flags()` (`:664`). Critically, add an
   `expected_flags()` row at `attribute.rs:1369` for
@@ -370,8 +374,9 @@ on the `local-role` line. The FRR doc reference is pinned to
   procedures to AFI 1/2 SAFI 1; non-unicast SAFIs are explicitly out of
   v1 scope.
 - **Transport — ingress OTC check (I1/I2 semantic rule + malformed
-  handling):** valid `PathAttribute::OnlyToCustomer { asn, partial }` values
-  feed the role-dependent I1/I2 rules; Partial does not alter their semantics.
+  handling):** valid `PathAttribute::OnlyToCustomer(u32)` and
+  `PathAttribute::OnlyToCustomerPartial(u32)` values feed the role-dependent
+  I1/I2 rules; Partial does not alter their semantics.
   Malformed OTC is omitted by revised decoding and handled before Role logic
   from `MalformedAttribute` metadata. A reachable UPDATE uses RFC 7606
   treat-as-withdraw and stays Established; an UPDATE with no reachable NLRI

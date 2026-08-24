@@ -74,7 +74,8 @@ fn should_warn_rejected_route_eviction(count: u64) -> bool {
 fn otc_state(attrs: &[PathAttribute]) -> OtcState {
     let mut found = OtcState::Absent;
     for attr in attrs {
-        if let PathAttribute::OnlyToCustomer { asn, .. } = attr {
+        if let PathAttribute::OnlyToCustomer(asn) | PathAttribute::OnlyToCustomerPartial(asn) = attr
+        {
             found = OtcState::Present(*asn);
         }
     }
@@ -453,10 +454,7 @@ impl RouteAttrBundle {
         let mp = strip_next_hop(base);
         let mut unicast = base.to_vec();
         if let Some(asn) = otc_add {
-            unicast.push(PathAttribute::OnlyToCustomer {
-                asn,
-                partial: false,
-            });
+            unicast.push(PathAttribute::OnlyToCustomer(asn));
         }
         let mp_unicast = strip_next_hop(&unicast);
         Self {
@@ -3091,9 +3089,12 @@ mod route_attr_bundle_tests {
         attrs.iter().any(|a| matches!(a, PathAttribute::NextHop(_)))
     }
     fn has_otc(attrs: &[PathAttribute]) -> bool {
-        attrs
-            .iter()
-            .any(|a| matches!(a, PathAttribute::OnlyToCustomer { .. }))
+        attrs.iter().any(|a| {
+            matches!(
+                a,
+                PathAttribute::OnlyToCustomer(_) | PathAttribute::OnlyToCustomerPartial(_)
+            )
+        })
     }
     #[test]
     fn bundle_variant_shapes_with_otc() {

@@ -83,7 +83,9 @@ impl PeerSession {
             .attributes
             .iter()
             .find_map(|attribute| match attribute {
-                PathAttribute::OnlyToCustomer { asn, .. } => Some(*asn),
+                PathAttribute::OnlyToCustomer(asn) | PathAttribute::OnlyToCustomerPartial(asn) => {
+                    Some(*asn)
+                }
                 _ => None,
             });
         let as_path_string = route

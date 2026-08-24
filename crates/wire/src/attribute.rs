@@ -717,14 +717,11 @@ pub enum PathAttribute {
     /// ingress-replication BUM forwarding.
     PmsiTunnel(crate::pmsi::PmsiTunnel),
     /// RFC 9234 §5 `Only-to-Customer` (type 35) — carries the 32-bit ASN
-    /// that initially set OTC on the route. Optional + Transitive (`0xC0`),
-    /// with the received RFC 4271 Partial bit retained for propagation.
-    OnlyToCustomer {
-        /// ASN of the AS that initially attached OTC.
-        asn: u32,
-        /// Whether the received attribute carried the Partial bit.
-        partial: bool,
-    },
+    /// that initially set OTC on the route. Optional + Transitive (`0xC0`).
+    OnlyToCustomer(u32),
+    /// A valid received `Only-to-Customer` attribute carrying the RFC 4271
+    /// Partial bit (`0xE0`). Kept typed so Partial survives propagation.
+    OnlyToCustomerPartial(u32),
     /// Unknown or unrecognized attribute, preserved for re-advertisement.
     Unknown(RawAttribute),
 }
@@ -748,7 +745,7 @@ impl PathAttribute {
             Self::MpReachNlri(_) => attr_type::MP_REACH_NLRI,
             Self::MpUnreachNlri(_) => attr_type::MP_UNREACH_NLRI,
             Self::PmsiTunnel(_) => attr_type::PMSI_TUNNEL,
-            Self::OnlyToCustomer { .. } => attr_type::ONLY_TO_CUSTOMER,
+            Self::OnlyToCustomer(_) | Self::OnlyToCustomerPartial(_) => attr_type::ONLY_TO_CUSTOMER,
             Self::Unknown(raw) => raw.type_code,
         }
     }
@@ -778,11 +775,10 @@ impl PathAttribute {
             Self::Communities(_)
             | Self::ExtendedCommunities(_)
             | Self::LargeCommunities(_)
-            | Self::PmsiTunnel(_) => attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
-            Self::OnlyToCustomer { partial, .. } => {
-                attr_flags::OPTIONAL
-                    | attr_flags::TRANSITIVE
-                    | if *partial { attr_flags::PARTIAL } else { 0 }
+            | Self::PmsiTunnel(_)
+            | Self::OnlyToCustomer(_) => attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            Self::OnlyToCustomerPartial(_) => {
+                attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL
             }
             Self::Unknown(raw) => raw.flags,
         }
@@ -1696,10 +1692,11 @@ fn decode_attribute_value(
                 });
             }
             let asn = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
-            Ok(PathAttribute::OnlyToCustomer {
-                asn,
-                partial: flags & attr_flags::PARTIAL != 0,
-            })
+            if flags & attr_flags::PARTIAL != 0 {
+                Ok(PathAttribute::OnlyToCustomerPartial(asn))
+            } else {
+                Ok(PathAttribute::OnlyToCustomer(asn))
+            }
         }
         attr_type::ATOMIC_AGGREGATE => {
             // RFC 4271 §5.1.6: zero-length. RFC 7606 §7.6: any other length
@@ -2761,11 +2758,16 @@ fn encode_path_attributes_with_scratch(
                 );
                 pmsi.encode(value_scratch);
             }
-            PathAttribute::OnlyToCustomer { asn, partial } => {
+            PathAttribute::OnlyToCustomer(asn) => {
                 // RFC 9234 §5: Optional + Transitive, length 4, 32-bit ASN.
-                flags = attr_flags::OPTIONAL
-                    | attr_flags::TRANSITIVE
-                    | if *partial { attr_flags::PARTIAL } else { 0 };
+                flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+                type_code = attr_type::ONLY_TO_CUSTOMER;
+                value_scratch.extend_from_slice(&asn.to_be_bytes());
+            }
+            PathAttribute::OnlyToCustomerPartial(asn) => {
+                // RFC 4271 §5: retain Partial on a received recognized
+                // optional-transitive attribute when propagating it.
+                flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL;
                 type_code = attr_type::ONLY_TO_CUSTOMER;
                 value_scratch.extend_from_slice(&asn.to_be_bytes());
             }
@@ -5827,10 +5829,7 @@ mod tests {
     #[test]
     fn only_to_customer_encode_decode_roundtrip() {
         for asn in [0u32, 65000, 65536, 4_200_000_000, u32::MAX] {
-            let attrs = vec![PathAttribute::OnlyToCustomer {
-                asn,
-                partial: false,
-            }];
+            let attrs = vec![PathAttribute::OnlyToCustomer(asn)];
             let mut buf = Vec::new();
             encode_path_attributes(&attrs, &mut buf, true, false).unwrap();
             // Wire shape: flags=0xC0, type=35, len=4, value=asn(be).
@@ -5840,23 +5839,17 @@ mod tests {
             assert_eq!(&buf[3..7], &asn.to_be_bytes()[..]);
             let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
             assert_eq!(decoded.len(), 1);
-            assert_eq!(
-                decoded[0],
-                PathAttribute::OnlyToCustomer {
-                    asn,
-                    partial: false,
-                }
-            );
+            assert_eq!(decoded[0], PathAttribute::OnlyToCustomer(asn));
         }
     }
     #[test]
     fn only_to_customer_type_code_and_flags() {
-        let attr = PathAttribute::OnlyToCustomer {
-            asn: 65001,
-            partial: false,
-        };
+        let attr = PathAttribute::OnlyToCustomer(65001);
         assert_eq!(attr.type_code(), 35);
         assert_eq!(attr.flags(), attr_flags::OPTIONAL | attr_flags::TRANSITIVE);
+        let partial = PathAttribute::OnlyToCustomerPartial(65001);
+        assert_eq!(partial.type_code(), 35);
+        assert_eq!(partial.flags(), 0xe0);
     }
     #[test]
     fn only_to_customer_malformed_length_is_attribute_length_error() {
@@ -5950,13 +5943,7 @@ mod tests {
         ];
         let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(decoded.len(), 1);
-        assert_eq!(
-            decoded[0],
-            PathAttribute::OnlyToCustomer {
-                asn: 65000,
-                partial: true,
-            }
-        );
+        assert_eq!(decoded[0], PathAttribute::OnlyToCustomerPartial(65000));
         // Round-trip: typed encoding must retain Partial exactly.
         let mut reencoded = Vec::new();
         encode_path_attributes(&decoded, &mut reencoded, true, false).unwrap();
@@ -5973,10 +5960,7 @@ mod tests {
     fn only_to_customer_locally_constructed_emits_canonical_flags() {
         // Locally-added OTC is built with Partial clear and must emit
         // canonical 0xC0.
-        let attrs = vec![PathAttribute::OnlyToCustomer {
-            asn: 65000,
-            partial: false,
-        }];
+        let attrs = vec![PathAttribute::OnlyToCustomer(65000)];
         let mut buf = Vec::new();
         encode_path_attributes(&attrs, &mut buf, true, false).unwrap();
         assert_eq!(
@@ -6012,9 +5996,10 @@ mod tests {
             let decoded = decode_path_attributes(&wire, true, &[]).unwrap();
             assert_eq!(
                 decoded,
-                vec![PathAttribute::OnlyToCustomer {
-                    asn: 65_001,
-                    partial,
+                vec![if partial {
+                    PathAttribute::OnlyToCustomerPartial(65_001)
+                } else {
+                    PathAttribute::OnlyToCustomer(65_001)
                 }]
             );
             let mut emitted = Vec::new();

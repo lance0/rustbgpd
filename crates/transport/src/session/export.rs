@@ -445,10 +445,7 @@ impl SessionExportProfile {
             )
             && !has_otc(&attrs)
         {
-            attrs.push(PathAttribute::OnlyToCustomer {
-                asn: self.local_asn,
-                partial: false,
-            });
+            attrs.push(PathAttribute::OnlyToCustomer(self.local_asn));
         }
         if matches!(route.prefix, Prefix::V4(_))
             && !attrs
@@ -2135,9 +2132,12 @@ impl PeerSession {
 pub(super) fn has_otc(attrs: &[PathAttribute]) -> bool {
     // Network ingress types every valid type-35 attribute and omits malformed
     // ones under revised handling. Synthetic Unknown(type 35) is not OTC.
-    attrs
-        .iter()
-        .any(|attr| matches!(attr, PathAttribute::OnlyToCustomer { .. }))
+    attrs.iter().any(|attr| {
+        matches!(
+            attr,
+            PathAttribute::OnlyToCustomer(_) | PathAttribute::OnlyToCustomerPartial(_)
+        )
+    })
 }
 
 /// Remove private ASNs from an `AS_PATH` according to the configured mode.

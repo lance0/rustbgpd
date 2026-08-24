@@ -121,16 +121,21 @@ fn otc_registry_claim_is_typed_partial_preserving_and_revised_safe() {
     ] {
         let decoded = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
         assert!(decoded.malformed.is_empty());
-        let [PathAttribute::OnlyToCustomer { asn, partial }] = decoded.attributes.as_slice() else {
+        let [otc] = decoded.attributes.as_slice() else {
             panic!("OTC must remain typed");
         };
-        assert_eq!(*asn, 65_001);
-        assert_eq!(*partial, input[0] & 0x20 != 0);
+        let (asn, partial) = match otc {
+            PathAttribute::OnlyToCustomer(asn) => (*asn, false),
+            PathAttribute::OnlyToCustomerPartial(asn) => (*asn, true),
+            other => panic!("expected typed OTC, got {other:?}"),
+        };
+        assert_eq!(asn, 65_001);
+        assert_eq!(partial, input[0] & 0x20 != 0);
         let mut emitted = Vec::new();
         encode_path_attributes(&decoded.attributes, &mut emitted, true, false).unwrap();
         assert_eq!(
             emitted,
-            attribute(if *partial { 0xe0 } else { 0xc0 }, 35, &value)
+            attribute(if partial { 0xe0 } else { 0xc0 }, 35, &value)
         );
     }
 

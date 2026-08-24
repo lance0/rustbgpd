@@ -80,10 +80,7 @@ fn rich_attributes(peer_idx: u32) -> Vec<PathAttribute> {
             .map(|i| Ipv4Addr::new(198, 51, 100, i + 1))
             .collect(),
     ));
-    attrs.push(PathAttribute::OnlyToCustomer {
-        asn: 65_000,
-        partial: false,
-    });
+    attrs.push(PathAttribute::OnlyToCustomer(65_000));
     attrs
 }
 

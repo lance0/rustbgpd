@@ -1,10 +1,7 @@
 use super::*;
 
 fn otc(asn: u32) -> PathAttribute {
-    PathAttribute::OnlyToCustomer {
-        asn,
-        partial: false,
-    }
+    PathAttribute::OnlyToCustomer(asn)
 }
 
 #[test]
@@ -16,13 +13,9 @@ fn otc_egress_adds_local_asn_for_provider_peer_and_route_server() {
         let attrs =
             session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
         assert!(
-            attrs.iter().any(|a| matches!(
-                a,
-                PathAttribute::OnlyToCustomer {
-                    asn: 65001,
-                    partial: false
-                }
-            )),
+            attrs
+                .iter()
+                .any(|a| matches!(a, PathAttribute::OnlyToCustomer(65001))),
             "role {role:?} must add OTC(local AS) on eBGP unicast egress"
         );
     }
@@ -47,7 +40,9 @@ fn otc_egress_preserves_existing_otc() {
     let otcs: Vec<u32> = attrs
         .iter()
         .filter_map(|a| match a {
-            PathAttribute::OnlyToCustomer { asn, .. } => Some(*asn),
+            PathAttribute::OnlyToCustomer(asn) | PathAttribute::OnlyToCustomerPartial(asn) => {
+                Some(*asn)
+            }
             _ => None,
         })
         .collect();
@@ -122,13 +117,10 @@ async fn otc_ingress_adds_remote_asn_for_route_from_provider_unicast() {
         };
         assert_eq!(announced.len(), 1);
         assert!(
-            announced[0].attributes.iter().any(|a| matches!(
-                a,
-                PathAttribute::OnlyToCustomer {
-                    asn: 65002,
-                    partial: false
-                }
-            )),
+            announced[0]
+                .attributes
+                .iter()
+                .any(|a| matches!(a, PathAttribute::OnlyToCustomer(65002))),
             "I3 must add OTC(remote AS) for local role {role:?} receiving untagged unicast"
         );
     }
@@ -197,10 +189,7 @@ async fn otc_ingress_provider_applies_role_rule_to_partial_typed_otc() {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
         }),
         PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-        PathAttribute::OnlyToCustomer {
-            asn: 65_002,
-            partial: true,
-        },
+        PathAttribute::OnlyToCustomerPartial(65_002),
     ];
     session
         .process_update(UpdateMessage::build(
@@ -890,9 +879,10 @@ async fn otc_roleless_canonical_and_partial_roundtrip_ingress_rib_egress_bytes()
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
             }),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-            PathAttribute::OnlyToCustomer {
-                asn: 64_512,
-                partial,
+            if partial {
+                PathAttribute::OnlyToCustomerPartial(64_512)
+            } else {
+                PathAttribute::OnlyToCustomer(64_512)
             },
         ];
         inbound
@@ -911,13 +901,11 @@ async fn otc_roleless_canonical_and_partial_roundtrip_ingress_rib_egress_bytes()
         let [route] = announced.as_slice() else {
             panic!("expected one accepted route");
         };
-        assert!(route.attributes.iter().any(|attr| matches!(
-            attr,
-            PathAttribute::OnlyToCustomer {
-                asn: 64_512,
-                partial: actual
-            } if *actual == partial
-        )));
+        assert!(route.attributes.iter().any(|attr| match attr {
+            PathAttribute::OnlyToCustomer(asn) => *asn == 64_512 && !partial,
+            PathAttribute::OnlyToCustomerPartial(asn) => *asn == 64_512 && partial,
+            _ => false,
+        }));
 
         let mut outbound = make_test_session(65003, 65004);
         outbound.config.peer.local_role = None;

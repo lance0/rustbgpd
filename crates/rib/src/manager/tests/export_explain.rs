@@ -369,10 +369,7 @@ async fn add_path_source_explain_retains_attempted_rank_on_post_rank_otc_denial(
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 122, 0), 24);
     let mut route = make_route_with_lp(prefix, source_peer, 200);
     route.path_id = 9;
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::OnlyToCustomer {
-        asn: 64512,
-        partial: false,
-    });
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::OnlyToCustomer(64512));
     feed_routes(&tx, IpAddr::V4(source_peer), vec![route]).await;
 
     let explain = query_explain_advertised_source(

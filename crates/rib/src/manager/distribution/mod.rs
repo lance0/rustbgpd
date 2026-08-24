@@ -803,7 +803,8 @@ pub(in crate::manager) fn otc_egress_blocked(
     ) && route.attributes.iter().any(|attribute| {
         matches!(
             attribute,
-            rustbgpd_wire::PathAttribute::OnlyToCustomer { .. }
+            rustbgpd_wire::PathAttribute::OnlyToCustomer(_)
+                | rustbgpd_wire::PathAttribute::OnlyToCustomerPartial(_)
         )
     })
 }

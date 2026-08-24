@@ -61,10 +61,7 @@ pub(super) fn with_no_advertise(mut route: Route) -> Route {
 }
 
 fn with_otc(mut route: Route, asn: u32) -> Route {
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::OnlyToCustomer {
-        asn,
-        partial: false,
-    });
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::OnlyToCustomer(asn));
     route
 }
 
