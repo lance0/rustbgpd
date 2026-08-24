@@ -59,7 +59,7 @@ wait_frr_type5_originated() {
     local attempts=$((timeout / 2))
     for _ in $(seq 1 "$attempts"); do
         if docker exec "$VTEP_A" vtysh -c "show bgp l2vpn evpn route type prefix json" 2>/dev/null \
-            | grep -q "\\[5\\]:\\[0\\]:\\[32\\]:\\[$TENANT_HOST\\]"; then
+            | grep "\\[5\\]:\\[0\\]:\\[32\\]:\\[$TENANT_HOST\\]" >/dev/null; then
             return 0
         fi
         sleep 2
