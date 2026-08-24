@@ -38,6 +38,17 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   attributes are now ignored by both strict and revised decoders and by the
   defensive encoder. Unknown optional transitive attributes remain preserved
   for propagation with the Partial bit.
+- **Additive registry constants and assigned-class fencing:** Added
+  `attr_type::TUNNEL_ENCAPSULATION`, `AIGP`, `PE_DISTINGUISHER_LABELS`,
+  `BGPSEC_PATH`, `PREFIX_SID`, and `ATTR_SET`. Those six assigned types now
+  carry their registered Optional/Transitive class through decode: a class
+  conflict is an UPDATE attribute flags error in the strict decoder and an
+  RFC 7606 outcome in the revised decoder instead of being silently ignored
+  or retained opaquely. AIGP carrying Transitive is attribute-discard per
+  RFC 7311 §3.2; every other class conflict is treat-as-withdraw.
+  Correct-class handling is unchanged, with optional non-transitive types
+  ignored and optional transitive types retained opaque and re-emitted with
+  Partial. Payload semantics remain unsupported for all six.
 - **Adoption example:** Added a standalone captured-UPDATE decoder using the
   crate's public framing and parsed-update APIs.
 
