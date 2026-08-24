@@ -213,6 +213,32 @@ remote_asn = 65002
 }
 
 #[test]
+fn hold_timer_validation_matches_neighbor_and_peer_group() {
+    let debug_error = |source: &str| {
+        let error = parse(source).unwrap_err();
+        format!("{error:?}")
+    };
+    let direct_base = valid_toml().replace("hold_time = 90", "");
+    for (fields, expected) in [
+        ("hold_time = 1", "InvalidHoldTime { value: 1 }"),
+        ("min_hold_time = 2", "InvalidMinHoldTime { value: 2 }"),
+        (
+            "hold_time = 30\nmin_hold_time = 31",
+            "InvalidMinHoldTimeForHoldTime { minimum: 31, hold_time: 30 }",
+        ),
+        (
+            "send_hold_time = 90",
+            "InvalidSendHoldTime { value: 90, hold_time: 90 }",
+        ),
+    ] {
+        let direct = format!("{direct_base}\n{fields}");
+        let group = format!("{}\n[peer_groups.validation]\n{fields}", valid_toml());
+        assert_eq!(debug_error(&direct), expected);
+        assert_eq!(debug_error(&group), expected);
+    }
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "one end-to-end inheritance and negotiation matrix keeps the floor contract coherent"
