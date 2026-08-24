@@ -123,8 +123,8 @@ lab-relevant paths (the rest of the matrix below runs on the hosted
 kernel-dataplane workflow or manual gates).
 
 A `classify_changes` job runs `scripts/classify_heavy_ci_paths.py` first and
-`prime_dev_image` — which every lab job depends on — is gated on its
-`run_labs` output. Workflow path filters exclude documentation-only pull
+`prime_dev_image` — which every M-series topology job depends on — is gated on
+its `run_labs` output. Workflow path filters exclude documentation-only pull
 requests and pushes before any job starts. For a triggered pull request, a
 complete three-dot diff that is standalone-fuzz-only or
 release/packaging-only skips the entire lab roster. The classifier defaults to
