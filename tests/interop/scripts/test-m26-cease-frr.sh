@@ -119,7 +119,7 @@ inject_excess_prefix() {
         -c "address-family ipv4 unicast" \
         -c "network 10.10.0.0/16" >/dev/null 2>&1 || true
     if ! docker exec "$FRR" vtysh -c "show running-config" 2>/dev/null \
-        | grep -q '^  network 10\.10\.0\.0/16$'; then
+        | grep '^  network 10\.10\.0\.0/16$' >/dev/null; then
         fail "FRR did not install the third network statement"
         return 1
     fi
@@ -210,7 +210,7 @@ test_recovery_requires_removal_and_enable() {
         -c "address-family ipv4 unicast" \
         -c "no network 10.10.0.0/16" >/dev/null 2>&1 || true
     if docker exec "$FRR" vtysh -c "show running-config" 2>/dev/null \
-        | grep -q '^  network 10\.10\.0\.0/16$'; then
+        | grep '^  network 10\.10\.0\.0/16$' >/dev/null; then
         fail "FRR retained the third network statement after removal"
         return
     fi
