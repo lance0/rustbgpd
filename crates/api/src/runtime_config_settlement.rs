@@ -1340,8 +1340,7 @@ impl RuntimeConfigSettlementWatchdog {
                     }
                     operation.deadline
                 }
-                RuntimeConfigSettlementTerminal::RecoveryFenced
-                | RuntimeConfigSettlementTerminal::Settled => {
+                RuntimeConfigSettlementTerminal::RecoveryFenced => {
                     let fatal_at = self
                         .registry
                         .nanos_instant(operation.fatal_at_nanos.load(Ordering::Acquire));
@@ -1349,6 +1348,13 @@ impl RuntimeConfigSettlementWatchdog {
                         run_terminal_action(&self.registry);
                     }
                     fatal_at
+                }
+                RuntimeConfigSettlementTerminal::Settled => {
+                    // Settlement marks the operation before clearing `current`.
+                    // Recheck that pointer instead of applying a fatal boundary
+                    // to an operation whose outcome is already proven clean.
+                    thread::yield_now();
+                    continue;
                 }
             };
             (idle, _) = self
@@ -2534,6 +2540,28 @@ mod tests {
         assert!(operation.try_settle());
         drop(guard);
         waiter.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_wait_rechecks_the_settled_unregister_window() {
+        let (watchdog, receiver) =
+            isolated_test_watchdog(Duration::from_millis(20), Duration::from_millis(20));
+        let (operation, guard, _, _) = operation(&watchdog, false).await;
+        operation
+            .inner
+            .state
+            .store(TERMINAL_SETTLED | PHASE_PREFLIGHT, Ordering::Release);
+        let waiter = {
+            let watchdog = watchdog.clone();
+            thread::spawn(move || watchdog.wait_until_idle_or_fail_stop())
+        };
+        thread::sleep(Duration::from_millis(50));
+        assert!(!waiter.is_finished());
+        assert!(receiver.try_recv().is_err());
+        watchdog.registry.current.store(None);
+        waiter.join().unwrap();
+        assert!(receiver.try_recv().is_err());
+        drop(guard);
     }
 
     #[tokio::test]
