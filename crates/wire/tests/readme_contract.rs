@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use syn::{Attribute, Expr, Item, Lit, Meta, UseTree, Visibility};
+use syn::{Attribute, Expr, Item, Lit, Meta, Type, UseTree, Visibility};
 
 const README: &str = include_str!("../README.md");
 const LIB_SOURCE: &str = include_str!("../src/lib.rs");
@@ -45,21 +45,36 @@ fn decode_message_has_bytes_signature(source: &str) -> bool {
     )
 }
 
-fn use_tree_contains_name(tree: &UseTree, name: &str) -> bool {
+fn use_tree_imports_from(
+    tree: &UseTree,
+    source: &str,
+    source_name: &str,
+    local_name: &str,
+) -> bool {
+    let mut uses = Vec::new();
+    flatten_use_tree(tree, &mut Vec::new(), &mut uses);
+    uses.iter().any(|public_use| {
+        matches!(
+            public_use,
+            PublicUse::Named {
+                source: item_source,
+                local,
+            } if item_source == &[source, source_name] && local == local_name
+        )
+    })
+}
+
+fn use_tree_binds_name(tree: &UseTree, local_name: &str) -> bool {
     match tree {
-        UseTree::Path(path) => use_tree_contains_name(path.tree.as_ref(), name),
-        UseTree::Name(item) => item.ident == name,
-        UseTree::Rename(item) => item.rename == name,
+        UseTree::Path(path) => use_tree_binds_name(path.tree.as_ref(), local_name),
+        UseTree::Name(item) => item.ident == local_name,
+        UseTree::Rename(item) => item.rename == local_name,
         UseTree::Group(group) => group
             .items
             .iter()
-            .any(|item| use_tree_contains_name(item, name)),
+            .any(|item| use_tree_binds_name(item, local_name)),
         UseTree::Glob(_) => false,
     }
-}
-
-fn use_tree_imports_from(tree: &UseTree, source: &str, name: &str) -> bool {
-    matches!(tree, UseTree::Path(path) if path.ident == source && use_tree_contains_name(path.tree.as_ref(), name))
 }
 
 fn message_imports_bytes_type(source: &str) -> bool {
@@ -68,7 +83,7 @@ fn message_imports_bytes_type(source: &str) -> bool {
         .items
         .iter()
         .any(|item| {
-            matches!(item, Item::Use(item_use) if use_tree_imports_from(&item_use.tree, "bytes", "Bytes"))
+            matches!(item, Item::Use(item_use) if use_tree_imports_from(&item_use.tree, "bytes", "Bytes", "Bytes"))
         })
 }
 
@@ -110,29 +125,53 @@ fn has_feature_gate(attributes: &[Attribute], feature: &str) -> bool {
 
 fn lib_exposes_codec_only_behind_feature(source: &str) -> bool {
     let syntax = syn::parse_file(source).expect("lib.rs must remain valid Rust");
-    let module_is_gated = syntax.items.iter().any(|item| {
-        matches!(
-            item,
-            Item::Mod(item_mod)
-                if item_mod.ident == "tokio_codec"
-                    && is_public(&item_mod.vis)
-                    && has_feature_gate(&item_mod.attrs, "tokio-codec")
-        )
-    });
-    let root_reexport_is_gated = syntax.items.iter().any(|item| {
-        matches!(
-            item,
+    let codec_modules = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Mod(item_mod) if item_mod.ident == "tokio_codec" && is_public(&item_mod.vis) => {
+                Some(item_mod)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let codec_bindings = syntax
+        .items
+        .iter()
+        .filter(|item| match item {
+            Item::Use(item_use) => {
+                is_public(&item_use.vis) && use_tree_binds_name(&item_use.tree, "BgpCodecError")
+            }
+            Item::Enum(item) => item.ident == "BgpCodecError" && is_public(&item.vis),
+            Item::Struct(item) => item.ident == "BgpCodecError" && is_public(&item.vis),
+            Item::Type(item) => item.ident == "BgpCodecError" && is_public(&item.vis),
+            Item::Union(item) => item.ident == "BgpCodecError" && is_public(&item.vis),
+            Item::Mod(item) => item.ident == "BgpCodecError" && is_public(&item.vis),
+            Item::ExternCrate(item) => {
+                is_public(&item.vis)
+                    && item
+                        .rename
+                        .as_ref()
+                        .is_some_and(|(_, name)| name == "BgpCodecError")
+            }
+            _ => false,
+        })
+        .collect::<Vec<_>>();
+
+    codec_modules.len() == 1
+        && has_feature_gate(&codec_modules[0].attrs, "tokio-codec")
+        && codec_bindings.len() == 1
+        && matches!(
+            codec_bindings[0],
             Item::Use(item_use)
-                if is_public(&item_use.vis)
-                    && has_feature_gate(&item_use.attrs, "tokio-codec")
+                if has_feature_gate(&item_use.attrs, "tokio-codec")
                     && use_tree_imports_from(
                         &item_use.tree,
                         "tokio_codec",
                         "BgpCodecError",
+                        "BgpCodecError",
                     )
         )
-    });
-    module_is_gated && root_reexport_is_gated
 }
 
 fn external_module_path(module_directory: &Path, name: &str) -> PathBuf {
@@ -172,6 +211,7 @@ fn explicit_module_path(attributes: &[Attribute], module_directory: &Path) -> Op
 enum PublicExport {
     Error(String),
     BytesDependency,
+    Module(Vec<String>),
 }
 
 #[derive(Clone, Debug)]
@@ -257,6 +297,21 @@ fn inspect_module_items(
             Item::Use(item_use) if is_public(&item_use.vis) => {
                 flatten_use_tree(&item_use.tree, &mut Vec::new(), &mut inventory.public_uses);
             }
+            Item::Type(item_type) if is_public(&item_type.vis) => {
+                if let Type::Path(type_path) = item_type.ty.as_ref()
+                    && type_path.qself.is_none()
+                {
+                    inventory.public_uses.push(PublicUse::Named {
+                        source: type_path
+                            .path
+                            .segments
+                            .iter()
+                            .map(|segment| segment.ident.to_string())
+                            .collect(),
+                        local: item_type.ident.to_string(),
+                    });
+                }
+            }
             Item::Mod(item_mod) => {
                 let name = item_mod.ident.to_string();
                 let mut child_path = module_path.to_vec();
@@ -264,6 +319,9 @@ fn inspect_module_items(
                 let child_directory = module_directory.join(&name);
                 if is_public(&item_mod.vis) {
                     inventory.public_children.push(child_path.clone());
+                    inventory
+                        .direct_exports
+                        .insert(name.clone(), PublicExport::Module(child_path.clone()));
                 }
                 if let Some((_, child_items)) = &item_mod.content {
                     inspect_module_items(child_items, &child_path, &child_directory, modules);
@@ -399,6 +457,15 @@ fn inventory_from_modules(
             for child in &module.public_children {
                 changed |= reachable.insert(child.clone());
             }
+            for export in exports
+                .get(&module_path)
+                .expect("reachable module has resolved exports")
+                .values()
+            {
+                if let PublicExport::Module(child) = export {
+                    changed |= reachable.insert(child.clone());
+                }
+            }
         }
         if !changed {
             break;
@@ -419,7 +486,7 @@ fn inventory_from_modules(
         }
         errors.extend(module_exports.values().filter_map(|export| match export {
             PublicExport::Error(name) => Some(name.clone()),
-            PublicExport::BytesDependency => None,
+            PublicExport::BytesDependency | PublicExport::Module(_) => None,
         }));
     }
     (errors.into_iter().collect(), bytes_reexports)
@@ -571,11 +638,18 @@ fn contract_helpers_reject_independent_documentation_and_source_mutations() {
         1,
     );
     assert!(!message_imports_bytes_type(&aliased_bytes_source));
+    let wrong_source_item = MESSAGE_SOURCE.replacen(
+        "use bytes::{Bytes, BytesMut};",
+        "use bytes::{Bytes as DependencyBytes, BytesMut as Bytes};",
+        1,
+    );
+    assert!(!message_imports_bytes_type(&wrong_source_item));
 
     for reexport in [
         "pub use bytes::Bytes;",
         "pub use {bytes::Bytes};",
         "pub extern crate bytes;",
+        "pub type WireBytes = bytes::Bytes;",
     ] {
         assert!(
             !inline_source_inventory(reexport).1.is_empty(),
@@ -598,6 +672,26 @@ fn contract_helpers_reject_independent_documentation_and_source_mutations() {
         pub use tokio_codec::BgpCodecError;
     "#;
     assert!(!lib_exposes_codec_only_behind_feature(ungated_codec_module));
+    let wrong_codec_source_item = r#"
+        #[cfg(feature = "tokio-codec")]
+        pub mod tokio_codec { pub struct BgpCodec; pub enum BgpCodecError {} }
+        #[cfg(feature = "tokio-codec")]
+        pub use tokio_codec::BgpCodec as BgpCodecError;
+    "#;
+    assert!(!lib_exposes_codec_only_behind_feature(
+        wrong_codec_source_item
+    ));
+    let alternative_ungated_binding = r#"
+        #[cfg(feature = "tokio-codec")]
+        pub mod tokio_codec { pub enum BgpCodecError {} }
+        #[cfg(feature = "tokio-codec")]
+        pub use tokio_codec::BgpCodecError;
+        #[cfg(not(feature = "tokio-codec"))]
+        pub use error::DecodeError as BgpCodecError;
+    "#;
+    assert!(!lib_exposes_codec_only_behind_feature(
+        alternative_ungated_binding
+    ));
 
     let exhaustiveness = section(README, "## Enum exhaustiveness");
     for name in ERROR_ENUM_NAMES {
@@ -605,26 +699,18 @@ fn contract_helpers_reject_independent_documentation_and_source_mutations() {
         assert!(!has_documented_error_roster(&missing_name));
     }
 
-    let declarations = [
-        (include_str!("../src/error.rs"), "DecodeError"),
-        (include_str!("../src/error.rs"), "EncodeError"),
-        (
-            include_str!("../src/evpn.rs"),
-            "RouteDistinguisherParseError",
-        ),
-        (
-            include_str!("../src/notification.rs"),
-            "ShutdownCommunicationError",
-        ),
-        (include_str!("../src/tokio_codec.rs"), "BgpCodecError"),
-    ];
-    for (source, name) in declarations {
-        let exhaustive = source.replacen(
-            &format!("#[non_exhaustive]\npub enum {name}"),
-            &format!("pub enum {name}"),
-            1,
+    for name in ERROR_ENUM_NAMES {
+        assert!(
+            source_enum_is_public_and_non_exhaustive(
+                &format!("#[derive(Debug)]\n#[non_exhaustive]\npub enum {name} {{ Example }}"),
+                name,
+            ),
+            "structural checker must accept reordered attributes for {name}"
         );
-        assert!(!source_enum_is_public_and_non_exhaustive(&exhaustive, name));
+        assert!(!source_enum_is_public_and_non_exhaustive(
+            &format!("pub enum {name} {{ Example }}"),
+            name
+        ));
     }
 
     let mutations = r#"
@@ -664,4 +750,18 @@ fn contract_helpers_reject_independent_documentation_and_source_mutations() {
     let (facade_errors, facade_bytes) = inline_source_inventory(private_facade);
     assert_eq!(facade_errors, ["rustbgpd_wire::hidden::FutureError"]);
     assert_eq!(facade_bytes, ["rustbgpd_wire"]);
+
+    let private_module_facade = r#"
+        mod hidden {
+            pub mod api {
+                #[non_exhaustive]
+                pub enum FutureError { Example }
+                pub use bytes::Bytes;
+            }
+        }
+        pub use hidden::api;
+    "#;
+    let (module_errors, module_bytes) = inline_source_inventory(private_module_facade);
+    assert_eq!(module_errors, ["rustbgpd_wire::hidden::api::FutureError"]);
+    assert_eq!(module_bytes, ["rustbgpd_wire::hidden::api"]);
 }
