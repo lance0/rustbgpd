@@ -16,7 +16,7 @@
 //! - [`encode_message`] — encode a BGP message to bytes
 //! - [`peek_message_length`] — check if a
 //!   complete message is available (for transport framing)
-//! - [`BgpCodec`] — optional `tokio_util::codec` adapter, available with the
+//! - `BgpCodec` — optional `tokio_util::codec` adapter, available with the
 //!   `tokio-codec` feature
 //!
 //! # Invariants
