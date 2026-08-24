@@ -109,7 +109,7 @@ bird_route() {
 }
 
 bird_has_route() {
-    bird_route | grep "BGP.as_path" >/dev/null
+    bird_route | grep -F "BGP.as_path" >/dev/null
 }
 
 bird_lacks_route() {
