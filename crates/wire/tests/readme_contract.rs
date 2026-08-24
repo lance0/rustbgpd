@@ -48,7 +48,7 @@ fn use_tree_contains_name(tree: &UseTree, name: &str) -> bool {
     match tree {
         UseTree::Path(path) => use_tree_contains_name(path.tree.as_ref(), name),
         UseTree::Name(item) => item.ident == name,
-        UseTree::Rename(item) => item.ident == name,
+        UseTree::Rename(item) => item.rename == name,
         UseTree::Group(group) => group
             .items
             .iter()
@@ -347,6 +347,12 @@ fn contract_helpers_reject_independent_documentation_and_source_mutations() {
     let wrong_bytes_source =
         MESSAGE_SOURCE.replacen("use bytes::{Bytes, BytesMut};", "type Bytes = Vec<u8>;", 1);
     assert!(!message_imports_bytes_type(&wrong_bytes_source));
+    let aliased_bytes_source = MESSAGE_SOURCE.replacen(
+        "use bytes::{Bytes, BytesMut};",
+        "use bytes::{Bytes as DependencyBytes, BytesMut};\ntype Bytes = Vec<u8>;",
+        1,
+    );
+    assert!(!message_imports_bytes_type(&aliased_bytes_source));
 
     for reexport in [
         "pub use bytes::Bytes;",
