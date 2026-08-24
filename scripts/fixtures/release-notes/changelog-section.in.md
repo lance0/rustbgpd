@@ -1,4 +1,20 @@
 
+### Upgrade notes
+
+- Use `Route.local_pref_attr` when attribute presence matters;
+  `Route.local_pref` is the effective value and defaults to 100 when the
+  attribute is absent.
+- Migrate removed `RibService.WatchRoutes` and `RibService.WatchRouteEvents`
+  consumers to `EventService.WatchEvents` for live deltas or
+  `EventService.SubscribeFromEvent` for durable replay. Update route-stream
+  metric selectors to
+  `{service="watch_events",source="route"}`.
+- Recognize `chain_default_permit` as the stable policy-attribution value for
+  a nonempty chain that completes without rejection.
+- Revalidate custom Bird's Eye consumers against the verified IXP Manager 7.4
+  compatibility contract: route shapes and longest-match lookup behavior now
+  converge on the pinned oracle.
+
 ### Added
 
 - **ADR-0089 EVPN VNI-per-broadcast-domain VLAN-aware bridge support.**
