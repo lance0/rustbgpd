@@ -228,8 +228,10 @@ Mitigations, in preference order:
   the network isolation and separate credentials, not for tier filtering.
 - Disable retention daemon-side with `[policy.reject_retention]
   enabled = false`: the reject store is never populated, so the filtered view
-  and reserved rejection-pair view are served empty as a configuration fact.
-  This does not disable the adapter's other route or identity disclosures.
+  and the `{daemon ASN}:1101` rejection-pair behavior of
+  `/routes/lc-zwild/protocol/{id}/{x}/{y}` are served empty as a configuration
+  fact. This does not disable the adapter's other route, ordinary
+  large-community wildcard, or identity disclosures.
 
 ## TCP MD5 and GTSM
 
