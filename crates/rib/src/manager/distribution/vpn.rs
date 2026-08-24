@@ -1,7 +1,7 @@
 use super::{
-    AdjRibIn, AdjRibOut, Afi, HashMap, HashSet, IpAddr, Ipv4Addr, LocRib, PolicyChain, RibManager,
-    RouteContext, Safi, gauge_val, route_type, should_suppress_ibgp_inner, vpn_route_family,
-    vpn_routes_equal, warn,
+    AdjRibIn, AdjRibOut, Afi, HashMap, HashSet, IpAddr, Ipv4Addr, LocRib, OutboundCommitBatch,
+    PolicyChain, RibManager, RouteContext, Safi, gauge_val, route_type, should_suppress_ibgp_inner,
+    vpn_route_family, vpn_routes_equal, warn,
 };
 use crate::loc_rib::vpn_tiebreak_orr;
 use crate::route::{VpnRibRoute, VpnRibRouteKey};
@@ -886,23 +886,11 @@ impl RibManager {
                     .collect();
                 if !self.try_send_and_commit_outbound_update_with_group_prior(
                     peer,
-                    vec![].into(),
-                    vec![].into(),
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vpn_announce,
-                    vpn_withdraw,
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
+                    OutboundCommitBatch {
+                        vpn_announce,
+                        vpn_withdraw,
+                        ..OutboundCommitBatch::default()
+                    },
                     group_prior,
                     None,
                 ) {
@@ -1028,23 +1016,11 @@ impl RibManager {
             if (!vpn_announce.is_empty() || !vpn_withdraw.is_empty())
                 && !self.try_send_and_commit_outbound_update(
                     peer,
-                    vec![].into(),
-                    vec![].into(),
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vpn_announce,
-                    vpn_withdraw,
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
+                    OutboundCommitBatch {
+                        vpn_announce,
+                        vpn_withdraw,
+                        ..OutboundCommitBatch::default()
+                    },
                 )
             {
                 warn!(%peer, "outbound channel full — VPN update deferred");

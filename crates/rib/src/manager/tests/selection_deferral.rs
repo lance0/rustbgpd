@@ -10,6 +10,7 @@ use super::{
     dummy_query_rx, make_bgpls_route, make_evpn_imet, make_flowspec_route, make_labeled_rib_route,
     make_route_with_lp, make_rtc_rib_route, make_vpn_rib_route, query_best_routes,
 };
+use crate::manager::distribution::OutboundCommitBatch;
 use crate::manager::selection_deferral::SelectionDeferralTransition;
 use crate::{
     PeerOutboundState, RibManager, RibUpdate, SelectionDeferralConfig,
@@ -236,23 +237,11 @@ fn commit_control_markers(
 ) -> bool {
     manager.try_send_and_commit_outbound_update(
         peer,
-        Vec::new().into(),
-        Vec::new().into(),
-        Vec::new(),
-        end_of_rib,
-        refresh_markers,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        OutboundCommitBatch {
+            end_of_rib,
+            refresh_markers,
+            ..OutboundCommitBatch::default()
+        },
     )
 }
 
@@ -738,23 +727,11 @@ fn deferred_selection_rejects_route_commit_until_release() {
     let commit = |manager: &mut RibManager| {
         manager.try_send_and_commit_outbound_update(
             target,
-            vec![None].into(),
-            vec![make_route_with_lp(prefix, Ipv4Addr::new(10, 0, 0, 2), 100)].into(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            OutboundCommitBatch {
+                next_hop_override: vec![None].into(),
+                announce: vec![make_route_with_lp(prefix, Ipv4Addr::new(10, 0, 0, 2), 100)].into(),
+                ..OutboundCommitBatch::default()
+            },
         )
     };
     assert!(

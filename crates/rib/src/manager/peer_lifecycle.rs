@@ -7,6 +7,7 @@ use rustbgpd_wire::{EvpnRouteKey, Prefix, Safi};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use super::distribution::OutboundCommitBatch;
 use super::helpers::prefix_family;
 use super::{
     ExactExportKey, LiveSessionRecord, MAX_LIVE_SESSIONS_PER_PEER, PolicyFilteredRouteKey,
@@ -1775,23 +1776,24 @@ impl RibManager {
         let sent = !has_outbound_diff
             || self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                 peer,
-                nh_override_flags.into(),
-                announce.into(),
-                withdraw,
-                vec![],
-                vec![],
-                fs_announce,
-                fs_withdraw,
-                evpn_announce,
-                evpn_withdraw,
-                bgpls_announce,
-                bgpls_withdraw,
-                vpn_announce,
-                vpn_withdraw,
-                labeled_announce,
-                labeled_withdraw,
-                rtc_announce,
-                rtc_withdraw,
+                OutboundCommitBatch {
+                    next_hop_override: nh_override_flags.into(),
+                    announce: announce.into(),
+                    withdraw,
+                    flowspec_announce: fs_announce,
+                    flowspec_withdraw: fs_withdraw,
+                    evpn_announce,
+                    evpn_withdraw,
+                    bgpls_announce,
+                    bgpls_withdraw,
+                    vpn_announce,
+                    vpn_withdraw,
+                    labeled_announce,
+                    labeled_withdraw,
+                    rtc_announce,
+                    rtc_withdraw,
+                    ..OutboundCommitBatch::default()
+                },
                 HashSet::new(),
                 None,
                 member_of.is_none().then_some(&otc_prefixes),

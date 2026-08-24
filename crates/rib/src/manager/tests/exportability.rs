@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use super::*;
+use crate::manager::distribution::OutboundCommitBatch;
 use crate::update::{
     ExactExportCandidate, ExactExportEncoder, ExactExportError, ExactExportErrorCode,
     ExactExportKey, ExactExportResult, ExactExportSnapshot,
@@ -342,23 +343,24 @@ fn commit_batch(manager: &mut RibManager, peer: IpAddr, batch: ExactBatch) -> bo
     let next_hop_override = vec![None; batch.announce.len()].into();
     manager.try_send_and_commit_outbound_update(
         peer,
-        next_hop_override,
-        batch.announce.into(),
-        batch.withdraw,
-        Vec::new(),
-        Vec::new(),
-        batch.flowspec_announce,
-        batch.flowspec_withdraw,
-        batch.evpn_announce,
-        batch.evpn_withdraw,
-        batch.bgpls_announce,
-        batch.bgpls_withdraw,
-        batch.vpn_announce,
-        batch.vpn_withdraw,
-        batch.labeled_announce,
-        batch.labeled_withdraw,
-        batch.rtc_announce,
-        batch.rtc_withdraw,
+        OutboundCommitBatch {
+            next_hop_override,
+            announce: batch.announce.into(),
+            withdraw: batch.withdraw,
+            flowspec_announce: batch.flowspec_announce,
+            flowspec_withdraw: batch.flowspec_withdraw,
+            evpn_announce: batch.evpn_announce,
+            evpn_withdraw: batch.evpn_withdraw,
+            bgpls_announce: batch.bgpls_announce,
+            bgpls_withdraw: batch.bgpls_withdraw,
+            vpn_announce: batch.vpn_announce,
+            vpn_withdraw: batch.vpn_withdraw,
+            labeled_announce: batch.labeled_announce,
+            labeled_withdraw: batch.labeled_withdraw,
+            rtc_announce: batch.rtc_announce,
+            rtc_withdraw: batch.rtc_withdraw,
+            ..OutboundCommitBatch::default()
+        },
     )
 }
 
@@ -392,23 +394,11 @@ fn commit_shared_unicast_with_precommit(
 ) -> bool {
     manager.try_send_and_commit_outbound_update_with_group_prior(
         peer,
-        next_hop_override,
-        announce,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        OutboundCommitBatch {
+            next_hop_override,
+            announce,
+            ..OutboundCommitBatch::default()
+        },
         group_prior,
         Some(crate::manager::distribution::SharedUnicastPrecommit {
             group_id: 7,

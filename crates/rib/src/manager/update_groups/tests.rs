@@ -7,6 +7,7 @@ use rustbgpd_wire::{
 };
 
 use super::*;
+use crate::manager::distribution::OutboundCommitBatch;
 
 #[test]
 fn canceled_update_group_snapshot_does_not_invoke_builder() {
@@ -5337,23 +5338,11 @@ fn single_best_group_otc_at_backstop_trips_debug_assert() {
     let nh: Arc<[Option<NextHopAction>]> = vec![None].into();
     let _ = m.try_send_and_commit_outbound_update(
         MEMBER,
-        nh,
-        announce,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        OutboundCommitBatch {
+            next_hop_override: nh,
+            announce,
+            ..OutboundCommitBatch::default()
+        },
     );
 }
 
@@ -5383,23 +5372,11 @@ fn per_client_best_group_otc_at_backstop_strips_with_pending_gated_withdraw() {
     let nh: Arc<[Option<NextHopAction>]> = vec![None].into();
     assert!(m.try_send_and_commit_outbound_update(
         MEMBER,
-        nh,
-        announce,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        OutboundCommitBatch {
+            next_hop_override: nh,
+            announce,
+            ..OutboundCommitBatch::default()
+        },
     ));
     let update = outbound_rx.try_recv().unwrap();
     assert!(

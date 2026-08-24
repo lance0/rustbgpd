@@ -98,6 +98,32 @@ pub(in crate::manager) struct SharedUnicastPrecommit<'a> {
     pub(in crate::manager) lazy_group_prior: Option<LazyCleanGroupPrior<'a>>,
 }
 
+/// One owned outbound payload at the RIB-to-session commit boundary.
+///
+/// Control state that changes how the payload is committed stays explicit on
+/// the send-ladder methods; this value only keeps the family inventories
+/// together as they move through that ladder.
+#[derive(Default)]
+pub(in crate::manager) struct OutboundCommitBatch {
+    pub(in crate::manager) next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+    pub(in crate::manager) announce: Arc<[crate::route::Route]>,
+    pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
+    pub(in crate::manager) end_of_rib: Vec<(Afi, Safi)>,
+    pub(in crate::manager) refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
+    pub(in crate::manager) flowspec_announce: Vec<crate::route::FlowSpecRoute>,
+    pub(in crate::manager) flowspec_withdraw: Vec<crate::route::FlowSpecKey>,
+    pub(in crate::manager) evpn_announce: Vec<crate::route::EvpnRibRoute>,
+    pub(in crate::manager) evpn_withdraw: Vec<rustbgpd_wire::EvpnRouteKey>,
+    pub(in crate::manager) bgpls_announce: Vec<crate::route::BgpLsRibRoute>,
+    pub(in crate::manager) bgpls_withdraw: Vec<crate::route::BgpLsRouteKey>,
+    pub(in crate::manager) vpn_announce: Vec<crate::route::VpnRibRoute>,
+    pub(in crate::manager) vpn_withdraw: Vec<crate::route::VpnRibRouteKey>,
+    pub(in crate::manager) labeled_announce: Vec<crate::route::LabeledRibRoute>,
+    pub(in crate::manager) labeled_withdraw: Vec<crate::route::LabeledRibRouteKey>,
+    pub(in crate::manager) rtc_announce: Vec<crate::route::RtcRibRoute>,
+    pub(in crate::manager) rtc_withdraw: Vec<crate::route::RtcRibRouteKey>,
+}
+
 struct SharedUnicastProbeCacheEntry {
     announce: Arc<[crate::route::Route]>,
     next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
@@ -1907,53 +1933,12 @@ impl RibManager {
         }
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "RIB update messages carry every supported family as one transaction"
-    )]
     pub(super) fn try_send_and_commit_outbound_update(
         &mut self,
         peer: IpAddr,
-        next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
-        announce: Arc<[crate::route::Route]>,
-        withdraw: Vec<(Prefix, u32)>,
-        end_of_rib: Vec<(Afi, Safi)>,
-        refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
-        flowspec_announce: Vec<crate::route::FlowSpecRoute>,
-        flowspec_withdraw: Vec<crate::route::FlowSpecKey>,
-        evpn_announce: Vec<crate::route::EvpnRibRoute>,
-        evpn_withdraw: Vec<rustbgpd_wire::EvpnRouteKey>,
-        bgpls_announce: Vec<crate::route::BgpLsRibRoute>,
-        bgpls_withdraw: Vec<crate::route::BgpLsRouteKey>,
-        vpn_announce: Vec<crate::route::VpnRibRoute>,
-        vpn_withdraw: Vec<crate::route::VpnRibRouteKey>,
-        labeled_announce: Vec<crate::route::LabeledRibRoute>,
-        labeled_withdraw: Vec<crate::route::LabeledRibRouteKey>,
-        rtc_announce: Vec<crate::route::RtcRibRoute>,
-        rtc_withdraw: Vec<crate::route::RtcRibRouteKey>,
+        batch: OutboundCommitBatch,
     ) -> bool {
-        self.try_send_and_commit_outbound_update_with_group_prior(
-            peer,
-            next_hop_override,
-            announce,
-            withdraw,
-            end_of_rib,
-            refresh_markers,
-            flowspec_announce,
-            flowspec_withdraw,
-            evpn_announce,
-            evpn_withdraw,
-            bgpls_announce,
-            bgpls_withdraw,
-            vpn_announce,
-            vpn_withdraw,
-            labeled_announce,
-            labeled_withdraw,
-            rtc_announce,
-            rtc_withdraw,
-            HashSet::new(),
-            None,
-        )
+        self.try_send_and_commit_outbound_update_with_group_prior(peer, batch, HashSet::new(), None)
     }
 
     /// Reconcile the latest OTC disposition for exactly the prefixes evaluated
@@ -2025,52 +2010,16 @@ impl RibManager {
         }
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "outbound commit needs all family queues for one atomic send"
-    )]
     pub(super) fn try_send_and_commit_outbound_update_with_group_prior(
         &mut self,
         peer: IpAddr,
-        next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
-        announce: Arc<[crate::route::Route]>,
-        withdraw: Vec<(Prefix, u32)>,
-        end_of_rib: Vec<(Afi, Safi)>,
-        refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
-        flowspec_announce: Vec<crate::route::FlowSpecRoute>,
-        flowspec_withdraw: Vec<crate::route::FlowSpecKey>,
-        evpn_announce: Vec<crate::route::EvpnRibRoute>,
-        evpn_withdraw: Vec<rustbgpd_wire::EvpnRouteKey>,
-        bgpls_announce: Vec<crate::route::BgpLsRibRoute>,
-        bgpls_withdraw: Vec<crate::route::BgpLsRouteKey>,
-        vpn_announce: Vec<crate::route::VpnRibRoute>,
-        vpn_withdraw: Vec<crate::route::VpnRibRouteKey>,
-        labeled_announce: Vec<crate::route::LabeledRibRoute>,
-        labeled_withdraw: Vec<crate::route::LabeledRibRouteKey>,
-        rtc_announce: Vec<crate::route::RtcRibRoute>,
-        rtc_withdraw: Vec<crate::route::RtcRibRouteKey>,
+        batch: OutboundCommitBatch,
         group_prior: HashSet<crate::update::ExactExportKey>,
         shared_unicast_precommit: Option<SharedUnicastPrecommit<'_>>,
     ) -> bool {
         self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
             peer,
-            next_hop_override,
-            announce,
-            withdraw,
-            end_of_rib,
-            refresh_markers,
-            flowspec_announce,
-            flowspec_withdraw,
-            evpn_announce,
-            evpn_withdraw,
-            bgpls_announce,
-            bgpls_withdraw,
-            vpn_announce,
-            vpn_withdraw,
-            labeled_announce,
-            labeled_withdraw,
-            rtc_announce,
-            rtc_withdraw,
+            batch,
             group_prior,
             shared_unicast_precommit,
             None,
@@ -2078,34 +2027,36 @@ impl RibManager {
     }
 
     #[expect(
-        clippy::too_many_arguments,
         clippy::too_many_lines,
-        reason = "outbound commit needs all family queues for one atomic send"
+        reason = "outbound commit validates and commits every family as one atomic send"
     )]
     pub(super) fn try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
         &mut self,
         peer: IpAddr,
-        mut next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
-        mut announce: Arc<[crate::route::Route]>,
-        mut withdraw: Vec<(Prefix, u32)>,
-        end_of_rib: Vec<(Afi, Safi)>,
-        refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
-        mut flowspec_announce: Vec<crate::route::FlowSpecRoute>,
-        mut flowspec_withdraw: Vec<crate::route::FlowSpecKey>,
-        mut evpn_announce: Vec<crate::route::EvpnRibRoute>,
-        mut evpn_withdraw: Vec<rustbgpd_wire::EvpnRouteKey>,
-        mut bgpls_announce: Vec<crate::route::BgpLsRibRoute>,
-        mut bgpls_withdraw: Vec<crate::route::BgpLsRouteKey>,
-        mut vpn_announce: Vec<crate::route::VpnRibRoute>,
-        mut vpn_withdraw: Vec<crate::route::VpnRibRouteKey>,
-        mut labeled_announce: Vec<crate::route::LabeledRibRoute>,
-        mut labeled_withdraw: Vec<crate::route::LabeledRibRouteKey>,
-        mut rtc_announce: Vec<crate::route::RtcRibRoute>,
-        mut rtc_withdraw: Vec<crate::route::RtcRibRouteKey>,
+        batch: OutboundCommitBatch,
         group_prior: HashSet<crate::update::ExactExportKey>,
         mut shared_unicast_precommit: Option<SharedUnicastPrecommit<'_>>,
         otc_reconcile_prefixes: Option<&HashSet<Prefix>>,
     ) -> bool {
+        let OutboundCommitBatch {
+            mut next_hop_override,
+            mut announce,
+            mut withdraw,
+            end_of_rib,
+            refresh_markers,
+            mut flowspec_announce,
+            mut flowspec_withdraw,
+            mut evpn_announce,
+            mut evpn_withdraw,
+            mut bgpls_announce,
+            mut bgpls_withdraw,
+            mut vpn_announce,
+            mut vpn_withdraw,
+            mut labeled_announce,
+            mut labeled_withdraw,
+            mut rtc_announce,
+            mut rtc_withdraw,
+        } = batch;
         #[cfg(feature = "bench-internals")]
         let bench_per_client_best_resync = self.peer_per_client_best.contains(&peer)
             && (self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer));
@@ -5489,23 +5440,25 @@ impl RibManager {
                 };
                 if self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                     peer,
-                    nh_override_flags,
-                    announce,
-                    withdraw,
-                    pending_eor.clone(),
-                    vec![],
-                    fs_announce,
-                    fs_withdraw,
-                    evpn_announce,
-                    evpn_withdraw,
-                    bgpls_announce,
-                    bgpls_withdraw,
-                    vpn_announce,
-                    vpn_withdraw,
-                    labeled_announce,
-                    labeled_withdraw,
-                    rtc_announce,
-                    rtc_withdraw,
+                    OutboundCommitBatch {
+                        next_hop_override: nh_override_flags,
+                        announce,
+                        withdraw,
+                        end_of_rib: pending_eor.clone(),
+                        flowspec_announce: fs_announce,
+                        flowspec_withdraw: fs_withdraw,
+                        evpn_announce,
+                        evpn_withdraw,
+                        bgpls_announce,
+                        bgpls_withdraw,
+                        vpn_announce,
+                        vpn_withdraw,
+                        labeled_announce,
+                        labeled_withdraw,
+                        rtc_announce,
+                        rtc_withdraw,
+                        ..OutboundCommitBatch::default()
+                    },
                     group_prior,
                     shared_unicast_cache_group.map(|group_id| SharedUnicastPrecommit {
                         group_id,

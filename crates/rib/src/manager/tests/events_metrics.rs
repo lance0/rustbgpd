@@ -1,5 +1,6 @@
 use super::*;
 use crate::event_sink::RibEventSink;
+use crate::manager::distribution::OutboundCommitBatch;
 
 #[derive(Default)]
 struct SharedRouteCapture(std::sync::Mutex<Option<Arc<crate::event::RouteEvent>>>);
@@ -1097,23 +1098,12 @@ fn commit_family_gauge_fixture(
     let next_hop_override = vec![None; announce.len()].into();
     assert!(manager.try_send_and_commit_outbound_update(
         peer,
-        next_hop_override,
-        announce.into(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        vpn_announce,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        OutboundCommitBatch {
+            next_hop_override,
+            announce: announce.into(),
+            vpn_announce,
+            ..OutboundCommitBatch::default()
+        },
     ));
     let gathered = metrics.registry().gather();
     let gauge = gathered

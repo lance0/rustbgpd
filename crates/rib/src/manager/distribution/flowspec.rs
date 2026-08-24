@@ -1,8 +1,8 @@
 use super::{
     AdjRibIn, AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib,
-    NeighborPolicyStats, PolicyChain, Prefix, RibCommandError, RibManager, RouteContext, Safi,
-    debug, flowspec_route_family, gauge_val, record_export_policy_eval, route_type,
-    should_suppress_ibgp_inner, warn,
+    NeighborPolicyStats, OutboundCommitBatch, PolicyChain, Prefix, RibCommandError, RibManager,
+    RouteContext, Safi, debug, flowspec_route_family, gauge_val, record_export_policy_eval,
+    route_type, should_suppress_ibgp_inner, warn,
 };
 use crate::route::{FlowSpecKey, FlowSpecRouteKey};
 
@@ -354,10 +354,6 @@ impl RibManager {
 
     /// Recompute `FlowSpec` Loc-RIB best routes for affected rules and
     /// distribute changes to all outbound peers.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "FlowSpec recompute stages policy-aware changes for every outbound peer"
-    )]
     pub(in crate::manager) fn recompute_and_distribute_flowspec(
         &mut self,
         affected: &HashSet<FlowSpecKey>,
@@ -455,23 +451,11 @@ impl RibManager {
             if (!fs_announce.is_empty() || !fs_withdraw.is_empty())
                 && !self.try_send_and_commit_outbound_update(
                     peer,
-                    vec![].into(),
-                    vec![].into(),
-                    vec![],
-                    vec![],
-                    vec![],
-                    fs_announce,
-                    fs_withdraw,
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
+                    OutboundCommitBatch {
+                        flowspec_announce: fs_announce,
+                        flowspec_withdraw: fs_withdraw,
+                        ..OutboundCommitBatch::default()
+                    },
                 )
             {
                 warn!(%peer, "outbound channel full — FlowSpec update deferred");

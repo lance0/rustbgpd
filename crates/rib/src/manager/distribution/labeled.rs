@@ -1,7 +1,7 @@
 use super::{
-    AdjRibIn, AdjRibOut, Afi, HashMap, HashSet, IpAddr, Ipv4Addr, LocRib, PolicyChain, RibManager,
-    RouteContext, Safi, gauge_val, labeled_route_family, labeled_routes_equal, route_type,
-    should_suppress_ibgp_inner, warn,
+    AdjRibIn, AdjRibOut, Afi, HashMap, HashSet, IpAddr, Ipv4Addr, LocRib, OutboundCommitBatch,
+    PolicyChain, RibManager, RouteContext, Safi, gauge_val, labeled_route_family,
+    labeled_routes_equal, route_type, should_suppress_ibgp_inner, warn,
 };
 use crate::loc_rib::labeled_tiebreak_orr;
 use crate::route::{LabeledRibRoute, LabeledRibRouteKey};
@@ -815,23 +815,11 @@ impl RibManager {
             if (!labeled_announce.is_empty() || !labeled_withdraw.is_empty())
                 && !self.try_send_and_commit_outbound_update(
                     peer,
-                    vec![].into(),
-                    vec![].into(),
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    labeled_announce,
-                    labeled_withdraw,
-                    vec![],
-                    vec![],
+                    OutboundCommitBatch {
+                        labeled_announce,
+                        labeled_withdraw,
+                        ..OutboundCommitBatch::default()
+                    },
                 )
             {
                 warn!(%peer, "outbound channel full — labeled update deferred");

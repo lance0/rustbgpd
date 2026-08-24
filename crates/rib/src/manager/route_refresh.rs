@@ -5,6 +5,7 @@ use std::time::Instant;
 use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, RouteRefreshSubtype, Safi};
 use tracing::{debug, info, warn};
 
+use super::distribution::OutboundCommitBatch;
 use super::helpers::{afi_safi_label, gauge_val, prefix_family};
 use super::{PolicyFilteredRouteKey, RibManager};
 use crate::ERR_REFRESH_TIMEOUT;
@@ -1295,23 +1296,25 @@ impl RibManager {
         };
         if !self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
             peer,
-            nh_override_flags.into(),
-            announce.into(),
-            withdraw,
-            end_of_rib,
-            refresh_markers,
-            fs_announce,
-            fs_withdraw,
-            evpn_announce,
-            evpn_withdraw,
-            bgpls_announce,
-            bgpls_withdraw,
-            vpn_announce,
-            vpn_withdraw,
-            labeled_announce,
-            labeled_withdraw,
-            rtc_announce,
-            rtc_withdraw,
+            OutboundCommitBatch {
+                next_hop_override: nh_override_flags.into(),
+                announce: announce.into(),
+                withdraw,
+                end_of_rib,
+                refresh_markers,
+                flowspec_announce: fs_announce,
+                flowspec_withdraw: fs_withdraw,
+                evpn_announce,
+                evpn_withdraw,
+                bgpls_announce,
+                bgpls_withdraw,
+                vpn_announce,
+                vpn_withdraw,
+                labeled_announce,
+                labeled_withdraw,
+                rtc_announce,
+                rtc_withdraw,
+            },
             group_prior,
             None,
             member_of.is_none().then_some(&all_prefixes),
