@@ -78,7 +78,7 @@ frr_has_type2() {
     local mac=${1:?}
     frr_macip_table \
         | grep -A1 -iF "$mac" \
-        | grep -qF "$RUSTBGPD_IP"
+        | grep -F "$RUSTBGPD_IP" >/dev/null
 }
 
 frr_type2_absent() {
@@ -87,7 +87,7 @@ frr_type2_absent() {
     local mac=${1:?}
     local out
     out=$(frr_macip_table) || return 1
-    ! printf '%s\n' "$out" | grep -A1 -iF "$mac" | grep -qF "$RUSTBGPD_IP"
+    ! printf '%s\n' "$out" | grep -A1 -iF "$mac" | grep -F "$RUSTBGPD_IP" >/dev/null
 }
 
 rb_fdb_replace() {
