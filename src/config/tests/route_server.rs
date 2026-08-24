@@ -691,77 +691,110 @@ peer_group = "ixp-members"
 
 #[test]
 fn remove_private_as_on_ibgp_rejected() {
-    let toml_str = r#"
-[global]
-asn = 65001
-router_id = "10.0.0.1"
-listen_port = 179
-
-[global.telemetry]
-prometheus_addr = "0.0.0.0:9179"
-log_format = "json"
-
-[[neighbors]]
-address = "10.0.0.2"
-remote_asn = 65001
-remove_private_as = "all"
-"#;
-    let err = parse(toml_str).unwrap_err();
-    assert!(matches!(err, ConfigError::InvalidRemovePrivateAs { .. }));
+    let err = parse(&remove_private_as_toml(
+        "",
+        65001,
+        "remove_private_as = \"all\"",
+    ))
+    .unwrap_err();
+    assert_remove_private_as_error(
+        err,
+        "remove_private_as requires eBGP (remote_asn 65001 == local asn 65001)",
+    );
 }
 
 #[test]
-fn remove_private_as_invalid_mode_rejected() {
-    let toml_str = r#"
-[global]
-asn = 65001
-router_id = "10.0.0.1"
-listen_port = 179
-
-[global.telemetry]
-prometheus_addr = "0.0.0.0:9179"
-log_format = "json"
-
-[[neighbors]]
-address = "10.0.0.2"
-remote_asn = 65002
-remove_private_as = "bogus"
-"#;
-    let err = parse(toml_str).unwrap_err();
-    assert!(matches!(err, ConfigError::InvalidRemovePrivateAs { .. }));
-}
-
-#[test]
-fn remove_private_as_valid_modes_accepted() {
-    for mode in &["remove", "all", "replace"] {
-        let toml_str = format!(
-            r#"
-[global]
-asn = 65001
-router_id = "10.0.0.1"
-listen_port = 179
-
-[global.telemetry]
-prometheus_addr = "0.0.0.0:9179"
-log_format = "json"
-
-[[neighbors]]
-address = "10.0.0.2"
-remote_asn = 65002
-remove_private_as = "{mode}"
-"#,
-        );
-        let config = parse(&toml_str).unwrap();
-        assert_eq!(
-            config.neighbors[0].remove_private_as.as_deref(),
-            Some(*mode)
-        );
+fn remove_private_as_invalid_neighbor_mode_precedes_ebgp_check() {
+    let expected = "unknown mode \"bogus\", expected \"remove\", \"all\", or \"replace\"";
+    for remote_asn in [65002, 65001] {
+        let err = parse(&remove_private_as_toml(
+            "",
+            remote_asn,
+            "remove_private_as = \"bogus\"",
+        ))
+        .unwrap_err();
+        assert_remove_private_as_error(err, expected);
     }
 }
 
 #[test]
-fn to_peer_configs_maps_remove_private_as() {
-    let toml_str = r#"
+fn remove_private_as_group_errors_include_quoted_group_name() {
+    let expected = "peer_group \"ixp-members\": unknown mode \"bogus\", expected \"remove\", \"all\", or \"replace\"";
+    for neighbor in ["", "peer_group = \"ixp-members\""] {
+        let err = parse(&remove_private_as_toml(
+            "[peer_groups.ixp-members]\nremove_private_as = \"bogus\"",
+            65002,
+            neighbor,
+        ))
+        .unwrap_err();
+        assert_remove_private_as_error(err, expected);
+    }
+}
+
+#[test]
+fn remove_private_as_valid_modes_are_accepted_directly_and_on_groups() {
+    for mode in ["remove", "all", "replace"] {
+        let config = parse(&remove_private_as_toml(
+            "",
+            65002,
+            &format!("remove_private_as = {mode:?}"),
+        ))
+        .unwrap();
+        assert_eq!(config.neighbors[0].remove_private_as.as_deref(), Some(mode));
+
+        parse(&remove_private_as_toml(
+            &format!("[peer_groups.ixp-members]\nremove_private_as = {mode:?}"),
+            65002,
+            "",
+        ))
+        .unwrap();
+    }
+}
+
+#[test]
+fn remove_private_as_resolution_honors_fallback_override_and_omission() {
+    use rustbgpd_transport::RemovePrivateAs::{All, Disabled, Remove, Replace};
+
+    for (mode, expected) in [("remove", Remove), ("all", All), ("replace", Replace)] {
+        let config = parse(&remove_private_as_toml(
+            &format!("[peer_groups.ixp-members]\nremove_private_as = {mode:?}"),
+            65002,
+            "peer_group = \"ixp-members\"",
+        ))
+        .unwrap();
+        assert_eq!(
+            config.resolved_neighbors().unwrap()[0]
+                .transport_config
+                .remove_private_as,
+            expected
+        );
+    }
+
+    let config = parse(&remove_private_as_toml(
+        "[peer_groups.ixp-members]\nremove_private_as = \"remove\"",
+        65002,
+        "peer_group = \"ixp-members\"\nremove_private_as = \"replace\"",
+    ))
+    .unwrap();
+    assert_eq!(
+        config.resolved_neighbors().unwrap()[0]
+            .transport_config
+            .remove_private_as,
+        Replace
+    );
+
+    let config = parse(&remove_private_as_toml("", 65002, "")).unwrap();
+    assert_eq!(
+        config.resolved_neighbors().unwrap()[0]
+            .transport_config
+            .remove_private_as,
+        Disabled
+    );
+}
+
+fn remove_private_as_toml(group: &str, remote_asn: u32, neighbor: &str) -> String {
+    format!(
+        r#"
 [global]
 asn = 65001
 router_id = "10.0.0.1"
@@ -771,17 +804,21 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
+{group}
+
 [[neighbors]]
 address = "10.0.0.2"
-remote_asn = 65002
-remove_private_as = "all"
-"#;
-    let config = parse(toml_str).unwrap();
-    let peers = config.to_peer_configs().unwrap();
-    assert_eq!(
-        peers[0].0.remove_private_as,
-        rustbgpd_transport::RemovePrivateAs::All
-    );
+remote_asn = {remote_asn}
+{neighbor}
+"#
+    )
+}
+
+fn assert_remove_private_as_error(err: ConfigError, expected_reason: &str) {
+    match err {
+        ConfigError::InvalidRemovePrivateAs { reason } => assert_eq!(reason, expected_reason),
+        other => panic!("expected InvalidRemovePrivateAs, got {other:?}"),
+    }
 }
 
 #[test]

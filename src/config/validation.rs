@@ -783,16 +783,7 @@ impl Config {
                 .as_deref()
                 .or_else(|| group.and_then(|g| g.remove_private_as.as_deref()))
             {
-                match mode {
-                    "remove" | "all" | "replace" => {}
-                    other => {
-                        return Err(ConfigError::InvalidRemovePrivateAs {
-                            reason: format!(
-                                "unknown mode {other:?}, expected \"remove\", \"all\", or \"replace\""
-                            ),
-                        });
-                    }
-                }
+                validate_remove_private_as_mode(mode, None)?;
                 if neighbor.remote_asn == self.global.asn {
                     return Err(ConfigError::InvalidRemovePrivateAs {
                         reason: format!(
@@ -2681,16 +2672,7 @@ fn validate_peer_group(
     }
 
     if let Some(mode) = group.remove_private_as.as_deref() {
-        match mode {
-            "remove" | "all" | "replace" => {}
-            other => {
-                return Err(ConfigError::InvalidRemovePrivateAs {
-                    reason: format!(
-                        "peer_group {name:?}: unknown mode {other:?}, expected \"remove\", \"all\", or \"replace\""
-                    ),
-                });
-            }
-        }
+        validate_remove_private_as_mode(mode, Some(name))?;
     }
 
     validate_log_level(group.log_level.as_deref())?;
@@ -3019,6 +3001,23 @@ fn validate_grpc_principal(principal: Option<&str>, field_name: &str) -> Result<
         }
     }
     Ok(())
+}
+
+fn validate_remove_private_as_mode(
+    mode: &str,
+    peer_group_name: Option<&str>,
+) -> Result<(), ConfigError> {
+    if matches!(mode, "remove" | "all" | "replace") {
+        return Ok(());
+    }
+
+    let reason = match peer_group_name {
+        Some(name) => format!(
+            "peer_group {name:?}: unknown mode {mode:?}, expected \"remove\", \"all\", or \"replace\""
+        ),
+        None => format!("unknown mode {mode:?}, expected \"remove\", \"all\", or \"replace\""),
+    };
+    Err(ConfigError::InvalidRemovePrivateAs { reason })
 }
 
 fn validate_log_level(level: Option<&str>) -> Result<(), ConfigError> {
