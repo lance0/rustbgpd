@@ -103,9 +103,16 @@ pub(in crate::manager) struct SharedUnicastPrecommit<'a> {
 /// Control state that changes how the payload is committed stays explicit on
 /// the send-ladder methods; this value only keeps the family inventories
 /// together as they move through that ladder.
+///
+/// `announce` and `next_hop_override` are parallel slices: they must have the
+/// same length, and each override applies to the announcement at the same
+/// index. Callers using `..OutboundCommitBatch::default()` must populate both
+/// fields together when adding unicast announcements.
 #[derive(Default)]
 pub(in crate::manager) struct OutboundCommitBatch {
+    /// Next-hop actions indexed exactly like `announce`.
     pub(in crate::manager) next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+    /// Unicast announcements indexed exactly like `next_hop_override`.
     pub(in crate::manager) announce: Arc<[crate::route::Route]>,
     pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
     pub(in crate::manager) end_of_rib: Vec<(Afi, Safi)>,
