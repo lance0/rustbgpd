@@ -5405,7 +5405,7 @@ async fn run<T>(
     runtime_config_lock.close();
     info!("initiating coordinated shutdown");
     let settlement_wait = runtime_config_settlement.clone();
-    tokio::task::spawn_blocking(move || settlement_wait.wait_until_idle())
+    tokio::task::spawn_blocking(move || settlement_wait.wait_until_idle_or_fail_stop())
         .await
         .expect("runtime-config settlement wait task must not panic");
     runtime_config_lock.wait_until_drained().await;

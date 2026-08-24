@@ -4673,7 +4673,8 @@ remote_asn = 65002
             (main, "tokio::time::timeout_at(runtime_config_deadline, runtime_config_lock.acquire())", 0),
             (main, "RuntimeConfigSettlementWatchdog::new()", 1),
             (main, ".with_runtime_config_settlement(", 1),
-            (main, "move || settlement_wait.wait_until_idle()", 1),
+            (main, "move || settlement_wait.wait_until_idle()", 0),
+            (main, "move || settlement_wait.wait_until_idle_or_fail_stop()", 1),
             (transaction, "self.deps.lock.acquire()", 2),
             (transaction, ".execute_owned_operation(", 5),
             (settlement, "let coordinator_permit = coordinator.acquire().await?;", 1),
@@ -4953,7 +4954,7 @@ remote_asn = 65002
         assert_eq!(main.matches("runtime_config_lock.close();").count(), 1);
         let shutdown_gate = main.find("daemon_gate.begin_shutdown();").unwrap();
         let watched_idle = main
-            .find("move || settlement_wait.wait_until_idle()")
+            .find("move || settlement_wait.wait_until_idle_or_fail_stop()")
             .unwrap();
         let drained = main
             .find("runtime_config_lock.wait_until_drained().await;")
