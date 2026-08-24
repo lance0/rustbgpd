@@ -18,6 +18,7 @@ ROSTER = {
     "evpn_bum_filter_kernel",
 }
 RESULTS = ("V064_VALIDATOR", "CORE", "CORE_TESTS", "SCALE_RECEIPTS")
+RETIRED_PRIVILEGED_WORKFLOW = ".github/workflows/privileged-interop.yml"
 WORKFLOWS = tuple(
     f".github/workflows/{name}.yml"
     for name in ("ci", "container", "kernel-dataplane",
@@ -147,6 +148,10 @@ def check(root: Path) -> list[str]:
     text = (root / ".github/workflows/ci.yml").read_text()
     jobs = _jobs(text)
     errors: list[str] = []
+    if (root / RETIRED_PRIVILEGED_WORKFLOW).exists():
+        errors.append(
+            f"retired workflow must stay absent: {RETIRED_PRIVILEGED_WORKFLOW}"
+        )
     _check_dependency_commands(root, errors)
     if set(jobs) != ROSTER:
         errors.append("exact CI job roster drifted")
