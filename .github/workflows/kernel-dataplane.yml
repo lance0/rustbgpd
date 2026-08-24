@@ -61,24 +61,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
-      - name: Restore exact grpcurl archive cache
-        uses: actions/cache@v6
-        with:
-          path: ${{ runner.temp }}/grpcurl-cache/grpcurl_1.9.1_linux_x86_64.tar.gz
-          key: grpcurl-v1.9.1-linux-x86_64-588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214
-      - name: Prepare exact grpcurl archive
-        run: |
-          .github/scripts/install-grpcurl.sh \
-            --prepare-archive \
-            "$RUNNER_TEMP/grpcurl-cache/grpcurl_1.9.1_linux_x86_64.tar.gz"
-      - name: Upload verified grpcurl archive
-        uses: actions/upload-artifact@v7
-        with:
-          name: grpcurl-v1.9.1-linux-x86_64
-          path: ${{ runner.temp }}/grpcurl-cache/grpcurl_1.9.1_linux_x86_64.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
+      - name: Restore, prepare, and upload exact grpcurl archive
+        uses: ./.github/actions/prepare-grpcurl-artifact
 
   gobgp_archive:
     needs: classify_changes

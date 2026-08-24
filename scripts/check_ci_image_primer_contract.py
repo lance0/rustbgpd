@@ -77,6 +77,7 @@ GRPCURL_SHA256 = "588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc7702
 GRPCURL_ARCHIVE = "grpcurl_1.9.1_linux_x86_64.tar.gz"
 GRPCURL_ARTIFACT = "grpcurl-v1.9.1-linux-x86_64"
 GRPCURL_CACHE_KEY = f"grpcurl-v1.9.1-linux-x86_64-{GRPCURL_SHA256}"
+PREPARE_GRPCURL_ACTION = "uses: ./.github/actions/prepare-grpcurl-artifact"
 GRPCURL_ACTION = "uses: ./.github/actions/install-grpcurl-artifact"
 GNMIC_SHA256 = "a3ded2f355a615df73900f31b9791f41e796e9c5c63b171e1ce041e8139ee00e"
 GNMIC_ARCHIVE = "gnmic_0.46.0_Linux_x86_64.tar.gz"
@@ -126,8 +127,8 @@ PINS = collections.Counter(
         "dtolnay/rust-toolchain@v1 # 1.95": 2,
         "docker/setup-buildx-action@v4": 45,
         "docker/build-push-action@v7": 46,
-        "actions/cache@v6": 7,
-        "actions/upload-artifact@v7": 9,
+        "actions/cache@v6": 6,
+        "actions/upload-artifact@v7": 8,
         "actions/download-artifact@v8": 6,
         "rustsec/audit-check@v2.0.0": 1,
         "EmbarkStudios/cargo-deny-action@v2": 1,
@@ -423,16 +424,8 @@ def check(root: Path) -> list[str]:
             "timeout-minutes: 10",
             CHECKOUT,
             "ref: ${{ github.sha }}",
-            "uses: actions/cache@v6",
-            f"path: ${{{{ runner.temp }}}}/grpcurl-cache/{GRPCURL_ARCHIVE}",
-            f"key: {GRPCURL_CACHE_KEY}",
-            "--prepare-archive",
-            f'"$RUNNER_TEMP/grpcurl-cache/{GRPCURL_ARCHIVE}"',
-            "uses: actions/upload-artifact@v7",
-            f"name: {GRPCURL_ARTIFACT}",
-            "if-no-files-found: error",
-            "retention-days: 1",
-            "compression-level: 0",
+            "name: Restore, prepare, and upload exact grpcurl archive",
+            PREPARE_GRPCURL_ACTION,
         ):
             if seam not in grpcurl_producer:
                 errors.append(f"{name}:grpcurl_archive missing {seam}")
@@ -440,25 +433,28 @@ def check(root: Path) -> list[str]:
             "restore-keys:",
             "continue-on-error:",
             "actions/download-artifact@",
+            "actions/cache@",
+            "actions/upload-artifact@",
+            "--prepare-archive",
             "--install-archive",
         ):
             if forbidden in grpcurl_producer:
                 errors.append(f"{name}:grpcurl_archive permits {forbidden}")
-        if grpcurl_producer.count("uses: actions/cache@v6") != 1:
-            errors.append(f"{name}:grpcurl_archive must restore one exact cache")
-        if grpcurl_producer.count("--prepare-archive") != 1:
-            errors.append(f"{name}:grpcurl_archive must prepare one archive")
-        if grpcurl_producer.count("uses: actions/upload-artifact@v7") != 1:
-            errors.append(f"{name}:grpcurl_archive must upload one artifact")
-        exact_path = (
-            f"path: ${{{{ runner.temp }}}}/grpcurl-cache/{GRPCURL_ARCHIVE}"
+        producer_uses = re.findall(
+            r"(?m)^\s*(?:- )?uses:\s*(.+)$", grpcurl_producer
         )
-        if grpcurl_producer.count(exact_path) != 2:
-            errors.append(f"{name}:grpcurl_archive cache/artifact paths drifted")
-        if grpcurl_producer.count(f"key: {GRPCURL_CACHE_KEY}") != 1:
-            errors.append(f"{name}:grpcurl_archive cache key drifted")
-        if grpcurl_producer.count(f"name: {GRPCURL_ARTIFACT}") != 1:
-            errors.append(f"{name}:grpcurl_archive artifact name drifted")
+        if producer_uses != [
+            "actions/checkout@v7",
+            "./.github/actions/prepare-grpcurl-artifact",
+        ]:
+            errors.append(f"{name}:grpcurl_archive action inventory drifted")
+        if grpcurl_producer.count(PREPARE_GRPCURL_ACTION) != 1:
+            errors.append(
+                f"{name}:grpcurl_archive must call one exact producer action"
+            )
+        producer_call_tail = grpcurl_producer.split(PREPARE_GRPCURL_ACTION, 1)[-1]
+        if "with:" in producer_call_tail:
+            errors.append(f"{name}:grpcurl_archive producer call must have no inputs")
         if not setup:
             gnmic_producer = jobs.get("gnmic_archive", "")
             for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
@@ -743,6 +739,9 @@ def check(root: Path) -> list[str]:
     )
     if interop_classifier != kernel_classifier:
         errors.append("heavy workflows must share an identical classifier job")
+    interop_grpcurl = _jobs(texts["interop.yml"]).get("grpcurl_archive", "")
+    if interop_grpcurl != kernel_jobs.get("grpcurl_archive", ""):
+        errors.append("heavy workflows must share an identical grpcurl producer job")
     netns = kernel_jobs.get("netns", "")
     for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
         if not _has_line(netns, f"    {seam}"):
@@ -807,6 +806,9 @@ def check(root: Path) -> list[str]:
     grpcurl_action = (
         root / ".github" / "actions" / "install-grpcurl-artifact" / "action.yml"
     ).read_text()
+    prepare_grpcurl_action = (
+        root / ".github" / "actions" / "prepare-grpcurl-artifact" / "action.yml"
+    ).read_text()
     gnmic_action = (
         root / ".github" / "actions" / "install-gnmic-artifact" / "action.yml"
     ).read_text()
@@ -816,6 +818,50 @@ def check(root: Path) -> list[str]:
     bird3_action = (
         root / ".github" / "actions" / "stage-bird3-artifact" / "action.yml"
     ).read_text()
+    for seam in (
+        'using: "composite"',
+        "uses: actions/cache@v6",
+        f"path: ${{{{ runner.temp }}}}/grpcurl-cache/{GRPCURL_ARCHIVE}",
+        f"key: {GRPCURL_CACHE_KEY}",
+        "shell: bash",
+        "--prepare-archive",
+        f'"$RUNNER_TEMP/grpcurl-cache/{GRPCURL_ARCHIVE}"',
+        "uses: actions/upload-artifact@v7",
+        f"name: {GRPCURL_ARTIFACT}",
+        "if-no-files-found: error",
+        "retention-days: 1",
+        "compression-level: 0",
+    ):
+        if seam not in prepare_grpcurl_action:
+            errors.append(f"prepare-grpcurl-artifact missing {seam}")
+    if prepare_grpcurl_action.count("uses: actions/cache@v6") != 1:
+        errors.append("prepare-grpcurl-artifact must restore one exact cache")
+    if prepare_grpcurl_action.count("--prepare-archive") != 1:
+        errors.append("prepare-grpcurl-artifact must prepare one archive")
+    if prepare_grpcurl_action.count("uses: actions/upload-artifact@v7") != 1:
+        errors.append("prepare-grpcurl-artifact must upload one artifact")
+    exact_grpcurl_path = (
+        f"path: ${{{{ runner.temp }}}}/grpcurl-cache/{GRPCURL_ARCHIVE}"
+    )
+    if prepare_grpcurl_action.count(exact_grpcurl_path) != 2:
+        errors.append("prepare-grpcurl-artifact cache/artifact paths drifted")
+    if prepare_grpcurl_action.count(f"key: {GRPCURL_CACHE_KEY}") != 1:
+        errors.append("prepare-grpcurl-artifact cache key drifted")
+    if prepare_grpcurl_action.count(f"name: {GRPCURL_ARTIFACT}") != 1:
+        errors.append("prepare-grpcurl-artifact artifact name drifted")
+    for forbidden in (
+        "inputs:",
+        "outputs:",
+        "restore-keys:",
+        "continue-on-error:",
+        "actions/download-artifact@",
+        "--install-archive",
+        "releases/download/",
+    ):
+        if forbidden in prepare_grpcurl_action:
+            errors.append(f"prepare-grpcurl-artifact permits {forbidden}")
+    if re.search(r"(?m)^\s*curl\s", prepare_grpcurl_action):
+        errors.append("prepare-grpcurl-artifact permits curl")
     for seam in (
         "uses: actions/download-artifact@v8",
         f"name: {GRPCURL_ARTIFACT}",
@@ -954,7 +1000,13 @@ def check(root: Path) -> list[str]:
     if texts["kernel-dataplane.yml"].count(GNMIC_ACTION) != 0:
         errors.append("kernel-dataplane.yml: gnmic must remain interop-only")
     grpcurl_surfaces = "\n".join(
-        (texts["interop.yml"], texts["kernel-dataplane.yml"], action, grpcurl_action)
+        (
+            texts["interop.yml"],
+            texts["kernel-dataplane.yml"],
+            action,
+            prepare_grpcurl_action,
+            grpcurl_action,
+        )
     )
     if "bash .github/scripts/install-grpcurl.sh" in grpcurl_surfaces:
         errors.append("legacy grpcurl installer invocation remains")
@@ -988,6 +1040,7 @@ def check(root: Path) -> list[str]:
     for text in [
         *texts.values(),
         action,
+        prepare_grpcurl_action,
         grpcurl_action,
         gnmic_action,
         gobgp_action,
