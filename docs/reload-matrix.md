@@ -1,5 +1,7 @@
 # Reload Matrix
 
+See when each configuration change takes effect.
+
 Reference for every user-facing config key: what does it take to put a
 change into effect?
 
