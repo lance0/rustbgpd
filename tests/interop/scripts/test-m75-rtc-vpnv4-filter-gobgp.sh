@@ -132,7 +132,7 @@ assert_family_negotiated() {
     if gobgp "$container" neighbor "$peer" \
         | grep -A 30 "Neighbor capabilities" \
         | grep -E "(^|[[:space:]])${family}:" \
-        | grep -q "advertised and received"; then
+        | grep "advertised and received" >/dev/null; then
         ok "$label negotiated $family"
     else
         fail "$label did not negotiate $family"
@@ -149,7 +149,7 @@ assert_family_absent() {
     if gobgp "$container" neighbor "$peer" \
         | grep -A 30 "Neighbor capabilities" \
         | grep -E "(^|[[:space:]])${family}:" \
-        | grep -q "advertised and received"; then
+        | grep "advertised and received" >/dev/null; then
         fail "$label unexpectedly negotiated $family"
         gobgp "$container" neighbor "$peer" | grep -A 30 "Neighbor capabilities" || true
     else
@@ -165,7 +165,7 @@ wait_default_rtc_accepted() {
     local container=${1:?} rr=${2:?} label=${3:?}
     log "Waiting for $label to accept the RR's default RTC NLRI into adj-in..."
     for i in $(seq 1 30); do
-        if gobgp "$container" neighbor "$rr" adj-in -a rtc | grep -qi "default"; then
+        if gobgp "$container" neighbor "$rr" adj-in -a rtc | grep -i "default" >/dev/null; then
             ok "$label accepted the RR's default RTC NLRI (attempt $i)"
             return 0
         fi
