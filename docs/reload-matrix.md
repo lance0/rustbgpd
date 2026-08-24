@@ -318,10 +318,12 @@ chains all add/change/remove cleanly via reload.
 |---|---|---|
 | `[gnmi_dialout]` (whole section) | reload-applied | SIGHUP reconciles the dial-out target set in place: removed targets stop (their `gnmi_dialout_connected{target}` series is reaped), added targets start, changed targets tear down and redial, unchanged targets keep their live collector connection. The new section is validated during reload preflight; a rejected config leaves the running targets untouched. TLS key/cert *file contents* rotate without any reload — the files are re-read on every (re)connection attempt. |
 
-## `[[evpn_instances]]`, `[[evpn_ip_vrfs]]`, `[[ethernet_segments]]`
+<a id="evpn_instances-evpn_ip_vrfs-ethernet_segments"></a>
+## EVPN coordinator sections
 
-SIGHUP reuses the ADR-0063 EVPN runtime coordinator for the same supported
-live shapes as `EvpnService.ApplyEvpnRuntime`: single L2VNI/IP-VRF/ES
+`[[evpn_instances]]`, `[[evpn_ip_vrfs]]`, and `[[ethernet_segments]]` reuse
+the ADR-0063 EVPN runtime coordinator on SIGHUP for the same supported live
+shapes as `EvpnService.ApplyEvpnRuntime`: single L2VNI/IP-VRF/ES
 add/delete/redefine within the documented identity bounds, atomic tenant
 teardown, `ip_vrf` relink, additive build-up, and standalone L2VNI swaps that
 only combine L2VNI adds with standalone L2VNI deletes, plus L2VNI-only batch

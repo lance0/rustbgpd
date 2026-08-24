@@ -227,11 +227,13 @@ covers this view, its retention knobs, and the follow-up explain
 workflow; the full explain surface catalog is in
 [explain.md](../explain.md).
 
-## 6. Looking glass: Alice-LG via the birdwatcher adapter
+<a id="6-looking-glass-alice-lg-via-the-birdwatcher-adapter"></a>
+## 6. Alice-LG via the birdwatcher adapter
 
-The external
+Alice-LG uses the external
 [`examples/birdwatcher-adapter`](../../examples/birdwatcher-adapter/README.md)
-serves a Birdwatcher-shaped REST subset from the daemon's gRPC API —
+sidecar, which serves a Birdwatcher-shaped REST subset from the daemon's gRPC
+API —
 status, peers, a member's accepted routes, the filtered-route view
 above, and a noexport view (routes withheld from a member, each named
 by the export gate that stopped it, tagged `64496:65521:<id>`). For the

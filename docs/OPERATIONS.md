@@ -1307,14 +1307,15 @@ What to do when it fires:
    wedged socket, and outbound-buffer saturation tears the session
    down with `Cease/Out of Resources`.
 
-## gRPC authorization audit and resource guardrails
+<a id="grpc-authorization-audit-and-resource-guardrails"></a>
+## gRPC audit and resource guardrails
 
 ADR-0064 v1 uses the daemon's structured JSON log path plus Prometheus metrics
-as the operational audit surface. rustbgpd does not run a separate in-daemon
-audit file writer or remote audit sink in this release. That keeps audit
-emission on the existing non-blocking logging path instead of adding a second
-I/O path that could wedge routing-control tasks if a disk, syslog daemon, or
-collector stalls.
+as the operational gRPC authorization audit and resource-guardrail surface.
+rustbgpd does not run a separate in-daemon audit file writer or remote audit
+sink in this release. That keeps audit emission on the existing non-blocking
+logging path instead of adding a second I/O path that could wedge
+routing-control tasks if a disk, syslog daemon, or collector stalls.
 
 For production, collect stdout/stderr with journald, syslog, or your log agent
 of choice and apply retention outside the daemon:
@@ -1683,7 +1684,8 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 
 ---
 
-## Support bundles and triage checks (`rbgp doctor`)
+<a id="support-bundles-and-triage-checks-rbgp-doctor"></a>
+## Support bundles with `rbgp doctor`
 
 `rbgp doctor` runs red/green triage checks live (daemon reachable and
 healthy, peers stuck outside Established with time-in-state, flap loops,

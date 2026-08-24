@@ -175,16 +175,16 @@ role = "route_server"
 max_prefixes = 50000
 ```
 
-## Member-set control communities (RFC 7947 §2.3.2 / RFC 8195)
+<a id="member-set-control-communities-rfc-7947-232--rfc-8195"></a>
+## Member-set control communities
 
-A member with a selective peering policy steers what the route server
-redistributes on its behalf by tagging its announcements with control
-communities keyed on the *target* member's ASN — the same convention
-the major IXPs document. `RS` below is the route server's ASN, `PEER`
-the target member's ASN. The standard (16-bit) forms exist only when
-both ASNs fit 16 bits; the large-community forms (RFC 8195) work for
-4-byte ASNs. Extended-community control forms are deliberately not
-implemented (draft-ietf-grow-ixp-ext-comms).
+RFC 7947 §2.3.2 member-set control communities let a member with a selective
+peering policy steer what the route server redistributes on its behalf by
+tagging announcements for the *target* member's ASN — the same convention the
+major IXPs document. `RS` below is the route server's ASN, `PEER` the target
+member's ASN. The standard (16-bit) forms exist only when both ASNs fit 16 bits;
+the RFC 8195 large-community forms work for 4-byte ASNs. Extended-community
+control forms are deliberately not implemented (draft-ietf-grow-ixp-ext-comms).
 
 | Member intent | Standard | Large |
 |---|---|---|

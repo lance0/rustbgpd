@@ -10,7 +10,8 @@ supported structural subset and refuses to guess at anything else. There is
 untranslated policy and run the shadow trial before carrying production
 traffic.
 
-## The mechanical first step (BIRD, FRR, and GoBGP)
+<a id="the-mechanical-first-step-bird-frr-and-gobgp"></a>
+## Mechanical import: BIRD, FRR, and GoBGP
 
 ```bash
 # 1. Translate the structure; the report lists every warning and stanza that
