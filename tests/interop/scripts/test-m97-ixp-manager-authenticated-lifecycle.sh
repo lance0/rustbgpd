@@ -109,10 +109,10 @@ docker exec -i "$MYSQL" mysql --user root ixp_ci \
     <"$WORK/ixp-manager/data/ci/ci_test_db.sql"
 docker exec -i "$MYSQL" mysql --user root ixp_ci <<'SQL'
 UPDATE routers SET template='api/v4/router/server/rustbgpd/json',
-  last_update_started=NULL, last_updated=NULL, pause_updates=0
+  last_update_started=NULL, last_updated=NULL, pause_updates=0, quarantine=0
   WHERE handle='b2-rs1-lan1-ipv4';
 UPDATE routers SET template='api/v4/router/server/rustbgpd/json',
-  last_update_started=NULL, last_updated=NULL, pause_updates=0
+  last_update_started=NULL, last_updated=NULL, pause_updates=0, quarantine=0
   WHERE handle='b2-rs1-lan1-ipv6';
 UPDATE route_server_filters_prod SET enabled=0;
 UPDATE vlaninterface SET rsclient=0 WHERE id<>3;
@@ -182,10 +182,29 @@ api() {
 [ "$(api POST get-update-lock "$HANDLE4" wrong status)" = 401 ] \
     || fail "real IXP Manager accepted a wrong API key"
 api GET gen-config "$HANDLE4" valid body >"$WORK/foil.json"
-cmp -s "$WORK/foil.json" \
-    "$ROOT/tests/compat/ixp-manager-birdseye/fixtures/ixp-manager-v7.4-rustbgpd.json" \
-    || fail "real v7.4 Foil API capture drifted from the pinned oracle"
-ok "pinned v7.4 API authentication and exact Foil capture"
+# This lab intentionally seeds the legacy single-client PCH document. Project
+# that exact oracle into the additive v2 envelope instead of comparing against
+# the shared multi-client UI-filter fixture.
+jq -S . "$WORK/foil.json" >"$WORK/foil-actual.json" \
+    || fail "real v7.4 Foil API response was not valid JSON"
+jq -S '
+    .schema = "rustbgpd.ixp-manager.router-config/v2"
+    | .ui_filters = []
+    | .complete.ui_filter_count = 0
+' "$ROOT/tools/rs-config-render/tests/fixtures/ixp-manager-v1-supported.json" \
+    >"$WORK/foil-expected.json" \
+    || fail "pinned legacy PCH oracle could not be projected to v2"
+if ! cmp -s "$WORK/foil-actual.json" "$WORK/foil-expected.json"; then
+    jq -nr --slurpfile actual "$WORK/foil-actual.json" \
+        --slurpfile expected "$WORK/foil-expected.json" '
+        [($actual[0] | paths(scalars)), ($expected[0] | paths(scalars))]
+        | unique[] as $path
+        | select(($actual[0] | getpath($path)) != ($expected[0] | getpath($path)))
+        | $path | map(tostring) | join(".")
+    ' >&2 || true
+    fail "real v7.4 Foil API capture drifted from the exact PCH v2 projection"
+fi
+ok "pinned v7.4 API authentication and exact PCH v2 projection"
 
 cargo +1.98.0 build --locked --target x86_64-unknown-linux-musl \
     -p rs-config-render
@@ -343,15 +362,24 @@ session4_before=$(neighbor "$HANDLE4" "$PEER4")
 session6_before=$(neighbor "$HANDLE6" "$PEER6")
 last_updated=$(sql "SELECT DATE_FORMAT(last_updated,'%Y-%m-%d %H:%i:%s') FROM routers WHERE handle='$HANDLE4'")
 [ -n "$last_updated" ] || fail "updated timestamp was empty"
-sql "UPDATE route_server_filters_prod SET customer_id=3, enabled=1 WHERE id=31" \
-    >/dev/null
+# Foil exports this router mode directly, and the v2 renderer refuses it before
+# activation independently of the supported UI-filter action set.
+sql "UPDATE routers SET quarantine=1 WHERE handle='$HANDLE4'" >/dev/null
+[ "$(sql "SELECT IF(quarantine=1,1,0) FROM routers WHERE handle='$HANDLE4'")" = 1 ] \
+    || fail "IPv4 quarantine refusal fixture was not installed"
 docker exec "$RUST" rm -f "/tmp/m97-activation-entered-$HANDLE4"
 set +e
 lifecycle "$HANDLE4" /var/lib/m97-candidate-ipv4-refused "$KEY_FILE" \
     >"$WORK/refused.output" 2>&1
 status=$?
 set -e
+sql "UPDATE routers SET quarantine=0 WHERE handle='$HANDLE4'" >/dev/null
+[ "$(sql "SELECT IF(quarantine=0,1,0) FROM routers WHERE handle='$HANDLE4'")" = 1 ] \
+    || fail "IPv4 quarantine refusal fixture was not restored"
 [ "$status" -eq 2 ] || { cat "$WORK/refused.output" >&2; fail "refusal exited $status"; }
+grep -qxF 'rs-config-render: IXP Manager lifecycle: IXP Manager candidate was refused' \
+    "$WORK/refused.output" \
+    || fail "quarantine refusal diagnostic changed"
 docker exec "$RUST" test ! -e "/tmp/m97-activation-entered-$HANDLE4" \
     || fail "pre-activation refusal invoked the activation command"
 if [ "$(docker exec "$RUST" readlink "$STATE4/current")" != "$prior_link4" ] \
