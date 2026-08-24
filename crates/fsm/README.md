@@ -8,6 +8,8 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
 Requires Rust 1.95 or newer.
 
+Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
+
 ## Usage
 
 Run the deterministic session-establishment walkthrough from the repository root:
@@ -64,8 +66,9 @@ returns `Result` and rejects routes it previously encoded silently altered)
 — see the "0.17.0 compatibility note" in the `rustbgpd-wire` README.
 Upgrade both crates together so the re-exported types unify.
 
-`rustbgpd-fsm 0.4.1` keeps its public API backward-compatible with 0.4.0 — its
-source is unchanged since that publish. Its `^0.17.1` wire requirement admits
+`rustbgpd-fsm 0.4.1` keeps its public API backward-compatible with 0.4.0. It
+adds `Session::negotiated_shared` while preserving the existing
+`Session::negotiated` signature. Its `^0.17.1` wire requirement admits
 `rustbgpd-wire` 0.17.2, whose **decode acceptance changed**: ATOMIC_AGGREGATE
 (type 6) now decodes to `PathAttribute::AtomicAggregate` instead of
 `PathAttribute::Unknown`, so an UPDATE carrying it is no longer
