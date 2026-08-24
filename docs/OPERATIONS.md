@@ -1445,6 +1445,13 @@ FIB runtime. The actor is still default-off; configure at least one
 | `bgp_fib_kernel_failures_total{action="remove"}` | Kernel rejected a remove operation |
 | `bgp_kernel_route_notify_dropped_total{actor,reason="channel_full"}` | Kernel route-event wake feed dropped an event before the FIB or BLACKHOLE reconciler could consume it; periodic reconcile remains the repair backstop |
 | `bgp_kernel_route_notify_subscription_failures_total{actor,group}` | The FIB or BLACKHOLE reconciler failed to subscribe to an IPv4/IPv6 route multicast group and is running with periodic-only kernel-drift repair |
+| `bgp_netlink_subscription_overruns_total{subscriber}` | The kernel reported a receive-buffer overrun to the `link_carrier`, `general_fib`, or `blackhole_discard` NETLINK_ROUTE subscriber. Each increment is one overrun notification—not a count of lost events—and proves only that one or more multicast events may have been lost |
+
+The three netlink-overrun series are materialized at zero. A non-zero value
+does not identify which multicast group lost events and does not prove that a
+later 10 s link-carrier poll or 30 s route reconcile repaired the resulting
+drift. Preserve the counter as incident evidence; `rbgp doctor` includes all
+three series in `system/metrics.prom`.
 
 Use `rbgp rib fib --json` as the per-route companion to these counters.
 The most important states to investigate are `foreign_route_exists` and

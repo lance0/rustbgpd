@@ -98,6 +98,31 @@ const RIB_ACTOR_DURATION_BUCKETS: [f64; 13] = [
 /// Closed operation labels for outbound prefix-limit actor work.
 const OUTBOUND_PREFIX_LIMIT_ACTOR_OPERATIONS: [&str; 2] = ["apply", "recovery"];
 
+/// Closed subscriber vocabulary for `NETLINK_ROUTE` receive-buffer overruns.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetlinkSubscriber {
+    /// EVPN Ethernet-segment link-carrier watcher.
+    LinkCarrier,
+    /// General FIB kernel-route watcher.
+    GeneralFib,
+    /// BLACKHOLE-discard kernel-route watcher.
+    BlackholeDiscard,
+}
+
+impl NetlinkSubscriber {
+    const ALL: [Self; 3] = [Self::LinkCarrier, Self::GeneralFib, Self::BlackholeDiscard];
+
+    /// Stable Prometheus label for this bounded subscriber.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LinkCarrier => "link_carrier",
+            Self::GeneralFib => "general_fib",
+            Self::BlackholeDiscard => "blackhole_discard",
+        }
+    }
+}
+
 /// Closed label vocabulary for stale session-scoped RIB messages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StaleSessionMessageKind {
@@ -295,6 +320,7 @@ struct BgpMetricsInner {
     fib_kernel_failures: IntCounterVec,
     kernel_route_notify_dropped: IntCounterVec,
     kernel_route_notify_subscription_failures: IntCounterVec,
+    netlink_subscription_overruns: IntCounterVec,
 
     // ── Loop detection ─────────────────────────────────────────
     as_path_loop_detected: IntCounterVec,
@@ -1299,6 +1325,21 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let netlink_subscription_overruns = IntCounterVec::new(
+            Opts::new(
+                "bgp_netlink_subscription_overruns_total",
+                "NETLINK_ROUTE receive-buffer overrun notifications by bounded subscriber. \
+                 Each increment proves that one or more multicast notifications may have been \
+                 lost; it is not a dropped-message count and does not prove that a later \
+                 periodic reconcile repaired the resulting drift.",
+            ),
+            &["subscriber"],
+        )
+        .expect("valid metric definition");
+        for subscriber in NetlinkSubscriber::ALL {
+            netlink_subscription_overruns.with_label_values(&[subscriber.as_str()]);
+        }
+
         let as_path_loop_detected = IntCounterVec::new(
             Opts::new(
                 "bgp_as_path_loop_detected_total",
@@ -2302,6 +2343,9 @@ impl BgpMetrics {
             .register(Box::new(kernel_route_notify_subscription_failures.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(netlink_subscription_overruns.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(as_path_loop_detected.clone()))
             .expect("metric not already registered");
         registry
@@ -2653,6 +2697,7 @@ impl BgpMetrics {
             fib_kernel_failures,
             kernel_route_notify_dropped,
             kernel_route_notify_subscription_failures,
+            netlink_subscription_overruns,
             as_path_loop_detected,
             rr_loop_detected,
             bgpls_nlri_discarded,
@@ -3843,6 +3888,18 @@ impl BgpMetrics {
         self.0
             .kernel_route_notify_subscription_failures
             .with_label_values(&[actor, group])
+            .inc();
+    }
+
+    /// Record one observed `NETLINK_ROUTE` receive-buffer overrun notification.
+    ///
+    /// The subscriber vocabulary is type-bounded to the three socket owners.
+    /// One notification proves that at least one multicast event may have been
+    /// lost, but does not reveal the drop count.
+    pub fn record_netlink_subscription_overrun(&self, subscriber: NetlinkSubscriber) {
+        self.0
+            .netlink_subscription_overruns
+            .with_label_values(&[subscriber.as_str()])
             .inc();
     }
 
@@ -5593,6 +5650,56 @@ mod tests {
                 .with_label_values(&["blackhole_discard", "ipv6_route"])
                 .get(),
             1
+        );
+    }
+
+    #[test]
+    fn netlink_subscription_overruns_materialize_exact_bounded_zero_series() {
+        let m = BgpMetrics::new();
+
+        let family = m
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "bgp_netlink_subscription_overruns_total")
+            .expect("netlink overrun metric registered");
+        let observed: std::collections::BTreeMap<_, _> = family
+            .metric
+            .iter()
+            .map(|metric| {
+                assert_eq!(metric.get_label().len(), 1, "only subscriber label");
+                assert_eq!(metric.get_label()[0].name(), "subscriber");
+                (
+                    metric.get_label()[0].value().to_owned(),
+                    metric.get_counter().value(),
+                )
+            })
+            .collect();
+        assert_eq!(observed.len(), NetlinkSubscriber::ALL.len());
+        for subscriber in NetlinkSubscriber::ALL {
+            assert_eq!(observed.get(subscriber.as_str()), Some(&0.0));
+        }
+
+        m.record_netlink_subscription_overrun(NetlinkSubscriber::GeneralFib);
+        m.record_netlink_subscription_overrun(NetlinkSubscriber::GeneralFib);
+        m.record_netlink_subscription_overrun(NetlinkSubscriber::LinkCarrier);
+        assert_eq!(
+            m.0.netlink_subscription_overruns
+                .with_label_values(&["general_fib"])
+                .get(),
+            2
+        );
+        assert_eq!(
+            m.0.netlink_subscription_overruns
+                .with_label_values(&["link_carrier"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.0.netlink_subscription_overruns
+                .with_label_values(&["blackhole_discard"])
+                .get(),
+            0
         );
     }
 

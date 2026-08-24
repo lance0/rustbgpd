@@ -4656,6 +4656,7 @@ async fn run<T>(
                     drain_state: evpn_es_drain_state.clone(),
                     segment: Some(segment_control.clone()),
                     originator: evpn_originator_runtime_control.clone(),
+                    metrics: metrics.clone(),
                 },
                 evpn_es_link_drain_shutdown.clone(),
             )
