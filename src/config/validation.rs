@@ -709,17 +709,7 @@ impl Config {
                 });
             }
 
-            let group = neighbor
-                .peer_group
-                .as_deref()
-                .map(|name| {
-                    self.peer_groups
-                        .get(name)
-                        .ok_or_else(|| ConfigError::UndefinedPeerGroup {
-                            name: name.to_string(),
-                        })
-                })
-                .transpose()?;
+            let group = self.peer_group_for_neighbor(neighbor)?;
 
             if let Some(tcp_ao) = &neighbor.tcp_ao {
                 if neighbor.md5_password.is_some() {
