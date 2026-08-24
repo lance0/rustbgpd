@@ -12,6 +12,10 @@ use rustbgpd_policy::{
 
 use super::*;
 
+#[path = "update_groups_harness.rs"]
+mod update_groups_harness;
+use update_groups_harness::{RunningManager, spawn_running_manager};
+
 #[test]
 fn policy_transition_production_slice_boundaries_are_exact() {
     let budget = super::super::POLICY_TRANSITION_PRODUCTION_ROUTE_SLICE;
@@ -1409,9 +1413,7 @@ fn assert_metric(observed: f64, expected: f64, what: &str) {
 
 #[tokio::test]
 async fn replace_export_policy_after_peer_down_returns_typed_not_found() {
-    let (tx, rx) = mpsc::channel(16);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(16, BgpMetrics::new());
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 42));
     let _outbound = peer_up(&tx, PeerUpSpec::ibgp(peer)).await;
 
@@ -1441,9 +1443,7 @@ async fn replace_export_policy_after_peer_down_returns_typed_not_found() {
 #[tokio::test]
 async fn identical_peers_group_together_and_gauges_track_membership() {
     let metrics = BgpMetrics::new();
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
     let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -1530,9 +1530,7 @@ async fn identical_peers_group_together_and_gauges_track_membership() {
 )]
 async fn ungrouped_reasons_surface_per_disqualifier() {
     let metrics = BgpMetrics::new();
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
     let policy_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1));
     let add_path_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 2));
@@ -1674,9 +1672,7 @@ async fn ungrouped_reasons_surface_per_disqualifier() {
 #[tokio::test]
 async fn rs_transparent_peers_group_per_client_best_groups_on_own_key() {
     let metrics = BgpMetrics::new();
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
     // Conceptually: rs1/rs2 are RS-transparent members, plain is not.
     // The manager sees identical staging inputs for all three — the
@@ -1764,9 +1760,7 @@ async fn rs_transparent_peers_group_per_client_best_groups_on_own_key() {
 #[tokio::test]
 async fn per_client_best_with_vpn_or_rtc_families_keeps_fallback_reason() {
     let metrics = BgpMetrics::new();
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
     let vpn_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 1));
     let rtc_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 2));
@@ -1823,9 +1817,7 @@ async fn per_client_best_with_vpn_or_rtc_families_keeps_fallback_reason() {
 #[tokio::test]
 async fn content_identical_policy_replace_is_key_stable() {
     let metrics = BgpMetrics::new();
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1));
@@ -2124,9 +2116,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
 
 #[tokio::test]
 async fn clean_policy_transition_falls_back_for_distinct_runtime_group_edges() {
-    let (tx, rx) = mpsc::channel(32);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(32, BgpMetrics::new());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
     let peers = [
@@ -2204,9 +2194,7 @@ async fn clean_policy_transition_falls_back_for_distinct_runtime_group_edges() {
 )]
 async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
     let metrics = BgpMetrics::new();
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
     let old_policy = community_chain(0xFDE8_1101);
@@ -2352,9 +2340,7 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
     reason = "the existing-destination regression checks every grouped counter handle before and after later staging"
 )]
 async fn clean_policy_transition_existing_destination_shares_every_members_counters() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, BgpMetrics::new());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
     let old_policy = community_chain(0xFDE8_0001);
@@ -3024,11 +3010,9 @@ async fn clean_policy_transition_matches_force_ungrouped_member_views() {
     reason = "the fallback regression covers canonical counters through later staging and a complete prior-policy rollback"
 )]
 async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejection() {
-    let (tx, rx) = mpsc::channel(64);
     let metrics = BgpMetrics::new();
     metrics.set_rib_policy_transition_last_duration(std::time::Duration::from_secs(987));
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
     let old_policy = community_chain(0xFDE8_0001);
@@ -3249,9 +3233,7 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
 
 #[tokio::test]
 async fn clean_policy_transition_falls_back_wholesale_for_add_path_member() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, BgpMetrics::new());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
     let old_policy = community_chain(0xFDE8_0001);
@@ -3393,9 +3375,7 @@ async fn clean_policy_transition_admits_rs_control_members_on_untagged_inventory
     const ROUTE_COUNT: usize = 8;
     const RS_AS: u32 = 64512;
 
-    let (tx, rx) = mpsc::channel(128);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(128, BgpMetrics::new());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
     let old_policy = community_chain(0xFDE8_0001);
@@ -3518,9 +3498,7 @@ async fn clean_policy_transition_tagged_source_keeps_rs_members_on_authoritative
         local_data2: 65001,
     };
 
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, BgpMetrics::new());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
     // Both chains strip the control community (the stripped-tag trap:
@@ -3650,9 +3628,7 @@ async fn clean_policy_transition_tagged_source_keeps_rs_members_on_authoritative
     reason = "the saturation regression verifies enqueue, dirty carry, and timer healing together"
 )]
 async fn clean_policy_transition_saturation_falls_back_and_heals_without_duplicates() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, BgpMetrics::new());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
     let old_policy = community_chain(0xFDE8_0001);
@@ -3771,9 +3747,7 @@ async fn clean_policy_transition_saturation_falls_back_and_heals_without_duplica
 
 #[tokio::test]
 async fn clean_policy_transition_generation_change_rejects_stale_plan() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, BgpMetrics::new());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
     let old_policy = community_chain(0xFDE8_0001);
@@ -3866,9 +3840,7 @@ async fn clean_policy_transition_generation_change_rejects_stale_plan() {
 async fn residue_gauge_tracks_tombstones_and_clears_on_resync() {
     tokio::time::pause();
     let metrics = BgpMetrics::new();
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
     let residue = || gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]);
     let quiesce = async || {
@@ -3968,9 +3940,7 @@ async fn residue_gauge_tracks_tombstones_and_clears_on_resync() {
 async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
     tokio::time::pause();
     let metrics = BgpMetrics::new();
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
     let residue = || gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]);
     let quiesce = async || {
@@ -4132,9 +4102,7 @@ async fn content_identical_replace_keeps_export_term_hit_counters() {
     }
 
     let metrics = BgpMetrics::new();
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
     let denied = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 1));
@@ -4253,9 +4221,7 @@ async fn strict_next_hop_export_chain_disqualifies_grouping() {
     }";
 
     let metrics = BgpMetrics::new();
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
     let strict_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1));
     let plain_a = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2));
@@ -4317,9 +4283,7 @@ async fn family_predicate_export_chain_still_groups() {
     }";
 
     let metrics = BgpMetrics::new();
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
     let peer_a = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 1));
     let peer_b = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 2));
@@ -4374,9 +4338,7 @@ async fn computed_prepend_export_chains_group_unless_peer_dependent() {
     let peer_pad = "policy peer-pad { term t { prepend as peer 3; accept } }";
 
     let metrics = BgpMetrics::new();
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
     // Two peers sharing a `prepend as self` chain and two sharing a
     // `prepend as origin` chain: both pairs must group.
@@ -4436,9 +4398,7 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
     tokio::time::pause();
 
     let metrics = BgpMetrics::new();
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let grouped = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -5096,9 +5056,7 @@ async fn over_budget_commit_flush_still_completes() {
 async fn fence_holds_queued_work_until_commit_flush_terminal() {
     const MEMBER_COUNT: usize = 3 * super::super::COMMIT_MEMBERS_PER_POLL + 2;
     const ROUTE_COUNT: usize = 2;
-    let (tx, rx) = mpsc::channel(256);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(256, BgpMetrics::new());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
     let old_policy = community_chain(0xFDE8_2105);
@@ -5422,9 +5380,7 @@ async fn mark_outbound_dirty_drops_peer_with_closed_channel() {
     reason = "the fixture keeps prepare, churn, and commit phases in one scenario"
 )]
 async fn prepared_destination_commits_with_interleaved_churn() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, BgpMetrics::new());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
     let old_policy = community_chain(0xFDE8_0001);
@@ -5562,9 +5518,7 @@ async fn prepared_destination_commits_with_interleaved_churn() {
 /// consuming per-churn staging work.
 #[tokio::test]
 async fn discarded_prepared_destination_is_removed() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, BgpMetrics::new());
     let old_policy = community_chain(0xFDE8_0001);
     let next_policy = community_chain(0xFDE8_0002);
     let peers = [
@@ -5631,9 +5585,7 @@ async fn discarded_prepared_destination_is_removed() {
 /// ordinary Created path).
 #[tokio::test]
 async fn transition_immediately_after_prepare_commits_without_leaks() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, BgpMetrics::new());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
     let old_policy = community_chain(0xFDE8_0001);
@@ -6082,9 +6034,7 @@ async fn prestage_discarded_when_cohort_resolves_different_destination() {
 #[tokio::test]
 async fn slow_peer_isolation_moves_member_to_fallback_and_back() {
     let metrics = BgpMetrics::new();
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
     let a = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1));
     let b = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2));
@@ -6206,9 +6156,7 @@ fn ranked_rs_route(prefix: Ipv4Prefix, src: Ipv4Addr, rank: u32) -> Route {
 async fn converged_per_client_best_fleet_regroups_byte_empty() {
     tokio::time::pause();
     let metrics = BgpMetrics::new();
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let handle = tokio::spawn(manager.run());
+    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
     let a = Ipv4Addr::new(10, 0, 5, 1);
     let b = Ipv4Addr::new(10, 0, 5, 2);
