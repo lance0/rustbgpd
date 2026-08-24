@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use syn::{Attribute, Item, ItemExternCrate, ItemUse, UseTree, Visibility};
+
 const README: &str = include_str!("../README.md");
 const LIB_SOURCE: &str = include_str!("../src/lib.rs");
 const MESSAGE_SOURCE: &str = include_str!("../src/message.rs");
@@ -46,65 +48,130 @@ fn source_enum_is_public_and_non_exhaustive(source: &str, name: &str) -> bool {
     compact_whitespace(source).contains(&format!("#[non_exhaustive] pub enum {name}"))
 }
 
-fn error_enums_in_source(source: &str) -> Vec<String> {
-    let compact = compact_whitespace(source);
-    let marker = "#[non_exhaustive] pub enum ";
-    let mut remainder = compact.as_str();
-    let mut names = Vec::new();
-    while let Some(offset) = remainder.find(marker) {
-        let declaration = &remainder[offset + marker.len()..];
-        let end = declaration
-            .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
-            .unwrap_or(declaration.len());
-        let name = &declaration[..end];
-        if name.ends_with("Error") {
-            names.push(name.to_string());
-        }
-        remainder = &declaration[end..];
-    }
-    names
+fn is_public(visibility: &Visibility) -> bool {
+    matches!(visibility, Visibility::Public(_))
 }
 
-fn collect_rust_sources(directory: &Path, paths: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(directory)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", directory.display()))
-    {
-        let path = entry.expect("source directory entry").path();
-        if path.is_dir() {
-            collect_rust_sources(&path, paths);
-        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
-            paths.push(path);
-        }
-    }
-}
-
-fn public_non_exhaustive_error_enum_roster() -> Vec<String> {
-    let mut paths = Vec::new();
-    collect_rust_sources(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &mut paths,
-    );
-    let mut names = paths
+fn has_non_exhaustive_attribute(attributes: &[Attribute]) -> bool {
+    attributes
         .iter()
-        .flat_map(|path| {
-            let source = std::fs::read_to_string(path)
-                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-            error_enums_in_source(&source)
-        })
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    names
+        .any(|attribute| attribute.path().is_ident("non_exhaustive"))
 }
 
-fn public_bytes_reexports(source: &str) -> Vec<&str> {
-    source
-        .lines()
-        .map(str::trim)
-        .filter(|line| {
-            line.starts_with("pub use bytes") || line.starts_with("pub extern crate bytes")
-        })
-        .collect()
+fn use_tree_mentions_bytes(tree: &UseTree) -> bool {
+    match tree {
+        UseTree::Path(path) => path.ident == "bytes" || use_tree_mentions_bytes(path.tree.as_ref()),
+        UseTree::Name(name) => name.ident == "bytes",
+        UseTree::Rename(rename) => rename.ident == "bytes",
+        UseTree::Group(group) => group.items.iter().any(use_tree_mentions_bytes),
+        UseTree::Glob(_) => false,
+    }
+}
+
+fn public_item_reexports_bytes(item: &Item) -> bool {
+    match item {
+        Item::Use(ItemUse { vis, tree, .. }) => is_public(vis) && use_tree_mentions_bytes(tree),
+        Item::ExternCrate(ItemExternCrate { vis, ident, .. }) => is_public(vis) && ident == "bytes",
+        _ => false,
+    }
+}
+
+fn external_module_path(module_directory: &Path, name: &str) -> PathBuf {
+    let sibling = module_directory.join(format!("{name}.rs"));
+    if sibling.is_file() {
+        sibling
+    } else {
+        let nested = module_directory.join(name).join("mod.rs");
+        assert!(
+            nested.is_file(),
+            "cannot resolve public module {name:?} below {}",
+            module_directory.display()
+        );
+        nested
+    }
+}
+
+fn inspect_public_items(
+    items: &[Item],
+    module_path: &str,
+    module_directory: &Path,
+    errors: &mut Vec<String>,
+    bytes_reexports: &mut Vec<String>,
+) {
+    for item in items {
+        if public_item_reexports_bytes(item) {
+            bytes_reexports.push(module_path.to_string());
+        }
+
+        match item {
+            Item::Enum(item_enum)
+                if is_public(&item_enum.vis)
+                    && has_non_exhaustive_attribute(&item_enum.attrs)
+                    && item_enum.ident.to_string().ends_with("Error") =>
+            {
+                errors.push(format!("{module_path}::{}", item_enum.ident));
+            }
+            Item::Mod(item_mod) if is_public(&item_mod.vis) => {
+                let name = item_mod.ident.to_string();
+                let child_path = format!("{module_path}::{name}");
+                let child_directory = module_directory.join(&name);
+                if let Some((_, child_items)) = &item_mod.content {
+                    inspect_public_items(
+                        child_items,
+                        &child_path,
+                        &child_directory,
+                        errors,
+                        bytes_reexports,
+                    );
+                } else {
+                    inspect_public_module(
+                        &external_module_path(module_directory, &name),
+                        &child_path,
+                        &child_directory,
+                        errors,
+                        bytes_reexports,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn inspect_public_module(
+    source_path: &Path,
+    module_path: &str,
+    module_directory: &Path,
+    errors: &mut Vec<String>,
+    bytes_reexports: &mut Vec<String>,
+) {
+    let source = std::fs::read_to_string(source_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", source_path.display()));
+    let syntax = syn::parse_file(&source)
+        .unwrap_or_else(|error| panic!("cannot parse {}: {error}", source_path.display()));
+    inspect_public_items(
+        &syntax.items,
+        module_path,
+        module_directory,
+        errors,
+        bytes_reexports,
+    );
+}
+
+fn public_api_source_inventory() -> (Vec<String>, Vec<String>) {
+    let source_directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut errors = Vec::new();
+    let mut bytes_reexports = Vec::new();
+    inspect_public_module(
+        &source_directory.join("lib.rs"),
+        "rustbgpd_wire",
+        &source_directory,
+        &mut errors,
+        &mut bytes_reexports,
+    );
+    errors.sort();
+    bytes_reexports.sort();
+    (errors, bytes_reexports)
 }
 
 #[test]
@@ -132,9 +199,10 @@ fn decode_entry_point_keeps_the_documented_bytes_contract() {
         decode_message_has_bytes_signature(MESSAGE_SOURCE),
         "decode_message no longer has the documented &mut bytes::Bytes signature"
     );
+    let (_, bytes_reexports) = public_api_source_inventory();
     assert!(
-        public_bytes_reexports(LIB_SOURCE).is_empty(),
-        "README says bytes is not re-exported, but lib.rs contains a public bytes re-export"
+        bytes_reexports.is_empty(),
+        "README says bytes is not re-exported, but public modules re-export it: {bytes_reexports:?}"
     );
 }
 
@@ -190,11 +258,19 @@ fn every_documented_public_error_enum_stays_non_exhaustive_in_source() {
 
 #[test]
 fn enum_exhaustiveness_roster_covers_every_public_error_enum() {
-    let mut expected = ERROR_ENUM_NAMES.map(str::to_string).to_vec();
+    let mut expected = [
+        "rustbgpd_wire::error::DecodeError",
+        "rustbgpd_wire::error::EncodeError",
+        "rustbgpd_wire::evpn::RouteDistinguisherParseError",
+        "rustbgpd_wire::notification::ShutdownCommunicationError",
+        "rustbgpd_wire::tokio_codec::BgpCodecError",
+    ]
+    .map(str::to_string)
+    .to_vec();
     expected.sort();
+    let (errors, _) = public_api_source_inventory();
     assert_eq!(
-        public_non_exhaustive_error_enum_roster(),
-        expected,
+        errors, expected,
         "README roster must change whenever the public non-exhaustive error inventory changes"
     );
 }
@@ -211,11 +287,17 @@ fn contract_helpers_reject_independent_documentation_and_source_mutations() {
     let wrong_buffer = MESSAGE_SOURCE.replacen("buf: &mut Bytes", "buf: Bytes", 1);
     assert!(!decode_message_has_bytes_signature(&wrong_buffer));
 
-    let reexported_bytes = format!("{LIB_SOURCE}\npub use bytes::Bytes;");
-    assert_eq!(
-        public_bytes_reexports(&reexported_bytes),
-        ["pub use bytes::Bytes;"]
-    );
+    for reexport in [
+        "pub use bytes::Bytes;",
+        "pub use {bytes::Bytes};",
+        "pub extern crate bytes;",
+    ] {
+        let item = syn::parse_str::<Item>(reexport).expect("valid public re-export mutation");
+        assert!(
+            public_item_reexports_bytes(&item),
+            "inventory must detect {reexport}"
+        );
+    }
 
     let exhaustiveness = section(README, "## Enum exhaustiveness");
     for name in ERROR_ENUM_NAMES {
@@ -245,9 +327,37 @@ fn contract_helpers_reject_independent_documentation_and_source_mutations() {
         assert!(!source_enum_is_public_and_non_exhaustive(&exhaustive, name));
     }
 
+    let future_errors =
+        syn::parse_file("#[non_exhaustive]\n#[derive(Debug)]\npub enum FutureError { Example }")
+            .expect("valid future error mutation");
+    let duplicate_name =
+        syn::parse_file("#[non_exhaustive]\npub enum DecodeError { DistinctModuleVariant }")
+            .expect("valid duplicate-name mutation");
+    let private_nested =
+        syn::parse_file("mod private { #[non_exhaustive] pub enum PrivateError { Example } }")
+            .expect("valid private-module control");
+    let mut errors = Vec::new();
+    let mut bytes_reexports = Vec::new();
+    for (syntax, module_path) in [
+        (&future_errors, "rustbgpd_wire::future"),
+        (&duplicate_name, "rustbgpd_wire::distinct"),
+        (&private_nested, "rustbgpd_wire"),
+    ] {
+        inspect_public_items(
+            &syntax.items,
+            module_path,
+            Path::new("unused-for-inline-modules"),
+            &mut errors,
+            &mut bytes_reexports,
+        );
+    }
+    errors.sort();
     assert_eq!(
-        error_enums_in_source("#[non_exhaustive]\npub enum FutureError { Example }"),
-        ["FutureError"],
-        "the inventory helper must detect a newly added public error enum"
+        errors,
+        [
+            "rustbgpd_wire::distinct::DecodeError",
+            "rustbgpd_wire::future::FutureError",
+        ],
+        "inventory must retain qualified duplicates, accept intervening attributes, and ignore private modules"
     );
 }

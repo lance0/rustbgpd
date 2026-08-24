@@ -3293,6 +3293,7 @@ dependencies = [
  "bytes",
  "criterion",
  "proptest",
+ "syn 2.0.117",
  "thiserror 2.0.20",
  "tokio-util",
 ]
