@@ -203,7 +203,8 @@ soft-reset auto-fire). Peers on unchanged chains are untouched.
 $ rbgp policy explain --neighbor 192.0.2.10 --prefix 203.0.113.0/26
 
 # Export: the full gate ladder toward a peer; the export_policy rung
-# names the deciding policy:term.
+# reports chain_default_permit for nonempty Permit, or the deciding
+# policy[:term] for Deny.
 $ rbgp rib --prefix 203.0.113.0/26 advertised 192.0.2.20 --explain
 
 # Best path: why this candidate won in the Loc-RIB.
