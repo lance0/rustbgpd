@@ -30,7 +30,7 @@ use crate::engine::{
 };
 use crate::ir::{
     ArithOp, Cmp, CompiledChain, CompiledPolicy, DatasetProbe, ForEachNode, LoopSource, MatchExpr,
-    TermAction, ValueCmpOp, ValueExpr, ValueField,
+    TermAction, TermActionView, ValueCmpOp, ValueExpr, ValueField,
 };
 use crate::sets::prefix_entry_matches;
 
@@ -917,8 +917,8 @@ impl CompiledChain {
                 }
                 if matched {
                     *hit += 1;
-                    match &term.action {
-                        TermAction::Permit(mods) => {
+                    match term.action.view() {
+                        TermActionView::Permit(mods) => {
                             match self.resolve_computed(mods, ctx, locals_slice(locals.as_ref())) {
                                 Ok(resolved) => {
                                     permit_mods =
@@ -933,11 +933,13 @@ impl CompiledChain {
                         // Deny denies; stray loop control (confined
                         // to loop bodies by the typechecker) fails
                         // closed like the live walk — same disposition.
-                        TermAction::Deny | TermAction::Break | TermAction::ContinueLoop => {
+                        TermActionView::Deny
+                        | TermActionView::Break
+                        | TermActionView::ContinueLoop => {
                             denied = true;
                             break;
                         }
-                        TermAction::Continue(mods) => {
+                        TermActionView::Continue(mods) => {
                             if let Ok(resolved) =
                                 self.resolve_computed(mods, ctx, locals_slice(locals.as_ref()))
                             {
@@ -951,19 +953,23 @@ impl CompiledChain {
                         }
                         // LAN-302: eager `let`, identical to the live
                         // walk — initializer error fails closed.
-                        TermAction::Bind { slot, expr, .. } => {
+                        TermActionView::Bind {
+                            slot,
+                            name: _name,
+                            expr,
+                        } => {
                             let Ok(value) = eval_value(expr, ctx, locals_slice(locals.as_ref()))
                             else {
                                 denied = true;
                                 break;
                             };
-                            locals.get_or_insert([0; LOCAL_FRAME_SLOTS])[*slot as usize] = value;
+                            locals.get_or_insert([0; LOCAL_FRAME_SLOTS])[usize::from(slot)] = value;
                         }
                         // LAN-303: loops run identically to the live
                         // walk (same eval_for_each), errors fail
                         // closed. Body terms are outside the counter
                         // grid — the loop's own term counted above.
-                        TermAction::ForEach(node) => {
+                        TermActionView::ForEach(node) => {
                             let Ok(outcome) = self.eval_for_each(
                                 node,
                                 ctx,
@@ -987,20 +993,21 @@ impl CompiledChain {
                                 }
                             }
                         }
-                        TermAction::CommunityVar { add, slot, .. } => {
-                            if exec_community_var(*add, *slot, locals.as_ref(), &mut continued)
+                        TermActionView::CommunityVar {
+                            add,
+                            slot,
+                            name: _name,
+                        } => {
+                            if exec_community_var(add, slot, locals.as_ref(), &mut continued)
                                 .is_err()
                             {
                                 denied = true;
                                 break;
                             }
                         }
-                        TermAction::RemoveLargeCommunityAdmin { global_admin } => {
-                            if !exec_remove_large_community_admin(
-                                *global_admin,
-                                ctx,
-                                &mut continued,
-                            ) {
+                        TermActionView::RemoveLargeCommunityAdmin { global_admin } => {
+                            if !exec_remove_large_community_admin(global_admin, ctx, &mut continued)
+                            {
                                 denied = true;
                                 break;
                             }
@@ -1079,8 +1086,8 @@ impl CompiledChain {
                         counter.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                match &term.action {
-                    TermAction::Permit(mods) => {
+                match term.action.view() {
+                    TermActionView::Permit(mods) => {
                         // LAN-296/LAN-299: fold computed operands
                         // (prepend, set values) into literal fields
                         // before the modifications leave the
@@ -1102,12 +1109,12 @@ impl CompiledChain {
                             (None, None) => PolicyDecision::Permit(Some(mods)),
                         };
                     }
-                    TermAction::Deny => {
+                    TermActionView::Deny => {
                         return PolicyDecision::Deny {
                             term_index: Some(term_index),
                         };
                     }
-                    TermAction::Continue(mods) => {
+                    TermActionView::Continue(mods) => {
                         let resolved =
                             match self.resolve_computed(mods, ctx, locals_slice(locals.as_ref())) {
                                 Ok(resolved) => resolved,
@@ -1122,21 +1129,22 @@ impl CompiledChain {
                     // bindings are readable), write the slot, keep
                     // walking. An initializer error is terminal on the
                     // uniform eval-error rail, used or not.
-                    TermAction::Bind { slot, expr, .. } => {
-                        match eval_value(expr, ctx, locals_slice(locals.as_ref())) {
-                            Ok(value) => {
-                                locals.get_or_insert([0; LOCAL_FRAME_SLOTS])[*slot as usize] =
-                                    value;
-                            }
-                            Err(kind) => return PolicyDecision::Error { kind, term_index },
+                    TermActionView::Bind {
+                        slot,
+                        name: _name,
+                        expr,
+                    } => match eval_value(expr, ctx, locals_slice(locals.as_ref())) {
+                        Ok(value) => {
+                            locals.get_or_insert([0; LOCAL_FRAME_SLOTS])[usize::from(slot)] = value;
                         }
-                    }
+                        Err(kind) => return PolicyDecision::Error { kind, term_index },
+                    },
                     // LAN-303: a bounded loop. A body verdict decides
                     // the policy; otherwise the walk continues after
                     // it. Any error (fuel, iteration cap, body
                     // evaluation) is terminal on the uniform rail,
                     // attributed to the loop's term.
-                    TermAction::ForEach(node) => {
+                    TermActionView::ForEach(node) => {
                         match self.eval_for_each(
                             node,
                             ctx,
@@ -1168,7 +1176,7 @@ impl CompiledChain {
                     // Loop control at policy level is confined to loop
                     // bodies by the typechecker; fail closed on the
                     // compiler-bug rail rather than misinterpret it.
-                    TermAction::Break | TermAction::ContinueLoop => {
+                    TermActionView::Break | TermActionView::ContinueLoop => {
                         return PolicyDecision::Error {
                             kind: EvalErrorKind::StrayLoopControl,
                             term_index,
@@ -1176,15 +1184,19 @@ impl CompiledChain {
                     }
                     // LAN-303: stage the binding's value as a standard
                     // community add/remove; accumulates like Continue.
-                    TermAction::CommunityVar { add, slot, .. } => {
+                    TermActionView::CommunityVar {
+                        add,
+                        slot,
+                        name: _name,
+                    } => {
                         if let Err(kind) =
-                            exec_community_var(*add, *slot, locals.as_ref(), &mut continued)
+                            exec_community_var(add, slot, locals.as_ref(), &mut continued)
                         {
                             return PolicyDecision::Error { kind, term_index };
                         }
                     }
-                    TermAction::RemoveLargeCommunityAdmin { global_admin } => {
-                        if !exec_remove_large_community_admin(*global_admin, ctx, &mut continued) {
+                    TermActionView::RemoveLargeCommunityAdmin { global_admin } => {
+                        if !exec_remove_large_community_admin(global_admin, ctx, &mut continued) {
                             return PolicyDecision::Deny {
                                 term_index: Some(term_index),
                             };

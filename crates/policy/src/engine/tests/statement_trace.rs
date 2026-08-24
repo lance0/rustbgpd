@@ -805,3 +805,237 @@ fn rpol_statement_trace_agrees_with_live_evaluation_and_recorded_hits() {
         }
     }
 }
+
+const ACTION_VIEW_RPOL: &str = r"
+policy all-actions {
+    term walk {
+        let next = route.med + 1
+        set local-pref next
+        for c in route.communities {
+            if c == 65000:100 { remove community c }
+        }
+        remove large-community 65501:*:*
+        accept
+    }
+}
+
+policy deny-action { term stop { reject } }
+policy default-action { term miss { if route.med == 999 { reject } } }
+policy permit-error { term fail { set med route.med - 100; accept } }
+policy continue-error {
+    term stage { set med route.med - 100 }
+    term allow { accept }
+}
+";
+
+fn action_view_member(name: &str) -> PolicyChain {
+    let file = crate::rpol::RpolFile::parse(ACTION_VIEW_RPOL).expect("clean action-view rpol");
+    let mut store = crate::sets::SetStore::new();
+    let mut compiled = file
+        .compile_policy(name, &[], &mut store)
+        .unwrap_or_else(|| panic!("policy {name} exists"));
+    if name == "all-actions" {
+        compiled.policies[0]
+            .terms
+            .insert(2, nested_loop_control_term());
+    }
+    PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+        name.to_string(),
+        std::sync::Arc::new(compiled),
+    )])
+}
+
+fn nested_loop_control_term() -> crate::ir::Term {
+    use crate::ir::{ForEachNode, LoopSource, MatchExpr, Term, TermAction};
+
+    let inner = ForEachNode {
+        source: LoopSource::Communities,
+        slot: 251,
+        var: "inner".into(),
+        body: vec![Term {
+            name: Some("next-inner".to_string()),
+            guard: MatchExpr::True,
+            action: TermAction::ContinueLoop,
+        }],
+    };
+    let outer = ForEachNode {
+        source: LoopSource::Communities,
+        slot: 250,
+        var: "outer".into(),
+        body: vec![
+            Term {
+                name: Some("nested".to_string()),
+                guard: MatchExpr::True,
+                action: TermAction::ForEach(Box::new(inner)),
+            },
+            Term {
+                name: Some("stop-outer".to_string()),
+                guard: MatchExpr::True,
+                action: TermAction::Break,
+            },
+        ],
+    };
+    Term {
+        name: Some("walk.nested-control".to_string()),
+        guard: MatchExpr::True,
+        action: TermAction::ForEach(Box::new(outer)),
+    }
+}
+
+fn assert_action_view_attribution(
+    case_name: &str,
+    policy_name: &str,
+    live: &PolicyResult,
+    attribution: &PolicyEvaluation,
+    reject_term: Option<&str>,
+    step: &super::super::explain::StatementAttribution,
+) {
+    if live.action == PolicyAction::Permit {
+        assert_eq!(
+            attribution.matched_policy.as_deref(),
+            Some(CHAIN_DEFAULT_PERMIT_ATTRIBUTION),
+            "completed-chain attribution for {case_name}"
+        );
+    } else {
+        assert_eq!(
+            attribution.matched_policy.as_deref(),
+            Some(policy_name),
+            "denying-member attribution for {case_name}"
+        );
+        let expected_term = if matches!(case_name, "permit-error" | "continue-error") {
+            None
+        } else {
+            step.term_name.as_deref()
+        };
+        assert_eq!(
+            reject_term, expected_term,
+            "reject-term attribution for {case_name}"
+        );
+    }
+}
+
+fn assert_action_view_coverage_positions(
+    case_name: &str,
+    step: &super::super::explain::StatementAttribution,
+    evaluated: &[Vec<u64>],
+    matched: &[Vec<u64>],
+) {
+    let status_lines: Vec<_> = step
+        .term_traces
+        .iter()
+        .filter(|line| line.ends_with("[matched]") || line.ends_with("[not matched]"))
+        .collect();
+    for (index, (eval_count, match_count)) in evaluated[step.policy_index]
+        .iter()
+        .zip(&matched[step.policy_index])
+        .enumerate()
+    {
+        let status = status_lines.get(index);
+        assert_eq!(
+            *eval_count,
+            u64::from(status.is_some()),
+            "evaluated position {index} for {case_name}"
+        );
+        assert_eq!(
+            *match_count,
+            u64::from(status.is_some_and(|line| line.ends_with("[matched]"))),
+            "matched position {index} for {case_name}"
+        );
+    }
+}
+
+/// The action-view agreement pin sweeps every action family through the live,
+/// coverage, and explain walks. It also checks the coverage grid against the
+/// trace's evaluated/matched positions, including action-time error exits.
+#[test]
+fn action_view_walks_agree_across_action_and_error_matrix() {
+    use rustbgpd_wire::LargeCommunity;
+
+    const SCRUB: u32 = (65_000 << 16) | 0x0064;
+    const KEEP: u32 = (65_001 << 16) | 1;
+    let own = LargeCommunity::new(65_501, 1, 2);
+    let foreign = LargeCommunity::new(64_496, 3, 4);
+
+    let mut all_actions = plain_ctx(v4_prefix([10, 0, 0, 0], 24));
+    all_actions.med = Some(7);
+    all_actions.communities = Box::leak(vec![SCRUB, KEEP].into_boxed_slice());
+    all_actions.large_communities = Box::leak(vec![own, foreign].into_boxed_slice());
+
+    let mut permit_error = plain_ctx(v4_prefix([10, 0, 0, 0], 24));
+    permit_error.med = Some(5);
+    let mut continue_error = plain_ctx(v4_prefix([10, 0, 0, 0], 24));
+    continue_error.med = Some(5);
+    let mut oversized = plain_ctx(v4_prefix([10, 0, 0, 0], 24));
+    oversized.med = Some(7);
+    let wildcard_bound = usize::try_from(crate::eval::MAX_LARGE_COMMUNITIES_PER_ROUTE)
+        .expect("wire-derived bound fits usize");
+    oversized.large_communities = Box::leak(vec![own; wildcard_bound + 1].into_boxed_slice());
+
+    let cases = vec![
+        ("all-actions", all_actions, PolicyAction::Permit),
+        (
+            "deny-action",
+            plain_ctx(v4_prefix([10, 0, 0, 0], 24)),
+            PolicyAction::Deny,
+        ),
+        (
+            "default-action",
+            plain_ctx(v4_prefix([10, 0, 0, 0], 24)),
+            PolicyAction::Permit,
+        ),
+        ("permit-error", permit_error, PolicyAction::Deny),
+        ("continue-error", continue_error, PolicyAction::Deny),
+        ("all-actions-oversized", oversized, PolicyAction::Deny),
+    ];
+
+    for (case_name, ctx, expected) in cases {
+        let policy_name = case_name.strip_suffix("-oversized").unwrap_or(case_name);
+        let chain = action_view_member(policy_name);
+        let (live, attribution, reject_term) =
+            super::super::evaluate_chain_with_reject_term(Some(&chain), &ctx);
+        assert_eq!(live.action, expected, "live action for {case_name}");
+
+        let compiled = chain.compiled();
+        let mut evaluated = compiled.zero_term_hits();
+        let mut matched = compiled.zero_term_hits();
+        let dry = compiled.evaluate_recording_coverage(&ctx, &mut evaluated, &mut matched);
+        assert_eq!(dry, live, "coverage walk for {case_name}");
+
+        let trace = explain_chain_statements(Some(&chain), &ctx);
+        assert_eq!(trace.action, live.action, "explain action for {case_name}");
+        let step = trace.steps.last().expect("one-member chain was evaluated");
+        assert_eq!(step.action, live.action, "step action for {case_name}");
+        assert_action_view_attribution(
+            case_name,
+            policy_name,
+            &live,
+            &attribution,
+            reject_term.as_deref(),
+            step,
+        );
+        assert_action_view_coverage_positions(case_name, step, &evaluated, &matched);
+
+        match case_name {
+            "all-actions" => {
+                assert_eq!(live.modifications.set_local_pref, Some(8));
+                assert_eq!(live.modifications.communities_remove, vec![SCRUB]);
+                assert_eq!(live.modifications.large_communities_remove, vec![own]);
+            }
+            "default-action" => assert_eq!(step.statement_index, None),
+            "permit-error" | "continue-error" => assert!(
+                step.term_traces
+                    .iter()
+                    .any(|line| line.contains("arithmetic underflow")),
+                "missing action-time error for {case_name}"
+            ),
+            "all-actions-oversized" => assert!(
+                step.term_traces
+                    .iter()
+                    .any(|line| line.contains("wildcard-removal bound")),
+                "missing wildcard bound disposition"
+            ),
+            "deny-action" => {}
+            other => panic!("uncovered matrix case {other}"),
+        }
+    }
+}
