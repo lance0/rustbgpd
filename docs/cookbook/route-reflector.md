@@ -1,5 +1,7 @@
 # iBGP route reflector at scale
 
+Replace an iBGP full mesh with a dedicated route reflector.
+
 **When this is you:** you run (or are about to run) an iBGP full mesh
 that no longer scales, and you want a dedicated route reflector —
 tens to a thousand clients, fast convergence without per-peer tuning,

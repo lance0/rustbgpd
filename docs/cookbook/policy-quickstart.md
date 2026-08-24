@@ -1,5 +1,7 @@
 # Policy quickstart (`.rpol`)
 
+Build and validate your first rustbgpd routing policy.
+
 **When this is you:** you're about to write your first real routing
 policy on rustbgpd and want the workflow that keeps it honest — a
 typed, compiled policy file with its unit tests *in the file*, checked
