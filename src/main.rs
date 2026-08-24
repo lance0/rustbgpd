@@ -5866,16 +5866,47 @@ mod tests {
         assert!(
             production.contains("if initial_peer_boot_failed {\n            break;\n        }")
         );
-        let fence = production
-            .find("// ADR-0080: fence in-flight EVPN")
-            .unwrap();
-        let withdraw = production
-            .find("info!(\"draining EVPN originator\")")
-            .unwrap();
-        let cease = production
-            .find("send(PeerManagerCommand::Shutdown)")
-            .unwrap();
-        assert!(fence < withdraw && withdraw < cease);
+    }
+
+    #[test]
+    fn coordinated_shutdown_preserves_peer_visible_withdraw_order() {
+        // Load-bearing shutdown-order proof. Peer-visible EVPN withdrawals
+        // must finish while the BGP sessions are still available; local-only
+        // dataplane drains deliberately follow the one PeerManager shutdown.
+        // Anchor on source constructs rather than incidental log/telemetry order.
+        let source = include_str!("main.rs");
+        let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
+        let find = |needle| {
+            production
+                .find(needle)
+                .unwrap_or_else(|| panic!("coordinated shutdown lost `{needle}`"))
+        };
+        let ordered_stages = [
+            find("_evpn_apply_fence_guard = evpn_apply_fence"),
+            find("if let Some(handle) = evpn_originator_handle"),
+            find("if let Some(handle) = evpn_svi_handle"),
+            find("if let Some(handle) = evpn_l3_originator_handle"),
+            find("if let Some(handle) = evpn_segment_handle"),
+            find("imet_controller.withdraw_all(&rib_tx).await"),
+            find("peer_mgr_tx.send(PeerManagerCommand::Shutdown).await"),
+            find("if let Some(handle) = blackhole_handle"),
+            find("if let Some(handle) = fib_runtime_handle"),
+            find("if let Some(handle) = bfd_runtime_handle"),
+            find("if let Some(handle) = evpn_dataplane_handle {"),
+        ];
+        assert!(
+            ordered_stages
+                .windows(2)
+                .all(|stages| stages[0] < stages[1]),
+            "coordinated shutdown stages must remain in peer-visible withdrawal order"
+        );
+        assert_eq!(
+            production
+                .matches("send(PeerManagerCommand::Shutdown)")
+                .count(),
+            1,
+            "coordinated shutdown must retain one PeerManager shutdown command"
+        );
     }
 
     #[test]

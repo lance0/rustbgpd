@@ -90,6 +90,31 @@ a streamed apply, the candidate upload precedes that wait and is
 separately bounded at 30 minutes by the stream's total timeout, so the
 full RPC-start-to-fail-stop worst case is about 70 minutes 5 seconds.
 
+### What coordinated shutdown bounds
+
+The shutdown waiter bounds only the owned-settlement decision. A live owner
+has 30 minutes to prove settlement. At expiry the watchdog retains ownership,
+uses the configured five-second recovery-fence grace to close admission and
+publish the diagnostic, then exits 70. That path does not advance to BGP Cease.
+A clean settlement instead disarms the fatal boundary and lets coordinated
+teardown continue.
+
+After clean settlement, the explicit pre-Cease stages have these sequential
+ceilings:
+
+- warm-checkpoint capture and publication: 30 seconds;
+- restart-marker publication or removal: 5 seconds;
+- acquiring the EVPN runtime-apply fence when the checkpoint did not retain it:
+  10 seconds; and
+- local-MAC, SVI-MAC, L3, and segment actor drains: 5 seconds each.
+
+Those caps can account for 65 seconds before IMET withdrawal begins. This is a
+timing decomposition, not a guarantee or a minimum session hold time: stages
+may be skipped or finish early. The subsequent IMET controller mutex, RIB
+channel handoff, sequential per-VNI withdrawal acknowledgements, and
+PeerManager shutdown enqueue and scheduling have no aggregate deadline.
+Therefore the shipped path has no finite aggregate upper bound to first Cease.
+
 While an owner is live, the daemon logs a
 `runtime config settlement budget warning` at 15, 25, and 29 minutes
 elapsed (`remaining` = `15_minutes`, `5_minutes`, `1_minute`). The
@@ -402,10 +427,9 @@ detached), with a few semantics of its own:
   owner reaches its budget, the waiter fences it as `budget_expired`,
   preserves the configured recovery-fence grace, and invokes the same
   exit-70 boundary as the independent fatal clock. It never falls through
-  to checkpointing or actor teardown with an active owner. This bounds the
-  settlement wait itself; it does **not** establish a finite aggregate time
-  to the first BGP Cease because a clean owner may use its full budget and
-  later checkpoint and drain stages retain their own bounds.
+  to checkpointing or actor teardown with an active owner. The exact shutdown
+  timing boundary is decomposed in
+  [What coordinated shutdown bounds](#what-coordinated-shutdown-bounds).
 
 ## Related pages
 
