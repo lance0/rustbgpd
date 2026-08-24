@@ -546,6 +546,17 @@ pub enum WarmBundleError {
         /// Number skipped by [`SnapshotReader`].
         count: u64,
     },
+    /// MRT decoding needed loss-tolerant recovery, which is unsuitable for a
+    /// byte- and semantically-exact warm checkpoint.
+    #[error(
+        "warm bundle MRT recovery discarded {discarded_path_attributes} path attributes and {discarded_bgpls_nlris} BGP-LS NLRIs"
+    )]
+    RecoveredMrtData {
+        /// Malformed path-attribute instances omitted by the reader.
+        discarded_path_attributes: u64,
+        /// Malformed BGP-LS NLRIs omitted from otherwise usable attributes.
+        discarded_bgpls_nlris: u64,
+    },
     /// MRT semantic inventory did not exactly match the manifest.
     #[error("warm bundle MRT {field} does not match the manifest")]
     MrtIdentityMismatch {
@@ -1376,6 +1387,14 @@ fn validate_snapshot_semantics(
     if reader.skipped_records() != 0 {
         return Err(WarmBundleError::SkippedMrtRecords {
             count: reader.skipped_records(),
+        });
+    }
+    let discarded_path_attributes = reader.discarded_path_attributes();
+    let discarded_bgpls_nlris = reader.discarded_bgpls_nlris();
+    if discarded_path_attributes != 0 || discarded_bgpls_nlris != 0 {
+        return Err(WarmBundleError::RecoveredMrtData {
+            discarded_path_attributes,
+            discarded_bgpls_nlris,
         });
     }
     Ok(identity
@@ -2490,6 +2509,56 @@ mod tests {
         snapshot
     }
 
+    fn recovered_attributes() -> Vec<u8> {
+        let mut attributes = vec![
+            rustbgpd_wire::constants::attr_flags::TRANSITIVE,
+            rustbgpd_wire::constants::attr_type::ATOMIC_AGGREGATE,
+            1,
+            0,
+        ];
+        let mut nlri = Vec::new();
+        nlri.extend_from_slice(&1_u16.to_be_bytes());
+        nlri.extend_from_slice(&19_u16.to_be_bytes());
+        nlri.push(3);
+        nlri.extend_from_slice(&7_u64.to_be_bytes());
+        nlri.extend_from_slice(&515_u16.to_be_bytes());
+        nlri.extend_from_slice(&1_u16.to_be_bytes());
+        nlri.push(1);
+        nlri.extend_from_slice(&256_u16.to_be_bytes());
+        nlri.extend_from_slice(&1_u16.to_be_bytes());
+        nlri.push(1);
+        let mut value = Vec::new();
+        value.extend_from_slice(&(rustbgpd_wire::Afi::BgpLs as u16).to_be_bytes());
+        value.push(rustbgpd_wire::Safi::BgpLs as u8);
+        value.extend_from_slice(&nlri);
+        attributes.extend_from_slice(&[
+            rustbgpd_wire::constants::attr_flags::OPTIONAL,
+            rustbgpd_wire::constants::attr_type::MP_UNREACH_NLRI,
+            u8::try_from(value.len()).unwrap(),
+        ]);
+        attributes.extend_from_slice(&value);
+        attributes
+    }
+
+    fn with_recovered_attributes(mut snapshot: Vec<u8>) -> Vec<u8> {
+        let record_offset = last_record_offset(&snapshot);
+        let payload_len = u32::from_be_bytes(
+            snapshot[record_offset + 8..record_offset + 12]
+                .try_into()
+                .unwrap(),
+        );
+        let attributes = recovered_attributes();
+        let attr_len_offset = snapshot.len() - 2;
+        assert_eq!(&snapshot[attr_len_offset..], &[0, 0]);
+        snapshot[attr_len_offset..]
+            .copy_from_slice(&u16::try_from(attributes.len()).unwrap().to_be_bytes());
+        snapshot[record_offset + 8..record_offset + 12].copy_from_slice(
+            &(payload_len + u32::try_from(attributes.len()).unwrap()).to_be_bytes(),
+        );
+        snapshot.extend_from_slice(&attributes);
+        snapshot
+    }
+
     fn with_invalid_pit_utf8(identity: &WarmBundleIdentityV1) -> (WarmBundleIdentityV1, Vec<u8>) {
         let mut invalid_identity = identity.clone();
         let suffix = invalid_identity.peer_index_table_view[1..].to_string();
@@ -2573,6 +2642,30 @@ mod tests {
             ),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn public_write_and_load_reject_recovered_snapshot_with_exact_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let id = identity();
+        let recovered = with_recovered_attributes(valid_snapshot(&id));
+        assert!(matches!(
+            write_warm_bundle(&dir, id.clone(), &recovered),
+            Err(WarmBundleError::RecoveredMrtData {
+                discarded_path_attributes: 1,
+                discarded_bgpls_nlris: 1,
+            })
+        ));
+
+        install_raw_bundle(&temp, id.clone(), &recovered, vec![1, 1]);
+        assert!(matches!(
+            load_warm_bundle(&dir, &expected(&id), freshness()),
+            Err(WarmBundleError::RecoveredMrtData {
+                discarded_path_attributes: 1,
+                discarded_bgpls_nlris: 1,
+            })
+        ));
     }
 
     #[test]

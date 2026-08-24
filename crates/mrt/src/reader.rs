@@ -27,7 +27,7 @@ use bytes::Bytes;
 use rustbgpd_rib::update::MrtPeerEntry;
 use rustbgpd_wire::constants::{attr_flags, attr_type};
 use rustbgpd_wire::error::DecodeError;
-use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, PathAttribute, Prefix, Safi};
+use rustbgpd_wire::{Afi, ErrorDisposition, Ipv4Prefix, Ipv6Prefix, PathAttribute, Prefix, Safi};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -305,12 +305,17 @@ struct EntryAttributes {
     attributes: Vec<PathAttribute>,
     next_hop: Option<IpAddr>,
     link_local_next_hop: Option<Ipv6Addr>,
+    discarded_path_attributes: u64,
+    discarded_bgpls_nlris: u64,
 }
 
 /// Split a RIB entry's attribute block: walk the TLV framing with
 /// bounds checks, peel off the MRT-reduced `MP_REACH_NLRI`, and decode
-/// the remaining attributes with the standard wire decoder
-/// (`four_octet_as = true`, matching the writer).
+/// the remaining attributes with the revised wire decoder. Four-octet ASNs
+/// match the writer, while `is_ibgp = true` is the conservative all-lanes
+/// default on incomplete evidence: an MRT peer table does not preserve the
+/// original session relationship. Only attribute-discard recovery is safe for
+/// a snapshot entry; any stronger disposition still fails the decode.
 fn decode_entry_attributes(attrs: &[u8], base: usize) -> Result<EntryAttributes, ReadError> {
     let mut cur = Cur::new(attrs, base);
     let mut other: Vec<u8> = Vec::with_capacity(attrs.len());
@@ -335,7 +340,19 @@ fn decode_entry_attributes(attrs: &[u8], base: usize) -> Result<EntryAttributes,
             other.extend_from_slice(&attrs[span_start..cur.rel_pos()]);
         }
     }
-    let attributes = rustbgpd_wire::attribute::decode_path_attributes(&other, true, &[])?;
+    let decoded =
+        rustbgpd_wire::attribute::decode_path_attributes_revised(&other, true, true, &[])?;
+    if let Some(malformed) = decoded
+        .malformed
+        .iter()
+        .find(|malformed| malformed.disposition != ErrorDisposition::AttributeDiscard)
+    {
+        return Err(ReadError::AttributeDecode(malformed.error.clone()));
+    }
+    let discarded_path_attributes = u64::try_from(decoded.malformed.len())
+        .map_err(|_| malformed(base, "discarded path-attribute count exceeds u64"))?;
+    let discarded_bgpls_nlris = u64::from(decoded.bgpls_nlri_discarded);
+    let attributes = decoded.attributes;
     let (next_hop, link_local_next_hop) = match reduced {
         Some((nh, ll)) => (Some(nh), ll),
         None => (
@@ -350,7 +367,20 @@ fn decode_entry_attributes(attrs: &[u8], base: usize) -> Result<EntryAttributes,
         attributes,
         next_hop,
         link_local_next_hop,
+        discarded_path_attributes,
+        discarded_bgpls_nlris,
     })
+}
+
+/// Entry plus recovery observations held privately until it is yielded.
+///
+/// Keeping the observations beside the pending entry prevents a later failure
+/// in the same MRT record from incrementing counters for routes the iterator
+/// never exposes.
+struct PendingSnapshotEntry {
+    entry: SnapshotEntry,
+    discarded_path_attributes: u64,
+    discarded_bgpls_nlris: u64,
 }
 
 /// Streaming reader over a `TABLE_DUMP_V2` byte buffer.
@@ -365,8 +395,10 @@ pub struct SnapshotReader<'a> {
     collector_bgp_id: Ipv4Addr,
     view_name: String,
     peers: Vec<MrtPeerEntry>,
-    pending: VecDeque<SnapshotEntry>,
+    pending: VecDeque<PendingSnapshotEntry>,
     skipped_records: u64,
+    discarded_path_attributes: u64,
+    discarded_bgpls_nlris: u64,
     total_entries: u64,
     entry_cap: u64,
     fused: bool,
@@ -409,6 +441,8 @@ impl<'a> SnapshotReader<'a> {
                 peers,
                 pending: VecDeque::new(),
                 skipped_records,
+                discarded_path_attributes: 0,
+                discarded_bgpls_nlris: 0,
                 total_entries: 0,
                 entry_cap: MAX_TOTAL_ENTRIES,
                 fused: false,
@@ -439,6 +473,20 @@ impl<'a> SnapshotReader<'a> {
     #[must_use]
     pub fn skipped_records(&self) -> u64 {
         self.skipped_records
+    }
+
+    /// Number of malformed path-attribute instances omitted from entries
+    /// successfully yielded so far under attribute-discard recovery.
+    #[must_use]
+    pub fn discarded_path_attributes(&self) -> u64 {
+        self.discarded_path_attributes
+    }
+
+    /// Number of malformed BGP-LS NLRIs omitted from path attributes on
+    /// entries successfully yielded so far.
+    #[must_use]
+    pub fn discarded_bgpls_nlris(&self) -> u64 {
+        self.discarded_bgpls_nlris
     }
 
     #[cfg(test)]
@@ -589,16 +637,20 @@ impl<'a> SnapshotReader<'a> {
         let attr_base = cur.offset();
         let attrs = cur.take(usize::from(attr_len), "attribute bytes")?;
         let decoded = decode_entry_attributes(attrs, attr_base)?;
-        self.pending.push_back(SnapshotEntry {
-            nlri: nlri.clone(),
-            peer_index,
-            peer: peer.clone(),
-            originated_time,
-            path_id,
-            add_path,
-            attributes: decoded.attributes,
-            next_hop: decoded.next_hop,
-            link_local_next_hop: decoded.link_local_next_hop,
+        self.pending.push_back(PendingSnapshotEntry {
+            entry: SnapshotEntry {
+                nlri: nlri.clone(),
+                peer_index,
+                peer: peer.clone(),
+                originated_time,
+                path_id,
+                add_path,
+                attributes: decoded.attributes,
+                next_hop: decoded.next_hop,
+                link_local_next_hop: decoded.link_local_next_hop,
+            },
+            discarded_path_attributes: decoded.discarded_path_attributes,
+            discarded_bgpls_nlris: decoded.discarded_bgpls_nlris,
         });
         Ok(())
     }
@@ -612,8 +664,30 @@ impl Iterator for SnapshotReader<'_> {
             return None;
         }
         loop {
-            if let Some(entry) = self.pending.pop_front() {
-                return Some(Ok(entry));
+            if let Some(pending) = self.pending.pop_front() {
+                let Some(discarded_path_attributes) = self
+                    .discarded_path_attributes
+                    .checked_add(pending.discarded_path_attributes)
+                else {
+                    self.fused = true;
+                    return Some(Err(malformed(
+                        self.pos,
+                        "discarded path-attribute counter overflow",
+                    )));
+                };
+                let Some(discarded_bgpls_nlris) = self
+                    .discarded_bgpls_nlris
+                    .checked_add(pending.discarded_bgpls_nlris)
+                else {
+                    self.fused = true;
+                    return Some(Err(malformed(
+                        self.pos,
+                        "discarded BGP-LS NLRI counter overflow",
+                    )));
+                };
+                self.discarded_path_attributes = discarded_path_attributes;
+                self.discarded_bgpls_nlris = discarded_bgpls_nlris;
+                return Some(Ok(pending.entry));
             }
             if self.pos >= self.data.len() {
                 return None;
@@ -844,6 +918,54 @@ mod tests {
         buf
     }
 
+    /// Append one IPv4-unicast RIB record whose single entry carries `attrs`.
+    fn append_v4_rib_with_attributes(data: &mut Vec<u8>, attrs: &[u8]) {
+        append_v4_rib_attribute_entries(data, &[attrs]);
+    }
+
+    fn append_v4_rib_attribute_entries(data: &mut Vec<u8>, attribute_blocks: &[&[u8]]) {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0u32.to_be_bytes());
+        payload.push(24);
+        payload.extend_from_slice(&[192, 168, 1]);
+        payload.extend_from_slice(&u16::try_from(attribute_blocks.len()).unwrap().to_be_bytes());
+        for attrs in attribute_blocks {
+            payload.extend_from_slice(&0u16.to_be_bytes());
+            payload.extend_from_slice(&TS.to_be_bytes());
+            payload.extend_from_slice(&u16::try_from(attrs.len()).unwrap().to_be_bytes());
+            payload.extend_from_slice(attrs);
+        }
+        data.extend_from_slice(&raw_record(13, 2, &payload));
+    }
+
+    /// `MP_UNREACH_NLRI` carrying one BGP-LS Node NLRI whose descriptor TLVs
+    /// are out of canonical order. RFC 9552 isolates that NLRI and counts it.
+    fn discarded_bgpls_mp_unreach_attribute() -> Vec<u8> {
+        let mut nlri = Vec::new();
+        nlri.extend_from_slice(&1_u16.to_be_bytes()); // Node NLRI.
+        nlri.extend_from_slice(&19_u16.to_be_bytes());
+        nlri.push(3); // OSPFv2 protocol ID.
+        nlri.extend_from_slice(&7_u64.to_be_bytes());
+        nlri.extend_from_slice(&515_u16.to_be_bytes());
+        nlri.extend_from_slice(&1_u16.to_be_bytes());
+        nlri.push(1);
+        nlri.extend_from_slice(&256_u16.to_be_bytes());
+        nlri.extend_from_slice(&1_u16.to_be_bytes());
+        nlri.push(1);
+
+        let mut value = Vec::new();
+        value.extend_from_slice(&(Afi::BgpLs as u16).to_be_bytes());
+        value.push(Safi::BgpLs as u8);
+        value.extend_from_slice(&nlri);
+        let mut attribute = vec![
+            attr_flags::OPTIONAL,
+            attr_type::MP_UNREACH_NLRI,
+            u8::try_from(value.len()).unwrap(),
+        ];
+        attribute.extend_from_slice(&value);
+        attribute
+    }
+
     // ---- round-trip: writer output must read back with full fidelity ----
 
     #[test]
@@ -868,6 +990,8 @@ mod tests {
         assert!(err.is_none(), "unexpected error: {err:?}");
         assert_eq!(entries.len(), 2);
         assert_eq!(reader.skipped_records(), 0);
+        assert_eq!(reader.discarded_path_attributes(), 0);
+        assert_eq!(reader.discarded_bgpls_nlris(), 0);
         // Writer sorts prefixes; 192.168/16 < 198.51.100/24.
         assert_eq!(entries[0].nlri, SnapshotNlri::Unicast(routes[0].prefix));
         assert_eq!(entries[1].nlri, SnapshotNlri::Unicast(routes[1].prefix));
@@ -1199,43 +1323,108 @@ mod tests {
         assert!(matches!(err, Some(ReadError::Truncated { .. })));
     }
 
-    /// The reader decodes entry attributes on the legacy strict path, so a
-    /// non-zero-length `ATOMIC_AGGREGATE` (RFC 4271 §5.1.6 says zero) is an
-    /// attribute-length error that fails the record instead of reading back
-    /// as `PathAttribute::Unknown`.
+    /// RFC 7606 §7.6 permits omitting only the malformed attribute while the
+    /// rest of the snapshot entry remains usable.
     #[test]
-    fn nonzero_length_atomic_aggregate_is_attribute_length_error() {
-        use rustbgpd_wire::notification::update_subcode::ATTRIBUTE_LENGTH_ERROR;
+    fn nonzero_length_atomic_aggregate_is_discarded_and_counted() {
         let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
         let mut data =
             encode_snapshot(COLLECTOR, std::slice::from_ref(&peer), &[], &[], TS).unwrap();
         // ATOMIC_AGGREGATE with flags 0x40, length 1, one value byte.
         let attr = [attr_flags::TRANSITIVE, attr_type::ATOMIC_AGGREGATE, 1, 0];
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&0u32.to_be_bytes());
-        payload.push(24);
-        payload.extend_from_slice(&[192, 168, 1]);
-        payload.extend_from_slice(&1u16.to_be_bytes());
-        payload.extend_from_slice(&0u16.to_be_bytes()); // peer index
-        payload.extend_from_slice(&TS.to_be_bytes()); // originated
-        payload.extend_from_slice(&u16::try_from(attr.len()).unwrap().to_be_bytes());
-        payload.extend_from_slice(&attr);
-        data.extend_from_slice(&raw_record(13, 2, &payload));
+        append_v4_rib_with_attributes(&mut data, &attr);
         let mut reader = SnapshotReader::new(&data).unwrap();
         let (entries, err) = drain(&mut reader);
-        assert!(entries.is_empty());
-        assert!(
-            matches!(
-                err,
-                Some(ReadError::AttributeDecode(
-                    DecodeError::UpdateAttributeError {
-                        subcode: ATTRIBUTE_LENGTH_ERROR,
-                        ..
-                    }
-                ))
-            ),
-            "{err:?}"
-        );
+        assert!(err.is_none(), "unexpected error: {err:?}");
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].attributes.is_empty());
+        assert_eq!(reader.discarded_path_attributes(), 1);
+        assert_eq!(reader.discarded_bgpls_nlris(), 0);
+    }
+
+    #[test]
+    fn treat_as_withdraw_attribute_still_fails_and_fuses() {
+        let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
+        let mut data =
+            encode_snapshot(COLLECTOR, std::slice::from_ref(&peer), &[], &[], TS).unwrap();
+        // LOCAL_PREF must be four bytes. The conservative internal-neighbor
+        // classification makes this treat-as-withdraw rather than discard.
+        let attr = [attr_flags::TRANSITIVE, attr_type::LOCAL_PREF, 3, 0, 0, 100];
+        append_v4_rib_with_attributes(&mut data, &attr);
+        let mut reader = SnapshotReader::new(&data).unwrap();
+        assert!(matches!(
+            reader.next(),
+            Some(Err(ReadError::AttributeDecode(
+                DecodeError::UpdateAttributeError { .. }
+            )))
+        ));
+        assert!(reader.next().is_none());
+        assert_eq!(reader.discarded_path_attributes(), 0);
+        assert_eq!(reader.discarded_bgpls_nlris(), 0);
+    }
+
+    #[test]
+    fn recovery_counters_exclude_entries_not_yielded_before_record_failure() {
+        let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
+        let mut data =
+            encode_snapshot(COLLECTOR, std::slice::from_ref(&peer), &[], &[], TS).unwrap();
+        let discarded = [attr_flags::TRANSITIVE, attr_type::ATOMIC_AGGREGATE, 1, 0];
+        let stronger = [attr_flags::TRANSITIVE, attr_type::LOCAL_PREF, 3, 0, 0, 100];
+        append_v4_rib_attribute_entries(&mut data, &[&discarded, &stronger]);
+        let mut reader = SnapshotReader::new(&data).unwrap();
+        assert!(matches!(
+            reader.next(),
+            Some(Err(ReadError::AttributeDecode(_)))
+        ));
+        assert!(reader.next().is_none());
+        assert_eq!(reader.discarded_path_attributes(), 0);
+        assert_eq!(reader.discarded_bgpls_nlris(), 0);
+    }
+
+    #[test]
+    fn duplicate_ordinary_attribute_keeps_first_and_counts_duplicate() {
+        let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
+        let mut data =
+            encode_snapshot(COLLECTOR, std::slice::from_ref(&peer), &[], &[], TS).unwrap();
+        let attrs = [
+            attr_flags::TRANSITIVE,
+            attr_type::LOCAL_PREF,
+            4,
+            0,
+            0,
+            0,
+            100,
+            attr_flags::TRANSITIVE,
+            attr_type::LOCAL_PREF,
+            4,
+            0,
+            0,
+            0,
+            200,
+        ];
+        append_v4_rib_with_attributes(&mut data, &attrs);
+        let mut reader = SnapshotReader::new(&data).unwrap();
+        let (entries, err) = drain(&mut reader);
+        assert!(err.is_none(), "unexpected error: {err:?}");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].attributes, vec![PathAttribute::LocalPref(100)]);
+        assert_eq!(reader.discarded_path_attributes(), 1);
+        assert_eq!(reader.discarded_bgpls_nlris(), 0);
+    }
+
+    #[test]
+    fn bgpls_nlri_discard_is_counted_separately() {
+        let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
+        let mut data =
+            encode_snapshot(COLLECTOR, std::slice::from_ref(&peer), &[], &[], TS).unwrap();
+        append_v4_rib_with_attributes(&mut data, &discarded_bgpls_mp_unreach_attribute());
+        let mut reader = SnapshotReader::new(&data).unwrap();
+        let (entries, err) = drain(&mut reader);
+        assert!(err.is_none(), "unexpected error: {err:?}");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].attributes.len(), 1);
+        assert_eq!(reader.discarded_path_attributes(), 0);
+        assert_eq!(reader.discarded_bgpls_nlris(), 1);
     }
 
     #[test]

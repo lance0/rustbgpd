@@ -84,11 +84,12 @@ changes:
   (subcode 2); it now validates, and the encoder re-emits the attribute with
   the transitive flag and a zero-length value. A non-zero length is an
   attribute-length error — attribute-discard on the revised decode path
-  (RFC 7606 §7.6). On the legacy strict path (`decode_path_attributes`, used
-  by the MRT reader) that error fails the whole decode, so an MRT RIB entry
-  carrying a non-zero-length ATOMIC_AGGREGATE is rejected where it previously
-  read back as `PathAttribute::Unknown`. Code matching on `Unknown` for type
-  code 6 no longer sees it.
+  (RFC 7606 §7.6). The MRT reader now uses that revised path with a conservative
+  internal-neighbor classification when session evidence is incomplete: it
+  omits the malformed attribute, preserves the otherwise usable RIB entry, and
+  counts the discard. Any treat-as-withdraw or stronger result still rejects
+  and fuses the snapshot iteration. Code matching on `Unknown` for type code 6
+  no longer sees it.
 
 The attribute decode path also replaces its `unreachable!` arms (`AS4_PATH`
 segment types, the `COMMUNITIES` / `EXTENDED_COMMUNITIES` / `CLUSTER_LIST` /
