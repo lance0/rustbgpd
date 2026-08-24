@@ -837,7 +837,7 @@ async fn otc_ingress_event_collects_mp_reach_v6_prefixes() {
     // an IPv6-only OTC violation.
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Provider);
-    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    install_dual_stack_session(&mut session, false);
     let sink = install_recording_sink(&mut session);
     let v6_prefix = Ipv6Prefix::new(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32);
     let mp_reach = rustbgpd_wire::MpReachNlri {
@@ -876,6 +876,70 @@ async fn otc_ingress_event_collects_mp_reach_v6_prefixes() {
             .any(|p| p == &v6_prefix.to_string()),
         "OtcRouteBlockedEvent must surface MP_REACH IPv6 announcements"
     );
+}
+
+#[tokio::test]
+async fn otc_ingress_event_excludes_unnegotiated_mp_unicast() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.peer.local_role = Some(BgpRole::Provider);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let sink = install_recording_sink(&mut session);
+    let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let v6_prefix = Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 48);
+    let mp_reach = rustbgpd_wire::MpReachNlri {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+        link_local_next_hop: None,
+        announced: vec![rustbgpd_wire::NlriEntry {
+            path_id: 0,
+            prefix: Prefix::V6(v6_prefix),
+        }],
+        flowspec_announced: vec![],
+        evpn_announced: vec![],
+        bgpls_announced: vec![],
+        labeled_announced: vec![],
+        vpn_announced: vec![],
+        rtc_announced: vec![],
+    };
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        otc(65002),
+        PathAttribute::MpReachNlri(mp_reach),
+    ];
+    let blocked_before = session.otc_routes_blocked;
+    let otc_counter_before = otc_routes_blocked_count(&session, "ingress_from_customer_rsclient");
+    session
+        .process_update(UpdateMessage::build(
+            &[Ipv4NlriEntry {
+                path_id: 0,
+                prefix: v4_prefix,
+            }],
+            &[],
+            &attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+
+    assert_eq!(session.otc_routes_blocked, blocked_before + 1);
+    assert_eq!(
+        otc_routes_blocked_count(&session, "ingress_from_customer_rsclient"),
+        otc_counter_before + 1
+    );
+    let events = sink.snapshot();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].reason,
+        rustbgpd_telemetry::reason_labels::OtcBlockReason::IngressFromCustomerRsclient
+    );
+    assert_eq!(events[0].prefixes, vec![v4_prefix.to_string()]);
+    assert!(!events[0].prefixes.contains(&v6_prefix.to_string()));
 }
 
 #[tokio::test]

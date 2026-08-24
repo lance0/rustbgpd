@@ -65,6 +65,11 @@ fn with_otc(mut route: Route, asn: u32) -> Route {
     route
 }
 
+fn with_partial_otc(mut route: Route, asn: u32) -> Route {
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::OnlyToCustomerPartial(asn));
+    route
+}
+
 fn drain_unicast_state(
     rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
 ) -> HashMap<(Prefix, u32), Route> {
@@ -750,7 +755,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         assert!(update.otc_blocked.is_empty());
     }
 
-    let blocked_replacement = with_otc(advertised, 64512);
+    let blocked_replacement = with_partial_otc(advertised, 64512);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: blocked_replacement.peer,
@@ -768,6 +773,13 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         assert!(update.announce.is_empty());
         assert_eq!(update.withdraw, vec![(Prefix::V4(advertised_prefix), 0)]);
         assert_eq!(update.otc_blocked.len(), 1);
+        assert_eq!(update.otc_blocked[0].prefix, Prefix::V4(advertised_prefix));
+        assert!(
+            update.otc_blocked[0]
+                .attributes
+                .iter()
+                .any(|attr| { matches!(attr, PathAttribute::OnlyToCustomerPartial(64512)) })
+        );
     }
 
     let never_advertised_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24);
@@ -792,6 +804,12 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         assert!(update.announce.is_empty());
         assert!(update.withdraw.is_empty());
         assert_eq!(update.otc_blocked.len(), 1);
+        assert!(
+            update.otc_blocked[0]
+                .attributes
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::OnlyToCustomer(64512)))
+        );
 
         let explain =
             query_explain_advertised_route(&tx, *peer, Prefix::V4(never_advertised_prefix)).await;

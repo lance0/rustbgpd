@@ -493,21 +493,7 @@ impl PeerSession {
     /// Preserve the established OTC ingress diagnostic surfaces for a
     /// decision that rejects one or more unicast announcements.
     fn observe_otc_ingress_block(&mut self, parsed: &ParsedUpdate, reason: OtcBlockReason) {
-        let rejected = parsed.announced.len()
-            + parsed
-                .attributes
-                .iter()
-                .filter_map(|attr| {
-                    if let PathAttribute::MpReachNlri(mp) = attr
-                        && ((mp.afi, mp.safi) == (Afi::Ipv4, Safi::Unicast)
-                            || (mp.afi, mp.safi) == (Afi::Ipv6, Safi::Unicast))
-                    {
-                        Some(mp.announced.len())
-                    } else {
-                        None
-                    }
-                })
-                .sum::<usize>();
+        let rejected = self.eligible_unicast_announcement_iter(parsed).count();
         if rejected == 0 {
             return;
         }
@@ -521,19 +507,10 @@ impl PeerSession {
         if !self.event_sink().wants_otc_route_blocked() {
             return;
         }
-        let mut blocked_prefixes: Vec<String> = parsed
-            .announced
-            .iter()
-            .map(|entry| entry.prefix.to_string())
+        let blocked_prefixes = self
+            .eligible_unicast_announcement_iter(parsed)
+            .map(|(prefix, _)| prefix.to_string())
             .collect();
-        for attr in &parsed.attributes {
-            if let PathAttribute::MpReachNlri(mp) = attr
-                && ((mp.afi, mp.safi) == (Afi::Ipv4, Safi::Unicast)
-                    || (mp.afi, mp.safi) == (Afi::Ipv6, Safi::Unicast))
-            {
-                blocked_prefixes.extend(mp.announced.iter().map(|entry| entry.prefix.to_string()));
-            }
-        }
         let (otc_value, as_path_string) = otc_event_context(&parsed.attributes, reason);
         self.event_sink()
             .publish_otc_route_blocked(&crate::event_sink::OtcRouteBlockedEvent {
@@ -548,37 +525,46 @@ impl PeerSession {
             });
     }
 
+    /// Iterate over the unicast announcement identities accepted from this
+    /// UPDATE's wire surfaces before policy or safety checks.
+    fn eligible_unicast_announcement_iter<'a>(
+        &'a self,
+        parsed: &'a ParsedUpdate,
+    ) -> impl Iterator<Item = (Prefix, u32)> + 'a {
+        let body_eligible = !self.is_scoped_link_local_peer();
+        let negotiated_families = self.negotiated_families();
+        let extended_nexthop_ipv4 = self.use_extended_nexthop_ipv4();
+        let body = parsed
+            .announced
+            .iter()
+            .filter(move |_| body_eligible)
+            .map(|entry| (Prefix::V4(entry.prefix), entry.path_id));
+        let mp = parsed
+            .attributes
+            .iter()
+            .filter_map(|attr| match attr {
+                PathAttribute::MpReachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .filter(move |mp| {
+                let family = (mp.afi, mp.safi);
+                mp.safi == Safi::Unicast
+                    && matches!(mp.afi, Afi::Ipv4 | Afi::Ipv6)
+                    && negotiated_families.contains(&family)
+                    && (family != (Afi::Ipv4, Safi::Unicast) || extended_nexthop_ipv4)
+            })
+            .flat_map(|mp| {
+                mp.announced
+                    .iter()
+                    .map(|entry| (entry.prefix, entry.path_id))
+            });
+        body.chain(mp)
+    }
+
     /// Return unicast announcement identities that this session would accept
     /// from the UPDATE's wire surfaces before policy or safety checks.
     fn eligible_unicast_announcements(&self, parsed: &ParsedUpdate) -> Vec<(Prefix, u32)> {
-        let mut identities = if self.is_scoped_link_local_peer() {
-            Vec::new()
-        } else {
-            parsed
-                .announced
-                .iter()
-                .map(|entry| (Prefix::V4(entry.prefix), entry.path_id))
-                .collect()
-        };
-        for attr in &parsed.attributes {
-            let PathAttribute::MpReachNlri(mp) = attr else {
-                continue;
-            };
-            let family = (mp.afi, mp.safi);
-            if mp.safi != Safi::Unicast
-                || !matches!(mp.afi, Afi::Ipv4 | Afi::Ipv6)
-                || !self.negotiated_families().contains(&family)
-                || family == (Afi::Ipv4, Safi::Unicast) && !self.use_extended_nexthop_ipv4()
-            {
-                continue;
-            }
-            identities.extend(
-                mp.announced
-                    .iter()
-                    .map(|entry| (entry.prefix, entry.path_id)),
-            );
-        }
-        identities
+        self.eligible_unicast_announcement_iter(parsed).collect()
     }
 
     /// ADR-0107 strict-peer pre-policy gate: return the first announced
