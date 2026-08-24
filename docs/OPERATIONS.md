@@ -1419,9 +1419,16 @@ a snapshot or bounded history query.
 
 ### RFC 7999 BLACKHOLE discards
 
-`bgp_blackhole_discard_rejected_total{reason}` counts discard candidates
-withheld before kernel installation. The bounded reason is `broad_prefix` or
-`not_ebgp`; use `rbgp rib blackholes` for current per-prefix decision details.
+| Metric | What it tells you |
+|--------|-------------------|
+| `bgp_blackhole_discard_installed_total` | Successful kernel discard-route installation events |
+| `bgp_blackhole_discard_withdrawn_total` | Successful daemon-owned kernel discard-route removal events |
+| `bgp_blackhole_discard_adopted_total` | Startup adoption events for marker-matching kernel discard routes |
+| `bgp_blackhole_discard_reaped_total` | Post-startup cleanup events for adopted-but-unclaimed kernel discard routes |
+| `bgp_blackhole_discard_rejected_total{reason}` | Pre-install rejection events; `reason` is bounded to `broad_prefix` or `not_ebgp` |
+| `bgp_blackhole_discard_kernel_failures_total{action}` | Kernel-operation failure events; `action` is bounded to `setup`, `install`, `remove`, or `dump` |
+
+Use `rbgp rib blackholes` for the current per-prefix decision details.
 
 ### General Unicast FIB
 
