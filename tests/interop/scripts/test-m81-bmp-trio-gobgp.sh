@@ -250,7 +250,7 @@ wait_gobgp_established() {
     log "Waiting for $label session to $peer..."
     for i in $(seq 1 45); do
         if gobgp "$container" neighbor 2>/dev/null | grep -F -- "$peer" \
-            | grep -qi "establ"; then
+            | grep -i "establ" >/dev/null; then
             ok "$label session established (attempt $i)"
             return 0
         fi

@@ -166,7 +166,7 @@ wait_srl_established() {
         # contains the word "established" even when nothing is (summary
         # line), so pin the state leaf exactly.
         if srl_cli "info from state network-instance default protocols bgp neighbor 10.0.0.1 session-state" \
-            | grep -q "session-state established"; then
+            | grep "session-state established" >/dev/null; then
             ok "SR Linux reports the session Established (attempt $i)"
             return 0
         fi
@@ -182,7 +182,7 @@ test_sessions() {
     wait_srl_established || exit 1
     log "Waiting for the sink session..."
     for i in $(seq 1 45); do
-        if gobgp_sink neighbor 2>/dev/null | grep -F "10.0.1.1" | grep -qi establ; then
+        if gobgp_sink neighbor 2>/dev/null | grep -F "10.0.1.1" | grep -i establ >/dev/null; then
             ok "sink session established (attempt $i)"
             return 0
         fi

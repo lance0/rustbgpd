@@ -96,7 +96,7 @@ wait_frr_sees_type5() {
     local attempts=$((timeout / 2))
     for _ in $(seq 1 "$attempts"); do
         if docker exec "$PE2" vtysh -c "show bgp l2vpn evpn route type prefix json" 2>/dev/null \
-            | grep -q "\\[5\\]:\\[0\\]:\\[$plen\\]:\\[$host\\]"; then
+            | grep -F "[5]:[0]:[$plen]:[$host]" >/dev/null; then
             return 0
         fi
         sleep 2
@@ -321,9 +321,13 @@ wait_frr_loses_type5() {
     local plen=$2
     local timeout=${3:-30}
     local attempts=$((timeout / 2))
+    local dump
     for _ in $(seq 1 "$attempts"); do
-        if ! docker exec "$PE2" vtysh -c "show bgp l2vpn evpn route type prefix json" 2>/dev/null \
-            | grep -q "\\[5\\]:\\[0\\]:\\[$plen\\]:\\[$host\\]"; then
+        if ! dump=$(docker exec "$PE2" vtysh -c "show bgp l2vpn evpn route type prefix json" 2>/dev/null); then
+            sleep 2
+            continue
+        fi
+        if ! grep -F "[5]:[0]:[$plen]:[$host]" <<<"$dump" >/dev/null; then
             return 0
         fi
         sleep 2
