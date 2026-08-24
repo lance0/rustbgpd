@@ -2,13 +2,13 @@
 
 Replace an iBGP full mesh with a dedicated route reflector.
 
-**When this is you:** you run (or are about to run) an iBGP full mesh
-that no longer scales, and you want a dedicated route reflector —
-tens to a thousand clients, fast convergence without per-peer tuning,
-stale-route protection across client restarts, and per-client optimal
-paths if your clients sit in different corners of the IGP. rustbgpd's
-RR path needs no fanout configuration: peers whose staged output is
-provably identical share one update group automatically.
+**When this is you:** Your current or planned iBGP full mesh no longer
+scales. You want a dedicated route reflector — tens to a thousand
+clients, fast convergence without per-peer tuning, stale-route
+protection across client restarts, and per-client optimal paths if your
+clients sit in different corners of the IGP. rustbgpd's RR path needs no
+fanout configuration: peers whose staged output is provably identical
+share one update group automatically.
 
 **Proven by:** [M14](../RECEIPTS.md#interop-labs--pr-gated-interopyml)
 (RFC 4456 reflection vs FRR), M76 (RFC 9107 Optimal Route Reflection),

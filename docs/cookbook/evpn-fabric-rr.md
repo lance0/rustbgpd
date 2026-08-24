@@ -2,14 +2,14 @@
 
 This recipe builds a control-plane-only VXLAN-EVPN fabric route reflector.
 
-**When this is you:** a VXLAN-EVPN leaf/spine fabric where the VTEPs
-(FRR, SR Linux, GoBGP, or rustbgpd leaves) do the dataplane and you
-want a lean, API-first reflector distributing the RFC 7432 routes
-between them. Scope, stated up front: **this recipe is the RR role.**
-The RR holds no EVI state, learns no MACs, and forwards no packets —
-it reflects all five EVPN route types verbatim between clients.
-rustbgpd also has a bidirectional VTEP mode (alpha, Linux/VXLAN-only,
-with IRB and multi-homing — see
+**When this is you:** You operate a VXLAN-EVPN leaf/spine fabric. Its
+VTEPs (FRR, SR Linux, GoBGP, or rustbgpd leaves) do the dataplane, and
+you want a lean, API-first reflector distributing the RFC 7432 routes
+between them. Scope, stated up front: **this recipe is the RR role.** The
+RR holds no EVI state, learns no MACs, and forwards no packets — it
+reflects all five EVPN route types verbatim between clients. rustbgpd
+also has a bidirectional VTEP mode (alpha, Linux/VXLAN-only, with IRB
+and multi-homing — see
 [`evpn-enablement.md`](../evpn-enablement.md)); that is a different
 deployment and not this document.
 

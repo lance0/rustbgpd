@@ -2,11 +2,11 @@
 
 Operate a resilient pair of IXP route servers.
 
-**When this is you:** your exchange runs (or should run) two route
-servers, every member peers with both, and you want the operational
-discipline that makes the pair actually redundant: independent
-instances, staggered config rollout, a mechanical inter-RS consistency
-check, and a drain flow for maintenance.
+**When this is you:** Your exchange runs or should run two route servers.
+Every member peers with both, and you want the operational discipline
+that makes the pair actually redundant: independent instances,
+staggered config rollout, a mechanical inter-RS consistency check, and a
+drain flow for maintenance.
 
 ## Why two, and why members peer with both
 
