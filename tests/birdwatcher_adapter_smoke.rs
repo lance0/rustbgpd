@@ -726,6 +726,7 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
         ".nest_service(",
         ".fallback(",
         ".fallback_service(",
+        ".method_not_allowed_fallback(",
         ".merge(",
     ] {
         assert_eq!(
