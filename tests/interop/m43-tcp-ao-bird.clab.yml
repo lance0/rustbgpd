@@ -25,6 +25,7 @@ topology:
         - ./configs/rustbgpd-m43-tcp-ao-successor.toml:/etc/rustbgpd/config-successor.toml:ro
         - ./configs/rustbgpd-m43-tcp-ao-selection.toml:/etc/rustbgpd/config-selection.toml:ro
         - ./configs/rustbgpd-m43-tcp-ao-deletion.toml:/etc/rustbgpd/config-deletion.toml:ro
+        - ./configs/rustbgpd-m43-tcp-ao-dynamic.toml:/etc/rustbgpd/config-dynamic.toml:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
         - ip addr add 10.0.43.1/24 dev eth1

@@ -15,6 +15,8 @@
 #   7. An unsigned peer cannot establish while its static MKT remains installed,
 #      and the kernel accounts the matching unsigned traffic as TCPAORequired.
 #   8. A mismatch in the selected key fails closed and does not re-establish.
+#   9. The same signed/unsigned/recovery boundary holds for a direct dynamic
+#      `/24`, whose accepted session reports the dynamic owner and prefix MKT.
 #
 # Prerequisites:
 #   - BIRD image built:
@@ -39,6 +41,7 @@ BIRD="clab-${TOPO}-bird"
 GOOD_CONF="/etc/bird/bird.conf"
 BAD_CONF="/etc/bird/bird-bad.conf"
 UNSIGNED_CONF="/etc/bird/bird-unsigned.conf"
+DYNAMIC_CONFIG="/etc/rustbgpd/config-dynamic.toml"
 TEST_PREFIX="203.0.113.43"
 POST_DELETE_PROBE_PREFIX="203.0.113.44"
 ROUTE_CONTINUITY_PID=""
@@ -163,13 +166,15 @@ tcp_ao_required() {
 }
 
 prove_unsigned_peer_requires_ao() {
+    local owner=${1:?}
+    local recovery_conf=${2:?}
     local before
     if ! before=$(tcp_ao_required); then
         fail "Linux did not expose the TCPAORequired accounting oracle"
         return 1
     fi
 
-    log "Starting a bounded unsigned BIRD attempt from the MKT-matched address..."
+    log "Starting a bounded unsigned BIRD attempt from the $owner..."
     start_bird "$UNSIGNED_CONF"
     local after=$before
     local state
@@ -202,10 +207,10 @@ prove_unsigned_peer_requires_ao() {
     fi
     ok "unsigned BIRD stayed non-Established and TCPAORequired increased $before -> $after"
 
-    start_bird "/etc/bird/bird-successor.conf"
+    start_bird "$recovery_conf"
     wait_bird_established
     wait_route_present
-    ok "authenticated BIRD re-established normally after the unsigned receipt"
+    ok "authenticated BIRD re-established normally for the $owner after the unsigned receipt"
 }
 
 start_route_continuity_oracle() {
@@ -335,6 +340,48 @@ assert_two_key_inventory() {
     fi
 
     ok "Selected IDs are Current=2/RNext=12; GET_KEYS inventory is exact and redacted"
+}
+
+assert_dynamic_two_key_inventory() {
+    log "Checking dynamic owner provenance and prefix-scoped TCP-AO inventory..."
+    local state
+    state=$(grpc_neighbor_state || echo '{}')
+
+    if printf '%s' "$state" | grep -Eq \
+        'interop-(old|next)-secret-m43|wrong-(next|successor)-secret-m43'; then
+        fail "Dynamic neighbor state leaked TCP-AO secret material"
+        return 1
+    fi
+
+    if ! jq -e '
+        .isDynamic == true and
+        .acceptedDynamicRange.prefix == "10.0.43.0/24" and
+        .acceptedDynamicRange.peerGroup == "bird3-dynamic" and
+        .authentication == "AUTHENTICATION_MODE_TCP_AO" and
+        .tcpAoHealth == "TCP_AO_HEALTH_HEALTHY" and
+        .tcpAo.currentKeyId == 2 and
+        .tcpAo.rnextKeyId == 12 and
+        ((.tcpAo.packetsBad // 0) | tonumber) == 0 and
+        ((.tcpAo.packetsKeyNotFound // 0) | tonumber) == 0 and
+        ((.tcpAo.packetsAoRequired // 0) | tonumber) == 0 and
+        (.tcpAo.keys | length == 2) and
+        any(.tcpAo.keys[];
+          .peerAddress == "10.0.43.0" and .prefixLength == 24 and
+          .sendId == 1 and .recvId == 11 and
+          .algorithm == "hmac(sha256)" and .deprecated == true and
+          .preferred != true and .isCurrent != true and .isRnext != true) and
+        any(.tcpAo.keys[];
+          .peerAddress == "10.0.43.0" and .prefixLength == 24 and
+          .sendId == 2 and .recvId == 12 and
+          .algorithm == "hmac(sha256)" and .preferred == true and
+          .deprecated != true and .isCurrent == true and .isRnext == true)
+    ' >/dev/null <<<"$state"; then
+        fail "Dynamic TCP-AO state did not report exact range provenance and MKT inventory"
+        printf '%s\n' "$state" >&2
+        return 1
+    fi
+
+    ok "Dynamic /24 provenance, Current/RNext, and exact prefix MKT inventory are observable"
 }
 
 wait_successor_generation() {
@@ -594,6 +641,47 @@ rust_pid_gone_or_zombie() {
         done < "/proc/$pid/status"
         exit 1
     ' sh "$pid"
+}
+
+restart_rustbgpd_with_dynamic_range() {
+    local old_pid
+    if ! old_pid=$(rust_pid); then
+        fail "dynamic-range proof expected exactly one live rustbgpd process"
+        dump_diagnostics
+        return 1
+    fi
+
+    log "Restarting rustbgpd with the direct dynamic-prefix TCP-AO owner..."
+    if ! docker exec "$RUSTBGPD" sh -lc "kill -TERM $old_pid"; then
+        fail "could not stop rustbgpd PID $old_pid for the dynamic-range proof"
+        return 1
+    fi
+    local process_gone=false
+    for _ in $(seq 1 100); do
+        if rust_pid_gone_or_zombie "$old_pid"; then
+            process_gone=true
+            break
+        fi
+        sleep 0.1
+    done
+    if [ "$process_gone" != true ]; then
+        fail "rustbgpd PID $old_pid did not stop for the dynamic-range proof"
+        dump_diagnostics
+        return 1
+    fi
+
+    start_rustbgpd "exec /usr/local/bin/rustbgpd $DYNAMIC_CONFIG"
+    local new_pid
+    if ! new_pid=$(rust_pid); then
+        fail "dynamic-range proof expected exactly one restarted rustbgpd process"
+        dump_diagnostics
+        return 1
+    fi
+    if [ "$new_pid" = "$old_pid" ]; then
+        fail "dynamic-range proof restart reused rustbgpd PID $old_pid"
+        return 1
+    fi
+    ok "rustbgpd restarted on the direct dynamic-prefix config (PID $old_pid -> $new_pid)"
 }
 
 crash_rustbgpd_and_prove_disconnect() {
@@ -867,6 +955,20 @@ assert_bad_key_does_not_establish() {
     ok "BIRD stayed observable and non-Established throughout the 40s wrong-key window"
 }
 
+prove_dynamic_range_accept_boundary() {
+    log "BEGIN: direct dynamic-prefix TCP-AO accept and rejection proof"
+    restart_rustbgpd_with_dynamic_range
+    start_bird "$GOOD_CONF"
+    wait_bird_established
+    wait_route_present
+    assert_dynamic_two_key_inventory
+
+    prove_unsigned_peer_requires_ao \
+        "dynamic-prefix MKT-covered address" "$GOOD_CONF"
+    assert_dynamic_two_key_inventory
+    ok "direct dynamic-prefix TCP-AO accepted, rejected unsigned traffic, and recovered"
+}
+
 main_uninterrupted() {
     log "M43 interop test: TCP-AO full live key rotation with BIRD 3.3.1"
     log "Topology: $TOPO"
@@ -969,12 +1071,15 @@ main_uninterrupted() {
         return 1
     fi
 
-    prove_unsigned_peer_requires_ao
+    prove_unsigned_peer_requires_ao \
+        "static MKT-covered address" "/etc/bird/bird-successor.conf"
 
     log "Restarting BIRD with a mismatched preferred TCP-AO secret"
     start_bird "$BAD_CONF"
     wait_route_absent
     assert_bad_key_does_not_establish
+
+    prove_dynamic_range_accept_boundary
 
     print_summary
 }
