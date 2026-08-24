@@ -4523,7 +4523,10 @@ fn plain_group_staging_keeps_best_changed_exactly() {
 
 fn with_otc_attr(mut route: Route) -> Route {
     let mut attrs = (*route.attributes).clone();
-    attrs.push(PathAttribute::OnlyToCustomer(64_496));
+    attrs.push(PathAttribute::OnlyToCustomer {
+        asn: 64_496,
+        partial: false,
+    });
     route.attributes = Arc::new(attrs);
     route
 }
@@ -4640,7 +4643,7 @@ fn pcb_otc_blocked_winner_stays_staged_and_residue_recorded() {
         staged
             .attributes
             .iter()
-            .any(|attr| matches!(attr, PathAttribute::OnlyToCustomer(_))),
+            .any(|attr| matches!(attr, PathAttribute::OnlyToCustomer { .. })),
         "the staged form keeps the OTC attribute"
     );
     assert_eq!(lane_source(&m, p), Some(OTHER2));

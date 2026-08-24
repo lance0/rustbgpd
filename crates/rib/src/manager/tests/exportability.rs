@@ -590,8 +590,10 @@ fn post_otc_withdrawal_only_skips_exact_probe_and_keeps_snapshot() {
         .peer_local_roles
         .insert(peer, Some(rustbgpd_wire::BgpRole::Customer));
     let mut otc_blocked = route.clone();
-    Arc::make_mut(&mut otc_blocked.attributes)
-        .push(rustbgpd_wire::PathAttribute::OnlyToCustomer(64_512));
+    Arc::make_mut(&mut otc_blocked.attributes).push(rustbgpd_wire::PathAttribute::OnlyToCustomer {
+        asn: 64_512,
+        partial: false,
+    });
     manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
     let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
     assert!(commit_shared_unicast_with_precommit(

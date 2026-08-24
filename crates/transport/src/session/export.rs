@@ -445,7 +445,10 @@ impl SessionExportProfile {
             )
             && !has_otc(&attrs)
         {
-            attrs.push(PathAttribute::OnlyToCustomer(self.local_asn));
+            attrs.push(PathAttribute::OnlyToCustomer {
+                asn: self.local_asn,
+                partial: false,
+            });
         }
         if matches!(route.prefix, Prefix::V4(_))
             && !attrs
@@ -2130,13 +2133,11 @@ impl PeerSession {
 }
 
 pub(super) fn has_otc(attrs: &[PathAttribute]) -> bool {
-    attrs.iter().any(|attr| match attr {
-        PathAttribute::OnlyToCustomer(_) => true,
-        PathAttribute::Unknown(raw) => {
-            raw.type_code == rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER
-        }
-        _ => false,
-    })
+    // Network ingress types every valid type-35 attribute and omits malformed
+    // ones under revised handling. Synthetic Unknown(type 35) is not OTC.
+    attrs
+        .iter()
+        .any(|attr| matches!(attr, PathAttribute::OnlyToCustomer { .. }))
 }
 
 /// Remove private ASNs from an `AS_PATH` according to the configured mode.

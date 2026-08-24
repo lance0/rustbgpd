@@ -5,6 +5,13 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- **Breaking path-attribute API and corrected error classification:** Changed
+  `PathAttribute::OnlyToCustomer(u32)` to
+  `PathAttribute::OnlyToCustomer { asn, partial }`. Valid RFC 9234 OTC now
+  remains typed when Partial is set. Extended Length and reserved low flag
+  bits are accepted and canonically emitted; malformed flags or lengths are
+  legacy UPDATE attribute errors and revised RFC 7606 treat-as-withdraw
+  records instead of opaque attributes.
 - **Optional Tokio framing:** Added the default-off `tokio-codec` feature and
   the `BgpCodec` / `BgpCodecError` API. The adapter keeps separate inbound and
   outbound RFC 8654 ceilings, preserves incomplete input, isolates malformed

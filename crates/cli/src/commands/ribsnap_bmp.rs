@@ -966,8 +966,10 @@ fn convert_attribute<'a>(
             attr_type::CLUSTER_LIST,
             clusters.iter().flat_map(|c| c.octets()).collect(),
         )),
-        PathAttribute::OnlyToCustomer(asn) => base.unknown_attrs.push((
-            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+        PathAttribute::OnlyToCustomer { asn, partial } => base.unknown_attrs.push((
+            attr_flags::OPTIONAL
+                | attr_flags::TRANSITIVE
+                | if *partial { attr_flags::PARTIAL } else { 0 },
             attr_type::ONLY_TO_CUSTOMER,
             asn.to_be_bytes().to_vec(),
         )),

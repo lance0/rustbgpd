@@ -454,6 +454,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Malformed Only-to-Customer (OTC) framing is now handled before BGP Role
+  logic: revised decoding omits it and treats reachable NLRI as withdrawn, or
+  resets the session per RFC 7606 section 5.2 when none is reachable. Valid
+  Partial-bearing OTC remains typed and propagates normally. (LAN-1284)
 - `MrtDumpStale` in the shipped alert pack no longer fires on instances
   without `[mrt]` configured: the `mrt_*` gauges are exported as 0 on every
   instance, so the unguarded rule anchored dump age on process start with a

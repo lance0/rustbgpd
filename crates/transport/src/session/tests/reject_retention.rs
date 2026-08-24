@@ -475,7 +475,10 @@ async fn reject_retention_records_otc_ingress_drop_with_detail() {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
             }),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-            PathAttribute::OnlyToCustomer(65002),
+            PathAttribute::OnlyToCustomer {
+                asn: 65002,
+                partial: false,
+            },
         ],
         true,
         false,

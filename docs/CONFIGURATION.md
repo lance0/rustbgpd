@@ -1904,8 +1904,10 @@ Mismatch (NOTIFICATION 2/11).
 OTC handling is scoped to unicast. FlowSpec and EVPN route attributes are not
 modified by the v1 implementation. Existing OTC attributes are preserved;
 rustbgpd only adds OTC when RFC 9234 requires it and the attribute is absent.
-Malformed OTC length is handled as treat-as-withdraw for unicast announcements:
-withdrawals in the same UPDATE still apply and the BGP session stays up.
+Malformed OTC with reachable unicast announcements is handled as
+treat-as-withdraw: carried routes are removed, withdrawals in the same UPDATE
+still apply, and the BGP session stays up. With no reachable NLRI, RFC 7606
+§5.2 requires a session reset rather than a vacuous treat-as-withdraw.
 `rbgp neighbor <addr>` and `NeighborService.GetNeighborState` report the
 configured local role, any remote role advertised in OPEN, whether the role was
 mutually negotiated, and the running `otc_routes_blocked` count.
