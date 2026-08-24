@@ -28,9 +28,9 @@ fn malformed_disposition_label(disposition: ErrorDisposition) -> MalformedUpdate
     }
 }
 /// Increment `bgp_policy_routes_total{peer, policy, direction=import,
-/// action}` for one import-side chain evaluation. Policy falls back to
-/// `"inline"` for anonymous / inline policies; cardinality stays
-/// bounded by config.
+/// action}` for one import-side chain evaluation. Policy uses the configured
+/// denying member, the shared nonempty-chain Permit label, or `"inline"` for
+/// an anonymous denial or empty chain; cardinality stays bounded by config.
 fn record_import_policy_eval(
     metrics: &rustbgpd_telemetry::BgpMetrics,
     peer_label: &str,

@@ -231,7 +231,7 @@ impl RibManager {
 
     /// Reconstruct a joining member's export counters from the group's
     /// staged residue: one permit per `adv(m)` slot (labelled by its
-    /// retained terminal policy — the lane entry's where the member
+    /// retained decision attribution — the lane entry's where the member
     /// sourced the winner of a per-client-best prefix), one deny per
     /// persistent denial — own-sourced excluded on the denial side and
     /// substituted-or-excluded on the permit side, exactly what the
@@ -265,7 +265,7 @@ impl RibManager {
             // slot; the LANE entry's label where the member sourced
             // the winner — the runner-up's permit WAS evaluated
             // (Decision 2's over-replay posture), and its retained
-            // terminal label is exactly what the walk recorded.
+            // decision-attribution label is exactly what the walk recorded.
             // Nothing for an own-sourced slot with no substitution.
             for route in group.table.iter() {
                 if !in_family(&route.prefix) {

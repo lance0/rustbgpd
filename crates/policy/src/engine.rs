@@ -1230,8 +1230,7 @@ impl std::ops::Deref for NamedPolicy {
     }
 }
 
-/// Per-route policy evaluation outcome with attribution to the
-/// terminal-decision policy. Produced by
+/// Per-route policy evaluation outcome with stable decision attribution. Produced by
 /// [`PolicyChain::evaluate_with_attribution`] alongside the existing
 /// [`PolicyResult`] so the rich path doesn't churn the many sites that
 /// match on `PolicyResult` directly.
@@ -1239,7 +1238,7 @@ impl std::ops::Deref for NamedPolicy {
 /// `matched_policy` identifies the source of the chain decision:
 /// - For a Deny: the policy that issued the Deny (chain stops there).
 /// - For a Permit after a nonempty chain: [`CHAIN_DEFAULT_PERMIT_ATTRIBUTION`],
-///   because every member permitted and no member made a terminal decision.
+///   because every member permitted and no member rejected the route.
 /// - For an empty or absent chain: `None` (operator label `"inline"`).
 /// - For a Deny from an inline / anonymous member: `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1654,10 +1653,11 @@ impl PolicyChain {
     /// that need to label "which policy made this decision."
     ///
     /// Returns the same `PolicyResult` as [`evaluate`](Self::evaluate)
-    /// plus a `PolicyEvaluation` carrying the terminal-decision
-    /// policy's name (`None` for inline / anonymous, or for an empty
-    /// chain). The action on the `PolicyEvaluation` matches the
-    /// `PolicyResult.action`.
+    /// plus a `PolicyEvaluation` carrying the configured denying member,
+    /// [`CHAIN_DEFAULT_PERMIT_ATTRIBUTION`] for a nonempty chain that
+    /// completed without rejection, or `None` for an inline / anonymous
+    /// denial or an empty chain. The action on the `PolicyEvaluation`
+    /// matches the `PolicyResult.action`.
     #[must_use]
     pub fn evaluate_with_attribution(
         &self,

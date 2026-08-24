@@ -1620,7 +1620,7 @@
       "id": 25,
       "type": "timeseries",
       "title": "Policy decisions by direction/action",
-      "description": "bgp_policy_routes_total: routes evaluated through a policy chain, attributed to the terminal-decision policy.",
+      "description": "bgp_policy_routes_total: routes evaluated through a policy chain, attributed to the configured denying policy, chain_default_permit for a nonempty Permit, or inline for an empty chain or anonymous denial.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1670,7 +1670,7 @@
       "id": 26,
       "type": "timeseries",
       "title": "Top policies by evaluated routes",
-      "description": "topk(10) over bgp_policy_routes_total by terminal policy name (\"inline\" = anonymous chain).",
+      "description": "topk(10) over bgp_policy_routes_total by decision attribution (configured denying policy, chain_default_permit for a nonempty Permit, or inline for an empty chain or anonymous denial).",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

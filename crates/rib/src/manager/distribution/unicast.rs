@@ -864,7 +864,7 @@ impl RibManager {
             med: best.med_attr(),
         };
         // Explain is a one-shot operator query path: enrich the deny /
-        // permit reason with the terminal-decision policy name but do
+        // permit reason with stable decision attribution but do
         // NOT increment bgp_policy_routes_total or the ADR-0096
         // per-term hit counters here — the actual distribution path
         // counts each route once, and double-counting explain calls

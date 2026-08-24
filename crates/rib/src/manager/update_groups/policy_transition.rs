@@ -530,7 +530,7 @@ impl RibManager {
                 announce.push(route.clone());
             }
             // Counter fold: one permit per staged entry, labelled by its
-            // retained terminal policy; per-source rows feed the
+            // retained decision attribution; per-source rows feed the
             // Decision 4 `totals − own + lane` synthesis below.
             let label = destination.permit_policy_label.clone();
             counters.record_permit(route.peer, label);

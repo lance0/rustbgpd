@@ -279,7 +279,7 @@ impl RibManager {
                     false,
                 );
                 // Single-best stages at most one evaluation per prefix;
-                // its terminal-policy label tags the staged entry (or
+                // its decision-attribution label tags the staged entry (or
                 // the denial residue) for join-time counter replay.
                 let label = out.evals.take_last().and_then(|(label, _, _)| label);
                 for (route, nh) in result

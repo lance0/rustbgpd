@@ -590,8 +590,8 @@ impl CompiledChain {
         self.evaluate_attributed::<false, false>(ctx, None).0
     }
 
-    /// Evaluate a route against this chain with attribution to the
-    /// terminal-decision policy — the IR backend of
+    /// Evaluate a route against this chain with stable decision attribution — the
+    /// IR backend of
     /// `PolicyChain::evaluate_with_attribution`, with identical
     /// semantics and results.
     #[must_use]
@@ -604,7 +604,8 @@ impl CompiledChain {
 
     /// Evaluate with live hit counting but without attribution — the
     /// non-attributed hot path (`PolicyChain::evaluate`). Skips the
-    /// terminal policy-name clone that attribution pays per call.
+    /// configured denial-name or shared Permit-label clone that attribution
+    /// pays per call.
     #[must_use]
     pub fn evaluate_counting(
         &self,

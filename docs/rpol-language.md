@@ -1477,21 +1477,28 @@ surfaces (ADR-0073 / ADR-0096 Decision 3.3):
   $ rbgp policy explain --neighbor 10.0.0.2 --prefix 10.10.1.0/24
   import policy explain — peer 10.0.0.2 prefix 10.10.1.0/24 (policy generation 3)
     permit
-      policy:  customer-in(200)
+      decision: no policy rejected; chain default permit
       statements:
         [0] policy customer-in(200) term customer-routes permit  match: guard route.prefix in customers  set: local_pref 100 -> 200
           term rpki-guard: route.rpki == invalid => reject [not matched]
           term customer-routes: route.prefix in customers => set local-pref 200; accept [matched]
   ```
 
+  The statement trace still names `customer-in(200)` because it records the
+  members consulted. The Permit decision attribution is
+  `chain_default_permit`: no member rejected the route.
+
   Guards render with sets shown by their source name; terms after the
   deciding one were never evaluated and carry no line. A term that
   modified without a verdict shows as `... => set med 5; continue`.
 - **`rbgp rib advertised --explain`** (`ExplainAdvertisedRoute`,
-  export): the policy attribution extends to `<chain-ref>:<term>` when
-  the deciding member is `.rpol` — e.g.
+  export): a Deny's policy attribution extends to `<chain-ref>:<term>` when
+  the rejecting member is `.rpol` — e.g.
   `export policy "customer-in(200):transit-guard" denied this route`.
-  TOML members render unchanged.
+  TOML members render unchanged. A Permit after a nonempty export chain uses
+  `chain_default_permit`; the modification list and live term counters retain
+  the proof of which terms ran without mislabelling the final member as the
+  source of the chain decision.
 
 ### Live per-term policy counters
 

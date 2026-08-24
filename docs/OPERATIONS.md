@@ -2021,7 +2021,7 @@ which statement inside the matched chain decided, per policy evaluated:
 
 ```
   permit
-    policy:  edge-import
+    decision: no policy rejected; chain default permit
     ...
     statements:
       [0] policy edge-import statement 1 permit  match: prefix 192.0.2.0/24  set: local_pref 100 -> 200
@@ -2030,6 +2030,8 @@ which statement inside the matched chain decided, per policy evaluated:
 One row per policy the chain consulted (a deny ends the trace at the
 denying policy — later policies were never evaluated). `default-action`
 rows mean no statement in that policy matched and its default decided.
+For a Permit, the decision attribution is `chain_default_permit`: the
+statement rows retain the member walk, but no member rejected the route.
 Matched conditions lead with stable labels (`prefix`, `community`,
 `as_path`, `neighbor_set`, `rpki`, `local_pref`, …; `any` for an
 unconditional statement) and attribute edits render as
