@@ -73,9 +73,9 @@ adds `Session::negotiated_shared` while preserving the existing
 ATOMIC_AGGREGATE (type 6) now decodes to `PathAttribute::AtomicAggregate`
 instead of `PathAttribute::Unknown`, so an UPDATE carrying that valid form is
 no longer treat-as-withdrawn by unrecognized-well-known validation. A non-zero-
-length type 6 remains an attribute-length error. See the "0.17.2 compatibility
-note" in the `rustbgpd-wire` README, since the FSM surfaces wire decode results
-to its callers.
+length type 6 is an attribute-length error in the current decoder. See the
+"0.17.2 compatibility note" in the `rustbgpd-wire` README, since the FSM
+surfaces wire decode results to its callers.
 
 ## Key types
 
