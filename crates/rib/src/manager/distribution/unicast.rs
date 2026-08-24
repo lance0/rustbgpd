@@ -5,10 +5,11 @@ use super::{
     AdjRibIn, AdjRibOut, Afi, Arc, BgpMetrics, ExplainAdvertisedRoute, ExplainDecision,
     ExplainReason, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib, NeighborPolicyStats,
     PolicyAction, PolicyChain, PolicyFilteredRouteKey, Prefix, RibCommandError, RibManager,
-    RouteContext, Safi, UnicastPrefixPeers, VrpTable, debug, evaluate_chain_with_attribution,
-    family_label, gauge_val, policy_label_with_term, prefix_family, record_export_policy_eval,
-    route_type, route_type_label, route_type_message, routes_equal, rr_suppression_reason,
-    should_suppress_ibgp_inner, unicast_route_family, validate_route_aspa, validate_route_rpki,
+    RouteContext, Safi, UnicastDistributionResult, UnicastPrefixPeers, VrpTable, debug,
+    evaluate_chain_with_attribution, family_label, gauge_val, policy_label_with_term,
+    prefix_family, record_export_policy_eval, route_type, route_type_label, route_type_message,
+    routes_equal, rr_suppression_reason, should_suppress_ibgp_inner, unicast_route_family,
+    validate_route_aspa, validate_route_rpki,
 };
 
 /// Gate code and message for an export-policy deny.
@@ -1448,10 +1449,7 @@ impl RibManager {
         metrics: &BgpMetrics,
         policy_stats: &mut NeighborPolicyStats,
         target_peer_label: &str,
-        announce: &mut Vec<crate::route::Route>,
-        withdraw: &mut Vec<(Prefix, u32)>,
-        nh_override_flags: &mut Vec<Option<rustbgpd_policy::NextHopAction>>,
-        policy_filtered: &mut Vec<PolicyFilteredRouteKey>,
+        out: &mut UnicastDistributionResult,
         force: bool,
     ) {
         use crate::best_path::{best_path_cmp, best_path_cmp_orr};
@@ -1464,7 +1462,7 @@ impl RibManager {
         if !sendable.is_some_and(|f| f.contains(&family)) {
             // Withdraw all previously advertised paths for this prefix
             for path_id in rib_out.path_ids_for_prefix(prefix) {
-                withdraw.push((*prefix, path_id));
+                out.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -1473,7 +1471,7 @@ impl RibManager {
         // path-ids — gate the whole prefix once, before collecting candidates.
         if orf_filter.is_some_and(|f| !f.permits(prefix)) {
             for path_id in rib_out.path_ids_for_prefix(prefix) {
-                withdraw.push((*prefix, path_id));
+                out.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -1563,7 +1561,7 @@ impl RibManager {
             let (result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
             record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
             if result.action != PolicyAction::Permit {
-                policy_filtered.push(PolicyFilteredRouteKey {
+                out.policy_filtered.push(PolicyFilteredRouteKey {
                     target_peer,
                     source_peer: candidate.peer,
                     prefix: *prefix,
@@ -1581,7 +1579,7 @@ impl RibManager {
                 // by policy, so surface it through the same policy-filtered
                 // accounting as the deny arm above (export explain already
                 // covers this seam; live observability must too).
-                policy_filtered.push(PolicyFilteredRouteKey {
+                out.policy_filtered.push(PolicyFilteredRouteKey {
                     target_peer,
                     source_peer: candidate.peer,
                     prefix: *prefix,
@@ -1610,8 +1608,8 @@ impl RibManager {
                     .get(prefix, modified.path_id)
                     .is_none_or(|existing| !routes_equal(existing, &modified));
             if changed {
-                nh_override_flags.push(nh_action);
-                announce.push(modified);
+                out.next_hop_override.push(nh_action);
+                out.announce.push(modified);
             }
 
             next_rank += 1;
@@ -1626,14 +1624,14 @@ impl RibManager {
             let staged_winner = next_rank > 1;
             for path_id in rib_out.path_ids_for_prefix(prefix) {
                 if path_id != 0 || !staged_winner {
-                    withdraw.push((*prefix, path_id));
+                    out.withdraw.push((*prefix, path_id));
                 }
             }
         } else {
             // Withdraw any previously advertised path_ids beyond the new set
             for path_id in rib_out.path_ids_for_prefix(prefix) {
                 if path_id >= next_rank {
-                    withdraw.push((*prefix, path_id));
+                    out.withdraw.push((*prefix, path_id));
                 }
             }
         }
@@ -1701,10 +1699,7 @@ impl RibManager {
         export_pol: Option<&PolicyChain>,
         memo: &mut super::ExportMemo,
         evals: &mut GroupEvalAccumulator,
-        announce: &mut Vec<crate::route::Route>,
-        withdraw: &mut Vec<(Prefix, u32)>,
-        nh_override_flags: &mut Vec<Option<rustbgpd_policy::NextHopAction>>,
-        policy_filtered: &mut Vec<(PolicyFilteredRouteKey, Option<PolicyLabel>)>,
+        out: &mut UnicastDistributionResult<(PolicyFilteredRouteKey, Option<PolicyLabel>)>,
         otc_blocked: &mut Vec<crate::route::Route>,
     ) -> PerClientBestPrefixStage {
         use crate::best_path::best_path_cmp;
@@ -1716,7 +1711,7 @@ impl RibManager {
         };
         if !sendable.is_some_and(|f| f.contains(&family)) {
             for path_id in rib_out.path_ids_for_prefix(prefix) {
-                withdraw.push((*prefix, path_id));
+                out.withdraw.push((*prefix, path_id));
             }
             return stage;
         }
@@ -1785,7 +1780,7 @@ impl RibManager {
                 path_id: candidate.path_id,
             };
             if result.action != PolicyAction::Permit {
-                policy_filtered.push((filtered_key, label));
+                out.policy_filtered.push((filtered_key, label));
                 continue;
             }
             let (mut modified, nh_action) = memo.apply(candidate, &result.modifications);
@@ -1793,7 +1788,7 @@ impl RibManager {
                 // Policy-added NO_ADVERTISE is a policy suppression —
                 // same accounting as the deny arm, matching the
                 // per-peer multipath body.
-                policy_filtered.push((filtered_key, label));
+                out.policy_filtered.push((filtered_key, label));
                 continue;
             }
             modified.path_id = 0;
@@ -1828,8 +1823,8 @@ impl RibManager {
                 .get(prefix, 0)
                 .is_none_or(|existing| !routes_equal(existing, &modified));
             if changed {
-                nh_override_flags.push(nh_action);
-                announce.push(modified);
+                out.next_hop_override.push(nh_action);
+                out.announce.push(modified);
             }
         }
 
@@ -1840,7 +1835,7 @@ impl RibManager {
         let staged_winner = winner_source.is_some();
         for path_id in rib_out.path_ids_for_prefix(prefix) {
             if path_id != 0 || !staged_winner {
-                withdraw.push((*prefix, path_id));
+                out.withdraw.push((*prefix, path_id));
             }
         }
         stage
@@ -1874,10 +1869,7 @@ impl RibManager {
         export_pol: Option<&PolicyChain>,
         orf_filter: Option<&crate::orf::OrfFilterSet>,
         memo: &mut super::ExportMemo,
-        announce: &mut Vec<crate::route::Route>,
-        withdraw: &mut Vec<(Prefix, u32)>,
-        nh_override_flags: &mut Vec<Option<rustbgpd_policy::NextHopAction>>,
-        policy_filtered: &mut Vec<PolicyFilteredRouteKey>,
+        result: &mut UnicastDistributionResult,
         force: bool,
     ) {
         use crate::update::ExportGateVerdict::{NotApplicable, Pass, Stop};
@@ -1889,7 +1881,7 @@ impl RibManager {
                 "no best route exists for this prefix".to_string()
             });
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         };
@@ -1917,7 +1909,7 @@ impl RibManager {
                     .to_string()
             });
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -1944,7 +1936,7 @@ impl RibManager {
                 trace.push("rr_reflection", code, Stop, detail.to_string());
             }
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -1959,7 +1951,7 @@ impl RibManager {
                 format!("peer cannot receive {} routes", family_label(family))
             });
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -1982,7 +1974,7 @@ impl RibManager {
                     .to_string()
             });
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -2010,7 +2002,7 @@ impl RibManager {
                         .to_string()
                 });
                 for &path_id in &existing_path_ids {
-                    withdraw.push((*prefix, path_id));
+                    result.withdraw.push((*prefix, path_id));
                 }
                 return;
             }
@@ -2033,7 +2025,7 @@ impl RibManager {
                     .to_string()
             });
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -2049,7 +2041,7 @@ impl RibManager {
                     .to_string()
             });
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -2075,7 +2067,7 @@ impl RibManager {
                     .to_string()
             });
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -2110,7 +2102,7 @@ impl RibManager {
             local_pref: best.local_pref_attr(),
             med: best.med_attr(),
         };
-        let (result, evaluation) = target.evaluate_export_chain(export_pol, &ctx);
+        let (policy_result, evaluation) = target.evaluate_export_chain(export_pol, &ctx);
         target.record_eval(&evaluation, best.peer);
         if let Some(trace) = target.trace() {
             // Enrich the deciding chain member with the rpol term name
@@ -2121,7 +2113,7 @@ impl RibManager {
                 policy_label_with_term(Some(chain), &ctx, evaluation.matched_policy.as_deref())
             });
         }
-        if result.action != PolicyAction::Permit {
+        if policy_result.action != PolicyAction::Permit {
             if let Some(trace) = target.trace() {
                 let label = trace.policy_label.clone().unwrap_or_default();
                 let (code, message) =
@@ -2133,14 +2125,14 @@ impl RibManager {
                     message,
                 );
             }
-            policy_filtered.push(PolicyFilteredRouteKey {
+            result.policy_filtered.push(PolicyFilteredRouteKey {
                 target_peer: target.policy_filtered_target(),
                 source_peer: best.peer,
                 prefix: *prefix,
                 path_id: best.path_id,
             });
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -2149,7 +2141,7 @@ impl RibManager {
             // denied route carries no modifications (mirrors the
             // per-client-best arm, which sets `explain.modifications`
             // after its own deny early-return).
-            trace.modifications = result.modifications.clone();
+            trace.modifications = policy_result.modifications.clone();
             match trace.policy_label.clone() {
                 Some(label) => trace.push(
                     "export_policy",
@@ -2171,7 +2163,7 @@ impl RibManager {
         // (route, peer) with the same source attribute set and equal
         // modifications; no-modification exports keep sharing the
         // source Arc as before.
-        let (mut modified, nh_action) = memo.apply(best, &result.modifications);
+        let (mut modified, nh_action) = memo.apply(best, &policy_result.modifications);
         modified.path_id = 0;
 
         // Export policy may add NO_ADVERTISE to an otherwise eligible
@@ -2191,14 +2183,14 @@ impl RibManager {
             // Policy-added NO_ADVERTISE is a policy suppression: surface it
             // through the same policy-filtered accounting as the deny arm
             // above, matching the multipath body.
-            policy_filtered.push(PolicyFilteredRouteKey {
+            result.policy_filtered.push(PolicyFilteredRouteKey {
                 target_peer: target.policy_filtered_target(),
                 source_peer: best.peer,
                 prefix: *prefix,
                 path_id: best.path_id,
             });
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -2231,7 +2223,7 @@ impl RibManager {
             });
             target.record_otc_blocked(modified);
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -2295,15 +2287,15 @@ impl RibManager {
             }
         }
         if changed {
-            nh_override_flags.push(nh_action);
-            announce.push(modified);
+            result.next_hop_override.push(nh_action);
+            result.announce.push(modified);
         }
 
         // Clean up any stale multi-path entries if this prefix was previously
         // advertised via Add-Path and is now single-best.
         for &path_id in &existing_path_ids {
             if path_id != 0 {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
         }
     }
@@ -2355,10 +2347,7 @@ impl RibManager {
         metrics: &BgpMetrics,
         policy_stats: &mut NeighborPolicyStats,
         target_peer_label: &str,
-        announce: &mut Vec<crate::route::Route>,
-        withdraw: &mut Vec<(Prefix, u32)>,
-        nh_override_flags: &mut Vec<Option<rustbgpd_policy::NextHopAction>>,
-        policy_filtered: &mut Vec<PolicyFilteredRouteKey>,
+        result: &mut UnicastDistributionResult,
         force: bool,
     ) {
         use crate::best_path::best_path_cmp_orr;
@@ -2369,7 +2358,7 @@ impl RibManager {
         let family = prefix_family(prefix);
         if !sendable.is_some_and(|f| f.contains(&family)) {
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -2378,7 +2367,7 @@ impl RibManager {
         // policy denial — see `distribute_single_best_prefix`.
         if orf_filter.is_some_and(|f| !f.permits(prefix)) {
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -2409,7 +2398,7 @@ impl RibManager {
             )
         }) else {
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         };
@@ -2426,7 +2415,7 @@ impl RibManager {
             llgr,
         ) {
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -2436,7 +2425,7 @@ impl RibManager {
         // runner-up merely because the selected best is NO_ADVERTISE.
         if super::no_advertise_export_suppressed(best.communities()) {
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -2445,7 +2434,7 @@ impl RibManager {
         if super::no_export_export_suppressed(best.communities(), target_is_ebgp, interpret_rfc1997)
         {
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -2477,17 +2466,17 @@ impl RibManager {
             local_pref: best.local_pref_attr(),
             med: best.med_attr(),
         };
-        let (result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
+        let (policy_result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
         record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
-        if result.action != PolicyAction::Permit {
-            policy_filtered.push(PolicyFilteredRouteKey {
+        if policy_result.action != PolicyAction::Permit {
+            result.policy_filtered.push(PolicyFilteredRouteKey {
                 target_peer,
                 source_peer: best.peer,
                 prefix: *prefix,
                 path_id: best.path_id,
             });
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -2499,21 +2488,21 @@ impl RibManager {
         // winner memo the doc comment above rejects — the key here is
         // (source attribute identity, modifications value), which is
         // independent of which candidate won.
-        let (mut modified, nh_action) = memo.apply(best, &result.modifications);
+        let (mut modified, nh_action) = memo.apply(best, &policy_result.modifications);
         modified.path_id = 0;
 
         if super::no_advertise_export_suppressed(modified.communities()) {
             // Policy-added NO_ADVERTISE is a policy suppression: record the
             // policy-filtered entry, matching the multipath and single-best
             // bodies.
-            policy_filtered.push(PolicyFilteredRouteKey {
+            result.policy_filtered.push(PolicyFilteredRouteKey {
                 target_peer,
                 source_peer: best.peer,
                 prefix: *prefix,
                 path_id: best.path_id,
             });
             for &path_id in &existing_path_ids {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
             return;
         }
@@ -2524,15 +2513,15 @@ impl RibManager {
                 .get(prefix, 0)
                 .is_none_or(|existing| !routes_equal(existing, &modified));
         if changed {
-            nh_override_flags.push(nh_action);
-            announce.push(modified);
+            result.next_hop_override.push(nh_action);
+            result.announce.push(modified);
         }
 
         // Clean up any stale multi-path entries if this prefix was
         // previously advertised via Add-Path and is now single-best.
         for &path_id in &existing_path_ids {
             if path_id != 0 {
-                withdraw.push((*prefix, path_id));
+                result.withdraw.push((*prefix, path_id));
             }
         }
     }

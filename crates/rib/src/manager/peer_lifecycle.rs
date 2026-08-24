@@ -1131,9 +1131,7 @@ impl RibManager {
         reason = "initial dump stages every family queue before one Adj-RIB-Out commit"
     )]
     pub(super) fn send_initial_table(&mut self, peer: IpAddr) {
-        let mut announce = Vec::new();
-        let mut withdraw = Vec::new();
-        let mut nh_override_flags: Vec<Option<rustbgpd_policy::NextHopAction>> = Vec::new();
+        let mut unicast = super::distribution::UnicastDistributionResult::default();
         let mut fs_announce = Vec::new();
         let mut fs_withdraw = Vec::new();
         let mut evpn_announce = Vec::new();
@@ -1255,14 +1253,14 @@ impl RibManager {
                 ) {
                     continue;
                 }
-                nh_override_flags.push(entry.nh.cloned());
+                unicast.next_hop_override.push(entry.nh.cloned());
                 let mut route = entry.route.clone();
                 super::distribution::rs_control::rs_control_route_rewrite(
                     &mut route,
                     source_large_communities,
                     rs_control,
                 );
-                announce.push(route);
+                unicast.announce.push(route);
             }
             // VPN join replay: table minus own-sourced, filtered by the
             // joining member's Φ (the RFC 4684 gate the per-peer dump
@@ -1324,7 +1322,6 @@ impl RibManager {
                 0
             };
             if prefix_send_max > 0 {
-                let mut policy_filtered = Vec::new();
                 Self::distribute_multipath_prefix(
                     &self.ribs,
                     &self.unicast_prefix_peers,
@@ -1352,13 +1349,10 @@ impl RibManager {
                     &metrics,
                     policy_stats,
                     &target_peer_label,
-                    &mut announce,
-                    &mut withdraw,
-                    &mut nh_override_flags,
-                    &mut policy_filtered,
+                    &mut unicast,
                     false, // initial dump — equality check is correct
                 );
-                current_policy_filtered_routes.extend(policy_filtered);
+                current_policy_filtered_routes.extend(std::mem::take(&mut unicast.policy_filtered));
             } else if per_client_best {
                 // RFC 7947 §2.3.2 per-client best-path: the first
                 // export-policy-permitted candidate from the per-target
@@ -1370,7 +1364,6 @@ impl RibManager {
                 // requires an eBGP route-server client
                 // (validation-enforced).
                 debug_assert!(orr_ctx.is_none(), "ORR vantage on a per-client-best peer");
-                let mut policy_filtered = Vec::new();
                 Self::distribute_multipath_prefix(
                     &self.ribs,
                     &self.unicast_prefix_peers,
@@ -1398,16 +1391,12 @@ impl RibManager {
                     &metrics,
                     policy_stats,
                     &target_peer_label,
-                    &mut announce,
-                    &mut withdraw,
-                    &mut nh_override_flags,
-                    &mut policy_filtered,
+                    &mut unicast,
                     false, // initial dump — equality check is correct
                 );
-                current_policy_filtered_routes.extend(policy_filtered);
+                current_policy_filtered_routes.extend(std::mem::take(&mut unicast.policy_filtered));
             } else if let Some((orr_topology, orr_spf)) = orr_ctx {
                 // ORR peer with a resolved vantage: per-vantage best.
-                let mut policy_filtered = Vec::new();
                 Self::distribute_orr_best_prefix(
                     &self.ribs,
                     &self.unicast_prefix_peers,
@@ -1433,15 +1422,11 @@ impl RibManager {
                     &metrics,
                     policy_stats,
                     &target_peer_label,
-                    &mut announce,
-                    &mut withdraw,
-                    &mut nh_override_flags,
-                    &mut policy_filtered,
+                    &mut unicast,
                     false, // initial dump — equality check is correct
                 );
-                current_policy_filtered_routes.extend(policy_filtered);
+                current_policy_filtered_routes.extend(std::mem::take(&mut unicast.policy_filtered));
             } else {
-                let mut policy_filtered = Vec::new();
                 let mut target = super::distribution::ExportTarget::Peer {
                     peer,
                     peer_asn: target_peer_asn,
@@ -1468,13 +1453,10 @@ impl RibManager {
                     // has no installed filter during the initial dump.
                     None,
                     &mut export_memo,
-                    &mut announce,
-                    &mut withdraw,
-                    &mut nh_override_flags,
-                    &mut policy_filtered,
+                    &mut unicast,
                     false, // initial dump — equality check is correct
                 );
-                current_policy_filtered_routes.extend(policy_filtered);
+                current_policy_filtered_routes.extend(std::mem::take(&mut unicast.policy_filtered));
             }
         }
 
@@ -1758,8 +1740,8 @@ impl RibManager {
             self.reconcile_peer_otc_blocked(peer, &otc_prefixes, grouped_otc_blocked);
         }
 
-        let has_outbound_diff = !announce.is_empty()
-            || !withdraw.is_empty()
+        let has_outbound_diff = !unicast.announce.is_empty()
+            || !unicast.withdraw.is_empty()
             || !fs_announce.is_empty()
             || !fs_withdraw.is_empty()
             || !evpn_announce.is_empty()
@@ -1777,9 +1759,9 @@ impl RibManager {
             || self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                 peer,
                 OutboundCommitBatch {
-                    next_hop_override: nh_override_flags.into(),
-                    announce: announce.into(),
-                    withdraw,
+                    next_hop_override: unicast.next_hop_override.into(),
+                    announce: unicast.announce.into(),
+                    withdraw: unicast.withdraw,
                     flowspec_announce: fs_announce,
                     flowspec_withdraw: fs_withdraw,
                     evpn_announce,

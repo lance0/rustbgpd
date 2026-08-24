@@ -1,8 +1,8 @@
 use super::{
-    GroupDelta, GroupRibOut, GroupStageOutput, HashMap, HashSet, IpAddr, LaneDelta, NextHopAction,
-    PolicyAction, PolicyChain, PolicyFilteredRouteKey, PolicyLabel, Prefix, RibManager, Route,
-    RunnerUp, VpnDenialRecord, VpnGroupDelta, VpnGroupStageOutput, VpnRibRoute, VpnRibRouteKey,
-    VpnRouteKey, capture_source_attrs, routes_equal, source_control_input,
+    GroupDelta, GroupRibOut, GroupStageOutput, HashMap, HashSet, IpAddr, LaneDelta, PolicyAction,
+    PolicyChain, PolicyFilteredRouteKey, PolicyLabel, Prefix, RibManager, RunnerUp,
+    VpnDenialRecord, VpnGroupDelta, VpnGroupStageOutput, VpnRibRoute, VpnRibRouteKey, VpnRouteKey,
+    capture_source_attrs, routes_equal, source_control_input,
 };
 
 impl RibManager {
@@ -90,18 +90,19 @@ impl RibManager {
         let mut out = GroupStageOutput::default();
         let mut labeled_filtered: Vec<(PolicyFilteredRouteKey, Option<PolicyLabel>)> = Vec::new();
         let mut lane_updates: Vec<(Prefix, Option<RunnerUp>)> = Vec::new();
+        let mut result = crate::manager::distribution::UnicastDistributionResult::default();
+        let mut per_client_best_result =
+            crate::manager::distribution::UnicastDistributionResult::default();
+        let per_client_best;
         {
             let Some(group) = self.group_ribs.get(&gid) else {
                 return out;
             };
+            per_client_best = group.per_client_best;
             // `share()`, not `clone()`: evaluations through the group
             // handle must land in the installed chain's ADR-0096 term
             // hit counters, exactly like the per-peer path's handle.
             let chain = group.export_chain.as_ref().map(PolicyChain::share);
-            let mut announce: Vec<Route> = Vec::new();
-            let mut withdraw: Vec<(Prefix, u32)> = Vec::new();
-            let mut nh_flags: Vec<Option<NextHopAction>> = Vec::new();
-            let mut filtered: Vec<PolicyFilteredRouteKey> = Vec::new();
             for prefix in prefixes {
                 let old_source = group.table.get(prefix, 0).map(|r| r.peer);
                 if group.per_client_best {
@@ -124,17 +125,21 @@ impl RibManager {
                         chain.as_ref(),
                         memo,
                         &mut out.evals,
-                        &mut announce,
-                        &mut withdraw,
-                        &mut nh_flags,
-                        &mut labeled_filtered,
+                        &mut per_client_best_result,
                         &mut out.otc_blocked,
                     );
                     // The winner announce (at most one — the walk
                     // stages a single `path_id 0` winner), captured
                     // for the lane-transition supersession decision.
-                    let winner_announce = announce.first().map(|route| route.peer);
-                    for (route, nh) in announce.drain(..).zip(nh_flags.drain(..)) {
+                    let winner_announce = per_client_best_result
+                        .announce
+                        .first()
+                        .map(|route| route.peer);
+                    for (route, nh) in per_client_best_result
+                        .announce
+                        .drain(..)
+                        .zip(per_client_best_result.next_hop_override.drain(..))
+                    {
                         out.deltas.push(GroupDelta {
                             prefix: *prefix,
                             path_id: route.path_id,
@@ -145,7 +150,7 @@ impl RibManager {
                             lane: stage.runner_up.clone(),
                         });
                     }
-                    for (p, path_id) in withdraw.drain(..) {
+                    for (p, path_id) in per_client_best_result.withdraw.drain(..) {
                         out.deltas.push(GroupDelta {
                             prefix: p,
                             path_id,
@@ -270,17 +275,18 @@ impl RibManager {
                     chain.as_ref(),
                     None, // ORF disqualifies from grouping — never present here
                     memo,
-                    &mut announce,
-                    &mut withdraw,
-                    &mut nh_flags,
-                    &mut filtered,
+                    &mut result,
                     false,
                 );
                 // Single-best stages at most one evaluation per prefix;
                 // its terminal-policy label tags the staged entry (or
                 // the denial residue) for join-time counter replay.
                 let label = out.evals.take_last().and_then(|(label, _, _)| label);
-                for (route, nh) in announce.drain(..).zip(nh_flags.drain(..)) {
+                for (route, nh) in result
+                    .announce
+                    .drain(..)
+                    .zip(result.next_hop_override.drain(..))
+                {
                     out.deltas.push(GroupDelta {
                         prefix: *prefix,
                         path_id: route.path_id,
@@ -291,7 +297,7 @@ impl RibManager {
                         lane: None,
                     });
                 }
-                for (p, path_id) in withdraw.drain(..) {
+                for (p, path_id) in result.withdraw.drain(..) {
                     out.deltas.push(GroupDelta {
                         prefix: p,
                         path_id,
@@ -308,8 +314,16 @@ impl RibManager {
                 {
                     out.rs_transitions.push(transition);
                 }
-                labeled_filtered.extend(filtered.drain(..).map(|key| (key, label.clone())));
+                labeled_filtered.extend(
+                    result
+                        .policy_filtered
+                        .drain(..)
+                        .map(|key| (key, label.clone())),
+                );
             }
+        }
+        if per_client_best {
+            labeled_filtered = per_client_best_result.policy_filtered;
         }
         let group = self.staged_group_mut(gid);
         for delta in &out.deltas {

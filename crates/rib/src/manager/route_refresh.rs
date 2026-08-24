@@ -676,9 +676,7 @@ impl RibManager {
             .get(&peer)
             .and_then(|m| m.get(&family))
             .cloned();
-        let mut announce = Vec::new();
-        let mut withdraw = Vec::new();
-        let mut nh_override_flags: Vec<Option<rustbgpd_policy::NextHopAction>> = Vec::new();
+        let mut unicast = super::distribution::UnicastDistributionResult::default();
         let mut fs_announce = Vec::new();
         let mut fs_withdraw = Vec::new();
         let mut evpn_announce = Vec::new();
@@ -1054,14 +1052,14 @@ impl RibManager {
                     ) {
                         continue;
                     }
-                    nh_override_flags.push(entry.nh.cloned());
+                    unicast.next_hop_override.push(entry.nh.cloned());
                     let mut route = entry.route.clone();
                     super::distribution::rs_control::rs_control_route_rewrite(
                         &mut route,
                         source_large_communities,
                         rs_control,
                     );
-                    announce.push(route);
+                    unicast.announce.push(route);
                 }
                 current_policy_filtered_routes
                     .extend(group.policy_filtered_for_member(peer, &all_prefixes));
@@ -1086,7 +1084,6 @@ impl RibManager {
                     0
                 };
                 if prefix_send_max > 0 {
-                    let mut policy_filtered = Vec::new();
                     Self::distribute_multipath_prefix(
                         &self.ribs,
                         &self.unicast_prefix_peers,
@@ -1112,13 +1109,11 @@ impl RibManager {
                         &metrics,
                         policy_stats,
                         &target_peer_label,
-                        &mut announce,
-                        &mut withdraw,
-                        &mut nh_override_flags,
-                        &mut policy_filtered,
+                        &mut unicast,
                         false, // route refresh re-emits all anyway via empty refresh_view
                     );
-                    current_policy_filtered_routes.extend(policy_filtered);
+                    current_policy_filtered_routes
+                        .extend(std::mem::take(&mut unicast.policy_filtered));
                 } else if per_client_best {
                     // RFC 7947 §2.3.2 per-client best-path: the refresh
                     // replay re-derives the same filtered best the live
@@ -1126,7 +1121,6 @@ impl RibManager {
                     // `send_initial_table` arm for the mode-precedence
                     // notes (Add-Path outranks; ORR cannot coexist).
                     debug_assert!(orr_ctx.is_none(), "ORR vantage on a per-client-best peer");
-                    let mut policy_filtered = Vec::new();
                     Self::distribute_multipath_prefix(
                         &self.ribs,
                         &self.unicast_prefix_peers,
@@ -1152,16 +1146,13 @@ impl RibManager {
                         &metrics,
                         policy_stats,
                         &target_peer_label,
-                        &mut announce,
-                        &mut withdraw,
-                        &mut nh_override_flags,
-                        &mut policy_filtered,
+                        &mut unicast,
                         false, // route refresh re-emits all anyway via empty refresh_view
                     );
-                    current_policy_filtered_routes.extend(policy_filtered);
+                    current_policy_filtered_routes
+                        .extend(std::mem::take(&mut unicast.policy_filtered));
                 } else if let Some((orr_topology, orr_spf)) = orr_ctx {
                     // ORR peer with a resolved vantage: per-vantage best.
-                    let mut policy_filtered = Vec::new();
                     Self::distribute_orr_best_prefix(
                         &self.ribs,
                         &self.unicast_prefix_peers,
@@ -1185,15 +1176,12 @@ impl RibManager {
                         &metrics,
                         policy_stats,
                         &target_peer_label,
-                        &mut announce,
-                        &mut withdraw,
-                        &mut nh_override_flags,
-                        &mut policy_filtered,
+                        &mut unicast,
                         false,
                     );
-                    current_policy_filtered_routes.extend(policy_filtered);
+                    current_policy_filtered_routes
+                        .extend(std::mem::take(&mut unicast.policy_filtered));
                 } else {
-                    let mut policy_filtered = Vec::new();
                     let mut target = super::distribution::ExportTarget::Peer {
                         peer,
                         peer_asn: target_peer_asn,
@@ -1218,13 +1206,11 @@ impl RibManager {
                         export_pol.as_ref(),
                         orf_filter.as_ref(),
                         &mut export_memo,
-                        &mut announce,
-                        &mut withdraw,
-                        &mut nh_override_flags,
-                        &mut policy_filtered,
+                        &mut unicast,
                         false,
                     );
-                    current_policy_filtered_routes.extend(policy_filtered);
+                    current_policy_filtered_routes
+                        .extend(std::mem::take(&mut unicast.policy_filtered));
                 }
             }
             // The refresh view is intentionally empty so permitted routes are
@@ -1239,7 +1225,7 @@ impl RibManager {
                     .iter()
                     .filter(|r| prefix_family(&r.prefix) == family && !filter.permits(&r.prefix))
                 {
-                    withdraw.push((route.prefix, route.path_id));
+                    unicast.withdraw.push((route.prefix, route.path_id));
                 }
             }
         }
@@ -1297,9 +1283,9 @@ impl RibManager {
         if !self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
             peer,
             OutboundCommitBatch {
-                next_hop_override: nh_override_flags.into(),
-                announce: announce.into(),
-                withdraw,
+                next_hop_override: unicast.next_hop_override.into(),
+                announce: unicast.announce.into(),
+                withdraw: unicast.withdraw,
                 end_of_rib,
                 refresh_markers,
                 flowspec_announce: fs_announce,
