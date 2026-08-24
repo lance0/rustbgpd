@@ -74,24 +74,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
-      - name: Restore exact gobgp archive cache
-        uses: actions/cache@v6
-        with:
-          path: ${{ runner.temp }}/gobgp-cache/gobgp_3.37.0_linux_amd64.tar.gz
-          key: gobgp-v3.37.0-linux-amd64-e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522
-      - name: Prepare exact gobgp archive
-        run: |
-          .github/scripts/install-gobgp.sh \
-            --prepare-archive \
-            "$RUNNER_TEMP/gobgp-cache/gobgp_3.37.0_linux_amd64.tar.gz"
-      - name: Upload verified gobgp archive
-        uses: actions/upload-artifact@v7
-        with:
-          name: gobgp-v3.37.0-linux-amd64
-          path: ${{ runner.temp }}/gobgp-cache/gobgp_3.37.0_linux_amd64.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
+      - name: Restore, prepare, and upload exact gobgp archive
+        uses: ./.github/actions/prepare-gobgp-artifact
 
   # This archive feeds exactly one scenario, m43. Its host is a third party:
   # when it refuses to serve the pinned tarball (nic.cz returned 403 on all
@@ -165,17 +149,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
       - name: Prime rustbgpd:dev build cache
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: false
-          tags: rustbgpd:dev
-          target: dev
-          cache-from: type=gha,scope=rustbgpd-dev
-          cache-to: type=gha,scope=rustbgpd-dev,mode=max,ignore-error=true
+        uses: ./.github/actions/prime-rustbgpd-dev-cache
 
   m36:
     needs: [grpcurl_archive, prime_dev_image]

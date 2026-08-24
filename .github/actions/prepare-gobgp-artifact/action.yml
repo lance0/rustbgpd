@@ -1,0 +1,26 @@
+name: "Prepare exact GoBGP artifact"
+description: "Restore, verify, and upload the pinned GoBGP archive for heavy CI lanes."
+runs:
+  using: "composite"
+  steps:
+    - name: Restore exact gobgp archive cache
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/gobgp-cache/gobgp_3.37.0_linux_amd64.tar.gz
+        key: gobgp-v3.37.0-linux-amd64-e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522
+
+    - name: Prepare exact gobgp archive
+      shell: bash
+      run: |
+        .github/scripts/install-gobgp.sh \
+          --prepare-archive \
+          "$RUNNER_TEMP/gobgp-cache/gobgp_3.37.0_linux_amd64.tar.gz"
+
+    - name: Upload verified gobgp archive
+      uses: actions/upload-artifact@v7
+      with:
+        name: gobgp-v3.37.0-linux-amd64
+        path: ${{ runner.temp }}/gobgp-cache/gobgp_3.37.0_linux_amd64.tar.gz
+        if-no-files-found: error
+        retention-days: 1
+        compression-level: 0

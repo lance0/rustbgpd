@@ -123,7 +123,6 @@ BIRD3_CACHE_SEAMS = (
     "cache-from: type=gha,scope=bird3-tcpao",
     "cache-to: type=gha,mode=max,scope=bird3-tcpao,ignore-error=true",
 )
-
 TRIGGER_HASHES = {
     "ci.yml": "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8",
     "audit.yml": "1829597143324f5361dfdfece50ddeffd6f7d5934b72198f1837fbdf25339fd3",
@@ -146,19 +145,108 @@ PINS = collections.Counter(
         "dtolnay/rust-toolchain@v1 # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@v1 # 1.95": 2,
-        "docker/setup-buildx-action@v4": 45,
-        "docker/build-push-action@v7": 46,
-        "actions/cache@v6": 6,
-        "actions/upload-artifact@v7": 8,
+        "docker/setup-buildx-action@v4": 44,
+        "docker/build-push-action@v7": 45,
+        "actions/cache@v6": 5,
+        "actions/upload-artifact@v7": 7,
         "actions/download-artifact@v8": 6,
         "rustsec/audit-check@v2.0.0": 1,
         "EmbarkStudios/cargo-deny-action@v2": 1,
     }
 )
 
+GOBGP_PRODUCER_JOB_CONTRACT = (
+    "    needs: classify_changes",
+    "    if: needs.classify_changes.outputs.run_labs == 'true'",
+    "    name: Prepare exact gobgp archive",
+    "    runs-on: ubuntu-latest",
+    "    timeout-minutes: 10",
+    "    steps:",
+    "      - uses: actions/checkout@v7",
+    "        with:",
+    "          ref: ${{ github.sha }}",
+    "      - name: Restore, prepare, and upload exact gobgp archive",
+    "        uses: ./.github/actions/prepare-gobgp-artifact",
+)
+PRIME_DEV_IMAGE_JOB_CONTRACT = (
+    "    needs: classify_changes",
+    "    if: needs.classify_changes.outputs.run_labs == 'true'",
+    "    name: Prime rustbgpd:dev build cache",
+    "    runs-on: ubuntu-latest",
+    "    timeout-minutes: 30",
+    "    concurrency:",
+    "      group: rustbgpd-dev-image-${{ github.sha }}",
+    "      cancel-in-progress: false",
+    "    steps:",
+    "      - uses: actions/checkout@v7",
+    "        with:",
+    "          ref: ${{ github.sha }}",
+    "      - name: Prime rustbgpd:dev build cache",
+    "        uses: ./.github/actions/prime-rustbgpd-dev-cache",
+)
+PREPARE_GOBGP_ACTION_CONTRACT = (
+    'name: "Prepare exact GoBGP artifact"',
+    (
+        'description: "Restore, verify, and upload the pinned GoBGP archive '
+        'for heavy CI lanes."'
+    ),
+    "runs:",
+    '  using: "composite"',
+    "  steps:",
+    "    - name: Restore exact gobgp archive cache",
+    "      uses: actions/cache@v6",
+    "      with:",
+    f"        path: ${{{{ runner.temp }}}}/gobgp-cache/{GOBGP_ARCHIVE}",
+    f"        key: {GOBGP_CACHE_KEY}",
+    "    - name: Prepare exact gobgp archive",
+    "      shell: bash",
+    "      run: |",
+    "        .github/scripts/install-gobgp.sh \\",
+    "          --prepare-archive \\",
+    f'          "$RUNNER_TEMP/gobgp-cache/{GOBGP_ARCHIVE}"',
+    "    - name: Upload verified gobgp archive",
+    "      uses: actions/upload-artifact@v7",
+    "      with:",
+    f"        name: {GOBGP_ARTIFACT}",
+    f"        path: ${{{{ runner.temp }}}}/gobgp-cache/{GOBGP_ARCHIVE}",
+    "        if-no-files-found: error",
+    "        retention-days: 1",
+    "        compression-level: 0",
+)
+PRIME_DEV_IMAGE_ACTION_CONTRACT = (
+    'name: "Prime rustbgpd:dev build cache"',
+    (
+        'description: "Warm the fixed heavy-lane image cache without loading '
+        'a local image."'
+    ),
+    "runs:",
+    '  using: "composite"',
+    "  steps:",
+    "    - name: Set up Docker Buildx",
+    "      uses: docker/setup-buildx-action@v4",
+    "    - name: Prime rustbgpd:dev build cache",
+    "      uses: docker/build-push-action@v7",
+    "      with:",
+    "        context: .",
+    "        load: false",
+    "        tags: rustbgpd:dev",
+    "        target: dev",
+    "        cache-from: type=gha,scope=rustbgpd-dev",
+    "        cache-to: type=gha,scope=rustbgpd-dev,mode=max,ignore-error=true",
+)
+
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _canonical_yaml_contract(text: str) -> tuple[str, ...]:
+    """Return behavior-bearing YAML lines with exact order and indentation."""
+    return tuple(
+        line.rstrip()
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
 
 
 def _installer_executable(root: Path, installer: Path) -> bool:
@@ -518,47 +606,11 @@ def check(root: Path) -> list[str]:
             if gnmic_producer.count(exact_gnmic_path) != 2:
                 errors.append(f"{name}:gnmic_archive cache/artifact paths drifted")
         gobgp_producer = jobs.get("gobgp_archive", "")
-        for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
-            if not _has_line(gobgp_producer, f"    {seam}"):
-                errors.append(f"{name}:gobgp_archive missing job-level {seam}")
-        for seam in (
-            "name: Prepare exact gobgp archive",
-            "runs-on: ubuntu-latest",
-            "timeout-minutes: 10",
-            CHECKOUT,
-            "ref: ${{ github.sha }}",
-            "uses: actions/cache@v6",
-            f"path: ${{{{ runner.temp }}}}/gobgp-cache/{GOBGP_ARCHIVE}",
-            f"key: {GOBGP_CACHE_KEY}",
-            "--prepare-archive",
-            f'"$RUNNER_TEMP/gobgp-cache/{GOBGP_ARCHIVE}"',
-            "uses: actions/upload-artifact@v7",
-            f"name: {GOBGP_ARTIFACT}",
-            "if-no-files-found: error",
-            "retention-days: 1",
-            "compression-level: 0",
+        if (
+            _canonical_yaml_contract(gobgp_producer)
+            != GOBGP_PRODUCER_JOB_CONTRACT
         ):
-            if seam not in gobgp_producer:
-                errors.append(f"{name}:gobgp_archive missing {seam}")
-        for forbidden in (
-            "restore-keys:",
-            "continue-on-error:",
-            "actions/download-artifact@",
-            "--stage-archive",
-        ):
-            if forbidden in gobgp_producer:
-                errors.append(f"{name}:gobgp_archive permits {forbidden}")
-        if gobgp_producer.count("uses: actions/cache@v6") != 1:
-            errors.append(f"{name}:gobgp_archive must restore one exact cache")
-        if gobgp_producer.count("--prepare-archive") != 1:
-            errors.append(f"{name}:gobgp_archive must prepare one archive")
-        if gobgp_producer.count("uses: actions/upload-artifact@v7") != 1:
-            errors.append(f"{name}:gobgp_archive must upload one artifact")
-        exact_gobgp_path = (
-            f"path: ${{{{ runner.temp }}}}/gobgp-cache/{GOBGP_ARCHIVE}"
-        )
-        if gobgp_producer.count(exact_gobgp_path) != 2:
-            errors.append(f"{name}:gobgp_archive cache/artifact paths drifted")
+            errors.append(f"{name}:gobgp_archive exact job contract drifted")
         if setup:
             bird3_producer = jobs.get("bird3_archive", "")
             for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
@@ -603,28 +655,11 @@ def check(root: Path) -> list[str]:
             if bird3_producer.count(exact_bird3_path) != 2:
                 errors.append(f"{name}:bird3_archive cache/artifact paths drifted")
         primer = jobs.get("prime_dev_image", "")
-        for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
-            if not _has_line(primer, f"    {seam}"):
-                errors.append(f"{name}: primer missing job-level {seam}")
-        for seam in (
-            "timeout-minutes: 30",
-            PRIMER_GROUP,
-            "cancel-in-progress: false",
-            CHECKOUT,
-            "ref: ${{ github.sha }}",
-            BUILDX,
-            BUILD_PUSH,
-            "context: .",
-            "load: false",
-            "tags: rustbgpd:dev",
-            "target: dev",
-            IMPORT,
-            EXPORT,
+        if (
+            _canonical_yaml_contract(primer)
+            != PRIME_DEV_IMAGE_JOB_CONTRACT
         ):
-            if seam not in primer:
-                errors.append(f"{name}: primer missing {seam}")
-        if "load: true" in primer:
-            errors.append(f"{name}: primer must export cache, not load an image")
+            errors.append(f"{name}: primer exact job contract drifted")
         for job_name in roster:
             job = jobs.get(job_name, "")
             if not setup and job_name in ("m54", "m56"):
@@ -830,6 +865,12 @@ def check(root: Path) -> list[str]:
     prepare_grpcurl_action = (
         root / ".github" / "actions" / "prepare-grpcurl-artifact" / "action.yml"
     ).read_text()
+    prepare_gobgp_action = (
+        root / ".github" / "actions" / "prepare-gobgp-artifact" / "action.yml"
+    ).read_text()
+    prime_dev_image_action = (
+        root / ".github" / "actions" / "prime-rustbgpd-dev-cache" / "action.yml"
+    ).read_text()
     gnmic_action = (
         root / ".github" / "actions" / "install-gnmic-artifact" / "action.yml"
     ).read_text()
@@ -883,6 +924,16 @@ def check(root: Path) -> list[str]:
             errors.append(f"prepare-grpcurl-artifact permits {forbidden}")
     if re.search(r"(?m)^\s*curl\s", prepare_grpcurl_action):
         errors.append("prepare-grpcurl-artifact permits curl")
+    if (
+        _canonical_yaml_contract(prepare_gobgp_action)
+        != PREPARE_GOBGP_ACTION_CONTRACT
+    ):
+        errors.append("prepare-gobgp-artifact exact action contract drifted")
+    if (
+        _canonical_yaml_contract(prime_dev_image_action)
+        != PRIME_DEV_IMAGE_ACTION_CONTRACT
+    ):
+        errors.append("prime-rustbgpd-dev-cache exact action contract drifted")
     for seam in (
         "uses: actions/download-artifact@v8",
         f"name: {GRPCURL_ARTIFACT}",
@@ -1043,7 +1094,12 @@ def check(root: Path) -> list[str]:
     if texts["kernel-dataplane.yml"].count(GOBGP_ACTION) != 3:
         errors.append("kernel-dataplane.yml: gobgp stage consumer inventory drifted")
     gobgp_surfaces = "\n".join(
-        (texts["interop.yml"], texts["kernel-dataplane.yml"], gobgp_action)
+        (
+            texts["interop.yml"],
+            texts["kernel-dataplane.yml"],
+            prepare_gobgp_action,
+            gobgp_action,
+        )
     )
     if "osrg/gobgp/releases" in gobgp_surfaces:
         errors.append("gobgp release URL escaped the installer/Dockerfile")
@@ -1062,6 +1118,8 @@ def check(root: Path) -> list[str]:
         *texts.values(),
         action,
         prepare_grpcurl_action,
+        prepare_gobgp_action,
+        prime_dev_image_action,
         grpcurl_action,
         gnmic_action,
         gobgp_action,
