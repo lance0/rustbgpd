@@ -1,10 +1,8 @@
-# The main CI lane ignores `**/*.md`, so a doc-only pull request — exactly
-# the change that reintroduces an unresolvable tracker citation — would skip
-# the gate entirely. This lane runs unfiltered: the release-checklist path
-# gate cross-references source paths from the doc surface, so a pure source
-# rename — exactly the drift that silenced four EVPN interop triggers — must
-# fire it too, and every step here is a seconds-cheap python check.
-name: Public docs contract
+# The main CI lane ignores `**/*.md`, so these seconds-cheap Python contracts
+# run unfiltered. The public lane must see pure source renames because release
+# documentation cross-references source paths; the embedding lane is cheap
+# enough to share that stronger trigger instead of recreating path filters.
+name: Documentation contracts
 
 on:
   push:
@@ -15,23 +13,46 @@ permissions:
   contents: read
 
 jobs:
-  public-docs-contract:
+  contract:
+    name: ${{ matrix.job_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - contract: public
+            job_name: public-docs-contract
+          - contract: embedding
+            job_name: embedding-doc-contract
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Check published crate boundary
+        if: matrix.contract == 'embedding'
+        run: |
+          python3 -m unittest -v scripts/test_check_embedding_versions.py
+          python3 scripts/check_embedding_versions.py
+      - name: Check embedding crate map
+        if: matrix.contract == 'embedding'
+        run: |
+          python3 -m unittest -v scripts/test_check_embedding_crate_map.py
+          python3 scripts/check_embedding_crate_map.py
       - name: Check emitted metrics have a shipped consumer
+        if: matrix.contract == 'public'
         run: |
           python3 -m unittest -v scripts/test_check_metric_consumers.py
           python3 scripts/check-metric-consumers.py
       - name: Check public documentation cites no private tracker IDs
+        if: matrix.contract == 'public'
         run: |
           python3 -m unittest -v scripts/test_check_public_tracker_ids.py
           python3 scripts/check_public_tracker_ids.py
       - name: Check IXP Manager docs against the pinned contract
+        if: matrix.contract == 'public'
         run: |
           python3 -m unittest -v scripts/test_check_ixp_manager_docs.py
           python3 scripts/check_ixp_manager_docs.py
       - name: Check release-checklist trigger paths exist
+        if: matrix.contract == 'public'
         run: |
           python3 -m unittest -v scripts/test_check_release_checklist_paths.py
           python3 scripts/check_release_checklist_paths.py
