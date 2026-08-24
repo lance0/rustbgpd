@@ -126,7 +126,7 @@ log "[test] VTEP-B receives VTEP-A's Type 3 IMET"
 imet_seen=0
 for _ in $(seq 1 15); do
     if docker exec "$VTEP_B" vtysh -c "show bgp l2vpn evpn route type multicast json" 2>/dev/null \
-        | grep -q "$VTEP_A_IP"; then
+        | grep "$VTEP_A_IP" >/dev/null; then
         imet_seen=1
         break
     fi
