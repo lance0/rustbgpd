@@ -239,7 +239,7 @@ log "Waiting for the BIRD session to reach Established..."
 bird_up=0
 for i in $(seq 1 45); do
     if docker exec "$BIRD" birdc show protocols edge 2>/dev/null \
-        | grep -q Established; then
+        | grep Established >/dev/null; then
         ok "rustbgpd <-> BIRD session established (attempt $i)"
         bird_up=1
         break
