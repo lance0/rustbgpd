@@ -51,7 +51,7 @@ start_rtr_server() {
 
     for i in $(seq 1 15); do
         if docker exec "$RTR_SERVER" sh -c 'cat /tmp/rtr-server-status.json 2>/dev/null' \
-            | grep -q '"listening": true'; then
+            | grep '"listening": true' >/dev/null; then
             ok "RTR v2 server is listening (attempt $i)"
             return 0
         fi
