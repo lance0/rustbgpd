@@ -10,8 +10,9 @@ pushing a version tag.
 The core `.github/workflows/ci.yml` and `.github/workflows/interop.yml`
 lanes run on qualifying pull requests and main-branch pushes. Both ignore
 Markdown-only changes, and interop also ignores the rest of `docs/`. The
-specialized lanes below have their own event and path filters, so confirm every
-lane applicable to the release diff actually ran before tagging.
+specialized lanes below have their own trigger semantics: some are unfiltered,
+while others are path-scoped. Confirm every lane applicable to the release
+diff actually ran before tagging.
 
 - [ ] `cargo fmt --check`
 - [ ] `python3 scripts/check-clippy-reasons.py`
@@ -44,10 +45,10 @@ lane applicable to the release diff actually ran before tagging.
       is green. It runs unfiltered on every pull request and main-branch push,
       covering metric consumers, public tracker-ID and artifact-home-path
       hygiene, pinned IXP Manager docs, and release-checklist source paths.
-- [ ] **Embedding docs contract** — when embedding docs, this checklist,
-      Cargo manifests, or the embedding checker surface changed,
-      `.github/workflows/embedding-doc-contract.yml` ran on the pull request
-      and is green; it is path-scoped on pull requests and main-branch pushes.
+- [ ] **Embedding docs contract** — the `embedding-doc-contract` matrix job in
+      `.github/workflows/public-docs-contract.yml` is green. Its two
+      seconds-cheap Python checks now run unfiltered beside the public-docs
+      contract on every pull request and main-branch push.
 - [ ] **Published-crate semver contract** — when `crates/wire/` or
       `crates/fsm/` changed, `.github/workflows/semver-checks.yml` is green for
       the pull request or a manual dispatch at the release commit. It is
