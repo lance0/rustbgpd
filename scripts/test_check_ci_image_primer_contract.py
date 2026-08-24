@@ -748,7 +748,7 @@ class PrimerContractTests(unittest.TestCase):
             with self.subTest(seam=old):
                 self.mutate(installer, old, new)
 
-    def test_shared_job_envelopes_reject_additive_permissions(self):
+    def test_shared_job_contracts_reject_additive_permissions(self):
         producer = (
             "  gobgp_archive:\n"
             "    needs: classify_changes\n"
@@ -782,6 +782,50 @@ class PrimerContractTests(unittest.TestCase):
                 )
                 with self.subTest(workflow=workflow, job=job):
                     self.mutate(relative, envelope, widened)
+
+    def test_shared_job_steps_reject_additive_behavior(self):
+        gobgp_call = (
+            "      - name: Restore, prepare, and upload exact gobgp archive\n"
+            "        uses: ./.github/actions/prepare-gobgp-artifact"
+        )
+        primer_call = (
+            "      - name: Prime rustbgpd:dev build cache\n"
+            "        uses: ./.github/actions/prime-rustbgpd-dev-cache"
+        )
+        for workflow in ("interop.yml", "kernel-dataplane.yml"):
+            relative = f".github/workflows/{workflow}"
+            cases = (
+                (
+                    "pre-gobgp helper change",
+                    gobgp_call,
+                    "      - name: Alter GoBGP helper\n"
+                    "        run: printf '\\nexit 0\\n' >> "
+                    ".github/scripts/install-gobgp.sh\n\n"
+                    + gobgp_call,
+                ),
+                (
+                    "pre-primer Dockerfile change",
+                    primer_call,
+                    "      - name: Alter Dockerfile before priming\n"
+                    "        run: printf '\\nRUN true\\n' >> Dockerfile\n\n"
+                    + primer_call,
+                ),
+            )
+            for seam, old, new in cases:
+                with self.subTest(workflow=workflow, seam=seam):
+                    self.mutate(relative, old, new)
+
+            for job, call in (
+                ("gobgp_archive", gobgp_call),
+                ("primer", primer_call),
+            ):
+                for field in (
+                    "        if: false",
+                    "        env:\n          CI_PROOF_MODE: altered",
+                    "        with:\n          mode: altered",
+                ):
+                    with self.subTest(workflow=workflow, job=job, field=field):
+                        self.mutate(relative, call, f"{call}\n{field}")
 
     def test_bird3_producer_and_stage_consumer_are_load_bearing(self):
         checksum = "d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190"

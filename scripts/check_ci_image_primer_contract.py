@@ -108,7 +108,6 @@ GNMIC_ACTION = "uses: ./.github/actions/install-gnmic-artifact"
 GOBGP_ARCHIVE = f"gobgp_{GOBGP_VERSION}_linux_amd64.tar.gz"
 GOBGP_ARTIFACT = f"gobgp-v{GOBGP_VERSION}-linux-amd64"
 GOBGP_CACHE_KEY = f"{GOBGP_ARTIFACT}-{GOBGP_CHECKSUMS['amd64']}"
-PREPARE_GOBGP_ACTION = "uses: ./.github/actions/prepare-gobgp-artifact"
 GOBGP_ACTION = "uses: ./.github/actions/stage-gobgp-artifact"
 GOBGP_BUILD = (
     "docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop"
@@ -124,8 +123,6 @@ BIRD3_CACHE_SEAMS = (
     "cache-from: type=gha,scope=bird3-tcpao",
     "cache-to: type=gha,mode=max,scope=bird3-tcpao,ignore-error=true",
 )
-PRIME_DEV_IMAGE_ACTION = "uses: ./.github/actions/prime-rustbgpd-dev-cache"
-
 TRIGGER_HASHES = {
     "ci.yml": "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8",
     "audit.yml": "1829597143324f5361dfdfece50ddeffd6f7d5934b72198f1837fbdf25339fd3",
@@ -158,15 +155,20 @@ PINS = collections.Counter(
     }
 )
 
-GOBGP_PRODUCER_JOB_ENVELOPE = (
+GOBGP_PRODUCER_JOB_CONTRACT = (
     "    needs: classify_changes",
     "    if: needs.classify_changes.outputs.run_labs == 'true'",
     "    name: Prepare exact gobgp archive",
     "    runs-on: ubuntu-latest",
     "    timeout-minutes: 10",
     "    steps:",
+    "      - uses: actions/checkout@v7",
+    "        with:",
+    "          ref: ${{ github.sha }}",
+    "      - name: Restore, prepare, and upload exact gobgp archive",
+    "        uses: ./.github/actions/prepare-gobgp-artifact",
 )
-PRIME_DEV_IMAGE_JOB_ENVELOPE = (
+PRIME_DEV_IMAGE_JOB_CONTRACT = (
     "    needs: classify_changes",
     "    if: needs.classify_changes.outputs.run_labs == 'true'",
     "    name: Prime rustbgpd:dev build cache",
@@ -176,6 +178,11 @@ PRIME_DEV_IMAGE_JOB_ENVELOPE = (
     "      group: rustbgpd-dev-image-${{ github.sha }}",
     "      cancel-in-progress: false",
     "    steps:",
+    "      - uses: actions/checkout@v7",
+    "        with:",
+    "          ref: ${{ github.sha }}",
+    "      - name: Prime rustbgpd:dev build cache",
+    "        uses: ./.github/actions/prime-rustbgpd-dev-cache",
 )
 PREPARE_GOBGP_ACTION_CONTRACT = (
     'name: "Prepare exact GoBGP artifact"',
@@ -240,22 +247,6 @@ def _canonical_yaml_contract(text: str) -> tuple[str, ...]:
         for line in text.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     )
-
-
-def _job_envelope_contract(block: str) -> tuple[str, ...]:
-    """Return every job-level setting while treating the steps sequence as opaque."""
-    envelope: list[str] = []
-    in_steps = False
-    for line in block.splitlines():
-        if line == "    steps:":
-            envelope.append(line)
-            in_steps = True
-        elif in_steps and re.match(r"^    \S", line):
-            in_steps = False
-            envelope.append(line)
-        elif not in_steps:
-            envelope.append(line)
-    return _canonical_yaml_contract("\n".join(envelope))
 
 
 def _installer_executable(root: Path, installer: Path) -> bool:
@@ -615,42 +606,11 @@ def check(root: Path) -> list[str]:
             if gnmic_producer.count(exact_gnmic_path) != 2:
                 errors.append(f"{name}:gnmic_archive cache/artifact paths drifted")
         gobgp_producer = jobs.get("gobgp_archive", "")
-        if _job_envelope_contract(gobgp_producer) != GOBGP_PRODUCER_JOB_ENVELOPE:
-            errors.append(f"{name}:gobgp_archive exact job envelope drifted")
-        for seam in (
-            CHECKOUT,
-            "ref: ${{ github.sha }}",
-            "name: Restore, prepare, and upload exact gobgp archive",
-            PREPARE_GOBGP_ACTION,
+        if (
+            _canonical_yaml_contract(gobgp_producer)
+            != GOBGP_PRODUCER_JOB_CONTRACT
         ):
-            if seam not in gobgp_producer:
-                errors.append(f"{name}:gobgp_archive missing {seam}")
-        for forbidden in (
-            "restore-keys:",
-            "continue-on-error:",
-            "actions/download-artifact@",
-            "actions/cache@",
-            "actions/upload-artifact@",
-            "--prepare-archive",
-            "--stage-archive",
-        ):
-            if forbidden in gobgp_producer:
-                errors.append(f"{name}:gobgp_archive permits {forbidden}")
-        producer_uses = re.findall(
-            r"(?m)^\s*(?:- )?uses:\s*(.+)$", gobgp_producer
-        )
-        if producer_uses != [
-            "actions/checkout@v7",
-            "./.github/actions/prepare-gobgp-artifact",
-        ]:
-            errors.append(f"{name}:gobgp_archive action inventory drifted")
-        if gobgp_producer.count(PREPARE_GOBGP_ACTION) != 1:
-            errors.append(
-                f"{name}:gobgp_archive must call one exact producer action"
-            )
-        producer_call_tail = gobgp_producer.split(PREPARE_GOBGP_ACTION, 1)[-1]
-        if "with:" in producer_call_tail:
-            errors.append(f"{name}:gobgp_archive producer call must have no inputs")
+            errors.append(f"{name}:gobgp_archive exact job contract drifted")
         if setup:
             bird3_producer = jobs.get("bird3_archive", "")
             for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
@@ -695,37 +655,11 @@ def check(root: Path) -> list[str]:
             if bird3_producer.count(exact_bird3_path) != 2:
                 errors.append(f"{name}:bird3_archive cache/artifact paths drifted")
         primer = jobs.get("prime_dev_image", "")
-        if _job_envelope_contract(primer) != PRIME_DEV_IMAGE_JOB_ENVELOPE:
-            errors.append(f"{name}: primer exact job envelope drifted")
-        for seam in (
-            CHECKOUT,
-            "ref: ${{ github.sha }}",
-            "name: Prime rustbgpd:dev build cache",
-            PRIME_DEV_IMAGE_ACTION,
+        if (
+            _canonical_yaml_contract(primer)
+            != PRIME_DEV_IMAGE_JOB_CONTRACT
         ):
-            if seam not in primer:
-                errors.append(f"{name}: primer missing {seam}")
-        primer_uses = re.findall(r"(?m)^\s*(?:- )?uses:\s*(.+)$", primer)
-        if primer_uses != [
-            "actions/checkout@v7",
-            "./.github/actions/prime-rustbgpd-dev-cache",
-        ]:
-            errors.append(f"{name}: primer action inventory drifted")
-        if primer.count(PRIME_DEV_IMAGE_ACTION) != 1:
-            errors.append(f"{name}: primer must call one exact image-primer action")
-        primer_call_tail = primer.split(PRIME_DEV_IMAGE_ACTION, 1)[-1]
-        if "with:" in primer_call_tail:
-            errors.append(f"{name}: image-primer call must have no inputs")
-        for forbidden in (
-            "continue-on-error:",
-            "docker/setup-buildx-action@",
-            "docker/build-push-action@",
-            "cache-from:",
-            "cache-to:",
-            "load:",
-        ):
-            if forbidden in primer:
-                errors.append(f"{name}: primer bypasses shared action with {forbidden}")
+            errors.append(f"{name}: primer exact job contract drifted")
         for job_name in roster:
             job = jobs.get(job_name, "")
             if not setup and job_name in ("m54", "m56"):
