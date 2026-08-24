@@ -1765,7 +1765,8 @@ mod tests {
             43
         );
 
-        let readme = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"));
+        let readme =
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md")).replace("\r\n", "\n");
         let features_marker = "## Features\n";
         let architecture_marker = "\n## Architecture\n";
         assert_eq!(readme.matches(features_marker).count(), 1);
