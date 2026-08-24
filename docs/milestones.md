@@ -749,11 +749,12 @@ for the architectural record.
 
 ### Later interop scenarios (M30b onward) and where they run
 
-Scenarios beyond the M29-M33 set above live in
-`tests/interop/scripts/`. The Status column names where each one runs:
-hosted `interop.yml` CI, hosted `kernel-dataplane` CI, or local-only —
-the last reserved for scenarios needing privileged kernel capabilities
-or wall time a hosted runner can't sustain:
+Scenarios beyond the M29-M33 set above are catalogued below. Most executable
+drivers live in `tests/interop/scripts/`; compatibility-contract oracles such
+as M98 live under `tests/compat/`. The Status column names where each one runs:
+hosted `interop.yml` or `kernel-dataplane.yml` CI, another named hosted lane,
+or local-only — the last reserved for scenarios needing privileged kernel
+capabilities or wall time a hosted runner can't sustain:
 
 | ID | Scope | Status |
 |----|-------|--------|
@@ -798,6 +799,9 @@ or wall time a hosted runner can't sustain:
 | **M92** | GoBGP 4.7.0 incumbent vs rustbgpd dual-stack route-server differential. Two sources feed five exact routes; independent BIRD views, per-PDU wire EoRs, and two canonical incumbent captures authorize one semantic diff. Baseline/restore match four routes; one target-policy mutant adds exactly one rustbgpd-only IPv6 row. A separate GR-disabled negative retains routes but withholds both GoBGP EoRs and refuses comparison. | Hosted CI (GitHub-hosted) in `.github/workflows/interop.yml`, baseline plus the `M92_COMPLETENESS_NEGATIVE` proof. Script: `test-m92-gobgp-v47-rs-differential.sh`; the load-bearing proof is recorded in the lab README. |
 | **M93** | Required-family OPEN enforcement against BIRD 2: exact missing-IPv6 OPEN 2/7 bytes, explicit dual-stack restart success, then cleared-requirement IPv4-only compatibility. | Hosted CI beside M85 (`m93-required-families-bird.clab.yml`, `test-m93-required-families-bird.sh`). |
 | **M94** | RFC 6793 legacy-AS migration. A digest-pinned real ExaBGP 5.0.9 OLD source sends type 2 `[65010, 23456]`, type 17 `[65010, 4200000194]`, type 7 `23456:10.94.0.2`, and type 18 `4200000294:10.94.0.2` through an independently decoding byte-transparent relay; both rustbgpd sessions negotiate without ASN4. The 13/13 receipt proves canonical ingress reconstruction, a second route's high local ASN triggers loop rejection after reconstruction, the exact accepted-route pairs reach an independent Python OLD-speaker sink, source withdrawal removes the received route, and both sessions remain Established. ExaBGP is not used as a receiver because 5.0.9 rejects its own valid legacy AS4 output. | Hosted CI (`m94-as4-migration-exabgp.clab.yml`, `test-m94-as4-migration-exabgp.sh`). |
+| **M96** | IXP Manager v7.4 local activation. Feeds the pinned Foil capture through the real renderer and strict checker, then proves atomic initial, no-op, hot-reload, and pre-effect spawn-failure restoration with exact prior bytes, unchanged daemon PID, and route/session continuity. | Local containerlab with MD5-authenticated FRR. Script: `test-m96-ixp-manager-activation-frr.sh`. |
+| **M97** | IXP Manager v7.4 authenticated lifecycle. Proves two same-host IPv4/IPv6 handles with distinct processes, state and UDS endpoints, and TCP/179 listeners, plus a shared durable host fence, competing-423 behavior, sequential callbacks, and cross-handle failure containment. | Local containerlab with IXP Manager v7.4.0, MySQL 8.4, and MD5-authenticated FRR. Script: `test-m97-ixp-manager-authenticated-lifecycle.sh`. |
+| **M98** | IXP Manager v7.4 Nagios monitoring. Proves both pinned Nagios generators include the rustbgpd route server and its client-session services, then requires the pinned Bird's Eye daemon plugin to report `OK` with `Last Reconfigure` against the live adapter. | Hosted CI in `.github/workflows/ixp-compat.yml`; entry point: `tests/compat/ixp-manager-birdseye/run.sh`. |
 
 ---
 
