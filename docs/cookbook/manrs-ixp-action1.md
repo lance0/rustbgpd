@@ -1,5 +1,7 @@
 # MANRS IXP Programme Action 1 on rustbgpd
 
+Map rustbgpd controls to MANRS IXP Programme Action 1.
+
 **When this is you:** your exchange participates in (or is applying to)
 the MANRS IXP Programme and you need to show, control by control, how a
 rustbgpd route server implements Action 1 — and how members can verify

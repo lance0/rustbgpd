@@ -1,5 +1,7 @@
 # IXP filter pipeline: arouteserver → rs-config-render → rustbgpd → Alice-LG
 
+Build an IXP filter pipeline around rustbgpd.
+
 The toolchain an IXP already runs — [arouteserver] for
 IRR/PeeringDB/RPKI member-filter generation, a looking glass for
 member support — end to end on rustbgpd. You keep your existing
