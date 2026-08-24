@@ -70,7 +70,7 @@ fib_status() {
 
 kernel_route() {
     local prefix=$1
-    docker exec "$RUSTBGPD" ip route show table "$TABLE_ID" exact "$prefix" 2>/dev/null || true
+    docker exec "$RUSTBGPD" ip route show table "$TABLE_ID" exact "$prefix" 2>/dev/null
 }
 
 dump_state_on_failure() {
@@ -134,15 +134,16 @@ wait_fib_status_missing() {
 
 wait_kernel_owned_route() {
     local prefix=$1
+    local route
     log "Waiting for kernel route $prefix in table $TABLE_ID..."
     for i in $(seq 1 30); do
-        local route
-        route=$(kernel_route "$prefix")
-        if echo "$route" | grep -q "via $NEXT_HOP" \
-            && echo "$route" | grep -q "proto bgp" \
-            && echo "$route" | grep -q "metric $METRIC"; then
-            ok "$prefix installed in table $TABLE_ID via $NEXT_HOP proto bgp metric $METRIC after ${i}s"
-            return 0
+        if route=$(kernel_route "$prefix"); then
+            if grep "via $NEXT_HOP" <<<"$route" >/dev/null \
+                && grep "proto bgp" <<<"$route" >/dev/null \
+                && grep "metric $METRIC" <<<"$route" >/dev/null; then
+                ok "$prefix installed in table $TABLE_ID via $NEXT_HOP proto bgp metric $METRIC after ${i}s"
+                return 0
+            fi
         fi
         sleep 1
     done
@@ -153,11 +154,14 @@ wait_kernel_owned_route() {
 
 wait_no_kernel_route() {
     local prefix=$1
+    local route
     log "Waiting for kernel route $prefix to be absent from table $TABLE_ID..."
     for i in $(seq 1 30); do
-        if ! kernel_route "$prefix" | grep -q .; then
-            ok "$prefix absent from table $TABLE_ID after ${i}s"
-            return 0
+        if route=$(kernel_route "$prefix"); then
+            if [ -z "$route" ]; then
+                ok "$prefix absent from table $TABLE_ID after ${i}s"
+                return 0
+            fi
         fi
         sleep 1
     done
@@ -169,10 +173,14 @@ wait_no_kernel_route() {
 assert_kernel_foreign_route() {
     local prefix=$1
     local route
-    route=$(kernel_route "$prefix")
-    if echo "$route" | grep -q "via $NEXT_HOP" \
-        && echo "$route" | grep -q "proto static" \
-        && echo "$route" | grep -q "metric $METRIC"; then
+    if ! route=$(kernel_route "$prefix"); then
+        fail "could not observe $prefix in table $TABLE_ID"
+        dump_state_on_failure
+        return 1
+    fi
+    if grep "via $NEXT_HOP" <<<"$route" >/dev/null \
+        && grep "proto static" <<<"$route" >/dev/null \
+        && grep "metric $METRIC" <<<"$route" >/dev/null; then
         ok "$prefix foreign static route preserved in table $TABLE_ID"
     else
         fail "$prefix foreign static route missing or modified: ${route:-<empty>}"
