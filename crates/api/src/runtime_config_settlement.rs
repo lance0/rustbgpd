@@ -1351,10 +1351,11 @@ impl RuntimeConfigSettlementWatchdog {
                 }
                 RuntimeConfigSettlementTerminal::Settled => {
                     // Settlement marks the operation before clearing `current`.
-                    // Recheck that pointer instead of applying a fatal boundary
-                    // to an operation whose outcome is already proven clean.
-                    thread::yield_now();
-                    continue;
+                    // Poll that pointer at a low rate instead of applying a
+                    // fatal boundary to an operation whose outcome is already
+                    // proven clean. The timeout also covers a notification
+                    // delivered between the pointer load and this wait.
+                    now + Duration::from_millis(10)
                 }
             };
             (idle, _) = self
