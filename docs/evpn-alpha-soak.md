@@ -383,11 +383,11 @@ landing, tracked here for visibility)
     diffing only against `L3OwnedState`, never the kernel dump.
     Shutdown drain (`reconcile::drain`) computes
     `compute_l3_diff` against empty intent so the L3 ownership
-    state unwinds before exit. 12 unit tests in `l3_diff.rs`
-    cover cold start, refcount, shape change, value drift,
-    Router MAC conflict, partial-success cleanup, failed-remove
-    retry, NotReady drain, idempotent record, and route-event
-    wakeup behavior. Three privileged netns integration tests at
+    state unwinds before exit. Unit tests in `l3_diff.rs` cover
+    cold start, refcount, shape change, value drift, Router MAC
+    conflict, partial-success cleanup, failed-remove retry,
+    NotReady drain, idempotent record, and route-event wakeup
+    behavior. Privileged netns integration tests at
     `crates/evpn-linux/tests/netns_l3_install.rs` (gated on
     `EVPN_LINUX_NETNS=1`) re-exec the process inside an `ip
     netns` and assert kernel `ip route show table`, `ip neigh
