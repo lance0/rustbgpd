@@ -35,6 +35,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 |-----|----------|
 | RFC 5880 | Control-packet format (§4.1) and the async session state machine (§6.8), including the slow-while-not-Up transmit floor (§6.8.3), detection time (§6.8.4), reception/FSM (§6.8.6), and AdminDown teardown (§6.8.16). |
 | RFC 5881 | Single-hop encapsulation context (UDP/3784, TTL/Hop-Limit 255). The TTL check and the sockets themselves live in the daemon actor, not this crate. |
+| RFC 5882 | BFD-client/BGP coupling (§3.2, §4.1/§4.2): `Session::remote_admin_down()` distinguishes a peer's administrative disable from a genuine liveness failure. Cause-only flips emit `Action::StateChanged` even when the local state remains `Down`, so callers can permit BGP during remote `AdminDown` without hiding a later remote `Down` or detection timeout. |
 
 ## Design
 
