@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use syn::{Attribute, Expr, Item, Lit, Meta, Type, UseTree, Visibility};
+use syn::{
+    Attribute, Expr, FnArg, GenericArgument, Item, Lit, Meta, PathArguments, ReturnType, Type,
+    UseTree, Visibility,
+};
 
 const README: &str = include_str!("../README.md");
 const LIB_SOURCE: &str = include_str!("../src/lib.rs");
@@ -40,9 +43,69 @@ fn has_documented_error_roster(exhaustiveness: &str) -> bool {
 }
 
 fn decode_message_has_bytes_signature(source: &str) -> bool {
-    compact_whitespace(source).contains(
-        "pub fn decode_message(buf: &mut Bytes, max_message_len: u16) -> Result<Message, DecodeError>",
+    let syntax = syn::parse_file(source).expect("message.rs must remain valid Rust");
+    let Some(function) = syntax.items.iter().find_map(|item| match item {
+        Item::Fn(function)
+            if function.sig.ident == "decode_message" && is_public(&function.vis) =>
+        {
+            Some(function)
+        }
+        _ => None,
+    }) else {
+        return false;
+    };
+    let mut inputs = function.sig.inputs.iter();
+    let first_is_bytes = inputs.next().is_some_and(|argument| {
+        matches!(argument, FnArg::Typed(argument) if is_mut_reference_to(&argument.ty, "Bytes"))
+    });
+    let second_is_u16 = inputs.next().is_some_and(
+        |argument| matches!(argument, FnArg::Typed(argument) if is_plain_type(&argument.ty, "u16")),
+    );
+    first_is_bytes
+        && second_is_u16
+        && inputs.next().is_none()
+        && return_type_is_result(&function.sig.output, "Message", "DecodeError")
+}
+
+fn is_plain_type(ty: &Type, name: &str) -> bool {
+    matches!(
+        ty,
+        Type::Path(path)
+            if path.qself.is_none()
+                && path.path.leading_colon.is_none()
+                && path.path.segments.len() == 1
+                && path.path.segments[0].ident == name
+                && matches!(path.path.segments[0].arguments, PathArguments::None)
     )
+}
+
+fn is_mut_reference_to(ty: &Type, name: &str) -> bool {
+    matches!(ty, Type::Reference(reference) if reference.mutability.is_some() && is_plain_type(&reference.elem, name))
+}
+
+fn return_type_is_result(output: &ReturnType, ok: &str, error: &str) -> bool {
+    let ReturnType::Type(_, ty) = output else {
+        return false;
+    };
+    let Type::Path(path) = ty.as_ref() else {
+        return false;
+    };
+    if path.qself.is_some() || path.path.segments.len() != 1 {
+        return false;
+    }
+    let result = &path.path.segments[0];
+    let PathArguments::AngleBracketed(arguments) = &result.arguments else {
+        return false;
+    };
+    let mut arguments = arguments.args.iter();
+    result.ident == "Result"
+        && arguments.next().is_some_and(
+            |argument| matches!(argument, GenericArgument::Type(ty) if is_plain_type(ty, ok)),
+        )
+        && arguments.next().is_some_and(
+            |argument| matches!(argument, GenericArgument::Type(ty) if is_plain_type(ty, error)),
+        )
+        && arguments.next().is_none()
 }
 
 fn use_tree_imports_from(
@@ -146,6 +209,11 @@ fn lib_exposes_codec_only_behind_feature(source: &str) -> bool {
             Item::Struct(item) => item.ident == "BgpCodecError" && is_public(&item.vis),
             Item::Type(item) => item.ident == "BgpCodecError" && is_public(&item.vis),
             Item::Union(item) => item.ident == "BgpCodecError" && is_public(&item.vis),
+            Item::Trait(item) => item.ident == "BgpCodecError" && is_public(&item.vis),
+            Item::TraitAlias(item) => item.ident == "BgpCodecError" && is_public(&item.vis),
+            Item::Fn(item) => item.sig.ident == "BgpCodecError" && is_public(&item.vis),
+            Item::Const(item) => item.ident == "BgpCodecError" && is_public(&item.vis),
+            Item::Static(item) => item.ident == "BgpCodecError" && is_public(&item.vis),
             Item::Mod(item) => item.ident == "BgpCodecError" && is_public(&item.vis),
             Item::ExternCrate(item) => {
                 is_public(&item.vis)
@@ -161,6 +229,7 @@ fn lib_exposes_codec_only_behind_feature(source: &str) -> bool {
     codec_modules.len() == 1
         && has_feature_gate(&codec_modules[0].attrs, "tokio-codec")
         && codec_bindings.len() == 1
+        && !root_public_glob_may_bind(source, "BgpCodecError")
         && matches!(
             codec_bindings[0],
             Item::Use(item_use)
@@ -212,6 +281,7 @@ enum PublicExport {
     Error(String),
     BytesDependency,
     Module(Vec<String>),
+    NamedItem,
 }
 
 #[derive(Clone, Debug)]
@@ -225,6 +295,18 @@ struct ModuleInventory {
     direct_exports: BTreeMap<String, PublicExport>,
     public_uses: Vec<PublicUse>,
     public_children: Vec<Vec<String>>,
+}
+
+fn merge_module_inventory(target: &mut ModuleInventory, incoming: ModuleInventory) {
+    // The source graph intentionally sees every cfg branch. Mutually exclusive declarations of
+    // one logical module therefore contribute a conservative all-configuration union here.
+    for (name, export) in incoming.direct_exports {
+        target.direct_exports.entry(name).or_insert(export);
+    }
+    target.public_uses.extend(incoming.public_uses);
+    target.public_children.extend(incoming.public_children);
+    target.public_children.sort();
+    target.public_children.dedup();
 }
 
 fn flatten_use_tree(tree: &UseTree, prefix: &mut Vec<String>, uses: &mut Vec<PublicUse>) {
@@ -270,34 +352,73 @@ fn inspect_module_items(
     let mut inventory = ModuleInventory::default();
     for item in items {
         match item {
-            Item::Enum(item_enum)
-                if is_public(&item_enum.vis)
-                    && has_non_exhaustive_attribute(&item_enum.attrs)
-                    && item_enum.ident.to_string().ends_with("Error") =>
-            {
+            Item::Enum(item_enum) if is_public(&item_enum.vis) => {
                 let name = item_enum.ident.to_string();
-                let mut qualified = vec!["rustbgpd_wire".to_string()];
-                qualified.extend_from_slice(module_path);
-                qualified.push(name.clone());
-                inventory
-                    .direct_exports
-                    .insert(name, PublicExport::Error(qualified.join("::")));
+                let export =
+                    if has_non_exhaustive_attribute(&item_enum.attrs) && name.ends_with("Error") {
+                        let mut qualified = vec!["rustbgpd_wire".to_string()];
+                        qualified.extend_from_slice(module_path);
+                        qualified.push(name.clone());
+                        PublicExport::Error(qualified.join("::"))
+                    } else {
+                        PublicExport::NamedItem
+                    };
+                inventory.direct_exports.insert(name, export);
             }
-            Item::ExternCrate(item_extern)
-                if is_public(&item_extern.vis) && item_extern.ident == "bytes" =>
-            {
-                let local = item_extern
-                    .rename
-                    .as_ref()
-                    .map_or_else(|| "bytes".to_string(), |(_, name)| name.to_string());
+            Item::Struct(item_struct) if is_public(&item_struct.vis) => {
                 inventory
                     .direct_exports
-                    .insert(local, PublicExport::BytesDependency);
+                    .insert(item_struct.ident.to_string(), PublicExport::NamedItem);
+            }
+            Item::Union(item_union) if is_public(&item_union.vis) => {
+                inventory
+                    .direct_exports
+                    .insert(item_union.ident.to_string(), PublicExport::NamedItem);
+            }
+            Item::Trait(item_trait) if is_public(&item_trait.vis) => {
+                inventory
+                    .direct_exports
+                    .insert(item_trait.ident.to_string(), PublicExport::NamedItem);
+            }
+            Item::TraitAlias(item_alias) if is_public(&item_alias.vis) => {
+                inventory
+                    .direct_exports
+                    .insert(item_alias.ident.to_string(), PublicExport::NamedItem);
+            }
+            Item::Fn(item_fn) if is_public(&item_fn.vis) => {
+                inventory
+                    .direct_exports
+                    .insert(item_fn.sig.ident.to_string(), PublicExport::NamedItem);
+            }
+            Item::Const(item_const) if is_public(&item_const.vis) => {
+                inventory
+                    .direct_exports
+                    .insert(item_const.ident.to_string(), PublicExport::NamedItem);
+            }
+            Item::Static(item_static) if is_public(&item_static.vis) => {
+                inventory
+                    .direct_exports
+                    .insert(item_static.ident.to_string(), PublicExport::NamedItem);
+            }
+            Item::ExternCrate(item_extern) if is_public(&item_extern.vis) => {
+                let local = item_extern.rename.as_ref().map_or_else(
+                    || item_extern.ident.to_string(),
+                    |(_, name)| name.to_string(),
+                );
+                let export = if item_extern.ident == "bytes" {
+                    PublicExport::BytesDependency
+                } else {
+                    PublicExport::NamedItem
+                };
+                inventory.direct_exports.insert(local, export);
             }
             Item::Use(item_use) if is_public(&item_use.vis) => {
                 flatten_use_tree(&item_use.tree, &mut Vec::new(), &mut inventory.public_uses);
             }
             Item::Type(item_type) if is_public(&item_type.vis) => {
+                inventory
+                    .direct_exports
+                    .insert(item_type.ident.to_string(), PublicExport::NamedItem);
                 if let Type::Path(type_path) = item_type.ty.as_ref()
                     && type_path.qself.is_none()
                 {
@@ -338,10 +459,11 @@ fn inspect_module_items(
             _ => {}
         }
     }
-    assert!(
-        modules.insert(module_path.to_vec(), inventory).is_none(),
-        "duplicate module path {module_path:?}"
-    );
+    if let Some(existing) = modules.get_mut(module_path) {
+        merge_module_inventory(existing, inventory);
+    } else {
+        modules.insert(module_path.to_vec(), inventory);
+    }
 }
 
 fn inspect_module_file(
@@ -374,6 +496,35 @@ fn absolute_use_path(current_module: &[String], source: &[String]) -> Vec<String
     }
     absolute.extend_from_slice(source);
     absolute
+}
+
+fn resolve_module_path(
+    exports: &BTreeMap<Vec<String>, BTreeMap<String, PublicExport>>,
+    path: &[String],
+) -> Option<Vec<String>> {
+    let mut resolved = Vec::new();
+    for segment in path {
+        let mut physical_child = resolved.clone();
+        physical_child.push(segment.clone());
+        if exports.contains_key(&physical_child) {
+            resolved = physical_child;
+            continue;
+        }
+        let PublicExport::Module(alias_target) = exports.get(&resolved)?.get(segment)? else {
+            return None;
+        };
+        resolved.clone_from(alias_target);
+    }
+    Some(resolved)
+}
+
+fn resolve_export_path(
+    exports: &BTreeMap<Vec<String>, BTreeMap<String, PublicExport>>,
+    path: &[String],
+) -> Option<PublicExport> {
+    let (name, module_path) = path.split_last()?;
+    let resolved_module = resolve_module_path(exports, module_path)?;
+    exports.get(&resolved_module)?.get(name).cloned()
 }
 
 fn resolved_module_exports(
@@ -411,22 +562,18 @@ fn resolved_module_exports(
                     }
                     PublicUse::Named { source, local } => {
                         let absolute = absolute_use_path(module_path, source);
-                        let Some((name, target_module)) = absolute.split_last() else {
-                            continue;
-                        };
-                        if let Some(export) = snapshot
-                            .get(target_module)
-                            .and_then(|target| target.get(name))
-                        {
+                        if let Some(export) = resolve_export_path(&snapshot, &absolute) {
                             changed |= module_exports
                                 .insert(local.clone(), export.clone())
                                 .as_ref()
-                                != Some(export);
+                                != Some(&export);
                         }
                     }
                     PublicUse::Glob { source } => {
                         let absolute = absolute_use_path(module_path, source);
-                        if let Some(target) = snapshot.get(&absolute) {
+                        if let Some(target) = resolve_module_path(&snapshot, &absolute)
+                            .and_then(|target| snapshot.get(&target))
+                        {
                             for (name, export) in target {
                                 changed |=
                                     module_exports.insert(name.clone(), export.clone()).as_ref()
@@ -441,6 +588,32 @@ fn resolved_module_exports(
             return exports;
         }
     }
+}
+
+fn root_public_glob_may_bind(source: &str, name: &str) -> bool {
+    let syntax = syn::parse_file(source).expect("lib.rs must remain valid Rust");
+    let source_directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut modules = BTreeMap::new();
+    inspect_module_items(&syntax.items, &[], &source_directory, &mut modules);
+    let exports = resolved_module_exports(&modules);
+    modules
+        .get(&Vec::new())
+        .expect("root module was inspected")
+        .public_uses
+        .iter()
+        .filter_map(|public_use| match public_use {
+            PublicUse::Glob { source } => Some(source),
+            PublicUse::Named { .. } => None,
+        })
+        .any(|source| {
+            let absolute = absolute_use_path(&[], source);
+            let Some(target) = resolve_module_path(&exports, &absolute) else {
+                return true;
+            };
+            exports
+                .get(&target)
+                .is_none_or(|module| module.contains_key(name))
+        })
 }
 
 fn inventory_from_modules(
@@ -486,7 +659,9 @@ fn inventory_from_modules(
         }
         errors.extend(module_exports.values().filter_map(|export| match export {
             PublicExport::Error(name) => Some(name.clone()),
-            PublicExport::BytesDependency | PublicExport::Module(_) => None,
+            PublicExport::BytesDependency | PublicExport::Module(_) | PublicExport::NamedItem => {
+                None
+            }
         }));
     }
     (errors.into_iter().collect(), bytes_reexports)
@@ -629,6 +804,25 @@ fn contract_helpers_reject_independent_documentation_and_source_mutations() {
 
     let wrong_buffer = MESSAGE_SOURCE.replacen("buf: &mut Bytes", "buf: Bytes", 1);
     assert!(!decode_message_has_bytes_signature(&wrong_buffer));
+    let wrong_limit_type =
+        MESSAGE_SOURCE.replacen("max_message_len: u16", "max_message_len: u32", 1);
+    assert!(!decode_message_has_bytes_signature(&wrong_limit_type));
+    let wrong_return = MESSAGE_SOURCE.replacen(
+        "Result<Message, DecodeError>",
+        "Result<Message, EncodeError>",
+        1,
+    );
+    assert!(!decode_message_has_bytes_signature(&wrong_return));
+    let stale_signature_comment = r#"
+        // pub fn decode_message(buf: &mut Bytes, max_message_len: u16) -> Result<Message, DecodeError>
+        pub fn decode_message(
+            _buf: &mut Vec<u8>,
+            _max_message_len: u16,
+        ) -> Result<Message, DecodeError> {
+            unimplemented!()
+        }
+    "#;
+    assert!(!decode_message_has_bytes_signature(stale_signature_comment));
     let wrong_bytes_source =
         MESSAGE_SOURCE.replacen("use bytes::{Bytes, BytesMut};", "type Bytes = Vec<u8>;", 1);
     assert!(!message_imports_bytes_type(&wrong_bytes_source));
@@ -692,6 +886,30 @@ fn contract_helpers_reject_independent_documentation_and_source_mutations() {
     assert!(!lib_exposes_codec_only_behind_feature(
         alternative_ungated_binding
     ));
+    let glob_alternative_binding = r#"
+        #[cfg(feature = "tokio-codec")]
+        pub mod tokio_codec { pub enum BgpCodecError {} }
+        #[cfg(feature = "tokio-codec")]
+        pub use tokio_codec::BgpCodecError;
+        #[cfg(not(feature = "tokio-codec"))]
+        mod fallback {
+            pub struct BgpCodecError;
+        }
+        #[cfg(not(feature = "tokio-codec"))]
+        pub use fallback::*;
+    "#;
+    assert!(!lib_exposes_codec_only_behind_feature(
+        glob_alternative_binding
+    ));
+    let unrelated_glob = r#"
+        #[cfg(feature = "tokio-codec")]
+        pub mod tokio_codec { pub enum BgpCodecError {} }
+        #[cfg(feature = "tokio-codec")]
+        pub use tokio_codec::BgpCodecError;
+        mod additional { pub struct OtherPublicType; }
+        pub use additional::*;
+    "#;
+    assert!(lib_exposes_codec_only_behind_feature(unrelated_glob));
 
     let exhaustiveness = section(README, "## Enum exhaustiveness");
     for name in ERROR_ENUM_NAMES {
@@ -764,4 +982,48 @@ fn contract_helpers_reject_independent_documentation_and_source_mutations() {
     let (module_errors, module_bytes) = inline_source_inventory(private_module_facade);
     assert_eq!(module_errors, ["rustbgpd_wire::hidden::api::FutureError"]);
     assert_eq!(module_bytes, ["rustbgpd_wire::hidden::api"]);
+
+    let chained_module_facade = r#"
+        mod hidden {
+            mod deeper {
+                pub mod api {
+                    #[non_exhaustive]
+                    pub enum FutureError { Example }
+                    pub use bytes::Bytes;
+                }
+            }
+            pub use self::deeper::api as facade;
+            pub use self::facade::{Bytes, FutureError};
+        }
+        pub use hidden::{Bytes, FutureError};
+    "#;
+    let (chained_errors, chained_bytes) = inline_source_inventory(chained_module_facade);
+    assert_eq!(
+        chained_errors,
+        ["rustbgpd_wire::hidden::deeper::api::FutureError"]
+    );
+    assert_eq!(chained_bytes, ["rustbgpd_wire"]);
+
+    let cfg_exclusive_modules = r#"
+        #[cfg(unix)]
+        pub mod platform {
+            #[non_exhaustive]
+            pub enum UnixError { Example }
+        }
+        #[cfg(windows)]
+        pub mod platform {
+            #[non_exhaustive]
+            pub enum WindowsError { Example }
+        }
+    "#;
+    let (cfg_errors, cfg_bytes) = inline_source_inventory(cfg_exclusive_modules);
+    assert_eq!(
+        cfg_errors,
+        [
+            "rustbgpd_wire::platform::UnixError",
+            "rustbgpd_wire::platform::WindowsError",
+        ],
+        "cfg-exclusive declarations of one logical module must form an all-config union"
+    );
+    assert!(cfg_bytes.is_empty());
 }
