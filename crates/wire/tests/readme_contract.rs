@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use syn::{Attribute, Item, ItemExternCrate, ItemUse, UseTree, Visibility};
+use syn::{Attribute, Item, ItemExternCrate, ItemUse, Meta, UseTree, Visibility};
 
 const README: &str = include_str!("../README.md");
 const LIB_SOURCE: &str = include_str!("../src/lib.rs");
@@ -44,6 +44,33 @@ fn decode_message_has_bytes_signature(source: &str) -> bool {
     )
 }
 
+fn use_tree_contains_name(tree: &UseTree, name: &str) -> bool {
+    match tree {
+        UseTree::Path(path) => use_tree_contains_name(path.tree.as_ref(), name),
+        UseTree::Name(item) => item.ident == name,
+        UseTree::Rename(item) => item.ident == name,
+        UseTree::Group(group) => group
+            .items
+            .iter()
+            .any(|item| use_tree_contains_name(item, name)),
+        UseTree::Glob(_) => false,
+    }
+}
+
+fn use_tree_imports_from(tree: &UseTree, source: &str, name: &str) -> bool {
+    matches!(tree, UseTree::Path(path) if path.ident == source && use_tree_contains_name(path.tree.as_ref(), name))
+}
+
+fn message_imports_bytes_type(source: &str) -> bool {
+    syn::parse_file(source)
+        .expect("message.rs must remain valid Rust")
+        .items
+        .iter()
+        .any(|item| {
+            matches!(item, Item::Use(item_use) if use_tree_imports_from(&item_use.tree, "bytes", "Bytes"))
+        })
+}
+
 fn source_enum_is_public_and_non_exhaustive(source: &str, name: &str) -> bool {
     compact_whitespace(source).contains(&format!("#[non_exhaustive] pub enum {name}"))
 }
@@ -74,6 +101,36 @@ fn public_item_reexports_bytes(item: &Item) -> bool {
         Item::ExternCrate(ItemExternCrate { vis, ident, .. }) => is_public(vis) && ident == "bytes",
         _ => false,
     }
+}
+
+fn has_feature_gate(attributes: &[Attribute], feature: &str) -> bool {
+    attributes.iter().any(|attribute| {
+        let Meta::List(list) = &attribute.meta else {
+            return false;
+        };
+        attribute.path().is_ident("cfg")
+            && compact_whitespace(&list.tokens.to_string()) == format!("feature = \"{feature}\"")
+    })
+}
+
+fn lib_reexports_codec_error_behind_feature(source: &str) -> bool {
+    syn::parse_file(source)
+        .expect("lib.rs must remain valid Rust")
+        .items
+        .iter()
+        .any(|item| {
+            matches!(
+                item,
+                Item::Use(item_use)
+                    if is_public(&item_use.vis)
+                        && has_feature_gate(&item_use.attrs, "tokio-codec")
+                        && use_tree_imports_from(
+                            &item_use.tree,
+                            "tokio_codec",
+                            "BgpCodecError",
+                        )
+            )
+        })
 }
 
 fn external_module_path(module_directory: &Path, name: &str) -> PathBuf {
@@ -199,6 +256,10 @@ fn decode_entry_point_keeps_the_documented_bytes_contract() {
         decode_message_has_bytes_signature(MESSAGE_SOURCE),
         "decode_message no longer has the documented &mut bytes::Bytes signature"
     );
+    assert!(
+        message_imports_bytes_type(MESSAGE_SOURCE),
+        "decode_message's Bytes type must be imported from the bytes crate"
+    );
     let (_, bytes_reexports) = public_api_source_inventory();
     assert!(
         bytes_reexports.is_empty(),
@@ -247,11 +308,8 @@ fn every_documented_public_error_enum_stays_non_exhaustive_in_source() {
         );
     }
 
-    let compact_lib = compact_whitespace(LIB_SOURCE);
     assert!(
-        compact_lib.contains(
-            "#[cfg(feature = \"tokio-codec\")] pub use tokio_codec::{BgpCodec, BgpCodecError};"
-        ),
+        lib_reexports_codec_error_behind_feature(LIB_SOURCE),
         "BgpCodecError must remain publicly re-exported behind the tokio-codec feature"
     );
 }
@@ -286,6 +344,9 @@ fn contract_helpers_reject_independent_documentation_and_source_mutations() {
 
     let wrong_buffer = MESSAGE_SOURCE.replacen("buf: &mut Bytes", "buf: Bytes", 1);
     assert!(!decode_message_has_bytes_signature(&wrong_buffer));
+    let wrong_bytes_source =
+        MESSAGE_SOURCE.replacen("use bytes::{Bytes, BytesMut};", "type Bytes = Vec<u8>;", 1);
+    assert!(!message_imports_bytes_type(&wrong_bytes_source));
 
     for reexport in [
         "pub use bytes::Bytes;",
@@ -298,6 +359,18 @@ fn contract_helpers_reject_independent_documentation_and_source_mutations() {
             "inventory must detect {reexport}"
         );
     }
+
+    let reordered_codec_reexport = r#"
+        #[cfg(feature = "tokio-codec")]
+        pub use tokio_codec::{BgpCodecError, BgpCodec};
+    "#;
+    assert!(lib_reexports_codec_error_behind_feature(
+        reordered_codec_reexport
+    ));
+    let ungated_codec_reexport = "pub use tokio_codec::BgpCodecError;";
+    assert!(!lib_reexports_codec_error_behind_feature(
+        ungated_codec_reexport
+    ));
 
     let exhaustiveness = section(README, "## Enum exhaustiveness");
     for name in ERROR_ENUM_NAMES {
