@@ -677,6 +677,10 @@ impl Config {
             .expect("validated in Config::load");
         let peer_addr: IpAddr = neighbor.address.parse().expect("validated in Config::load");
         let group = self.peer_group_for_neighbor(neighbor)?;
+        let llgr_stale_time = neighbor
+            .llgr_stale_time
+            .or_else(|| group.and_then(|g| g.llgr_stale_time))
+            .unwrap_or(0);
         let families = Self::resolved_families(neighbor, group, peer_addr)?;
         let add_path = Self::resolved_add_path(neighbor, group);
 
@@ -704,10 +708,7 @@ impl Config {
             .gr_restart_time
             .or_else(|| group.and_then(|g| g.gr_restart_time))
             .unwrap_or(120);
-        peer.llgr_stale_time = neighbor
-            .llgr_stale_time
-            .or_else(|| group.and_then(|g| g.llgr_stale_time))
-            .unwrap_or(0);
+        peer.llgr_stale_time = llgr_stale_time;
         peer.add_path_receive = add_path.as_ref().is_some_and(|c| c.receive);
         peer.add_path_send = add_path.as_ref().is_some_and(|c| c.send);
         peer.add_path_send_max = add_path.as_ref().and_then(|c| c.send_max).unwrap_or(0);
@@ -795,10 +796,7 @@ impl Config {
             .gr_peer_restart_time_max
             .or_else(|| group.and_then(|g| g.gr_peer_restart_time_max))
             .unwrap_or(4095);
-        transport.llgr_stale_time = neighbor
-            .llgr_stale_time
-            .or_else(|| group.and_then(|g| g.llgr_stale_time))
-            .unwrap_or(0);
+        transport.llgr_stale_time = llgr_stale_time;
         transport.route_server_client = neighbor
             .route_server_client
             .or_else(|| group.and_then(|g| g.route_server_client))
