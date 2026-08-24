@@ -1592,6 +1592,10 @@ daemon log for the peer-specific reason.
 | `evpn_foreign_replaces_blocked_total` | Installs or replaces withheld because an exact-key foreign kernel row already exists |
 | `evpn_foreign_deletes_skipped_total` | Deletes skipped after the live kernel row ceased to be rustbgpd-owned |
 | `evpn_foreign_owned_relinquished_total` | Owned keys released after another writer replaced the live kernel row |
+| `evpn_fdb_nhg_drift_members_repaired_total` | Per-VTEP nexthop members repaired after kernel drift. Repeated growth means recovery is working but another writer or unstable kernel state needs investigation; correlate with dataplane logs and `ip nexthop show`. |
+| `evpn_fdb_nhg_drift_groups_replaced_total` | FDB nexthop groups re-created or replaced after kernel drift. Investigate sustained increases alongside member repairs for competing kernel writers. |
+| `evpn_fdb_nhg_orphans_cleaned_total` | Unreferenced rustbgpd-tagged FDB nexthops removed by ownership-aware garbage collection. Sustained growth outside restart recovery indicates unstable group membership or cleanup churn. |
+| `evpn_fdb_nhg_drift_disabled_total` | Permanent dump failures that disabled FDB-NHG drift recovery for this daemon lifetime. Any increase means automatic repair is unavailable; use the accompanying error to correct kernel support, privilege, or netlink-message failures, then restart the daemon. |
 | `evpn_single_active_backup_active` | Single-active groups currently retargeted to a backup PE during the post-failover window |
 
 During M37 or a synthetic MAC-churn soak, the inject and withdraw counters
