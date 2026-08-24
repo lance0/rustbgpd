@@ -1304,9 +1304,9 @@ impl RuntimeConfigSettlementWatchdog {
         }
     }
 
-    /// Block the calling OS thread until every clean registration settles.
-    /// Ambiguous ownership deliberately never unregisters; its fail-stop wins.
-    pub fn wait_until_idle(&self) {
+    /// Unbounded test-only wait for focused condition-variable settlement proofs.
+    #[cfg(test)]
+    fn wait_until_idle(&self) {
         let mut idle = self
             .registry
             .idle_lock
