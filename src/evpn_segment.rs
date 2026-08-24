@@ -1327,7 +1327,7 @@ fn gather_candidates_from_routes(
 fn has_matching_es_import_rt(attrs: &[PathAttribute], esi: EthernetSegmentIdentifier) -> bool {
     let expected = es_import_rt_from_esi(esi);
     attrs.iter().any(|attr| {
-        let PathAttribute::ExtendedCommunities(extcomms) = attr else {
+        let Some(extcomms) = attr.extended_communities() else {
             return false;
         };
         extcomms
@@ -1344,7 +1344,7 @@ fn decode_df_election_extcomm(attrs: &[PathAttribute]) -> Option<(u32, bool, DfA
     // best-effort — unrecognized extcomms fall back to defaults at
     // the call site.
     for attr in attrs {
-        let PathAttribute::ExtendedCommunities(ecs) = attr else {
+        let Some(ecs) = attr.extended_communities() else {
             continue;
         };
         for ec in ecs {
@@ -2143,6 +2143,27 @@ mod tests {
         assert_eq!(pref, 42);
         assert!(dont_preempt);
         assert_eq!(alg, DfAlgorithm::LowestPreference);
+    }
+
+    #[test]
+    fn partial_extended_communities_preserve_es_import_and_df_election() {
+        let id = esi(0x44);
+        let communities = vec![
+            ExtendedCommunity::es_import_rt(es_import_rt_from_esi(id)),
+            ExtendedCommunity::df_election(3, 0x8000, Some(42)),
+        ];
+        let canonical = [PathAttribute::ExtendedCommunities(communities.clone())];
+        let partial = [PathAttribute::ExtendedCommunitiesPartial(communities)];
+
+        assert!(has_matching_es_import_rt(&canonical, id));
+        assert_eq!(
+            has_matching_es_import_rt(&partial, id),
+            has_matching_es_import_rt(&canonical, id)
+        );
+        assert_eq!(
+            decode_df_election_extcomm(&partial),
+            decode_df_election_extcomm(&canonical)
+        );
     }
 
     #[test]

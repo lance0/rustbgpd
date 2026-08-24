@@ -36,7 +36,7 @@ octet from 0 through 255 to appear exactly once with no blank cell.
 | 5 | LOCAL_PREF | well-known discretionary; flags `0x40`; RFC 4271 §5.1.5; RFC 7606 §7.5 | typed round-trip; malformed is discard on eBGP and treat-as-withdraw on iBGP | core matrix below |
 | 6 | ATOMIC_AGGREGATE | well-known discretionary; flags `0x40`; RFC 4271 §5.1.6; RFC 7606 §7.6 | typed round-trip; bad length is attribute-discard | core matrix below |
 | 7 | AGGREGATOR | optional transitive; flags `0xc0`; RFC 4271 §5.1.7; RFC 7606 §7.7 | typed round-trip; bad length is attribute-discard | core matrix below |
-| 8 | COMMUNITIES | optional transitive; flags `0xc0`; RFC 7606 §7.8 | typed round-trip; malformed is treat-as-withdraw | core matrix below |
+| 8 | COMMUNITIES | optional transitive; flags `0xc0`; values are four-octet communities; RFC 1997 / RFC 7606 §7.8 | typed canonical + Partial round-trip; Extended Length and reserved low bits canonicalize; malformed length is treat-as-withdraw | core matrix and typed-Partial matrix |
 | 9 | ORIGINATOR_ID | optional non-transitive; flags `0x80`; RFC 7606 §7.9 | typed round-trip; malformed is discard on eBGP and treat-as-withdraw on iBGP | core matrix below |
 | 10 | CLUSTER_LIST | optional non-transitive; flags `0x80`; RFC 7606 §7.10 | typed round-trip; malformed is discard on eBGP and treat-as-withdraw on iBGP | core matrix below |
 | 11 | DPA (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
@@ -44,13 +44,13 @@ octet from 0 through 255 to appear exactly once with no blank cell.
 | 13 | RCID_PATH / CLUSTER_ID (Historic) (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 14 | MP_REACH_NLRI | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 15 | MP_UNREACH_NLRI | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 16 | EXTENDED COMMUNITIES | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
+| 16 | EXTENDED COMMUNITIES | optional transitive; flags `0xc0`; values are eight-octet communities; RFC 4360 / RFC 7606 §7.14 | typed canonical + Partial round-trip; Extended Length and reserved low bits canonicalize; malformed length is treat-as-withdraw | typed-Partial matrix |
 | 17 | AS4_PATH | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 18 | AS4_AGGREGATOR | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 19 | SAFI Specific Attribute (SSA) (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 20 | Connector Attribute (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 21 | AS_PATHLIMIT (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 22 | PMSI_TUNNEL | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
+| 22 | PMSI_TUNNEL | optional transitive; flags `0xc0`; RFC 6514 §5 / RFC 7385 | typed canonical + Partial round-trip; Extended Length and reserved low bits canonicalize; malformed tunnel type or identifier is treat-as-withdraw | typed-Partial and PMSI tunnel-type matrices |
 | 23 | Tunnel Encapsulation | optional transitive; flags `0xc0`; RFC 9012 | payload semantics unsupported; correct class retained opaque and emitted with Partial; wrong class is treat-as-withdraw | assigned-class matrix below |
 | 24 | Traffic Engineering | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 25 | IPv6 Address Specific Extended Community | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
@@ -60,7 +60,7 @@ octet from 0 through 255 to appear exactly once with no blank cell.
 | 29 | BGP-LS Attribute | optional non-transitive; flags `0x80`; RFC 9552 §5.3 | recognized opaque attribute survives byte-for-byte; `0xc0` is malformed | enriched fence test |
 | 30 | Deprecated | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 31 | Deprecated | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 32 | LARGE_COMMUNITY | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
+| 32 | LARGE_COMMUNITY | optional transitive; flags `0xc0`; values are twelve-octet communities; RFC 8092 §6 | typed canonical + Partial round-trip; duplicate values normalize first-seen; malformed length is treat-as-withdraw | typed-Partial matrix |
 | 33 | BGPsec_Path | optional non-transitive; flags `0x80`; RFC 8205 | payload semantics unsupported; correct class ignored; wrong class is treat-as-withdraw | assigned-class matrix below |
 | 34 | BGP Community Container Attribute (TEMPORARY - registered 2017-07-28, extension registered 2024-08-22, expires 2025-07-28) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 35 | Only to Customer (OTC) | optional transitive; flags `0xc0`; exactly one four-octet ASN; RFC 9234 §5 | typed ASN + Partial round-trip; Extended Length and reserved low bits canonicalize; wrong class or length is treat-as-withdraw | OTC codec and transport matrices |
@@ -117,6 +117,25 @@ negotiation. "Wrong O" toggles Optional, "wrong T" toggles Transitive, and
 | 23, 27, 40, 128 | optional transitive (`0xc0`) | opaque retention; Partial set on egress; input Partial and Extended Length preserved | treat-as-withdraw | treat-as-withdraw | treat-as-withdraw | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
 | 26 | optional non-transitive (`0x80`) | ignored; no retention or egress | treat-as-withdraw | attribute-discard | attribute-discard | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
 | 33 | optional non-transitive (`0x80`) | ignored; no retention or egress | treat-as-withdraw | treat-as-withdraw | treat-as-withdraw | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
+
+## PMSI tunnel-type matrix
+
+PMSI Tunnel values use RFC 6514 base type and identifier semantics, the RFC
+7385/IANA registry boundary, and RFC 8317 composite tunnel-type semantics.
+Assigned types without a dedicated enum variant and experimental values remain
+typed through opaque `PmsiTunnelType::Other` state; this is distinct from
+accepting an unassigned value.
+
+| Wire value | Result |
+|---|---|
+| `0x00`-`0x08`, `0x0a`-`0x0d`, `0xff` | accepted assigned type; type 0 requires an empty identifier and type 6 requires exactly 4 or 16 identifier octets |
+| `0x7b`-`0x7e`, `0xfb`-`0xfe` | accepted experimental type with opaque identifier |
+| `0x80`-`0xfa` | accepted only when the low seven bits name an assigned base other than 0 or 6 |
+| `0x09`, `0x0e`-`0x7a`, `0x7f`, invalid composite | malformed field; revised decoding omits the attribute and records treat-as-withdraw |
+
+For a valid RFC 8317 composite, decoding checks only the generic 3-octet
+receiver-label prefix framing; it does not interpret the underlying transmit
+identifier semantics.
 
 The enriched fence tests separately prove all six rows' outcomes, BGP-LS
 opaque behavior, typed PMSI behavior and wrong-class handling, and unchanged

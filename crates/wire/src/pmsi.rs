@@ -20,9 +20,10 @@
 //!
 //! - **Flags** — RFC 6514 §5 defines bit 0 ("Leaf Information Required")
 //!   only. EVPN ingress replication does not use it.
-//! - **Tunnel Type** — IANA registry, RFC 7385. Values 0–7 are well-
-//!   known; unknown values must round-trip without loss for forward
-//!   compatibility.
+//! - **Tunnel Type** — IANA registry, RFC 7385. Assigned and experimental
+//!   values are accepted, while unassigned values and invalid composite
+//!   encodings are rejected. Assigned values without a dedicated typed
+//!   variant round-trip through `PmsiTunnelType::Other`.
 //! - **MPLS Label** — 3 octets. For pure-MPLS deployments the
 //!   high-order 20 bits carry the MPLS label value (RFC 6514 §5).
 //!   For EVPN-VXLAN deployments **the full 24-bit field is the VNI**,
@@ -35,20 +36,22 @@
 //!   Tunnel Type. For Ingress Replication (type 6) it is the unicast
 //!   tunnel endpoint IP — 4 octets for IPv4, 16 octets for IPv6
 //!   (RFC 6514 §5; ipv6 form per RFC 8365). Other tunnel types carry
-//!   opaque bytes that the codec preserves without interpretation.
+//!   opaque bytes that the codec preserves without interpretation. Type 0
+//!   requires an empty identifier; type 6 requires exactly 4 or 16 octets.
 //!
 //! # Why a typed `PmsiTunnelType`
 //!
 //! Validating the tunnel type at decode time catches the most common
 //! interop bug (operator misconfigures FRR with the wrong tunnel type
-//! and the wire becomes nonsensical) without forcing the daemon to
-//! reject otherwise-legal future tunnel types — `PmsiTunnelType::Other`
-//! preserves any unknown value the IANA registry adds later.
+//! and the wire becomes nonsensical). `PmsiTunnelType::Other` preserves
+//! assigned types without a dedicated variant, experimental values, and
+//! valid composite encodings; unassigned values are rejected until the
+//! registry assigns them.
 //!
 //! # Gate 7b+1 scope
 //!
 //! Only `PmsiTunnelType::IngressReplication` is exercised by rustbgpd
-//! origination today. Decode handles all variants; encode round-trips
+//! origination today. Decode handles all valid variants; encode round-trips
 //! all variants. Phase F (Type 3 IMET) emits Ingress Replication with
 //! the raw 24-bit VNI in the label field (RFC 8365 §5.1.3) and the
 //! local VTEP IP as the tunnel identifier.
@@ -78,7 +81,7 @@ pub enum PmsiTunnelType {
     IngressReplication,
     /// 7 — mLDP MP2MP LSP.
     MldpMp2mp,
-    /// Forward-compat: any value not yet known.
+    /// Assigned unsupported, experimental, or valid composite value.
     Other(u8),
 }
 
@@ -113,6 +116,31 @@ impl PmsiTunnelType {
             7 => Self::MldpMp2mp,
             other => Self::Other(other),
         }
+    }
+}
+
+const fn assigned_tunnel_type(value: u8) -> bool {
+    matches!(value, 0x00..=0x08 | 0x0a..=0x0d | 0xff)
+}
+
+const fn composite_tunnel_type(value: u8) -> bool {
+    if matches!(value, 0x80..=0xfa) {
+        let base = value & 0x7f;
+        base != 0 && base != 6 && assigned_tunnel_type(base)
+    } else {
+        false
+    }
+}
+
+fn validate_tunnel_type(value: u8) -> Result<(), DecodeError> {
+    let experimental = matches!(value, 0x7b..=0x7e | 0xfb..=0xfe);
+    if assigned_tunnel_type(value) || experimental || composite_tunnel_type(value) {
+        Ok(())
+    } else {
+        Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: format!("PMSI Tunnel type {value:#04x} is unassigned or invalid"),
+        })
     }
 }
 
@@ -205,14 +233,21 @@ impl PmsiTunnel {
     /// flags, type code, and length.
     ///
     /// Tunnel Identifier interpretation:
-    /// - Tunnel Type 6 (Ingress Replication) with 4-octet rest → IPv4.
-    /// - Tunnel Type 6 with 16-octet rest → IPv6.
-    /// - Anything else (including type 6 with non-4/16 rest) → `Raw`.
+    /// - Tunnel Type 0 requires an empty identifier.
+    /// - Tunnel Type 6 (Ingress Replication) requires 4 octets (IPv4) or 16
+    ///   octets (IPv6).
+    /// - A composite tunnel type requires at least the 3-octet RFC 8317
+    ///   receiver ingress-replication label prefix.
+    /// - Other accepted tunnel types retain a non-empty identifier as `Raw`.
     ///
     /// # Errors
     ///
-    /// Returns [`DecodeError::MalformedField`] when the value is shorter
-    /// than the 5-octet header (flags + type + 3-octet label).
+    /// Returns [`DecodeError::MalformedField`] when the value:
+    /// - is shorter than the 5-octet header;
+    /// - carries an invalid tunnel type;
+    /// - violates the type-0/type-6 identifier length contract; or
+    /// - has a composite identifier shorter than the RFC 8317 receiver-label
+    ///   prefix.
     pub fn decode(value: &[u8]) -> Result<Self, DecodeError> {
         if value.len() < 5 {
             return Err(DecodeError::MalformedField {
@@ -224,12 +259,32 @@ impl PmsiTunnel {
             });
         }
         let flags = value[0];
-        let tunnel_type = PmsiTunnelType::from_u8(value[1]);
+        let tunnel_type_value = value[1];
+        validate_tunnel_type(tunnel_type_value)?;
+        let tunnel_type = PmsiTunnelType::from_u8(tunnel_type_value);
         let label = (u32::from(value[2]) << 16) | (u32::from(value[3]) << 8) | u32::from(value[4]);
         let rest = &value[5..];
 
+        if composite_tunnel_type(tunnel_type_value) && rest.len() < 3 {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: format!(
+                    "composite PMSI Tunnel type {tunnel_type_value:#04x} identifier length {} (expected at least 3)",
+                    rest.len()
+                ),
+            });
+        }
+
         let tunnel_identifier = match (tunnel_type, rest.len()) {
-            (_, 0) => PmsiTunnelIdentifier::Empty,
+            (PmsiTunnelType::NoTunnelInfo, 0) => PmsiTunnelIdentifier::Empty,
+            (PmsiTunnelType::NoTunnelInfo, len) => {
+                return Err(DecodeError::MalformedField {
+                    message_type: "UPDATE",
+                    detail: format!(
+                        "PMSI Tunnel type 0 requires an empty identifier, got {len} octets"
+                    ),
+                });
+            }
             (PmsiTunnelType::IngressReplication, 4) => {
                 let mut o = [0u8; 4];
                 o.copy_from_slice(rest);
@@ -240,6 +295,15 @@ impl PmsiTunnel {
                 o.copy_from_slice(rest);
                 PmsiTunnelIdentifier::Ipv6(Ipv6Addr::from(o))
             }
+            (PmsiTunnelType::IngressReplication, len) => {
+                return Err(DecodeError::MalformedField {
+                    message_type: "UPDATE",
+                    detail: format!(
+                        "PMSI Tunnel type 6 identifier length {len} (expected 4 or 16)"
+                    ),
+                });
+            }
+            (_, 0) => PmsiTunnelIdentifier::Empty,
             _ => PmsiTunnelIdentifier::Raw(rest.to_vec()),
         };
 
@@ -387,14 +451,54 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tunnel_type_round_trips_without_loss() {
+    fn experimental_tunnel_type_round_trips_without_loss() {
         let t = PmsiTunnel {
             flags: 0x01, // pretend Leaf Information Required is set
-            tunnel_type: PmsiTunnelType::Other(99),
+            tunnel_type: PmsiTunnelType::Other(0x7b),
             mpls_label: 0x00ab_cdef,
             tunnel_identifier: PmsiTunnelIdentifier::Raw(vec![0xde, 0xad, 0xbe, 0xef]),
         };
         roundtrip(&t);
+    }
+
+    #[test]
+    fn assigned_experimental_and_valid_composite_types_are_accepted() {
+        for tunnel_type in [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x07, 0x08, 0x0a, 0x0b, 0x0c, 0x0d, 0x7b, 0x7c,
+            0x7d, 0x7e, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
+        ] {
+            let decoded = PmsiTunnel::decode(&[0, tunnel_type, 0, 0, 0])
+                .unwrap_or_else(|error| panic!("type {tunnel_type:#04x}: {error}"));
+            assert_eq!(decoded.tunnel_type.as_u8(), tunnel_type);
+        }
+
+        for tunnel_type in [
+            0x81, 0x82, 0x83, 0x84, 0x85, 0x87, 0x88, 0x8a, 0x8b, 0x8c, 0x8d,
+        ] {
+            let decoded = PmsiTunnel::decode(&[0, tunnel_type, 0, 0, 0, 1, 2, 3])
+                .unwrap_or_else(|error| panic!("composite type {tunnel_type:#04x}: {error}"));
+            assert_eq!(decoded.tunnel_type.as_u8(), tunnel_type);
+        }
+
+        for tunnel_type in [0x08, 0x0a, 0x0b, 0x0c, 0x0d, 0xff] {
+            assert!(matches!(
+                PmsiTunnel::decode(&[0, tunnel_type, 0, 0, 0])
+                    .unwrap()
+                    .tunnel_type,
+                PmsiTunnelType::Other(value) if value == tunnel_type
+            ));
+        }
+    }
+
+    #[test]
+    fn unassigned_and_invalid_composite_types_are_rejected() {
+        for tunnel_type in [
+            0x09, 0x0e, 0x20, 0x7a, 0x7f, 0x80, 0x86, 0x89, 0x8e, 0x90, 0xfa,
+        ] {
+            let error = PmsiTunnel::decode(&[0, tunnel_type, 0, 0, 0])
+                .expect_err("unassigned or invalid composite type must fail");
+            assert!(matches!(error, DecodeError::MalformedField { .. }));
+        }
     }
 
     #[test]
@@ -412,16 +516,25 @@ mod tests {
     }
 
     #[test]
-    fn ingress_replication_with_8_byte_id_treated_as_raw() {
-        // Tunnel type 6 but identifier neither 4 nor 16 octets: keep as Raw
-        // for forward-compat (an extension might define a longer form).
+    fn ingress_replication_with_8_byte_id_is_rejected() {
         let buf = [
             0u8, 6u8, // type = Ingress Replication
             0u8, 0u8, 0u8, // label = 0
             1, 2, 3, 4, 5, 6, 7, 8, // 8-byte tunnel identifier
         ];
-        let t = PmsiTunnel::decode(&buf).unwrap();
-        assert!(matches!(t.tunnel_identifier, PmsiTunnelIdentifier::Raw(_)));
+        assert!(matches!(
+            PmsiTunnel::decode(&buf),
+            Err(DecodeError::MalformedField { .. })
+        ));
+    }
+
+    #[test]
+    fn no_tunnel_info_with_non_empty_identifier_is_rejected() {
+        let buf = [0u8, 0u8, 0u8, 0u8, 0u8, 1u8];
+        assert!(matches!(
+            PmsiTunnel::decode(&buf),
+            Err(DecodeError::MalformedField { .. })
+        ));
     }
 
     #[test]

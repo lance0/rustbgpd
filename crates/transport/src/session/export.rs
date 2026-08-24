@@ -324,8 +324,8 @@ impl SessionExportProfile {
             return;
         }
         let is_llgr_stale = attrs.iter().any(|attr| {
-            matches!(attr, PathAttribute::Communities(comms)
-                if comms.contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE))
+            attr.communities()
+                .is_some_and(|comms| comms.contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE))
         });
         if !is_llgr_stale {
             return;
@@ -337,12 +337,13 @@ impl SessionExportProfile {
                     *local_pref = 0;
                     has_local_pref = true;
                 }
-                PathAttribute::Communities(comms)
-                    if !comms.contains(&rustbgpd_wire::COMMUNITY_NO_EXPORT) =>
-                {
-                    comms.push(rustbgpd_wire::COMMUNITY_NO_EXPORT);
+                _ => {
+                    if let Some(comms) = attr.communities_mut()
+                        && !comms.contains(&rustbgpd_wire::COMMUNITY_NO_EXPORT)
+                    {
+                        comms.push(rustbgpd_wire::COMMUNITY_NO_EXPORT);
+                    }
                 }
-                _ => {}
             }
         }
         if !has_local_pref {
@@ -355,7 +356,7 @@ impl SessionExportProfile {
             return;
         }
         for attr in attrs.iter_mut() {
-            if let PathAttribute::Communities(comms) = attr {
+            if let Some(comms) = attr.communities_mut() {
                 if !comms.contains(&rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN) {
                     comms.push(rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN);
                 }

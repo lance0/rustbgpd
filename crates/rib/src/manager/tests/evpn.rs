@@ -1902,6 +1902,114 @@ async fn evpn_export_policy_applies_modifications() {
     handle.await.unwrap();
 }
 
+#[tokio::test]
+async fn partial_pmsi_survives_type3_imet_distribution_and_wire_encoding() {
+    let (tx, rx) = mpsc::channel(32);
+    let manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 0, 0, 100)),
+        BgpMetrics::new(),
+    );
+    let handle = tokio::spawn(manager.run());
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65_000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let (source_tx, mut source_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: source,
+        peer_asn: 65_000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        outbound_tx: source_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut source_rx).await;
+
+    let mut imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    imet.attributes = Arc::new(vec![PathAttribute::PmsiTunnelPartial(
+        rustbgpd_wire::PmsiTunnel::for_evpn_ingress_replication(100, source),
+    )]);
+    let imet_key = imet.key();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_evpn_routes(&tx).await;
+
+    let update = out_rx.try_recv().expect("Type 3 IMET is distributed");
+    let advertised = update
+        .evpn_announce
+        .first()
+        .expect("one Type 3 IMET announced");
+    assert_eq!(advertised.key(), imet_key);
+    assert!(
+        advertised
+            .attributes
+            .iter()
+            .any(|attribute| matches!(attribute, PathAttribute::PmsiTunnelPartial(_)))
+    );
+    let mut wire = Vec::new();
+    rustbgpd_wire::attribute::encode_path_attributes(
+        &advertised.attributes,
+        &mut wire,
+        true,
+        false,
+    )
+    .unwrap();
+    let pmsi_frame = [0xe0, 22, 9, 0, 6, 0, 0, 100, 10, 0, 0, 1];
+    assert!(
+        wire.windows(pmsi_frame.len())
+            .any(|window| window == pmsi_frame)
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// Regression: `PendingRoutesReceived::has_more()` previously omitted
 /// the EVPN iterators, so a `RoutesReceived` carrying more than
 /// `ROUTES_RECEIVED_CHUNK_SIZE` EVPN routes had everything past the

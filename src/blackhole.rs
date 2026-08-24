@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use rustbgpd_rib::{RibUpdate, Route, RouteOrigin};
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{PathAttribute, Prefix};
+use rustbgpd_wire::Prefix;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -1066,11 +1066,8 @@ fn derive_desired(config: BlackholeConfig, routes: &[Route]) -> Vec<Candidate<'_
 
 fn has_blackhole_community(route: &Route) -> bool {
     route.attributes.iter().any(|attr| {
-        matches!(
-            attr,
-            PathAttribute::Communities(values)
-                if values.contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
-        )
+        attr.communities()
+            .is_some_and(|values| values.contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE))
     })
 }
 
@@ -1307,7 +1304,7 @@ mod tests {
     use prometheus::Registry;
     use rustbgpd_rib::RouteEvent;
     use rustbgpd_rib::route::RouteOrigin;
-    use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Origin};
+    use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute};
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
@@ -1686,6 +1683,45 @@ mod tests {
             &routes,
         );
         assert!(got.is_empty());
+    }
+
+    #[test]
+    fn derive_desired_treats_partial_blackhole_communities_like_canonical() {
+        let config = BlackholeConfig {
+            enabled: true,
+            allow_broad_prefixes: false,
+        };
+        for (prefix, origin_type, expected_installable, expected_reason) in [
+            (v4(32), RouteOrigin::Ebgp, true, "eligible"),
+            (v4(24), RouteOrigin::Ebgp, false, "broad_prefix"),
+            (v4(32), RouteOrigin::Ibgp, false, "not_ebgp"),
+        ] {
+            let canonical = route(
+                prefix,
+                origin_type,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            );
+            let mut partial = canonical.clone();
+            partial.attributes = Arc::new(vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::CommunitiesPartial(vec![rustbgpd_wire::COMMUNITY_BLACKHOLE]),
+            ]);
+
+            for candidate in [canonical, partial] {
+                let routes = [candidate];
+                let got = derive_desired(config, &routes);
+                assert_eq!(got.len(), 1);
+                assert_eq!(got[0].installable, expected_installable);
+                assert_eq!(got[0].reason, expected_reason);
+            }
+        }
+
+        let mut untagged = route(v4(32), RouteOrigin::Ebgp, Vec::new());
+        untagged.attributes = Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::CommunitiesPartial(vec![0x0001_0002]),
+        ]);
+        assert!(derive_desired(config, &[untagged]).is_empty());
     }
 
     #[test]

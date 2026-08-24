@@ -454,6 +454,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Recognized optional-transitive Communities, Extended Communities, PMSI
+  Tunnel, and Large Communities attributes now preserve a received Partial
+  bit as typed state through policy and the RIB to egress; existing read
+  projections continue to expose recognized community values. Local synthesis
+  remains canonical, malformed recognized values retain their RFC 7606
+  dispositions, and PMSI tunnel-type/identifier validation now follows the
+  assigned, experimental, and composite registry boundaries. (LAN-1285)
 - Malformed Only-to-Customer (OTC) framing is now handled before BGP Role
   logic: revised decoding omits it and treats reachable NLRI as withdrawn, or
   resets the session per RFC 7606 section 5.2 when none is reachable. Valid

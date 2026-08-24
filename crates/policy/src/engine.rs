@@ -1806,11 +1806,21 @@ pub fn apply_modifications(
         attrs,
         &mods.communities_add,
         &mods.communities_remove,
-        |a| match a {
-            PathAttribute::Communities(c) => Some(c.clone()),
-            _ => None,
+        |a| {
+            a.communities().map(|values| {
+                (
+                    values.to_vec(),
+                    matches!(a, PathAttribute::CommunitiesPartial(_)),
+                )
+            })
         },
-        PathAttribute::Communities,
+        |values, partial| {
+            if partial {
+                PathAttribute::CommunitiesPartial(values)
+            } else {
+                PathAttribute::Communities(values)
+            }
+        },
     );
 
     // 4. Extended communities
@@ -1825,11 +1835,21 @@ pub fn apply_modifications(
         attrs,
         &mods.large_communities_add,
         &mods.large_communities_remove,
-        |a| match a {
-            PathAttribute::LargeCommunities(c) => Some(c.clone()),
-            _ => None,
+        |a| {
+            a.large_communities().map(|values| {
+                (
+                    values.to_vec(),
+                    matches!(a, PathAttribute::LargeCommunitiesPartial(_)),
+                )
+            })
         },
-        PathAttribute::LargeCommunities,
+        |values, partial| {
+            if partial {
+                PathAttribute::LargeCommunitiesPartial(values)
+            } else {
+                PathAttribute::LargeCommunities(values)
+            }
+        },
     );
 
     // 6. AS_PATH prepend
@@ -1888,8 +1908,8 @@ fn apply_community_mods<T: Clone + Eq + Hash>(
     attrs: &mut Vec<PathAttribute>,
     add: &[T],
     remove: &[T],
-    extract: impl Fn(&PathAttribute) -> Option<Vec<T>>,
-    wrap: impl Fn(Vec<T>) -> PathAttribute,
+    extract: impl Fn(&PathAttribute) -> Option<(Vec<T>, bool)>,
+    wrap: impl Fn(Vec<T>, bool) -> PathAttribute,
 ) {
     if add.is_empty() && remove.is_empty() {
         return;
@@ -1897,12 +1917,14 @@ fn apply_community_mods<T: Clone + Eq + Hash>(
 
     let mut items = Vec::new();
     let mut found = false;
+    let mut partial = false;
     let mut index = 0;
     while index < attrs.len() {
-        if let Some(extracted) = extract(&attrs[index]) {
+        if let Some((extracted, extracted_partial)) = extract(&attrs[index]) {
             attrs.remove(index);
             if !found {
                 items = extracted;
+                partial = extracted_partial;
                 found = true;
             }
         } else {
@@ -1912,7 +1934,7 @@ fn apply_community_mods<T: Clone + Eq + Hash>(
 
     apply_exact_community_delta(&mut items, add, remove);
     if !items.is_empty() {
-        attrs.push(wrap(items));
+        attrs.push(wrap(items, partial));
     }
 }
 
@@ -1953,11 +1975,15 @@ fn apply_extended_community_mods(
         return;
     }
 
-    let mut items: Vec<ExtendedCommunity> = attrs
+    let (mut items, partial): (Vec<ExtendedCommunity>, bool) = attrs
         .iter()
-        .find_map(|a| match a {
-            PathAttribute::ExtendedCommunities(c) => Some(c.clone()),
-            _ => None,
+        .find_map(|a| {
+            a.extended_communities().map(|values| {
+                (
+                    values.to_vec(),
+                    matches!(a, PathAttribute::ExtendedCommunitiesPartial(_)),
+                )
+            })
         })
         .unwrap_or_default();
 
@@ -1976,9 +2002,13 @@ fn apply_extended_community_mods(
         }
     }
 
-    attrs.retain(|a| !matches!(a, PathAttribute::ExtendedCommunities(_)));
+    attrs.retain(|a| a.extended_communities().is_none());
     if !items.is_empty() {
-        attrs.push(PathAttribute::ExtendedCommunities(items));
+        attrs.push(if partial {
+            PathAttribute::ExtendedCommunitiesPartial(items)
+        } else {
+            PathAttribute::ExtendedCommunities(items)
+        });
     }
 }
 

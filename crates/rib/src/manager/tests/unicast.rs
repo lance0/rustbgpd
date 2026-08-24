@@ -60,6 +60,11 @@ pub(super) fn with_no_advertise(mut route: Route) -> Route {
     route
 }
 
+fn with_partial_community(mut route: Route, community: u32) -> Route {
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::CommunitiesPartial(vec![community]));
+    route
+}
+
 fn with_otc(mut route: Route, asn: u32) -> Route {
     Arc::make_mut(&mut route.attributes).push(PathAttribute::OnlyToCustomer(asn));
     route
@@ -83,6 +88,256 @@ fn drain_unicast_state(
         }
     }
     state
+}
+
+#[tokio::test]
+async fn partial_communities_enforce_no_export_and_no_advertise() {
+    let (tx, rx) = mpsc::channel(32);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target: IpAddr = "192.0.2.90".parse().unwrap();
+    let source: IpAddr = "198.51.100.90".parse().unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        session_id: 0,
+        peer_asn: 65_100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 119, 0), 24);
+    let plain = make_route(prefix, Ipv4Addr::new(198, 51, 100, 90));
+    for community in [
+        rustbgpd_wire::COMMUNITY_NO_EXPORT,
+        rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+    ] {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: source,
+            announced: vec![plain.clone()],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        let _ = query_best_routes(&tx).await;
+        let announced = out_rx.try_recv().expect("plain route is announced");
+        assert_eq!(announced.announce.len(), 1);
+
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: source,
+            announced: vec![with_partial_community(plain.clone(), community)],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        let _ = query_best_routes(&tx).await;
+        let withdrawn = out_rx
+            .try_recv()
+            .expect("Partial well-known community withdraws prior route");
+        assert!(withdrawn.announce.is_empty());
+        assert_eq!(withdrawn.withdraw, vec![(Prefix::V4(prefix), 0)]);
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+fn partial_community_export_policy(
+    added_community: u32,
+    added_extended: ExtendedCommunity,
+    added_large: rustbgpd_wire::LargeCommunity,
+) -> PolicyChain {
+    PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Permit,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications {
+                communities_add: vec![added_community],
+                extended_communities_add: vec![added_extended],
+                large_communities_add: vec![added_large],
+                ..Default::default()
+            },
+        }],
+        default_action: PolicyAction::Deny,
+    }])
+}
+
+fn assert_partial_community_export(
+    advertised: &Route,
+    communities: [u32; 2],
+    extended: [ExtendedCommunity; 2],
+    large: [rustbgpd_wire::LargeCommunity; 2],
+) {
+    assert!(matches!(
+        advertised
+            .attributes
+            .iter()
+            .find(|attr| attr.communities().is_some()),
+        Some(PathAttribute::CommunitiesPartial(values)) if values == &communities
+    ));
+    assert!(matches!(
+        advertised
+            .attributes
+            .iter()
+            .find(|attr| attr.extended_communities().is_some()),
+        Some(PathAttribute::ExtendedCommunitiesPartial(values)) if values == &extended
+    ));
+    assert!(matches!(
+        advertised
+            .attributes
+            .iter()
+            .find(|attr| attr.large_communities().is_some()),
+        Some(PathAttribute::LargeCommunitiesPartial(values)) if values == &large
+    ));
+
+    let mut wire = Vec::new();
+    rustbgpd_wire::attribute::encode_path_attributes(
+        &advertised.attributes,
+        &mut wire,
+        true,
+        false,
+    )
+    .unwrap();
+    let assert_partial_frame = |type_code: u8, value: &[u8]| {
+        let mut expected = vec![0xe0, type_code, u8::try_from(value.len()).unwrap()];
+        expected.extend_from_slice(value);
+        assert!(
+            wire.windows(expected.len())
+                .any(|window| window == expected),
+            "missing Partial type {type_code} frame in {wire:02x?}"
+        );
+    };
+    let communities_value = communities
+        .into_iter()
+        .flat_map(u32::to_be_bytes)
+        .collect::<Vec<_>>();
+    assert_partial_frame(8, &communities_value);
+    let extended_value = extended
+        .into_iter()
+        .flat_map(|value| value.as_u64().to_be_bytes())
+        .collect::<Vec<_>>();
+    assert_partial_frame(16, &extended_value);
+    let large_value = large
+        .into_iter()
+        .flat_map(|value| {
+            [value.global_admin, value.local_data1, value.local_data2]
+                .into_iter()
+                .flat_map(u32::to_be_bytes)
+        })
+        .collect::<Vec<_>>();
+    assert_partial_frame(32, &large_value);
+}
+
+#[tokio::test]
+async fn partial_community_attributes_survive_policy_update_group_and_wire_encoding() {
+    let community = (65_000u32 << 16) | 0x0064;
+    let added_community = (65_000u32 << 16) | 0x00c8;
+    let extended = ExtendedCommunity::new(0x0002_FDE8_0000_0064);
+    let added_extended = ExtendedCommunity::new(0x0002_FDE8_0000_00C8);
+    let large = rustbgpd_wire::LargeCommunity::new(65_000, 1, 100);
+    let added_large = rustbgpd_wire::LargeCommunity::new(65_000, 1, 200);
+    let export_policy =
+        partial_community_export_policy(added_community, added_extended, added_large);
+
+    let (tx, rx) = mpsc::channel(32);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target: IpAddr = "192.0.2.91".parse().unwrap();
+    let source: IpAddr = "198.51.100.91".parse().unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        session_id: 0,
+        peer_asn: 65_100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: Some(export_policy),
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 120, 0), 24);
+    let mut route = make_route(prefix, Ipv4Addr::new(198, 51, 100, 91));
+    Arc::make_mut(&mut route.attributes).extend([
+        PathAttribute::CommunitiesPartial(vec![community]),
+        PathAttribute::ExtendedCommunitiesPartial(vec![extended]),
+        PathAttribute::LargeCommunitiesPartial(vec![large]),
+    ]);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+    let update = out_rx.try_recv().expect("route is exported after policy");
+    let advertised = update.announce.first().expect("one route announced");
+    assert_partial_community_export(
+        advertised,
+        [community, added_community],
+        [extended, added_extended],
+        [large, added_large],
+    );
+
+    drop(tx);
+    handle.await.unwrap();
 }
 
 async fn seed_three_dual_stack_candidates(

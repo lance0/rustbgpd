@@ -5,6 +5,14 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- **Additive typed Partial preservation:** Added
+  `PathAttribute::CommunitiesPartial`, `ExtendedCommunitiesPartial`,
+  `PmsiTunnelPartial`, and `LargeCommunitiesPartial` while retaining every
+  canonical tuple variant. Valid Partial-bearing values now remain typed and
+  re-emit with Partial across compact and Extended Length framing; malformed
+  recognized values remain RFC 7606 treat-as-withdraw. PMSI decoding now
+  enforces the assigned, experimental, composite, and identifier-length
+  boundaries from the IANA registry, RFC 6514, and RFC 8317.
 - **Additive typed OTC correction:** Preserved
   `PathAttribute::OnlyToCustomer(u32)` for canonical/local OTC and added
   `PathAttribute::OnlyToCustomerPartial(u32)` for valid received OTC carrying
