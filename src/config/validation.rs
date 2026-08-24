@@ -3222,15 +3222,11 @@ fn validate_bfd(config: &Config) -> Result<(), ConfigError> {
         // Effective BFD = own block, else inherited from the peer group; a
         // disabled (`enabled = false`) block runs no session, so it does not
         // count.
-        let effective_bfd = if neighbor.bfd.is_some() {
-            neighbor.bfd.as_ref()
-        } else {
-            neighbor
-                .peer_group
-                .as_ref()
-                .and_then(|g| config.peer_groups.get(g))
-                .and_then(|pg| pg.bfd.as_ref())
-        };
+        let group = config.peer_group_for_neighbor(neighbor)?;
+        let effective_bfd = neighbor
+            .bfd
+            .as_ref()
+            .or_else(|| group.and_then(|group| group.bfd.as_ref()));
         let has_effective_bfd = effective_bfd.is_some_and(|b| b.enabled);
         if has_effective_bfd && is_ipv6_link_local(&neighbor.address) {
             return Err(ConfigError::InvalidBfd {
