@@ -18,7 +18,8 @@
 //! Each target runs an independent reconnect loop with capped exponential
 //! backoff, logs at `warn` only on state transitions (first failure after
 //! a success, disconnect) and at `debug` for repeated retries, and surfaces
-//! connection state and established-session loss as per-target metrics.
+//! connection state, established-session loss, bounded response backlog, and
+//! last transport handoff as per-target metrics.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -38,6 +39,9 @@ use crate::gnmi_service::validate_stream_subscription_list;
 /// How long a single connection attempt may sit in TCP/TLS/HTTP-2
 /// establishment before it counts as failed and enters backoff.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Queue-depth sampling stays independent of transport polling, so a collector
+/// that stops reading cannot leave the gauge at its last healthy value.
+const QUEUE_OBSERVATION_INTERVAL: Duration = Duration::from_millis(250);
 
 /// One configured dial-out collector target, fully resolved from config.
 /// `PartialEq` drives the reload diff: an unchanged target keeps its live
@@ -352,6 +356,22 @@ enum SessionError {
     Fatal(String),
 }
 
+fn subscription_queue_depth(
+    probe: &tokio::sync::mpsc::WeakSender<Result<gnmi::SubscribeResponse, tonic::Status>>,
+) -> usize {
+    probe.upgrade().map_or(0, |sender| {
+        sender.max_capacity().saturating_sub(sender.capacity())
+    })
+}
+
+fn refresh_queue_depth(
+    metrics: &BgpMetrics,
+    target: &str,
+    probe: &tokio::sync::mpsc::WeakSender<Result<gnmi::SubscribeResponse, tonic::Status>>,
+) {
+    metrics.set_gnmi_dialout_queue_depth(target, subscription_queue_depth(probe));
+}
+
 /// Dial the collector, run one Publish session to completion, and report
 /// how it ended. `Ok(())` means the stream was established (the gauge was
 /// raised) and later ended; the caller decides reconnect pacing.
@@ -367,13 +387,22 @@ async fn publish_session(
     // outbound stream (holding the receiver) is dropped, and a reconnecting
     // collector gets a fresh initial snapshot + sync_response — the same
     // resync contract a dial-in reconnect has.
-    let rx = service
+    let subscription = service
         .spawn_stream_subscription(&target.subscriptions)
         .map_err(|status| SessionError::Fatal(status.message().to_string()))?;
+    let queue_probe = subscription.queue_probe;
     let name = target.name.clone();
-    let outbound = ReceiverStream::new(rx).map_while(move |item| match item {
-        Ok(response) => Some(response),
+    let publish_metrics = metrics.clone();
+    let publish_target = target.name.clone();
+    let dequeue_probe = queue_probe.clone();
+    let outbound = ReceiverStream::new(subscription.responses).map_while(move |item| match item {
+        Ok(response) => {
+            refresh_queue_depth(&publish_metrics, &publish_target, &dequeue_probe);
+            publish_metrics.record_gnmi_dialout_publish(&publish_target);
+            Some(response)
+        }
         Err(status) => {
+            refresh_queue_depth(&publish_metrics, &publish_target, &dequeue_probe);
             // e.g. ON_CHANGE broadcast lag → DataLoss. End the stream so the
             // reconnect path resyncs from a fresh snapshot.
             debug!(
@@ -413,6 +442,9 @@ async fn publish_session(
     );
     metrics.set_gnmi_dialout_connected(&target.name, true);
 
+    let mut queue_observation = tokio::time::interval(QUEUE_OBSERVATION_INTERVAL);
+    queue_observation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     // Drain the collector's response stream. Nothing is expected on it
     // today (PublishResponse is reserved for future flow control); the
     // disconnect signal is its end or error — or the outbound stream
@@ -421,6 +453,9 @@ async fn publish_session(
     // fresh-snapshot resync.
     loop {
         tokio::select! {
+            _ = queue_observation.tick() => {
+                refresh_queue_depth(metrics, &target.name, &queue_probe);
+            }
             _ = &mut ended_rx => {
                 debug!(
                     target = %target.name,
@@ -738,14 +773,14 @@ mod tests {
 
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "the connection gauge only ever holds 0 or 1"
+        reason = "test-only Prometheus gauges under inspection hold bounded integer values"
     )]
-    fn gauge_value(metrics: &BgpMetrics, target: &str) -> Option<i64> {
+    fn labeled_gauge_value(metrics: &BgpMetrics, family_name: &str, target: &str) -> Option<i64> {
         metrics
             .registry()
             .gather()
             .iter()
-            .find(|family| family.name() == "gnmi_dialout_connected")?
+            .find(|family| family.name() == family_name)?
             .get_metric()
             .iter()
             .find(|metric| {
@@ -755,6 +790,22 @@ mod tests {
                     .any(|label| label.name() == "target" && label.value() == target)
             })
             .map(|metric| metric.get_gauge().value() as i64)
+    }
+
+    fn gauge_value(metrics: &BgpMetrics, target: &str) -> Option<i64> {
+        labeled_gauge_value(metrics, "gnmi_dialout_connected", target)
+    }
+
+    fn queue_depth_value(metrics: &BgpMetrics, target: &str) -> Option<i64> {
+        labeled_gauge_value(metrics, "gnmi_dialout_queue_depth", target)
+    }
+
+    fn last_publish_value(metrics: &BgpMetrics, target: &str) -> Option<i64> {
+        labeled_gauge_value(
+            metrics,
+            "gnmi_dialout_last_publish_timestamp_seconds",
+            target,
+        )
     }
 
     fn counter_value(metrics: &BgpMetrics, target: &str) -> Option<f64> {
@@ -789,6 +840,24 @@ mod tests {
                 "gauge gnmi_dialout_connected{{target={target}}} never reached {expected} \
                  (last: {:?})",
                 gauge_value(metrics, target)
+            )
+        });
+    }
+
+    async fn wait_for_first_publish(metrics: &BgpMetrics, target: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if last_publish_value(metrics, target).is_some_and(|value| value > 0) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "gnmi_dialout_last_publish_timestamp_seconds{{target={target}}} remained {:?}",
+                last_publish_value(metrics, target)
             )
         });
     }
@@ -857,6 +926,35 @@ mod tests {
 
     // ── integration: dial out, stream, reconnect ──────────────────────
 
+    #[tokio::test]
+    async fn queue_probe_tracks_bounded_subscription_backlog() {
+        let metrics = BgpMetrics::new();
+        metrics.set_gnmi_dialout_connected("collector-queue", false);
+        let (tx, mut rx) = mpsc::channel(2);
+        let probe = tx.downgrade();
+
+        refresh_queue_depth(&metrics, "collector-queue", &probe);
+        assert_eq!(queue_depth_value(&metrics, "collector-queue"), Some(0));
+
+        tx.send(Ok(gnmi::SubscribeResponse::default()))
+            .await
+            .unwrap();
+        tx.send(Ok(gnmi::SubscribeResponse::default()))
+            .await
+            .unwrap();
+        refresh_queue_depth(&metrics, "collector-queue", &probe);
+        assert_eq!(queue_depth_value(&metrics, "collector-queue"), Some(2));
+
+        let _ = rx.recv().await;
+        refresh_queue_depth(&metrics, "collector-queue", &probe);
+        assert_eq!(queue_depth_value(&metrics, "collector-queue"), Some(1));
+
+        drop(tx);
+        let _ = rx.recv().await;
+        refresh_queue_depth(&metrics, "collector-queue", &probe);
+        assert_eq!(queue_depth_value(&metrics, "collector-queue"), Some(0));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn dial_out_streams_updates_and_reconnects_after_collector_restart() {
         let metrics = BgpMetrics::new();
@@ -870,7 +968,10 @@ mod tests {
 
         // Initial snapshot arrives and the gauge rises.
         expect_update_with_as(&mut received).await;
+        expect_sync(&mut received).await;
         wait_for_gauge(&metrics, "collector-a", 1).await;
+        wait_for_first_publish(&metrics, "collector-a").await;
+        assert_eq!(queue_depth_value(&metrics, "collector-a"), Some(0));
 
         // Kill the collector (stop accepting, then end the live stream):
         // the gauge must drop (disconnect transition). Await the aborted
@@ -988,6 +1089,8 @@ mod tests {
         manager.apply(&[]);
         assert_eq!(gauge_value(&metrics, "collector-reap"), None);
         assert_eq!(counter_value(&metrics, "collector-reap"), None);
+        assert_eq!(queue_depth_value(&metrics, "collector-reap"), None);
+        assert_eq!(last_publish_value(&metrics, "collector-reap"), None);
         server.abort();
     }
 
@@ -1007,6 +1110,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(gauge_value(&metrics, "collector-late"), Some(0));
         assert_eq!(counter_value(&metrics, "collector-late"), Some(0.0));
+        assert_eq!(queue_depth_value(&metrics, "collector-late"), Some(0));
+        assert_eq!(last_publish_value(&metrics, "collector-late"), Some(0));
 
         // The collector comes up later; the retry loop finds it.
         let (server, mut received) = spawn_stub_collector(reservation);

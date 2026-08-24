@@ -977,7 +977,8 @@ impl GnmiService {
     }
 
     /// Spawn the STREAM-mode subscription described by `list` and return the
-    /// response channel. This is the dial-out reuse seam: the dial-out client
+    /// response channel plus a non-owning queue-depth probe. This is the
+    /// dial-out reuse seam: the dial-out client
     /// drives the exact `Subscribe` update-generation tasks (`SAMPLE` /
     /// `ON_CHANGE`) a dial-in collector would, then forwards the channel over
     /// its device-initiated connection. The spawned task exits when the
@@ -991,9 +992,10 @@ impl GnmiService {
     pub(crate) fn spawn_stream_subscription(
         &self,
         list: &gnmi::SubscriptionList,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<gnmi::SubscribeResponse, Status>>, Status> {
+    ) -> Result<SpawnedStreamSubscription, Status> {
         let plan = validate_stream_subscription_list(list)?;
         let (tx, rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+        let queue_probe = tx.downgrade();
         let service = self.clone();
         tokio::spawn(async move {
             match plan.stream_mode {
@@ -1001,8 +1003,19 @@ impl GnmiService {
                 _ => service.run_stream_sample(plan, tx).await,
             }
         });
-        Ok(rx)
+        Ok(SpawnedStreamSubscription {
+            responses: rx,
+            queue_probe,
+        })
     }
+}
+
+/// One spawned dial-out subscription plus a non-owning probe for its bounded
+/// response queue. The weak sender does not keep the subscription alive; it
+/// only exposes channel capacity while a producer still exists.
+pub(crate) struct SpawnedStreamSubscription {
+    pub(crate) responses: tokio::sync::mpsc::Receiver<Result<gnmi::SubscribeResponse, Status>>,
+    pub(crate) queue_probe: tokio::sync::mpsc::WeakSender<Result<gnmi::SubscribeResponse, Status>>,
 }
 
 /// Validate a dial-out subscription list without spawning anything — shared

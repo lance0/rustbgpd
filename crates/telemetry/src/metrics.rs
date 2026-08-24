@@ -226,6 +226,8 @@ struct BgpMetricsInner {
     // ── gNMI dial-out (LAN-471) ────────────────────────────────────
     gnmi_dialout_connected: IntGaugeVec,
     gnmi_dialout_resync_total: IntCounterVec,
+    gnmi_dialout_queue_depth: IntGaugeVec,
+    gnmi_dialout_last_publish_timestamp: IntGaugeVec,
 
     // ── Notifications ──────────────────────────────────────────────
     notifications_sent: IntCounterVec,
@@ -565,6 +567,24 @@ impl BgpMetrics {
             Opts::new(
                 "gnmi_dialout_resync_total",
                 "Established gNMI dial-out sessions that ended and will trigger a fresh snapshot resync, per configured target",
+            ),
+            &["target"],
+        )
+        .expect("valid metric definition");
+
+        let gnmi_dialout_queue_depth = IntGaugeVec::new(
+            Opts::new(
+                "gnmi_dialout_queue_depth",
+                "SubscribeResponse items waiting in the bounded gNMI dial-out queue, per configured target",
+            ),
+            &["target"],
+        )
+        .expect("valid metric definition");
+
+        let gnmi_dialout_last_publish_timestamp = IntGaugeVec::new(
+            Opts::new(
+                "gnmi_dialout_last_publish_timestamp_seconds",
+                "Unix time the most recent SubscribeResponse was handed to the gNMI dial-out transport, per configured target; 0 until the first publish",
             ),
             &["target"],
         )
@@ -2098,6 +2118,12 @@ impl BgpMetrics {
             .register(Box::new(gnmi_dialout_resync_total.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(gnmi_dialout_queue_depth.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(gnmi_dialout_last_publish_timestamp.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(stale_timer_events.clone()))
             .expect("metric not already registered");
         registry
@@ -2624,6 +2650,8 @@ impl BgpMetrics {
             bfd_session_flaps_total,
             gnmi_dialout_connected,
             gnmi_dialout_resync_total,
+            gnmi_dialout_queue_depth,
+            gnmi_dialout_last_publish_timestamp,
             notifications_sent,
             notifications_received,
             messages_sent,
@@ -3016,13 +3044,22 @@ impl BgpMetrics {
     /// Set the gNMI dial-out connection gauge for a configured target.
     /// Refreshed on BOTH transitions (connect and disconnect) so the series
     /// always reflects the live Publish-stream state. The first call for a
-    /// target also materializes its resync counter at zero without incrementing
-    /// it, making failed-dial targets visible on `/metrics`.
+    /// target also materializes its resync counter and publish-observability
+    /// gauges at zero without incrementing them, making failed-dial targets
+    /// visible on `/metrics`.
     pub fn set_gnmi_dialout_connected(&self, target: &str, connected: bool) {
         let _resync_counter = self
             .0
             .gnmi_dialout_resync_total
             .with_label_values(&[target]);
+        let queue_depth = self.0.gnmi_dialout_queue_depth.with_label_values(&[target]);
+        let _last_publish = self
+            .0
+            .gnmi_dialout_last_publish_timestamp
+            .with_label_values(&[target]);
+        if !connected {
+            queue_depth.set(0);
+        }
         self.0
             .gnmi_dialout_connected
             .with_label_values(&[target])
@@ -3038,6 +3075,25 @@ impl BgpMetrics {
             .inc();
     }
 
+    /// Publish the current bounded `SubscribeResponse` queue depth for one
+    /// dial-out target.
+    pub fn set_gnmi_dialout_queue_depth(&self, target: &str, depth: usize) {
+        self.0
+            .gnmi_dialout_queue_depth
+            .with_label_values(&[target])
+            .set(i64::try_from(depth).unwrap_or(i64::MAX));
+    }
+
+    /// Record one `SubscribeResponse` being handed to the dial-out transport.
+    /// Without a collector acknowledgement this is the narrowest observable
+    /// successful-publish boundary; it does not claim remote application.
+    pub fn record_gnmi_dialout_publish(&self, target: &str) {
+        self.0
+            .gnmi_dialout_last_publish_timestamp
+            .with_label_values(&[target])
+            .set(unix_now_seconds());
+    }
+
     /// Reap the dial-out metric series for a target removed from the config
     /// (SIGHUP reload), so `/metrics` stops exporting stale targets.
     pub fn remove_gnmi_dialout_target(&self, target: &str) {
@@ -3045,6 +3101,14 @@ impl BgpMetrics {
         let _ = self
             .0
             .gnmi_dialout_resync_total
+            .remove_label_values(&[target]);
+        let _ = self
+            .0
+            .gnmi_dialout_queue_depth
+            .remove_label_values(&[target]);
+        let _ = self
+            .0
+            .gnmi_dialout_last_publish_timestamp
             .remove_label_values(&[target]);
     }
 
