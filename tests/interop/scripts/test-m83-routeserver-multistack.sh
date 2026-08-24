@@ -901,7 +901,7 @@ assert_otc_client_views() {
     else
         fail "FRR does not report OTC on 203.0.113.0/24"
     fi
-    if birdc_route_all 100.66.0.0/24 | grep "BGP.otc: 65500" >/dev/null; then
+    if birdc_route_all 100.66.0.0/24 | grep -F "BGP.otc: 65500" >/dev/null; then
         ok "BIRD reports BGP.otc: 65500"
     else
         fail "BIRD does not report BGP.otc: 65500 on 100.66.0.0/24"
@@ -939,7 +939,7 @@ assert_rov() {
     log "Assertions 23-25: ROV — RPKI-invalid rejected at import, explain names the term"
     # 100.67.0.0/24 (same member, not-found) already propagated, so the
     # absence of the invalid twin is convergence-safe to assert now.
-    if birdc_route_all 100.68.0.0/24 | grep "BGP.as_path" >/dev/null; then
+    if birdc_route_all 100.68.0.0/24 | grep -F "BGP.as_path" >/dev/null; then
         fail "BIRD holds RPKI-invalid 100.68.0.0/24"
     else
         ok "BIRD lacks RPKI-invalid 100.68.0.0/24"
