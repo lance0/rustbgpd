@@ -1,5 +1,7 @@
 # Runbook: a peer is flapping
 
+Diagnose a BGP session that keeps flapping.
+
 **When this is you:** a session keeps cycling in and out of Established
 — the `BgpSessionFlapping` alert fired, or a client noticed churn.
 Work top to bottom; each step narrows the cause.
