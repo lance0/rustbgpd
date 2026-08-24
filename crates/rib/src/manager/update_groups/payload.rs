@@ -24,8 +24,8 @@ pub(in crate::manager) struct GroupDelta {
     /// Source peer of the group-table entry this delta replaces, read
     /// BEFORE commit. `None` = the key was not previously staged.
     pub(in crate::manager) old_source: Option<IpAddr>,
-    /// Decision attribution of the permitting evaluation (`None` = empty
-    /// chain). Retained on the staged entry so a later join can
+    /// Decision attribution of the permitting evaluation (`None` = absent or
+    /// empty chain). Retained on the staged entry so a later join can
     /// replay the member's export counters without re-running policy.
     pub(in crate::manager) policy_label: Option<PolicyLabel>,
     /// Pre-policy SOURCE attributes of an announce delta (`None` for a
@@ -89,8 +89,8 @@ pub(in crate::manager) struct AdvEntry<'a> {
     /// field and derives equivalent input from [`Self::route`]; its dense
     /// staged entries leave the field `None`.
     pub(in crate::manager) source_attrs: Option<&'a Arc<Vec<PathAttribute>>>,
-    /// Decision attribution of the permitting evaluation (`None` = empty
-    /// chain) — join-time counter replay residue.
+    /// Decision attribution of the permitting evaluation (`None` = absent or
+    /// empty chain) — join-time counter replay residue.
     pub(in crate::manager) policy_label: Option<&'a PolicyLabel>,
 }
 

@@ -31,8 +31,8 @@ There is no equivalent for **import**. The operator question
 - `PolicyEvaluation` (`crates/policy/src/engine.rs`) carries the action
   plus stable decision attribution: the configured denying member,
   `chain_default_permit` when a nonempty chain completes without rejection,
-  or no label for an empty chain. It is consumed and discarded at the eval
-  site.
+  or no label for an absent or empty chain. It is consumed and discarded at
+  the eval site.
 
 The denied case is the load-bearing one. An import-explain that
 only answers for accepted routes is the wrong shape: it ships

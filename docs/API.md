@@ -1023,8 +1023,8 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 Each `matches` entry carries an outcome — `PERMIT` / `DENY` / `WITHDRAWN` /
 `EVICTED` / `STALE` / `NOT_SEEN` — plus decision attribution and the
 modifications applied. A Deny names its configured denying member; a Permit
-after a nonempty chain uses `chain_default_permit`, while an empty chain stays
-inline. Compare a match's
+after a nonempty chain uses `chain_default_permit`, while an absent or empty
+chain stays inline. Compare a match's
 `policy_generation` to the response's `current_policy_generation` to spot a
 `STALE` decision recorded before a policy reload.
 

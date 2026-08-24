@@ -886,11 +886,13 @@ fn rr_suppression_reason(
     }
 }
 
-/// `"<policy>"` or `"<policy>:<term>"` label of the deciding export
-/// chain member, enriched with the rpol term name via the statement
-/// trace (explain-only re-walk, pinned to agree with the counted
-/// evaluation by the policy crate's agreement tests). TOML members
-/// carry no term name and render unchanged.
+/// Stable export decision attribution. A Deny uses `"<policy>"` or
+/// `"<policy>:<term>"` for its deciding member, enriched via the rpol
+/// statement trace; a nonempty Permit uses the shared chain-completion
+/// label and therefore has no member-term suffix. The explain-only re-walk
+/// is pinned to agree with the counted evaluation by the policy crate's
+/// agreement tests. TOML denying members carry no term name and render
+/// unchanged.
 fn policy_label_with_term(
     chain: Option<&PolicyChain>,
     ctx: &RouteContext<'_>,
