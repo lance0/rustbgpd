@@ -33,9 +33,10 @@ class MetricConsumerContractTests(unittest.TestCase):
             )
         )
         cls.documents = CHECK.PUBLIC_DOCS_CHECK.discover_documents()
-        cls.doc_refs = set(
-            CHECK.public_document_references(cls.documents, cls.inventory)
+        cls.public_doc_refs = CHECK.public_document_references(
+            cls.documents, cls.inventory
         )
+        cls.doc_refs = CHECK.normative_document_references(cls.public_doc_refs)
 
     @staticmethod
     def before_tests(source, addition):
@@ -57,6 +58,7 @@ class MetricConsumerContractTests(unittest.TestCase):
         self.assertEqual(len(CHECK.PROCESS_FAMILIES), 7)
         self.assertEqual(len(self.dashboard_refs), 93)
         self.assertEqual(len(self.rule_refs), 39)
+        self.assertEqual(len(self.public_doc_refs), 176)
         self.assertEqual(len(self.doc_refs), 176)
         consumers = self.dashboard_refs | self.rule_refs | self.doc_refs
         self.assertEqual(len(consumers), 183)
@@ -71,6 +73,7 @@ class MetricConsumerContractTests(unittest.TestCase):
         with redirect_stdout(stdout):
             self.assertEqual(CHECK.main(), 0)
         self.assertIn("189 emitted families", stdout.getvalue())
+        self.assertIn("176 normative-doc families", stdout.getvalue())
         self.assertIn("183 consumed, 6 justified raw diagnostics", stdout.getvalue())
 
     def test_comments_literals_and_test_modules_are_not_definitions(self):
@@ -339,6 +342,66 @@ groups:
             ):
                 CHECK.public_document_references({"docs/metrics.md": text}, inventory)
 
+    def test_historical_documents_still_enforce_metric_name_checks(self):
+        with self.assertRaisesRegex(ValueError, "near-miss.*bgp_raedy.*bgp_ready"):
+            CHECK.public_document_references(
+                {"docs/soaks/receipt.md": "Observed `bgp_raedy`."},
+                {"bgp_ready": "ordinary"},
+            )
+
+    def test_document_evidence_classification_is_pinned(self):
+        self.assertNotIn("CHANGELOG.md", self.documents)
+        self.assertNotIn("ROADMAP.md", self.documents)
+        self.assertEqual(
+            CHECK.HISTORICAL_DOCUMENTS,
+            frozenset(
+                {
+                    "docs/OPERATIONAL_PROOF.md",
+                    "docs/RECEIPTS.md",
+                    "docs/evpn-alpha-soak.md",
+                    "docs/milestones.md",
+                    "docs/upstream-findings.md",
+                }
+            ),
+        )
+        self.assertEqual(
+            CHECK.HISTORICAL_DOCUMENT_PREFIXES,
+            ("docs/adr/", "docs/artifacts/", "docs/perf/", "docs/soaks/"),
+        )
+        cases = {
+            "docs/OPERATIONS.md": "normative",
+            "docs/CONFIGURATION.md": "normative",
+            "docs/milestones.md": "historical",
+            "docs/adr/9999-example.md": "historical",
+            "docs/artifacts/soak/receipt.md": "historical",
+            "docs/perf/artifacts/receipt.md": "historical",
+            "docs/soaks/receipt.md": "historical",
+        }
+        for relative, expected in cases.items():
+            with self.subTest(relative=relative):
+                self.assertEqual(CHECK.document_evidence_class(relative), expected)
+
+    def test_only_normative_document_references_certify_consumers(self):
+        inventory = {
+            "bgp_runbook_metric": "ordinary",
+            "bgp_historical_metric": "ordinary",
+        }
+        references = CHECK.public_document_references(
+            {
+                "docs/OPERATIONS.md": "Watch `bgp_runbook_metric`.",
+                "docs/milestones.md": "Shipped `bgp_historical_metric`.",
+                "docs/adr/9999-example.md": "Chose `bgp_historical_metric`.",
+                "docs/soaks/example.md": "Observed `bgp_historical_metric`.",
+            },
+            inventory,
+        )
+        normative = CHECK.normative_document_references(references)
+
+        self.assertEqual(normative, {"bgp_runbook_metric"})
+        CHECK.validate_coverage({"bgp_runbook_metric": "ordinary"}, normative, {})
+        with self.assertRaisesRegex(ValueError, "bgp_historical_metric"):
+            CHECK.validate_coverage(inventory, normative, {})
+
     def test_dashboard_only_and_docs_only_consumer_removals_fail(self):
         dashboard = copy.deepcopy(self.dashboard)
         for panel in CHECK.DASHBOARD_CHECK.all_panels(dashboard["panels"]):
@@ -358,18 +421,49 @@ groups:
                 self.inventory, dashboard_refs | self.rule_refs | self.doc_refs
             )
 
-        documents = {
-            relative: text.replace(
-                "bgp_event_outbox_cursor_gap_total",
-                "bgp_event_outbox_cursor_gap_removed_total",
-            )
-            for relative, text in self.documents.items()
-        }
-        doc_refs = set(CHECK.public_document_references(documents, self.inventory))
+        documents = dict(self.documents)
+        for relative, text in documents.items():
+            if CHECK.document_evidence_class(relative) == "normative":
+                documents[relative] = text.replace(
+                    "bgp_event_outbox_cursor_gap_total",
+                    "bgp_event_outbox_cursor_gap_removed_total",
+                )
+        public_doc_refs = CHECK.public_document_references(documents, self.inventory)
+        self.assertIn("bgp_event_outbox_cursor_gap_total", public_doc_refs)
+        doc_refs = CHECK.normative_document_references(public_doc_refs)
         with self.assertRaisesRegex(ValueError, "bgp_event_outbox_cursor_gap_total"):
             CHECK.validate_coverage(
                 self.inventory, self.dashboard_refs | self.rule_refs | doc_refs
             )
+
+    def test_evpn_nhg_recovery_metrics_require_normative_runbook_evidence(self):
+        recovery_metrics = (
+            "evpn_fdb_nhg_drift_members_repaired_total",
+            "evpn_fdb_nhg_drift_groups_replaced_total",
+            "evpn_fdb_nhg_orphans_cleaned_total",
+            "evpn_fdb_nhg_drift_disabled_total",
+        )
+        for metric in recovery_metrics:
+            with self.subTest(metric=metric):
+                documents = {}
+                for relative, text in self.documents.items():
+                    if CHECK.document_evidence_class(relative) == "normative":
+                        text = "\n".join(
+                            line for line in text.splitlines() if metric not in line
+                        )
+                    documents[relative] = text
+
+                public_doc_refs = CHECK.public_document_references(
+                    documents, self.inventory
+                )
+                self.assertIn(metric, public_doc_refs)
+                doc_refs = CHECK.normative_document_references(public_doc_refs)
+                self.assertNotIn(metric, doc_refs)
+                with self.assertRaisesRegex(ValueError, metric):
+                    CHECK.validate_coverage(
+                        self.inventory,
+                        self.dashboard_refs | self.rule_refs | doc_refs,
+                    )
 
     def test_allowlist_missing_unknown_empty_and_stale_entries_fail(self):
         inventory = {"bgp_ready": "ordinary", "process_raw": "ordinary"}

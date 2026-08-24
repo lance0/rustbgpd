@@ -21,6 +21,27 @@ DASHBOARD = ROOT / "docs/grafana/rustbgpd-overview.json"
 ALERT_RULES = ROOT / "examples/prometheus/rustbgpd-alerts.yml"
 CARGO_LOCK = ROOT / "Cargo.lock"
 
+# Decision records, evidence receipts, and point-in-time status documents remain
+# part of the public-document spelling check, but they are historical evidence:
+# a metric mention there must not keep an otherwise unused family certified.
+# CHANGELOG.md and ROADMAP.md are already outside the shared public-document
+# discovery surface, so they cannot certify a metric and do not belong here.
+HISTORICAL_DOCUMENTS = frozenset(
+    {
+        "docs/OPERATIONAL_PROOF.md",
+        "docs/RECEIPTS.md",
+        "docs/evpn-alpha-soak.md",
+        "docs/milestones.md",
+        "docs/upstream-findings.md",
+    }
+)
+HISTORICAL_DOCUMENT_PREFIXES = (
+    "docs/adr/",
+    "docs/artifacts/",
+    "docs/perf/",
+    "docs/soaks/",
+)
+
 EMITTER_FILES = frozenset({TELEMETRY, SETTLEMENT})
 CUSTOM_COLLECTORS = frozenset(
     {
@@ -689,6 +710,29 @@ def public_document_references(
     return references
 
 
+def document_evidence_class(relative: str) -> str:
+    """Classify a public Markdown path as normative or historical evidence."""
+    if relative in HISTORICAL_DOCUMENTS or relative.startswith(
+        HISTORICAL_DOCUMENT_PREFIXES
+    ):
+        return "historical"
+    return "normative"
+
+
+def normative_document_references(
+    references: dict[str, list[str]],
+) -> set[str]:
+    """Return metric names backed by current operator-facing guidance."""
+    return {
+        name
+        for name, documents in references.items()
+        if any(
+            document_evidence_class(relative) == "normative"
+            for relative in documents
+        )
+    }
+
+
 def markdown_fenced_code(text: str) -> list[str]:
     """Return fenced Markdown bodies without widening typo checks to prose."""
     bodies: list[str] = []
@@ -788,7 +832,8 @@ def main() -> int:
             )
         )
         documents = PUBLIC_DOCS_CHECK.discover_documents()
-        doc_refs = set(public_document_references(documents, inventory))
+        public_doc_refs = public_document_references(documents, inventory)
+        doc_refs = normative_document_references(public_doc_refs)
         consumers = dashboard_refs | rule_refs | doc_refs
         validate_coverage(inventory, consumers)
     except (OSError, RuntimeError, ValueError) as error:
@@ -799,7 +844,7 @@ def main() -> int:
         "metric consumer check passed: "
         f"{len(inventory)} emitted families; "
         f"{len(dashboard_refs)} dashboard, {len(rule_refs)} rules, "
-        f"{len(doc_refs)} public docs; {len(consumers)} consumed, "
+        f"{len(doc_refs)} normative-doc families; {len(consumers)} consumed, "
         f"{len(ALLOWLIST)} justified raw diagnostics"
     )
     return 0
