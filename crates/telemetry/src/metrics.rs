@@ -1316,7 +1316,7 @@ impl BgpMetrics {
 
         let fib_routes_unresolved = IntGauge::new(
             "bgp_fib_routes_unresolved",
-            "General unicast FIB Add/Replace targets held after Linux returned the family-specific route-level unreachable errno for an all-unscoped same-family target.",
+            "General unicast FIB Add/Replace targets held after Linux returned the family-specific route-level unreachable errno for an all-unscoped, same-family, non-link-local target.",
         )
         .expect("valid metric definition");
 
@@ -3920,7 +3920,8 @@ impl BgpMetrics {
     }
 
     /// Set the number of desired general-FIB routes currently held because
-    /// their unscoped next-hops are unresolved in the Linux kernel.
+    /// Linux returned the family-specific route-level unreachable errno for
+    /// their unscoped, same-family, non-link-local next-hops.
     pub fn set_fib_routes_unresolved(&self, count: usize) {
         self.0
             .fib_routes_unresolved

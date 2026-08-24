@@ -3220,10 +3220,11 @@ status through `RibService.ListFibRoutes` and
 `rbgp rib fib`. The actor also writes a crash-recovery owned-state
 file at `<runtime_state_dir>/fib-owned.json` so an ungraceful process
 restart can recover routes the previous rustbgpd instance installed.
-Unscoped next hops that Linux cannot yet resolve are held in memory rather
-than reported as permanent apply failures. A route notification whose prefix
-contains a held next hop wakes a retry, and the periodic reconcile retries all
-holds. These holds are derived runtime state and are not persisted.
+Unscoped, same-family, non-link-local next hops whose complete Add/Replace
+target Linux rejects with the family-specific unreachable errno are held in
+memory rather than reported as permanent apply failures. A route notification
+whose prefix contains a held next hop wakes a retry, and the periodic reconcile
+retries all holds. These holds are derived runtime state and are not persisted.
 
 Peer and route-count guardrails are enforced before any kernel apply.
 If `allowed_peer_groups` or `allowed_neighbors` is non-empty, a best

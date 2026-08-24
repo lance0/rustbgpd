@@ -11,10 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- General unicast FIB Add/Replace operations whose unscoped next hops are not
-  yet reachable are now held as `unresolved` and retried on relevant Linux
-  route notifications or the periodic reconcile, without failure-event or
-  failure-counter noise. (LAN-1194)
+- General unicast FIB Add/Replace operations whose unscoped, same-family,
+  non-link-local next-hop target receives Linux's family-specific unreachable
+  errno are now held as `unresolved` and retried on relevant route notifications
+  or the periodic reconcile, without failure-event or failure-counter noise.
+  (LAN-1194)
 
 ### Upgrade notes
 

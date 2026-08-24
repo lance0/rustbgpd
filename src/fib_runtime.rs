@@ -1064,24 +1064,34 @@ where
 }
 
 fn refresh_unresolved_holds(unresolved: &mut UnresolvedHolds, plan: &FibPlan) {
+    if unresolved.routes.is_empty() {
+        return;
+    }
+    let planned: BTreeMap<FibRouteKey, (&FibRoute, UnresolvedOpKind)> = plan
+        .ops
+        .iter()
+        .filter_map(|op| {
+            let (key, planned) = match op {
+                FibOp::Add(route) => Some((route.key, (route, UnresolvedOpKind::Add))),
+                FibOp::Replace { desired, .. } => {
+                    Some((desired.key, (desired, UnresolvedOpKind::Replace)))
+                }
+                FibOp::Adopt(_) | FibOp::Remove(_) | FibOp::Forget(_) => None,
+            }?;
+            unresolved
+                .routes
+                .contains_key(&key)
+                .then_some((key, planned))
+        })
+        .collect();
     unresolved.routes.retain(|key, held| {
-        let Some((desired, op_kind)) = plan.ops.iter().find_map(|op| match op {
-            FibOp::Add(route) if route.key == *key => Some((route, UnresolvedOpKind::Add)),
-            FibOp::Replace { desired, .. } if desired.key == *key => {
-                Some((desired, UnresolvedOpKind::Replace))
-            }
-            FibOp::Add(_)
-            | FibOp::Adopt(_)
-            | FibOp::Replace { .. }
-            | FibOp::Remove(_)
-            | FibOp::Forget(_) => None,
-        }) else {
+        let Some((desired, op_kind)) = planned.get(key) else {
             return false;
         };
-        if held.route.target != desired.target || held.op_kind != op_kind {
+        if held.route.target != desired.target || held.op_kind != *op_kind {
             return false;
         }
-        held.route = desired.clone();
+        held.route = (*desired).clone();
         true
     });
 }

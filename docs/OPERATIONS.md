@@ -1447,7 +1447,7 @@ FIB runtime. The actor is still default-off; configure at least one
 |--------|-------------------|
 | `bgp_fib_routes_installed_total` | Configured-table routes successfully installed or replaced in the Linux kernel |
 | `bgp_fib_routes_withdrawn_total` | Daemon-owned configured-table routes successfully removed from the kernel |
-| `bgp_fib_routes_unresolved` | Current desired Add/Replace rows held after Linux returned the family-specific route-level unreachable errno for a target made entirely of unscoped same-family next hops; one uncovered ECMP member can hold the whole route, and relevant route events plus the periodic reconcile trigger retries |
+| `bgp_fib_routes_unresolved` | Current desired Add/Replace rows held after Linux returned the family-specific route-level unreachable errno for a target made entirely of unscoped, same-family, non-link-local next hops; one uncovered ECMP member can hold the whole route, and relevant route events plus the periodic reconcile trigger retries |
 | `bgp_fib_routes_rejected_total{reason="foreign_route_exists"}` | Desired route suppressed because a kernel row already exists at the same table / metric / prefix and is not daemon-owned |
 | `bgp_fib_routes_rejected_total{reason="owned_route_drifted"}` | A row rustbgpd previously owned was externally changed; rustbgpd released ownership and preserved the live kernel row |
 | `bgp_fib_routes_rejected_total{reason="next_hop_family_unsupported"}` | Desired route suppressed because the table family and BGP next-hop family do not match |
@@ -2392,9 +2392,10 @@ for sampled `route_limit_exceeded` rows.
   the current best route.
 - `unresolved` / `next_hop_unresolved`: Linux returned the family-specific
   route-level unreachable errno while applying a target made entirely of
-  unscoped same-family next hops. One uncovered ECMP member can therefore hold
-  the whole route. The desired row is held without counting a rejection/failure;
-  relevant kernel route events and the 30-second periodic reconcile retry it.
+  unscoped, same-family, non-link-local next hops. One uncovered ECMP member can
+  therefore hold the whole route. The desired row is held without counting a
+  rejection/failure; relevant kernel route events and the 30-second periodic
+  reconcile retry it.
   Withdrawal, target change, foreign-row appearance, or owned drift clears the
   stale hold.
 - `rejected` / `foreign_route_exists`: a kernel row already exists at the
