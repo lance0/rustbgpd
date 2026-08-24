@@ -1,5 +1,7 @@
 # Explain route decisions
 
+Find the `rbgp` command that explains each stage of a route decision.
+
 Every stage of a route's life through the daemon can explain itself,
 from the live RIB, in one command — no debug rebuild, no external
 looking-glass daemon, no packet capture. This page is the catalog:

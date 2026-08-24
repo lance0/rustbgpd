@@ -1,5 +1,7 @@
 # Compare advertised routes
 
+Compare rustbgpd's advertised routes with an incumbent route server.
+
 Compares what rustbgpd is advertising to each peer (the live Adj-RIB-Out,
 read over gRPC) against a snapshot of what an incumbent route server
 advertises to the same peers, and reports semantic divergence. Built for
