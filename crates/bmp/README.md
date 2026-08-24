@@ -14,7 +14,10 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 - Per-collector async TCP client with automatic reconnect and backoff
 - Fan-out manager distributes events to all connected collectors
 - Peer Up replay on collector reconnect
-- Periodic Stats Report (Adj-RIB-In route count)
+- Periodic Stats Reports for each peer carry the RFC 7854 Adj-RIB-In route
+  count (type 7); when available, they also carry the RFC 8671 post-policy
+  Adj-RIB-Out total (type 15) and per-(AFI, SAFI) counts (type 17); types 15/17
+  are omitted when unavailable rather than reported as false zero.
 - RFC 8671 post-policy Adj-RIB-Out route monitoring (O=1/L=1)
 - RFC 9069 Loc-RIB route monitoring + Loc-RIB Stats Report (peer type 3),
   with a resumable cursor-based Loc-RIB dump

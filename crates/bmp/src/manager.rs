@@ -1676,7 +1676,29 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one end-to-end proof couples emitted Stats Report bytes to the crate README contract"
+    )]
     async fn manager_handles_stats_report() {
+        fn decode_stats(message: &[u8]) -> Vec<(u16, &[u8])> {
+            assert_eq!(message[5], 1, "expected a Stats Report");
+            let count = u32::from_be_bytes(message[48..52].try_into().unwrap());
+            let mut cursor = 52;
+            let mut stats = Vec::new();
+            for _ in 0..count {
+                let stat_type = u16::from_be_bytes(message[cursor..cursor + 2].try_into().unwrap());
+                let len = usize::from(u16::from_be_bytes(
+                    message[cursor + 2..cursor + 4].try_into().unwrap(),
+                ));
+                cursor += 4;
+                stats.push((stat_type, &message[cursor..cursor + len]));
+                cursor += len;
+            }
+            assert_eq!(cursor, message.len(), "all Stats Report bytes are decoded");
+            stats
+        }
+
         let (event_tx, event_rx) = mpsc::channel(16);
         let (control_tx, control_rx) = mpsc::channel(16);
         let (c_tx, mut c_rx) = mpsc::channel(16);
@@ -1704,19 +1726,85 @@ mod tests {
             .unwrap();
 
         let msg = c_rx.recv().await.unwrap();
-        assert_eq!(msg[5], 1); // Stats Report type
-        // Stats count at offset 6 (common hdr) + 42 (per-peer hdr):
-        // type 7 + type 15 + two type-17 entries = 4.
-        let count = u32::from_be_bytes(msg[48..52].try_into().unwrap());
-        assert_eq!(count, 4);
-        // First: type 7 (len 8, value 42). Second: type 15 = sum 15.
-        assert_eq!(u16::from_be_bytes([msg[52], msg[53]]), 7);
-        assert_eq!(u64::from_be_bytes(msg[56..64].try_into().unwrap()), 42);
-        assert_eq!(u16::from_be_bytes([msg[64], msg[65]]), 15);
-        assert_eq!(u64::from_be_bytes(msg[68..76].try_into().unwrap()), 15);
-        // Then the two AFI/SAFI-qualified type-17 entries.
-        assert_eq!(u16::from_be_bytes([msg[76], msg[77]]), 17);
-        assert_eq!(u16::from_be_bytes([msg[91], msg[92]]), 17);
+        let stats = decode_stats(&msg);
+        assert_eq!(stats.len(), 4);
+        assert_eq!(u64::from_be_bytes(stats[0].1.try_into().unwrap()), 42);
+        assert_eq!(u64::from_be_bytes(stats[1].1.try_into().unwrap()), 15);
+        assert_eq!(&stats[2].1[..3], &[0, 1, 1]);
+        assert_eq!(u64::from_be_bytes(stats[2].1[3..].try_into().unwrap()), 10);
+        assert_eq!(&stats[3].1[..3], &[0, 2, 1]);
+        assert_eq!(u64::from_be_bytes(stats[3].1[3..].try_into().unwrap()), 5);
+
+        let adj_rib_in_type = stats[0].0;
+        let adj_rib_out_total_type = stats[1].0;
+        let adj_rib_out_family_type = stats[2].0;
+        assert_eq!(stats[3].0, adj_rib_out_family_type);
+        assert_eq!(
+            (
+                adj_rib_in_type,
+                adj_rib_out_total_type,
+                adj_rib_out_family_type
+            ),
+            (7, 15, 17)
+        );
+
+        event_tx
+            .send(BmpEvent::StatsReport {
+                peer_info: sample_peer_info(),
+                adj_rib_in_routes: 43,
+                adj_rib_out_post: None,
+            })
+            .await
+            .unwrap();
+        let unavailable = c_rx.recv().await.unwrap();
+        let unavailable_stats = decode_stats(&unavailable);
+        assert_eq!(unavailable_stats.len(), 1);
+        assert_eq!(unavailable_stats[0].0, adj_rib_in_type);
+        assert_eq!(
+            u64::from_be_bytes(unavailable_stats[0].1.try_into().unwrap()),
+            43
+        );
+
+        let readme = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"));
+        let features_marker = "## Features\n";
+        let architecture_marker = "\n## Architecture\n";
+        assert_eq!(readme.matches(features_marker).count(), 1);
+        assert_eq!(readme.matches(architecture_marker).count(), 1);
+        let features_start = readme.find(features_marker).unwrap() + features_marker.len();
+        let architecture_start = readme.find(architecture_marker).unwrap();
+        assert!(features_start < architecture_start);
+        let features = &readme[features_start..architecture_start];
+
+        let mut bullets = Vec::new();
+        for line in features.lines() {
+            if line.starts_with("- ") {
+                bullets.push(line.to_owned());
+            } else if line.starts_with("  ") {
+                let bullet = bullets.last_mut().expect("continuation follows a bullet");
+                bullet.push(' ');
+                bullet.push_str(line.trim());
+            } else {
+                assert!(line.is_empty(), "Features contains only bullets");
+            }
+        }
+        let matching: Vec<_> = bullets
+            .iter()
+            .filter(|bullet| bullet.starts_with("- Periodic Stats Report"))
+            .collect();
+        assert_eq!(matching.len(), 1);
+        let actual = matching[0].split_whitespace().collect::<Vec<_>>().join(" ");
+        let expected = format!(
+            "- Periodic Stats Reports for each peer carry the RFC 7854 Adj-RIB-In route count \
+             (type {adj_rib_in_type}); when available, they also carry the RFC 8671 post-policy \
+             Adj-RIB-Out total (type {adj_rib_out_total_type}) and per-(AFI, SAFI) counts \
+             (type {adj_rib_out_family_type}); types \
+             {adj_rib_out_total_type}/{adj_rib_out_family_type} are omitted when unavailable \
+             rather than reported as false zero."
+        );
+        assert_eq!(
+            actual,
+            expected.split_whitespace().collect::<Vec<_>>().join(" ")
+        );
 
         drop(event_tx);
         drop(control_tx);
