@@ -39,8 +39,8 @@ see [`../rr-evpn-fabric/`](../rr-evpn-fabric/).
 # uniqueness invariants without starting the daemon.
 rustbgpd --check --strict examples/evpn-vtep-leaf/config.toml
 
-# Preview against another config.
-rustbgpd --diff examples/rr-evpn-fabric/config.toml \
+# Preview what SIGHUP would change if a candidate replaced this leaf config.
+rustbgpd --diff /path/to/candidate.toml \
                 examples/evpn-vtep-leaf/config.toml
 ```
 
