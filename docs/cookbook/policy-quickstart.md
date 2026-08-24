@@ -2,12 +2,12 @@
 
 Build and validate your first rustbgpd routing policy.
 
-**When this is you:** you're about to write your first real routing
-policy on rustbgpd and want the workflow that keeps it honest — a
-typed, compiled policy file with its unit tests *in the file*, checked
-before it ever touches the daemon, dry-run against the live RIB before
-it's attached, hot-swapped under traffic with SIGHUP, and explainable
-per term afterwards. Full language reference:
+**When this is you:** You're about to write your first real rustbgpd
+routing policy. You want the workflow that keeps it honest — a typed,
+compiled policy file with its unit tests *in the file*, checked before
+it ever touches the daemon, dry-run against the live RIB before it's
+attached, hot-swapped under traffic with SIGHUP, and explainable per
+term afterwards. Full language reference:
 [`rpol-language.md`](../rpol-language.md)
 ([ADR-0096](../adr/0096-policy-language.md)).
 

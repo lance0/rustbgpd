@@ -2,10 +2,10 @@
 
 Map rustbgpd controls to MANRS IXP Programme Action 1.
 
-**When this is you:** your exchange participates in (or is applying to)
-the MANRS IXP Programme and you need to show, control by control, how a
-rustbgpd route server implements Action 1 — and how members can verify
-each control from the outside.
+**When this is you:** Your exchange participates in or is applying to the
+MANRS IXP Programme. You need to show, control by control, how a rustbgpd
+route server implements Action 1 — and how members can verify each control
+from the outside.
 
 The normative source is
 [MANRS-004.01, "MANRS Actions for IXP Program"](https://manrs.org/specifications/MANRS-004/01/).

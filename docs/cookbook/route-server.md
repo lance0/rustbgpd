@@ -2,14 +2,14 @@
 
 This recipe builds an IXP route server for transparent member route exchange.
 
-**When this is you:** you run (or are about to run) an Internet-exchange
-route server — one BGP speaker that redistributes routes among member
-networks so they don't need a full mesh of bilateral sessions. You want
-transparent redistribution (the members' own NEXT_HOP and AS_PATH, not
-yours), RPKI origin validation and import hygiene at the door, RFC 9234
-roles so a member can't leak transit back through the fabric, and a path
-that doesn't hide a prefix from a member just because that member's own
-policy rejected the single best path.
+**When this is you:** You run or plan an Internet-exchange route server.
+It is one BGP speaker that redistributes routes among member networks so
+they don't need a full mesh of bilateral sessions. You want transparent
+redistribution (the members' own NEXT_HOP and AS_PATH, not yours), RPKI
+origin validation and import hygiene at the door, RFC 9234 roles so a
+member can't leak transit back through the fabric, and a path that
+doesn't hide a prefix from a member just because that member's own policy
+rejected the single best path.
 
 **Proven by:**
 [M83](../RECEIPTS.md#interop-labs--pr-gated-interopyml) (RFC 7947

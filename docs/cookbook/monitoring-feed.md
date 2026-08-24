@@ -2,13 +2,14 @@
 
 Export routing state to your monitoring stack.
 
-**When this is you:** a controller, analytics pipeline, or NOC stack
-needs to see what this daemon sees — pre-policy, post-policy, and
-Loc-RIB route streams into BMP collectors, a durable event feed your
-bridge can replay after a restart, periodic MRT table archives, and a
-Grafana dashboard on top. rustbgpd exports the full BMP monitoring
-trio on one exporter (RFC 7854 Adj-RIB-In, RFC 8671 Adj-RIB-Out as
-byte-exact wire PDUs, RFC 9069 Loc-RIB), selectable per collector.
+**When this is you:** Your controller, analytics pipeline, or NOC needs
+routing state. It needs to see what this daemon sees — pre-policy,
+post-policy, and Loc-RIB route streams into BMP collectors, a durable
+event feed your bridge can replay after a restart, periodic MRT table
+archives, and a Grafana dashboard on top. rustbgpd exports the full BMP
+monitoring trio on one exporter (RFC 7854 Adj-RIB-In, RFC 8671
+Adj-RIB-Out as byte-exact wire PDUs, RFC 9069 Loc-RIB), selectable per
+collector.
 
 **Proven by:** [M24](../RECEIPTS.md#interop-labs--pr-gated-interopyml)
 (BMP Initiation / PeerUp / RouteMonitoring ordering vs a BMP receiver)

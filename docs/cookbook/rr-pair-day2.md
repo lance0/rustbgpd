@@ -2,10 +2,11 @@
 
 Operate a production route-reflector pair safely.
 
-**When this is you:** a redundant route-reflector pair (per
-[route-reflector.md](route-reflector.md)) is in production and you need
-to make routine changes without dropping the fleet. Rule of thumb for
-every task below: change one RR, verify, then the other.
+**When this is you:** Your redundant route-reflector pair is in
+production. It follows the
+[route-reflector recipe](route-reflector.md), and you need to make
+routine changes without dropping the fleet. Rule of thumb for every task
+below: change one RR, verify, then the other.
 
 ## GR settings sanity
 

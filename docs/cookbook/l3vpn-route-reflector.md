@@ -2,12 +2,12 @@
 
 This recipe builds a control-plane-only VPNv4/VPNv6 route reflector.
 
-**When this is you:** you have a PE fleet exchanging VPNv4/VPNv6
-routes (SAFI 128) and want the reflector out of the vendor-appliance
-business — reflect with RD, MPLS label stack, next-hop, and Route
-Targets preserved verbatim, and only send each PE the routes whose RTs
-it actually imports (RFC 4684 RT-Constrain). Scope honesty up front:
-this is the **route-reflector / controller-feed slice only**
+**When this is you:** Your PE fleet exchanges VPNv4/VPNv6 routes.
+These use SAFI 128, and you want the reflector out of the
+vendor-appliance business — reflect with RD, MPLS label stack, next-hop,
+and Route Targets preserved verbatim, and only send each PE the routes
+whose RTs it actually imports (RFC 4684 RT-Constrain). Scope honesty up
+front: this is the **route-reflector / controller-feed slice only**
 ([ADR-0077](../adr/0077-mpls-vpn-bgpls-address-family-boundary.md)).
 rustbgpd does no VRF import, no MPLS label forwarding, no CE-facing
 attachment circuits — the PEs keep their dataplane; the RR moves
