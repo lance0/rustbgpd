@@ -1406,8 +1406,9 @@ impl BgpMetrics {
                 "bgp_policy_routes_total",
                 "Routes evaluated through a policy chain, attributed to the denying \
                  member or nonempty-chain default Permit. Labels: peer (bounded by neighbor \
-                 count), policy (configured policy name; \"inline\" for \
-                 anonymous), direction ∈ {import, export}, action ∈ {permit, \
+                 count), policy (configured denying name, \"chain_default_permit\" for a \
+                 nonempty-chain Permit, or \"inline\" for anonymous / empty), \
+                 direction ∈ {import, export}, action ∈ {permit, \
                  deny}. Cardinality is bounded by config — no per-clause \
                  reason label in v1.",
             ),

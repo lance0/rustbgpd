@@ -875,8 +875,8 @@ serves `/livez` and `/readyz` for orchestrators. Key counters operators watch:
 policy evaluation to the decisive member on Deny. A nonempty chain that
 completes without rejection uses the bounded
 `policy="chain_default_permit"` sentinel; `policy="inline"` remains the
-label for an inline Deny or a Permit from an absent / genuinely empty chain. Initial
-table dumps, route refreshes, dirty resyncs, and forced outbound
+label for an inline Deny or a Permit from an absent / genuinely empty chain.
+Initial table dumps, route refreshes, dirty resyncs, and forced outbound
 refreshes can increment export counters because they re-evaluate export
 policy. The Prometheus counter is **monotonic for the lifetime of the
 daemon process** — use Prometheus `rate()` / `increase()` to read it.
