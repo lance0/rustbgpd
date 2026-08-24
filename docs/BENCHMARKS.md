@@ -220,10 +220,10 @@ cargo bench -p rustbgpd-rib --bench rib_ops -- "adj_rib_in_insert"
 
 HTML reports are generated to `target/criterion/`.
 
-### EVPN dataplane generation query (LAN-1055)
+### EVPN dataplane generation query
 
 The `evpn_dataplane_query` target isolates the internal query/materialization
-seam. Its legacy path is the exact pre-LAN-1055 whole-EVPN-table clone; the new
+seam. Its legacy path is the exact pre-change whole-EVPN-table clone; the new
 changed path clones only Type 1/2/5 rows. The downstream intent projection is
 outside both timings, which conservatively omits the new path's smaller mixed
 input. Both sides receive the same input cardinality; mixed output cardinality
@@ -240,7 +240,7 @@ cardinality; the unchanged receipt must be `routes=None` with zero row visits.
 Those are control-flow/materialization receipts, not allocator measurements;
 no allocation-count or byte claim is made here.
 
-Measured 2026-08-24 from the LAN-1055 candidate based on
+Measured 2026-08-24 from the PR #1988 candidate based on
 `5871d4c2fb5583fe1dd1b24c28849f624fa68043`, with rustc 1.98.0, Linux
 6.17.0-35-generic, AMD Ryzen Threadripper 7970X, CPU 8 pinned under the
 `performance` governor, and the shared host lock held:
