@@ -152,12 +152,18 @@ wait_blackhole_status() {
     return 1
 }
 
+kernel_route_exact() {
+    local prefix=$1
+    docker exec "$RUSTBGPD" ip route show exact "$prefix"
+}
+
 wait_kernel_blackhole_route() {
     local prefix=$1
+    local route
     log "Waiting for kernel blackhole route $prefix..."
     for i in $(seq 1 30); do
-        if docker exec "$RUSTBGPD" ip route show exact "$prefix" \
-            | grep -Eq "^blackhole ${prefix%/*}"; then
+        if route=$(kernel_route_exact "$prefix") \
+            && printf '%s\n' "$route" | grep -E "^blackhole ${prefix%/*}" >/dev/null; then
             ok "$prefix installed as kernel blackhole route after ${i}s"
             return 0
         fi
@@ -170,7 +176,13 @@ wait_kernel_blackhole_route() {
 
 assert_no_kernel_route() {
     local prefix=$1
-    if docker exec "$RUSTBGPD" ip route show exact "$prefix" | grep -q .; then
+    local route
+    if ! route=$(kernel_route_exact "$prefix"); then
+        fail "could not observe $prefix in rustbgpd kernel FIB"
+        dump_state_on_failure
+        return 1
+    fi
+    if [ -n "$route" ]; then
         fail "$prefix unexpectedly present in rustbgpd kernel FIB"
         dump_state_on_failure
         return 1
@@ -180,11 +192,14 @@ assert_no_kernel_route() {
 
 wait_no_kernel_route() {
     local prefix=$1
+    local route
     log "Waiting for kernel route $prefix to be removed..."
     for i in $(seq 1 30); do
-        if ! docker exec "$RUSTBGPD" ip route show exact "$prefix" | grep -q .; then
-            ok "$prefix removed from rustbgpd kernel FIB after ${i}s"
-            return 0
+        if route=$(kernel_route_exact "$prefix"); then
+            if [ -z "$route" ]; then
+                ok "$prefix removed from rustbgpd kernel FIB after ${i}s"
+                return 0
+            fi
         fi
         sleep 1
     done
