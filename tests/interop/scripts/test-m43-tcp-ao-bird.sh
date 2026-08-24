@@ -629,7 +629,9 @@ rust_pid() {
     docker exec "$RUSTBGPD" sh -lc '
         pids=$(pidof rustbgpd 2>/dev/null || true)
         set -- $pids
-        [ "$#" -eq 1 ]
+        if [ "$#" -ne 1 ]; then
+            exit 1
+        fi
         printf "%s\n" "$1"
     '
 }
@@ -654,10 +656,23 @@ signal_rustbgpd_pid() {
 
 self_test_pid_signal() {
     local kill_calls=0
+    local census_output=""
     local expected_command="kill \"-\$1\" \"\$2\""
     local expected_signal="TERM"
     local expected_pid="42"
+    pidof() { printf '%s\n' "${PIDOF_FIXTURE-}"; }
+    export -f pidof
     docker() {
+        if [ "$#" -eq 5 ] \
+            && [ "$1" = "exec" ] \
+            && [ "$2" = "fixture-rustbgpd" ] \
+            && [ "$3" = "sh" ] \
+            && [ "$4" = "-lc" ] \
+            && [[ "$5" == *"pidof rustbgpd"* ]]; then
+            PIDOF_FIXTURE="$census_output" bash -c "$5"
+            return
+        fi
+
         kill_calls=$((kill_calls + 1))
         if [ "$#" -ne 8 ] \
             || [ "$1" != "exec" ] \
@@ -674,6 +689,38 @@ self_test_pid_signal() {
             return 1
         fi
     }
+    fail() { :; }
+    dump_diagnostics() { :; }
+
+    local observed_pid
+    census_output=""
+    if observed_pid=$(rust_pid); then
+        printf 'PID census self-test accepted zero processes as %q\n' \
+            "$observed_pid" >&2
+        return 1
+    fi
+    if restart_rustbgpd_with_dynamic_range || [ "$kill_calls" -ne 0 ]; then
+        printf 'PID census self-test signaled after a zero-process census\n' >&2
+        return 1
+    fi
+
+    census_output="42 43"
+    if observed_pid=$(rust_pid); then
+        printf 'PID census self-test accepted multiple processes as %q\n' \
+            "$observed_pid" >&2
+        return 1
+    fi
+    if restart_rustbgpd_with_dynamic_range || [ "$kill_calls" -ne 0 ]; then
+        printf 'PID census self-test signaled after a multiple-process census\n' >&2
+        return 1
+    fi
+
+    census_output="42"
+    if ! observed_pid=$(rust_pid) || [ "$observed_pid" != "42" ]; then
+        printf 'PID census self-test rejected exact-one output %q\n' \
+            "$observed_pid" >&2
+        return 1
+    fi
 
     if ! signal_rustbgpd_pid TERM "42"; then
         printf 'PID signal self-test rejected valid PID 42\n' >&2
@@ -713,7 +760,7 @@ self_test_pid_signal() {
         fi
     done
 
-    printf 'M43 PID signal self-test passed\n'
+    printf 'M43 PID census and signal self-test passed\n'
 }
 
 rust_pid_gone_or_zombie() {

@@ -266,14 +266,35 @@ fn m51_remote_admin_down_uses_the_public_field_as_primary_oracle() {
     assert!(!source.contains("BFD remote AdminDown flip without local transition"));
 }
 
-/// Load-bearing restart safety proof: the same production helper exercised by
-/// M43 accepts a positive decimal PID, preserves its shell argument boundary,
-/// and rejects unsafe PID shapes before invoking the container runtime.
+/// Load-bearing restart safety proof: the same production helpers exercised by
+/// M43 require an exact-one process census and a positive decimal PID, preserve
+/// shell argument boundaries, and reject ambiguity before signaling.
 #[test]
 fn m43_restart_signal_accepts_only_a_positive_decimal_pid() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let script = root.join("tests/interop/scripts/test-m43-tcp-ao-bird.sh");
     let source = fs::read_to_string(&script).expect("M43 driver must be readable");
+
+    let rust_pid = source
+        .split_once("rust_pid() {")
+        .and_then(|(_, remainder)| {
+            remainder
+                .split_once("signal_rustbgpd_pid() {")
+                .map(|(body, _)| body)
+        })
+        .expect("M43 PID census function has a bounded source section");
+    assert!(rust_pid.contains("pidof rustbgpd"));
+    assert!(rust_pid.contains("if [ \"$#\" -ne 1 ]; then"));
+    let census_exit = rust_pid
+        .find("exit 1")
+        .expect("ambiguous PID census must exit nonzero");
+    let census_print = rust_pid
+        .find("printf \"%s\\n\" \"$1\"")
+        .expect("exact-one PID census must print its PID");
+    assert!(
+        census_exit < census_print,
+        "census must reject before printing"
+    );
 
     assert!(source.contains("signal_rustbgpd_pid TERM \"$old_pid\""));
     assert!(source.contains("signal_rustbgpd_pid KILL \"$pid\""));
@@ -297,6 +318,6 @@ fn m43_restart_signal_accepts_only_a_positive_decimal_pid() {
     );
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "M43 PID signal self-test passed\n"
+        "M43 PID census and signal self-test passed\n"
     );
 }
