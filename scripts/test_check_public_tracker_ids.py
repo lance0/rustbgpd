@@ -75,15 +75,81 @@ class PublicTrackerIdTests(unittest.TestCase):
             clean = write_fixture(
                 root,
                 "docs/perf/artifacts/example/clean.txt",
-                "/home/<user>/run $HOME/run ${HOME}/run\n",
+                "/home/<user>/run $HOME/run ${HOME}/run <SOAK_HOME>/run\n",
             )
-            linux = write_fixture(root, "docs/perf/artifacts/linux.txt", "/home/alice/run\n")
-            mac = root / "docs/perf/artifacts/example/mac.txt.gz"
+            linux = write_fixture(
+                root,
+                "docs/artifacts/soak/example/linux.txt",
+                "metadata\n/home/alice/run\n",
+            )
+            mac = root / "docs/artifacts/soak/example/mac.txt.gz"
             with gzip.open(mac, "wb") as handle:
-                handle.write(b"/Users/bob/run\n")
+                handle.write(b"metadata\n/Users/bob/run\n")
             failures = guard.audit_artifact_home_paths([clean, linux, mac], root)
-            self.assertTrue(any("/home/alice" in failure for failure in failures))
-            self.assertTrue(any("/Users/bob" in failure for failure in failures))
+            self.assertEqual(len(failures), 2)
+            self.assertTrue(
+                any(
+                    "docs/artifacts/soak/example/linux.txt:2" in failure
+                    and "/home/alice" in failure
+                    for failure in failures
+                )
+            )
+            self.assertTrue(
+                any(
+                    "docs/artifacts/soak/example/mac.txt.gz:2" in failure
+                    and "/Users/bob" in failure
+                    for failure in failures
+                )
+            )
+
+    def test_artifact_roots_fail_closed_independently(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            perf = write_fixture(
+                root, "docs/perf/artifacts/example/clean.txt", "clean\n"
+            )
+            soak = write_fixture(
+                root, "docs/artifacts/soak/example/clean.txt", "clean\n"
+            )
+            with self.assertRaisesRegex(
+                guard.TrackerIdGuardError, "docs/artifacts/soak"
+            ):
+                guard.audit_artifact_home_paths([perf], root)
+            with self.assertRaisesRegex(
+                guard.TrackerIdGuardError, "docs/perf/artifacts"
+            ):
+                guard.audit_artifact_home_paths([soak], root)
+
+    def test_out_of_scope_artifact_path_is_not_scanned(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            perf = write_fixture(
+                root, "docs/perf/artifacts/example/clean.txt", "clean\n"
+            )
+            soak = write_fixture(
+                root, "docs/artifacts/soak/example/clean.txt", "clean\n"
+            )
+            outside = write_fixture(
+                root, "docs/artifacts/archive/example.txt", "/home/alice/run\n"
+            )
+            self.assertEqual(
+                guard.audit_artifact_home_paths([perf, soak, outside], root), []
+            )
+
+    def test_repository_artifact_roots_are_discovered_and_clean(self) -> None:
+        self.assertEqual(
+            guard.ARTIFACT_ROOTS,
+            (Path("docs/perf/artifacts"), Path("docs/artifacts/soak")),
+        )
+        paths = guard.tracked_files()
+        relatives = [path.relative_to(guard.ROOT) for path in paths]
+        for artifact_root in guard.ARTIFACT_ROOTS:
+            with self.subTest(artifact_root=artifact_root):
+                self.assertTrue(
+                    any(path.is_relative_to(artifact_root) for path in relatives),
+                    f"{artifact_root} must contain tracked evidence",
+                )
+        self.assertEqual(guard.audit_artifact_home_paths(paths), [])
 
     def test_artifact_scan_is_chunk_bounded_and_boundary_safe(self) -> None:
         class RecordingStream(io.BytesIO):
@@ -110,24 +176,32 @@ class PublicTrackerIdTests(unittest.TestCase):
             with self.assertRaisesRegex(guard.TrackerIdGuardError, "no tracked"):
                 guard.audit_artifact_home_paths([], root)
 
-            corrupt = write_fixture(root, "docs/perf/artifacts/corrupt.gz", b"not gzip")
+            perf_clean = write_fixture(
+                root, "docs/perf/artifacts/clean.txt", "clean\n"
+            )
+            soak_clean = write_fixture(
+                root, "docs/artifacts/soak/clean.txt", "clean\n"
+            )
+            corrupt = write_fixture(
+                root, "docs/artifacts/soak/corrupt.gz", b"not gzip"
+            )
             with self.assertRaisesRegex(guard.TrackerIdGuardError, "cannot read"):
-                guard.audit_artifact_home_paths([corrupt], root)
+                guard.audit_artifact_home_paths([perf_clean, corrupt], root)
 
             unreadable = write_fixture(root, "docs/perf/artifacts/unreadable", "clean\n")
             unreadable.chmod(0)
             try:
                 with self.assertRaisesRegex(guard.TrackerIdGuardError, "cannot read"):
-                    guard.audit_artifact_home_paths([unreadable], root)
+                    guard.audit_artifact_home_paths([unreadable, soak_clean], root)
             finally:
                 unreadable.chmod(0o600)
 
             target = write_fixture(root, "target.txt", "clean\n")
-            symlink = root / "docs/perf/artifacts/example/link.txt"
+            symlink = root / "docs/artifacts/soak/example/link.txt"
             symlink.parent.mkdir(parents=True)
             symlink.symlink_to(target)
             with self.assertRaisesRegex(guard.TrackerIdGuardError, "symlink"):
-                guard.audit_artifact_home_paths([symlink], root)
+                guard.audit_artifact_home_paths([perf_clean, symlink], root)
 
     def test_artifact_git_enumeration_failure_is_closed(self) -> None:
         original = guard.tracked_files
@@ -185,12 +259,31 @@ class PublicTrackerIdTests(unittest.TestCase):
             outside = write_fixture(
                 root, "docs/SHA256SUMS", f"{digest(public)}  public.md\n"
             )
+            soak = write_fixture(
+                root, "docs/artifacts/soak/example/run.json", "{}\n"
+            )
+            soak_manifest = write_fixture(
+                root,
+                "docs/artifacts/soak/example/SHA256SUMS",
+                f"{digest(soak)}  run.json\n",
+            )
             sealed = guard.sealed_paths(
-                [manifest, readme, nested, data, outside, public], root
+                [
+                    manifest,
+                    readme,
+                    nested,
+                    data,
+                    outside,
+                    public,
+                    soak_manifest,
+                    soak,
+                ],
+                root,
             )
             self.assertIn("docs/perf/artifacts/example/README.md", sealed)
             self.assertIn("docs/perf/artifacts/example/nested/data.tsv", sealed)
             self.assertNotIn("docs/public.md", sealed)
+            self.assertNotIn("docs/artifacts/soak/example/run.json", sealed)
 
     def test_malformed_or_unsafe_seals_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
