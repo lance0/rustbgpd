@@ -123,7 +123,7 @@ if wait_frr_rd_present 30; then
     ok "FRR EVPN RIB contains the tenant RD ${TENANT_RD}"
 else
     fail "FRR never received the tenant routes within 30s"
-    frr_evpn_table >&2
+    frr_evpn_table >&2 || true
 fi
 
 # Test 3: rustbgpd's own RIB holds the locally-originated Type 3 + Type 4.
@@ -175,7 +175,7 @@ if wait_frr_rd_absent 20; then
     ok "FRR dropped the tenant RD ${TENANT_RD} after teardown"
 else
     fail "FRR still shows the tenant RD ${TENANT_RD} 20s after teardown"
-    frr_evpn_table >&2
+    frr_evpn_table >&2 || true
 fi
 
 # Test 6: rustbgpd's RIB no longer holds the tenant's Type 3 / Type 4.
