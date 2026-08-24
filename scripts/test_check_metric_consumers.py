@@ -95,7 +95,7 @@ class MetricConsumerContractTests(unittest.TestCase):
         self.assertEqual(operations.count(start), 1)
         self.assertEqual(operations.count(end), 1)
         section = operations.split(start, 1)[1].split(end, 1)[0]
-        for metric in registered:
+        for metric in sorted(registered):
             with self.subTest(metric=metric):
                 self.assertEqual(section.count(metric), 1)
 
