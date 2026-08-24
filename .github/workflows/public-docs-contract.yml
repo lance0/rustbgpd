@@ -2,7 +2,7 @@
 # run unfiltered. The public lane must see pure source renames because release
 # documentation cross-references source paths; the embedding lane is cheap
 # enough to share that stronger trigger instead of recreating path filters.
-name: Documentation contracts
+name: Public docs contract
 
 on:
   push:
