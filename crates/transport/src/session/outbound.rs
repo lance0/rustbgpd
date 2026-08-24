@@ -83,17 +83,8 @@ impl PeerSession {
             .attributes
             .iter()
             .find_map(|attribute| match attribute {
-                PathAttribute::OnlyToCustomer(asn) => Some(*asn),
-                PathAttribute::Unknown(raw)
-                    if raw.type_code == rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER
-                        && raw.data.len() == 4 =>
-                {
-                    Some(u32::from_be_bytes([
-                        raw.data[0],
-                        raw.data[1],
-                        raw.data[2],
-                        raw.data[3],
-                    ]))
+                PathAttribute::OnlyToCustomer(asn) | PathAttribute::OnlyToCustomerPartial(asn) => {
+                    Some(*asn)
                 }
                 _ => None,
             });

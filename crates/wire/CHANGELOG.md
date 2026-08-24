@@ -5,6 +5,13 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- **Additive typed OTC correction:** Preserved
+  `PathAttribute::OnlyToCustomer(u32)` for canonical/local OTC and added
+  `PathAttribute::OnlyToCustomerPartial(u32)` for valid received OTC carrying
+  Partial. Extended Length and reserved low flag bits are accepted and
+  canonically emitted; malformed flags or lengths are legacy UPDATE attribute
+  errors and revised RFC 7606 treat-as-withdraw records instead of opaque
+  attributes.
 - **Optional Tokio framing:** Added the default-off `tokio-codec` feature and
   the `BgpCodec` / `BgpCodecError` API. The adapter keeps separate inbound and
   outbound RFC 8654 ceilings, preserves incomplete input, isolates malformed

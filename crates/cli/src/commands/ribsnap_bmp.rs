@@ -971,6 +971,11 @@ fn convert_attribute<'a>(
             attr_type::ONLY_TO_CUSTOMER,
             asn.to_be_bytes().to_vec(),
         )),
+        PathAttribute::OnlyToCustomerPartial(asn) => base.unknown_attrs.push((
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL,
+            attr_type::ONLY_TO_CUSTOMER,
+            asn.to_be_bytes().to_vec(),
+        )),
         PathAttribute::AtomicAggregate => {
             base.unknown_attrs.push((
                 attr_flags::TRANSITIVE,
@@ -1563,6 +1568,39 @@ mod tests {
         assert!(snapshot.contains("\"path_id\":2"));
         // The skipped rib-in message is noted.
         assert!(notes.iter().any(|n| n.contains("Adj-RIB-In")), "{notes:?}");
+    }
+
+    #[test]
+    fn partial_otc_snapshot_retains_partial_flag() {
+        let (mut capture, info) = v4_peer_capture();
+        let mut attrs = attr(attr_type::ORIGIN, &[0]);
+        attrs.extend(as_path_attr(&[65500]));
+        attrs.extend(attr(attr_type::NEXT_HOP, &[192, 0, 2, 254]));
+        let mut otc = attr(attr_type::ONLY_TO_CUSTOMER, &65500u32.to_be_bytes());
+        otc[0] |= attr_flags::PARTIAL;
+        attrs.extend(otc);
+        capture.extend(route_monitoring(
+            &info,
+            &update_pdu(&[], &attrs, &v4_nlri([10, 0, 0, 0], 24, None)),
+        ));
+        capture.extend(route_monitoring(&info, &eor_v4()));
+
+        let (snapshot, _) = run_capture(&capture).unwrap();
+        let route: serde_json::Value = serde_json::from_str(
+            snapshot
+                .lines()
+                .find(|line| line.contains("\"record\":\"route\""))
+                .expect("one route record"),
+        )
+        .unwrap();
+        assert_eq!(
+            route["unknown_attrs"],
+            serde_json::json!([{
+                "flags": 224,
+                "type_code": attr_type::ONLY_TO_CUSTOMER,
+                "value": "0000ffdc"
+            }])
+        );
     }
 
     #[test]

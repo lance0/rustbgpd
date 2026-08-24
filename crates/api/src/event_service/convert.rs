@@ -319,8 +319,10 @@ pub fn policy_event_to_bgp_event(event: PolicyEvent) -> proto::BgpEvent {
 ///
 /// `local_role` / `remote_role` lower to the RFC 9234 §4 lowercase
 /// names (`provider`, `route_server`, `route_server_client`,
-/// `customer`, `peer`). The `otc_value` is `None` only on the
-/// `malformed_length` path where the attribute couldn't be decoded.
+/// `customer`, `peer`), or to an empty string when absent. A missing
+/// `local_role` is valid on the role-independent `malformed_length` path.
+/// The `otc_value` is `None` only when that malformed attribute couldn't be
+/// decoded.
 #[must_use]
 pub fn otc_route_blocked_event_to_bgp_event(
     event: &rustbgpd_transport::OtcRouteBlockedEvent,
@@ -547,7 +549,7 @@ mod tests {
             direction: rustbgpd_transport::OtcDirection::Ingress,
             reason: rustbgpd_telemetry::reason_labels::OtcBlockReason::MalformedLength,
             prefixes: vec!["203.0.113.0/24".to_string()],
-            local_role: Some(rustbgpd_wire::BgpRole::Provider),
+            local_role: None,
             remote_role: None,
             otc_value: None,
             as_path: String::new(),
@@ -557,6 +559,10 @@ mod tests {
         let Some(proto::bgp_event::Payload::OtcRouteBlocked(payload)) = bgp.payload else {
             panic!("expected OtcRouteBlocked payload variant");
         };
+        assert_eq!(
+            payload.local_role, "",
+            "role-independent malformed length has no local role"
+        );
         assert!(payload.otc_value.is_none());
         assert_eq!(
             payload.remote_role, "",

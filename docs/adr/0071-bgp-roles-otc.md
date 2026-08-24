@@ -59,8 +59,9 @@ ingress (the RFC numbers them under one heading; we list five for clarity):
   Graceful Restart (RFC 4724), Long-Lived GR (RFC 9494), Notification GR (RFC
   8538). Role is one more capability code following the same pattern.
 - **`PathAttribute`** is the typed-or-`Unknown` hybrid enum (`AsPath`,
-  `NextHop`, `MpReachNlri`, communities, `PmsiTunnel`, …) — `OnlyToCustomer(u32)`
-  slots in as a new typed variant.
+  `NextHop`, `MpReachNlri`, communities, `PmsiTunnel`, …) —
+  `OnlyToCustomer(u32)` and `OnlyToCustomerPartial(u32)` are its typed OTC
+  variants.
 - **FSM OPEN-error paths** already produce a `NOTIFICATION` + transition to
   Idle for things like Bad Peer AS / Unsupported Capability; Role Mismatch
   (subcode 11) plugs into the same shape.
@@ -113,9 +114,12 @@ event-history work so it can carry stable cursors/backfill semantics.
 
 ### OTC path attribute (§5)
 
-- New `PathAttribute::OnlyToCustomer(u32)` variant. **Type code 35**, **flags
-  `0xC0`** (Optional + Transitive — NOT Partial), **length 4**, value = the
-  32-bit ASN that initially set OTC.
+- `PathAttribute::OnlyToCustomer(u32)` for canonical/local OTC and
+  `PathAttribute::OnlyToCustomerPartial(u32)` for valid received OTC carrying
+  Partial. Both use **type code 35** and **length 4**, with the value equal to
+  the 32-bit ASN that initially set OTC. Canonical local flags are **`0xC0`**
+  (Optional + Transitive); received `0xE0` retains Partial in the additive
+  typed variant. Extended Length and reserved low bits canonicalize on emit.
 - **Scope: IPv4 unicast and IPv6 unicast only.** RFC 9234 §5 explicitly
   scopes the procedures to AFI 1 / AFI 2, SAFI 1. v1 does NOT apply OTC to
   FlowSpec, EVPN, or any other AFI/SAFI. E2 is staged in the unicast RIB export
@@ -163,17 +167,12 @@ event-history work so it can carry stable cursors/backfill semantics.
     invariant above — I3 does NOT overwrite.
 - **Malformed OTC length (length ≠ 4 octets)** ⇒ **RFC 7606 treat-as-
   withdraw** (RFC 9234 §5 explicitly cites RFC 7606 for malformed OTC).
-  **The wire crate MUST preserve a malformed OTC as a recoverable
-  marker, not raise a fatal decode error** — otherwise `update.parse(…)`
-  in `process_update` would short-circuit into the FSM error path and
-  kill the session, which is precisely what RFC 7606 forbids for this
-  case. v1 carries the malformed OTC through as
-  `PathAttribute::Unknown(RawAttribute)` with the OTC type code retained
-  on the raw bytes; the transport ingress branch inspects the parsed
-  attribute set, sees a raw attribute with type 35 and length ≠ 4, and
-  applies the same transport-layer mechanics as I1/I2 (drop
-  announcements, process withdrawals, session stays Established) but
-  with a distinct counter label:
+  The strict wire decoder returns subcode 5 with the offending attribute
+  data. Revised decoding omits the attribute and records type 35
+  treat-as-withdraw metadata, allowing transport to withdraw reachable
+  announcements while the session stays Established. With no reachable NLRI,
+  RFC 7606 §5.2 resets the session. Transport derives the distinct
+  role-independent diagnostic
   `bgp_otc_routes_blocked_total{reason="malformed_length"}`. This is a
   syntactic error, not a semantic leak; the reason label makes the distinction
   observable.
@@ -300,7 +299,7 @@ on the `local-role` line. The FRR doc reference is pinned to
 
 | PR | Scope | Verification |
 |----|-------|--------------|
-| **PR1** | `crates/wire`: Role capability (code 9, 1-byte enum encode/decode) + OTC path attribute (type 35, 4-byte AS encode/decode) + their public re-exports. **Malformed OTC length (≠ 4) is preserved as `PathAttribute::Unknown(RawAttribute)` carrying the OTC type code — NOT a fatal `DecodeError`** so transport can apply RFC 7606 treat-as-withdraw without killing the session. Pure crate; unit tests + fuzz-target update if applicable. | `cargo test -p rustbgpd-wire`; new tests cover all five role values, the `0xC0` flag encoding, round-trips, **malformed-length stored as recoverable `Unknown` (verified non-fatal)**, and the `expected_flags()` rejection path for bad flags. |
+| **PR1** | `crates/wire`: Role capability (code 9, 1-byte enum encode/decode) + typed OTC path attribute (type 35, four-byte ASN + Partial) + their public re-exports. Revised decoding records malformed OTC as type-35 RFC 7606 metadata. | `cargo test -p rustbgpd-wire`; tests cover all five role values, `0xC0`/`0xE0`, compact/Extended Length, reserved-bit canonicalization, strict subcode 4/5 errors, and revised treat-as-withdraw. |
 | **PR2** | `crates/fsm` role compatibility + NOTIFICATION 2/11 + strict-mode gating + duplicate-role-cap rejection, and recording the configured local role + advertised peer role on `NegotiatedSession`; `crates/transport` ingress (I1/I2 semantic leak + malformed-OTC-length treat-as-withdraw + I3 set) + egress (E1/E2 unicast only — FlowSpec/EVPN siblings NOT touched) wired through `prepare_outbound_attributes` and the inbound UPDATE path; `src/config` schema + validation for `role` / `strict_role` (mirroring the `remove_private_as` precedent); Prometheus counters with distinct `reason` labels for `ingress_from_customer_rsclient` / `ingress_peer_mismatch` / `malformed_length` / `egress_to_upstream_via_otc`. | `cargo test --workspace`; unit tests cover each ingress/egress rule, the duplicate-cap behaviour, the malformed-length treat-as-withdraw, the preserve-existing-OTC invariant, and the strict / non-strict paths; FSM table covers the compatibility matrix. |
 | **PR3** | `proto/rustbgpd.proto` + `crates/api/src/neighbor_service.rs`: surface `local_role` / `remote_role` / `role_negotiated` on `NeighborState`; `crates/cli` renders them in `rbgp neighbor show`. Additive — no new authz-matrix entries. | `cargo test -p rustbgpd-api`; `rbgp neighbor show` smoke. |
 | **PR4** | FRR interop topology + driver under `tests/interop/`, wired into `interop.yml`. Covers the six interop scenarios above (pair establishment, mismatch, OTC egress set, OTC ingress leak via deliberate injection, strict mode, malformed-length treat-as-withdraw). | M-series CI green against FRR 10.3.1. |
@@ -333,7 +332,8 @@ on the `local-role` line. The FRR doc reference is pinned to
   sub-buffer — no change needed.
 - **Path attribute:** `PathAttribute` enum at `crates/wire/src/attribute.rs:608`
   with `Unknown(RawAttribute)` fallback at `:637`. Add a
-  `PathAttribute::OnlyToCustomer(u32)` variant + arms in
+  `PathAttribute::OnlyToCustomer(u32)` and
+  `PathAttribute::OnlyToCustomerPartial(u32)` variants + arms in
   `decode_attribute_value` (`:773`, match at `:797`), `encode_path_attributes`
   (`:1405`), `type_code()` (`:643`), `flags()` (`:664`). Critically, add an
   `expected_flags()` row at `attribute.rs:1369` for
@@ -373,20 +373,17 @@ on the `local-role` line. The FRR doc reference is pinned to
   `prepare_outbound_attributes_evpn` (`:1286`) — RFC 9234 §5 scopes the
   procedures to AFI 1/2 SAFI 1; non-unicast SAFIs are explicitly out of
   v1 scope.
-- **Transport — ingress OTC check (I1/I2 semantic leak + malformed-
-  length treat-as-withdraw):** new branch modelled on the AS_PATH-loop
-  branch at `crates/transport/src/session/inbound.rs:216` (the branch
-  body spans `:219-292`, with the keep-withdrawals fallthrough at
-  `:250-289`). Insert after the RR-loop branch (after `:369`). The
-  branch inspects `parsed.attributes` for **two** cases: (a) a typed
-  `PathAttribute::OnlyToCustomer(value)` (I1/I2 semantic check), and (b)
-  a `PathAttribute::Unknown(raw)` where `raw.type_code ==
-  attr_type::ONLY_TO_CUSTOMER` (malformed length — the wire crate
-  preserves it as Unknown rather than raising `DecodeError`, see PR1).
-  All three cases drop announcements, process withdrawals, bump
-  `bgp_otc_routes_blocked_total{reason=…}` with the right label, and update
-  per-peer OTC counters. No NOTIFICATION; session stays Established.
-  `process_update` entry is `inbound.rs:74`.
+- **Transport — ingress OTC check (I1/I2 semantic rule + malformed
+  handling):** valid `PathAttribute::OnlyToCustomer(u32)` and
+  `PathAttribute::OnlyToCustomerPartial(u32)` values feed the role-dependent
+  I1/I2 rules; Partial does not alter their semantics.
+  Malformed OTC is omitted by revised decoding and handled before Role logic
+  from `MalformedAttribute` metadata. A reachable UPDATE uses RFC 7606
+  treat-as-withdraw and stays Established; an UPDATE with no reachable NLRI
+  uses the RFC 7606 §5.2 reset path. The existing `malformed_length` OTC
+  counter/event is derived from that metadata in addition to the generic
+  malformed-update disposition and therefore remains available without a
+  configured local Role.
 - **Config schema:** `Neighbor` struct at `src/config/schema.rs:459` —
   add `role: Option<String>` + `strict_role: Option<bool>` following the
   `Option<T>`-with-string-enum pattern. Mirror fields on `PeerGroupConfig`

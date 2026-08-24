@@ -2130,12 +2130,13 @@ impl PeerSession {
 }
 
 pub(super) fn has_otc(attrs: &[PathAttribute]) -> bool {
-    attrs.iter().any(|attr| match attr {
-        PathAttribute::OnlyToCustomer(_) => true,
-        PathAttribute::Unknown(raw) => {
-            raw.type_code == rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER
-        }
-        _ => false,
+    // Network ingress types every valid type-35 attribute and omits malformed
+    // ones under revised handling. Synthetic Unknown(type 35) is not OTC.
+    attrs.iter().any(|attr| {
+        matches!(
+            attr,
+            PathAttribute::OnlyToCustomer(_) | PathAttribute::OnlyToCustomerPartial(_)
+        )
     })
 }
 

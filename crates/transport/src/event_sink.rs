@@ -23,7 +23,7 @@ use std::net::IpAddr;
 use rustbgpd_telemetry::reason_labels::OtcBlockReason;
 use rustbgpd_wire::BgpRole;
 
-/// Direction in which an OTC route-leak rule fired.
+/// Direction in which an OTC route-leak or malformed-framing decision fired.
 ///
 /// Maps to the operator-facing `direction` field on the proto event.
 /// Ingress decisions cover the three I1 / I2 / malformed-length
@@ -32,8 +32,8 @@ use rustbgpd_wire::BgpRole;
 /// `crates/transport/src/session/outbound.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OtcDirection {
-    /// Inbound UPDATE rejected because the OTC attribute made the
-    /// route invalid for this local role.
+    /// Inbound unicast announcements blocked because the OTC attribute was
+    /// malformed or made the route invalid for this local role.
     Ingress,
     /// Outbound route suppressed because it carries OTC and the
     /// session's local role is one of `Customer` / `Peer` /
@@ -81,10 +81,9 @@ pub struct OtcRouteBlockedEvent {
     /// entry. For egress this is a single prefix (the loop already
     /// runs per-route).
     pub prefixes: Vec<String>,
-    /// Local BGP role at the moment of the decision. `None` only
-    /// when the session has no negotiated role (in which case OTC
-    /// ingress action would have been `None` and this event would
-    /// not have been emitted, so production paths always set this).
+    /// Local configured BGP role at the moment of the decision. `None` is
+    /// valid for the role-independent `malformed_length` path; semantic OTC
+    /// ingress and egress role decisions carry `Some`.
     pub local_role: Option<BgpRole>,
     /// Peer's advertised BGP role, if the Role capability was
     /// negotiated (RFC 9234 §4). `None` when the peer didn't

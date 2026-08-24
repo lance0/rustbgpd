@@ -4637,10 +4637,12 @@ fn pcb_otc_blocked_winner_stays_staged_and_residue_recorded() {
         .expect("blocked winner stays in the table");
     assert_eq!(staged.peer, OTHER1);
     assert!(
-        staged
-            .attributes
-            .iter()
-            .any(|attr| matches!(attr, PathAttribute::OnlyToCustomer(_))),
+        staged.attributes.iter().any(|attr| {
+            matches!(
+                attr,
+                PathAttribute::OnlyToCustomer(_) | PathAttribute::OnlyToCustomerPartial(_)
+            )
+        }),
         "the staged form keeps the OTC attribute"
     );
     assert_eq!(lane_source(&m, p), Some(OTHER2));

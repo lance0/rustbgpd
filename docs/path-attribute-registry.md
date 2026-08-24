@@ -11,7 +11,7 @@ codec claim.
 - CSV: `https://www.iana.org/assignments/bgp-parameters/bgp-parameters-2.csv`
 - Registry snapshot: 2026-08-18 (live-verified 2026-08-23)
 - SHA-256: `691f147f5c9ef9dbde82febe339f5691a1bfc4d83f63e3ed0d224676ebe68886`
-- Normative anchors: [RFC 4271 §§4.3, 5](https://www.rfc-editor.org/rfc/rfc4271), [RFC 7606 §§2, 3, 7.1-7.10](https://www.rfc-editor.org/rfc/rfc7606), [RFC 7311](https://www.rfc-editor.org/rfc/rfc7311), [RFC 9552](https://www.rfc-editor.org/rfc/rfc9552), and [RFC 8669 §3](https://www.rfc-editor.org/rfc/rfc8669).
+- Normative anchors: [RFC 4271 §§4.3, 5](https://www.rfc-editor.org/rfc/rfc4271), [RFC 7606 §§2, 3, 5.2, 7.1-7.10](https://www.rfc-editor.org/rfc/rfc7606), [RFC 9234 §§5](https://www.rfc-editor.org/rfc/rfc9234), [RFC 7311](https://www.rfc-editor.org/rfc/rfc7311), [RFC 9552](https://www.rfc-editor.org/rfc/rfc9552), and [RFC 8669 §3](https://www.rfc-editor.org/rfc/rfc8669).
 
 Manual live comparison (never run by normal CI): download the CSV with
 `curl -fsSL https://www.iana.org/assignments/bgp-parameters/bgp-parameters-2.csv -o /tmp/bgp-parameters-2.csv`, run
@@ -63,7 +63,7 @@ octet from 0 through 255 to appear exactly once with no blank cell.
 | 32 | LARGE_COMMUNITY | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 33 | BGPsec_Path | optional non-transitive; flags `0x80`; RFC 8205 | payload semantics unsupported; correct class ignored; wrong class is treat-as-withdraw | assigned-class matrix below |
 | 34 | BGP Community Container Attribute (TEMPORARY - registered 2017-07-28, extension registered 2024-08-22, expires 2025-07-28) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 35 | Only to Customer (OTC) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
+| 35 | Only to Customer (OTC) | optional transitive; flags `0xc0`; exactly one four-octet ASN; RFC 9234 §5 | typed ASN + Partial round-trip; Extended Length and reserved low bits canonicalize; wrong class or length is treat-as-withdraw | OTC codec and transport matrices |
 | 36 | BGP Domain Path (D-PATH) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 37 | SFP attribute | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 38 | BFD Discriminator | pending follow-up audit | pending follow-up audit | IANA CSV digest above |

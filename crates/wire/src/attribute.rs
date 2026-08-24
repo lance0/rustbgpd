@@ -719,6 +719,9 @@ pub enum PathAttribute {
     /// RFC 9234 §5 `Only-to-Customer` (type 35) — carries the 32-bit ASN
     /// that initially set OTC on the route. Optional + Transitive (`0xC0`).
     OnlyToCustomer(u32),
+    /// A valid received `Only-to-Customer` attribute carrying the RFC 4271
+    /// Partial bit (`0xE0`). Kept typed so Partial survives propagation.
+    OnlyToCustomerPartial(u32),
     /// Unknown or unrecognized attribute, preserved for re-advertisement.
     Unknown(RawAttribute),
 }
@@ -742,7 +745,7 @@ impl PathAttribute {
             Self::MpReachNlri(_) => attr_type::MP_REACH_NLRI,
             Self::MpUnreachNlri(_) => attr_type::MP_UNREACH_NLRI,
             Self::PmsiTunnel(_) => attr_type::PMSI_TUNNEL,
-            Self::OnlyToCustomer(_) => attr_type::ONLY_TO_CUSTOMER,
+            Self::OnlyToCustomer(_) | Self::OnlyToCustomerPartial(_) => attr_type::ONLY_TO_CUSTOMER,
             Self::Unknown(raw) => raw.type_code,
         }
     }
@@ -774,6 +777,9 @@ impl PathAttribute {
             | Self::LargeCommunities(_)
             | Self::PmsiTunnel(_)
             | Self::OnlyToCustomer(_) => attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            Self::OnlyToCustomerPartial(_) => {
+                attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL
+            }
             Self::Unknown(raw) => raw.flags,
         }
     }
@@ -1675,40 +1681,22 @@ fn decode_attribute_value(
             }))
         }
         attr_type::ONLY_TO_CUSTOMER => {
-            // Preserve as Unknown(RawAttribute) in two cases — both keep
-            // PR2's transport-side OTC inspection working (it matches
-            // typed `OnlyToCustomer(_)` AND `Unknown(raw)` with
-            // raw.type_code == 35):
-            //
-            // (1) **Malformed length (≠ 4 octets).** RFC 9234 §5 / RFC
-            //     7606 — must be recoverable, NOT a fatal DecodeError,
-            //     because UPDATE parse errors otherwise short-circuit
-            //     into the FSM and tear the session down. PR2 detects
-            //     malformed type-35 attributes via the Unknown path and
-            //     applies treat-as-withdraw.
-            //
-            // (2) **Partial bit set.** RFC 4271 §5: a recognized
-            //     optional-transitive attribute received with Partial=1
-            //     MUST have Partial preserved on re-advertisement.
-            //     Decoding to canonical `OnlyToCustomer(u32)` would lose
-            //     the bit (encode emits 0xC0). Routing it through the
-            //     Unknown arm lets the existing Unknown-encode path
-            //     keep Partial faithfully (it OR's Partial into
-            //     optional-transitive flags on emit). Locally-added OTC
-            //     (PR2 E1/I3) constructs `OnlyToCustomer(u32)` directly
-            //     and emits canonical 0xC0.
-            //
-            // Flag-validity ran above (subcode 4), so this arm only
-            // sees flags whose (OPTIONAL | TRANSITIVE) bits are 0xC0.
-            if value.len() != 4 || (flags & attr_flags::PARTIAL) != 0 {
-                return Ok(PathAttribute::Unknown(RawAttribute {
-                    flags,
-                    type_code,
-                    data: Bytes::copy_from_slice(value),
-                }));
+            // RFC 9234 §5 fixes the OTC value at one four-octet ASN. The
+            // shared flags check above runs first, so a packet with both a
+            // class and length error reports ATTRIBUTE_FLAGS_ERROR.
+            if value.len() != 4 {
+                return Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: format!("ONLY_TO_CUSTOMER length {} (expected 4)", value.len()),
+                });
             }
             let asn = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
-            Ok(PathAttribute::OnlyToCustomer(asn))
+            if flags & attr_flags::PARTIAL != 0 {
+                Ok(PathAttribute::OnlyToCustomerPartial(asn))
+            } else {
+                Ok(PathAttribute::OnlyToCustomer(asn))
+            }
         }
         attr_type::ATOMIC_AGGREGATE => {
             // RFC 4271 §5.1.6: zero-length. RFC 7606 §7.6: any other length
@@ -2772,10 +2760,14 @@ fn encode_path_attributes_with_scratch(
             }
             PathAttribute::OnlyToCustomer(asn) => {
                 // RFC 9234 §5: Optional + Transitive, length 4, 32-bit ASN.
-                // This typed variant is only used for locally constructed
-                // canonical OTC. Received Partial-bearing OTC stays in the
-                // `Unknown` arm so the original Partial bit is preserved.
                 flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+                type_code = attr_type::ONLY_TO_CUSTOMER;
+                value_scratch.extend_from_slice(&asn.to_be_bytes());
+            }
+            PathAttribute::OnlyToCustomerPartial(asn) => {
+                // RFC 4271 §5: retain Partial on a received recognized
+                // optional-transitive attribute when propagating it.
+                flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL;
                 type_code = attr_type::ONLY_TO_CUSTOMER;
                 value_scratch.extend_from_slice(&asn.to_be_bytes());
             }
@@ -5855,14 +5847,17 @@ mod tests {
         let attr = PathAttribute::OnlyToCustomer(65001);
         assert_eq!(attr.type_code(), 35);
         assert_eq!(attr.flags(), attr_flags::OPTIONAL | attr_flags::TRANSITIVE);
+        let partial = PathAttribute::OnlyToCustomerPartial(65001);
+        assert_eq!(partial.type_code(), 35);
+        assert_eq!(partial.flags(), 0xe0);
     }
     #[test]
-    fn only_to_customer_malformed_length_stored_as_unknown() {
-        // RFC 9234 §5 + RFC 7606: malformed-length OTC is recoverable —
-        // preserved as Unknown(RawAttribute) with type_code 35 so transport
-        // can apply treat-as-withdraw without the session-resetting
-        // DecodeError path. Flags are correct (0xC0); only length varies.
+    fn only_to_customer_malformed_length_is_attribute_length_error() {
+        // RFC 9234 §5 + RFC 7606: the legacy decoder reports subcode 5
+        // with the complete offending attribute as error data. The revised
+        // decoder below recovers this same error as treat-as-withdraw.
         for bad_value in [
+            &[][..],
             &[0xAA, 0xBB, 0xCC][..],                               // len 3
             &[0xAA, 0xBB, 0xCC, 0xDD, 0xEE][..],                   // len 5
             &[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11][..], // len 8
@@ -5873,19 +5868,14 @@ mod tests {
                 u8::try_from(bad_value.len()).unwrap(),
             ];
             buf.extend_from_slice(bad_value);
-            let decoded = decode_path_attributes(&buf, true, &[])
-                .expect("malformed-length OTC must NOT be a fatal DecodeError");
-            assert_eq!(decoded.len(), 1);
-            match &decoded[0] {
-                PathAttribute::Unknown(raw) => {
-                    assert_eq!(raw.type_code, attr_type::ONLY_TO_CUSTOMER);
-                    assert_eq!(raw.data.as_ref(), bad_value);
-                    assert_eq!(raw.flags, attr_flags::OPTIONAL | attr_flags::TRANSITIVE);
+            let err = decode_path_attributes(&buf, true, &[])
+                .expect_err("legacy malformed-length OTC must report subcode 5");
+            match err {
+                DecodeError::UpdateAttributeError { subcode, data, .. } => {
+                    assert_eq!(subcode, update_subcode::ATTRIBUTE_LENGTH_ERROR);
+                    assert_eq!(data, buf);
                 }
-                other => panic!(
-                    "len {}: expected Unknown(type_code=35), got {other:?}",
-                    bad_value.len()
-                ),
+                other => panic!("expected UpdateAttributeError, got {other:?}"),
             }
         }
     }
@@ -5922,16 +5912,24 @@ mod tests {
                 other => panic!("expected UpdateAttributeError, got {other:?}"),
             }
         }
+
+        // When both the Optional/Transitive class and length are wrong, the
+        // mandatory flag check takes precedence over OTC value decoding.
+        let both_wrong = [0, attr_type::ONLY_TO_CUSTOMER, 3, 0, 0, 1];
+        let err = decode_path_attributes(&both_wrong, true, &[])
+            .expect_err("flags must be classified before the malformed OTC length");
+        assert!(matches!(
+            err,
+            DecodeError::UpdateAttributeError {
+                subcode: update_subcode::ATTRIBUTE_FLAGS_ERROR,
+                ..
+            }
+        ));
     }
     #[test]
-    fn only_to_customer_partial_bit_preserved_via_unknown() {
+    fn only_to_customer_partial_bit_preserved_typed() {
         // RFC 4271 §5: a recognized optional-transitive attribute received
         // with Partial set MUST have Partial preserved on re-advertisement.
-        // We achieve this by routing Partial-bearing OTC through the
-        // `Unknown(RawAttribute)` arm — the typed `OnlyToCustomer(u32)`
-        // path emits canonical 0xC0 and is reserved for locally-added or
-        // received-with-canonical-flags OTC.
-        //
         // Wire-shape sanity: flags = 0xE0 (Optional | Transitive | Partial),
         // length 4, ASN = 65000.
         let buf = [
@@ -5945,24 +5943,8 @@ mod tests {
         ];
         let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(decoded.len(), 1);
-        match &decoded[0] {
-            PathAttribute::Unknown(raw) => {
-                assert_eq!(raw.type_code, attr_type::ONLY_TO_CUSTOMER);
-                assert_eq!(
-                    raw.flags,
-                    attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL,
-                    "Partial bit must survive decode for round-trip-faithful re-emission"
-                );
-                assert_eq!(raw.data.as_ref(), &[0x00, 0x00, 0xFD, 0xE8][..]);
-            }
-            other => panic!(
-                "Partial-bearing OTC must decode to Unknown (so encode preserves \
-                 Partial via the existing Unknown-encode path); got {other:?}"
-            ),
-        }
-        // Round-trip: encoding the decoded Unknown must emit flags with
-        // Partial set (the Unknown-encode arm OR's Partial into optional-
-        // transitive flags, so 0xE0 → 0xE0).
+        assert_eq!(decoded[0], PathAttribute::OnlyToCustomerPartial(65000));
+        // Round-trip: typed encoding must retain Partial exactly.
         let mut reencoded = Vec::new();
         encode_path_attributes(&decoded, &mut reencoded, true, false).unwrap();
         assert_eq!(
@@ -5976,8 +5958,8 @@ mod tests {
     }
     #[test]
     fn only_to_customer_locally_constructed_emits_canonical_flags() {
-        // Locally-added OTC (PR2 E1/I3 will use this path) is built as
-        // `OnlyToCustomer(u32)` and must emit canonical 0xC0 — no Partial.
+        // Locally-added OTC is built with Partial clear and must emit
+        // canonical 0xC0.
         let attrs = vec![PathAttribute::OnlyToCustomer(65000)];
         let mut buf = Vec::new();
         encode_path_attributes(&attrs, &mut buf, true, false).unwrap();
@@ -5986,6 +5968,126 @@ mod tests {
             attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
             "locally-constructed OTC must emit 0xC0, never 0xE0"
         );
+    }
+
+    #[test]
+    fn only_to_customer_valid_framing_and_reserved_bits_canonicalize() {
+        let canonical = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+        for (received_flags, extended, partial) in [
+            (canonical, false, false),
+            (canonical | attr_flags::PARTIAL, false, true),
+            (canonical | attr_flags::EXTENDED_LENGTH, true, false),
+            (
+                canonical | attr_flags::PARTIAL | attr_flags::EXTENDED_LENGTH,
+                true,
+                true,
+            ),
+            (canonical | 0x0f, false, false),
+            (canonical | attr_flags::PARTIAL | 0x0f, false, true),
+        ] {
+            let mut wire = vec![received_flags, attr_type::ONLY_TO_CUSTOMER];
+            if extended {
+                wire.extend_from_slice(&4_u16.to_be_bytes());
+            } else {
+                wire.push(4);
+            }
+            wire.extend_from_slice(&65_001_u32.to_be_bytes());
+
+            let decoded = decode_path_attributes(&wire, true, &[]).unwrap();
+            assert_eq!(
+                decoded,
+                vec![if partial {
+                    PathAttribute::OnlyToCustomerPartial(65_001)
+                } else {
+                    PathAttribute::OnlyToCustomer(65_001)
+                }]
+            );
+            let mut emitted = Vec::new();
+            encode_path_attributes(&decoded, &mut emitted, true, false).unwrap();
+            assert_eq!(
+                emitted,
+                attr_bytes(
+                    canonical | if partial { attr_flags::PARTIAL } else { 0 },
+                    attr_type::ONLY_TO_CUSTOMER,
+                    &65_001_u32.to_be_bytes(),
+                ),
+                "input flags {received_flags:#04x} must emit canonical compact framing"
+            );
+        }
+    }
+
+    #[test]
+    fn revised_only_to_customer_error_matrix_is_treat_as_withdraw() {
+        let canonical = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+        for is_ibgp in [false, true] {
+            for value in [&[][..], &[0, 0, 1][..], &[0, 0, 0, 1, 2][..]] {
+                let wire = attr_bytes(canonical, attr_type::ONLY_TO_CUSTOMER, value);
+                let decoded = decode_path_attributes_revised(&wire, true, is_ibgp, &[]).unwrap();
+                assert!(decoded.attributes.is_empty());
+                let [malformed] = decoded.malformed.as_slice() else {
+                    panic!("expected exactly one malformed OTC record");
+                };
+                assert_eq!(malformed.type_code, attr_type::ONLY_TO_CUSTOMER);
+                assert_eq!(malformed.disposition, ErrorDisposition::TreatAsWithdraw);
+                let DecodeError::UpdateAttributeError { subcode, data, .. } = &malformed.error
+                else {
+                    panic!("expected UPDATE attribute error");
+                };
+                assert_eq!(*subcode, update_subcode::ATTRIBUTE_LENGTH_ERROR);
+                assert_eq!(data, &wire);
+            }
+
+            for (flags, value) in [
+                (attr_flags::TRANSITIVE, &[0, 0, 0, 1][..]),
+                (attr_flags::OPTIONAL, &[0, 0, 0, 1][..]),
+                (0, &[0, 0, 0, 1][..]),
+                // Flag classification takes priority when length is also bad.
+                (attr_flags::OPTIONAL, &[0, 0, 1][..]),
+                (0, &[0, 0, 1][..]),
+            ] {
+                let wire = attr_bytes(flags, attr_type::ONLY_TO_CUSTOMER, value);
+                let decoded = decode_path_attributes_revised(&wire, true, is_ibgp, &[]).unwrap();
+                assert!(decoded.attributes.is_empty());
+                let [malformed] = decoded.malformed.as_slice() else {
+                    panic!("expected exactly one malformed OTC record");
+                };
+                assert_eq!(malformed.disposition, ErrorDisposition::TreatAsWithdraw);
+                assert!(matches!(
+                    malformed.error,
+                    DecodeError::UpdateAttributeError {
+                        subcode: update_subcode::ATTRIBUTE_FLAGS_ERROR,
+                        ..
+                    }
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn revised_only_to_customer_truncated_framing_retains_type_and_disposition() {
+        let cases = [
+            ("ordinary length", &[0xc0, 35][..]),
+            ("ordinary value", &[0xc0, 35, 4, 0, 0, 1][..]),
+            ("extended length", &[0xd0, 35, 0][..]),
+            ("extended value", &[0xd0, 35, 0, 4, 0, 0, 1][..]),
+        ];
+        for (case, wire) in cases {
+            let decoded = decode_path_attributes_revised(wire, true, false, &[]).unwrap();
+            assert!(decoded.attributes.is_empty(), "{case}");
+            let [malformed] = decoded.malformed.as_slice() else {
+                panic!("{case}: expected exactly one malformed OTC record");
+            };
+            assert_eq!(malformed.type_code, attr_type::ONLY_TO_CUSTOMER, "{case}");
+            assert_eq!(
+                malformed.disposition,
+                ErrorDisposition::TreatAsWithdraw,
+                "{case}"
+            );
+            assert!(
+                matches!(malformed.error, DecodeError::MalformedField { .. }),
+                "{case}: truncated framing must retain MalformedField metadata"
+            );
+        }
     }
 
     // -----------------------------------------------------------------

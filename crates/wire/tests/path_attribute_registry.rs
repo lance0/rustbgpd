@@ -3,7 +3,7 @@ use rustbgpd_wire::attribute::{
 };
 use rustbgpd_wire::notification::update_subcode;
 use rustbgpd_wire::validate::validate_update_attributes;
-use rustbgpd_wire::{ErrorDisposition, PathAttribute};
+use rustbgpd_wire::{DecodeError, ErrorDisposition, PathAttribute};
 
 const DOC: &str = include_str!("../../../docs/path-attribute-registry.md");
 
@@ -94,6 +94,79 @@ fn census_covers_every_code_exactly_once() {
         coverage.iter().all(|count| *count == 1),
         "census coverage must be exactly one per code: {coverage:?}"
     );
+}
+
+#[test]
+fn otc_registry_claim_is_typed_partial_preserving_and_revised_safe() {
+    let census = rows(
+        section(
+            "<!-- registry-census:start -->",
+            "<!-- registry-census:end -->",
+        ),
+        5,
+    );
+    let row = census
+        .iter()
+        .find(|row| row[0] == "35")
+        .expect("OTC registry row");
+    assert!(row[2].contains("flags `0xc0`"));
+    assert!(row[2].contains("four-octet ASN"));
+    assert!(row[3].contains("typed ASN + Partial"));
+    assert!(row[3].contains("treat-as-withdraw"));
+
+    let value = 65_001_u32.to_be_bytes();
+    for input in [
+        attribute(0xc0, 35, &value),
+        extended_attribute(0xe0, 35, &value),
+    ] {
+        let decoded = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
+        assert!(decoded.malformed.is_empty());
+        let [otc] = decoded.attributes.as_slice() else {
+            panic!("OTC must remain typed");
+        };
+        let (asn, partial) = match otc {
+            PathAttribute::OnlyToCustomer(asn) => (*asn, false),
+            PathAttribute::OnlyToCustomerPartial(asn) => (*asn, true),
+            other => panic!("expected typed OTC, got {other:?}"),
+        };
+        assert_eq!(asn, 65_001);
+        assert_eq!(partial, input[0] & 0x20 != 0);
+        let mut emitted = Vec::new();
+        encode_path_attributes(&decoded.attributes, &mut emitted, true, false).unwrap();
+        assert_eq!(
+            emitted,
+            attribute(if partial { 0xe0 } else { 0xc0 }, 35, &value)
+        );
+    }
+
+    for (flags, value, subcode) in [
+        (0xc0, &[0, 0, 1][..], update_subcode::ATTRIBUTE_LENGTH_ERROR),
+        (
+            0x80,
+            &[0, 0, 0, 1][..],
+            update_subcode::ATTRIBUTE_FLAGS_ERROR,
+        ),
+        // Wrong class takes priority over the simultaneous bad length.
+        (0x00, &[0, 0, 1][..], update_subcode::ATTRIBUTE_FLAGS_ERROR),
+    ] {
+        let input = attribute(flags, 35, value);
+        let legacy = decode_path_attributes(&input, true, &[]).unwrap_err();
+        assert!(matches!(
+            legacy,
+            DecodeError::UpdateAttributeError {
+                subcode: actual,
+                ref data,
+                ..
+            } if actual == subcode && data == &input
+        ));
+        let revised = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
+        assert!(revised.attributes.is_empty());
+        assert_eq!(revised.malformed.len(), 1);
+        assert_eq!(
+            revised.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
+    }
 }
 
 #[test]

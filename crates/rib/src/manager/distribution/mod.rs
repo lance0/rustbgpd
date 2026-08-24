@@ -795,15 +795,17 @@ pub(in crate::manager) fn otc_egress_blocked(
     route: &crate::route::Route,
     local_role: Option<BgpRole>,
 ) -> bool {
+    // Valid network OTC is always typed; malformed type 35 is omitted before
+    // the RIB. An opaque synthetic type-35 value has no OTC semantics.
     matches!(
         local_role,
         Some(BgpRole::Customer | BgpRole::Peer | BgpRole::RouteServerClient)
-    ) && route.attributes.iter().any(|attribute| match attribute {
-        rustbgpd_wire::PathAttribute::OnlyToCustomer(_) => true,
-        rustbgpd_wire::PathAttribute::Unknown(raw) => {
-            raw.type_code == rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER
-        }
-        _ => false,
+    ) && route.attributes.iter().any(|attribute| {
+        matches!(
+            attribute,
+            rustbgpd_wire::PathAttribute::OnlyToCustomer(_)
+                | rustbgpd_wire::PathAttribute::OnlyToCustomerPartial(_)
+        )
     })
 }
 

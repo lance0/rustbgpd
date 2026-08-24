@@ -60,7 +60,6 @@ fn record_import_policy_eval(
 enum OtcState {
     Absent,
     Present(u32),
-    MalformedLength,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OtcIngressAction {
@@ -75,22 +74,9 @@ fn should_warn_rejected_route_eviction(count: u64) -> bool {
 fn otc_state(attrs: &[PathAttribute]) -> OtcState {
     let mut found = OtcState::Absent;
     for attr in attrs {
-        match attr {
-            PathAttribute::OnlyToCustomer(asn) => found = OtcState::Present(*asn),
-            PathAttribute::Unknown(raw)
-                if raw.type_code == rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER =>
-            {
-                if raw.data.len() != 4 {
-                    return OtcState::MalformedLength;
-                }
-                found = OtcState::Present(u32::from_be_bytes([
-                    raw.data[0],
-                    raw.data[1],
-                    raw.data[2],
-                    raw.data[3],
-                ]));
-            }
-            _ => {}
+        if let PathAttribute::OnlyToCustomer(asn) | PathAttribute::OnlyToCustomerPartial(asn) = attr
+        {
+            found = OtcState::Present(*asn);
         }
     }
     found
@@ -119,8 +105,7 @@ fn vpn_inner_prefix(prefix: &rustbgpd_wire::VpnPrefix) -> Prefix {
 /// [`OtcRouteBlockedEvent`] for the ingress decision sites.
 ///
 /// `otc_value` is `None` on the `malformed_length` path because the
-/// attribute could not be decoded (the codec returns
-/// `OtcState::MalformedLength` rather than a usable ASN). For both
+/// attribute could not be decoded. For both
 /// I1 (`ingress_from_customer_rsclient`) and I2
 /// (`ingress_peer_mismatch`) the codec returns the present ASN.
 ///
@@ -134,7 +119,7 @@ fn otc_event_context(attrs: &[PathAttribute], reason: OtcBlockReason) -> (Option
     } else {
         match otc_state(attrs) {
             OtcState::Present(asn) => Some(asn),
-            OtcState::Absent | OtcState::MalformedLength => None,
+            OtcState::Absent => None,
         }
     };
     let as_path_string = attrs
@@ -155,9 +140,6 @@ fn otc_ingress_action(
         return OtcIngressAction::None;
     };
     match otc_state(attrs) {
-        OtcState::MalformedLength => {
-            OtcIngressAction::DropUnicastAnnouncements(OtcBlockReason::MalformedLength)
-        }
         OtcState::Present(_) if matches!(local_role, BgpRole::Provider | BgpRole::RouteServer) => {
             OtcIngressAction::DropUnicastAnnouncements(OtcBlockReason::IngressFromCustomerRsclient)
         }
@@ -508,37 +490,81 @@ pub fn materialize_attrs(
     }
 }
 impl PeerSession {
+    /// Preserve the established OTC ingress diagnostic surfaces for a
+    /// decision that rejects one or more unicast announcements.
+    fn observe_otc_ingress_block(&mut self, parsed: &ParsedUpdate, reason: OtcBlockReason) {
+        let rejected = self.eligible_unicast_announcement_iter(parsed).count();
+        if rejected == 0 {
+            return;
+        }
+        warn!(
+            peer = %self.peer_label,
+            reason = reason.as_str(),
+            rejected,
+            "OTC rule rejected unicast announcements"
+        );
+        self.record_otc_routes_blocked(reason, rejected as u64);
+        if !self.event_sink().wants_otc_route_blocked() {
+            return;
+        }
+        let blocked_prefixes = self
+            .eligible_unicast_announcement_iter(parsed)
+            .map(|(prefix, _)| prefix.to_string())
+            .collect();
+        let (otc_value, as_path_string) = otc_event_context(&parsed.attributes, reason);
+        self.event_sink()
+            .publish_otc_route_blocked(&crate::event_sink::OtcRouteBlockedEvent {
+                peer: self.peer_ip,
+                direction: crate::event_sink::OtcDirection::Ingress,
+                reason,
+                prefixes: blocked_prefixes,
+                local_role: self.config.peer.local_role,
+                remote_role: self.negotiated.as_ref().and_then(|n| n.remote_role),
+                otc_value,
+                as_path: as_path_string,
+            });
+    }
+
+    /// Iterate over the unicast announcement identities accepted from this
+    /// UPDATE's wire surfaces before policy or safety checks.
+    fn eligible_unicast_announcement_iter<'a>(
+        &'a self,
+        parsed: &'a ParsedUpdate,
+    ) -> impl Iterator<Item = (Prefix, u32)> + 'a {
+        let body_eligible = !self.is_scoped_link_local_peer();
+        let negotiated_families = self.negotiated_families();
+        let extended_nexthop_ipv4 = self.use_extended_nexthop_ipv4();
+        let body = parsed
+            .announced
+            .iter()
+            .filter(move |_| body_eligible)
+            .map(|entry| (Prefix::V4(entry.prefix), entry.path_id));
+        let mp = parsed
+            .attributes
+            .iter()
+            .filter_map(|attr| match attr {
+                PathAttribute::MpReachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .filter(move |mp| {
+                let family = (mp.afi, mp.safi);
+                mp.safi == Safi::Unicast
+                    && matches!(mp.afi, Afi::Ipv4 | Afi::Ipv6)
+                    && negotiated_families.contains(&family)
+                    && (family != (Afi::Ipv4, Safi::Unicast) || extended_nexthop_ipv4)
+            })
+            .flat_map(|mp| {
+                mp.announced
+                    .iter()
+                    .map(|entry| (entry.prefix, entry.path_id))
+            });
+        body.chain(mp)
+    }
+
     /// Return unicast announcement identities that this session would accept
     /// from the UPDATE's wire surfaces before policy or safety checks.
     fn eligible_unicast_announcements(&self, parsed: &ParsedUpdate) -> Vec<(Prefix, u32)> {
-        let mut identities = if self.is_scoped_link_local_peer() {
-            Vec::new()
-        } else {
-            parsed
-                .announced
-                .iter()
-                .map(|entry| (Prefix::V4(entry.prefix), entry.path_id))
-                .collect()
-        };
-        for attr in &parsed.attributes {
-            let PathAttribute::MpReachNlri(mp) = attr else {
-                continue;
-            };
-            let family = (mp.afi, mp.safi);
-            if mp.safi != Safi::Unicast
-                || !matches!(mp.afi, Afi::Ipv4 | Afi::Ipv6)
-                || !self.negotiated_families().contains(&family)
-                || family == (Afi::Ipv4, Safi::Unicast) && !self.use_extended_nexthop_ipv4()
-            {
-                continue;
-            }
-            identities.extend(
-                mp.announced
-                    .iter()
-                    .map(|entry| (entry.prefix, entry.path_id)),
-            );
-        }
-        identities
+        self.eligible_unicast_announcement_iter(parsed).collect()
     }
 
     /// ADR-0107 strict-peer pre-policy gate: return the first announced
@@ -1256,6 +1282,23 @@ impl PeerSession {
         if !malformed.is_empty() {
             self.debug_dump_malformed_update(&update, &parsed);
         }
+        // Keep the established OTC-specific diagnostic in addition to the
+        // generic RFC 7606 malformed-update disposition. The codec omits the
+        // bad attribute, so derive this solely from its revised metadata;
+        // critically, this happens before and independently of BGP Roles.
+        let malformed_otc_length =
+            malformed.iter().any(|malformed| {
+                malformed.type_code == rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER
+                    && match &malformed.error {
+                        rustbgpd_wire::DecodeError::UpdateAttributeError { subcode, .. } => *subcode
+                            == rustbgpd_wire::notification::update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                        rustbgpd_wire::DecodeError::MalformedField { .. } => true,
+                        _ => false,
+                    }
+            });
+        if malformed_otc_length {
+            self.observe_otc_ingress_block(&parsed, OtcBlockReason::MalformedLength);
+        }
         // RFC 7606 §3 (h): when multiple attribute errors exist, the approach
         // with the strongest action wins.
         let mut disposition = malformed.iter().map(|m| m.disposition).max();
@@ -1529,78 +1572,7 @@ impl PeerSession {
             Vec::new()
         };
         if let OtcIngressAction::DropUnicastAnnouncements(reason) = otc_action {
-            // Count every unicast prefix the OTC rule rejected: body NLRI
-            // (always IPv4) plus IPv4/IPv6 unicast MP_REACH_NLRI. Other
-            // families are out of scope for OTC.
-            let rejected = parsed.announced.len()
-                + parsed
-                    .attributes
-                    .iter()
-                    .filter_map(|attr| {
-                        if let PathAttribute::MpReachNlri(mp) = attr
-                            && ((mp.afi, mp.safi) == (Afi::Ipv4, Safi::Unicast)
-                                || (mp.afi, mp.safi) == (Afi::Ipv6, Safi::Unicast))
-                        {
-                            Some(mp.announced.len())
-                        } else {
-                            None
-                        }
-                    })
-                    .sum::<usize>();
-            // An OTC-tagged UPDATE with no announced unicast routes —
-            // e.g. malformed-length on a body-NLRI withdrawals-only
-            // UPDATE, or any tagged UPDATE that carries only
-            // withdrawals or non-unicast MP_REACH — produces no
-            // counter bump and no structured event. The
-            // OtcRouteBlockedEvent proto contract is "blocks one or
-            // more unicast routes", so a zero-count event would be
-            // semantically wrong. Withdrawals still flow through the
-            // normal path regardless.
-            if rejected > 0 {
-                warn!(
-                    peer = %self.peer_label,
-                    reason = reason.as_str(),
-                    rejected,
-                    "OTC route-leak rule rejected unicast announcements; withdrawals still processed"
-                );
-                self.record_otc_routes_blocked(reason, rejected as u64);
-                if self.event_sink().wants_otc_route_blocked() {
-                    // The prefix strings are event-only payload. Build them
-                    // only for sinks that retain structured events; the
-                    // counter/log path above remains allocation-light when
-                    // event history is disabled.
-                    let mut blocked_prefixes: Vec<String> = parsed
-                        .announced
-                        .iter()
-                        .map(|e| e.prefix.to_string())
-                        .collect();
-                    for attr in &parsed.attributes {
-                        if let PathAttribute::MpReachNlri(mp) = attr
-                            && ((mp.afi, mp.safi) == (Afi::Ipv4, Safi::Unicast)
-                                || (mp.afi, mp.safi) == (Afi::Ipv6, Safi::Unicast))
-                        {
-                            blocked_prefixes
-                                .extend(mp.announced.iter().map(|entry| entry.prefix.to_string()));
-                        }
-                    }
-                    // Publish the structured event AFTER the counter +
-                    // per-NeighborState scalar update, so a sink that drops
-                    // (queue_full / closed) can never leave the legacy
-                    // surfaces inconsistent.
-                    let (otc_value, as_path_string) = otc_event_context(&parsed.attributes, reason);
-                    let otc_event = crate::event_sink::OtcRouteBlockedEvent {
-                        peer: self.peer_ip,
-                        direction: crate::event_sink::OtcDirection::Ingress,
-                        reason,
-                        prefixes: blocked_prefixes,
-                        local_role: self.config.peer.local_role,
-                        remote_role: self.negotiated.as_ref().and_then(|n| n.remote_role),
-                        otc_value,
-                        as_path: as_path_string,
-                    };
-                    self.event_sink().publish_otc_route_blocked(&otc_event);
-                }
-            }
+            self.observe_otc_ingress_block(&parsed, reason);
         }
         // ADR-0107: route-server strict-peer NEXT_HOP ownership. Inspects
         // the immutable decoded wire next-hop before import policy can
@@ -3104,9 +3076,12 @@ mod route_attr_bundle_tests {
         attrs.iter().any(|a| matches!(a, PathAttribute::NextHop(_)))
     }
     fn has_otc(attrs: &[PathAttribute]) -> bool {
-        attrs
-            .iter()
-            .any(|a| matches!(a, PathAttribute::OnlyToCustomer(_)))
+        attrs.iter().any(|a| {
+            matches!(
+                a,
+                PathAttribute::OnlyToCustomer(_) | PathAttribute::OnlyToCustomerPartial(_)
+            )
+        })
     }
     #[test]
     fn bundle_variant_shapes_with_otc() {
