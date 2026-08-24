@@ -28,6 +28,7 @@ gate-rib:
     cargo check --locked -p rustbgpd-rib --features bench-internals --benches
     cargo check --locked -p rustbgpd-transport --features bench-internals --benches
     cargo check --locked -p rustbgpd-api --features bench-internals --benches
+    cargo check --locked -p rustbgpd-api --features bench-internals,vpn-query-allocation --bench vpn_query_allocation
 
 # Test the four standalone scale-harness manifests used by CI.
 gate-deps:

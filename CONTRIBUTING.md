@@ -43,8 +43,9 @@ cannot resolve.
 
 The repository includes an optional [`just`](https://just.systems/) task
 runner for a curated local baseline. It does not add a build dependency, and
-the recipes are not a full CI or pre-merge replica. Install it outside the
-repository if you want the shortcuts:
+the recipes are not a full CI or pre-merge replica. The contract checks require
+Python 3.11 or newer. Install `just` outside the repository if you want the
+shortcuts:
 
 ```bash
 cargo install --locked just
@@ -57,9 +58,11 @@ The recipes intentionally expose their direct commands:
   workspace Clippy, the full workspace tests, and library docs. This is the
   broad local baseline and can take several minutes on a cold target directory.
 - `just gate-rib` compiles the feature-gated RIB, transport, and API benchmark
-  surfaces that the default workspace build cannot see.
+  surfaces that the default workspace build cannot see, including both API
+  feature combinations.
 - `just gate-deps` tests the four standalone scale-harness manifests. These
-  builds have separate lockfiles and can add substantial cold-build time.
+  manifests share `bench/scale/Cargo.lock`, which is separate from the
+  workspace lockfile, and can add substantial cold-build time.
 - `just gate-contract` executes every Criterion benchmark body once without
   collecting timings. The harness is Linux/GNU-Bash oriented and requires the
   same local toolchain and system libraries as those benches.
