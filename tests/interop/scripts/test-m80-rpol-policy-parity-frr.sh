@@ -31,8 +31,9 @@
 #      the live RIB (both families): counts + per-term hits +
 #      before/after diffs.
 #   6. `rbgp policy stats` — live per-term hit counters, export AND
-#      import (--direction, #761), plus explain traces naming the
-#      deciding source term on both directions.
+#      import (--direction, #761), plus import explain traces naming
+#      the deciding source term and export explain preserving the
+#      chain-default Permit attribution with exact modifications.
 #   7. .rpol edit under traffic (m34 pattern): flip src-default's LP
 #      100 -> 150, SIGHUP; no session flap, Route Refresh fired at
 #      the src peer ONLY (down's chains are content-identical), the
@@ -422,7 +423,7 @@ else
     echo "$import_stats" | jq . >&2 || true
 fi
 
-log "Test 6c: explain traces name the deciding source term (import + export)"
+log "Test 6c: import terms and export chain-default attribution are exact"
 explain_v6=$(rbgp policy explain --neighbor "$SRC_PEER" --prefix 2001:db8:64::/48)
 if echo "$explain_v6" | grep -q "partner-v6"; then
     ok "import explain for 2001:db8:64::/48 names deciding term partner-v6"
@@ -439,10 +440,12 @@ else
 fi
 export_explain=$(rbgp rib --prefix 2001:db8:64::/48 advertised "$DOWN_PEER" --explain)
 if echo "$export_explain" | grep -q "^Advertise" \
-    && echo "$export_explain" | grep -q "med-v6"; then
-    ok "export explain for 2001:db8:64::/48 -> Advertise via deciding term med-v6"
+    && echo "$export_explain" | grep -q 'export policy "chain_default_permit" permitted' \
+    && echo "$export_explain" | grep -q -- '- set_med: 60' \
+    && ! echo "$export_explain" | grep -q 'edge-out:med-v6'; then
+    ok "export explain for 2001:db8:64::/48 -> chain-default Permit with MED 60"
 else
-    fail "export explain for 2001:db8:64::/48 missing Advertise/med-v6"
+    fail "export explain for 2001:db8:64::/48 has stale Permit attribution or modifications"
     echo "$export_explain" >&2
 fi
 

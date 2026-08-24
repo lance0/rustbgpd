@@ -886,23 +886,32 @@ fn rr_suppression_reason(
     }
 }
 
-/// `"<policy>"` or `"<policy>:<term>"` label of the deciding export
-/// chain member, enriched with the rpol term name via the statement
-/// trace (explain-only re-walk, pinned to agree with the counted
-/// evaluation by the policy crate's agreement tests). TOML members
-/// carry no term name and render unchanged.
+/// Stable export decision attribution. A Deny uses `"<policy>"` or
+/// `"<policy>:<term>"` for its deciding member, enriched via the rpol
+/// statement trace; a nonempty Permit uses the shared chain-completion
+/// label and therefore has no member-term suffix. The explain-only re-walk
+/// is pinned to agree with the counted evaluation by the policy crate's
+/// agreement tests. TOML denying members carry no term name and render
+/// unchanged.
 fn policy_label_with_term(
     chain: Option<&PolicyChain>,
     ctx: &RouteContext<'_>,
+    action: PolicyAction,
     matched_policy: Option<&str>,
 ) -> String {
-    let term_suffix = rustbgpd_policy::explain_chain_statements(chain, ctx)
-        .steps
-        .last()
-        .filter(|step| step.policy_name.as_deref() == matched_policy)
-        .and_then(|step| step.term_name.as_deref())
-        .map(|term| format!(":{term}"))
-        .unwrap_or_default();
+    let term_suffix = if action == PolicyAction::Deny {
+        matched_policy.and_then(|matched_policy| {
+            rustbgpd_policy::explain_chain_statements(chain, ctx)
+                .steps
+                .last()
+                .filter(|step| step.policy_name.as_deref() == Some(matched_policy))
+                .and_then(|step| step.term_name.as_deref())
+                .map(|term| format!(":{term}"))
+        })
+    } else {
+        None
+    }
+    .unwrap_or_default();
     format!("{}{term_suffix}", matched_policy.unwrap_or("inline"))
 }
 
@@ -961,8 +970,9 @@ pub(in crate::manager) struct ExportGateTrace {
     pub best_route_type: Option<RouteType>,
     /// Export-policy modifications of the permitting chain verdict.
     pub modifications: rustbgpd_policy::RouteModifications,
-    /// `"<policy>"` or `"<policy>:<term>"` label of the deciding chain
-    /// member (rpol term via the statement trace), `None` = no chain.
+    /// Attribution label: `chain_default_permit` for Permit from a nonempty
+    /// chain, or `"<policy>"` / `"<policy>:<term>"` for Deny. `None` means
+    /// the chain is absent or genuinely empty.
     pub policy_label: Option<String>,
     /// Post-modification next hop the route would be staged with.
     pub staged_next_hop: Option<IpAddr>,

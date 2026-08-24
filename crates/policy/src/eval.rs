@@ -590,8 +590,8 @@ impl CompiledChain {
         self.evaluate_attributed::<false, false>(ctx, None).0
     }
 
-    /// Evaluate a route against this chain with attribution to the
-    /// terminal-decision policy — the IR backend of
+    /// Evaluate a route against this chain with stable decision attribution — the
+    /// IR backend of
     /// `PolicyChain::evaluate_with_attribution`, with identical
     /// semantics and results.
     #[must_use]
@@ -604,7 +604,8 @@ impl CompiledChain {
 
     /// Evaluate with live hit counting but without attribution — the
     /// non-attributed hot path (`PolicyChain::evaluate`). Skips the
-    /// terminal policy-name clone that attribution pays per call.
+    /// configured denial-name or shared Permit-label clone that attribution
+    /// pays per call.
     #[must_use]
     pub fn evaluate_counting(
         &self,
@@ -786,11 +787,11 @@ impl CompiledChain {
                 }
             }
         }
-        // All policies permitted (including an empty chain). Attribute
-        // to the last policy in the chain since chain evaluation
-        // completes only after every policy permits.
-        let matched_policy = if ATTR {
-            self.policies.last().and_then(|p| p.name.clone())
+        // A nonempty chain that completes without rejection has no
+        // terminal member. Retain one process-shared sentinel instead;
+        // a genuinely empty chain remains inline / unattributed.
+        let matched_policy = if ATTR && !self.policies.is_empty() {
+            Some(crate::engine::chain_default_permit_label())
         } else {
             None
         };
@@ -1707,19 +1708,14 @@ mod tests {
         }
     }
 
-    /// Attribution is requested for the live metrics path. It must share
-    /// the compiled policy-name allocation rather than reconstructing an
-    /// owned label for every evaluated route.
-    ///
-    /// Red proof: replacing the evaluator's `policy.name.clone()` with
-    /// `Arc::from(policy.name.as_deref().unwrap())` preserves text output
-    /// but allocates a distinct backing buffer, making this assertion fail.
+    /// Attribution is requested for the live metrics path. A default Permit
+    /// must share the process label rather than reconstructing an owned label
+    /// for every evaluated route.
     #[test]
-    fn attributed_policy_name_shares_compiled_allocation() {
-        let name: Arc<str> = Arc::from("customer-import");
+    fn attributed_default_permit_shares_process_allocation() {
         let chain = CompiledChain {
             policies: vec![CompiledPolicy {
-                name: Some(name.clone()),
+                name: Some(Arc::from("customer-import")),
                 terms: vec![Term {
                     name: None,
                     guard: MatchExpr::True,
@@ -1733,12 +1729,63 @@ mod tests {
 
         let (result, evaluation) = chain.evaluate_with_attribution(&ctx(None));
         assert_eq!(result.action, PolicyAction::Permit);
-        let attributed = evaluation.matched_policy.expect("named terminal policy");
-        assert_eq!(attributed.as_ref(), "customer-import");
-        assert!(
-            Arc::ptr_eq(&name, &attributed),
-            "attribution must reuse the compiled policy-name allocation"
+        let attributed = evaluation.matched_policy.expect("nonempty chain Permit");
+        assert_eq!(
+            attributed.as_ref(),
+            crate::engine::CHAIN_DEFAULT_PERMIT_ATTRIBUTION
         );
+        let repeated = chain
+            .evaluate_with_attribution(&ctx(None))
+            .1
+            .matched_policy
+            .expect("repeated nonempty chain Permit");
+        assert!(
+            Arc::ptr_eq(&attributed, &repeated),
+            "attribution must reuse the process-shared allocation"
+        );
+    }
+
+    #[test]
+    fn deny_attribution_preserves_member_identity_and_error_state() {
+        let evaluate = |name: Option<&str>, action: TermAction, source: PolicySource| {
+            let chain = CompiledChain {
+                policies: vec![CompiledPolicy {
+                    name: name.map(Arc::from),
+                    terms: vec![Term {
+                        name: Some("decide".to_string()),
+                        guard: MatchExpr::True,
+                        action,
+                    }],
+                    default_action: PolicyAction::Permit,
+                    source,
+                }],
+                ..CompiledChain::empty()
+            };
+            chain.evaluate_with_attribution(&ctx(None)).1
+        };
+
+        let literal_sentinel = evaluate(
+            Some(crate::engine::CHAIN_DEFAULT_PERMIT_ATTRIBUTION),
+            TermAction::Deny,
+            PolicySource::Toml,
+        );
+        assert_eq!(
+            literal_sentinel.matched_policy.as_deref(),
+            Some(crate::engine::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)
+        );
+        assert!(literal_sentinel.eval_error.is_none());
+
+        let anonymous = evaluate(None, TermAction::Deny, PolicySource::Toml);
+        assert!(anonymous.matched_policy.is_none());
+        assert!(anonymous.eval_error.is_none());
+
+        let error = evaluate(
+            Some("erroring-member"),
+            TermAction::Break,
+            PolicySource::Rpol,
+        );
+        assert_eq!(error.matched_policy.as_deref(), Some("erroring-member"));
+        assert!(error.eval_error.is_some());
     }
 
     fn v4(addr: [u8; 4], len: u8) -> Prefix {

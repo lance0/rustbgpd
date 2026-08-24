@@ -285,6 +285,7 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
     // populated cache, so turn it on explicitly.
     config.explain_enabled = true;
     let metrics = BgpMetrics::new();
+    let metric_view = metrics.clone();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
@@ -336,9 +337,13 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
             ..RouteModifications::default()
         },
     };
-    let chain = PolicyChain::new(vec![Policy {
-        entries: vec![deny_stmt, permit_stmt],
-        default_action: PolicyAction::Permit,
+    let chain = PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy {
+        name: Some("edge-import".to_string()),
+        policy: Policy {
+            entries: vec![deny_stmt, permit_stmt],
+            default_action: PolicyAction::Permit,
+        },
+        rpol: None,
     }]);
     let mut session = PeerSession::new(
         config,
@@ -393,7 +398,10 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
         .import_decision_cache
         .lookup(&key(denied_prefix), generation)
     {
-        LookupResult::Hit(d) => assert_eq!(d.outcome, CachedOutcome::Deny),
+        LookupResult::Hit(d) => {
+            assert_eq!(d.outcome, CachedOutcome::Deny);
+            assert_eq!(d.matched_policy.as_deref(), Some("edge-import"));
+        }
         other => panic!("expected Hit(Deny) for denied prefix, got {other:?}"),
     }
     // Pin 2: the permitted prefix is explainable and carries the
@@ -404,10 +412,31 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
     {
         LookupResult::Hit(d) => {
             assert_eq!(d.outcome, CachedOutcome::Permit);
+            assert_eq!(
+                d.matched_policy.as_deref(),
+                Some(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)
+            );
             assert_eq!(d.modifications.set_local_pref, Some(200));
         }
         other => panic!("expected Hit(Permit) for permitted prefix, got {other:?}"),
     }
+    assert_eq!(session.import_policy_routes_permitted, 1);
+    assert_eq!(session.import_policy_routes_denied, 1);
+    let samples = counter_samples(&metric_view, "bgp_policy_routes_total");
+    let sample = |policy: &str, action: &str| {
+        samples.iter().find(|(labels, _)| {
+            labels.get("policy").is_some_and(|value| value == policy)
+                && labels
+                    .get("direction")
+                    .is_some_and(|value| value == "import")
+                && labels.get("action").is_some_and(|value| value == action)
+        })
+    };
+    assert_eq!(
+        sample(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION, "permit").map(|(_, n)| *n),
+        Some(1.0)
+    );
+    assert_eq!(sample("edge-import", "deny").map(|(_, n)| *n), Some(1.0));
 }
 
 /// ADR-0073 contract: the per-session import-decision cache must be

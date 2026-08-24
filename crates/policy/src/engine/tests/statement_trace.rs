@@ -5,7 +5,8 @@
 //!    modification kind produces its stable `"<label> <detail>"` form.
 //! 2. Agreement: over a matrix of chains × route contexts the
 //!    explain-only walk must reach the same terminal action and the
-//!    same terminal policy as `evaluate_chain_with_attribution` — the
+//!    same deny member or chain-default Permit attribution as
+//!    `evaluate_chain_with_attribution` — the
 //!    same discipline that pins the RIB-side tiebreaker-explain ladder
 //!    to the live comparator.
 
@@ -480,8 +481,8 @@ fn agreement_contexts() -> Vec<(&'static str, RouteContext<'static>)> {
 
 /// The load-bearing pin: over the full chain × context matrix the
 /// explain-only statement walk must reach the same terminal action as
-/// `evaluate_chain_with_attribution`, and its last step must name the
-/// same terminal policy `PolicyEvaluation.matched_policy` reports.
+/// `evaluate_chain_with_attribution`. A Deny names the decisive member;
+/// a nonempty completed chain reports the default-Permit sentinel.
 #[test]
 fn statement_trace_agrees_with_live_evaluation_across_matrix() {
     for (chain_name, chain) in agreement_chains() {
@@ -497,14 +498,16 @@ fn statement_trace_agrees_with_live_evaluation_across_matrix() {
                 trace.action, evaluation.action,
                 "attribution action diverged for chain={chain_name} ctx={ctx_name}"
             );
-            // Terminal-policy agreement. For an empty chain both sides
-            // report nothing; otherwise the last step is the policy the
-            // live evaluator attributes the decision to.
             match trace.steps.last() {
-                Some(last) => assert_eq!(
+                Some(last) if live.action == PolicyAction::Deny => assert_eq!(
                     last.policy_name.as_deref(),
                     evaluation.matched_policy.as_deref(),
-                    "terminal policy diverged for chain={chain_name} ctx={ctx_name}"
+                    "decisive deny member diverged for chain={chain_name} ctx={ctx_name}"
+                ),
+                Some(_) => assert_eq!(
+                    evaluation.matched_policy.as_deref(),
+                    Some(CHAIN_DEFAULT_PERMIT_ATTRIBUTION),
+                    "chain-default Permit diverged for chain={chain_name} ctx={ctx_name}"
                 ),
                 None => assert_eq!(
                     evaluation.matched_policy, None,
@@ -718,8 +721,8 @@ fn rpol_agreement_contexts() -> Vec<(&'static str, RouteContext<'static>)> {
 }
 
 /// The rpol extension of the agreement pin: over the rpol chain ×
-/// context matrix the trace must reach the live evaluator's terminal
-/// action / policy, its per-policy modifications must reproduce the
+/// context matrix the trace must reach the live evaluator's action and
+/// deny-member / chain-default attribution, its per-policy modifications must reproduce the
 /// live result's accumulated modifications (Continue-merge parity),
 /// and its matched-term view must equal `evaluate_recording_hits`'
 /// counted guards term by term.
@@ -735,11 +738,19 @@ fn rpol_statement_trace_agrees_with_live_evaluation_and_recorded_hits() {
                 "action diverged for chain={chain_name} ctx={ctx_name}"
             );
             let last = trace.steps.last().expect("non-empty chains");
-            assert_eq!(
-                last.policy_name.as_deref(),
-                evaluation.matched_policy.as_deref(),
-                "terminal policy diverged for chain={chain_name} ctx={ctx_name}"
-            );
+            if live.action == PolicyAction::Deny {
+                assert_eq!(
+                    last.policy_name.as_deref(),
+                    evaluation.matched_policy.as_deref(),
+                    "decisive deny member diverged for chain={chain_name} ctx={ctx_name}"
+                );
+            } else {
+                assert_eq!(
+                    evaluation.matched_policy.as_deref(),
+                    Some(CHAIN_DEFAULT_PERMIT_ATTRIBUTION),
+                    "chain-default Permit diverged for chain={chain_name} ctx={ctx_name}"
+                );
+            }
             let traced_reject_term = (live.action == PolicyAction::Deny)
                 .then_some(last.term_name.as_deref())
                 .flatten();

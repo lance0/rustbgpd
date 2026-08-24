@@ -996,7 +996,9 @@ fn pcb_all_denied_withdraws_and_clears_lane() {
     seed(&mut m, cand(p, OTHER1, 300));
     seed(&mut m, cand(p, OTHER2, 200));
     let mut group = per_client_best_group(Some(empty_policy(PolicyAction::Deny)));
-    group.apply_delta(&announce_delta(p, OTHER1, None));
+    let mut staged = announce_delta(p, OTHER1, None);
+    staged.policy_label = group.permit_policy_label.clone();
+    group.apply_delta(&staged);
     group.apply_lane(
         p,
         Some(RunnerUp {
@@ -1100,11 +1102,17 @@ fn pcb_winner_label_is_captured_at_its_permit_point() {
     let out = stage_pcb(&mut m, &[p]);
 
     assert_eq!(out.deltas.len(), 1);
-    // Chain permits attribute to the LAST policy; the trailing
-    // denial attributes to "screen". The winner keeps "tail".
-    assert_eq!(out.deltas[0].policy_label.as_deref(), Some("tail"));
+    // The completed chain Permit uses the stable sentinel; the trailing
+    // denial still attributes to "screen".
+    assert_eq!(
+        out.deltas[0].policy_label.as_deref(),
+        Some(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)
+    );
     let group = m.group_ribs.get(&PCB_GID).unwrap();
-    assert_eq!(group.permit_policy_label.as_deref(), Some("tail"));
+    assert_eq!(
+        group.permit_policy_label.as_deref(),
+        Some(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)
+    );
     assert_eq!(
         group
             .policy_filtered
@@ -1662,7 +1670,7 @@ fn adv_entry_derivation_matrix() {
         path_id: 0,
         new: Some((route_with_comm(p, OTHER1, 7), Some(NextHopAction::Self_))),
         old_source: None,
-        policy_label: Some(Arc::from("staged")),
+        policy_label: Some(Arc::from(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)),
         source_attrs: Some(Arc::new(vec![PathAttribute::Communities(vec![7])])),
         lane: None,
     });
@@ -1677,7 +1685,10 @@ fn adv_entry_derivation_matrix() {
             .0,
         &[7]
     );
-    assert_eq!(adv.policy_label.map(|label| &**label), Some("staged"));
+    assert_eq!(
+        adv.policy_label.map(|label| &**label),
+        Some(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)
+    );
 
     // Own-sourced + lane: the runner-up substitutes with ITS
     // payload, at the same (prefix, path_id 0) slot.
@@ -1992,35 +2003,40 @@ fn pcb_grouped_count_queries_include_lane_term() {
 fn pcb_join_counters_replay_lane_permit() {
     let (p1, p2) = (prefix(1), prefix(2));
     let mut group = per_client_best_group(Some(named_permit_chain("win")));
-    // p1: winner MEMBER (label "win"), runner-up OTHER2 in the
-    // lane (label "lane"). p2: winner OTHER1 (label "win").
+    // p1: winner MEMBER, runner-up OTHER2 in the lane. p2: winner
+    // OTHER1. Every completed chain evaluation uses one sentinel.
     group.apply_delta(&GroupDelta {
         prefix: p1,
         path_id: 0,
         new: Some((route(p1, MEMBER), None)),
         old_source: None,
-        policy_label: Some(Arc::from("win")),
+        policy_label: Some(Arc::from(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)),
         source_attrs: None,
         lane: None,
     });
     group.apply_lane(
         p1,
-        Some(lane_entry(route(p1, OTHER2), MEMBER, "lane", None)),
+        Some(lane_entry(
+            route(p1, OTHER2),
+            MEMBER,
+            rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION,
+            None,
+        )),
     );
     group.apply_delta(&GroupDelta {
         prefix: p2,
         path_id: 0,
         new: Some((route(p2, OTHER1), None)),
         old_source: None,
-        policy_label: Some(Arc::from("win")),
+        policy_label: Some(Arc::from(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)),
         source_attrs: None,
         lane: None,
     });
     let mut m = staging_manager();
     m.group_ribs.insert(PCB_GID, group);
 
-    // MEMBER sourced p1's winner: replay = p2's staged permit
-    // ("win") + p1's lane permit ("lane").
+    // MEMBER sourced p1's winner: replay = p2's staged permit plus
+    // p1's lane permit, both under the chain-default sentinel.
     m.apply_group_join_counters(MEMBER, PCB_GID, None);
     // OTHER1 sourced p2's winner with NO lane entry: replay =
     // p1's staged permit only.
@@ -2034,8 +2050,7 @@ fn pcb_join_counters_replay_lane_permit() {
     assert_eq!(stats(MEMBER), 2);
     assert_eq!(stats(OTHER1), 1);
 
-    // Label attribution: the substituted permit carries the LANE
-    // entry's label, not the winner's.
+    // Label attribution is uniform across staged and lane permits.
     let gathered = m.metrics.registry().gather();
     let family = gathered
         .iter()
@@ -2060,10 +2075,14 @@ fn pcb_join_counters_replay_lane_permit() {
             })
             .map_or(0.0, |metric| metric.get_counter().value())
     };
-    assert!((permits(MEMBER, "lane") - 1.0).abs() < f64::EPSILON);
-    assert!((permits(MEMBER, "win") - 1.0).abs() < f64::EPSILON);
-    assert!((permits(OTHER1, "win") - 1.0).abs() < f64::EPSILON);
-    assert!(permits(OTHER1, "lane").abs() < f64::EPSILON);
+    assert!(
+        (permits(MEMBER, rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION) - 2.0).abs()
+            < f64::EPSILON
+    );
+    assert!(
+        (permits(OTHER1, rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION) - 1.0).abs()
+            < f64::EPSILON
+    );
 }
 
 // --- ADR-0126 Phase 2 (steady-state emit): the Decision 5 matrix
@@ -3028,7 +3047,9 @@ fn pcb_resync_substitution_applies_rs_control() {
     // Suppressing tag: skip + withdraw, and the extras filter
     // agrees (a suppressed substitution does not retain).
     let mut group = per_client_best_group(Some(strip_communities_chain(vec![deny_comm])));
-    group.apply_delta(&announce_delta(k, MEMBER, None));
+    let mut staged = announce_delta(k, MEMBER, None);
+    staged.policy_label = group.permit_policy_label.clone();
+    group.apply_delta(&staged);
     group.apply_lane(
         k,
         Some(lane_entry(
@@ -3876,10 +3897,10 @@ fn vpn_counts_and_family_synthesis_track_deltas() {
     assert!(rtc_group.rtc_negotiated());
 }
 
-/// The group Permit label is derived once from the immutable chain tail.
-/// No chain, an empty chain, and an anonymous tail are inline.
+/// The group Permit label is derived once from chain presence.
+/// No chain and an empty chain are inline; an anonymous nonempty chain is not.
 #[test]
-fn group_permit_label_is_the_named_chain_tail_or_inline() {
+fn group_permit_label_distinguishes_nonempty_chain_from_inline() {
     let group = GroupRibOut::new(
         None,
         false,
@@ -3917,13 +3938,16 @@ fn group_permit_label_is_the_named_chain_tail_or_inline() {
         false,
         0,
     );
-    assert!(anonymous.permit_policy_label.is_none());
+    assert_eq!(
+        anonymous.permit_policy_label.as_deref(),
+        Some(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)
+    );
 }
 
-/// A named multi-policy chain retains one group-owned terminal Permit label
+/// A named multi-policy chain retains one group-owned default-Permit label
 /// for both unicast and VPN staged routes, independent of restaging.
 #[test]
-fn named_chain_tail_is_one_group_owned_permit_label() {
+fn nonempty_chain_default_is_one_group_owned_permit_label() {
     let mut chain = PolicyChain::new(vec![
         Policy {
             entries: vec![],
@@ -3947,14 +3971,22 @@ fn named_chain_tail_is_one_group_owned_permit_label() {
         false,
         0,
     );
-    let label = Arc::clone(group.permit_policy_label.as_ref().expect("named tail"));
+    let label = Arc::clone(
+        group
+            .permit_policy_label
+            .as_ref()
+            .expect("nonempty chain default"),
+    );
     let mut announce = announce_delta(prefix(1), OTHER1, Some(OTHER1));
     announce.policy_label = Some(Arc::clone(&label));
     group.apply_delta(&announce);
     let mut vpn_announce = vpn_announce_delta(1, OTHER1, Some(OTHER1));
     vpn_announce.policy_label = Some(Arc::clone(&label));
     group.apply_vpn_delta(&vpn_announce);
-    assert_eq!(label.as_ref(), "tail");
+    assert_eq!(
+        label.as_ref(),
+        rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION
+    );
     assert!(Arc::ptr_eq(
         &label,
         group
@@ -4251,12 +4283,13 @@ fn source_control_modifying_mode_preserves_historical_residue_and_transition() {
     let staged = cand(p, OTHER1, 300);
     let mut group = plain_group_with_chain(Some(strip_communities_chain(vec![CONTROL])));
     assert!(!group.source_control_passthrough);
+    let policy_label = group.permit_policy_label.clone();
     group.apply_delta(&GroupDelta {
         prefix: p,
         path_id: 0,
         new: Some((staged, None)),
         old_source: None,
-        policy_label: None,
+        policy_label,
         source_attrs: capture_source_attrs(&source),
         lane: None,
     });

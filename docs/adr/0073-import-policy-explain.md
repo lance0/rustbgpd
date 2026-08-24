@@ -28,10 +28,11 @@ There is no equivalent for **import**. The operator question
   prefix that was *rejected* on arrival.
 - `bgp_policy_routes_total{peer,policy,direction,action}`
   counters answer "how many," not "which prefix and why."
-- `PolicyEvaluation` (`crates/policy/src/engine.rs`) carries
-  the terminal-decision policy + action, which is what an explain
-  surface should report — but it is consumed and discarded at the
-  eval site.
+- `PolicyEvaluation` (`crates/policy/src/engine.rs`) carries the action
+  plus stable decision attribution: the configured denying member,
+  `chain_default_permit` when a nonempty chain completes without rejection,
+  or no label for an absent or empty chain. It is consumed and discarded at
+  the eval site.
 
 The denied case is the load-bearing one. An import-explain that
 only answers for accepted routes is the wrong shape: it ships
@@ -80,13 +81,13 @@ flag on this one.
 - **Key:** `(AFI, SAFI, prefix, path_id)`. Path-ID is part of the
   key so Add-Path-enabled peers don't collapse multiple paths into
   one entry.
-- **Value:** outcome (`PERMIT` / `DENY`), terminal policy label
-  and name (from `PolicyEvaluation`), compact pre-policy policy-context
+- **Value:** outcome (`PERMIT` / `DENY`), decision attribution from
+  `PolicyEvaluation`, compact pre-policy policy-context
   fields, modifications applied, RPKI + ASPA validation state
   at eval time, `evaluated_at` timestamp, `policy_generation`. A
   `WITHDRAWN` tombstone is **lighter**: on withdraw the entry's
   pre-policy context and modifications are dropped, keeping only
-  outcome + matched policy + timestamp + generation. A churny
+  outcome + decision attribution + timestamp + generation. A churny
   announce/withdraw peer therefore can't fill the LRU with
   full-payload dead entries crowding out live decisions.
 - **Write triggers:** every return from
@@ -224,8 +225,10 @@ rbgp policy explain --neighbor X --prefix Y [--path-id N]
                     [--json]
 ```
 
-Text render: outcome line, peer + prefix, terminal policy, pre-eval
-summary, modifications, RPKI/ASPA, timestamp, policy generation.
+Text render: outcome line, peer + prefix, decision attribution, pre-eval
+summary, modifications, RPKI/ASPA, timestamp, policy generation. A nonempty
+Permit says that no policy rejected the route; a Deny names its rejecting
+member.
 JSON render: every response field, machine-stable.
 
 Add-Path semantics: when the peer negotiated Add-Path and
@@ -355,9 +358,9 @@ review added the enable flag (7). They are pinned here, not deferred:
 | 1 | Default per-peer cache size | **4096 entries**, a deliberate **fabric / partial-table** starter default (hundreds–low-thousands of prefixes fully observable). **Not** sized for internet full-table retention: a 100k-prefix peer keeps the cache saturated, so explain is a coin-flip vs `EVICTED`. Operators wanting reliable full-table explain raise `cache_size` toward their expected retained-prefix count for that peer and own the memory (each live entry holds a cloned policy-context snapshot). See the Bound section — the old "mirrors the event ring" justification is retracted (different axis). |
 | 2 | Default-on retention | **Reversed — retention is opt-in.** Originally yes, contingent on the conservative payload + cap in (1). The contingency did not hold at the scale this project targets: the cost multiplies by session count and 4096 entries cannot honestly promise full-table explainability. See [Reversal](#reversal-retention-is-opt-in). |
 | 3 | EVICTED tracker | **Yes**, kept compact: lossy recent-eviction key set / bloom-ish ring, false-positive-only. A wrong `EVICTED` is operationally better than a wrong `NOT_SEEN`. |
-| 4 | Withdraw semantics | **`WITHDRAWN`**, retained as a **lighter** tombstone (attrs + mods dropped; outcome + matched policy + timestamp + generation kept) until evicted / stale / session reset. Preserves the "never seen" vs "seen and removed" distinction without letting a churny peer crowd live decisions out of the LRU with full-payload dead entries. |
+| 4 | Withdraw semantics | **`WITHDRAWN`**, retained as a **lighter** tombstone (attrs + mods dropped; outcome + decision attribution + timestamp + generation kept) until evicted / stale / session reset. Preserves the "never seen" vs "seen and removed" distinction without letting a churny peer crowd live decisions out of the LRU with full-payload dead entries. |
 | 5 | Add-Path | Include `path_id` in the cache key and the response. CLI accepts optional `--path-id`. Without it, return all matching entries for the prefix (a clear multi-path response), never an arbitrary first hit. |
-| 6 | Statement-level trace | **Shipped.** Originally deferred ("No in v1," terminal `matched_policy` only); the per-statement trace later landed as `repeated ImportExplainStatementStep statements = 13` on `ImportExplainMatch` — the per-match element of the explain response, not the response message itself, whose fields stop at 6 (rendered by the CLI). It is **re-derived at query time** from the cached pre-policy context, **not** stored inside `PolicyEvaluation` — so the live import path records no extra statement-trace state and the out-of-scope item below (storage *inside* `PolicyEvaluation`) still holds. |
+| 6 | Statement-level trace | **Shipped.** Originally deferred ("No in v1," decision attribution only); the per-statement trace later landed as `repeated ImportExplainStatementStep statements = 13` on `ImportExplainMatch` — the per-match element of the explain response, not the response message itself, whose fields stop at 6 (rendered by the CLI). It is **re-derived at query time** from the cached pre-policy context, **not** stored inside `PolicyEvaluation` — so the live import path records no extra statement-trace state and the out-of-scope item below (storage *inside* `PolicyEvaluation`) still holds. |
 | 7 | Enable flag (added post-review) | **`[policy.explain].enabled`, default `false`.** The load-bearing perf control: the cost is on the write path (per-NLRI policy-context/modification clone on every UPDATE, denies included). The decision-build is gated on this flag, checked *before* any clone, so the default costs one boolean per UPDATE, stores nothing, and allocates no cache. The flag is **global** — no per-peer or per-group granularity. Shipped `true`; see [Reversal](#reversal-retention-is-opt-in). |
 
 ## Out of scope

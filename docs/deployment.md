@@ -872,10 +872,11 @@ serves `/livez` and `/readyz` for orchestrators. Key counters operators watch:
 
 **Policy filtering visibility — Prometheus.** `bgp_policy_routes_total
 {peer, policy, direction, action}` attributes each import and export
-policy evaluation to the terminal-decision policy in the chain with
-`policy="…"` (the configured name) or `policy="inline"` for inline
-statements and permit-all peers without an explicit chain. Initial
-table dumps, route refreshes, dirty resyncs, and forced outbound
+policy evaluation to the decisive member on Deny. A nonempty chain that
+completes without rejection uses the bounded
+`policy="chain_default_permit"` sentinel; `policy="inline"` remains the
+label for an inline Deny or a Permit from an absent / genuinely empty chain.
+Initial table dumps, route refreshes, dirty resyncs, and forced outbound
 refreshes can increment export counters because they re-evaluate export
 policy. The Prometheus counter is **monotonic for the lifetime of the
 daemon process** — use Prometheus `rate()` / `increase()` to read it.
@@ -884,6 +885,10 @@ daemon process** — use Prometheus `rate()` / `increase()` to read it.
 # Routes denied by a named filter on each peer's import side:
 rate(bgp_policy_routes_total{direction="import", action="deny"}[5m])
 ```
+
+An operator policy literally named `chain_default_permit` remains ordinary
+Deny attribution. The sentinel interpretation applies only when
+`action="permit"`.
 
 **Policy evaluation errors — Prometheus.** `bgp_policy_eval_errors_total
 {direction, kind}` counts routes denied by the fail-closed evaluation-

@@ -127,9 +127,10 @@ pub struct CachedPolicyContext {
 #[derive(Debug, Clone)]
 pub struct CachedDecision {
     pub outcome: CachedOutcome,
-    /// Terminal-decision policy name from
+    /// Decision attribution from
     /// [`rustbgpd_policy::PolicyEvaluation::matched_policy`]. `None` =
-    /// inline / anonymous.
+    /// inline deny or absent / genuinely empty chain; a nonempty-chain
+    /// Permit carries `chain_default_permit`.
     pub matched_policy: Option<Arc<str>>,
     /// RPKI origin-validation state at evaluation time.
     pub rpki: RpkiValidation,
@@ -314,7 +315,7 @@ impl ImportDecisionCache {
     ///
     /// The tombstone is **lighter** than a live entry: the cached policy
     /// context and modifications are dropped, keeping only outcome,
-    /// matched policy, RPKI/ASPA state, timestamp, and generation. A
+    /// decision attribution, RPKI/ASPA state, timestamp, and generation. A
     /// peer that churns announce/withdraw/announce therefore can't fill
     /// the bounded LRU with full-payload dead entries that crowd out
     /// live decisions (ADR-0073). The withdrawn route's context is

@@ -1021,8 +1021,10 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ```
 
 Each `matches` entry carries an outcome — `PERMIT` / `DENY` / `WITHDRAWN` /
-`EVICTED` / `STALE` / `NOT_SEEN` — and, when a chain matched, the matched
-policy plus the modifications it applied. Compare a match's
+`EVICTED` / `STALE` / `NOT_SEEN` — plus decision attribution and the
+modifications applied. A Deny names its configured denying member; a Permit
+after a nonempty chain uses `chain_default_permit`, while an absent or empty
+chain stays inline. Compare a match's
 `policy_generation` to the response's `current_policy_generation` to spot a
 `STALE` decision recorded before a policy reload.
 
@@ -1175,7 +1177,7 @@ route changes through `EventService.WatchEvents` or `EventService.SubscribeFromE
 | `ListReceivedRoutes` | Adj-RIB-In: all routes received from peers |
 | `ListBestRoutes` | Loc-RIB: best route per prefix after path selection |
 | `ListAdvertisedRoutes` | Adj-RIB-Out: routes advertised to a specific peer |
-| `ExplainAdvertisedRoute` | Dry-run export decision for one prefix (or, with `rd`, one VPN identity) to one peer: the full gate ladder in live evaluation order (split horizon, RFC 4456 reflection, family, RFC 9494 LLGR, RFC 5291 ORF, RFC 4684 RT membership, export policy with per-term labels, Adj-RIB-Out diff), produced by a dry run of the live staging body. For negotiated unicast Add-Path send, optional `source { peer_address, path_id }` selects one exact Adj-RIB-In candidate. |
+| `ExplainAdvertisedRoute` | Dry-run export decision for one prefix (or, with `rd`, one VPN identity) to one peer: the full gate ladder in live evaluation order (split horizon, RFC 4456 reflection, family, RFC 9494 LLGR, RFC 5291 ORF, RFC 4684 RT membership, export-policy rejection with per-term attribution or nonempty Permit with `chain_default_permit`, Adj-RIB-Out diff), produced by a dry run of the live staging body. For negotiated unicast Add-Path send, optional `source { peer_address, path_id }` selects one exact Adj-RIB-In candidate. |
 | `ExplainBestPath` | Show all candidates for a prefix with decisive comparison reasons; optional `peer_address` field scopes to that peer's Add-Path send view |
 | `LookupBestPath` | Outside-v1 global-only LPM: bounded ancestor probes return the closest installed Loc-RIB winner plus every alternative for that one matched prefix from one actor turn; old daemons fail with `UNIMPLEMENTED` |
 | `ListFlowSpecRoutes` | FlowSpec routes in Adj-RIB-In / Loc-RIB view |

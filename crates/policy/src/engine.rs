@@ -1230,26 +1230,22 @@ impl std::ops::Deref for NamedPolicy {
     }
 }
 
-/// Per-route policy evaluation outcome with attribution to the
-/// terminal-decision policy. Produced by
+/// Per-route policy evaluation outcome with stable decision attribution. Produced by
 /// [`PolicyChain::evaluate_with_attribution`] alongside the existing
 /// [`PolicyResult`] so the rich path doesn't churn the many sites that
 /// match on `PolicyResult` directly.
 ///
-/// `matched_policy` is the name of the policy that **terminated** chain
-/// evaluation:
+/// `matched_policy` identifies the source of the chain decision:
 /// - For a Deny: the policy that issued the Deny (chain stops there).
-/// - For a Permit (all policies permitted): the last policy in the
-///   chain, since chain evaluation completes only after every policy
-///   has permitted. With one named policy in the chain that's the named
-///   one; with an empty chain it's `None`.
-/// - For chains where the terminal policy is inline / anonymous, it's
-///   `None` — the operator can read `"inline"` as the metric label.
+/// - For a Permit after a nonempty chain: [`CHAIN_DEFAULT_PERMIT_ATTRIBUTION`],
+///   because every member permitted and no member rejected the route.
+/// - For an empty or absent chain: `None` (operator label `"inline"`).
+/// - For a Deny from an inline / anonymous member: `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyEvaluation {
     /// The terminal action — `Permit` or `Deny`.
     pub action: PolicyAction,
-    /// Configured name of the terminal-decision policy, if it has one.
+    /// Configured denying policy or the nonempty-chain Permit sentinel.
     pub matched_policy: Option<Arc<str>>,
     /// Set when the Deny is the fail-closed disposition of an
     /// evaluation error (ADR-0103 Decision 4) rather than a clean
@@ -1257,6 +1253,19 @@ pub struct PolicyEvaluation {
     /// `None` on a Permit; built on the error path only, so the hot
     /// path never allocates for it.
     pub eval_error: Option<crate::eval::EvalError>,
+}
+
+/// Stable attribution for a nonempty chain that completed without rejection.
+pub const CHAIN_DEFAULT_PERMIT_ATTRIBUTION: &str = "chain_default_permit";
+
+static CHAIN_DEFAULT_PERMIT_LABEL: OnceLock<Arc<str>> = OnceLock::new();
+
+/// Return the process-shared label used for chain default permits.
+#[must_use]
+pub fn chain_default_permit_label() -> Arc<str> {
+    Arc::clone(
+        CHAIN_DEFAULT_PERMIT_LABEL.get_or_init(|| Arc::from(CHAIN_DEFAULT_PERMIT_ATTRIBUTION)),
+    )
 }
 
 /// An ordered sequence of policies evaluated in chain.
@@ -1643,10 +1652,11 @@ impl PolicyChain {
     /// that need to label "which policy made this decision."
     ///
     /// Returns the same `PolicyResult` as [`evaluate`](Self::evaluate)
-    /// plus a `PolicyEvaluation` carrying the terminal-decision
-    /// policy's name (`None` for inline / anonymous, or for an empty
-    /// chain). The action on the `PolicyEvaluation` matches the
-    /// `PolicyResult.action`.
+    /// plus a `PolicyEvaluation` carrying the configured denying member,
+    /// [`CHAIN_DEFAULT_PERMIT_ATTRIBUTION`] for a nonempty chain that
+    /// completed without rejection, or `None` for an inline / anonymous
+    /// denial or an empty chain. The action on the `PolicyEvaluation`
+    /// matches the `PolicyResult.action`.
     #[must_use]
     pub fn evaluate_with_attribution(
         &self,

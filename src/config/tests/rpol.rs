@@ -64,7 +64,10 @@ fn rpol_files_load_resolve_and_evaluate_in_chains() {
         rustbgpd_policy::evaluate_chain_with_attribution(Some(&import), &ctx(customer));
     assert_eq!(result.action, rustbgpd_policy::PolicyAction::Permit);
     assert_eq!(result.modifications.set_local_pref, Some(200));
-    assert_eq!(eval.matched_policy.as_deref(), Some("toml-pass"));
+    assert_eq!(
+        eval.matched_policy.as_deref(),
+        Some(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)
+    );
     let (result, eval) =
         rustbgpd_policy::evaluate_chain_with_attribution(Some(&import), &ctx(bogon));
     assert_eq!(result.action, rustbgpd_policy::PolicyAction::Deny);

@@ -475,7 +475,10 @@ policy bogon-filter {
         let (result, eval) = chain.evaluate_with_attribution(&ctx(v4(10, 10, 3, 0, 24), ""));
         assert_eq!(result.action, PolicyAction::Permit);
         assert_eq!(result.modifications.set_local_pref, Some(200));
-        assert_eq!(eval.matched_policy.as_deref(), Some("bogon-filter"));
+        assert_eq!(
+            eval.matched_policy.as_deref(),
+            Some(crate::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)
+        );
         // Transit AS in the path → the rpol regex guard denies.
         let (result, eval) =
             chain.evaluate_with_attribution(&ctx(v4(203, 0, 113, 0, 24), "65010 65020"));

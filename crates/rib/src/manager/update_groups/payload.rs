@@ -24,8 +24,8 @@ pub(in crate::manager) struct GroupDelta {
     /// Source peer of the group-table entry this delta replaces, read
     /// BEFORE commit. `None` = the key was not previously staged.
     pub(in crate::manager) old_source: Option<IpAddr>,
-    /// Terminal policy of the permitting evaluation (`None` = inline /
-    /// no chain). Retained on the staged entry so a later join can
+    /// Decision attribution of the permitting evaluation (`None` = absent or
+    /// empty chain). Retained on the staged entry so a later join can
     /// replay the member's export counters without re-running policy.
     pub(in crate::manager) policy_label: Option<PolicyLabel>,
     /// Pre-policy SOURCE attributes of an announce delta (`None` for a
@@ -58,8 +58,8 @@ pub(in crate::manager) fn capture_source_attrs(source: &Route) -> Option<Arc<Vec
 /// 3): the exception lane's per-prefix payload — the same shape the
 /// group table keeps per staged key: the post-policy route shell with
 /// its source peer preserved, the next-hop-override residue, the
-/// captured pre-policy SOURCE attributes, and the permitting
-/// terminal-policy label for join-time counter replay.
+/// captured pre-policy SOURCE attributes, and the permitting decision
+/// attribution for join-time counter replay.
 #[derive(Debug, Clone)]
 pub(in crate::manager) struct RunnerUp {
     pub(in crate::manager) route: Route,
@@ -89,8 +89,8 @@ pub(in crate::manager) struct AdvEntry<'a> {
     /// field and derives equivalent input from [`Self::route`]; its dense
     /// staged entries leave the field `None`.
     pub(in crate::manager) source_attrs: Option<&'a Arc<Vec<PathAttribute>>>,
-    /// Terminal policy label of the permitting evaluation (`None` =
-    /// inline verdict) — join-time counter replay residue.
+    /// Decision attribution of the permitting evaluation (`None` = absent or
+    /// empty chain) — join-time counter replay residue.
     pub(in crate::manager) policy_label: Option<&'a PolicyLabel>,
 }
 
@@ -144,7 +144,7 @@ pub(in crate::manager) struct LaneDelta {
 /// distribution body.
 #[derive(Default)]
 pub(in crate::manager) struct PerClientBestPrefixStage {
-    /// Terminal policy of the winner's permitting evaluation, captured
+    /// Decision attribution of the winner's permitting evaluation, captured
     /// at its own permit point: [`GroupEvalAccumulator::take_last`]
     /// returns the walk's LAST evaluation — the runner-up's permit or
     /// a trailing denial — never the winner's.
@@ -569,7 +569,7 @@ impl BatchedTransitionCounters {
 }
 
 /// Export-policy verdicts of one shared staging pass, aggregated by
-/// (terminal policy, action) with a per-source-peer breakdown so each
+/// (decision attribution, action) with a per-source-peer breakdown so each
 /// member can be bumped by `totals − own-sourced` — exactly what the
 /// per-peer path would have recorded (split horizon skips the eval for
 /// the route's own source). Integer adds only; no per-(prefix × peer)
@@ -922,7 +922,7 @@ pub(in crate::manager) struct VpnGroupDelta {
     /// Prior staged entry for the key, cloned before commit (one clone
     /// per delta, total). `None` = the key was not previously staged.
     pub(in crate::manager) old: Option<VpnRibRoute>,
-    /// Terminal policy of the permitting evaluation — join-time counter
+    /// Decision attribution of the permitting evaluation — join-time counter
     /// replay residue, exactly like [`GroupDelta::policy_label`].
     pub(in crate::manager) policy_label: Option<PolicyLabel>,
 }

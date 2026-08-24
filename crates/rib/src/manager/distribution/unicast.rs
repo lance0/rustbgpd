@@ -526,6 +526,7 @@ impl RibManager {
                                 let label = super::policy_label_with_term(
                                     export_pol,
                                     &ctx,
+                                    evaluation.action,
                                     evaluation.matched_policy.as_deref(),
                                 );
                                 if first_no_advertise_suppression.is_none() {
@@ -551,6 +552,7 @@ impl RibManager {
                             let label = super::policy_label_with_term(
                                 export_pol,
                                 &ctx,
+                                evaluation.action,
                                 evaluation.matched_policy.as_deref(),
                             );
                             explain.reasons.push(ExplainReason {
@@ -864,7 +866,7 @@ impl RibManager {
             med: best.med_attr(),
         };
         // Explain is a one-shot operator query path: enrich the deny /
-        // permit reason with the terminal-decision policy name but do
+        // permit reason with stable decision attribution but do
         // NOT increment bgp_policy_routes_total or the ADR-0096
         // per-term hit counters here — the actual distribution path
         // counts each route once, and double-counting explain calls
@@ -881,8 +883,12 @@ impl RibManager {
                 },
             ),
         };
-        let policy_label =
-            super::policy_label_with_term(export_pol, &ctx, evaluation.matched_policy.as_deref());
+        let policy_label = super::policy_label_with_term(
+            export_pol,
+            &ctx,
+            evaluation.action,
+            evaluation.matched_policy.as_deref(),
+        );
         if result.action != PolicyAction::Permit {
             explain.decision = ExplainDecision::Deny;
             let (code, message) =
@@ -2105,12 +2111,17 @@ impl RibManager {
         let (policy_result, evaluation) = target.evaluate_export_chain(export_pol, &ctx);
         target.record_eval(&evaluation, best.peer);
         if let Some(trace) = target.trace() {
-            // Enrich the deciding chain member with the rpol term name
-            // via the statement trace (explain-only re-walk, pinned to
-            // agree with the evaluation by the policy crate's agreement
-            // tests). TOML members carry no term name.
+            // Keep Permit on the chain-default label. For Deny, enrich the
+            // deciding rpol member with its term through an explain-only
+            // statement-trace re-walk, pinned to agree with the evaluation by
+            // policy-crate agreement tests. TOML members carry no term name.
             trace.policy_label = export_pol.map(|chain| {
-                policy_label_with_term(Some(chain), &ctx, evaluation.matched_policy.as_deref())
+                policy_label_with_term(
+                    Some(chain),
+                    &ctx,
+                    evaluation.action,
+                    evaluation.matched_policy.as_deref(),
+                )
             });
         }
         if policy_result.action != PolicyAction::Permit {

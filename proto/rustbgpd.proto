@@ -1448,10 +1448,11 @@ message ImportExplainMatch {
   uint32 path_id               = 5;
   AddressFamily afi_safi       = 6;
 
-  // Terminal-decision policy label from
-  // `PolicyEvaluation.matched_policy`. Empty when the terminal
-  // policy is inline / anonymous (read as "inline" by the operator).
-  // Unset on NOT_SEEN / EVICTED outcomes.
+  // Decision attribution from `PolicyEvaluation.matched_policy`:
+  // the denying member, or `chain_default_permit` when a nonempty
+  // chain completed without rejection. Empty for an inline deny or
+  // an absent / genuinely empty chain (read as "inline").
+  // Empty on NOT_SEEN / EVICTED outcomes.
   string matched_policy        = 7;
 
   // RPKI origin-validation state at evaluation time, as a stable
@@ -1509,8 +1510,9 @@ message ImportExplainMatch {
 message ImportExplainStatementStep {
   // 0-based position of the policy within the resolved import chain.
   uint32 policy_index = 1;
-  // Configured policy name. Empty when the policy is inline /
-  // anonymous (operators read "inline", matching `matched_policy`).
+  // Configured policy name. Empty when this member is inline /
+  // anonymous. On a chain Permit, `matched_policy` names the chain
+  // default rather than this final trace member.
   string policy_name = 2;
   // True when no statement in this policy matched and the policy's
   // default action decided (fallthrough). `statement_index` is

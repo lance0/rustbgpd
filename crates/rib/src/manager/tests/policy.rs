@@ -925,8 +925,13 @@ async fn export_as_path_regex_still_filters_through_distribution() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one direct-export scenario pins route, explain, metric attribution, and scalar totals"
+)]
 async fn explain_advertised_route_reports_modifications() {
     let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
     let export_policy = rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
         default_action: rustbgpd_policy::PolicyAction::Permit,
         entries: vec![rustbgpd_policy::PolicyStatement {
@@ -954,7 +959,7 @@ async fn explain_advertised_route_reports_modifications() {
             action: rustbgpd_policy::PolicyAction::Permit,
         }],
     }]);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let handle = tokio::spawn(manager.run());
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -980,6 +985,7 @@ async fn explain_advertised_route_reports_modifications() {
     })
     .await
     .unwrap();
+
     drain_eor(&mut out_rx).await;
 
     let route = make_route(
@@ -999,6 +1005,9 @@ async fn explain_advertised_route_reports_modifications() {
     .await
     .unwrap();
 
+    let update = out_rx.recv().await.expect("permitted route emitted");
+    assert_eq!(update.announce.len(), 1);
+
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
     let explain = query_explain_advertised_route(&tx, target, prefix).await;
     assert_eq!(explain.decision, crate::update::ExplainDecision::Advertise);
@@ -1010,6 +1019,25 @@ async fn explain_advertised_route_reports_modifications() {
     assert_eq!(explain.modifications.set_local_pref, Some(200));
     assert_eq!(explain.reasons[0].code, "ebgp_route");
     assert_eq!(explain.reasons[1].code, "policy_permitted");
+    assert!(
+        explain.reasons[1]
+            .message
+            .contains(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)
+    );
+    assert!(
+        (policy_metric_value(
+            &metrics,
+            "10.0.0.2",
+            rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION,
+            "export",
+            "permit"
+        ) - 1.0)
+            .abs()
+            < f64::EPSILON
+    );
+    let stats = query_neighbor_policy_stats(&tx, target).await;
+    assert_eq!(stats.export_policy_routes_permitted, 1);
+    assert_eq!(stats.export_policy_routes_denied, 0);
 
     drop(tx);
     handle.await.unwrap();
@@ -1171,18 +1199,19 @@ async fn peer_down_cleans_up_export_policy() {
     handle.await.unwrap();
 }
 
-/// ADR-0096 explain slice: when the deciding export-chain member is an
-/// `.rpol` policy, the explain reason labels the decision
-/// `<chain-ref>:<term>`, and the live per-term hit counters are
-/// queryable — with explain itself not counting (side-effect-free).
+/// ADR-0096 explain slice: an `.rpol` Deny names the deciding
+/// `<chain-ref>:<term>`, while a Permit retains the chain-default label even
+/// when a configured member has that literal name, and an anonymous Deny stays
+/// `inline`. Live per-term hit counters remain queryable, and explain itself
+/// does not count (side-effect-free).
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "one end-to-end walk: install, distribute, explain, query counters"
 )]
-async fn explain_names_rpol_term_and_term_hit_counters_are_queryable() {
+async fn explain_disambiguates_literal_chain_default_name_and_reports_term_hits() {
     const RPOL: &str = r"
-policy no-doc {
+policy chain_default_permit {
     term block-doc {
         if route.prefix == 203.0.113.0/24 { reject }
     }
@@ -1191,13 +1220,23 @@ policy no-doc {
     let file = rustbgpd_policy::rpol::RpolFile::parse(RPOL).expect("clean rpol");
     let mut store = rustbgpd_policy::sets::SetStore::new();
     let compiled = file
-        .compile_policy("no-doc", &[], &mut store)
+        .compile_policy("chain_default_permit", &[], &mut store)
         .expect("policy exists");
+    let compiled = Arc::new(compiled);
     let chain =
         rustbgpd_policy::PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
-            "no-doc".to_string(),
-            Arc::new(compiled),
+            "chain_default_permit".to_string(),
+            Arc::clone(&compiled),
         )]);
+    let anonymous_chain =
+        rustbgpd_policy::PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy {
+            name: None,
+            policy: rustbgpd_policy::Policy {
+                entries: Vec::new(),
+                default_action: rustbgpd_policy::PolicyAction::Permit,
+            },
+            rpol: Some(compiled),
+        }]);
 
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
@@ -1255,10 +1294,25 @@ policy no-doc {
     let explain = query_explain_advertised_route(&tx, target, prefix).await;
     assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
     assert_eq!(explain.reasons[0].code, "policy_denied");
-    assert!(
-        explain.reasons[0].message.contains("no-doc:block-doc"),
-        "expected the deciding rpol term in the label, got {:?}",
-        explain.reasons[0].message
+    assert_eq!(
+        explain.reasons[0].message,
+        "export policy \"chain_default_permit:block-doc\" denied this route"
+    );
+
+    let permitted_prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+    let permitted = query_explain_advertised_route(&tx, target, permitted_prefix).await;
+    assert_eq!(
+        permitted.decision,
+        crate::update::ExplainDecision::Advertise
+    );
+    let permit_reason = permitted
+        .reasons
+        .iter()
+        .find(|reason| reason.code == "policy_permitted")
+        .expect("permitted export policy reason");
+    assert_eq!(
+        permit_reason.message, "export policy \"chain_default_permit\" permitted this route",
+        "Permit attribution must not inherit the literal member's term suffix"
     );
 
     // Live counters: the two distributed routes evaluated once each;
@@ -1278,7 +1332,10 @@ policy no-doc {
     assert_eq!(hits[0].peer, Some(target));
     assert_eq!(hits[0].evals, 2);
     assert_eq!(hits[0].terms.len(), 1);
-    assert_eq!(hits[0].terms[0].policy.as_deref(), Some("no-doc"));
+    assert_eq!(
+        hits[0].terms[0].policy.as_deref(),
+        Some("chain_default_permit")
+    );
     assert_eq!(hits[0].terms[0].term.as_deref(), Some("block-doc"));
     assert_eq!(hits[0].terms[0].hits, 1);
 
@@ -1307,6 +1364,40 @@ policy no-doc {
         reply_rx.await.unwrap()
     };
     assert!(missing.is_empty());
+
+    // An anonymous `.rpol` Deny has no stable member identity. Its term must
+    // not escape into the operator label as `inline:<term>`.
+    let anonymous_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let (anonymous_out_tx, mut anonymous_out_rx) = mpsc::channel(8);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: anonymous_target,
+        peer_asn: 65003,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 3),
+        outbound_tx: anonymous_out_tx,
+        export_policy: Some(anonymous_chain),
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    // Registration also emits the already-known permitted route before EOR;
+    // keep the receiver live so initial staging cannot backpressure the actor.
+    assert!(anonymous_out_rx.recv().await.is_some());
+    let anonymous = query_explain_advertised_route(&tx, anonymous_target, prefix).await;
+    assert_eq!(anonymous.decision, crate::update::ExplainDecision::Deny);
+    assert_eq!(
+        anonymous.reasons[0].message,
+        "export policy \"inline\" denied this route"
+    );
 
     drop(tx);
     handle.await.unwrap();

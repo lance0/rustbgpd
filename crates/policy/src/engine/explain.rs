@@ -13,9 +13,11 @@
 //! evaluation path is **never** routed through here. The chain walk is
 //! deliberately duplicated rather than factored into the live
 //! evaluator, and the two are pinned together by the agreement matrix
-//! in `engine/tests/statement_trace.rs` — the trace's terminal action
-//! and terminal policy must equal what `evaluate_chain_with_attribution`
-//! returns for the same context. Per-statement *matching* is not
+//! in `engine/tests/statement_trace.rs` — the trace's terminal action must
+//! equal what `evaluate_chain_with_attribution` returns for the same context.
+//! On a Deny, its final policy also equals the configured denying member; on
+//! a Permit, the trace retains the member walk while `PolicyEvaluation` uses
+//! the shared nonempty-chain completion label. Per-statement *matching* is not
 //! duplicated: both walks call the same (private) `PolicyStatement::matches`,
 //! so they cannot disagree about whether an individual statement fires.
 //!

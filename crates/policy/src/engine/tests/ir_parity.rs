@@ -706,7 +706,8 @@ fn composed_chains() -> Vec<(String, PolicyChain)> {
         ]),
     ));
 
-    // Unnamed terminal policy: attribution must be None.
+    // An unnamed nonempty member still completes through the shared
+    // chain-default Permit attribution.
     chains.push((
         "unnamed_terminal".to_string(),
         PolicyChain::new(vec![Policy {

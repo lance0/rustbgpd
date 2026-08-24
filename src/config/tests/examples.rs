@@ -662,7 +662,7 @@ fn route_server_example_exception_chain_preserves_later_guards() {
             rustbgpd_wire::RpkiValidation::Valid,
             rustbgpd_wire::AspaValidation::Unknown,
             rustbgpd_policy::PolicyAction::Permit,
-            "prefer-rpki-valid",
+            rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION,
             Some(200),
         ),
     ];
