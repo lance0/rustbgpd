@@ -707,8 +707,8 @@ for the architectural record.
   forwarding-safe across transitions; Router MAC conflicts drop
   conflicting prefixes with `L3Drop::RouterMacConflict`;
   foreign state preservation is enforced by diffing only
-  against `L3OwnedState`. Validated by 12 unit tests in
-  `crates/evpn-linux/src/l3_diff.rs` and three privileged netns
+  against `L3OwnedState`. Validated by unit tests in
+  `crates/evpn-linux/src/l3_diff.rs` and privileged netns
   integration tests at `crates/evpn-linux/tests/netns_l3_install.rs`
   (gated on `EVPN_LINUX_NETNS=1`) against Linux 6.17, including
   foreign-route preservation and route-event wakeup. **M39 containerlab smoke**
@@ -1097,8 +1097,8 @@ to the plain capability they delivered.
   apply ordering (route-remove → resolution-add → route-add → resolution-remove)
   keeps the kernel forwarding-safe across transitions; Router MAC conflicts drop
   conflicting prefixes with `L3Drop::RouterMacConflict`; foreign state is
-  preserved by diffing only against `L3OwnedState`. 11 unit tests in
-  `l3_diff.rs` and two privileged netns integration tests validate kernel
+  preserved by diffing only against `L3OwnedState`. Unit tests in `l3_diff.rs`
+  and privileged netns integration tests validate kernel
   programming against Linux 6.17. M39 hosted kernel-dataplane smoke validates the
   bidirectional symmetric IRB datapath against FRR 10.3.1.
 - **EVPN aliasing dataplane ECMP via FDB nexthop groups** (v0.19.0–v0.20.0,
