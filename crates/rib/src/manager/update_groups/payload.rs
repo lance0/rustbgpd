@@ -169,17 +169,11 @@ pub(in crate::manager) fn source_control_input(
     };
     let communities = attrs
         .iter()
-        .find_map(|attr| match attr {
-            PathAttribute::Communities(values) => Some(values.as_slice()),
-            _ => None,
-        })
+        .find_map(PathAttribute::communities)
         .unwrap_or(&[]);
     let large_communities = attrs
         .iter()
-        .find_map(|attr| match attr {
-            PathAttribute::LargeCommunities(values) => Some(values.as_slice()),
-            _ => None,
-        })
+        .find_map(PathAttribute::large_communities)
         .unwrap_or(&[]);
     (communities, large_communities)
 }

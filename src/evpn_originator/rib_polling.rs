@@ -474,7 +474,7 @@ pub(super) fn prefer_mac_ip_new(new: &ProjectedEvpnRoute, existing: &ProjectedEv
 /// Extract `(sticky, mobility_seq)` from a route's path attributes.
 pub(super) fn extract_mac_mobility_full(attrs: &[PathAttribute]) -> (bool, Option<u32>) {
     for attr in attrs {
-        let PathAttribute::ExtendedCommunities(ecs) = attr else {
+        let Some(ecs) = attr.extended_communities() else {
             continue;
         };
         for ec in ecs {
@@ -500,4 +500,77 @@ pub(super) async fn query_evpn_routes(
         .await
         .map_err(|_| RibQueryError::SendFailed)?;
     reply_rx.await.map_err(|_| RibQueryError::ReplyDropped)
+}
+
+#[cfg(test)]
+mod partial_extended_community_tests {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use rustbgpd_evpn::EvpnInstanceTable;
+    use rustbgpd_rib::route::RouteOrigin;
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, ExtendedCommunity, MplsLabel,
+        PathAttribute, RouteDistinguisher,
+    };
+
+    use super::*;
+    use crate::test_support::{evpn_instance, ip as ipa, mac, vni};
+
+    fn contender(attribute: PathAttribute) -> EvpnRibRoute {
+        EvpnRibRoute {
+            route: EvpnRoute::MacIp(EvpnMacIp {
+                rd: RouteDistinguisher::ZERO,
+                esi: EthernetSegmentIdentifier::ZERO,
+                ethernet_tag: EthernetTagId(0),
+                mac: mac(0xaa),
+                ip: Some(ipa("192.0.2.10")),
+                label1: MplsLabel::new(100),
+                label2: None,
+            }),
+            next_hop: ipa("10.0.0.2"),
+            link_local_next_hop: None,
+            peer: ipa("10.0.0.99"),
+            attributes: Arc::new(vec![attribute]),
+            received_at: Instant::now(),
+            origin_type: RouteOrigin::Ebgp,
+            peer_router_id: "10.0.0.99".parse().unwrap(),
+            is_stale: false,
+            is_llgr_stale: false,
+        }
+    }
+
+    #[test]
+    fn partial_mac_mobility_preserves_sticky_sequence_contender_state() {
+        let mobility = ExtendedCommunity::mac_mobility(true, 7);
+        let canonical = contender(PathAttribute::ExtendedCommunities(vec![mobility]));
+        let partial = contender(PathAttribute::ExtendedCommunitiesPartial(vec![mobility]));
+        let mut instances = EvpnInstanceTable::new();
+        instances
+            .insert(evpn_instance(
+                65_000,
+                100,
+                100,
+                Some("br100".to_string()),
+                false,
+            ))
+            .unwrap();
+
+        let canonical_views = build_remote_views(&instances, &[canonical]);
+        let partial_views = build_remote_views(&instances, &[partial]);
+        assert_eq!(partial_views, canonical_views);
+
+        let mac_view = partial_views
+            .0
+            .get(&(vni(100), mac(0xaa)))
+            .expect("partial contender produces MAC state");
+        assert!(mac_view.sticky);
+        assert_eq!(mac_view.mobility_sequence, Some(7));
+        let mac_ip_view = partial_views
+            .1
+            .get(&(vni(100), mac(0xaa), ipa("192.0.2.10")))
+            .expect("partial contender produces MAC+IP state");
+        assert!(mac_ip_view.sticky);
+        assert_eq!(mac_ip_view.mobility_sequence, Some(7));
+    }
 }

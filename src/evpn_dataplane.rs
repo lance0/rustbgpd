@@ -1494,10 +1494,8 @@ fn project_type5(route: &EvpnRibRoute) -> Option<rustbgpd_evpn::ip_vrf::Projecte
     let ext_comms: Vec<rustbgpd_wire::ExtendedCommunity> = route
         .attributes
         .iter()
-        .find_map(|a| match a {
-            rustbgpd_wire::PathAttribute::ExtendedCommunities(v) => Some(v.clone()),
-            _ => None,
-        })
+        .find_map(rustbgpd_wire::PathAttribute::extended_communities)
+        .map(<[_]>::to_vec)
         .unwrap_or_default();
     let (route_targets, router_mac) =
         rustbgpd_evpn::ip_vrf::ProjectedIpPrefixRoute::extcomms_to_fields(&ext_comms);
@@ -1594,7 +1592,7 @@ fn project_ead_per_es_reachability(
 
 fn ead_per_es_is_single_active(attrs: &[PathAttribute]) -> bool {
     attrs.iter().any(|attr| {
-        let PathAttribute::ExtendedCommunities(ecs) = attr else {
+        let Some(ecs) = attr.extended_communities() else {
             return false;
         };
         ecs.iter().copied().any(|ec| {
@@ -1781,7 +1779,7 @@ fn project_one(
 /// projection's tie-break treats `None` as "older than any sequence").
 fn extract_mac_mobility_sequence(attrs: &[PathAttribute]) -> Option<u32> {
     for attr in attrs {
-        let PathAttribute::ExtendedCommunities(ecs) = attr else {
+        let Some(ecs) = attr.extended_communities() else {
             continue;
         };
         for ec in ecs {
@@ -2002,6 +2000,21 @@ mod tests {
         let projected = project_type5(&route).expect("Type 5 route projects");
 
         assert_eq!(projected.ethernet_tag, EthernetTagId(77));
+    }
+
+    #[test]
+    fn partial_extended_communities_preserve_type5_projection() {
+        let canonical = evpn_ip_prefix_route("10.10.0.0/24", "0.0.0.0", "10.0.0.2", 5000);
+        let mut partial = canonical.clone();
+        let extended_communities = canonical.attributes[0]
+            .extended_communities()
+            .expect("helper carries route target")
+            .to_vec();
+        partial.attributes = Arc::new(vec![PathAttribute::ExtendedCommunitiesPartial(
+            extended_communities,
+        )]);
+
+        assert_eq!(project_type5(&partial), project_type5(&canonical));
     }
 
     fn evpn_ead_per_es_route(
@@ -2630,6 +2643,38 @@ mod tests {
         assert_eq!(
             project_ead_per_es_reachability(&single_active),
             Some(((ipa("10.0.0.3"), esi), true))
+        );
+    }
+
+    #[test]
+    fn partial_extended_communities_preserve_ead_per_es_mode() {
+        let esi = EthernetSegmentIdentifier::new([9; 10]);
+        let canonical = evpn_ead_per_es_route(esi, "10.0.0.3", true);
+        let mut partial = canonical.clone();
+        let extended_communities = canonical.attributes[0]
+            .extended_communities()
+            .expect("helper carries ESI label")
+            .to_vec();
+        partial.attributes = Arc::new(vec![PathAttribute::ExtendedCommunitiesPartial(
+            extended_communities,
+        )]);
+
+        assert_eq!(
+            project_ead_per_es_reachability(&partial),
+            project_ead_per_es_reachability(&canonical)
+        );
+    }
+
+    #[test]
+    fn partial_extended_communities_preserve_mac_mobility_sequence() {
+        let mobility = ExtendedCommunity::mac_mobility(true, 42);
+        let canonical = [PathAttribute::ExtendedCommunities(vec![mobility])];
+        let partial = [PathAttribute::ExtendedCommunitiesPartial(vec![mobility])];
+
+        assert_eq!(extract_mac_mobility_sequence(&canonical), Some(42));
+        assert_eq!(
+            extract_mac_mobility_sequence(&partial),
+            extract_mac_mobility_sequence(&canonical)
         );
     }
 

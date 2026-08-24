@@ -700,11 +700,20 @@ pub enum PathAttribute {
     Med(u32),
     /// RFC 1997 COMMUNITIES — each u32 is high16=ASN, low16=value.
     Communities(Vec<u32>),
+    /// A valid received RFC 1997 COMMUNITIES attribute carrying the RFC 4271
+    /// Partial bit. Values are otherwise identical to [`Self::Communities`].
+    CommunitiesPartial(Vec<u32>),
     /// RFC 4360 EXTENDED COMMUNITIES.
     ExtendedCommunities(Vec<ExtendedCommunity>),
+    /// A valid received RFC 4360 EXTENDED COMMUNITIES attribute carrying the
+    /// RFC 4271 Partial bit.
+    ExtendedCommunitiesPartial(Vec<ExtendedCommunity>),
     /// RFC 8092 LARGE COMMUNITIES. Duplicate values are normalized at
     /// decode and encode boundaries while retaining first-seen order.
     LargeCommunities(Vec<LargeCommunity>),
+    /// A valid received RFC 8092 LARGE COMMUNITIES attribute carrying the
+    /// RFC 4271 Partial bit.
+    LargeCommunitiesPartial(Vec<LargeCommunity>),
     /// RFC 4456 `ORIGINATOR_ID` — original router-id of the route.
     OriginatorId(Ipv4Addr),
     /// RFC 4456 `CLUSTER_LIST` — list of cluster-ids traversed.
@@ -716,6 +725,9 @@ pub enum PathAttribute {
     /// RFC 6514 §5 `PMSI Tunnel` — used by EVPN Type 3 IMET for
     /// ingress-replication BUM forwarding.
     PmsiTunnel(crate::pmsi::PmsiTunnel),
+    /// A valid received RFC 6514 §5 PMSI Tunnel attribute carrying the RFC
+    /// 4271 Partial bit.
+    PmsiTunnelPartial(crate::pmsi::PmsiTunnel),
     /// RFC 9234 §5 `Only-to-Customer` (type 35) — carries the 32-bit ASN
     /// that initially set OTC on the route. Optional + Transitive (`0xC0`).
     OnlyToCustomer(u32),
@@ -737,14 +749,18 @@ impl PathAttribute {
             Self::NextHop(_) => attr_type::NEXT_HOP,
             Self::LocalPref(_) => attr_type::LOCAL_PREF,
             Self::Med(_) => attr_type::MULTI_EXIT_DISC,
-            Self::Communities(_) => attr_type::COMMUNITIES,
+            Self::Communities(_) | Self::CommunitiesPartial(_) => attr_type::COMMUNITIES,
             Self::OriginatorId(_) => attr_type::ORIGINATOR_ID,
             Self::ClusterList(_) => attr_type::CLUSTER_LIST,
-            Self::ExtendedCommunities(_) => attr_type::EXTENDED_COMMUNITIES,
-            Self::LargeCommunities(_) => attr_type::LARGE_COMMUNITIES,
+            Self::ExtendedCommunities(_) | Self::ExtendedCommunitiesPartial(_) => {
+                attr_type::EXTENDED_COMMUNITIES
+            }
+            Self::LargeCommunities(_) | Self::LargeCommunitiesPartial(_) => {
+                attr_type::LARGE_COMMUNITIES
+            }
             Self::MpReachNlri(_) => attr_type::MP_REACH_NLRI,
             Self::MpUnreachNlri(_) => attr_type::MP_UNREACH_NLRI,
-            Self::PmsiTunnel(_) => attr_type::PMSI_TUNNEL,
+            Self::PmsiTunnel(_) | Self::PmsiTunnelPartial(_) => attr_type::PMSI_TUNNEL,
             Self::OnlyToCustomer(_) | Self::OnlyToCustomerPartial(_) => attr_type::ONLY_TO_CUSTOMER,
             Self::Unknown(raw) => raw.type_code,
         }
@@ -777,10 +793,86 @@ impl PathAttribute {
             | Self::LargeCommunities(_)
             | Self::PmsiTunnel(_)
             | Self::OnlyToCustomer(_) => attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
-            Self::OnlyToCustomerPartial(_) => {
+            Self::CommunitiesPartial(_)
+            | Self::ExtendedCommunitiesPartial(_)
+            | Self::LargeCommunitiesPartial(_)
+            | Self::PmsiTunnelPartial(_)
+            | Self::OnlyToCustomerPartial(_) => {
                 attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL
             }
             Self::Unknown(raw) => raw.flags,
+        }
+    }
+
+    /// RFC 1997 community values, independent of the received Partial bit.
+    #[inline]
+    #[must_use]
+    pub fn communities(&self) -> Option<&[u32]> {
+        match self {
+            Self::Communities(values) | Self::CommunitiesPartial(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    /// Mutable RFC 1997 community values, preserving the typed variant and
+    /// therefore the received Partial bit.
+    #[inline]
+    pub fn communities_mut(&mut self) -> Option<&mut Vec<u32>> {
+        match self {
+            Self::Communities(values) | Self::CommunitiesPartial(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    /// RFC 4360 extended-community values, independent of Partial.
+    #[inline]
+    #[must_use]
+    pub fn extended_communities(&self) -> Option<&[ExtendedCommunity]> {
+        match self {
+            Self::ExtendedCommunities(values) | Self::ExtendedCommunitiesPartial(values) => {
+                Some(values)
+            }
+            _ => None,
+        }
+    }
+
+    /// Mutable RFC 4360 extended-community values, preserving Partial.
+    #[inline]
+    pub fn extended_communities_mut(&mut self) -> Option<&mut Vec<ExtendedCommunity>> {
+        match self {
+            Self::ExtendedCommunities(values) | Self::ExtendedCommunitiesPartial(values) => {
+                Some(values)
+            }
+            _ => None,
+        }
+    }
+
+    /// RFC 8092 large-community values, independent of Partial.
+    #[inline]
+    #[must_use]
+    pub fn large_communities(&self) -> Option<&[LargeCommunity]> {
+        match self {
+            Self::LargeCommunities(values) | Self::LargeCommunitiesPartial(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    /// Mutable RFC 8092 large-community values, preserving Partial.
+    #[inline]
+    pub fn large_communities_mut(&mut self) -> Option<&mut Vec<LargeCommunity>> {
+        match self {
+            Self::LargeCommunities(values) | Self::LargeCommunitiesPartial(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    /// RFC 6514 PMSI Tunnel value, independent of Partial.
+    #[inline]
+    #[must_use]
+    pub fn pmsi_tunnel(&self) -> Option<&crate::pmsi::PmsiTunnel> {
+        match self {
+            Self::PmsiTunnel(value) | Self::PmsiTunnelPartial(value) => Some(value),
+            _ => None,
         }
     }
 }
@@ -1574,7 +1666,11 @@ fn decode_attribute_value(
                 .iter()
                 .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
                 .collect();
-            Ok(PathAttribute::Communities(communities))
+            if flags & attr_flags::PARTIAL != 0 {
+                Ok(PathAttribute::CommunitiesPartial(communities))
+            } else {
+                Ok(PathAttribute::Communities(communities))
+            }
         }
         attr_type::EXTENDED_COMMUNITIES => {
             // RFC 7606 §7.14: the length must be a NON-ZERO multiple of 8.
@@ -1599,7 +1695,11 @@ fn decode_attribute_value(
                     ]))
                 })
                 .collect();
-            Ok(PathAttribute::ExtendedCommunities(communities))
+            if flags & attr_flags::PARTIAL != 0 {
+                Ok(PathAttribute::ExtendedCommunitiesPartial(communities))
+            } else {
+                Ok(PathAttribute::ExtendedCommunities(communities))
+            }
         }
         attr_type::ORIGINATOR_ID => {
             if value.len() != 4 {
@@ -1652,7 +1752,11 @@ fn decode_attribute_value(
                     seen.insert(community).then_some(community)
                 })
                 .collect();
-            Ok(PathAttribute::LargeCommunities(communities))
+            if flags & attr_flags::PARTIAL != 0 {
+                Ok(PathAttribute::LargeCommunitiesPartial(communities))
+            } else {
+                Ok(PathAttribute::LargeCommunities(communities))
+            }
         }
         attr_type::MP_REACH_NLRI => decode_mp_reach_nlri(value, add_path_families, bgpls_discarded),
         attr_type::MP_UNREACH_NLRI => {
@@ -1660,7 +1764,11 @@ fn decode_attribute_value(
         }
         attr_type::PMSI_TUNNEL => {
             let pmsi = crate::pmsi::PmsiTunnel::decode(value)?;
-            Ok(PathAttribute::PmsiTunnel(pmsi))
+            if flags & attr_flags::PARTIAL != 0 {
+                Ok(PathAttribute::PmsiTunnelPartial(pmsi))
+            } else {
+                Ok(PathAttribute::PmsiTunnel(pmsi))
+            }
         }
         attr_type::BGP_LS => {
             // RFC 9552 §8.2.2: an intact path-attribute boundary containing
@@ -2701,22 +2809,43 @@ fn encode_path_attributes_with_scratch(
                 type_code = attr_type::LOCAL_PREF;
                 value_scratch.extend_from_slice(&lp.to_be_bytes());
             }
-            PathAttribute::Communities(communities) => {
-                flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+            PathAttribute::Communities(communities)
+            | PathAttribute::CommunitiesPartial(communities) => {
+                flags = attr_flags::OPTIONAL
+                    | attr_flags::TRANSITIVE
+                    | if matches!(attr, PathAttribute::CommunitiesPartial(_)) {
+                        attr_flags::PARTIAL
+                    } else {
+                        0
+                    };
                 type_code = attr_type::COMMUNITIES;
                 for &c in communities {
                     value_scratch.extend_from_slice(&c.to_be_bytes());
                 }
             }
-            PathAttribute::ExtendedCommunities(communities) => {
-                flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+            PathAttribute::ExtendedCommunities(communities)
+            | PathAttribute::ExtendedCommunitiesPartial(communities) => {
+                flags = attr_flags::OPTIONAL
+                    | attr_flags::TRANSITIVE
+                    | if matches!(attr, PathAttribute::ExtendedCommunitiesPartial(_)) {
+                        attr_flags::PARTIAL
+                    } else {
+                        0
+                    };
                 type_code = attr_type::EXTENDED_COMMUNITIES;
                 for &c in communities {
                     value_scratch.extend_from_slice(&c.as_u64().to_be_bytes());
                 }
             }
-            PathAttribute::LargeCommunities(communities) => {
-                flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+            PathAttribute::LargeCommunities(communities)
+            | PathAttribute::LargeCommunitiesPartial(communities) => {
+                flags = attr_flags::OPTIONAL
+                    | attr_flags::TRANSITIVE
+                    | if matches!(attr, PathAttribute::LargeCommunitiesPartial(_)) {
+                        attr_flags::PARTIAL
+                    } else {
+                        0
+                    };
                 type_code = attr_type::LARGE_COMMUNITIES;
                 let mut seen = std::collections::HashSet::with_capacity(communities.len());
                 for &c in communities {
@@ -2750,10 +2879,16 @@ fn encode_path_attributes_with_scratch(
                 type_code = attr_type::MP_UNREACH_NLRI;
                 encode_mp_unreach_nlri(mp, value_scratch, add_path_mp)?;
             }
-            PathAttribute::PmsiTunnel(pmsi) => {
+            PathAttribute::PmsiTunnel(pmsi) | PathAttribute::PmsiTunnelPartial(pmsi) => {
                 // RFC 6514 §5: Optional + Transitive.
                 (flags, type_code) = (
-                    attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                    attr_flags::OPTIONAL
+                        | attr_flags::TRANSITIVE
+                        | if matches!(attr, PathAttribute::PmsiTunnelPartial(_)) {
+                            attr_flags::PARTIAL
+                        } else {
+                            0
+                        },
                     attr_type::PMSI_TUNNEL,
                 );
                 pmsi.encode(value_scratch);
@@ -5825,6 +5960,289 @@ mod tests {
         let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
         assert!(matches!(err, DecodeError::MalformedField { .. }));
     }
+
+    fn framed_test_attribute(flags: u8, type_code: u8, value: &[u8]) -> Vec<u8> {
+        let mut wire = vec![flags, type_code];
+        if flags & attr_flags::EXTENDED_LENGTH != 0 {
+            wire.extend_from_slice(&u16::try_from(value.len()).unwrap().to_be_bytes());
+        } else {
+            wire.push(u8::try_from(value.len()).unwrap());
+        }
+        wire.extend_from_slice(value);
+        wire
+    }
+
+    #[test]
+    fn recognized_optional_transitive_partial_framing_matrix() {
+        let pmsi =
+            crate::pmsi::PmsiTunnel::for_evpn_ingress_replication(100, "10.0.0.1".parse().unwrap());
+        let rows = [
+            (
+                attr_type::COMMUNITIES,
+                65_000_u32.to_be_bytes().to_vec(),
+                PathAttribute::Communities(vec![65_000]),
+                PathAttribute::CommunitiesPartial(vec![65_000]),
+            ),
+            (
+                attr_type::EXTENDED_COMMUNITIES,
+                0x0002_FDE8_0000_0064_u64.to_be_bytes().to_vec(),
+                PathAttribute::ExtendedCommunities(vec![ExtendedCommunity::new(
+                    0x0002_FDE8_0000_0064,
+                )]),
+                PathAttribute::ExtendedCommunitiesPartial(vec![ExtendedCommunity::new(
+                    0x0002_FDE8_0000_0064,
+                )]),
+            ),
+            (
+                attr_type::LARGE_COMMUNITIES,
+                [65_000_u32, 1, 2]
+                    .into_iter()
+                    .flat_map(u32::to_be_bytes)
+                    .collect(),
+                PathAttribute::LargeCommunities(vec![LargeCommunity::new(65_000, 1, 2)]),
+                PathAttribute::LargeCommunitiesPartial(vec![LargeCommunity::new(65_000, 1, 2)]),
+            ),
+            (
+                attr_type::PMSI_TUNNEL,
+                {
+                    let mut value = Vec::new();
+                    pmsi.encode(&mut value);
+                    value
+                },
+                PathAttribute::PmsiTunnel(pmsi.clone()),
+                PathAttribute::PmsiTunnelPartial(pmsi),
+            ),
+        ];
+
+        for (type_code, value, canonical, partial_attr) in rows {
+            for (flags, expected) in [
+                (0xc0, &canonical),
+                (0xd0, &canonical),
+                (0xe0, &partial_attr),
+                (0xf0, &partial_attr),
+                (0xcf, &canonical),
+                (0xdf, &canonical),
+                (0xef, &partial_attr),
+                (0xff, &partial_attr),
+            ] {
+                let wire = framed_test_attribute(flags, type_code, &value);
+                let decoded = decode_path_attributes(&wire, true, &[]).unwrap();
+                assert_eq!(decoded, vec![expected.clone()], "flags {flags:#04x}");
+
+                let mut emitted = Vec::new();
+                encode_path_attributes(&decoded, &mut emitted, true, false).unwrap();
+                assert_eq!(
+                    emitted[0],
+                    if expected.flags() & attr_flags::PARTIAL != 0 {
+                        0xe0
+                    } else {
+                        0xc0
+                    },
+                    "type {type_code}, flags {flags:#04x}"
+                );
+                assert_eq!(emitted[1], type_code);
+                assert_eq!(usize::from(emitted[2]), value.len());
+                assert_eq!(&emitted[3..], value.as_slice());
+            }
+        }
+    }
+
+    #[test]
+    fn recognized_optional_transitive_long_values_use_extended_framing() {
+        let communities: Vec<u32> = (0..64).collect();
+        let extended: Vec<ExtendedCommunity> = (0..32).map(ExtendedCommunity::new).collect();
+        let large: Vec<LargeCommunity> = (0..22)
+            .map(|value| LargeCommunity::new(65_000, value, value + 1))
+            .collect();
+        let pmsi = crate::pmsi::PmsiTunnel {
+            flags: 0,
+            tunnel_type: crate::pmsi::PmsiTunnelType::RsvpTeP2mp,
+            mpls_label: 0,
+            tunnel_identifier: crate::pmsi::PmsiTunnelIdentifier::Raw(vec![0xaa; 251]),
+        };
+        let rows = [
+            (
+                PathAttribute::Communities(communities.clone()),
+                PathAttribute::CommunitiesPartial(communities),
+            ),
+            (
+                PathAttribute::ExtendedCommunities(extended.clone()),
+                PathAttribute::ExtendedCommunitiesPartial(extended),
+            ),
+            (
+                PathAttribute::LargeCommunities(large.clone()),
+                PathAttribute::LargeCommunitiesPartial(large),
+            ),
+            (
+                PathAttribute::PmsiTunnel(pmsi.clone()),
+                PathAttribute::PmsiTunnelPartial(pmsi),
+            ),
+        ];
+
+        for (canonical, partial) in rows {
+            for (attribute, expected_flags) in [(canonical, 0xd0), (partial, 0xf0)] {
+                let mut wire = Vec::new();
+                encode_path_attributes(std::slice::from_ref(&attribute), &mut wire, true, false)
+                    .unwrap();
+                assert_eq!(wire[0], expected_flags, "type {}", attribute.type_code());
+                assert_eq!(wire[1], attribute.type_code());
+                assert!(u16::from_be_bytes([wire[2], wire[3]]) > 255);
+                assert_eq!(
+                    decode_path_attributes(&wire, true, &[]).unwrap(),
+                    vec![attribute]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recognized_optional_transitive_malformed_matrix_is_treat_as_withdraw() {
+        let malformed_rows = [
+            (attr_type::COMMUNITIES, &[0, 0, 1][..]),
+            (attr_type::EXTENDED_COMMUNITIES, &[0; 7][..]),
+            (attr_type::LARGE_COMMUNITIES, &[0; 11][..]),
+            // Type 6 requires a 4- or 16-octet identifier after its header.
+            (attr_type::PMSI_TUNNEL, &[0, 6, 0, 0, 0][..]),
+        ];
+        for (type_code, value) in malformed_rows {
+            for flags in [0xc0, 0xd0, 0xe0, 0xf0] {
+                let wire = framed_test_attribute(flags, type_code, value);
+                if type_code != attr_type::PMSI_TUNNEL {
+                    let legacy = decode_path_attributes(&wire, true, &[]).unwrap_err();
+                    assert!(matches!(
+                        legacy,
+                        DecodeError::UpdateAttributeError {
+                            subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                            ref data,
+                            ..
+                        } if data == &wire
+                    ));
+                }
+                let decoded = decode_path_attributes_revised(&wire, true, false, &[]).unwrap();
+                assert!(decoded.attributes.is_empty());
+                let [malformed] = decoded.malformed.as_slice() else {
+                    panic!("type {type_code}, flags {flags:#04x}: expected one malformation");
+                };
+                assert_eq!(malformed.type_code, type_code);
+                assert_eq!(malformed.disposition, ErrorDisposition::TreatAsWithdraw);
+                match type_code {
+                    attr_type::PMSI_TUNNEL => {
+                        assert!(matches!(
+                            malformed.error,
+                            DecodeError::MalformedField { .. }
+                        ));
+                    }
+                    _ => assert!(matches!(
+                        malformed.error,
+                        DecodeError::UpdateAttributeError {
+                            subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                            ..
+                        }
+                    )),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn composite_pmsi_identifier_prefix_framing_matrix() {
+        const COMPOSITE: u8 = 0x81;
+
+        for identifier_len in 0..=2 {
+            let mut value = vec![0, COMPOSITE, 0, 0, 0];
+            value.extend(std::iter::repeat_n(0xaa, identifier_len));
+            for flags in [0xc0, 0xe0] {
+                let wire = framed_test_attribute(flags, attr_type::PMSI_TUNNEL, &value);
+                let legacy = decode_path_attributes(&wire, true, &[]).unwrap_err();
+                assert!(matches!(
+                    legacy,
+                    DecodeError::MalformedField { ref detail, .. }
+                        if detail.contains("composite PMSI Tunnel")
+                ));
+
+                let revised = decode_path_attributes_revised(&wire, true, false, &[]).unwrap();
+                assert!(revised.attributes.is_empty());
+                let [malformed] = revised.malformed.as_slice() else {
+                    panic!(
+                        "flags {flags:#04x}, identifier len {identifier_len}: expected one malformation"
+                    );
+                };
+                assert_eq!(malformed.type_code, attr_type::PMSI_TUNNEL);
+                assert_eq!(malformed.disposition, ErrorDisposition::TreatAsWithdraw);
+                assert!(matches!(
+                    malformed.error,
+                    DecodeError::MalformedField { .. }
+                ));
+            }
+        }
+
+        for identifier in [&[0x01, 0x02, 0x03][..], &[0x01, 0x02, 0x03, 0xaa, 0xbb][..]] {
+            let mut value = vec![0, COMPOSITE, 0, 0, 0];
+            value.extend_from_slice(identifier);
+            for (flags, partial) in [(0xc0, false), (0xe0, true)] {
+                let wire = framed_test_attribute(flags, attr_type::PMSI_TUNNEL, &value);
+                let decoded = decode_path_attributes(&wire, true, &[]).unwrap();
+                let expected = crate::pmsi::PmsiTunnel {
+                    flags: 0,
+                    tunnel_type: crate::pmsi::PmsiTunnelType::Other(COMPOSITE),
+                    mpls_label: 0,
+                    tunnel_identifier: crate::pmsi::PmsiTunnelIdentifier::Raw(identifier.to_vec()),
+                };
+                assert_eq!(
+                    decoded,
+                    vec![if partial {
+                        PathAttribute::PmsiTunnelPartial(expected)
+                    } else {
+                        PathAttribute::PmsiTunnel(expected)
+                    }]
+                );
+
+                let mut emitted = Vec::new();
+                encode_path_attributes(&decoded, &mut emitted, true, false).unwrap();
+                assert_eq!(emitted, wire);
+            }
+        }
+    }
+
+    #[test]
+    fn partial_large_community_duplicate_normalization_preserves_order_and_framing() {
+        let a = LargeCommunity::new(65_001, 100, 200);
+        let b = LargeCommunity::new(65_002, 300, 400);
+        let mut short = Vec::new();
+        encode_path_attributes(
+            &[PathAttribute::LargeCommunitiesPartial(vec![b, a, a])],
+            &mut short,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(&short[..3], &[0xe0, attr_type::LARGE_COMMUNITIES, 24]);
+        assert_eq!(
+            decode_path_attributes(&short, true, &[]).unwrap(),
+            vec![PathAttribute::LargeCommunitiesPartial(vec![b, a])]
+        );
+
+        let unique: Vec<_> = (0..22)
+            .map(|value| LargeCommunity::new(65_000, value, value + 1))
+            .collect();
+        let mut with_duplicate = unique.clone();
+        with_duplicate.push(unique[7]);
+        let mut long = Vec::new();
+        encode_path_attributes(
+            &[PathAttribute::LargeCommunitiesPartial(with_duplicate)],
+            &mut long,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(&long[..2], &[0xf0, attr_type::LARGE_COMMUNITIES]);
+        assert_eq!(u16::from_be_bytes([long[2], long[3]]), 264);
+        assert_eq!(
+            decode_path_attributes(&long, true, &[]).unwrap(),
+            vec![PathAttribute::LargeCommunitiesPartial(unique)]
+        );
+    }
+
     // --- Only-to-Customer (RFC 9234 §5) tests ---
     #[test]
     fn only_to_customer_encode_decode_roundtrip() {

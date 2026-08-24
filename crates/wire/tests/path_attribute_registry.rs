@@ -170,6 +170,54 @@ fn otc_registry_claim_is_typed_partial_preserving_and_revised_safe() {
 }
 
 #[test]
+fn recognized_optional_transitive_rows_are_typed_partial_preserving() {
+    let census = rows(
+        section(
+            "<!-- registry-census:start -->",
+            "<!-- registry-census:end -->",
+        ),
+        5,
+    );
+    for code in [8_u8, 16, 22, 32] {
+        let row = census
+            .iter()
+            .find(|row| row[0] == code.to_string())
+            .unwrap_or_else(|| panic!("missing registry row {code}"));
+        assert!(row[2].contains("flags `0xc0`"), "row {code}");
+        assert!(row[3].contains("typed canonical + Partial"), "row {code}");
+        assert!(row[3].contains("treat-as-withdraw"), "row {code}");
+    }
+
+    for (code, value) in [
+        (8_u8, 65_000_u32.to_be_bytes().to_vec()),
+        (16, 0x0002_FDE8_0000_0064_u64.to_be_bytes().to_vec()),
+        (22, vec![0, 0, 0, 0, 0]),
+        (
+            32,
+            [65_000_u32, 1, 100]
+                .into_iter()
+                .flat_map(u32::to_be_bytes)
+                .collect(),
+        ),
+    ] {
+        for flags in [0xc0, 0xe0] {
+            let input = attribute(flags, code, &value);
+            let decoded = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
+            assert!(decoded.malformed.is_empty(), "row {code}, flags {flags:#x}");
+            let [typed] = decoded.attributes.as_slice() else {
+                panic!("row {code} must decode to one typed attribute");
+            };
+            assert_eq!(typed.type_code(), code);
+            assert_eq!(typed.flags() & 0x20, flags & 0x20);
+            assert!(!matches!(typed, PathAttribute::Unknown(_)));
+            let mut emitted = Vec::new();
+            encode_path_attributes(&decoded.attributes, &mut emitted, true, false).unwrap();
+            assert_eq!(emitted, input);
+        }
+    }
+}
+
+#[test]
 fn core_matrix_proves_flags_roundtrip_and_malformed_dispositions() {
     let matrix = rows(
         section("<!-- core-behavior:start -->", "<!-- core-behavior:end -->"),

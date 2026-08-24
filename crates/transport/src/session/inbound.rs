@@ -369,16 +369,25 @@ impl<'a> PolicyAttrSummary<'a> {
         // unambiguous — a duplicate *empty* community must not blank out
         // an earlier populated one (an `is_empty()` sentinel would).
         for attr in attrs {
+            if extended_communities.is_none()
+                && let Some(values) = attr.extended_communities()
+            {
+                extended_communities = Some(values);
+                continue;
+            }
+            if communities.is_none()
+                && let Some(values) = attr.communities()
+            {
+                communities = Some(values);
+                continue;
+            }
+            if large_communities.is_none()
+                && let Some(values) = attr.large_communities()
+            {
+                large_communities = Some(values);
+                continue;
+            }
             match attr {
-                PathAttribute::ExtendedCommunities(c) if extended_communities.is_none() => {
-                    extended_communities = Some(c.as_slice());
-                }
-                PathAttribute::Communities(c) if communities.is_none() => {
-                    communities = Some(c.as_slice());
-                }
-                PathAttribute::LargeCommunities(c) if large_communities.is_none() => {
-                    large_communities = Some(c.as_slice());
-                }
                 PathAttribute::AsPath(p) if as_path.is_none() => as_path = Some(p),
                 PathAttribute::LocalPref(v) if local_pref.is_none() => local_pref = Some(*v),
                 PathAttribute::Med(v) if med.is_none() => med = Some(*v),
@@ -670,15 +679,21 @@ impl PeerSession {
         let mut communities: Vec<u32> = Vec::new();
         let mut large_communities: Vec<rustbgpd_wire::LargeCommunity> = Vec::new();
         for attr in &parsed.attributes {
+            if communities.is_empty()
+                && let Some(values) = attr.communities()
+            {
+                communities.extend_from_slice(values);
+                continue;
+            }
+            if large_communities.is_empty()
+                && let Some(values) = attr.large_communities()
+            {
+                large_communities.extend_from_slice(values);
+                continue;
+            }
             match attr {
                 PathAttribute::AsPath(p) if as_path.is_empty() => {
                     as_path = p.to_aspath_string();
-                }
-                PathAttribute::Communities(c) if communities.is_empty() => {
-                    communities.clone_from(c);
-                }
-                PathAttribute::LargeCommunities(c) if large_communities.is_empty() => {
-                    large_communities.clone_from(c);
                 }
                 _ => {}
             }
@@ -3028,6 +3043,19 @@ mod policy_attr_summary_tests {
         assert_eq!(s.origin_asn, Some(65002));
         assert_eq!(s.local_pref, Some(150));
         assert_eq!(s.med, Some(42));
+    }
+
+    #[test]
+    fn partial_community_variants_feed_identical_policy_inputs() {
+        let attrs = vec![
+            PathAttribute::CommunitiesPartial(vec![100, 200]),
+            PathAttribute::ExtendedCommunitiesPartial(vec![ExtendedCommunity::new(1)]),
+            PathAttribute::LargeCommunitiesPartial(vec![LargeCommunity::new(65001, 1, 2)]),
+        ];
+        let s = PolicyAttrSummary::from_route_attrs(&attrs, true);
+        assert_eq!(s.communities, [100u32, 200]);
+        assert_eq!(s.extended_communities, [ExtendedCommunity::new(1)]);
+        assert_eq!(s.large_communities, [LargeCommunity::new(65001, 1, 2)]);
     }
     /// The load-bearing guard for the `find_map` → single-pass change:
     /// first match wins for every attribute type, and a *later empty*

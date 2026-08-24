@@ -457,7 +457,7 @@ impl AdjRibIn {
         family: (Afi, Safi),
         attr_intern: &mut crate::attr_intern::AttrInternTable,
     ) -> Vec<Prefix> {
-        use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR, PathAttribute};
+        use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
         // First pass: remove routes with NO_LLGR community
         let no_llgr_keys: Vec<(Prefix, u32)> = self
@@ -483,17 +483,7 @@ impl AdjRibIn {
                 route.is_llgr_stale = true;
                 // Add LLGR_STALE community
                 let attrs = Arc::make_mut(&mut route.attributes);
-                if let Some(PathAttribute::Communities(comms)) = attrs
-                    .iter_mut()
-                    .find(|a| matches!(a, PathAttribute::Communities(_)))
-                {
-                    if !comms.contains(&COMMUNITY_LLGR_STALE) {
-                        comms.push(COMMUNITY_LLGR_STALE);
-                        self.llgr_stale_local_tags
-                            .insert((route.prefix, route.path_id));
-                    }
-                } else {
-                    attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                if add_llgr_stale_community(attrs) {
                     self.llgr_stale_local_tags
                         .insert((route.prefix, route.path_id));
                 }
@@ -737,7 +727,7 @@ impl AdjRibIn {
         family: (Afi, Safi),
         attr_intern: &mut crate::attr_intern::AttrInternTable,
     ) -> Vec<EvpnRouteKey> {
-        use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR};
+        use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
         if family != (Afi::L2Vpn, Safi::Evpn) {
             return Vec::new();
@@ -762,16 +752,7 @@ impl AdjRibIn {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
                 let attrs = Arc::make_mut(&mut route.attributes);
-                if let Some(PathAttribute::Communities(comms)) = attrs
-                    .iter_mut()
-                    .find(|a| matches!(a, PathAttribute::Communities(_)))
-                {
-                    if !comms.contains(&COMMUNITY_LLGR_STALE) {
-                        comms.push(COMMUNITY_LLGR_STALE);
-                        self.evpn_llgr_stale_local_tags.insert(route.key());
-                    }
-                } else {
-                    attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                if add_llgr_stale_community(attrs) {
                     self.evpn_llgr_stale_local_tags.insert(route.key());
                 }
                 attr_intern.intern(&mut route.attributes);
@@ -1002,7 +983,7 @@ impl AdjRibIn {
         family: (Afi, Safi),
         attr_intern: &mut crate::attr_intern::AttrInternTable,
     ) -> Vec<BgpLsRouteKey> {
-        use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR};
+        use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
         let Some(fam) = BgpLsFamily::from_afi_safi(family.0, family.1) else {
             return Vec::new();
@@ -1029,16 +1010,7 @@ impl AdjRibIn {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
                 let attrs = Arc::make_mut(&mut route.attributes);
-                if let Some(PathAttribute::Communities(comms)) = attrs
-                    .iter_mut()
-                    .find(|a| matches!(a, PathAttribute::Communities(_)))
-                {
-                    if !comms.contains(&COMMUNITY_LLGR_STALE) {
-                        comms.push(COMMUNITY_LLGR_STALE);
-                        self.bgpls_llgr_stale_local_tags.insert(route.key());
-                    }
-                } else {
-                    attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                if add_llgr_stale_community(attrs) {
                     self.bgpls_llgr_stale_local_tags.insert(route.key());
                 }
                 attr_intern.intern(&mut route.attributes);
@@ -1316,7 +1288,7 @@ impl AdjRibIn {
         family: (Afi, Safi),
         attr_intern: &mut crate::attr_intern::AttrInternTable,
     ) -> Vec<VpnRibRouteKey> {
-        use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR};
+        use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
         if family.1 != Safi::MplsVpn {
             return Vec::new();
@@ -1342,16 +1314,7 @@ impl AdjRibIn {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
                 let attrs = Arc::make_mut(&mut route.attributes);
-                if let Some(PathAttribute::Communities(comms)) = attrs
-                    .iter_mut()
-                    .find(|a| matches!(a, PathAttribute::Communities(_)))
-                {
-                    if !comms.contains(&COMMUNITY_LLGR_STALE) {
-                        comms.push(COMMUNITY_LLGR_STALE);
-                        self.vpn_llgr_stale_local_tags.insert(route.key());
-                    }
-                } else {
-                    attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                if add_llgr_stale_community(attrs) {
                     self.vpn_llgr_stale_local_tags.insert(route.key());
                 }
                 attr_intern.intern(&mut route.attributes);
@@ -1619,7 +1582,7 @@ impl AdjRibIn {
         family: (Afi, Safi),
         attr_intern: &mut crate::attr_intern::AttrInternTable,
     ) -> Vec<LabeledRibRouteKey> {
-        use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR};
+        use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
         if family.1 != Safi::LabeledUnicast {
             return Vec::new();
@@ -1645,16 +1608,7 @@ impl AdjRibIn {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
                 let attrs = Arc::make_mut(&mut route.attributes);
-                if let Some(PathAttribute::Communities(comms)) = attrs
-                    .iter_mut()
-                    .find(|a| matches!(a, PathAttribute::Communities(_)))
-                {
-                    if !comms.contains(&COMMUNITY_LLGR_STALE) {
-                        comms.push(COMMUNITY_LLGR_STALE);
-                        self.labeled_llgr_stale_local_tags.insert(route.key());
-                    }
-                } else {
-                    attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                if add_llgr_stale_community(attrs) {
                     self.labeled_llgr_stale_local_tags.insert(route.key());
                 }
                 attr_intern.intern(&mut route.attributes);
@@ -1884,7 +1838,7 @@ impl AdjRibIn {
         family: (Afi, Safi),
         attr_intern: &mut crate::attr_intern::AttrInternTable,
     ) -> Vec<RtcRibRouteKey> {
-        use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR};
+        use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
         if family != RtcRibRouteKey::afi_safi() {
             return Vec::new();
@@ -1909,16 +1863,7 @@ impl AdjRibIn {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
                 let attrs = Arc::make_mut(&mut route.attributes);
-                if let Some(PathAttribute::Communities(comms)) = attrs
-                    .iter_mut()
-                    .find(|a| matches!(a, PathAttribute::Communities(_)))
-                {
-                    if !comms.contains(&COMMUNITY_LLGR_STALE) {
-                        comms.push(COMMUNITY_LLGR_STALE);
-                        self.rtc_llgr_stale_local_tags.insert(route.key());
-                    }
-                } else {
-                    attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                if add_llgr_stale_community(attrs) {
                     self.rtc_llgr_stale_local_tags.insert(route.key());
                 }
                 attr_intern.intern(&mut route.attributes);
@@ -2093,7 +2038,7 @@ impl AdjRibIn {
     ///
     /// Returns rules affected (for best-path recalc).
     pub fn promote_to_llgr_stale_flowspec(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecKey> {
-        use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR, PathAttribute};
+        use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
         if family.1 != Safi::FlowSpec {
             return Vec::new();
@@ -2106,9 +2051,10 @@ impl AdjRibIn {
             .filter(|(_, r)| {
                 r.is_stale
                     && r.afi == family.0
-                    && r.attributes
-                        .iter()
-                        .any(|a| matches!(a, PathAttribute::Communities(c) if c.contains(&COMMUNITY_NO_LLGR)))
+                    && r.attributes.iter().any(|a| {
+                        a.communities()
+                            .is_some_and(|values| values.contains(&COMMUNITY_NO_LLGR))
+                    })
             })
             .map(|(k, _)| k.clone())
             .collect();
@@ -2128,19 +2074,7 @@ impl AdjRibIn {
             if route.is_stale && route.afi == family.0 {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
-                if let Some(PathAttribute::Communities(comms)) = route
-                    .attributes
-                    .iter_mut()
-                    .find(|a| matches!(a, PathAttribute::Communities(_)))
-                {
-                    if !comms.contains(&COMMUNITY_LLGR_STALE) {
-                        comms.push(COMMUNITY_LLGR_STALE);
-                        self.flowspec_llgr_stale_local_tags.insert(route.key());
-                    }
-                } else {
-                    route
-                        .attributes
-                        .push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                if add_llgr_stale_community(&mut route.attributes) {
                     self.flowspec_llgr_stale_local_tags.insert(route.key());
                 }
                 affected.push(route.selection_key());
@@ -2279,6 +2213,23 @@ impl AdjRibIn {
     }
 }
 
+/// Add `LLGR_STALE`, mutating an existing canonical or Partial COMMUNITIES
+/// attribute in place. Returns whether this call added the value.
+fn add_llgr_stale_community(attrs: &mut Vec<PathAttribute>) -> bool {
+    use rustbgpd_wire::COMMUNITY_LLGR_STALE;
+    if let Some(communities) = attrs.iter_mut().find_map(PathAttribute::communities_mut) {
+        if communities.contains(&COMMUNITY_LLGR_STALE) {
+            false
+        } else {
+            communities.push(COMMUNITY_LLGR_STALE);
+            true
+        }
+    } else {
+        attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+        true
+    }
+}
+
 /// Remove the `LLGR_STALE` community from a route's attributes, if present.
 fn remove_llgr_stale_community(route: &mut Route) {
     use std::sync::Arc;
@@ -2287,11 +2238,15 @@ fn remove_llgr_stale_community(route: &mut Route) {
 
 fn remove_llgr_stale_community_attrs(attrs: &mut Vec<PathAttribute>) {
     use rustbgpd_wire::COMMUNITY_LLGR_STALE;
-    for attr in attrs {
-        if let PathAttribute::Communities(comms) = attr {
+    for attr in attrs.iter_mut() {
+        if let Some(comms) = attr.communities_mut() {
             comms.retain(|&c| c != COMMUNITY_LLGR_STALE);
         }
     }
+    attrs.retain(|attr| {
+        attr.communities()
+            .is_none_or(|communities| !communities.is_empty())
+    });
 }
 
 /// Check whether a route's prefix matches an AFI/SAFI family.
@@ -2319,6 +2274,28 @@ mod tests {
 
     use crate::route::BgpLsFamily;
     use crate::test_support::{make_flowspec_route, make_route, make_v6_route};
+
+    #[test]
+    fn llgr_stale_mutation_preserves_partial_and_removes_empty_state() {
+        let other = 0x0001_0002;
+        let mut attrs = vec![PathAttribute::CommunitiesPartial(vec![other])];
+        assert!(add_llgr_stale_community(&mut attrs));
+        assert!(!add_llgr_stale_community(&mut attrs));
+        assert!(matches!(
+            attrs.as_slice(),
+            [PathAttribute::CommunitiesPartial(values)]
+                if values == &[other, COMMUNITY_LLGR_STALE]
+        ));
+
+        remove_llgr_stale_community_attrs(&mut attrs);
+        assert_eq!(attrs, vec![PathAttribute::CommunitiesPartial(vec![other])]);
+
+        let mut only_stale = vec![PathAttribute::CommunitiesPartial(vec![
+            COMMUNITY_LLGR_STALE,
+        ])];
+        remove_llgr_stale_community_attrs(&mut only_stale);
+        assert!(only_stale.is_empty());
+    }
 
     fn bgpls_nlri(payload_suffix: u8) -> rustbgpd_wire::bgpls::BgpLsNlri {
         let bytes = [0xfd, 0xe8, 0, 3, 0xaa, 0xbb, payload_suffix];

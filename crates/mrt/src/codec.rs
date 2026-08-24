@@ -1645,7 +1645,8 @@ mod tests {
     use super::*;
     use rustbgpd_rib::route::{Route, RouteOrigin};
     use rustbgpd_wire::{
-        Aggregator, AsPath, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
+        Aggregator, AsPath, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity, Origin,
+        PathAttribute, Prefix, RpkiValidation,
     };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::Arc;
@@ -1667,6 +1668,35 @@ mod tests {
                 RIB_IPV6_UNICAST_ADDPATH,
             ),
         ]
+    }
+
+    #[test]
+    fn mrt_rib_attributes_preserve_partial_transitive_framing() {
+        let pmsi = rustbgpd_wire::PmsiTunnel::for_evpn_ingress_replication(
+            100,
+            "192.0.2.1".parse().unwrap(),
+        );
+        let attrs = [
+            PathAttribute::CommunitiesPartial(vec![0xFDE8_0064]),
+            PathAttribute::ExtendedCommunitiesPartial(vec![ExtendedCommunity::new(
+                0x0002_FDE8_0000_0064,
+            )]),
+            PathAttribute::PmsiTunnelPartial(pmsi),
+            PathAttribute::LargeCommunitiesPartial(vec![LargeCommunity::new(65_000, 1, 100)]),
+        ];
+        let mut bytes = Vec::new();
+        encode_mrt_rib_attributes(&attrs, &mut EncodeBuffer::new(&mut bytes, None)).unwrap();
+
+        let mut expected = vec![0xe0, 8, 4];
+        expected.extend_from_slice(&0xFDE8_0064u32.to_be_bytes());
+        expected.extend_from_slice(&[0xe0, 16, 8]);
+        expected.extend_from_slice(&0x0002_FDE8_0000_0064u64.to_be_bytes());
+        expected.extend_from_slice(&[0xe0, 22, 9, 0, 6, 0, 0, 100, 192, 0, 2, 1]);
+        expected.extend_from_slice(&[0xe0, 32, 12]);
+        for value in [65_000u32, 1, 100] {
+            expected.extend_from_slice(&value.to_be_bytes());
+        }
+        assert_eq!(bytes, expected);
     }
 
     fn subtype_marker(name: &str, subtype: u16) -> String {

@@ -324,6 +324,115 @@ fn apply_large_community_add_remove() {
 }
 
 #[test]
+fn no_op_modifications_preserve_all_partial_variants() {
+    let attrs = vec![
+        PathAttribute::CommunitiesPartial(vec![1]),
+        PathAttribute::ExtendedCommunitiesPartial(vec![make_rt(65_001, 100)]),
+        PathAttribute::LargeCommunitiesPartial(vec![LargeCommunity::new(65_001, 1, 100)]),
+        PathAttribute::PmsiTunnelPartial(rustbgpd_wire::PmsiTunnel::for_evpn_ingress_replication(
+            100,
+            "192.0.2.1".parse().unwrap(),
+        )),
+    ];
+    let mut modified = attrs.clone();
+    apply_modifications(&mut modified, &RouteModifications::default());
+    assert_eq!(modified, attrs);
+}
+
+#[test]
+fn community_modifications_retain_partial_on_existing_attributes() {
+    let c1 = (65_001u32 << 16) | 0x0064;
+    let c2 = (65_001u32 << 16) | 0x00c8;
+    let ec1 = make_rt(65_001, 100);
+    let ec2 = make_rt(65_001, 200);
+    let lc1 = LargeCommunity::new(65_001, 1, 100);
+    let lc2 = LargeCommunity::new(65_001, 1, 200);
+    let mut attrs = vec![
+        PathAttribute::CommunitiesPartial(vec![c1]),
+        PathAttribute::ExtendedCommunitiesPartial(vec![ec1]),
+        PathAttribute::LargeCommunitiesPartial(vec![lc1]),
+    ];
+
+    apply_modifications(
+        &mut attrs,
+        &RouteModifications {
+            communities_add: vec![c2],
+            communities_remove: vec![c1],
+            extended_communities_add: vec![ec2],
+            extended_communities_remove: vec![ec1],
+            large_communities_add: vec![lc2],
+            large_communities_remove: vec![lc1],
+            ..Default::default()
+        },
+    );
+
+    assert!(matches!(
+        attrs.as_slice(),
+        [
+            PathAttribute::CommunitiesPartial(values),
+            PathAttribute::ExtendedCommunitiesPartial(extended),
+            PathAttribute::LargeCommunitiesPartial(large),
+        ] if values == &[c2] && extended == &[ec2] && large == &[lc2]
+    ));
+}
+
+#[test]
+fn removing_all_community_values_removes_partial_attributes() {
+    let community = (65_001u32 << 16) | 0x0064;
+    let extended = make_rt(65_001, 100);
+    let large = LargeCommunity::new(65_001, 1, 100);
+    let mut attrs = vec![
+        PathAttribute::CommunitiesPartial(vec![community]),
+        PathAttribute::ExtendedCommunitiesPartial(vec![extended]),
+        PathAttribute::LargeCommunitiesPartial(vec![large]),
+    ];
+
+    apply_modifications(
+        &mut attrs,
+        &RouteModifications {
+            communities_remove: vec![community],
+            extended_communities_remove: vec![extended],
+            large_communities_remove: vec![large],
+            ..Default::default()
+        },
+    );
+
+    assert!(attrs.is_empty());
+}
+
+#[test]
+fn absent_community_synthesis_is_canonical() {
+    let community = (65_001u32 << 16) | 0x0064;
+    let extended = make_rt(65_001, 100);
+    let large = LargeCommunity::new(65_001, 1, 100);
+    let mut attrs = Vec::new();
+
+    apply_modifications(
+        &mut attrs,
+        &RouteModifications {
+            communities_add: vec![community],
+            extended_communities_add: vec![extended],
+            large_communities_add: vec![large],
+            ..Default::default()
+        },
+    );
+
+    assert!(
+        attrs.iter().any(
+            |attr| matches!(attr, PathAttribute::Communities(values) if values == &[community])
+        )
+    );
+    assert!(attrs.iter().any(
+        |attr| matches!(attr, PathAttribute::ExtendedCommunities(values) if values == &[extended])
+    ));
+    assert!(
+        attrs.iter().any(
+            |attr| matches!(attr, PathAttribute::LargeCommunities(values) if values == &[large])
+        )
+    );
+}
+
+#[test]
 fn apply_as_path_prepend_existing() {
     let mut attrs = vec![PathAttribute::AsPath(AsPath {
         segments: vec![AsPathSegment::AsSequence(vec![65002, 65003])],

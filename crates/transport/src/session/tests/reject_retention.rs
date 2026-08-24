@@ -224,7 +224,10 @@ async fn reject_retention_clears_when_route_is_later_accepted() {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
             }),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-            PathAttribute::Communities(vec![999]),
+            PathAttribute::CommunitiesPartial(vec![999]),
+            PathAttribute::LargeCommunitiesPartial(vec![rustbgpd_wire::LargeCommunity::new(
+                65_002, 1, 999,
+            )]),
         ],
         true,
         false,
@@ -237,6 +240,11 @@ async fn reject_retention_clears_when_route_is_later_accepted() {
         entries[0].1.communities,
         vec![999],
         "the rejected UPDATE's communities are retained for the surface"
+    );
+    assert_eq!(
+        entries[0].1.large_communities,
+        vec![rustbgpd_wire::LargeCommunity::new(65_002, 1, 999)],
+        "the rejected UPDATE's Partial Large Communities are retained for the surface"
     );
 
     // Re-announce without the community — accepted, entry cleared.

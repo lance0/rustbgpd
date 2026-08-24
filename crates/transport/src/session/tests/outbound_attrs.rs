@@ -207,6 +207,97 @@ fn llgr_stale_to_non_llgr_ibgp_peer_carries_no_export_and_lpref_zero() {
     );
 }
 
+#[test]
+fn llgr_rewrite_preserves_partial_communities() {
+    let session = make_test_session(65001, 65001);
+    let route = Route {
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::LocalPref(100),
+            PathAttribute::CommunitiesPartial(vec![rustbgpd_wire::COMMUNITY_LLGR_STALE]),
+        ]),
+        ..make_route(100)
+    };
+
+    let attrs =
+        session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
+    let communities = attrs
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::CommunitiesPartial(values) => Some(values),
+            _ => None,
+        })
+        .expect("LLGR rewrite retains Partial");
+    assert!(communities.contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE));
+    assert!(communities.contains(&rustbgpd_wire::COMMUNITY_NO_EXPORT));
+    assert!(
+        attrs
+            .iter()
+            .any(|attr| matches!(attr, PathAttribute::LocalPref(0)))
+    );
+}
+
+#[test]
+fn outbound_attribute_preparation_preserves_partial_community_variants() {
+    let session = make_test_session(65001, 65002);
+    let community = 0x0001_0002;
+    let extended = rustbgpd_wire::ExtendedCommunity::new(0x0002_FDE8_0000_0064);
+    let large = rustbgpd_wire::LargeCommunity::new(65_000, 1, 100);
+    let route = Route {
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::CommunitiesPartial(vec![community]),
+            PathAttribute::ExtendedCommunitiesPartial(vec![extended]),
+            PathAttribute::LargeCommunitiesPartial(vec![large]),
+        ]),
+        ..make_route(100)
+    };
+
+    let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
+    assert!(matches!(
+        attrs.iter().find(|attr| attr.communities().is_some()),
+        Some(PathAttribute::CommunitiesPartial(values)) if values == &[community]
+    ));
+    assert!(matches!(
+        attrs
+            .iter()
+            .find(|attr| attr.extended_communities().is_some()),
+        Some(PathAttribute::ExtendedCommunitiesPartial(values)) if values == &[extended]
+    ));
+    assert!(matches!(
+        attrs
+            .iter()
+            .find(|attr| attr.large_communities().is_some()),
+        Some(PathAttribute::LargeCommunitiesPartial(values)) if values == &[large]
+    ));
+
+    let mut wire = Vec::new();
+    rustbgpd_wire::attribute::encode_path_attributes(&attrs, &mut wire, true, false).unwrap();
+    for (type_code, value) in [
+        (8, community.to_be_bytes().to_vec()),
+        (16, extended.as_u64().to_be_bytes().to_vec()),
+        (
+            32,
+            [large.global_admin, large.local_data1, large.local_data2]
+                .into_iter()
+                .flat_map(u32::to_be_bytes)
+                .collect(),
+        ),
+    ] {
+        let mut frame = vec![0xe0, type_code, u8::try_from(value.len()).unwrap()];
+        frame.extend(value);
+        assert!(wire.windows(frame.len()).any(|window| window == frame));
+    }
+}
+
 /// A fresh (non-LLGR-stale) route toward the same non-LLGR iBGP peer is
 /// untouched by the §4.6 rewrite: no `NO_EXPORT`, `LOCAL_PREF` preserved.
 #[test]

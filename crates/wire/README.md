@@ -20,12 +20,12 @@ Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
 | RFC | Feature |
 |-----|---------|
-| 1997 | Standard communities (4-byte), including `NO_EXPORT`, `NO_ADVERTISE`, and `NO_EXPORT_SUBCONFED` well-known constants |
+| 1997 | Standard communities (4-byte), including `NO_EXPORT`, `NO_ADVERTISE`, and `NO_EXPORT_SUBCONFED` well-known constants. Canonical/local values use `PathAttribute::Communities`; received Partial-bearing values use `CommunitiesPartial` and retain Partial through propagation and policy changes |
 | 2545 | IPv6 link-local next-hop in `MP_REACH_NLRI` (32-byte form); second-segment validated as `fe80::/10` on receive (rejects malformed advertisements) |
 | 2918 | Route Refresh capability |
 | 3032 | MPLS label: 3-byte label field as carried in EVPN NLRI |
 | 4271 | BGP-4 core: OPEN, UPDATE, NOTIFICATION, KEEPALIVE |
-| 4360 | Extended communities (route target, route origin, 4-byte AS) |
+| 4360 | Extended communities (route target, route origin, 4-byte AS), represented by `ExtendedCommunities` or the received Partial-preserving `ExtendedCommunitiesPartial` variant |
 | 4364 §4.2 | Route Distinguisher: 8-byte wire form with all three encodings (2-octet AS, IPv4, 4-octet AS) plus `Display` and `FromStr` for the canonical textual forms |
 | 4364 / 4659 | VPNv4/VPNv6 labeled NLRI substrate: label-stack + RD + IPv4/IPv6 prefix encode/decode. No daemon AFI/SAFI negotiation or RIB support by itself |
 | 4456 | Route reflector: ORIGINATOR_ID, CLUSTER_LIST |
@@ -37,19 +37,20 @@ Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 | 5292 | Address-Prefix ORF-Type (64), with the legacy pre-standard type (128) decoded for interoperability |
 | 5492 | BGP capabilities |
 | 5512 | Tunnel Encapsulation extended-community layout (4-byte reserved + 2-byte value) used by the EVPN VXLAN encap sub-type |
-| 6514 §5 | PMSI Tunnel attribute (path attribute type 22): all 8 tunnel types from the IANA registry, with the EVPN-VXLAN ingress-replication form encoding the label field as the raw 24-bit VNI per RFC 8365 §5.1.3 |
+| 6514 §5 | PMSI Tunnel attribute (path attribute type 22): base tunnel-type and identifier semantics, with canonical `PmsiTunnel` and received Partial-preserving `PmsiTunnelPartial` variants. The EVPN-VXLAN ingress-replication form encodes the label field as the raw 24-bit VNI per RFC 8365 §5.1.3 |
 | 6793 | 4-octet AS numbers, including canonical type 2/17 and type 7/18 ingress normalization plus capability-specific egress projection |
 | 6811 | RPKI prefix-origin validation state — the `RpkiValidation` routing-domain enum (no extended-community codec) |
 | 7313 | Enhanced Route Refresh (BoRR / EoRR markers) |
-| 7385 | PMSI Tunnel Type IANA registry — `PmsiTunnelType` preserves unknown values via an `Other(u8)` variant |
+| 7385 | PMSI Tunnel Type IANA registry — assigned unsupported and experimental values round-trip opaquely through `PmsiTunnelType::Other`; unassigned values and invalid composite encodings are rejected |
 | 7432 | EVPN: Types 1–4 (EAD, MAC/IP, IMET, Ethernet Segment) including the MAC Mobility extended community (§7.7) and the flag-only Default Gateway extended community (§7.8, type 0x03 / subtype 0x0D, decode + construct) |
 | 7606 | Revised UPDATE error handling: `UpdateMessage::parse_revised` recovers malformed path attributes without aborting the parse, each carrying its §7 per-attribute disposition (treat-as-withdraw / attribute-discard / session-reset) from `malformed_attr_disposition`; an attribute that decodes but fails validation may be retained in `update.attributes` for observation alongside its disposition; malformed or duplicated `MP_REACH_NLRI` / `MP_UNREACH_NLRI` and unparseable NLRI stay session-reset (§5.3, §7.11) |
 | 7674 | FlowSpec Redirect Extended Community formatting (updates RFC 5575): redirect-to-IPv4 type 0x8108 and redirect-to-4-octet-AS type 0x8208 in `FlowSpecAction` |
 | 7911 | Add-Path: path ID in NLRI encode/decode |
 | 7999 | `BLACKHOLE` well-known community (`0xFFFF_029A`, rendered as `65535:666`) |
-| 8092 | Large communities (3× u32) |
+| 8092 | Large communities (3× u32), represented by `LargeCommunities` or the received Partial-preserving `LargeCommunitiesPartial` variant; duplicate values normalize in first-seen order |
 | 8097 | Origin Validation State Extended Community (type 0x43): `ORIGIN_VALIDATION_{VALID,NOT_FOUND,INVALID}` `ExtendedCommunity` constants with `OV_*` textual rendering. Codec only — RPKI-to-community stamping lives in the daemon |
 | 8277 | IPv4/IPv6 labeled-unicast NLRI codec (SAFI 4): label-stack + prefix encode/decode, Add-Path and withdraw forms. Inert codec substrate |
+| 8317 | PMSI Tunnel composite tunnel-type encoding: valid composites use an assigned base tunnel type other than 0 or 6 and require the 3-octet receiver-label prefix |
 | 8326 | `GRACEFUL_SHUTDOWN` well-known community (`0xFFFF_0000`) |
 | 8365 | EVPN over VXLAN encapsulation |
 | 8538 | Notification GR (N-bit) |
@@ -297,7 +298,7 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
 - **`BgpCodec` / `BgpCodecError`** — optional Tokio `Decoder` / `Encoder`
   adapter and typed I/O/decode/encode errors, gated by `tokio-codec`
 - **`UpdateMessage`** / **`ParsedUpdate`** — raw wire form and parsed routes + attributes
-- **`PathAttribute`** — typed variants plus `Unknown` pass-through, including `AsPath`, `Aggregator`, `AtomicAggregate`, `NextHop`, `Communities`, `MpReachNlri`, `LargeCommunities`, `PmsiTunnel` (RFC 6514), and `OnlyToCustomer` (RFC 9234)
+- **`PathAttribute`** — typed variants plus `Unknown` pass-through, including `AsPath`, `Aggregator`, `AtomicAggregate`, `NextHop`, canonical/Partial pairs `Communities` / `CommunitiesPartial`, `ExtendedCommunities` / `ExtendedCommunitiesPartial`, `LargeCommunities` / `LargeCommunitiesPartial`, and `PmsiTunnel` / `PmsiTunnelPartial`, plus `MpReachNlri` and canonical/Partial `OnlyToCustomer` (RFC 9234)
 - **`Prefix`** — `V4(Ipv4Prefix)` / `V6(Ipv6Prefix)` enum
 - **`RpkiValidation` / `AspaValidation` / `AspaValidationContext`** — shared
   routing-domain validation state and ASPA session context used by rustbgpd's
@@ -326,7 +327,7 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
 - **`rtc` module** — Route Target Constrain NLRI codec (SAFI 132, RFC 4684):
   `RtcNlri` / `RTC_SAFI` / `RTC_MAX_PREFIX_BITS`, `decode_rtc_nlri` /
   `encode_rtc_nlri` with default-route and prefix-bit bounds
-- **`PmsiTunnel`** / **`PmsiTunnelType`** / **`PmsiTunnelIdentifier`** — PMSI Tunnel attribute (RFC 6514 §5) carried on EVPN Type 3 IMET routes for ingress-replication BUM. Constructor `PmsiTunnel::for_evpn_ingress_replication(vni, ip)` emits the RFC 8365 §5.1.3 wire shape (raw 24-bit VNI in the label field, originator IP as the tunnel identifier).
+- **`PmsiTunnel`** / **`PmsiTunnelType`** / **`PmsiTunnelIdentifier`** — PMSI Tunnel attribute (RFC 6514 §5) carried by `PathAttribute::PmsiTunnel` or `PmsiTunnelPartial` on EVPN Type 3 IMET routes for ingress-replication BUM. Constructor `PmsiTunnel::for_evpn_ingress_replication(vni, ip)` emits the RFC 8365 §5.1.3 wire shape (raw 24-bit VNI in the label field, originator IP as the tunnel identifier).
 - **`RouteDistinguisher`** — RFC 4364 §4.2 8-byte RD, used by EVPN and
   VPNv4/v6. Implements `Display` + `FromStr` for the structured `asn:val` /
   `ipv4:val` textual encodings and the exact `0x<16-hex-digits>` display

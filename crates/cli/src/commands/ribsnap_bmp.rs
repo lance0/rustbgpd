@@ -946,11 +946,16 @@ fn convert_attribute<'a>(
         PathAttribute::NextHop(next_hop) => base.next_hop = Some(IpAddr::V4(*next_hop)),
         PathAttribute::Med(med) => base.med = Some(*med),
         PathAttribute::LocalPref(local_pref) => base.local_pref = Some(*local_pref),
-        PathAttribute::Communities(communities) => base.communities = communities.clone(),
-        PathAttribute::ExtendedCommunities(communities) => {
+        PathAttribute::Communities(communities)
+        | PathAttribute::CommunitiesPartial(communities) => {
+            base.communities = communities.clone();
+        }
+        PathAttribute::ExtendedCommunities(communities)
+        | PathAttribute::ExtendedCommunitiesPartial(communities) => {
             base.extended_communities = communities.iter().map(|c| c.as_u64()).collect();
         }
-        PathAttribute::LargeCommunities(communities) => {
+        PathAttribute::LargeCommunities(communities)
+        | PathAttribute::LargeCommunitiesPartial(communities) => {
             base.large_communities = communities
                 .iter()
                 .map(|c| [c.global_admin, c.local_data1, c.local_data2])
@@ -998,7 +1003,7 @@ fn convert_attribute<'a>(
         }
         PathAttribute::MpReachNlri(mp) => *mp_reach = Some(mp),
         PathAttribute::MpUnreachNlri(mp) => *mp_unreach = Some(mp),
-        PathAttribute::PmsiTunnel(_) => {
+        PathAttribute::PmsiTunnel(_) | PathAttribute::PmsiTunnelPartial(_) => {
             return Err(
                 "PMSI_TUNNEL attribute on a unicast Adj-RIB-Out route is not supported".to_string(),
             );
@@ -1600,6 +1605,58 @@ mod tests {
                 "type_code": attr_type::ONLY_TO_CUSTOMER,
                 "value": "0000ffdc"
             }])
+        );
+    }
+
+    #[test]
+    fn partial_transitive_typed_attributes_expose_canonical_snapshot_values() {
+        let (mut capture, info) = v4_peer_capture();
+        let mut attrs = attr(attr_type::ORIGIN, &[0]);
+        attrs.extend(as_path_attr(&[65500]));
+        attrs.extend(attr(attr_type::NEXT_HOP, &[192, 0, 2, 254]));
+        for (type_code, value) in [
+            (
+                attr_type::COMMUNITIES,
+                0xFDE8_0064u32.to_be_bytes().to_vec(),
+            ),
+            (
+                attr_type::EXTENDED_COMMUNITIES,
+                0x0002_FDE8_0000_0064u64.to_be_bytes().to_vec(),
+            ),
+            (
+                attr_type::LARGE_COMMUNITIES,
+                [65_000u32, 1, 100]
+                    .into_iter()
+                    .flat_map(u32::to_be_bytes)
+                    .collect(),
+            ),
+        ] {
+            let mut partial = attr(type_code, &value);
+            partial[0] |= attr_flags::PARTIAL;
+            attrs.extend(partial);
+        }
+        capture.extend(route_monitoring(
+            &info,
+            &update_pdu(&[], &attrs, &v4_nlri([10, 0, 0, 0], 24, None)),
+        ));
+        capture.extend(route_monitoring(&info, &eor_v4()));
+
+        let (snapshot, _) = run_capture(&capture).unwrap();
+        let route: serde_json::Value = serde_json::from_str(
+            snapshot
+                .lines()
+                .find(|line| line.contains("\"record\":\"route\""))
+                .expect("one route record"),
+        )
+        .unwrap();
+        assert_eq!(route["communities"], serde_json::json!([0xFDE8_0064u32]));
+        assert_eq!(
+            route["extended_communities"],
+            serde_json::json!([0x0002_FDE8_0000_0064u64])
+        );
+        assert_eq!(
+            route["large_communities"],
+            serde_json::json!(["65000:1:100"])
         );
     }
 

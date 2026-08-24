@@ -394,16 +394,22 @@ impl<'a> RouteFilterAttrs<'a> {
         let mut large_communities = None;
 
         for attr in route.attributes.iter() {
+            if communities.is_none()
+                && let Some(values) = attr.communities()
+            {
+                communities = Some(values);
+                continue;
+            }
+            if large_communities.is_none()
+                && let Some(values) = attr.large_communities()
+            {
+                large_communities = Some(values);
+                continue;
+            }
             match attr {
                 PathAttribute::AsPath(path) if !as_path_seen => {
                     origin_asn = path.origin_asn();
                     as_path_seen = true;
-                }
-                PathAttribute::Communities(values) if communities.is_none() => {
-                    communities = Some(values.as_slice());
-                }
-                PathAttribute::LargeCommunities(values) if large_communities.is_none() => {
-                    large_communities = Some(values.as_slice());
                 }
                 _ => {}
             }
@@ -1261,6 +1267,18 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
     let mut atomic_aggregate = false;
 
     for attr in route.attributes.iter() {
+        if let Some(values) = attr.communities() {
+            communities.extend(values);
+            continue;
+        }
+        if let Some(values) = attr.extended_communities() {
+            extended_communities.extend(values.iter().map(|c| c.as_u64()));
+            continue;
+        }
+        if let Some(values) = attr.large_communities() {
+            large_communities.extend(values.iter().map(ToString::to_string));
+            continue;
+        }
         match attr {
             PathAttribute::Origin(o) => origin = *o as u32,
             PathAttribute::AsPath(path) => {
@@ -1273,13 +1291,6 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
             }
             PathAttribute::LocalPref(lp) => local_pref = *lp,
             PathAttribute::Med(m) => med = *m,
-            PathAttribute::Communities(c) => communities.extend(c),
-            PathAttribute::ExtendedCommunities(ec) => {
-                extended_communities.extend(ec.iter().map(|c| c.as_u64()));
-            }
-            PathAttribute::LargeCommunities(lc) => {
-                large_communities.extend(lc.iter().map(ToString::to_string));
-            }
             PathAttribute::Aggregator(a) => {
                 aggregator = Some(proto::RouteAggregator {
                     asn: a.asn,
@@ -2044,20 +2055,21 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
     let mut extended_communities = Vec::new();
 
     for attr in &route.attributes {
-        match attr {
-            PathAttribute::AsPath(path) => {
-                for segment in &path.segments {
-                    let asns = match segment {
-                        AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
-                    };
-                    as_path.extend(asns);
-                }
+        if let Some(values) = attr.communities() {
+            communities.extend(values);
+            continue;
+        }
+        if let Some(values) = attr.extended_communities() {
+            extended_communities.extend(values.iter().map(|c| c.as_u64()));
+            continue;
+        }
+        if let PathAttribute::AsPath(path) = attr {
+            for segment in &path.segments {
+                let asns = match segment {
+                    AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
+                };
+                as_path.extend(asns);
             }
-            PathAttribute::Communities(c) => communities.extend(c),
-            PathAttribute::ExtendedCommunities(ec) => {
-                extended_communities.extend(ec.iter().map(|c| c.as_u64()));
-            }
-            _ => {}
         }
     }
 
@@ -2162,10 +2174,7 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
     let actions: Vec<proto::FlowSpecAction> = route
         .attributes
         .iter()
-        .filter_map(|attr| match attr {
-            PathAttribute::ExtendedCommunities(ecs) => Some(ecs),
-            _ => None,
-        })
+        .filter_map(PathAttribute::extended_communities)
         .flatten()
         .filter_map(|ec| {
             use rustbgpd_wire::flowspec::FlowSpecAction as FA;
@@ -2259,6 +2268,14 @@ pub(crate) fn bgpls_route_to_proto(route: &BgpLsRibRoute) -> proto::BgpLsRouteEn
     let mut bgp_ls_attribute = Vec::new();
 
     for attr in route.attributes.iter() {
+        if let Some(values) = attr.communities() {
+            communities.extend(values);
+            continue;
+        }
+        if let Some(values) = attr.extended_communities() {
+            extended_communities.extend(values.iter().map(|ec| ec.as_u64()));
+            continue;
+        }
         match attr {
             PathAttribute::AsPath(path) => {
                 for segment in &path.segments {
@@ -2267,10 +2284,6 @@ pub(crate) fn bgpls_route_to_proto(route: &BgpLsRibRoute) -> proto::BgpLsRouteEn
                     };
                     as_path.extend(asns);
                 }
-            }
-            PathAttribute::Communities(c) => communities.extend(c),
-            PathAttribute::ExtendedCommunities(ecs) => {
-                extended_communities.extend(ecs.iter().map(|ec| ec.as_u64()));
             }
             PathAttribute::Unknown(raw) if raw.type_code == 29 => {
                 bgp_ls_attribute = raw.data.to_vec();
@@ -2315,22 +2328,21 @@ pub(crate) fn vpn_route_to_proto(route: &VpnRibRoute) -> proto::VpnRouteEntry {
     let mut extended_communities = Vec::new();
 
     for attr in route.attributes.iter() {
-        match attr {
-            PathAttribute::AsPath(path) => {
-                for segment in &path.segments {
-                    let asns = match segment {
-                        AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
-                    };
-                    as_path.extend(asns);
-                }
+        if let Some(values) = attr.communities() {
+            communities.extend(values.iter().map(|c| format!("{}:{}", c >> 16, c & 0xFFFF)));
+            continue;
+        }
+        if let Some(values) = attr.extended_communities() {
+            extended_communities.extend(values.iter().map(ToString::to_string));
+            continue;
+        }
+        if let PathAttribute::AsPath(path) = attr {
+            for segment in &path.segments {
+                let asns = match segment {
+                    AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
+                };
+                as_path.extend(asns);
             }
-            PathAttribute::Communities(c) => {
-                communities.extend(c.iter().map(|c| format!("{}:{}", c >> 16, c & 0xFFFF)));
-            }
-            PathAttribute::ExtendedCommunities(ecs) => {
-                extended_communities.extend(ecs.iter().map(ToString::to_string));
-            }
-            _ => {}
         }
     }
 
@@ -2364,22 +2376,21 @@ pub(crate) fn labeled_route_to_proto(route: &LabeledRibRoute) -> proto::LabeledR
     let mut extended_communities = Vec::new();
 
     for attr in route.attributes.iter() {
-        match attr {
-            PathAttribute::AsPath(path) => {
-                for segment in &path.segments {
-                    let asns = match segment {
-                        AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
-                    };
-                    as_path.extend(asns);
-                }
+        if let Some(values) = attr.communities() {
+            communities.extend(values.iter().map(|c| format!("{}:{}", c >> 16, c & 0xFFFF)));
+            continue;
+        }
+        if let Some(values) = attr.extended_communities() {
+            extended_communities.extend(values.iter().map(ToString::to_string));
+            continue;
+        }
+        if let PathAttribute::AsPath(path) = attr {
+            for segment in &path.segments {
+                let asns = match segment {
+                    AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
+                };
+                as_path.extend(asns);
             }
-            PathAttribute::Communities(c) => {
-                communities.extend(c.iter().map(|c| format!("{}:{}", c >> 16, c & 0xFFFF)));
-            }
-            PathAttribute::ExtendedCommunities(ecs) => {
-                extended_communities.extend(ecs.iter().map(ToString::to_string));
-            }
-            _ => {}
         }
     }
 
@@ -2403,19 +2414,17 @@ pub(crate) fn rtc_route_to_proto(route: &RtcRibRoute) -> proto::RtcRouteEntry {
     let mut communities = Vec::new();
 
     for attr in route.attributes.iter() {
-        match attr {
-            PathAttribute::AsPath(path) => {
-                for segment in &path.segments {
-                    let asns = match segment {
-                        AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
-                    };
-                    as_path.extend(asns);
-                }
+        if let Some(values) = attr.communities() {
+            communities.extend(values.iter().map(|c| format!("{}:{}", c >> 16, c & 0xFFFF)));
+            continue;
+        }
+        if let PathAttribute::AsPath(path) = attr {
+            for segment in &path.segments {
+                let asns = match segment {
+                    AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
+                };
+                as_path.extend(asns);
             }
-            PathAttribute::Communities(c) => {
-                communities.extend(c.iter().map(|c| format!("{}:{}", c >> 16, c & 0xFFFF)));
-            }
-            _ => {}
         }
     }
 
@@ -2487,27 +2496,26 @@ pub(crate) fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry
     let mut tunnel_type = 0u32;
 
     for attr in route.attributes.iter() {
-        match attr {
-            PathAttribute::AsPath(path) => {
-                for segment in &path.segments {
-                    let asns = match segment {
-                        AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
-                    };
-                    as_path.extend(asns);
+        if let Some(values) = attr.communities() {
+            communities.extend(values);
+            continue;
+        }
+        if let Some(values) = attr.extended_communities() {
+            for ec in values {
+                extended_communities.push(ec.as_u64());
+                if let Some(tt) = ec.as_bgp_encapsulation() {
+                    tunnel_type = u32::from(tt);
                 }
             }
-            PathAttribute::Communities(c) => {
-                communities.extend(c);
+            continue;
+        }
+        if let PathAttribute::AsPath(path) = attr {
+            for segment in &path.segments {
+                let asns = match segment {
+                    AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
+                };
+                as_path.extend(asns);
             }
-            PathAttribute::ExtendedCommunities(ecs) => {
-                for ec in ecs {
-                    extended_communities.push(ec.as_u64());
-                    if let Some(tt) = ec.as_bgp_encapsulation() {
-                        tunnel_type = u32::from(tt);
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
@@ -4765,6 +4773,41 @@ mod tests {
         );
         assert_eq!(without.aggregator, None);
         assert!(!without.atomic_aggregate);
+    }
+
+    #[test]
+    fn route_to_proto_projects_partial_transitive_values_like_canonical() {
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 2, 0), 24));
+        let communities = vec![0x0001_0002];
+        let extended = vec![rustbgpd_wire::ExtendedCommunity::new(0x0002_FDE8_0000_0064)];
+        let large = vec![LargeCommunity::new(65_000, 1, 100)];
+        let canonical = route_to_proto(
+            &test_route(
+                prefix,
+                vec![
+                    PathAttribute::Communities(communities.clone()),
+                    PathAttribute::ExtendedCommunities(extended.clone()),
+                    PathAttribute::LargeCommunities(large.clone()),
+                ],
+            ),
+            false,
+        );
+        let partial = route_to_proto(
+            &test_route(
+                prefix,
+                vec![
+                    PathAttribute::CommunitiesPartial(communities),
+                    PathAttribute::ExtendedCommunitiesPartial(extended),
+                    PathAttribute::LargeCommunitiesPartial(large),
+                ],
+            ),
+            false,
+        );
+
+        assert_eq!(partial, canonical);
+        assert_eq!(partial.communities, [0x0001_0002]);
+        assert_eq!(partial.extended_communities, [0x0002_FDE8_0000_0064]);
+        assert_eq!(partial.large_communities, ["65000:1:100"]);
     }
 
     #[test]

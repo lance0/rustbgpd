@@ -261,10 +261,7 @@ impl Route {
     pub fn communities(&self) -> &[u32] {
         self.attributes
             .iter()
-            .find_map(|a| match a {
-                PathAttribute::Communities(c) => Some(c.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::communities)
             .unwrap_or(&[])
     }
 
@@ -273,10 +270,7 @@ impl Route {
     pub fn extended_communities(&self) -> &[ExtendedCommunity] {
         self.attributes
             .iter()
-            .find_map(|a| match a {
-                PathAttribute::ExtendedCommunities(c) => Some(c.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::extended_communities)
             .unwrap_or(&[])
     }
 
@@ -285,10 +279,7 @@ impl Route {
     pub fn large_communities(&self) -> &[LargeCommunity] {
         self.attributes
             .iter()
-            .find_map(|a| match a {
-                PathAttribute::LargeCommunities(c) => Some(c.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::large_communities)
             .unwrap_or(&[])
     }
 
@@ -451,10 +442,7 @@ impl BgpLsRibRoute {
     pub fn communities(&self) -> &[u32] {
         self.attributes
             .iter()
-            .find_map(|attr| match attr {
-                PathAttribute::Communities(values) => Some(values.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::communities)
             .unwrap_or(&[])
     }
 
@@ -463,10 +451,7 @@ impl BgpLsRibRoute {
     pub fn extended_communities(&self) -> &[ExtendedCommunity] {
         self.attributes
             .iter()
-            .find_map(|attr| match attr {
-                PathAttribute::ExtendedCommunities(values) => Some(values.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::extended_communities)
             .unwrap_or(&[])
     }
 
@@ -475,10 +460,7 @@ impl BgpLsRibRoute {
     pub fn large_communities(&self) -> &[LargeCommunity] {
         self.attributes
             .iter()
-            .find_map(|attr| match attr {
-                PathAttribute::LargeCommunities(values) => Some(values.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::large_communities)
             .unwrap_or(&[])
     }
 }
@@ -626,10 +608,7 @@ impl VpnRibRoute {
     pub fn communities(&self) -> &[u32] {
         self.attributes
             .iter()
-            .find_map(|attr| match attr {
-                PathAttribute::Communities(values) => Some(values.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::communities)
             .unwrap_or(&[])
     }
 
@@ -641,10 +620,7 @@ impl VpnRibRoute {
     pub fn extended_communities(&self) -> &[ExtendedCommunity] {
         self.attributes
             .iter()
-            .find_map(|attr| match attr {
-                PathAttribute::ExtendedCommunities(values) => Some(values.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::extended_communities)
             .unwrap_or(&[])
     }
 
@@ -653,10 +629,7 @@ impl VpnRibRoute {
     pub fn large_communities(&self) -> &[LargeCommunity] {
         self.attributes
             .iter()
-            .find_map(|attr| match attr {
-                PathAttribute::LargeCommunities(values) => Some(values.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::large_communities)
             .unwrap_or(&[])
     }
 }
@@ -760,10 +733,7 @@ impl LabeledRibRoute {
     pub fn communities(&self) -> &[u32] {
         self.attributes
             .iter()
-            .find_map(|attr| match attr {
-                PathAttribute::Communities(values) => Some(values.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::communities)
             .unwrap_or(&[])
     }
 
@@ -799,10 +769,7 @@ impl LabeledRibRoute {
     pub fn extended_communities(&self) -> &[ExtendedCommunity] {
         self.attributes
             .iter()
-            .find_map(|attr| match attr {
-                PathAttribute::ExtendedCommunities(values) => Some(values.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::extended_communities)
             .unwrap_or(&[])
     }
 
@@ -811,10 +778,7 @@ impl LabeledRibRoute {
     pub fn large_communities(&self) -> &[LargeCommunity] {
         self.attributes
             .iter()
-            .find_map(|attr| match attr {
-                PathAttribute::LargeCommunities(values) => Some(values.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::large_communities)
             .unwrap_or(&[])
     }
 }
@@ -925,10 +889,7 @@ impl RtcRibRoute {
     pub fn communities(&self) -> &[u32] {
         self.attributes
             .iter()
-            .find_map(|attr| match attr {
-                PathAttribute::Communities(values) => Some(values.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::communities)
             .unwrap_or(&[])
     }
 
@@ -937,10 +898,7 @@ impl RtcRibRoute {
     pub fn extended_communities(&self) -> &[ExtendedCommunity] {
         self.attributes
             .iter()
-            .find_map(|attr| match attr {
-                PathAttribute::ExtendedCommunities(values) => Some(values.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::extended_communities)
             .unwrap_or(&[])
     }
 
@@ -949,10 +907,7 @@ impl RtcRibRoute {
     pub fn large_communities(&self) -> &[LargeCommunity] {
         self.attributes
             .iter()
-            .find_map(|attr| match attr {
-                PathAttribute::LargeCommunities(values) => Some(values.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::large_communities)
             .unwrap_or(&[])
     }
 }
@@ -1046,10 +1001,7 @@ impl FlowSpecRoute {
     pub fn communities(&self) -> &[u32] {
         self.attributes
             .iter()
-            .find_map(|a| match a {
-                PathAttribute::Communities(c) => Some(c.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::communities)
             .unwrap_or(&[])
     }
 
@@ -1058,10 +1010,7 @@ impl FlowSpecRoute {
     pub fn extended_communities(&self) -> &[ExtendedCommunity] {
         self.attributes
             .iter()
-            .find_map(|a| match a {
-                PathAttribute::ExtendedCommunities(c) => Some(c.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::extended_communities)
             .unwrap_or(&[])
     }
 
@@ -1070,10 +1019,7 @@ impl FlowSpecRoute {
     pub fn large_communities(&self) -> &[LargeCommunity] {
         self.attributes
             .iter()
-            .find_map(|a| match a {
-                PathAttribute::LargeCommunities(c) => Some(c.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::large_communities)
             .unwrap_or(&[])
     }
 
@@ -1220,10 +1166,7 @@ impl EvpnRibRoute {
     pub fn communities(&self) -> &[u32] {
         self.attributes
             .iter()
-            .find_map(|a| match a {
-                PathAttribute::Communities(c) => Some(c.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::communities)
             .unwrap_or(&[])
     }
 
@@ -1232,10 +1175,7 @@ impl EvpnRibRoute {
     pub fn extended_communities(&self) -> &[ExtendedCommunity] {
         self.attributes
             .iter()
-            .find_map(|a| match a {
-                PathAttribute::ExtendedCommunities(c) => Some(c.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::extended_communities)
             .unwrap_or(&[])
     }
 
@@ -1244,10 +1184,7 @@ impl EvpnRibRoute {
     pub fn large_communities(&self) -> &[LargeCommunity] {
         self.attributes
             .iter()
-            .find_map(|a| match a {
-                PathAttribute::LargeCommunities(c) => Some(c.as_slice()),
-                _ => None,
-            })
+            .find_map(PathAttribute::large_communities)
             .unwrap_or(&[])
     }
 
