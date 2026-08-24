@@ -1,5 +1,7 @@
 # Cookbook — scenario-driven deployment recipes
 
+Choose a complete rustbgpd deployment recipe.
+
 Each recipe here is a complete deployment shape: a working config, the
 verification commands with the output shape to expect, the metrics to
 watch, and the failure modes with the explain commands that debug them.
