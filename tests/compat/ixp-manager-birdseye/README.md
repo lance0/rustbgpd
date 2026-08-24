@@ -452,6 +452,40 @@ on one segment, so `source_address` is compared as `<route-server>`; BIRD's
 default hold time is mirrored in the rustbgpd config so the negotiated timers
 match.
 
+## Fixture ownership and consumers
+
+The Rust smoke test pins `adapter-consumer.php`'s journey source and the CI
+entry point, but most data and configuration fixtures are owned by the
+shell/PHP/Python harness. The renderer fixtures in the last three rows are the
+exceptions; they are listed here so every checked-in capture has an explicit
+owner and refresh relationship.
+
+| Pinned file | Owner or producer | Executable consumers and checked relationship |
+|---|---|---|
+| `Dockerfile` | Hand-maintained PHP/Composer environment for the two pinned upstream checkouts | `run.sh` builds the image used by `run-in-container.sh`, `run-adapter-consumer.sh`, and `run-oracle-leg.sh`. |
+| `Dockerfile.oracle` | Hand-maintained BIRD 2.0.12 oracle image | `run-oracle-leg.sh` builds it and verifies the installed BIRD version before the populated comparison. |
+| `birdseye.env` | Hand-maintained production-mode Bird's Eye settings | `run-in-container.sh` copies it unchanged; `run-oracle-leg.sh` changes only `BIRDC` and `MAX_ROUTES` before installing it in the real-BIRD oracle. |
+| `fake-birdc` | Hand-maintained deterministic `birdc` transcript oracle selected by `birdseye.env` | Bird's Eye executes it during `run-in-container.sh`; `verify_capture.py` checks the resulting HTTP capture. The populated oracle does not use it. |
+| `contract.json` | Reviewed compatibility pins, scope, and divergence decisions | `run.sh`, `verify_capture.py`, `consumer.php`, `adapter-consumer.php`, `oracle-consumer.php`, `nagios-consumer.php`, `scripts/check_ixp_manager_docs.py`, and `tests/interop/scripts/test-m97-ixp-manager-authenticated-lifecycle.sh` read it directly. |
+| `fixtures/birdseye-contract.json` | `verify_capture.py` output from pinned Bird's Eye plus `fake-birdc` | `run-in-container.sh` invokes `verify_capture.py`, which byte-compares a fresh HTTP capture with this file. |
+| `fixtures/ixp-manager-consumer.json` | `consumer.php` output from the pinned IXP Manager `BirdsEye` client | `run-in-container.sh` byte-compares the fresh consumer output with this file. |
+| `fixtures/ixp-manager-v7.4-rustbgpd.json` | `config-consumer.php`'s row-31-disabled, two-client real Foil capture | `run.sh` byte-compares the fresh capture with this file and the renderer-owned v2 supported fixture; `verify_capture.py` checks its schema, filter rows, completion count, and absence of legacy refusal markers. M96 and M97 intentionally use the separate single-client PCH projection below. |
+| `fixtures/populated-oracle.json`, `fixtures/populated-live.json` | Normalized `oracle-consumer.php` outputs from BIRD/Bird's Eye and rustbgpd/adapter respectively | `run-oracle-leg.sh` produces the raw pair; `verify_capture.py --populated` normalizes, byte-compares, then applies the divergence audit. |
+| `oracle-bird.conf` | Hand-maintained BIRD half of the populated topology | `run-oracle-leg.sh` copies it into the BIRD 2.0.12 container. |
+| `oracle-announcer-as64496.conf`, `oracle-announcer-as64497.conf` | Hand-maintained deterministic ExaBGP announcements | `run-oracle-leg.sh` validates each file with ExaBGP, then mounts it into its announcer. |
+| `tools/rs-config-render/tests/fixtures/ixp-manager-v1-supported.json` | Pinned legacy single-client PCH contract: VLAN interface 3, customer 3, ASN 42, and `31.135.128.0/19` | `run.sh` renders it directly, projects it into the additive v2 envelope, and compares the transient fresh `config-pch-v2.json` capture before M96 consumes that capture. M97 independently projects the same oracle and compares its authenticated API response. `ixp_manager.rs`, `activation.rs`, and `ixp_manager_lifecycle.rs` also consume it with `include_bytes!`. |
+| `tools/rs-config-render/tests/fixtures/ixp-manager-v2-supported.json` | Pinned copy of the row-31-disabled, two-client real capture; intentionally byte-identical to the compatibility fixture above | `run.sh` compares it with the fresh `ixp-manager-v7.4-rustbgpd.json` capture; `ixp_manager.rs`, `recover.rs`, and `ixp_manager_lifecycle.rs` consume it with `include_bytes!`. |
+| `tools/rs-config-render/tests/fixtures/ixp-manager-v2-ui-filters.json` | Pinned copy of the distinct real `config-ui-filter.json` capture with rows 31, 33, and 35 enabled | `run.sh` compares it with that fresh capture; `ixp_manager.rs` consumes it with `include_bytes!`. |
+
+Keep the two renderer capture files separate. The supported file pins the
+row-31-disabled state (`32, 33, 35`), while the UI-filter file pins the
+different full state (`31, 33, 35`). Collapsing them would make one fixture
+stand for two real IXP Manager database states, weakening both capture
+provenance and the row-selection behavior exercised by the harness. The
+byte-identical compatibility and renderer copies of the supported capture are
+also intentional: each subtree owns its public contract, and `run.sh` proves
+both copies still match the same fresh output.
+
 ## Provenance and licensing
 
 Upstream source stays in a temporary directory and is never vendored. IXP
