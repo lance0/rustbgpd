@@ -2,7 +2,7 @@
 
 This recipe builds an IXP route server for transparent member route exchange.
 
-**When this is you:** You run or plan an Internet-exchange route server.
+**When this is you:** You run or plan to run an Internet-exchange route server.
 It is one BGP speaker that redistributes routes among member networks so
 they don't need a full mesh of bilateral sessions. You want transparent
 redistribution (the members' own NEXT_HOP and AS_PATH, not yours), RPKI
