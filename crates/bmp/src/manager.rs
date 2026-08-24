@@ -1682,18 +1682,34 @@ mod tests {
     )]
     async fn manager_handles_stats_report() {
         fn decode_stats(message: &[u8]) -> Vec<(u16, &[u8])> {
+            assert!(
+                message.len() >= 52,
+                "Stats Report must contain both BMP headers and Stats Count"
+            );
             assert_eq!(message[5], 1, "expected a Stats Report");
             let count = u32::from_be_bytes(message[48..52].try_into().unwrap());
-            let mut cursor = 52;
+            let mut cursor: usize = 52;
             let mut stats = Vec::new();
             for _ in 0..count {
+                let header_end = cursor.checked_add(4).expect("Stats header offset overflow");
+                assert!(
+                    header_end <= message.len(),
+                    "Stats entry header exceeds the BMP message"
+                );
                 let stat_type = u16::from_be_bytes(message[cursor..cursor + 2].try_into().unwrap());
                 let len = usize::from(u16::from_be_bytes(
-                    message[cursor + 2..cursor + 4].try_into().unwrap(),
+                    message[cursor + 2..header_end].try_into().unwrap(),
                 ));
-                cursor += 4;
-                stats.push((stat_type, &message[cursor..cursor + len]));
-                cursor += len;
+                cursor = header_end;
+                let payload_end = cursor
+                    .checked_add(len)
+                    .expect("Stats payload offset overflow");
+                assert!(
+                    payload_end <= message.len(),
+                    "Stats entry payload exceeds the BMP message"
+                );
+                stats.push((stat_type, &message[cursor..payload_end]));
+                cursor = payload_end;
             }
             assert_eq!(cursor, message.len(), "all Stats Report bytes are decoded");
             stats
