@@ -379,7 +379,8 @@ impl Config {
         external_pinned: bool,
     ) -> Result<EffectivePolicyChains, ConfigError> {
         let mut store = SetStore::new();
-        self.effective_policy_for_neighbor_with_store(neighbor, external_pinned, &mut store)
+        let group = self.peer_group_for_neighbor(neighbor)?;
+        self.effective_policy_for_neighbor_with_store(neighbor, group, external_pinned, &mut store)
     }
 
     #[expect(
@@ -389,10 +390,10 @@ impl Config {
     fn effective_policy_for_neighbor_with_store(
         &self,
         neighbor: &Neighbor,
+        group: Option<&PeerGroupConfig>,
         external_pinned: bool,
         store: &mut SetStore,
     ) -> Result<EffectivePolicyChains, ConfigError> {
-        let group = self.peer_group_for_neighbor(neighbor)?;
         let global_import = self.import_chain_with_store(store)?;
         let global_export = self.export_chain_with_store(store)?;
         let group_import = if let Some(group) = group {
@@ -897,7 +898,7 @@ impl Config {
         transport.reject_retention_capacity = self.policy.reject_retention.capacity;
 
         let policy =
-            self.effective_policy_for_neighbor_with_store(neighbor, external_pinned, store)?;
+            self.effective_policy_for_neighbor_with_store(neighbor, group, external_pinned, store)?;
 
         Ok(ResolvedNeighbor {
             transport_config: transport,

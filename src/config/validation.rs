@@ -2614,16 +2614,15 @@ fn validate_peer_group(
 ) -> Result<(), ConfigError> {
     EffectiveHoldTimers::for_peer_group(group).validate()?;
 
-    if !group.families.is_empty() {
-        parse_families(&group.families)?;
-    }
+    let configured_families = (!group.families.is_empty())
+        .then(|| parse_families(&group.families))
+        .transpose()?;
     if !group.required_families.is_empty() {
         let required = parse_families(&group.required_families)?;
         // A group with no configured families has no address-dependent
         // default until it is consumed; validate those effective consumers
         // above instead of rejecting an otherwise reusable definition.
-        if !group.families.is_empty() {
-            let mut effective = parse_families(&group.families)?;
+        if let Some(mut effective) = configured_families {
             if group.disable_ipv4_unicast.unwrap_or(false) {
                 effective.retain(|family| {
                     *family != (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast)
