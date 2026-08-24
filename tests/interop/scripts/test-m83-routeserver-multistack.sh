@@ -548,7 +548,7 @@ wait_bird_established() {
     log "Waiting for BIRD session to reach Established..."
     for i in $(seq 1 45); do
         if docker exec "$BIRD" birdc show protocols 2>/dev/null \
-            | awk '$1 == "routeserver"' | grep -q "Established"; then
+            | awk '$1 == "routeserver"' | grep "Established" >/dev/null; then
             ok "BIRD session established (attempt $i)"
             return 0
         fi
@@ -563,7 +563,7 @@ wait_gobgp_established() {
     log "Waiting for GoBGP session to reach Established..."
     for i in $(seq 1 45); do
         if docker exec "$GOBGP" gobgp neighbor "$RS_GOBGP_ADDR" 2>/dev/null \
-            | grep -qi "state = ESTABLISHED\|BGP state = established"; then
+            | grep -i "state = ESTABLISHED\|BGP state = established" >/dev/null; then
             ok "GoBGP session established (attempt $i)"
             return 0
         fi
@@ -896,12 +896,12 @@ assert_gobgp_probe() {
 assert_otc_client_views() {
     log "Assertions 17-18: RFC 9234 OTC toward clients (role = route_server)"
     if frr_prefix_json 203.0.113.0/24 \
-        | grep -Eiq 'only[ -]?to[ -]?customer|"otc"|onlyToCustomer'; then
+        | grep -Ei 'only[ -]?to[ -]?customer|"otc"|onlyToCustomer' >/dev/null; then
         ok "FRR reports OTC on the reflected route"
     else
         fail "FRR does not report OTC on 203.0.113.0/24"
     fi
-    if birdc_route_all 100.66.0.0/24 | grep -q "BGP.otc: 65500"; then
+    if birdc_route_all 100.66.0.0/24 | grep -F "BGP.otc: 65500" >/dev/null; then
         ok "BIRD reports BGP.otc: 65500"
     else
         fail "BIRD does not report BGP.otc: 65500 on 100.66.0.0/24"
@@ -923,12 +923,12 @@ assert_member_scoped_deny() {
     else
         fail "GoBGP missing 100.69.0.0/24"
     fi
-    if rs_ctl rib advertised "$FRR_ADDR" -a ipv4 | grep -qF "100.69.0.0/24"; then
+    if rs_ctl rib advertised "$FRR_ADDR" -a ipv4 | grep -F "100.69.0.0/24" >/dev/null; then
         fail "rbgp rib advertised to FRR lists 100.69.0.0/24"
     else
         ok "rbgp rib advertised to FRR agrees: 100.69.0.0/24 absent"
     fi
-    if rs_ctl rib advertised "$GOBGP_ADDR" -a ipv4 | grep -qF "100.69.0.0/24"; then
+    if rs_ctl rib advertised "$GOBGP_ADDR" -a ipv4 | grep -F "100.69.0.0/24" >/dev/null; then
         ok "rbgp rib advertised to GoBGP agrees: 100.69.0.0/24 present"
     else
         fail "rbgp rib advertised to GoBGP missing 100.69.0.0/24"
@@ -939,7 +939,7 @@ assert_rov() {
     log "Assertions 23-25: ROV — RPKI-invalid rejected at import, explain names the term"
     # 100.67.0.0/24 (same member, not-found) already propagated, so the
     # absence of the invalid twin is convergence-safe to assert now.
-    if birdc_route_all 100.68.0.0/24 | grep -q "BGP.as_path"; then
+    if birdc_route_all 100.68.0.0/24 | grep -F "BGP.as_path" >/dev/null; then
         fail "BIRD holds RPKI-invalid 100.68.0.0/24"
     else
         ok "BIRD lacks RPKI-invalid 100.68.0.0/24"
@@ -1095,35 +1095,35 @@ assert_wire() {
     fi
 
     if bird_tshark -Y "$base && bgp.nlri_prefix == 100.66.0.0 && bgp.update.path_attribute.next_hop == ${GOBGP_ADDR}" \
-        -T fields -e frame.number | grep -q .; then
+        -T fields -e frame.number | grep . >/dev/null; then
         ok "wire NEXT_HOP ${GOBGP_ADDR} on the 100.66.0.0/24 UPDATE"
     else
         fail "wire NEXT_HOP for 100.66.0.0/24 not ${GOBGP_ADDR}"
     fi
 
     if bird_tshark -Y "$base && bgp.nlri_prefix == 100.66.0.0 && bgp.update.path_attribute.multi_exit_disc == 77" \
-        -T fields -e frame.number | grep -q .; then
+        -T fields -e frame.number | grep . >/dev/null; then
         ok "wire MED 77 verbatim"
     else
         fail "wire MED 77 missing"
     fi
 
     if bird_tshark -Y "$base && bgp.nlri_prefix == 100.66.0.0 && bgp.update.path_attribute.community_as == 65002 && bgp.update.path_attribute.community_value == 222" \
-        -T fields -e frame.number | grep -q .; then
+        -T fields -e frame.number | grep . >/dev/null; then
         ok "wire community 65002:222 verbatim"
     else
         fail "wire community 65002:222 missing"
     fi
 
     if bird_tshark -Y "$base && bgp.nlri_prefix == 100.66.0.0 && bgp.large_communities.ga == 65002 && bgp.large_communities.ldp1 == 2 && bgp.large_communities.ldp2 == 2" \
-        -T fields -e frame.number | grep -q .; then
+        -T fields -e frame.number | grep . >/dev/null; then
         ok "wire large community 65002:2:2 verbatim"
     else
         fail "wire large community 65002:2:2 missing"
     fi
 
     if bird_tshark -Y "$base && bgp.update.path_attribute.type_code == 35 && bgp.nlri_prefix" \
-        -T fields -e frame.number | grep -q .; then
+        -T fields -e frame.number | grep . >/dev/null; then
         ok "wire OTC path attribute (type 35) on RS→BIRD announcements"
     else
         fail "wire OTC attribute (type 35) missing"
