@@ -21,6 +21,24 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+locked_args=()
+fail_fast=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --locked)
+      locked_args=(--locked)
+      ;;
+    --fail-fast)
+      fail_fast=1
+      ;;
+    *)
+      echo "usage: $0 [--locked] [--fail-fast]" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
 # Excluded — standalone measurement harnesses with their own CLIs rather than
 # criterion, so they reject criterion's `--test` flag:
 #
@@ -34,7 +52,7 @@ cd "$(dirname "$0")/.."
 EXCLUDED=(snapshot_allocation route_paging vpn_query_timing vpn_query_allocation)
 
 mapfile -t targets < <(
-  cargo metadata --no-deps --format-version 1 | python3 -c '
+  cargo metadata "${locked_args[@]}" --no-deps --format-version 1 | python3 -c '
 import json, sys
 
 for package in json.load(sys.stdin)["packages"]:
@@ -72,8 +90,11 @@ for target in "${targets[@]}"; do
   fi
 
   echo "smoke $package/$name ${features:+[$features]}"
-  if ! cargo test -p "$package" --bench "$name" "${feature_args[@]}"; then
+  if ! cargo test "${locked_args[@]}" -p "$package" --bench "$name" "${feature_args[@]}"; then
     echo "::error::bench target $package/$name failed to execute" >&2
+    if [ "$fail_fast" -eq 1 ]; then
+      exit 1
+    fi
     status=1
   fi
 done

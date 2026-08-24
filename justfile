@@ -25,6 +25,7 @@ gate:
 
 # Compile the feature-gated RIB, transport, and API bench surfaces.
 gate-rib:
+    cargo check --locked -p rustbgpd --features bench-internals --benches
     cargo check --locked -p rustbgpd-rib --features bench-internals --benches
     cargo check --locked -p rustbgpd-transport --features bench-internals --benches
     cargo check --locked -p rustbgpd-api --features bench-internals --benches
@@ -39,7 +40,7 @@ gate-deps:
 
 # Execute every Criterion benchmark body once without collecting timings.
 gate-contract:
-    bash bench/smoke-benches.sh
+    bash bench/smoke-benches.sh --locked --fail-fast
 
 # Apply safe Clippy suggestions, then format the workspace.
 fix:

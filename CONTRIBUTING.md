@@ -58,14 +58,15 @@ The recipes intentionally expose their direct commands:
   workspace Clippy, the full workspace tests, and library docs. This is the
   broad local baseline and can take several minutes on a cold target directory.
 - `just gate-rib` compiles the feature-gated RIB, transport, and API benchmark
-  surfaces that the default workspace build cannot see, including both API
-  feature combinations.
+  surfaces that the default workspace build cannot see, including the root
+  FIB projection and both API feature combinations.
 - `just gate-deps` tests the four standalone scale-harness manifests. These
   manifests share `bench/scale/Cargo.lock`, which is separate from the
   workspace lockfile, and can add substantial cold-build time.
 - `just gate-contract` executes every Criterion benchmark body once without
-  collecting timings. The harness is Linux/GNU-Bash oriented and requires the
-  same local toolchain and system libraries as those benches.
+  collecting timings, with locked dependency resolution and fail-fast local
+  behavior. The harness is Linux/GNU-Bash oriented and requires the same local
+  toolchain and system libraries as those benches.
 - `just fix` applies safe Clippy suggestions before formatting. Cargo's normal
   refusal to modify dirty or staged worktrees remains in force.
 
