@@ -219,6 +219,86 @@ impl EffectiveHoldTimers {
     }
 }
 
+struct EffectiveGracefulRestartTimers {
+    enabled: bool,
+    restart_time: Option<u16>,
+    peer_restart_time_max: Option<u16>,
+    stale_routes_time: Option<u64>,
+    llgr_stale_time: Option<u32>,
+}
+
+impl EffectiveGracefulRestartTimers {
+    fn for_neighbor(neighbor: &Neighbor, group: Option<&PeerGroupConfig>) -> Self {
+        Self {
+            enabled: neighbor
+                .graceful_restart
+                .or_else(|| group.and_then(|g| g.graceful_restart))
+                .unwrap_or(true),
+            restart_time: neighbor
+                .gr_restart_time
+                .or_else(|| group.and_then(|g| g.gr_restart_time)),
+            peer_restart_time_max: neighbor
+                .gr_peer_restart_time_max
+                .or_else(|| group.and_then(|g| g.gr_peer_restart_time_max)),
+            stale_routes_time: neighbor
+                .gr_stale_routes_time
+                .or_else(|| group.and_then(|g| g.gr_stale_routes_time)),
+            llgr_stale_time: neighbor
+                .llgr_stale_time
+                .or_else(|| group.and_then(|g| g.llgr_stale_time)),
+        }
+    }
+
+    fn for_peer_group(group: &PeerGroupConfig) -> Self {
+        Self {
+            enabled: group.graceful_restart.unwrap_or(true),
+            restart_time: group.gr_restart_time,
+            peer_restart_time_max: group.gr_peer_restart_time_max,
+            stale_routes_time: group.gr_stale_routes_time,
+            llgr_stale_time: group.llgr_stale_time,
+        }
+    }
+
+    fn validate(self) -> Result<(), String> {
+        if let Some(t) = self.restart_time
+            && t > 4095
+        {
+            return Err(format!("gr_restart_time {t} exceeds 4095 (12-bit max)"));
+        }
+        if let Some(0) = self.restart_time
+            && self.enabled
+        {
+            return Err("gr_restart_time must be > 0 when graceful_restart is enabled".to_string());
+        }
+        if let Some(0) = self.peer_restart_time_max {
+            return Err("gr_peer_restart_time_max must be > 0".to_string());
+        }
+        if let Some(t) = self.peer_restart_time_max
+            && t > 4095
+        {
+            return Err(format!(
+                "gr_peer_restart_time_max {t} exceeds 4095 (12-bit max)"
+            ));
+        }
+        if let Some(0) = self.stale_routes_time {
+            return Err("gr_stale_routes_time must be > 0".to_string());
+        }
+        if let Some(t) = self.stale_routes_time
+            && t > 3600
+        {
+            return Err(format!(
+                "gr_stale_routes_time {t} exceeds 3600 (1 hour max)"
+            ));
+        }
+        if let Some(t) = self.llgr_stale_time
+            && t > 16_777_215
+        {
+            return Err(format!("llgr_stale_time {t} exceeds 16777215 (24-bit max)"));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 enum PeerModeViolation {
     RouteReflector(String),
@@ -784,75 +864,9 @@ impl Config {
                     .or_else(|| group.and_then(|g| g.log_level.as_deref())),
             )?;
 
-            // Validate GR config
-            let gr_enabled = neighbor
-                .graceful_restart
-                .or_else(|| group.and_then(|g| g.graceful_restart))
-                .unwrap_or(true);
-            if let Some(t) = neighbor
-                .gr_restart_time
-                .or_else(|| group.and_then(|g| g.gr_restart_time))
-                && t > 4095
-            {
-                return Err(ConfigError::InvalidGrConfig {
-                    reason: format!("gr_restart_time {t} exceeds 4095 (12-bit max)"),
-                });
-            }
-            if let Some(0) = neighbor
-                .gr_restart_time
-                .or_else(|| group.and_then(|g| g.gr_restart_time))
-                && gr_enabled
-            {
-                return Err(ConfigError::InvalidGrConfig {
-                    reason: "gr_restart_time must be > 0 when graceful_restart is enabled"
-                        .to_string(),
-                });
-            }
-            if let Some(t) = neighbor
-                .gr_peer_restart_time_max
-                .or_else(|| group.and_then(|g| g.gr_peer_restart_time_max))
-                && t == 0
-            {
-                return Err(ConfigError::InvalidGrConfig {
-                    reason: "gr_peer_restart_time_max must be > 0".to_string(),
-                });
-            }
-            if let Some(t) = neighbor
-                .gr_peer_restart_time_max
-                .or_else(|| group.and_then(|g| g.gr_peer_restart_time_max))
-                && t > 4095
-            {
-                return Err(ConfigError::InvalidGrConfig {
-                    reason: format!("gr_peer_restart_time_max {t} exceeds 4095 (12-bit max)"),
-                });
-            }
-            if let Some(t) = neighbor
-                .gr_stale_routes_time
-                .or_else(|| group.and_then(|g| g.gr_stale_routes_time))
-                && t == 0
-            {
-                return Err(ConfigError::InvalidGrConfig {
-                    reason: "gr_stale_routes_time must be > 0".to_string(),
-                });
-            }
-            if let Some(t) = neighbor
-                .gr_stale_routes_time
-                .or_else(|| group.and_then(|g| g.gr_stale_routes_time))
-                && t > 3600
-            {
-                return Err(ConfigError::InvalidGrConfig {
-                    reason: format!("gr_stale_routes_time {t} exceeds 3600 (1 hour max)"),
-                });
-            }
-            if let Some(t) = neighbor
-                .llgr_stale_time
-                .or_else(|| group.and_then(|g| g.llgr_stale_time))
-                && t > 16_777_215
-            {
-                return Err(ConfigError::InvalidGrConfig {
-                    reason: format!("llgr_stale_time {t} exceeds 16777215 (24-bit max)"),
-                });
-            }
+            EffectiveGracefulRestartTimers::for_neighbor(neighbor, group)
+                .validate()
+                .map_err(|reason| ConfigError::InvalidGrConfig { reason })?;
 
             // Validate local_ipv6_nexthop if configured
             if let Some(nh) = neighbor
@@ -2679,64 +2693,11 @@ fn validate_peer_group(
 
     validate_log_level(group.log_level.as_deref())?;
 
-    let gr_enabled = group.graceful_restart.unwrap_or(true);
-    if let Some(t) = group.gr_restart_time
-        && t > 4095
-    {
-        return Err(ConfigError::InvalidGrConfig {
-            reason: format!("peer_group {name:?}: gr_restart_time {t} exceeds 4095 (12-bit max)"),
-        });
-    }
-    if let Some(0) = group.gr_restart_time
-        && gr_enabled
-    {
-        return Err(ConfigError::InvalidGrConfig {
-            reason: format!(
-                "peer_group {name:?}: gr_restart_time must be > 0 when graceful_restart is enabled"
-            ),
-        });
-    }
-    if let Some(t) = group.gr_peer_restart_time_max
-        && t == 0
-    {
-        return Err(ConfigError::InvalidGrConfig {
-            reason: format!("peer_group {name:?}: gr_peer_restart_time_max must be > 0"),
-        });
-    }
-    if let Some(t) = group.gr_peer_restart_time_max
-        && t > 4095
-    {
-        return Err(ConfigError::InvalidGrConfig {
-            reason: format!(
-                "peer_group {name:?}: gr_peer_restart_time_max {t} exceeds 4095 (12-bit max)"
-            ),
-        });
-    }
-    if let Some(t) = group.gr_stale_routes_time
-        && t == 0
-    {
-        return Err(ConfigError::InvalidGrConfig {
-            reason: format!("peer_group {name:?}: gr_stale_routes_time must be > 0"),
-        });
-    }
-    if let Some(t) = group.gr_stale_routes_time
-        && t > 3600
-    {
-        return Err(ConfigError::InvalidGrConfig {
-            reason: format!(
-                "peer_group {name:?}: gr_stale_routes_time {t} exceeds 3600 (1 hour max)"
-            ),
-        });
-    }
-    if let Some(t) = group.llgr_stale_time
-        && t > 16_777_215
-    {
-        return Err(ConfigError::InvalidGrConfig {
-            reason: format!(
-                "peer_group {name:?}: llgr_stale_time {t} exceeds 16777215 (24-bit max)"
-            ),
-        });
-    }
+    EffectiveGracefulRestartTimers::for_peer_group(group)
+        .validate()
+        .map_err(|reason| ConfigError::InvalidGrConfig {
+            reason: format!("peer_group {name:?}: {reason}"),
+        })?;
 
     if let Some(nh) = group.local_ipv6_nexthop.as_deref() {
         let addr = nh
