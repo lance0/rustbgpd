@@ -85,11 +85,11 @@ id matches the milestone. Full procedures: [`INTEROP.md`](INTEROP.md).
 | M95 | ADR-0112 live RFC 8212 policy-presence transitions: Route Refresh qualification, whole-edit rejection with nothing mutated, real refresh convergence in both directions, and GR-stale deferral | FRR 10.3.1 + BIRD 2.0.12 (Route Refresh disabled) |
 | M98 | [IXP Manager Nagios monitoring](INTEROP.md#ixp-manager-v74-manual-configuration-oracle): the pinned v7.4 `birdseye-daemons` and `birdseye-bgp-sessions` generators include the rustbgpd route server (host, service, hostgroup, both client session services with rendered alias names), and the pinned Bird's Eye daemon plugin reports `OK` with `Last Reconfigure` against the live adapter; gated by `ixp-compat.yml` | IXP Manager v7.4.0 + Bird's Eye v2.1.0 plugin + live `birdwatcher-adapter` |
 
-## Interop labs — kernel dataplane, PR + push (`kernel-dataplane.yml`)
+## Interop labs — kernel dataplane, PR + push + manual (`kernel-dataplane.yml`)
 
 Privileged containerlab/netns receipts on hosted runners via
 [`.github/workflows/kernel-dataplane.yml`](../.github/workflows/kernel-dataplane.yml)
-(PRs, pushes to `main`, manual dispatch). Kernel claims are
+(lab-relevant PRs, non-documentation pushes to `main`, manual dispatch). Kernel claims are
 proved with kernel evidence (routes, FDB rows, nexthop groups, netdev state).
 
 | Receipt | Proves | Peer stack |
@@ -212,8 +212,8 @@ artifacts under [`artifacts/soak/`](artifacts/soak/). Harnesses live in
 | Workflow | Trigger | What it re-proves |
 |----------|---------|-------------------|
 | [`ci.yml`](../.github/workflows/ci.yml) | every PR / push | fmt, clippy (warnings denied), workspace tests, rustdoc, kernel-primitive gate, the exact fail-closed 19-target fuzz inventory, and bounded timing/diagnostic MRT snapshot-allocation bench smokes |
-| [`interop.yml`](../.github/workflows/interop.yml) | every PR / push | The PR-gated M-series table above, one containerlab job per milestone |
-| [`kernel-dataplane.yml`](../.github/workflows/kernel-dataplane.yml) | PR, push, manual dispatch | Privileged EVPN/FIB/BFD/TCP-AO dataplane receipts + netns selectors |
+| [`interop.yml`](../.github/workflows/interop.yml) | lab-relevant PR / non-documentation push | The PR-gated M-series table above, one containerlab job per milestone |
+| [`kernel-dataplane.yml`](../.github/workflows/kernel-dataplane.yml) | lab-relevant PR / non-documentation push / manual dispatch | Privileged EVPN/FIB/BFD/TCP-AO dataplane receipts + netns selectors |
 | [`fuzz.yml`](../.github/workflows/fuzz.yml) | nightly 04:00 UTC + manual dispatch | The sole scheduled 19-target campaign: libFuzzer wire, policy, EVPN route-target, MRT/warm-bundle, BFD, and RTR harnesses |
 | [`clusterfuzzlite.yml`](../.github/workflows/clusterfuzzlite.yml) | manual dispatch | On-demand official ClusterFuzzLite address-sanitized code-change fuzzing for the exact 19-target inventory; not a PR or scheduled gate |
 | [`audit.yml`](../.github/workflows/audit.yml) | daily 06:00 UTC | `cargo audit` / dependency advisories |

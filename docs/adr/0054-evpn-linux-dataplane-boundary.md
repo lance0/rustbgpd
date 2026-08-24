@@ -539,7 +539,7 @@ What landed in PR #34:
   withdraw cleans up. 8/8 rows pass.
 - **Privileged netns dataplane test** (`crates/evpn-linux/tests/netns_dataplane.rs`)
   gated on `EVPN_LINUX_NETNS=1`; exact selectors now run in Kernel Dataplane
-  for PRs, pushes to `main`, and manual dispatch.
+  for lab-relevant PRs, non-documentation pushes to `main`, and manual dispatch.
 
 Total: 1493 workspace tests + 8/8 M36 smoke at the time of PR #34.
 

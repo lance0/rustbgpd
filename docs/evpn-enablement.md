@@ -509,7 +509,7 @@ re-originate routes after it.
 | Errno classification (EPERM/EACCES → `PermissionDenied`; EOPNOTSUPP → `KernelTooOld`; EINVAL → `InvalidArgument`) | `crates/evpn-linux/src/linux/fdb.rs` | landed (PR #34) |
 | EVPN supervisor: project RIB EVPN routes → `RemoteMacTable`, publish `DataplaneIntent` only on semantic change (no per-poll generation churn) | `src/evpn_dataplane.rs` | landed (PR #34) |
 | M36 containerlab smoke: rustbgpd-as-VTEP + FRR-as-originator (iBGP, AS 65000); verifies bridge-master row + VXLAN-self+dst row both carry `extern_learn`, foreign-static survives, withdraw cleans up. 8/8 PASS. | `tests/interop/scripts/test-m36-evpn-vtep-smoke.sh` | landed (PR #34) |
-| Privileged netns dataplane proofs (gated on `EVPN_LINUX_NETNS=1`; exact selectors run in Kernel Dataplane for PRs, pushes to `main`, and manual dispatch) | `crates/evpn-linux/tests/netns_dataplane.rs` | landed (PR #34) |
+| Privileged netns dataplane proofs (gated on `EVPN_LINUX_NETNS=1`; exact selectors run in Kernel Dataplane for lab-relevant PRs, non-documentation pushes to `main`, and manual dispatch) | `crates/evpn-linux/tests/netns_dataplane.rs` | landed (PR #34) |
 
 **Origination loop (Gate 7b+1, v0.15.0):**
 
