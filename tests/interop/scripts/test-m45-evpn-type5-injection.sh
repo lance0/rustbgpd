@@ -161,7 +161,7 @@ if wait_frr_type5_present 30; then
     ok "FRR EVPN RIB contains injected ${PREFIX}/${PREFIX_LEN}"
 else
     fail "FRR never received the injected Type 5 within 30s"
-    frr_type5_routes >&2
+    frr_type5_routes >&2 || true
 fi
 
 # Test 4b: the received route carries the right next-hop + route-target.
@@ -199,7 +199,7 @@ if wait_frr_type5_absent 20; then
     ok "FRR dropped ${PREFIX}/${PREFIX_LEN} after withdrawal"
 else
     fail "FRR still shows ${PREFIX}/${PREFIX_LEN} 20s after withdrawal"
-    frr_type5_routes >&2
+    frr_type5_routes >&2 || true
 fi
 
 # Test 6: overlay-index Gateway Address injection — still control-plane only,
@@ -227,7 +227,7 @@ if wait_frr_type5_present 30 "$OVERLAY_PREFIX"; then
     ok "FRR EVPN RIB contains overlay-index ${OVERLAY_PREFIX}/${OVERLAY_PREFIX_LEN}"
 else
     fail "FRR never received overlay-index Type 5 within 30s"
-    frr_type5_routes >&2
+    frr_type5_routes >&2 || true
 fi
 
 log "[test] Withdrawal: DeleteEvpnRoute removes the overlay-index Type 5"
@@ -241,7 +241,7 @@ if wait_frr_type5_absent 20 "$OVERLAY_PREFIX"; then
     ok "FRR dropped overlay-index ${OVERLAY_PREFIX}/${OVERLAY_PREFIX_LEN} after withdrawal"
 else
     fail "FRR still shows overlay-index ${OVERLAY_PREFIX}/${OVERLAY_PREFIX_LEN} 20s after withdrawal"
-    frr_type5_routes >&2
+    frr_type5_routes >&2 || true
 fi
 
 print_summary
