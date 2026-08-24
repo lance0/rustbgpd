@@ -34,7 +34,7 @@ Single-task ownership — `RibManager` runs as one tokio task with no
 ## Key types
 
 - **`RibManager`** — event loop processing `RibUpdate` messages
-- **`AdjRibIn`** — per-peer inbound route table
+- **`adj_rib_in::AdjRibIn`** — per-peer inbound route table
 - **`Route`** — prefix + attributes + metadata (path_id, validation_state, stale flags)
 - **`best_path_cmp()`** — standalone comparison function (not `Ord` on `Route`)
 
