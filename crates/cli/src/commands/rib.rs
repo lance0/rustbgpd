@@ -2298,7 +2298,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_route_completeness_uses_only_the_optional_eviction_count() {
+    fn rejected_route_completeness_notice_matches_the_cli_readme() {
         let mut response = ListRejectedRoutesResponse {
             capacity: 2,
             routes: vec![Default::default(), Default::default()],
@@ -2306,18 +2306,36 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(rejected_routes_completeness_notice(&response), None);
+
         response.evictions_since_reset = Some(3);
-        assert!(
-            rejected_routes_completeness_notice(&response)
-                .unwrap()
-                .contains("3 older rejected route(s)")
+        let known_evictions = rejected_routes_completeness_notice(&response).unwrap();
+        assert_eq!(
+            known_evictions,
+            "WARNING: 3 older rejected route(s) were evicted since session reset; this listing may be incomplete"
         );
+
         response.evictions_since_reset = None;
-        assert!(
-            rejected_routes_completeness_notice(&response)
-                .unwrap()
-                .contains("completeness is unknown")
+        let unknown_evictions = rejected_routes_completeness_notice(&response).unwrap();
+        assert_eq!(
+            unknown_evictions,
+            "WARNING: rejected-route eviction count is unavailable from this daemon; listing completeness is unknown"
         );
+
+        let readme = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"));
+        assert!(readme.contains(&known_evictions));
+        assert!(readme.contains(&unknown_evictions));
+        assert!(readme.contains("`evictions_since_reset`"));
+
+        let normalized_readme = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized_readme.contains(
+            "`rib received <addr> --rejected` reads a bounded per-peer retention buffer, not a guaranteed complete history of rejected routes."
+        ));
+        assert!(normalized_readme.contains(
+            "JSON output exposes `evictions_since_reset`: zero means no eviction has occurred since the session reset, while a nonzero value means the listing may be incomplete."
+        ));
+        assert!(normalized_readme.contains(
+            "A `null` value means the daemon did not report completeness; it is compatibility evidence from an older or otherwise unreporting daemon, not the normal output from a current server."
+        ));
     }
 
     #[tokio::test]
