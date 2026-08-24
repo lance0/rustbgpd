@@ -246,7 +246,8 @@ on stdout, 2 refused. Per-incumbent capture prerequisites, view
 limitations, and worked examples live in the
 [route-server migration cookbook](cookbook/route-server-migration.md#capturing-the-incumbents-advertised-view).
 
-### `rbgp diff snapshot from-mrt` and the `--view` contract
+<a id="rbgp-diff-snapshot-from-mrt-and-the---view-contract"></a>
+### MRT snapshot view contract
 
 RFC 6396 `TABLE_DUMP_V2` is, by default, a **collector RIB view** — best
 paths as seen by a collector, not what any client was sent after export
@@ -271,7 +272,10 @@ RFC 8050 Add-Path entries carry their path identifier through as
 `path_id`. Extended and large communities are emitted from the raw
 attribute bytes.
 
-### `rbgp diff snapshot from-bmp` — RFC 8671 post-policy BMP captures
+<a id="rbgp-diff-snapshot-from-bmp--rfc-8671-post-policy-bmp-captures"></a>
+### BMP post-policy snapshots
+
+`rbgp diff snapshot from-bmp` consumes RFC 8671 post-policy BMP captures.
 
 If the incumbent exports BMP with the RFC 8671 post-policy Adj-RIB-Out
 view enabled, its own BMP feed is a wire-true source of what it sent

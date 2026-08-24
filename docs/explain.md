@@ -35,7 +35,8 @@ For operators coming from FRR/BIRD, the
 [familiar command map](../crates/cli/README.md#familiar-command-map)
 translates the usual show-commands into these.
 
-## Best-path explain — decisive-comparison attribution
+<a id="best-path-explain--decisive-comparison-attribution"></a>
+## Best-path explain
 
 Why did this path win? Every losing candidate is annotated with the
 decisive comparison step (`only_path`, `higher_local_pref`,
@@ -78,7 +79,8 @@ an unresolved vantage, or an explanation without `--explain-peer` retains
 the ordinary global Loc-RIB ladder.
 Details: [OPERATIONS.md](OPERATIONS.md#explain-a-best-path-decision).
 
-## Export explain — the full gate ladder, from the real export body
+<a id="export-explain--the-full-gate-ladder-from-the-real-export-body"></a>
+## Export explain
 
 Why did (or didn't) this exact prefix reach this exact peer? The
 answer is produced by a read-only dry run of the *same staging body*
@@ -126,7 +128,8 @@ policy-permitted rank. It stays 0 before ranking or beyond `send_max`; an OTC
 or exact-wire denial after ranking retains the attempted rank. Omit the flags
 for the legacy winner-oriented explanation.
 
-### ORR: why two clients received different winners
+<a id="orr-why-two-clients-received-different-winners"></a>
+### ORR client differences
 
 For an ORR client, the advertised-route explanation ranks the same
 split-horizon/RR-eligible candidates as live distribution, using that target's
@@ -149,7 +152,8 @@ resolves to its own address; different clients can therefore select different
 winners for the same prefix. Run the advertised explanation once per client,
 then use `--explain-peer <client>` for the candidate-by-candidate comparison.
 
-## Import explain — the per-session decision cache
+<a id="import-explain--the-per-session-decision-cache"></a>
+## Import explain
 
 What did import policy decide when this prefix arrived from this
 peer — including paths that were denied and are therefore *not in the
@@ -196,7 +200,8 @@ Details:
 and
 [OPERATIONS.md](OPERATIONS.md#explain-an-import-decision-adr-0073).
 
-## The filtered-route view — rejected routes, retained with reasons
+<a id="the-filtered-route-view--rejected-routes-retained-with-reasons"></a>
+## Filtered routes
 
 The route-server member-support question — "you're eating my
 routes, which ones and why?" — without knowing a prefix in advance.

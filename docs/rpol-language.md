@@ -1252,7 +1252,10 @@ import: there is no filesystem to resolve against, and the diagnostic
 says so. Check import-using files with `rbgp policy check`; the daemon
 resolves them at config load / SIGHUP.
 
-### Migration example — extracting a shared library
+<a id="migration-example--extracting-a-shared-library"></a>
+### Migration example
+
+This example extracts a repeated bogon set into a shared library.
 
 ```rpol
 # Before: every edge policy file carries its own bogon list.
