@@ -16,8 +16,11 @@
 //!    - a unique collect-metadata / SVD VXLAN member whose bridge VLAN
 //!      tunnel mapping ties `VID` to the instance VNI.
 //!      The bridge and selected VXLAN member must both carry `VID`.
-//! 4. In both shapes, the VXLAN port's `local` source IP matches
-//!    `local_vtep_ip` and kernel learning is disabled.
+//! 4. A fixed-VNI member's `local` source IP must match `local_vtep_ip`.
+//!    An SVD member may omit `local`, but any reported address must match.
+//! 5. Both shapes require kernel learning to be disabled; SVD also requires
+//!    `vnifilter`. A fixed-VNI member with the instance VNI and an SVD member
+//!    with the matching VLAN/tunnel mapping are ambiguous before selection.
 //!
 //! Any failed check produces `NotReady` with an operator-facing
 //! reason. Instances with `bridge = None` produce `Unbound` and are
@@ -534,6 +537,65 @@ mod tests {
         let inst = instance_with_vlan(100, "br100", "10.0.0.1", 10);
         let cache = cache_with("br100", svd_vlan_aware_link(100, 10, true));
         assert_eq!(probe_one(&inst, &cache), InstanceProbe::Ready);
+    }
+
+    #[test]
+    fn svd_local_ip_is_optional_but_must_match_when_reported() {
+        let inst = instance_with_vlan(100, "br100", "10.0.0.1", 10);
+
+        let absent = cache_with("br100", svd_vlan_aware_link(100, 10, true));
+        assert_eq!(probe_one(&inst, &absent), InstanceProbe::Ready);
+
+        let mut matching_link = svd_vlan_aware_link(100, 10, true);
+        matching_link.svd_vxlan_ports[0].local_ip = Some(ipa("10.0.0.1"));
+        let matching = cache_with("br100", matching_link);
+        assert_eq!(probe_one(&inst, &matching), InstanceProbe::Ready);
+
+        let mut mismatching_link = svd_vlan_aware_link(100, 10, true);
+        mismatching_link.svd_vxlan_ports[0].local_ip = Some(ipa("10.0.0.2"));
+        let mismatching = cache_with("br100", mismatching_link);
+        match probe_one(&inst, &mismatching) {
+            InstanceProbe::NotReady { reason } => {
+                assert!(reason.contains("local IP 10.0.0.2 does not match"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn evpn_vtep_setup_documents_svd_readiness_contract() {
+        const START: &str = "### L2VNI readiness predicates (ADR-0054 §4)";
+        const END: &str = "### MAC+IP origination (ARP/ND suppression)";
+
+        let docs = include_str!("../../../../docs/evpn-vtep-setup.md");
+        assert_eq!(docs.matches(START).count(), 1, "unique section start");
+        assert_eq!(docs.matches(END).count(), 1, "unique section end");
+        let (_, after_start) = docs.split_once(START).expect("readiness section start");
+        let (section, _) = after_start.split_once(END).expect("readiness section end");
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert_eq!(section.matches("| 2c |").count(), 1, "unique SVD row");
+        for clause in [
+            "`bridge_vlan` (fixed-VNI)",
+            "`bridge_vlan` (SVD / collect-metadata)",
+            "maps the configured bridge VLAN to the instance VNI",
+            "exactly one matching VXLAN target",
+            "`vnifilter`",
+            "`nolearning`",
+            "SVD `local` is optional; when reported, it equals",
+            "any fixed-VNI member has the instance VNI",
+            "an SVD member's VLAN/tunnel mapping binds the configured VLAN to that VNI",
+            "both target shapes are present",
+            "`NotReady`",
+            "`[[managed_netdevs.svd_vxlans]]`",
+        ] {
+            assert!(
+                section.contains(clause),
+                "missing readiness clause: {clause}"
+            );
+        }
+
+        let _: fn(&EvpnInstance, &str, &BridgeLink, u16) -> InstanceProbe = probe_vlan_aware_bridge;
     }
 
     #[test]

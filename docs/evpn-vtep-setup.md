@@ -101,10 +101,18 @@ instance `Ready` only when all hold (otherwise `NotReady{reason}`):
 |---|-----------|--------------|
 | 1 | `bridge` exists in the kernel | `ip link add … type bridge` |
 | 2a | without `bridge_vlan`: bridge is **not** VLAN-aware (`vlan_filtering=0`) and has exactly one VXLAN port | `type bridge vlan_filtering 0`; one `set master ${BRIDGE}` |
-| 2b | with `bridge_vlan`: bridge is VLAN-aware (`vlan_filtering=1`), exactly one VXLAN member has the instance VNI, and the configured VLAN is present on both bridge and VXLAN member | `type bridge vlan_filtering 1`; `bridge vlan add dev ${BRIDGE} vid ${VID} self`; `bridge vlan add dev ${VXLAN} vid ${VID}` |
-| 3 | VXLAN `IFLA_VXLAN_ID` == instance `vni` | `id ${VNI}` |
-| 4 | VXLAN local IP == instance `local_vtep_ip` | `local ${LOCAL_IP}` |
-| 5 | VXLAN `nolearning` (learning disabled) | `nolearning` |
+| 2b | with `bridge_vlan` (fixed-VNI): bridge is VLAN-aware (`vlan_filtering=1`), exactly one fixed-VNI member has the instance VNI, and the configured VLAN is present on both bridge and member | `type bridge vlan_filtering 1`; `bridge vlan add dev ${BRIDGE} vid ${VID} self`; `bridge vlan add dev ${VXLAN} vid ${VID}` |
+| 2c | with `bridge_vlan` (SVD / collect-metadata): bridge is VLAN-aware, the configured VLAN is present on both bridge and SVD member, and exactly one member maps the configured bridge VLAN to the instance VNI | `[[managed_netdevs.svd_vxlans]]`; bridge VLAN/tunnel mapping |
+| 3 | fixed-VNI target: VXLAN `IFLA_VXLAN_ID` == instance `vni`; SVD target: the row 2c VLAN/tunnel mapping supplies the VNI | `id ${VNI}` or the exact VLAN/tunnel mapping |
+| 4 | fixed-VNI `local` == instance `local_vtep_ip`; SVD `local` is optional; when reported, it equals `local_vtep_ip` | `local ${LOCAL_IP}`, or omit it for SVD |
+| 5 | selected VXLAN has `nolearning` (learning disabled); SVD also has `vnifilter` | `nolearning`; SVD `vnifilter` |
+
+For `bridge_vlan`, the probe requires exactly one matching VXLAN target. If any
+fixed-VNI member has the instance VNI while an SVD member's VLAN/tunnel mapping
+binds the configured VLAN to that VNI, both target shapes are present; the probe
+reports `NotReady` before choosing either. For managed creation or adoption of
+the SVD shape, see `[[managed_netdevs.svd_vxlans]]` in
+[CONFIGURATION.md](CONFIGURATION.md).
 
 (No `bridge` configured ⇒ `Unbound`, not `NotReady`.)
 
