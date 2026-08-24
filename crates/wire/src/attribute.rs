@@ -6063,6 +6063,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn revised_only_to_customer_truncated_framing_retains_type_and_disposition() {
+        let cases = [
+            ("ordinary length", &[0xc0, 35][..]),
+            ("ordinary value", &[0xc0, 35, 4, 0, 0, 1][..]),
+            ("extended length", &[0xd0, 35, 0][..]),
+            ("extended value", &[0xd0, 35, 0, 4, 0, 0, 1][..]),
+        ];
+        for (case, wire) in cases {
+            let decoded = decode_path_attributes_revised(wire, true, false, &[]).unwrap();
+            assert!(decoded.attributes.is_empty(), "{case}");
+            let [malformed] = decoded.malformed.as_slice() else {
+                panic!("{case}: expected exactly one malformed OTC record");
+            };
+            assert_eq!(malformed.type_code, attr_type::ONLY_TO_CUSTOMER, "{case}");
+            assert_eq!(
+                malformed.disposition,
+                ErrorDisposition::TreatAsWithdraw,
+                "{case}"
+            );
+            assert!(
+                matches!(malformed.error, DecodeError::MalformedField { .. }),
+                "{case}: truncated framing must retain MalformedField metadata"
+            );
+        }
+    }
+
     // -----------------------------------------------------------------
     // RFC 7606 revised error handling — decode_path_attributes_revised
     // -----------------------------------------------------------------

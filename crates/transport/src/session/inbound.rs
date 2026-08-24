@@ -1300,15 +1300,16 @@ impl PeerSession {
         // generic RFC 7606 malformed-update disposition. The codec omits the
         // bad attribute, so derive this solely from its revised metadata;
         // critically, this happens before and independently of BGP Roles.
-        let malformed_otc_length = malformed.iter().any(|malformed| {
-            malformed.type_code == rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER
-                && matches!(
-                    &malformed.error,
-                    rustbgpd_wire::DecodeError::UpdateAttributeError { subcode, .. }
-                        if *subcode
-                            == rustbgpd_wire::notification::update_subcode::ATTRIBUTE_LENGTH_ERROR
-                )
-        });
+        let malformed_otc_length =
+            malformed.iter().any(|malformed| {
+                malformed.type_code == rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER
+                    && match &malformed.error {
+                        rustbgpd_wire::DecodeError::UpdateAttributeError { subcode, .. } => *subcode
+                            == rustbgpd_wire::notification::update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                        rustbgpd_wire::DecodeError::MalformedField { .. } => true,
+                        _ => false,
+                    }
+            });
         if malformed_otc_length {
             self.observe_otc_ingress_block(&parsed, OtcBlockReason::MalformedLength);
         }

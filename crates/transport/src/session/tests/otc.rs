@@ -4,6 +4,33 @@ fn otc(asn: u32) -> PathAttribute {
     PathAttribute::OnlyToCustomer(asn)
 }
 
+fn otc_routes_blocked_count(session: &PeerSession, reason: &str) -> u64 {
+    session
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_otc_routes_blocked_total")
+        .and_then(|family| {
+            family.get_metric().iter().find_map(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "reason" && label.value() == reason)
+                    .then(|| {
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_sign_loss,
+                            reason = "Prometheus counters are monotonic non-negative integers exposed as f64"
+                        )]
+                        let value = metric.get_counter().value() as u64;
+                        value
+                    })
+            })
+        })
+        .unwrap_or(0)
+}
+
 #[test]
 fn otc_egress_adds_local_asn_for_provider_peer_and_route_server() {
     for role in [BgpRole::Provider, BgpRole::Peer, BgpRole::RouteServer] {
@@ -542,6 +569,7 @@ async fn otc_ingress_wrong_flags_are_role_independent_treat_as_withdraw() {
             data: Bytes::copy_from_slice(value),
         }));
         let blocked_before = session.otc_routes_blocked;
+        let malformed_counter_before = otc_routes_blocked_count(&session, "malformed_length");
         session
             .process_update(UpdateMessage::build(
                 &[Ipv4NlriEntry { path_id: 0, prefix }],
@@ -566,6 +594,11 @@ async fn otc_ingress_wrong_flags_are_role_independent_treat_as_withdraw() {
         assert_eq!(
             session.otc_routes_blocked, blocked_before,
             "flags errors must not be mislabeled malformed_length"
+        );
+        assert_eq!(
+            otc_routes_blocked_count(&session, "malformed_length"),
+            malformed_counter_before,
+            "flags errors must not increment the malformed_length metric"
         );
         assert_single_malformed_disposition(&session, "treat_as_withdraw");
     }
@@ -729,6 +762,74 @@ async fn otc_ingress_malformed_publishes_structured_event_with_no_otc_value() {
 }
 
 #[tokio::test]
+async fn otc_ingress_truncated_framing_publishes_malformed_length_diagnostics() {
+    let cases = [
+        ("ordinary length", &[0xc0, 35][..]),
+        ("ordinary value", &[0xc0, 35, 4, 0, 0, 1][..]),
+        ("extended length", &[0xd0, 35, 0][..]),
+        ("extended value", &[0xd0, 35, 0, 4, 0, 0, 1][..]),
+    ];
+    for (index, (case, malformed_otc)) in cases.into_iter().enumerate() {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        session.config.peer.local_role = None;
+        let (client, _server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        rfc7606_drain(&mut rib_rx);
+        let sink = install_recording_sink(&mut session);
+        let prefix = Ipv4Prefix::new(
+            Ipv4Addr::new(203, 0, 113, u8::try_from(index + 1).unwrap()),
+            32,
+        );
+
+        session
+            .process_update(rfc7606_update(rfc7606_attr_bytes(&[]), &[prefix]))
+            .await;
+        assert!(
+            matches!(
+                rib_rx.try_recv(),
+                Ok(RibUpdate::RoutesReceived { announced, .. }) if announced.len() == 1
+            ),
+            "{case}: expected the clean route to be accepted"
+        );
+
+        let blocked_before = session.otc_routes_blocked;
+        let malformed_counter_before = otc_routes_blocked_count(&session, "malformed_length");
+        session
+            .process_update(rfc7606_update(rfc7606_attr_bytes(malformed_otc), &[prefix]))
+            .await;
+        let RibUpdate::RoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = rib_rx.try_recv().unwrap()
+        else {
+            panic!("{case}: truncated OTC framing must reach the RIB as a withdrawal");
+        };
+        assert!(announced.is_empty(), "{case}");
+        assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)], "{case}");
+        assert_eq!(session.otc_routes_blocked, blocked_before + 1, "{case}");
+        assert_eq!(
+            otc_routes_blocked_count(&session, "malformed_length"),
+            malformed_counter_before + 1,
+            "{case}"
+        );
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 1, "{case}");
+        assert_eq!(
+            events[0].reason,
+            rustbgpd_telemetry::reason_labels::OtcBlockReason::MalformedLength,
+            "{case}"
+        );
+        assert_eq!(events[0].prefixes, vec![prefix.to_string()], "{case}");
+        assert_eq!(events[0].local_role, None, "{case}");
+        assert_eq!(events[0].otc_value, None, "{case}");
+        assert_eq!(session.fsm.state(), SessionState::Established, "{case}");
+        assert_single_malformed_disposition(&session, "treat_as_withdraw");
+    }
+}
+
+#[tokio::test]
 async fn otc_ingress_event_collects_mp_reach_v6_prefixes() {
     // Regression: the event's prefix list must include IPv6 unicast
     // MP_REACH_NLRI announcements, not just IPv4 body NLRI. Otherwise
@@ -790,32 +891,16 @@ async fn otc_ingress_malformed_without_reachable_nlri_resets_without_block_event
     rfc7606_drain(&mut rib_rx);
     let sink = install_recording_sink(&mut session);
     let baseline_blocked = session.otc_routes_blocked;
+    let baseline_malformed_counter = otc_routes_blocked_count(&session, "malformed_length");
     let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
-    let attrs = vec![
-        PathAttribute::Origin(Origin::Igp),
-        PathAttribute::AsPath(AsPath {
-            segments: vec![AsPathSegment::AsSequence(vec![65002])],
-        }),
-        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-        PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
-            flags: rustbgpd_wire::constants::attr_flags::OPTIONAL
-                | rustbgpd_wire::constants::attr_flags::TRANSITIVE,
-            type_code: rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER,
-            data: Bytes::from_static(&[0, 0, 0]),
-        }),
-    ];
+    let mut withdrawn = Vec::new();
+    rustbgpd_wire::nlri::encode_nlri(&[withdrawn_prefix], &mut withdrawn);
     // No announced NLRI — only the withdrawal.
-    let update = UpdateMessage::build(
-        &[],
-        &[Ipv4NlriEntry {
-            path_id: 0,
-            prefix: withdrawn_prefix,
-        }],
-        &attrs,
-        true,
-        false,
-        Ipv4UnicastMode::Body,
-    );
+    let update = UpdateMessage {
+        withdrawn_routes: Bytes::from(withdrawn),
+        path_attributes: Bytes::from(rfc7606_attr_bytes(&[0xc0, 35])),
+        nlri: Bytes::new(),
+    };
     session.process_update(update).await;
     assert!(
         sink.snapshot().is_empty(),
@@ -824,6 +909,11 @@ async fn otc_ingress_malformed_without_reachable_nlri_resets_without_block_event
     assert_eq!(
         session.otc_routes_blocked, baseline_blocked,
         "rejected=0 must not bump the per-peer counter"
+    );
+    assert_eq!(
+        otc_routes_blocked_count(&session, "malformed_length"),
+        baseline_malformed_counter,
+        "no reachable NLRI must not bump the malformed_length metric"
     );
     assert_ne!(session.fsm.state(), SessionState::Established);
     while let Ok(update) = rib_rx.try_recv() {
