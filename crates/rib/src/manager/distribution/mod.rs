@@ -48,6 +48,29 @@ mod vpn;
 
 pub(in crate::manager) use export_memo::ExportMemo;
 
+/// Owned output channels produced by one or more unicast distribution walks.
+///
+/// Keeping the route, withdrawal, next-hop, and policy-filtered channels in
+/// one value makes their association explicit while allowing callers to
+/// retain and reuse the same backing vectors across a complete staging pass.
+pub(in crate::manager) struct UnicastDistributionResult<P = PolicyFilteredRouteKey> {
+    pub(in crate::manager) announce: Vec<crate::route::Route>,
+    pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
+    pub(in crate::manager) next_hop_override: Vec<Option<rustbgpd_policy::NextHopAction>>,
+    pub(in crate::manager) policy_filtered: Vec<P>,
+}
+
+impl<P> Default for UnicastDistributionResult<P> {
+    fn default() -> Self {
+        Self {
+            announce: Vec::new(),
+            withdraw: Vec::new(),
+            next_hop_override: Vec::new(),
+            policy_filtered: Vec::new(),
+        }
+    }
+}
+
 /// Maximum wire-equivalence cohorts retained for one update group.
 ///
 /// Eight covers the small set of negotiated/profile variants expected inside
@@ -4655,9 +4678,7 @@ impl RibManager {
 
             #[cfg(feature = "bench-internals")]
             let bench_staging_started = bench_per_client_best_resync.then(std::time::Instant::now);
-            let mut announce = Vec::new();
-            let mut withdraw = Vec::new();
-            let mut nh_override_flags: Vec<Option<rustbgpd_policy::NextHopAction>> = Vec::new();
+            let mut unicast = UnicastDistributionResult::default();
             // Set for an in-sync grouped member covered by the group's
             // pre-built shared emission: the announce payload is an Arc
             // clone shared across members, not a per-member Vec build.
@@ -4714,9 +4735,9 @@ impl RibManager {
                             self.pending_extra_withdraws
                                 .get(&peer)
                                 .map(|extras| &extras.unicast),
-                            &mut announce,
-                            &mut withdraw,
-                            &mut nh_override_flags,
+                            &mut unicast.announce,
+                            &mut unicast.withdraw,
+                            &mut unicast.next_hop_override,
                         );
                         // VPN portion of the resync, from the group's VPN
                         // maps under the member's Φ; the per-peer VPN
@@ -4755,15 +4776,15 @@ impl RibManager {
                             // the shared emission — enqueue Arc clones.
                             shared_unicast =
                                 Some((stage.shared_announce.clone(), stage.shared_nh.clone()));
-                            withdraw.extend_from_slice(&stage.shared_withdraw);
+                            unicast.withdraw.extend_from_slice(&stage.shared_withdraw);
                         } else {
                             super::update_groups::emit_group_deltas_for_member(
                                 &stage.deltas,
                                 peer,
                                 rs_control,
-                                &mut announce,
-                                &mut withdraw,
-                                &mut nh_override_flags,
+                                &mut unicast.announce,
+                                &mut unicast.withdraw,
+                                &mut unicast.next_hop_override,
                             );
                             // ADR-0126 Decision 5 lane arm: a
                             // member-scoped emission toward the ONE
@@ -4775,17 +4796,17 @@ impl RibManager {
                                 &stage.lane_deltas,
                                 peer,
                                 rs_control,
-                                &mut announce,
-                                &mut withdraw,
-                                &mut nh_override_flags,
+                                &mut unicast.announce,
+                                &mut unicast.withdraw,
+                                &mut unicast.next_hop_override,
                             );
                             super::update_groups::emit_rs_tag_transitions(
                                 &stage.rs_transitions,
                                 peer,
                                 rs_control,
-                                &mut announce,
-                                &mut withdraw,
-                                &mut nh_override_flags,
+                                &mut unicast.announce,
+                                &mut unicast.withdraw,
+                                &mut unicast.next_hop_override,
                             );
                         }
                     }
@@ -4910,7 +4931,6 @@ impl RibManager {
                 };
                 if prefix_send_max > 0 {
                     // Multi-path: collect all candidates, filter, sort, diff
-                    let mut policy_filtered = Vec::new();
                     Self::distribute_multipath_prefix(
                         &self.ribs,
                         &self.unicast_prefix_peers,
@@ -4936,13 +4956,11 @@ impl RibManager {
                         &metrics,
                         policy_stats,
                         &target_peer_label,
-                        &mut announce,
-                        &mut withdraw,
-                        &mut nh_override_flags,
-                        &mut policy_filtered,
+                        &mut unicast,
                         is_force,
                     );
-                    current_policy_filtered_routes.extend(policy_filtered);
+                    current_policy_filtered_routes
+                        .extend(std::mem::take(&mut unicast.policy_filtered));
                 } else if per_client_best {
                     // RFC 7947 §2.3.2 per-client best-path: the first
                     // export-policy-permitted candidate from the
@@ -4954,7 +4972,6 @@ impl RibManager {
                     // while per_client_best requires an eBGP
                     // route-server client (validation-enforced).
                     debug_assert!(orr_ctx.is_none(), "ORR vantage on a per-client-best peer");
-                    let mut policy_filtered = Vec::new();
                     Self::distribute_multipath_prefix(
                         &self.ribs,
                         &self.unicast_prefix_peers,
@@ -4980,16 +4997,13 @@ impl RibManager {
                         &metrics,
                         policy_stats,
                         &target_peer_label,
-                        &mut announce,
-                        &mut withdraw,
-                        &mut nh_override_flags,
-                        &mut policy_filtered,
+                        &mut unicast,
                         is_force,
                     );
-                    current_policy_filtered_routes.extend(policy_filtered);
+                    current_policy_filtered_routes
+                        .extend(std::mem::take(&mut unicast.policy_filtered));
                 } else if let Some((orr_topology, orr_spf)) = orr_ctx {
                     // ORR peer with a resolved vantage: per-vantage best.
-                    let mut policy_filtered = Vec::new();
                     Self::distribute_orr_best_prefix(
                         &self.ribs,
                         &self.unicast_prefix_peers,
@@ -5013,15 +5027,12 @@ impl RibManager {
                         &metrics,
                         policy_stats,
                         &target_peer_label,
-                        &mut announce,
-                        &mut withdraw,
-                        &mut nh_override_flags,
-                        &mut policy_filtered,
+                        &mut unicast,
                         is_force,
                     );
-                    current_policy_filtered_routes.extend(policy_filtered);
+                    current_policy_filtered_routes
+                        .extend(std::mem::take(&mut unicast.policy_filtered));
                 } else {
-                    let mut policy_filtered = Vec::new();
                     let mut target = ExportTarget::Peer {
                         peer,
                         peer_asn: target_peer_asn,
@@ -5046,13 +5057,11 @@ impl RibManager {
                         export_pol.as_ref(),
                         orf,
                         &mut export_memo,
-                        &mut announce,
-                        &mut withdraw,
-                        &mut nh_override_flags,
-                        &mut policy_filtered,
+                        &mut unicast,
                         is_force,
                     );
-                    current_policy_filtered_routes.extend(policy_filtered);
+                    current_policy_filtered_routes
+                        .extend(std::mem::take(&mut unicast.policy_filtered));
                 }
             }
 
@@ -5242,14 +5251,19 @@ impl RibManager {
                 && member_of.is_none()
                 && let Some(extras) = self.pending_extra_withdraws.get(&peer)
             {
-                let announced: HashSet<(Prefix, u32)> =
-                    announce.iter().map(|r| (r.prefix, r.path_id)).collect();
-                let staged: HashSet<(Prefix, u32)> = withdraw.iter().copied().collect();
-                withdraw.extend(extras.unicast.iter().copied().filter(|key| {
-                    !announced.contains(key)
-                        && !staged.contains(key)
-                        && rib_out.get(&key.0, key.1).is_none()
-                }));
+                let announced: HashSet<(Prefix, u32)> = unicast
+                    .announce
+                    .iter()
+                    .map(|r| (r.prefix, r.path_id))
+                    .collect();
+                let staged: HashSet<(Prefix, u32)> = unicast.withdraw.iter().copied().collect();
+                unicast
+                    .withdraw
+                    .extend(extras.unicast.iter().copied().filter(|key| {
+                        !announced.contains(key)
+                            && !staged.contains(key)
+                            && rib_out.get(&key.0, key.1).is_none()
+                    }));
                 let vpn_announced: HashSet<rustbgpd_wire::VpnRouteKey> =
                     vpn_announce.iter().map(|r| r.nlri.key()).collect();
                 let vpn_staged: HashSet<rustbgpd_wire::VpnRouteKey> =
@@ -5288,17 +5302,18 @@ impl RibManager {
             // member never stages per-peer unicast (grouped + in-sync),
             // so the locals are empty by construction when it is taken.
             debug_assert!(
-                shared_unicast.is_none() || (announce.is_empty() && nh_override_flags.is_empty()),
+                shared_unicast.is_none()
+                    || (unicast.announce.is_empty() && unicast.next_hop_override.is_empty()),
                 "shared group payload must not coexist with per-peer staged unicast"
             );
             let shared_unicast_cache_group = shared_unicast.as_ref().and(member_of);
             let (announce, nh_override_flags): super::update_groups::SharedUnicastPayload =
                 match shared_unicast {
                     Some(shared) => shared,
-                    None => (announce.into(), nh_override_flags.into()),
+                    None => (unicast.announce.into(), unicast.next_hop_override.into()),
                 };
             if !announce.is_empty()
-                || !withdraw.is_empty()
+                || !unicast.withdraw.is_empty()
                 || !fs_announce.is_empty()
                 || !fs_withdraw.is_empty()
                 || !evpn_announce.is_empty()
@@ -5337,7 +5352,7 @@ impl RibManager {
                     vec![]
                 };
                 let announced_count = announce.len();
-                let withdrawn_count = withdraw.len();
+                let withdrawn_count = unicast.withdraw.len();
                 let has_non_unicast_route_payload = !fs_announce.is_empty()
                     || !fs_withdraw.is_empty()
                     || !evpn_announce.is_empty()
@@ -5450,7 +5465,7 @@ impl RibManager {
                     OutboundCommitBatch {
                         next_hop_override: nh_override_flags,
                         announce,
-                        withdraw,
+                        withdraw: unicast.withdraw,
                         end_of_rib: pending_eor.clone(),
                         flowspec_announce: fs_announce,
                         flowspec_withdraw: fs_withdraw,

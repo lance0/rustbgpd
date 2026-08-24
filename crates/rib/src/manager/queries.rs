@@ -1048,10 +1048,7 @@ impl RibManager {
             trace: &mut trace,
         };
         let mut memo = distribution::ExportMemo::default();
-        let mut announce = Vec::new();
-        let mut withdraw = Vec::new();
-        let mut nh_override_flags = Vec::new();
-        let mut policy_filtered = Vec::new();
+        let mut result = distribution::UnicastDistributionResult::default();
         Self::distribute_single_best_prefix(
             &self.loc_rib,
             rib_out,
@@ -1068,10 +1065,7 @@ impl RibManager {
             self.export_policy_for(peer),
             orf,
             &mut memo,
-            &mut announce,
-            &mut withdraw,
-            &mut nh_override_flags,
-            &mut policy_filtered,
+            &mut result,
             false,
         );
         let explanation = trace.into_explain(peer, prefix, None, member_of.map(|gid| gid as u64));
