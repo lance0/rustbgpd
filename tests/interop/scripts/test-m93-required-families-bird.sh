@@ -40,7 +40,7 @@ wait_bird_established() {
     local label=${1:?}
     for i in $(seq 1 45); do
         if docker exec "$BIRD" birdc show protocols rustbgpd 2>/dev/null \
-            | grep -q Established; then
+            | grep Established >/dev/null; then
             ok "$label Established (attempt $i)"
             return 0
         fi
@@ -77,7 +77,7 @@ capture_has_exact_rejection() {
         -Y 'ip.src == 10.93.0.1 && bgp.type == 3' \
         -T fields -e tcp.payload 2>/dev/null \
         | tr -d ':\r' \
-        | grep -Fxq "$EXPECTED_NOTIFICATION"
+        | grep -Fx "$EXPECTED_NOTIFICATION" >/dev/null
 }
 
 main() {
