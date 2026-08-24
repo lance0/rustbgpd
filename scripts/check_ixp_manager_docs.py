@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Fail closed when the IXP Manager documentation drifts from its contract.
 
-Four documents restate facts that `tests/compat/ixp-manager-birdseye/contract.json`
+Five documents restate facts that `tests/compat/ixp-manager-birdseye/contract.json`
 pins executably, and each has drifted silently before:
 
 - the Birdwatcher adapter README's reason-id tables versus
   `reject_reasons.active_ids` / `defined_only_ids` / `fallback_id` / `display`;
 - the same README's capability table versus `runtime_supported` / `unsupported`;
-- `docs/RECEIPTS.md` and `docs/OPERATIONAL_PROOF.md`, which must each carry a
-  row for every M-series receipt that `docs/INTEROP.md` claims in its IXP
-  Manager sections.
+- `docs/INTEROP.md`, which defines the IXP Manager M-series receipt claims;
+- `docs/RECEIPTS.md`, `docs/OPERATIONAL_PROOF.md`, and `docs/milestones.md`,
+  which must each carry a row for every M-series receipt that
+  `docs/INTEROP.md` claims in its IXP Manager sections.
 
 The checks parse the markdown tables positively; an absent table or an empty
 M-number set is itself a failure, because a guard that cannot fail is worse
@@ -29,6 +30,7 @@ README = ROOT / "examples" / "birdwatcher-adapter" / "README.md"
 INTEROP = ROOT / "docs" / "INTEROP.md"
 RECEIPTS = ROOT / "docs" / "RECEIPTS.md"
 PROOF = ROOT / "docs" / "OPERATIONAL_PROOF.md"
+MILESTONES = ROOT / "docs" / "milestones.md"
 
 REASON_HEADER = ("Retained cause", "IXP Manager reason id", "Bird's Eye display")
 DEFINED_ONLY_HEADER = ("Defined-only id", "Bird's Eye display", "Emitted as")
@@ -173,7 +175,7 @@ def receipt_rows(receipts: str, header: str = "Receipt") -> set[str]:
     return found
 
 
-def check_receipts(interop: str, receipts: str, proof: str) -> list[str]:
+def check_receipts(interop: str, receipts: str, proof: str, milestones: str) -> list[str]:
     claimed = interop_ixp_receipts(interop)
     if not claimed:
         return ["INTEROP.md IXP Manager sections name no M-series receipts; the walk is broken"]
@@ -182,6 +184,7 @@ def check_receipts(interop: str, receipts: str, proof: str) -> list[str]:
     for name, rows in (
         ("RECEIPTS.md", receipt_rows(receipts)),
         ("OPERATIONAL_PROOF.md", receipt_rows(proof, "Receipts")),
+        ("milestones.md", receipt_rows(milestones, "ID")),
     ):
         for m in sorted(claimed - rows, key=lambda m: (len(m), m)):
             errors.append(
@@ -190,11 +193,18 @@ def check_receipts(interop: str, receipts: str, proof: str) -> list[str]:
     return errors
 
 
-def check(readme: str, contract: dict, interop: str, receipts: str, proof: str) -> list[str]:
+def check(
+    readme: str,
+    contract: dict,
+    interop: str,
+    receipts: str,
+    proof: str,
+    milestones: str,
+) -> list[str]:
     return (
         check_reason_ids(readme, contract)
         + check_capabilities(readme, contract)
-        + check_receipts(interop, receipts, proof)
+        + check_receipts(interop, receipts, proof, milestones)
     )
 
 
@@ -206,6 +216,7 @@ def main() -> int:
             INTEROP.read_text(encoding="utf-8"),
             RECEIPTS.read_text(encoding="utf-8"),
             PROOF.read_text(encoding="utf-8"),
+            MILESTONES.read_text(encoding="utf-8"),
         )
     except (OSError, KeyError, ValueError) as error:
         errors = [f"cannot load the IXP Manager contract surface: {error!r}"]

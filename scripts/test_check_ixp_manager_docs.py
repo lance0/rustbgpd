@@ -16,6 +16,7 @@ CONTRACT = json.loads(checker.CONTRACT.read_text(encoding="utf-8"))
 INTEROP = checker.INTEROP.read_text(encoding="utf-8")
 RECEIPTS = checker.RECEIPTS.read_text(encoding="utf-8")
 PROOF = checker.PROOF.read_text(encoding="utf-8")
+MILESTONES = checker.MILESTONES.read_text(encoding="utf-8")
 
 
 def row(document: str, prefix: str) -> str:
@@ -28,12 +29,23 @@ def without(document: str, prefix: str) -> str:
 
 
 class IxpManagerDocsTests(unittest.TestCase):
-    def assert_red(self, needle: str, readme=README, interop=INTEROP, receipts=RECEIPTS, proof=PROOF) -> None:
-        errors = checker.check(readme, CONTRACT, interop, receipts, proof)
+    def assert_red(
+        self,
+        needle: str,
+        readme=README,
+        interop=INTEROP,
+        receipts=RECEIPTS,
+        proof=PROOF,
+        milestones=MILESTONES,
+    ) -> None:
+        errors = checker.check(readme, CONTRACT, interop, receipts, proof, milestones)
         self.assertTrue(any(needle in error for error in errors), errors)
 
     def test_tree_is_green(self) -> None:
-        self.assertEqual(checker.check(README, CONTRACT, INTEROP, RECEIPTS, PROOF), [])
+        self.assertEqual(
+            checker.check(README, CONTRACT, INTEROP, RECEIPTS, PROOF, MILESTONES),
+            [],
+        )
 
     def test_dropped_active_reason_row_is_red(self) -> None:
         self.assert_red("active_ids", readme=without(README, "| `.rpol` term `ixp-manager-hygiene:reject-as-path-too-long` |"))
@@ -63,7 +75,9 @@ class IxpManagerDocsTests(unittest.TestCase):
         self.assert_red("contract unsupported", readme=without(README, "| `full-table-count` |"))
 
     def test_missing_tables_are_red(self) -> None:
-        errors = checker.check("# empty\n", CONTRACT, INTEROP, RECEIPTS, PROOF)
+        errors = checker.check(
+            "# empty\n", CONTRACT, INTEROP, RECEIPTS, PROOF, MILESTONES
+        )
         self.assertTrue(any("reason-id table" in e for e in errors), errors)
         self.assertTrue(any("capability table" in e for e in errors), errors)
 
@@ -72,6 +86,25 @@ class IxpManagerDocsTests(unittest.TestCase):
 
     def test_proof_row_removal_is_red(self) -> None:
         self.assert_red("claims M97 in its IXP Manager sections but OPERATIONAL_PROOF.md", proof=without(PROOF, "| M97 |"))
+
+    def test_milestone_row_removal_fails_closed(self) -> None:
+        self.assert_red(
+            "claims M98 in its IXP Manager sections but milestones.md",
+            milestones=without(MILESTONES, "| **M98** |"),
+        )
+
+    def test_future_claim_without_milestone_row_fails_closed(self) -> None:
+        interop = "# IXP Manager future proof\nM999\n"
+        receipts = "| Receipt | Proves |\n|---|---|\n| M999 | proof |\n"
+        proof = "| Receipts | Coverage |\n|---|---|\n| M999 | proof |\n"
+        milestones = "| ID | Scope | Status |\n|---|---|---|\n"
+        self.assertEqual(
+            checker.check_receipts(interop, receipts, proof, milestones),
+            [
+                "INTEROP.md claims M999 in its IXP Manager sections but "
+                "milestones.md has no row for it"
+            ],
+        )
 
     def test_new_interop_claim_without_receipt_row_is_red(self) -> None:
         unreceipted = next(f"M{n}" for n in range(100, 10000) if f"| {f'M{n}'} " not in RECEIPTS)
