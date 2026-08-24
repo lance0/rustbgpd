@@ -341,8 +341,8 @@ mod tests {
                 .metric
                 .iter()
                 .map(|metric| {
-                    assert_eq!(metric.get_label().len(), 1, "only subscriber label");
-                    assert_eq!(metric.get_label()[0].name(), "subscriber");
+                    assert_eq!(metric.get_label().len(), 1, "only actor label");
+                    assert_eq!(metric.get_label()[0].name(), "actor");
                     (
                         metric.get_label()[0].value().to_owned(),
                         metric.get_counter().value(),

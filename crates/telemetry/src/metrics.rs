@@ -112,7 +112,7 @@ pub enum NetlinkSubscriber {
 impl NetlinkSubscriber {
     const ALL: [Self; 3] = [Self::LinkCarrier, Self::GeneralFib, Self::BlackholeDiscard];
 
-    /// Stable Prometheus label for this bounded subscriber.
+    /// Stable Prometheus actor-label value for this bounded subscriber.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -1328,12 +1328,12 @@ impl BgpMetrics {
         let netlink_subscription_overruns = IntCounterVec::new(
             Opts::new(
                 "bgp_netlink_subscription_overruns_total",
-                "NETLINK_ROUTE receive-buffer overrun notifications by bounded subscriber. \
+                "NETLINK_ROUTE receive-buffer overrun notifications by bounded actor. \
                  Each increment proves that one or more multicast notifications may have been \
                  lost; it is not a dropped-message count and does not prove that a later \
                  periodic reconcile repaired the resulting drift.",
             ),
-            &["subscriber"],
+            &["actor"],
         )
         .expect("valid metric definition");
         for subscriber in NetlinkSubscriber::ALL {
@@ -5667,8 +5667,8 @@ mod tests {
             .metric
             .iter()
             .map(|metric| {
-                assert_eq!(metric.get_label().len(), 1, "only subscriber label");
-                assert_eq!(metric.get_label()[0].name(), "subscriber");
+                assert_eq!(metric.get_label().len(), 1, "only actor label");
+                assert_eq!(metric.get_label()[0].name(), "actor");
                 (
                     metric.get_label()[0].value().to_owned(),
                     metric.get_counter().value(),
