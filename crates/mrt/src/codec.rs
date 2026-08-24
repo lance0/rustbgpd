@@ -1651,6 +1651,104 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
+
+    fn emitted_table_dump_v2_subtypes() -> [(&'static str, u16); 6] {
+        [
+            (stringify!(PEER_INDEX_TABLE), PEER_INDEX_TABLE),
+            (stringify!(RIB_IPV4_UNICAST), RIB_IPV4_UNICAST),
+            (stringify!(RIB_IPV6_UNICAST), RIB_IPV6_UNICAST),
+            (stringify!(RIB_GENERIC), RIB_GENERIC),
+            (
+                stringify!(RIB_IPV4_UNICAST_ADDPATH),
+                RIB_IPV4_UNICAST_ADDPATH,
+            ),
+            (
+                stringify!(RIB_IPV6_UNICAST_ADDPATH),
+                RIB_IPV6_UNICAST_ADDPATH,
+            ),
+        ]
+    }
+
+    fn subtype_marker(name: &str, subtype: u16) -> String {
+        format!("`{name}` (subtype {subtype})")
+    }
+
+    fn emitted_subtype_doc_failures(document_name: &str, contents: &str) -> Vec<String> {
+        emitted_table_dump_v2_subtypes()
+            .into_iter()
+            .filter_map(|(name, subtype)| {
+                let marker = subtype_marker(name, subtype);
+                let count = contents.matches(&marker).count();
+                (count != 1).then(|| {
+                    format!(
+                        "{document_name}: expected exactly one emitted TABLE_DUMP_V2 marker \
+                         {marker:?}, found {count}"
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn emitted_subtype_documents() -> [(&'static str, String); 2] {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        [
+            (
+                "docs/CONFIGURATION.md",
+                read_subtype_document(&manifest_dir.join("../../docs/CONFIGURATION.md")),
+            ),
+            (
+                "crates/mrt/README.md",
+                read_subtype_document(&manifest_dir.join("README.md")),
+            ),
+        ]
+    }
+
+    fn read_subtype_document(path: &std::path::Path) -> String {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+    }
+
+    #[test]
+    fn emitted_table_dump_v2_subtypes_are_documented() {
+        let failures: Vec<_> = emitted_subtype_documents()
+            .into_iter()
+            .flat_map(|(name, contents)| emitted_subtype_doc_failures(name, &contents))
+            .collect();
+
+        assert!(
+            failures.is_empty(),
+            "emitted TABLE_DUMP_V2 documentation contract failed:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn emitted_table_dump_v2_doc_contract_rejects_marker_mutations() {
+        for (document_name, contents) in emitted_subtype_documents() {
+            for (name, subtype) in emitted_table_dump_v2_subtypes() {
+                let marker = subtype_marker(name, subtype);
+                let mutations = [
+                    ("removed", contents.replacen(&marker, "", 1)),
+                    (
+                        "renumbered",
+                        contents.replacen(&marker, &subtype_marker(name, subtype + 100), 1),
+                    ),
+                ];
+
+                for (mutation, mutated) in mutations {
+                    let failures = emitted_subtype_doc_failures(document_name, &mutated);
+                    assert!(
+                        failures.iter().any(|failure| {
+                            failure.contains(document_name) && failure.contains(&marker)
+                        }),
+                        "{document_name}: {mutation} mutation of {marker:?} must fail with a \
+                         document-and-marker diagnostic; got {failures:?}"
+                    );
+                }
+            }
+        }
+    }
+
     fn make_peer(addr: IpAddr, asn: u32) -> MrtPeerEntry {
         let bgp_id = match addr {
             IpAddr::V4(v4) => v4,
