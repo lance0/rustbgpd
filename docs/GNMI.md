@@ -313,7 +313,8 @@ at the transport layer and remains a possible future alternative.
 Subscriptions are declared in config (paths + `sample`/`on_change` mode
 per target), TLS uses the standard `tls_ca_file`/`tls_cert_file`/
 `tls_key_file` path idiom, reconnects use capped exponential backoff,
-and connection state is exported as `gnmi_dialout_connected{target}`.
+and connection state, bounded response-queue depth, resync count, and the last
+transport-handoff timestamp are exported as `gnmi_dialout_*{target}` metrics.
 Full field reference: `docs/CONFIGURATION.md` `[gnmi_dialout]`;
 operational behavior: `docs/OPERATIONS.md`.
 
