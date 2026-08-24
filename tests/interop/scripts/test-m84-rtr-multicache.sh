@@ -91,7 +91,7 @@ start_rtr_v2_server() {
     docker exec -d "$RTRV2" python3 /usr/local/bin/rtr-v2-server-m84.py
     for i in $(seq 1 15); do
         if docker exec "$RTRV2" sh -c 'cat /tmp/rtr-server-status.json 2>/dev/null' \
-            | grep -q '"listening": true'; then
+            | grep '"listening": true' >/dev/null; then
             ok "phased RTR v2 server is listening (attempt $i)"
             return 0
         fi
