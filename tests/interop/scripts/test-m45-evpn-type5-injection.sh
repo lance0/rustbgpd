@@ -88,7 +88,7 @@ grpc_list_evpn() {
 # ---------------------------------------------------------------------------
 
 frr_type5_routes() {
-    docker exec "$FRR" vtysh -c "show bgp l2vpn evpn route type prefix" 2>/dev/null || true
+    docker exec "$FRR" vtysh -c "show bgp l2vpn evpn route type prefix" 2>/dev/null
 }
 
 # Poll FRR's EVPN RIB until the injected prefix is present / absent.
@@ -96,9 +96,12 @@ wait_frr_type5_present() {
     local timeout=${1:-30}
     local prefix=${2:-$PREFIX}
     local attempts=$((timeout / 2))
+    local routes
     for _ in $(seq 1 "$attempts"); do
-        if frr_type5_routes | grep -q "$prefix"; then
-            return 0
+        if routes=$(frr_type5_routes); then
+            if printf '%s\n' "$routes" | grep -F -- "$prefix" >/dev/null; then
+                return 0
+            fi
         fi
         sleep 2
     done
@@ -109,9 +112,12 @@ wait_frr_type5_absent() {
     local timeout=${1:-20}
     local prefix=${2:-$PREFIX}
     local attempts=$((timeout / 2))
+    local routes
     for _ in $(seq 1 "$attempts"); do
-        if ! frr_type5_routes | grep -q "$prefix"; then
-            return 0
+        if routes=$(frr_type5_routes); then
+            if ! printf '%s\n' "$routes" | grep -F -- "$prefix" >/dev/null; then
+                return 0
+            fi
         fi
         sleep 2
     done
@@ -155,7 +161,7 @@ if wait_frr_type5_present 30; then
     ok "FRR EVPN RIB contains injected ${PREFIX}/${PREFIX_LEN}"
 else
     fail "FRR never received the injected Type 5 within 30s"
-    frr_type5_routes >&2
+    frr_type5_routes >&2 || true
 fi
 
 # Test 4b: the received route carries the right next-hop + route-target.
@@ -193,7 +199,7 @@ if wait_frr_type5_absent 20; then
     ok "FRR dropped ${PREFIX}/${PREFIX_LEN} after withdrawal"
 else
     fail "FRR still shows ${PREFIX}/${PREFIX_LEN} 20s after withdrawal"
-    frr_type5_routes >&2
+    frr_type5_routes >&2 || true
 fi
 
 # Test 6: overlay-index Gateway Address injection — still control-plane only,
@@ -221,7 +227,7 @@ if wait_frr_type5_present 30 "$OVERLAY_PREFIX"; then
     ok "FRR EVPN RIB contains overlay-index ${OVERLAY_PREFIX}/${OVERLAY_PREFIX_LEN}"
 else
     fail "FRR never received overlay-index Type 5 within 30s"
-    frr_type5_routes >&2
+    frr_type5_routes >&2 || true
 fi
 
 log "[test] Withdrawal: DeleteEvpnRoute removes the overlay-index Type 5"
@@ -235,7 +241,7 @@ if wait_frr_type5_absent 20 "$OVERLAY_PREFIX"; then
     ok "FRR dropped overlay-index ${OVERLAY_PREFIX}/${OVERLAY_PREFIX_LEN} after withdrawal"
 else
     fail "FRR still shows overlay-index ${OVERLAY_PREFIX}/${OVERLAY_PREFIX_LEN} 20s after withdrawal"
-    frr_type5_routes >&2
+    frr_type5_routes >&2 || true
 fi
 
 print_summary
