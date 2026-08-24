@@ -67,6 +67,10 @@ TRACKER_ID = re.compile(r"\bLAN-\d+\b")
 HOME_PATH = re.compile(rb"/(?:home|Users)/(?![<$\{])[^/\s\"'<>]+")
 READ_SIZE, OVERLAP, EXCERPT_SIZE = 64 * 1024, 8, 160
 
+ARTIFACT_ROOTS = (
+    Path("docs/perf/artifacts"),
+    Path("docs/artifacts/soak"),
+)
 SEAL_NAME = "SHA256SUMS"
 SEAL_ROOT = Path("docs/perf/artifacts")
 SEAL_LINE = re.compile(r"([0-9a-f]{64})  (.+)")
@@ -263,9 +267,11 @@ def audit_document(relative: str, text: str) -> list[str]:
 def audit_artifact_home_paths(
     paths: list[Path] | None = None, root: Path | None = None
 ) -> list[str]:
-    """Reject literal absolute home paths in tracked performance artifacts."""
+    """Reject literal absolute home paths in tracked published artifacts."""
     root = (root or ROOT).resolve()
-    artifacts = []
+    artifacts: dict[Path, list[tuple[str, Path]]] = {
+        artifact_root: [] for artifact_root in ARTIFACT_ROOTS
+    }
     for path in paths if paths is not None else tracked_files():
         try:
             relative = path.relative_to(root).as_posix()
@@ -273,26 +279,34 @@ def audit_artifact_home_paths(
             raise TrackerIdGuardError(
                 f"tracked path escapes the repository root: {path}"
             ) from error
-        if relative.startswith("docs/perf/artifacts/"):
-            artifacts.append((relative, path))
-    if not artifacts:
-        raise TrackerIdGuardError("no tracked performance artifacts were discovered")
+        relative_path = Path(relative)
+        for artifact_root in ARTIFACT_ROOTS:
+            if relative_path.is_relative_to(artifact_root):
+                artifacts[artifact_root].append((relative, path))
+                break
+
+    for artifact_root, discovered in artifacts.items():
+        if not discovered:
+            raise TrackerIdGuardError(
+                f"no tracked artifacts were discovered under {artifact_root.as_posix()}"
+            )
 
     failures: list[str] = []
-    for relative, path in artifacts:
-        if path.is_symlink():
-            raise TrackerIdGuardError(f"tracked artifact {relative} is a symlink")
-        try:
-            mode = path.stat().st_mode
-            if not stat.S_ISREG(mode) or mode & 0o444 == 0:
-                raise OSError("not a readable regular file")
-            opener = gzip.open if path.suffix == ".gz" else Path.open
-            with opener(path, "rb") as handle:
-                failures.extend(_audit_artifact_stream(relative, handle))
-        except (OSError, EOFError) as error:
-            raise TrackerIdGuardError(
-                f"cannot read tracked artifact {relative}: {error}"
-            ) from error
+    for discovered in artifacts.values():
+        for relative, path in discovered:
+            if path.is_symlink():
+                raise TrackerIdGuardError(f"tracked artifact {relative} is a symlink")
+            try:
+                mode = path.stat().st_mode
+                if not stat.S_ISREG(mode) or mode & 0o444 == 0:
+                    raise OSError("not a readable regular file")
+                opener = gzip.open if path.suffix == ".gz" else Path.open
+                with opener(path, "rb") as handle:
+                    failures.extend(_audit_artifact_stream(relative, handle))
+            except (OSError, EOFError) as error:
+                raise TrackerIdGuardError(
+                    f"cannot read tracked artifact {relative}: {error}"
+                ) from error
     return failures
 
 
