@@ -44,6 +44,65 @@ static PCB_TOTAL_EXACT_NANOS: AtomicU64 = AtomicU64::new(0);
 static PCB_TOTAL_COMMIT_NANOS: AtomicU64 = AtomicU64::new(0);
 static PCB_TOTAL_ENQUEUE_NANOS: AtomicU64 = AtomicU64::new(0);
 
+/// Bench-only receipt for the production EVPN dataplane generation gate.
+#[derive(Debug)]
+pub struct EvpnDataplaneQueryBenchReceipt {
+    pub routes: Option<Vec<crate::route::EvpnRibRoute>>,
+    pub row_visits: usize,
+}
+
+/// The pre-LAN-1055 whole-table clone paid by every supervisor pass.
+#[must_use]
+pub fn bench_evpn_dataplane_legacy_snapshot(
+    rows: &[crate::route::EvpnRibRoute],
+) -> Vec<crate::route::EvpnRibRoute> {
+    rows.to_vec()
+}
+
+/// Time the production collection helper without receipt instrumentation.
+#[must_use]
+pub fn bench_evpn_dataplane_generation_query(
+    rows: &[crate::route::EvpnRibRoute],
+    relevant_rows: usize,
+    known_generation: Option<u64>,
+    current_generation: u64,
+) -> Option<Vec<crate::route::EvpnRibRoute>> {
+    super::collect_evpn_dataplane_routes(
+        rows.iter(),
+        known_generation,
+        current_generation,
+        rows.len(),
+        relevant_rows,
+    )
+}
+
+/// Drive the same generation equality and Type 1/2/5 materialization helper
+/// used by the production actor query, with a deterministic visit receipt.
+#[must_use]
+pub fn bench_evpn_dataplane_generation_snapshot(
+    rows: &[crate::route::EvpnRibRoute],
+    known_generation: Option<u64>,
+    current_generation: u64,
+) -> EvpnDataplaneQueryBenchReceipt {
+    let relevant_rows = rows
+        .iter()
+        .filter(|route| matches!(route.route_type(), 1 | 2 | 5))
+        .count();
+    let visits = Cell::new(0usize);
+    let routes = super::collect_evpn_dataplane_routes(
+        rows.iter()
+            .inspect(|_| visits.set(visits.get().saturating_add(1))),
+        known_generation,
+        current_generation,
+        rows.len(),
+        relevant_rows,
+    );
+    EvpnDataplaneQueryBenchReceipt {
+        routes,
+        row_visits: visits.get(),
+    }
+}
+
 #[derive(Clone, Copy)]
 struct PerClientBestCandidateBenchAggregate {
     capture_active: bool,

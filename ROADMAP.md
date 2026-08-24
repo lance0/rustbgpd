@@ -1549,10 +1549,16 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
     change does not necessarily trigger full RIB query + full kernel dump +
     full projection. Design-gated because drift recovery, ECMP siblings,
     peer-group allow-lists, and max-route freeze semantics are non-local.
-  - EVPN dataplane supervisor: move from periodic whole-EVPN-RIB
-    query/project/equality suppression toward generation/dirty-driven
-    projection. Design-gated because EAD mass-withdraw, aliasing, quarantine,
-    and IP-VRF config changes can invalidate more than one route key.
+  - EVPN dataplane supervisor generation query (LAN-1055): **done**. The RIB
+    actor owns a wrapping Type 1/2/5 equality token and exact relevant-row
+    cardinality. Stable event and five-second poll passes now return an O(1)
+    unchanged response without walking/materializing the EVPN table; relevant
+    changes return one actor-atomic Type 1/2/5 snapshot. Local instance,
+    IP-VRF, quarantine, and same-ESI-bias changes durably invalidate the token
+    before querying, while BUM-only changes retain the cached-republish path.
+    Type 3/4 RR/public behavior is unchanged. This deliberately remains a
+    whole relevant-table projection on change rather than a per-key projection:
+    EAD mass-withdraw, aliasing, quarantine, and IP-VRF config are non-local.
   - Add-Path export: avoid sorting all candidate paths when `send_max` is small
     if deterministic ordering and export-policy filtering can be preserved.
   - Session establishment tuning: expose connect-retry timing as per-neighbor /
