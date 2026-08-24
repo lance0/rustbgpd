@@ -1,4 +1,7 @@
-use rustbgpd_wire::attribute::{decode_path_attributes_revised, encode_path_attributes};
+use rustbgpd_wire::attribute::{
+    decode_path_attributes, decode_path_attributes_revised, encode_path_attributes,
+};
+use rustbgpd_wire::notification::update_subcode;
 use rustbgpd_wire::validate::validate_update_attributes;
 use rustbgpd_wire::{ErrorDisposition, PathAttribute};
 
@@ -47,6 +50,13 @@ fn hex(value: &str) -> Vec<u8> {
 
 fn attribute(flags: u8, code: u8, value: &[u8]) -> Vec<u8> {
     let mut bytes = vec![flags, code, u8::try_from(value.len()).unwrap()];
+    bytes.extend_from_slice(value);
+    bytes
+}
+
+fn extended_attribute(flags: u8, code: u8, value: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![flags | 0x10, code];
+    bytes.extend_from_slice(&u16::try_from(value.len()).unwrap().to_be_bytes());
     bytes.extend_from_slice(value);
     bytes
 }
@@ -194,4 +204,155 @@ fn assigned_and_unknown_behavior_fences_are_explicit() {
         decode_path_attributes_revised(&attribute(0x40, 200, &[0xaa]), true, false, &[]).unwrap();
     let error = validate_update_attributes(&unknown.attributes, false, false, true).unwrap_err();
     assert_eq!(error.disposition, ErrorDisposition::TreatAsWithdraw);
+}
+
+#[test]
+fn assigned_unsupported_class_matrix_is_fail_closed_without_semantic_support() {
+    #[derive(Clone, Copy)]
+    struct Case {
+        code: u8,
+        canonical: u8,
+        transitive_conflict: ErrorDisposition,
+    }
+
+    let cases = [
+        Case {
+            code: 23,
+            canonical: 0xc0,
+            transitive_conflict: ErrorDisposition::TreatAsWithdraw,
+        },
+        Case {
+            code: 26,
+            canonical: 0x80,
+            transitive_conflict: ErrorDisposition::AttributeDiscard,
+        },
+        Case {
+            code: 27,
+            canonical: 0xc0,
+            transitive_conflict: ErrorDisposition::TreatAsWithdraw,
+        },
+        Case {
+            code: 33,
+            canonical: 0x80,
+            transitive_conflict: ErrorDisposition::TreatAsWithdraw,
+        },
+        Case {
+            code: 40,
+            canonical: 0xc0,
+            transitive_conflict: ErrorDisposition::TreatAsWithdraw,
+        },
+        Case {
+            code: 128,
+            canonical: 0xc0,
+            transitive_conflict: ErrorDisposition::TreatAsWithdraw,
+        },
+    ];
+    let value = [0xde, 0xad, 0xbe, 0xef];
+
+    for case in cases {
+        let canonical = attribute(case.canonical, case.code, &value);
+        let decoded = decode_path_attributes_revised(&canonical, true, false, &[]).unwrap();
+        assert!(decoded.malformed.is_empty(), "canonical type {}", case.code);
+        if case.canonical == 0x80 {
+            assert!(
+                decoded.attributes.is_empty(),
+                "ONT type {} retained",
+                case.code
+            );
+        } else {
+            let [PathAttribute::Unknown(raw)] = decoded.attributes.as_slice() else {
+                panic!("OT type {} must remain opaque", case.code);
+            };
+            assert_eq!(raw.data.as_ref(), value);
+            let mut emitted = Vec::new();
+            encode_path_attributes(&decoded.attributes, &mut emitted, true, false).unwrap();
+            assert_eq!(emitted, attribute(0xe0, case.code, &value));
+        }
+
+        for (label, flags, expected) in [
+            (
+                "wrong Optional",
+                case.canonical ^ 0x80,
+                ErrorDisposition::TreatAsWithdraw,
+            ),
+            (
+                "wrong Transitive",
+                case.canonical ^ 0x40,
+                case.transitive_conflict,
+            ),
+            (
+                "both wrong",
+                case.canonical ^ 0xc0,
+                if case.code == 26 {
+                    ErrorDisposition::AttributeDiscard
+                } else {
+                    ErrorDisposition::TreatAsWithdraw
+                },
+            ),
+        ] {
+            let bytes = attribute(flags, case.code, &value);
+            let revised = decode_path_attributes_revised(&bytes, true, false, &[]).unwrap();
+            assert!(
+                revised.attributes.is_empty(),
+                "type {} {label} retained",
+                case.code
+            );
+            assert_eq!(revised.malformed.len(), 1, "type {} {label}", case.code);
+            assert_eq!(
+                revised.malformed[0].disposition, expected,
+                "type {} {label}",
+                case.code
+            );
+
+            let legacy = decode_path_attributes(&bytes, true, &[]).unwrap_err();
+            assert!(
+                matches!(legacy, rustbgpd_wire::DecodeError::UpdateAttributeError { subcode, .. }
+                    if subcode == update_subcode::ATTRIBUTE_FLAGS_ERROR),
+                "type {} {label}: {legacy:?}",
+                case.code
+            );
+        }
+    }
+}
+
+#[test]
+fn assigned_unsupported_opaque_flags_and_neighboring_fences_stay_orthogonal() {
+    let value = [0xaa, 0xbb, 0xcc];
+    for code in [23, 27, 40, 128] {
+        for flags in [0xe0, 0xf0] {
+            let input = if flags == 0xf0 {
+                extended_attribute(flags, code, &value)
+            } else {
+                attribute(flags, code, &value)
+            };
+            let decoded = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
+            let [PathAttribute::Unknown(raw)] = decoded.attributes.as_slice() else {
+                panic!("type {code} did not remain opaque");
+            };
+            assert_eq!((raw.flags, raw.data.as_ref()), (flags, &value[..]));
+            let mut emitted = Vec::new();
+            encode_path_attributes(&decoded.attributes, &mut emitted, true, false).unwrap();
+            assert_eq!(emitted, input, "type {code} flag preservation");
+        }
+    }
+
+    let unassigned = attribute(0xc0, 200, &[0x55]);
+    let decoded = decode_path_attributes_revised(&unassigned, true, false, &[]).unwrap();
+    assert!(matches!(&decoded.attributes[..], [PathAttribute::Unknown(raw)] if raw.flags == 0xc0));
+
+    let pmsi =
+        decode_path_attributes_revised(&attribute(0xc0, 22, &[0; 5]), true, false, &[]).unwrap();
+    assert!(matches!(
+        pmsi.attributes.as_slice(),
+        [PathAttribute::PmsiTunnel(_)]
+    ));
+    assert!(pmsi.malformed.is_empty());
+
+    let wrong_pmsi =
+        decode_path_attributes_revised(&attribute(0x80, 22, &[]), true, false, &[]).unwrap();
+    assert_eq!(wrong_pmsi.malformed.len(), 1);
+    assert_eq!(
+        wrong_pmsi.malformed[0].disposition,
+        ErrorDisposition::TreatAsWithdraw
+    );
 }

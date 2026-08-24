@@ -159,10 +159,22 @@ pub mod attr_type {
     /// RFC 6514 §5: PMSI Tunnel attribute (used by EVPN Type 3 IMET
     /// for ingress-replication BUM).
     pub const PMSI_TUNNEL: u8 = 22;
+    /// RFC 9012: Tunnel Encapsulation attribute.
+    pub const TUNNEL_ENCAPSULATION: u8 = 23;
+    /// RFC 7311: Accumulated IGP Metric attribute.
+    pub const AIGP: u8 = 26;
+    /// RFC 6514: PE Distinguisher Labels attribute.
+    pub const PE_DISTINGUISHER_LABELS: u8 = 27;
     /// RFC 9552 §5.3: BGP-LS Attribute.
     pub const BGP_LS: u8 = 29;
+    /// RFC 8205: `BGPsec_PATH` attribute.
+    pub const BGPSEC_PATH: u8 = 33;
     /// RFC 9234 §5: Only-to-Customer (OTC).
     pub const ONLY_TO_CUSTOMER: u8 = 35;
+    /// RFC 8669: BGP Prefix-SID attribute.
+    pub const PREFIX_SID: u8 = 40;
+    /// RFC 6368: `ATTR_SET` attribute.
+    pub const ATTR_SET: u8 = 128;
 }
 
 /// Path attribute flag bits (RFC 4271 §4.3).

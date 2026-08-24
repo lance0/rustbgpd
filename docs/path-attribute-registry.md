@@ -51,28 +51,28 @@ octet from 0 through 255 to appear exactly once with no blank cell.
 | 20 | Connector Attribute (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 21 | AS_PATHLIMIT (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 22 | PMSI_TUNNEL | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 23 | Tunnel Encapsulation | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
+| 23 | Tunnel Encapsulation | optional transitive; flags `0xc0`; RFC 9012 | payload semantics unsupported; correct class retained opaque and emitted with Partial; wrong class is treat-as-withdraw | assigned-class matrix below |
 | 24 | Traffic Engineering | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 25 | IPv6 Address Specific Extended Community | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 26 | AIGP | optional non-transitive; flags `0x80`; RFC 7311 §3 | unsupported attribute is ignored, not retained | enriched fence test |
-| 27 | PE Distinguisher Labels | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
+| 26 | AIGP | optional non-transitive; flags `0x80`; RFC 7311 §3 | payload semantics unsupported; correct class ignored; Transitive-set conflicts are attribute-discard, other class conflicts are treat-as-withdraw | assigned-class matrix below |
+| 27 | PE Distinguisher Labels | optional transitive; flags `0xc0`; RFC 6514 | payload semantics unsupported; correct class retained opaque and emitted with Partial; wrong class is treat-as-withdraw | assigned-class matrix below |
 | 28 | BGP Entropy Label Capability Attribute (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 29 | BGP-LS Attribute | optional non-transitive; flags `0x80`; RFC 9552 §5.3 | recognized opaque attribute survives byte-for-byte; `0xc0` is malformed | enriched fence test |
 | 30 | Deprecated | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 31 | Deprecated | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 32 | LARGE_COMMUNITY | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 33 | BGPsec_Path | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
+| 33 | BGPsec_Path | optional non-transitive; flags `0x80`; RFC 8205 | payload semantics unsupported; correct class ignored; wrong class is treat-as-withdraw | assigned-class matrix below |
 | 34 | BGP Community Container Attribute (TEMPORARY - registered 2017-07-28, extension registered 2024-08-22, expires 2025-07-28) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 35 | Only to Customer (OTC) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 36 | BGP Domain Path (D-PATH) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 37 | SFP attribute | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 38 | BFD Discriminator | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 39 | Next Hop Dependent Characteristic (NHC) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 40 | BGP Prefix-SID | optional transitive; flags `0xc0`; RFC 8669 §3 | unsupported attribute is retained and re-emitted with Partial (`0xe0`) | enriched fence test |
+| 40 | BGP Prefix-SID | optional transitive; flags `0xc0`; RFC 8669 §3 | payload semantics unsupported; correct class retained opaque and emitted with Partial; wrong class is treat-as-withdraw | assigned-class matrix below |
 | 41 | BIER | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 42 | Edge Metadata Path Attribute (TEMPORARY - registered 2025-04-23, extension registered 2026-04-03, expires 2027-04-23) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 43-127 | Unassigned | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 128 | ATTR_SET | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
+| 128 | ATTR_SET | optional transitive; flags `0xc0`; RFC 6368 | payload semantics unsupported; correct class retained opaque and emitted with Partial; wrong class is treat-as-withdraw | assigned-class matrix below |
 | 129 | Deprecated | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 130-240 | Unassigned | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 241 | Deprecated | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
@@ -105,6 +105,20 @@ disposition shown.
 | 10 | 80 | c0000201 | c00002 | attribute-discard | treat-as-withdraw |
 <!-- core-behavior:end -->
 
-The enriched fence test separately proves the three assigned-but-unsupported
-boundaries above and a synthetic unrecognized well-known attribute. Everything
-outside this executable slice remains explicitly `pending follow-up audit`.
+## Assigned class fence
+
+This matrix audits only the registered Optional/Transitive class. It does not
+claim payload parsing, semantic validation, policy support, or feature
+negotiation. "Wrong O" toggles Optional, "wrong T" toggles Transitive, and
+"both" toggles both bits from the canonical class.
+
+| Codes | Class | Correct-class retention and egress | Wrong O | Wrong T | Both wrong | Legacy decoder |
+|---|---|---|---|---|---|---|
+| 23, 27, 40, 128 | optional transitive (`0xc0`) | opaque retention; Partial set on egress; input Partial and Extended Length preserved | treat-as-withdraw | treat-as-withdraw | treat-as-withdraw | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
+| 26 | optional non-transitive (`0x80`) | ignored; no retention or egress | treat-as-withdraw | attribute-discard | attribute-discard | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
+| 33 | optional non-transitive (`0x80`) | ignored; no retention or egress | treat-as-withdraw | treat-as-withdraw | treat-as-withdraw | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
+
+The enriched fence tests separately prove all six rows' outcomes, BGP-LS
+opaque behavior, typed PMSI behavior and wrong-class handling, and unchanged
+synthetic unassigned handling. Everything outside this executable slice remains
+explicitly `pending follow-up audit`.

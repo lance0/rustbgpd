@@ -1083,7 +1083,11 @@ pub fn decode_path_attributes_revised(
                 // inconsistent flags among what makes the MP attribute
                 // itself incorrect).
                 let mut disposition = malformed_attr_disposition(type_code, is_ibgp);
-                if matches!(
+                if type_code == attr_type::AIGP && (flags & attr_flags::TRANSITIVE) != 0 {
+                    // RFC 7311 §3.2 is more specific than RFC 7606 §3(c):
+                    // an AIGP attribute with Transitive set is discarded.
+                    disposition = ErrorDisposition::AttributeDiscard;
+                } else if matches!(
                     &error,
                     DecodeError::UpdateAttributeError { subcode, .. }
                         if *subcode == update_subcode::ATTRIBUTE_FLAGS_ERROR
@@ -1113,8 +1117,24 @@ pub fn decode_path_attributes_revised(
 /// attributes to be quietly ignored rather than stored or propagated.
 fn is_unknown_optional_non_transitive(flags: u8, type_code: u8) -> bool {
     expected_flags(type_code).is_none()
+        && assigned_unsupported_flags(type_code)
+            .is_none_or(|expected| expected == attr_flags::OPTIONAL)
         && (flags & attr_flags::OPTIONAL) != 0
         && (flags & attr_flags::TRANSITIVE) == 0
+}
+
+/// Registry-known class for assigned attributes whose payload semantics are
+/// intentionally unsupported. Keeping this separate from `expected_flags`
+/// prevents registry recognition from becoming a typed-codec support claim.
+fn assigned_unsupported_flags(type_code: u8) -> Option<u8> {
+    match type_code {
+        attr_type::AIGP | attr_type::BGPSEC_PATH => Some(attr_flags::OPTIONAL),
+        attr_type::TUNNEL_ENCAPSULATION
+        | attr_type::PE_DISTINGUISHER_LABELS
+        | attr_type::PREFIX_SID
+        | attr_type::ATTR_SET => Some(attr_flags::OPTIONAL | attr_flags::TRANSITIVE),
+        _ => None,
+    }
 }
 
 /// Consume RFC 6793 compatibility attributes and leave one canonical path and
@@ -1424,7 +1444,8 @@ fn decode_attribute_value(
         } else {
             0
         };
-    if let Some(expected) = expected_flags(type_code)
+    if let Some(expected) =
+        expected_flags(type_code).or_else(|| assigned_unsupported_flags(type_code))
         && (flags & flags_mask) != expected
     {
         return Err(DecodeError::UpdateAttributeError {
@@ -1703,6 +1724,11 @@ fn decode_attribute_value(
             }
             Ok(PathAttribute::AtomicAggregate)
         }
+        // Correctly-classed assigned optional non-transitive attributes whose
+        // payload semantics are unsupported are ignored, never retained.
+        attr_type::AIGP | attr_type::BGPSEC_PATH => unreachable!(
+            "assigned unsupported optional non-transitive attributes are filtered before decode"
+        ),
         // Any unknown type -> RawAttribute. AS4_PATH and AS4_AGGREGATOR are
         // kept raw only until the shared post-decode RFC 6793 normalizer
         // consumes them.
