@@ -280,18 +280,45 @@ description = "ibgp-reflector"
 hold_time = 90
 ```
 
-### Graceful Shutdown
+### Coordinated Shutdown
 
-Shutdown is triggered by SIGINT, SIGTERM, or the `Shutdown` gRPC RPC. Signal
-handlers are registered before the daemon becomes externally reachable, so a
-signal arriving during startup is never dropped:
+Shutdown is triggered by SIGINT, SIGTERM, the `Shutdown` gRPC RPC, or an
+unexpected supervised-component exit. Signal handlers are registered before
+the daemon becomes externally reachable, so a signal arriving during startup
+is never dropped. The common path follows
+[ADR-0020](adr/0020-global-control-services-coordinated-shutdown.md):
 
-1. Stop accepting new gRPC commands.
-2. Send NOTIFICATION/Cease (Administrative Shutdown, subcode 2) to every established peer.
-3. Wait up to 5 seconds for TCP sends to flush. Hard-drop after the timeout — don't hang.
-4. Drop all sessions and close listener sockets.
-5. Flush final telemetry (last metrics scrape, final log entries).
-6. Exit.
+1. Close mutation admission and wait for any owned runtime-config operation to
+   settle or reach its recovery boundary.
+2. Attempt the optional warm checkpoint and restart-marker publication, then
+   fence EVPN runtime applies out of teardown.
+3. Ask the local-MAC, SVI-MAC, L3, and segment originators to drain, waiting up
+   to five seconds for each actor, then await the complete best-effort sweep of
+   locally originated IMET routes. These peer-visible withdrawal attempts
+   deliberately start before Administrative Shutdown while BGP sessions are still
+   established. An actor that exceeds its five-second wait is detached and can
+   finish after Cease begins, so completion before Cease is best-effort for
+   those four actors. The IMET sweep completes before the next step, but each
+   per-route outcome may still be rejected, unavailable, or reply-unknown.
+   Writer-owned KEEPALIVEs keep sessions live during the bounded attempts
+   independently of a session task blocked on RIB delivery
+   ([ADR-0078](adr/0078-inbound-rib-backpressure.md)).
+4. Send the sole PeerManager shutdown command, which initiates
+   Cease/Administrative Shutdown (subcode 2), and await peer teardown.
+5. Drain local-only BLACKHOLE and general-FIB state, BFD sessions, and EVPN
+   Linux dataplane state, followed by the remaining daemon services.
+
+The coordinated path does not replace Administrative Shutdown with an
+Administrative Shutdown Hard Reset. When Notification GR is negotiated, the
+ordinary NOTIFICATION follows the behavior recorded in
+[ADR-0046](adr/0046-notification-gr.md) and
+[RFC 8538 section 4](https://www.rfc-editor.org/rfc/rfc8538.html#section-4).
+
+Configured and default hold timers describe BGP peer-silence handling; they are
+not a time-to-Cease service-level promise or a minimum period for keeping a
+session open. Several explicit stages are individually bounded, but the IMET
+and PeerManager handoffs have no shared deadline, so shipped code has no finite
+aggregate upper bound from shutdown request to first Cease.
 
 Neighbor add/delete mutations made via gRPC are persisted back to the config file (ADR-0043). Full route-state persistence remains deferred — restart replays the config file and re-learns routes from peers.
 
