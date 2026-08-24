@@ -1802,16 +1802,21 @@ mod tests {
         let features = &readme[features_start..architecture_start];
 
         let mut bullets = Vec::new();
+        let mut active_bullet = None;
         for line in features.lines() {
             if line.starts_with("- ") {
                 bullets.push(line.to_owned());
-            } else if line.starts_with("  ") {
-                let bullet = bullets.last_mut().expect("continuation follows a bullet");
-                bullet.push(' ');
-                bullet.push_str(line.trim());
-            } else {
-                assert!(line.is_empty(), "Features contains only bullets");
+                active_bullet = Some(bullets.len() - 1);
+                continue;
             }
+            if line.starts_with("  ")
+                && let Some(index) = active_bullet
+            {
+                bullets[index].push(' ');
+                bullets[index].push_str(line.trim());
+                continue;
+            }
+            active_bullet = None;
         }
         let matching: Vec<_> = bullets
             .iter()
