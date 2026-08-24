@@ -250,7 +250,7 @@ wait_default_rtc_accepted() {
     local container=${1:?} rr=${2:?} label=${3:?}
     log "Waiting for $label to accept the RR's default RTC NLRI..."
     for i in $(seq 1 30); do
-        if gobgp "$container" neighbor "$rr" adj-in -a rtc | grep -qi "default"; then
+        if gobgp "$container" neighbor "$rr" adj-in -a rtc | grep -i "default" >/dev/null; then
             ok "$label accepted the RR's default RTC NLRI (attempt $i)"
             return 0
         fi
