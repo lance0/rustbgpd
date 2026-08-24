@@ -24,9 +24,12 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 ## 0.4.0 - 2026-08-08
 
 - **Dependency-only breaking change:** Updated the public wire-type boundary
-  from `rustbgpd-wire` 0.16 to 0.17. The wire crate's fallible EVPN NLRI encoder
-  changed those exposed type identities; the FSM itself made no direct API
-  change in this release.
+  from `rustbgpd-wire` 0.16 to 0.17. The incompatible 0.x dependency update
+  changes the identity of the wire types exposed through the FSM API; the FSM
+  itself made no direct API change in this release.
+- The paired `rustbgpd-wire` 0.17 release separately made
+  `encode_evpn_nlri` fallible. Direct wire callers must handle its `Result`;
+  that encoder change is not what changes the FSM's exposed type identities.
 
 ## 0.3.1 - 2026-07-27
 
