@@ -76,14 +76,16 @@ grpc_apply_teardown() {
 # ---------------------------------------------------------------------------
 
 frr_evpn_table() {
-    docker exec "$FRR" vtysh -c "show bgp l2vpn evpn" 2>/dev/null || true
+    docker exec "$FRR" vtysh -c "show bgp l2vpn evpn" 2>/dev/null
 }
 
 wait_frr_rd_present() {
     local timeout=${1:-30}
     local attempts=$((timeout / 2))
+    local table
     for _ in $(seq 1 "$attempts"); do
-        if frr_evpn_table | grep -q "$TENANT_RD"; then
+        if table=$(frr_evpn_table) \
+            && printf '%s\n' "$table" | grep "$TENANT_RD" >/dev/null; then
             return 0
         fi
         sleep 2
@@ -94,8 +96,10 @@ wait_frr_rd_present() {
 wait_frr_rd_absent() {
     local timeout=${1:-20}
     local attempts=$((timeout / 2))
+    local table
     for _ in $(seq 1 "$attempts"); do
-        if ! frr_evpn_table | grep -q "$TENANT_RD"; then
+        if table=$(frr_evpn_table) \
+            && ! printf '%s\n' "$table" | grep "$TENANT_RD" >/dev/null; then
             return 0
         fi
         sleep 2
