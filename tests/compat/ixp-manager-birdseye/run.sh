@@ -76,13 +76,37 @@ docker run --rm --user "$(id -u):$(id -g)" \
   "$image" /harness/run-in-container.sh
 
 supported="$capture_output/ixp-manager-v7.4-rustbgpd.json"
+pch_v2="$capture_output/config-pch-v2.json"
 for capture in config-default.json config-default-excluded.json \
   config-default-all-excluded.json config-explicit-empty.json \
   config-explicit-nonempty.json config-implicit.json config-ui-filter.json \
-  config-skin.json "$supported"; do
+  config-skin.json "$pch_v2" "$supported"; do
   [ -f "$capture_output/$(basename "$capture")" ] || { echo "missing real IXP Manager capture: $capture" >&2; exit 1; }
   chmod 600 "$capture_output/$(basename "$capture")"
 done
+
+legacy_fixture="$repo/tools/rs-config-render/tests/fixtures/ixp-manager-v1-supported.json"
+expected_pch_v2="$tmp/expected-pch-v2.json"
+actual_pch_v2="$tmp/actual-pch-v2.json"
+jq -S '
+  .schema = "rustbgpd.ixp-manager.router-config/v2"
+  | .ui_filters = []
+  | .complete.ui_filter_count = 0
+' "$legacy_fixture" >"$expected_pch_v2"
+jq -S . "$pch_v2" >"$actual_pch_v2"
+if [ "${CAPTURE_FIXTURES:-0}" != 1 ] \
+    && ! cmp -s "$expected_pch_v2" "$actual_pch_v2"; then
+  jq -nr --slurpfile actual "$actual_pch_v2" \
+    --slurpfile expected "$expected_pch_v2" '
+      [($actual[0] | paths(scalars)), ($expected[0] | paths(scalars))]
+      | unique[] as $path
+      | select(($actual[0] | getpath($path)) != ($expected[0] | getpath($path)))
+      | $path | map(tostring) | join(".")
+    ' >&2 || true
+  echo "fresh PCH schema-v2 capture drifted from the pinned v1 fixture" >&2
+  exit 1
+fi
+
 cargo build --quiet --locked --manifest-path "$repo/Cargo.toml" -p rs-config-render --bin rs-config-render
 cargo build --quiet --locked --manifest-path "$repo/Cargo.toml" --bin rustbgpd
 cargo build --quiet --locked --manifest-path "$repo/Cargo.toml" -p rustbgpctl --bin rbgp
@@ -142,7 +166,7 @@ done
 
 legacy="$tmp/candidate-v1"
 legacy_input="$tmp/ixp-manager-v1-supported.json"
-cp "$repo/tools/rs-config-render/tests/fixtures/ixp-manager-v1-supported.json" "$legacy_input"
+cp "$legacy_fixture" "$legacy_input"
 chmod 600 "$legacy_input"
 "$repo/target/debug/rs-config-render" --input-format ixp-manager-v1 \
   --context "$legacy_input" \

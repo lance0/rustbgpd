@@ -85,7 +85,8 @@ exporter="$ixp_manager/resources/skins/${VIEW_SKIN}/api/v4/router/server/rustbgp
 mkdir -p "$exporter"
 cp /exporter/json.foil.php "$exporter/json.foil.php"
 IXP_MANAGER_ROOT="$ixp_manager" php "$root/config-consumer.php"
-for config_capture in config-implicit.json config-ui-filter.json config-skin.json ixp-manager-v7.4-rustbgpd.json; do
+for config_capture in config-implicit.json config-ui-filter.json config-skin.json \
+  config-pch-v2.json ixp-manager-v7.4-rustbgpd.json; do
   [ -s "${CAPTURE_OUTPUT}/$config_capture" ] || { echo "IXP Manager config capture failed: $config_capture" >&2; exit 1; }
 done
 python3 "$root/verify_capture.py" "$capture" "$CAPTURE_OUTPUT"
