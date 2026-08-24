@@ -176,9 +176,9 @@ surface over the daemon's gRPC API. Its 14 registered HTTP routes disclose:
 - Daemon identity and health through `GET /status`.
 - Peer and table identities: `GET /protocols/bgp`, `GET /protocol/{id}`, and
   `GET /symbols`.
-- Received, advertised, and Loc-RIB-selected route views through
-  `GET /routes/protocol/{id}`, `GET /routes/export/{id}`, and
-  `GET /routes/table/{table}`.
+- Received and advertised route views through `GET /routes/protocol/{id}` and
+  `GET /routes/export/{id}`, plus the global received-candidate table with
+  Loc-RIB winner attribution through `GET /routes/table/{table}`.
 - Exact-prefix or most-specific-covering route candidates through
   `GET /route/{prefix}/protocol/{id}`, `GET /route/{prefix}/export/{id}`, and
   `GET /route/{prefix}/table/{table}`.
@@ -195,18 +195,21 @@ retained rejection's prefix, next hop, AS path, communities, RPKI/ASPA
 validation state, and the policy rejection reason (canonical reason token,
 human-readable detail string, and a synthesized reject-reason large
 community). `/protocols/bgp` carries real per-neighbor filtered counts.
-`/routes/noexport/{id}` additionally serves every Loc-RIB best route
-withheld from that peer with the export gate that stopped it (split
-horizon, reflection rules, family, LLGR, ORF, RT membership, or export
-policy — including the deciding policy term's detail line), sourced from
-`RibService.ListBestRoutes`, `ListAdvertisedRoutes`, and
-`ExplainAdvertisedRoute`. The adapter's HTTP listener is unauthenticated
-and has no TLS; it binds `127.0.0.1:8080` by default and listens elsewhere
-only if you pass `--listen` / `BIRDWATCHER_ADAPTER_LISTEN`. Its optional
-gRPC bearer token authenticates the adapter to rustbgpd, not HTTP clients.
-Anyone who can reach it can enumerate daemon and peer identities, route
-candidates, policy rejects, and export-withholding reasons — treat that as
-looking-glass data you are choosing to publish.
+`/routes/noexport/{id}` additionally serves a prefix-granular view of returned
+Loc-RIB best-route candidates not represented in that peer's Adj-RIB-Out, with
+the export gate that stopped each candidate (split horizon, reflection rules,
+family, LLGR, ORF, RT membership, or export policy — including the deciding
+policy term's detail line). Any advertised path suppresses the whole prefix,
+duplicate candidates collapse per prefix, and cross-snapshot churn can omit a
+candidate if dry-run explanation says it would now advertise. The view is
+sourced from `RibService.ListBestRoutes`, `ListAdvertisedRoutes`, and
+`ExplainAdvertisedRoute`. The adapter's HTTP listener is unauthenticated and
+has no TLS; it binds `127.0.0.1:8080` by default and listens elsewhere only if
+you pass `--listen` / `BIRDWATCHER_ADAPTER_LISTEN`. Its optional gRPC bearer
+token authenticates the adapter to rustbgpd, not HTTP clients. Anyone who can
+reach it can enumerate daemon and peer identities, route candidates, policy
+rejects, and export-withholding reasons — treat that as looking-glass data you
+are choosing to publish.
 
 Mitigations, in preference order:
 

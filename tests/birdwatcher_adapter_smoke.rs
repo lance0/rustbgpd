@@ -714,14 +714,60 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
         .split_once(".with_state(state);")
         .unwrap()
         .0;
-    let routed_paths: Vec<_> = router
-        .split(".route(")
-        .skip(1)
+    let route_calls: Vec<_> = router.split(".route(").skip(1).collect();
+    assert_eq!(
+        route_calls.len(),
+        14,
+        "adapter must retain 14 direct routes"
+    );
+    for alternate in [
+        ".route_service(",
+        ".nest(",
+        ".nest_service(",
+        ".fallback(",
+        ".fallback_service(",
+        ".merge(",
+    ] {
+        assert_eq!(
+            router.matches(alternate).count(),
+            0,
+            "adapter route inventory must not bypass direct GET registration: {alternate}"
+        );
+    }
+    let routed_paths: Vec<_> = route_calls
+        .iter()
         .map(|call| {
-            call.trim_start()
+            let literal = call
+                .trim_start()
                 .strip_prefix('"')
-                .and_then(|literal| literal.split('"').next())
-                .expect("router paths must remain direct string literals")
+                .expect("router paths must remain direct string literals");
+            let (path, registration) = literal
+                .split_once('"')
+                .expect("router paths must remain terminated string literals");
+            let method = registration
+                .trim_start()
+                .strip_prefix(',')
+                .expect("router path must have a method registration")
+                .trim_start();
+            assert!(
+                method.starts_with("get("),
+                "adapter route must remain GET-only: {path}"
+            );
+            for extra_method in [
+                ".delete(",
+                ".head(",
+                ".options(",
+                ".patch(",
+                ".post(",
+                ".put(",
+                ".trace(",
+            ] {
+                assert!(
+                    !registration.contains(extra_method),
+                    "adapter route gained another HTTP method: {path} {extra_method}"
+                );
+            }
+            path
         })
         .collect();
     let expected_paths: Vec<_> = concat!(
