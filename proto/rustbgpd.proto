@@ -2299,6 +2299,9 @@ enum FibRouteState {
   FIB_ROUTE_STATE_REJECTED = 2;
   // Runtime hit a RIB, dump, or kernel boundary error.
   FIB_ROUTE_STATE_FAILED = 3;
+  // Linux returned the family-specific route-level unreachable errno for an
+  // Add/Replace target made entirely of unscoped same-family next hops.
+  FIB_ROUTE_STATE_UNRESOLVED = 4;
 }
 
 message FibRouteStatus {
@@ -2313,7 +2316,7 @@ message FibRouteStatus {
   // Operator-facing reason code. Stable values include "owned",
   // "next_hop_family_unsupported", "peer_not_allowed",
   // "route_limit_exceeded", "foreign_route_exists", and
-  // "owned_route_drifted"; failure values are prefixed diagnostics such as "dump_failed:DETAIL",
+  // "owned_route_drifted", and "next_hop_unresolved"; failure values are prefixed diagnostics such as "dump_failed:DETAIL",
   // "rib_query_failed:DETAIL", "install_failed:DETAIL",
   // "replace_failed:DETAIL", or "remove_failed:DETAIL". Treat text after
   // ':' as diagnostic detail.

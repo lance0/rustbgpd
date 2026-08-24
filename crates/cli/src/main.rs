@@ -1221,7 +1221,7 @@ enum RibAction {
         /// FIB table-name filter
         #[arg(long)]
         table: Option<String>,
-        /// FIB route state filter: installed, rejected, failed
+        /// FIB route state filter: installed, rejected, failed, unresolved
         #[arg(long)]
         state: Option<String>,
         /// Exact reason-code filter, e.g. owned or route_limit_exceeded

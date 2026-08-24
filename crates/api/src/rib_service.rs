@@ -4243,6 +4243,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_fib_routes_filters_unresolved_state_and_reason() {
+        let (tx, _rx) = mpsc::channel(16);
+        let svc = RibService::with_status_snapshots(
+            tx,
+            Arc::new(Vec::new),
+            Arc::new(|| {
+                vec![fib_status(
+                    "edge",
+                    "203.0.113.0",
+                    24,
+                    "198.51.100.1",
+                    proto::FibRouteState::Unresolved,
+                    "next_hop_unresolved",
+                )]
+            }),
+        );
+
+        let resp = svc
+            .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                state: proto::FibRouteState::Unresolved as i32,
+                reason: "next_hop_unresolved".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.routes.len(), 1);
+        assert_eq!(
+            resp.routes[0].state,
+            proto::FibRouteState::Unresolved as i32
+        );
+        assert_eq!(resp.routes[0].reason, "next_hop_unresolved");
+    }
+
+    #[tokio::test]
     async fn list_fib_routes_paginates_filtered_snapshot_deterministically() {
         let (tx, _rx) = mpsc::channel(16);
         let svc = RibService::with_status_snapshots(

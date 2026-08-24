@@ -9,6 +9,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- General unicast FIB Add/Replace operations whose unscoped next hops are not
+  yet reachable are now held as `unresolved` and retried on relevant Linux
+  route notifications or the periodic reconcile, without failure-event or
+  failure-counter noise. (LAN-1194)
+
 ### Upgrade notes
 
 - Use `Route.local_pref_attr` when attribute presence matters;

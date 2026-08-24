@@ -1541,10 +1541,11 @@ Returns one row per desired route, daemon-owned route, or one-pass
 reconciliation outcome in the ADR-0061 general unicast Linux FIB runtime.
 The runtime is default-off and only starts when at least one `[[fib_tables]]`
 block is configured. `state` is a `FibRouteState` enum (`FIB_ROUTE_STATE_INSTALLED`,
-`FIB_ROUTE_STATE_REJECTED`, or `FIB_ROUTE_STATE_FAILED`); `reason`
+`FIB_ROUTE_STATE_REJECTED`, `FIB_ROUTE_STATE_FAILED`, or
+`FIB_ROUTE_STATE_UNRESOLVED`); `reason`
 carries values such as `owned`, `foreign_route_exists`,
 `next_hop_family_unsupported`, `peer_not_allowed`,
-`route_limit_exceeded`, `owned_route_drifted`, `dump_failed:DETAIL`,
+`route_limit_exceeded`, `owned_route_drifted`, `next_hop_unresolved`, `dump_failed:DETAIL`,
 `rib_query_failed:DETAIL`, or a kernel apply error such as
 `install_failed:DETAIL`.
 
@@ -1861,7 +1862,7 @@ Dataplane event types:
 
 | Type | Meaning |
 |------|---------|
-| `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED` | FIB / BLACKHOLE installed, rejected, or failed status-row count changed |
+| `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED` | FIB / BLACKHOLE installed, rejected, or failed status-row count changed; the legacy three-bucket summary intentionally ignores unresolved FIB rows, which are exposed by `ListFibRoutes` and `bgp_fib_routes_unresolved` |
 | `BGP_EVENT_TYPE_DATAPLANE_ROUTE_INSTALLED` | ADR-0061 FIB runtime successfully installed or replaced one route |
 | `BGP_EVENT_TYPE_DATAPLANE_ROUTE_WITHDRAWN` | ADR-0061 FIB runtime successfully removed one owned route |
 | `BGP_EVENT_TYPE_DATAPLANE_ROUTE_FAILED` | ADR-0061 FIB runtime failed to apply one route operation; severity is `WARNING` |

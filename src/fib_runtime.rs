@@ -139,6 +139,7 @@ pub enum FibRuntimeState {
     Installed,
     Rejected,
     Failed,
+    Unresolved,
 }
 
 /// Per-route FIB dataplane outcome emitted by the reconciler.
@@ -294,11 +295,13 @@ async fn run_loop<F>(
     F: UnicastFib,
 {
     let mut owned = load_owned_state(&config);
+    let mut unresolved = UnresolvedHolds::default();
     let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval.tick().await;
     let mut event_debounce = Box::pin(tokio::time::sleep(ROUTE_EVENT_DEBOUNCE));
     let mut route_event_dirty = false;
+    let mut held_retry_keys = BTreeSet::new();
     let mut cmd_open = true;
 
     let mut route_events = subscribe_route_events(&rib_tx).await;
@@ -311,6 +314,8 @@ async fn run_loop<F>(
         &status_tx,
         &event_tx,
         &mut owned,
+        &mut unresolved,
+        HeldRetry::None,
         &shutdown,
     )
     .await;
@@ -346,6 +351,8 @@ async fn run_loop<F>(
                             &status_tx,
                             &event_tx,
                             &mut owned,
+                            &mut unresolved,
+                            HeldRetry::None,
                             &shutdown,
                         )
                         .await;
@@ -422,11 +429,14 @@ async fn run_loop<F>(
                     &status_tx,
                     &event_tx,
                     &mut owned,
+                    &mut unresolved,
+                    HeldRetry::All,
                     &shutdown,
                 ).await;
             }
             () = &mut event_debounce, if route_event_dirty => {
                 route_event_dirty = false;
+                let retry = HeldRetry::Keys(std::mem::take(&mut held_retry_keys));
                 reconcile_once_with_events(
                     &config,
                     &rib_query_tx,
@@ -435,6 +445,8 @@ async fn run_loop<F>(
                     &status_tx,
                     &event_tx,
                     &mut owned,
+                    &mut unresolved,
+                    retry,
                     &shutdown,
                 ).await;
             }
@@ -452,11 +464,15 @@ async fn run_loop<F>(
             maybe_drift = recv_kernel_route_event(&mut kernel_route_events) => {
                 match maybe_drift {
                     Some(event) => {
-                        if kernel_route_drift_wakes(&event, &config.tables, &owned) {
+                        let matching_holds = matching_unresolved_holds(&event, &unresolved);
+                        if kernel_route_drift_wakes(&event, &config.tables, &owned)
+                            || !matching_holds.is_empty()
+                        {
+                            held_retry_keys.extend(matching_holds);
                             debug!(
                                 table_id = event.table_id,
                                 metric = event.metric,
-                                "kernel route drift on an owned FIB surface; \
+                                "kernel route change may affect owned or unresolved FIB state; \
                                  coalesced reconcile follows"
                             );
                             route_event_dirty = true;
@@ -535,6 +551,54 @@ fn kernel_route_drift_wakes(
                     })
                 })
         }
+    }
+}
+
+/// Held routes whose unscoped next-hop falls within a kernel route event's
+/// prefix. Route notifications are only reachability hints: both NEW and DEL,
+/// and every table/protocol/type/metric, are accepted. The next reconcile still
+/// applies the complete desired route and lets Linux decide whether resolution
+/// is now possible.
+fn matching_unresolved_holds(
+    event: &KernelRouteEvent,
+    unresolved: &UnresolvedHolds,
+) -> BTreeSet<FibRouteKey> {
+    let Some(prefix) = event.prefix else {
+        return BTreeSet::new();
+    };
+    unresolved
+        .routes
+        .iter()
+        .filter_map(|(key, held)| {
+            held.route
+                .target
+                .next_hops
+                .iter()
+                .any(|next_hop| prefix_contains_addr(prefix, next_hop.addr))
+                .then_some(*key)
+        })
+        .collect()
+}
+
+fn prefix_contains_addr(prefix: Prefix, addr: IpAddr) -> bool {
+    match (prefix, addr) {
+        (Prefix::V4(prefix), IpAddr::V4(addr)) => {
+            let mask = if prefix.len == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix.len)
+            };
+            u32::from(prefix.addr) & mask == u32::from(addr) & mask
+        }
+        (Prefix::V6(prefix), IpAddr::V6(addr)) => {
+            let mask = if prefix.len == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix.len)
+            };
+            u128::from(prefix.addr) & mask == u128::from(addr) & mask
+        }
+        (Prefix::V4(_), IpAddr::V6(_)) | (Prefix::V6(_), IpAddr::V4(_)) => false,
     }
 }
 
@@ -681,6 +745,8 @@ async fn reconcile_once_with_events<F>(
     status_tx: &watch::Sender<Vec<FibRuntimeStatus>>,
     event_tx: &broadcast::Sender<FibRuntimeEvent>,
     owned: &mut FibOwnedState,
+    unresolved: &mut UnresolvedHolds,
+    retry_held: HeldRetry,
     shutdown: &CancellationToken,
 ) -> bool
 where
@@ -692,6 +758,8 @@ where
     // route events. (If routes are still owned, e.g. a withdraw is pending, we
     // must still reconcile to flush them.)
     if config.tables.is_empty() && owned.routes.is_empty() {
+        unresolved.routes.clear();
+        metrics.set_fib_routes_unresolved(0);
         status_tx.send_replace(Vec::new());
         return true;
     }
@@ -745,11 +813,28 @@ where
     for drop in &plan.drops {
         metrics.record_fib_route_rejected(drop_reason(drop));
     }
-    let outcome = apply_plan(fib, metrics, owned, &plan, event_tx, shutdown).await;
+    let outcome = apply_plan(
+        fib,
+        metrics,
+        owned,
+        unresolved,
+        &plan,
+        &retry_held,
+        event_tx,
+        shutdown,
+    )
+    .await;
     if outcome.owned_changed {
         persist_owned_state(config, owned);
     }
-    let mut statuses = build_statuses(config, &intent, owned, &plan, &outcome.failed_keys);
+    let mut statuses = build_statuses(
+        config,
+        &intent,
+        owned,
+        unresolved,
+        &plan,
+        &outcome.failed_keys,
+    );
     statuses.extend(outcome.failures);
     status_tx.send_replace(statuses);
     true
@@ -768,6 +853,7 @@ async fn reconcile_once<F>(
     F: UnicastFib,
 {
     let (event_tx, _) = broadcast::channel(16);
+    let mut unresolved = UnresolvedHolds::default();
     reconcile_once_with_events(
         config,
         rib_query_tx,
@@ -776,9 +862,46 @@ async fn reconcile_once<F>(
         status_tx,
         &event_tx,
         owned,
+        &mut unresolved,
+        HeldRetry::All,
         shutdown,
     )
     .await;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct UnresolvedHolds {
+    routes: BTreeMap<FibRouteKey, UnresolvedHold>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnresolvedHold {
+    route: FibRoute,
+    op_kind: UnresolvedOpKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnresolvedOpKind {
+    Add,
+    Replace,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum HeldRetry {
+    #[default]
+    None,
+    All,
+    Keys(BTreeSet<FibRouteKey>),
+}
+
+impl HeldRetry {
+    fn includes(&self, key: FibRouteKey) -> bool {
+        match self {
+            Self::None => false,
+            Self::All => true,
+            Self::Keys(keys) => keys.contains(&key),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -789,6 +912,7 @@ struct ApplyPlanOutcome {
 }
 
 #[expect(
+    clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "keeps success/failure handling for one FIB diff plan in one place"
 )]
@@ -796,7 +920,9 @@ async fn apply_plan<F>(
     fib: &mut F,
     metrics: &BgpMetrics,
     owned: &mut FibOwnedState,
+    unresolved: &mut UnresolvedHolds,
     plan: &FibPlan,
+    retry_held: &HeldRetry,
     event_tx: &broadcast::Sender<FibRuntimeEvent>,
     shutdown: &CancellationToken,
 ) -> ApplyPlanOutcome
@@ -804,6 +930,7 @@ where
     F: UnicastFib,
 {
     let mut outcome = ApplyPlanOutcome::default();
+    refresh_unresolved_holds(unresolved, plan);
     for op in &plan.ops {
         if shutdown.is_cancelled() {
             break;
@@ -830,6 +957,15 @@ where
             );
             continue;
         }
+        let route = op_route(op);
+        let op_kind = unresolved_op_kind(op);
+        let is_unchanged_hold = unresolved
+            .routes
+            .get(&route.key)
+            .is_some_and(|held| held.route.target == route.target && Some(held.op_kind) == op_kind);
+        if is_unchanged_hold && !retry_held.includes(route.key) {
+            continue;
+        }
         let result = tokio::select! {
             biased;
             () = shutdown.cancelled() => break,
@@ -837,6 +973,7 @@ where
         };
         match result {
             Ok(()) => {
+                unresolved.routes.remove(&route.key);
                 match op {
                     FibOp::Add(route) => {
                         metrics.record_fib_route_installed();
@@ -893,7 +1030,17 @@ where
                 }
                 outcome.owned_changed |= record_fib_success(owned, op);
             }
-            Err(e) => {
+            Err(FibApplyError::Unresolved) => {
+                unresolved.routes.insert(
+                    route.key,
+                    UnresolvedHold {
+                        route: route.clone(),
+                        op_kind: op_kind.expect("only add/replace can classify unresolved"),
+                    },
+                );
+            }
+            Err(FibApplyError::Other(e)) => {
+                unresolved.routes.remove(&route.key);
                 let action = op_action(op);
                 metrics.record_fib_kernel_failure(action);
                 warn!(action, error = %e, "failed to apply general FIB route op");
@@ -912,7 +1059,39 @@ where
             }
         }
     }
+    metrics.set_fib_routes_unresolved(unresolved.routes.len());
     outcome
+}
+
+fn refresh_unresolved_holds(unresolved: &mut UnresolvedHolds, plan: &FibPlan) {
+    unresolved.routes.retain(|key, held| {
+        let Some((desired, op_kind)) = plan.ops.iter().find_map(|op| match op {
+            FibOp::Add(route) if route.key == *key => Some((route, UnresolvedOpKind::Add)),
+            FibOp::Replace { desired, .. } if desired.key == *key => {
+                Some((desired, UnresolvedOpKind::Replace))
+            }
+            FibOp::Add(_)
+            | FibOp::Adopt(_)
+            | FibOp::Replace { .. }
+            | FibOp::Remove(_)
+            | FibOp::Forget(_) => None,
+        }) else {
+            return false;
+        };
+        if held.route.target != desired.target || held.op_kind != op_kind {
+            return false;
+        }
+        held.route = desired.clone();
+        true
+    });
+}
+
+fn unresolved_op_kind(op: &FibOp) -> Option<UnresolvedOpKind> {
+    match op {
+        FibOp::Add(_) => Some(UnresolvedOpKind::Add),
+        FibOp::Replace { .. } => Some(UnresolvedOpKind::Replace),
+        FibOp::Adopt(_) | FibOp::Remove(_) | FibOp::Forget(_) => None,
+    }
 }
 
 async fn drain_owned_with_events<F>(
@@ -1623,6 +1802,7 @@ fn build_statuses(
     config: &FibRuntimeConfig,
     intent: &FibIntent,
     owned: &FibOwnedState,
+    unresolved: &UnresolvedHolds,
     plan: &FibPlan,
     failed_keys: &BTreeSet<FibRouteKey>,
 ) -> Vec<FibRuntimeStatus> {
@@ -1646,6 +1826,7 @@ fn build_statuses(
         if (intent.routes.contains_key(&route.key)
             || intent.frozen_tables.contains(&route.key.table_key()))
             && !failed_keys.contains(&route.key)
+            && !unresolved.routes.contains_key(&route.key)
             && !dropped_keys.contains(&route.key)
         {
             out.push(status_for_route(
@@ -1655,6 +1836,13 @@ fn build_statuses(
             ));
         }
     }
+    out.extend(unresolved.routes.values().map(|held| {
+        status_for_route(
+            &held.route,
+            FibRuntimeState::Unresolved,
+            "next_hop_unresolved".to_string(),
+        )
+    }));
     out
 }
 
@@ -1868,6 +2056,21 @@ fn status_for_route(route: &FibRoute, state: FibRuntimeState, reason: String) ->
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FibApplyError {
+    Unresolved,
+    Other(String),
+}
+
+impl std::fmt::Display for FibApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unresolved => f.write_str("next hop unresolved"),
+            Self::Other(error) => f.write_str(error),
+        }
+    }
+}
+
 trait UnicastFib {
     fn dump<'a>(
         &'a mut self,
@@ -1877,7 +2080,7 @@ trait UnicastFib {
     fn apply<'a>(
         &'a mut self,
         op: &'a FibOp,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<(), FibApplyError>> + Send + 'a>>;
 
     /// Take the kernel route-change notification stream, if the
     /// backing can surface one. Called once at actor startup; `None`
@@ -1920,7 +2123,7 @@ impl UnicastFib for LinuxUnicastFib {
     fn apply<'a>(
         &'a mut self,
         op: &'a FibOp,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), FibApplyError>> + Send + 'a>> {
         Box::pin(async move { apply_linux_op(&self.handle, op).await })
     }
 
@@ -1930,36 +2133,79 @@ impl UnicastFib for LinuxUnicastFib {
 }
 
 #[cfg(target_os = "linux")]
-async fn apply_linux_op(handle: &rtnetlink::Handle, op: &FibOp) -> Result<(), String> {
+async fn apply_linux_op(handle: &rtnetlink::Handle, op: &FibOp) -> Result<(), FibApplyError> {
     match op {
         FibOp::Add(route) => {
-            let msg = build_route_message(route, RouteMessageGateway::Include)?;
+            let msg = build_route_message(route, RouteMessageGateway::Include)
+                .map_err(FibApplyError::Other)?;
             handle
                 .route()
                 .add(msg)
                 .execute()
                 .await
-                .map_err(|e| format!("kernel route add: {e}"))
+                .map_err(|error| classify_linux_apply_error(op, &error, "add"))
         }
         FibOp::Adopt(_) | FibOp::Forget(_) => Ok(()),
         FibOp::Replace { desired: route, .. } => {
-            let msg = build_route_message(route, RouteMessageGateway::Include)?;
+            let msg = build_route_message(route, RouteMessageGateway::Include)
+                .map_err(FibApplyError::Other)?;
             handle
                 .route()
                 .add(msg)
                 .replace()
                 .execute()
                 .await
-                .map_err(|e| format!("kernel route replace: {e}"))
+                .map_err(|error| classify_linux_apply_error(op, &error, "replace"))
         }
         FibOp::Remove(route) => {
-            let msg = build_route_message(route, RouteMessageGateway::Omit)?;
+            let msg = build_route_message(route, RouteMessageGateway::Omit)
+                .map_err(FibApplyError::Other)?;
             match handle.route().del(msg).execute().await {
                 Ok(()) => Ok(()),
                 Err(e) if is_idempotent_route_delete(&e) => Ok(()),
-                Err(e) => Err(format!("kernel route del: {e}")),
+                Err(e) => Err(FibApplyError::Other(format!("kernel route del: {e}"))),
             }
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn classify_linux_apply_error(op: &FibOp, error: &rtnetlink::Error, action: &str) -> FibApplyError {
+    if is_next_hop_unresolved(op, error) {
+        FibApplyError::Unresolved
+    } else {
+        FibApplyError::Other(format!("kernel route {action}: {error}"))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_next_hop_unresolved(op: &FibOp, error: &rtnetlink::Error) -> bool {
+    let rtnetlink::Error::NetlinkError(message) = error else {
+        return false;
+    };
+    let route = match op {
+        FibOp::Add(route) | FibOp::Replace { desired: route, .. } => route,
+        FibOp::Adopt(_) | FibOp::Remove(_) | FibOp::Forget(_) => return false,
+    };
+    next_hop_unresolved_for_raw_errno(route, message.raw_code())
+}
+
+#[cfg(target_os = "linux")]
+fn next_hop_unresolved_for_raw_errno(route: &FibRoute, raw_errno: i32) -> bool {
+    match route.key.prefix {
+        Prefix::V4(_) if raw_errno == -libc::ENETUNREACH => {
+            route.target.next_hops.iter().all(|next_hop| {
+                next_hop.scope.is_none()
+                    && matches!(next_hop.addr, IpAddr::V4(addr) if !addr.is_link_local())
+            })
+        }
+        Prefix::V6(_) if raw_errno == -libc::EHOSTUNREACH => {
+            route.target.next_hops.iter().all(|next_hop| {
+                next_hop.scope.is_none()
+                    && matches!(next_hop.addr, IpAddr::V6(addr) if !addr.is_unicast_link_local())
+            })
+        }
+        Prefix::V4(_) | Prefix::V6(_) => false,
     }
 }
 
@@ -2363,6 +2609,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::net::{Ipv4Addr, Ipv6Addr};
     #[cfg(target_os = "linux")]
+    use std::num::NonZeroI32;
+    #[cfg(target_os = "linux")]
     use std::process::Command;
     use std::sync::{
         Arc,
@@ -2373,7 +2621,7 @@ mod tests {
     struct FakeFib {
         kernel: FibKernelSnapshot,
         fail_dump: Option<String>,
-        fail_apply: Vec<String>,
+        fail_apply: Vec<FibApplyError>,
         fail_apply_signal: Option<Arc<std::sync::atomic::AtomicBool>>,
         applied: Vec<FibOp>,
         kernel_events: Option<mpsc::Receiver<KernelRouteEvent>>,
@@ -2396,7 +2644,7 @@ mod tests {
         fn apply<'a>(
             &'a mut self,
             op: &'a FibOp,
-        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = Result<(), FibApplyError>> + Send + 'a>> {
             self.applied.push(op.clone());
             Box::pin(async move {
                 if self
@@ -2404,7 +2652,7 @@ mod tests {
                     .as_ref()
                     .is_some_and(|signal| signal.load(Ordering::SeqCst))
                 {
-                    return Err("signaled apply failure".to_string());
+                    return Err(FibApplyError::Other("signaled apply failure".to_string()));
                 }
                 if let Some(error) = self.fail_apply.pop() {
                     return Err(error);
@@ -2874,6 +3122,7 @@ mod tests {
         let rib_tx = rib_with_routes(routes);
         let (status_tx, status_rx) = watch::channel(Vec::new());
         let (event_tx, mut event_rx) = broadcast::channel(16);
+        let mut unresolved = UnresolvedHolds::default();
         reconcile_once_with_events(
             &config(),
             &rib_tx,
@@ -2882,6 +3131,8 @@ mod tests {
             &status_tx,
             &event_tx,
             owned,
+            &mut unresolved,
+            HeldRetry::All,
             &CancellationToken::new(),
         )
         .await;
@@ -2890,6 +3141,56 @@ mod tests {
             events.push(event);
         }
         (status_rx.borrow().clone(), events)
+    }
+
+    async fn reconcile_for_test_with_holds(
+        routes: Vec<Route>,
+        fib: &mut FakeFib,
+        owned: &mut FibOwnedState,
+        unresolved: &mut UnresolvedHolds,
+        retry_held: HeldRetry,
+        metrics: &BgpMetrics,
+    ) -> (Vec<FibRuntimeStatus>, Vec<FibRuntimeEvent>) {
+        let rib_tx = rib_with_routes(routes);
+        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (event_tx, mut event_rx) = broadcast::channel(16);
+        reconcile_once_with_events(
+            &config(),
+            &rib_tx,
+            fib,
+            metrics,
+            &status_tx,
+            &event_tx,
+            owned,
+            unresolved,
+            retry_held,
+            &CancellationToken::new(),
+        )
+        .await;
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        let statuses = status_rx.borrow().clone();
+        (statuses, events)
+    }
+
+    fn metric_value_bits(registry: &Registry, name: &str) -> u64 {
+        registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == name)
+            .and_then(|family| family.get_metric().first().cloned())
+            .map_or(0.0_f64.to_bits(), |metric| {
+                metric.get_gauge().value().to_bits()
+            })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn netlink_error(raw_errno: i32) -> rtnetlink::Error {
+        let mut message = rtnetlink::packet_core::ErrorMessage::default();
+        message.code = NonZeroI32::new(raw_errno);
+        rtnetlink::Error::NetlinkError(message)
     }
 
     async fn reconcile_config_for_test(
@@ -3012,8 +3313,9 @@ mod tests {
         assert_eq!(owned.routes.len(), 1);
 
         // Remove the table, but force the kernel Remove to fail.
-        fib.fail_apply
-            .push("simulated kernel remove failure".to_string());
+        fib.fail_apply.push(FibApplyError::Other(
+            "simulated kernel remove failure".to_string(),
+        ));
         reconcile_config_for_test(
             config_with(vec![]),
             rib_with_routes(routes),
@@ -4070,6 +4372,49 @@ mod tests {
         owned
     }
 
+    fn unresolved_with(route: FibRoute) -> UnresolvedHolds {
+        UnresolvedHolds {
+            routes: BTreeMap::from([(
+                route.key,
+                UnresolvedHold {
+                    route,
+                    op_kind: UnresolvedOpKind::Add,
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn unresolved_wake_accepts_new_and_del_containment_but_not_unrelated_or_missing_prefix() {
+        let held = unresolved_with(fib_route(v4(24), ip("192.0.2.129")));
+        for kind in [KernelRouteEventKind::New, KernelRouteEventKind::Del] {
+            let event = drift_event_typed(
+                kind,
+                9999,
+                17,
+                Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24))),
+                false,
+                KernelRouteType::Other,
+            );
+            assert_eq!(
+                matching_unresolved_holds(&event, &held),
+                BTreeSet::from([key(v4(24))])
+            );
+        }
+
+        for prefix in [
+            Some(Prefix::V4(Ipv4Prefix::new(
+                Ipv4Addr::new(198, 51, 100, 0),
+                24,
+            ))),
+            Some(v6(64)),
+            None,
+        ] {
+            let event = drift_event(KernelRouteEventKind::New, 1000, 200, prefix, true);
+            assert!(matching_unresolved_holds(&event, &held).is_empty());
+        }
+    }
+
     #[test]
     fn drift_del_of_bgp_route_in_configured_table_wakes() {
         let event = drift_event(KernelRouteEventKind::Del, 1000, 200, Some(v4(24)), true);
@@ -4329,7 +4674,7 @@ mod tests {
     #[tokio::test]
     async fn failed_install_is_visible_in_status() {
         let mut fib = FakeFib {
-            fail_apply: vec!["permission denied".to_string()],
+            fail_apply: vec![FibApplyError::Other("permission denied".to_string())],
             ..FakeFib::default()
         };
         let mut owned = FibOwnedState::default();
@@ -4344,9 +4689,423 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unresolved_add_is_held_skipped_until_retry_and_recovers() {
+        let registry = Registry::new();
+        let metrics = BgpMetrics::with_registry(registry.clone());
+        let prefix = v4(24);
+        let desired = route(prefix, ip("192.0.2.1"));
+        let mut fib = FakeFib {
+            fail_apply: vec![FibApplyError::Unresolved],
+            ..FakeFib::default()
+        };
+        let mut owned = FibOwnedState::default();
+        let mut unresolved = UnresolvedHolds::default();
+
+        let (statuses, events) = reconcile_for_test_with_holds(
+            vec![desired],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &metrics,
+        )
+        .await;
+        assert_eq!(fib.applied.len(), 1);
+        assert!(owned.routes.is_empty());
+        assert_eq!(unresolved.routes.len(), 1);
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, FibRuntimeState::Unresolved);
+        assert_eq!(statuses[0].reason, "next_hop_unresolved");
+        assert!(events.is_empty());
+        assert_eq!(
+            metric_value_bits(&registry, "bgp_fib_routes_unresolved"),
+            1.0_f64.to_bits()
+        );
+
+        let metadata_update = route_from_peer(
+            prefix,
+            ip("192.0.2.1"),
+            RouteOrigin::Ibgp,
+            42,
+            ip("198.51.100.9"),
+        );
+        let (statuses, events) = reconcile_for_test_with_holds(
+            vec![metadata_update.clone()],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &metrics,
+        )
+        .await;
+        assert_eq!(fib.applied.len(), 1, "ordinary RIB pass must skip hold");
+        assert_eq!(statuses[0].state, FibRuntimeState::Unresolved);
+        assert_eq!(statuses[0].peer, Some(ip("198.51.100.9")));
+        assert!(events.is_empty());
+
+        fib.fail_apply.push(FibApplyError::Unresolved);
+        let (statuses, events) = reconcile_for_test_with_holds(
+            vec![metadata_update.clone()],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::All,
+            &metrics,
+        )
+        .await;
+        assert_eq!(fib.applied.len(), 2);
+        assert_eq!(statuses[0].state, FibRuntimeState::Unresolved);
+        assert!(
+            events.is_empty(),
+            "repeated unresolved must not emit Failed"
+        );
+        assert_eq!(
+            metric_value_bits(&registry, "bgp_fib_routes_unresolved"),
+            1.0_f64.to_bits()
+        );
+
+        let (statuses, events) = reconcile_for_test_with_holds(
+            vec![metadata_update],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::All,
+            &metrics,
+        )
+        .await;
+        assert_eq!(fib.applied.len(), 3);
+        assert!(unresolved.routes.is_empty());
+        assert_eq!(owned.routes.len(), 1);
+        assert_eq!(statuses[0].state, FibRuntimeState::Installed);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, FibRuntimeEventKind::Installed);
+        assert_eq!(
+            metric_value_bits(&registry, "bgp_fib_routes_unresolved"),
+            0.0_f64.to_bits()
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolved_hold_clears_on_target_change_and_withdrawal() {
+        let metrics = metrics();
+        let prefix = v4(24);
+        let mut fib = FakeFib {
+            fail_apply: vec![FibApplyError::Unresolved],
+            ..FakeFib::default()
+        };
+        let mut owned = FibOwnedState::default();
+        let mut unresolved = UnresolvedHolds::default();
+
+        reconcile_for_test_with_holds(
+            vec![route(prefix, ip("192.0.2.1"))],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &metrics,
+        )
+        .await;
+        let (statuses, _) = reconcile_for_test_with_holds(
+            vec![route(prefix, ip("192.0.2.2"))],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &metrics,
+        )
+        .await;
+        assert_eq!(
+            fib.applied.len(),
+            2,
+            "changed target must apply immediately"
+        );
+        assert!(unresolved.routes.is_empty());
+        assert_eq!(statuses[0].next_hop, Some(ip("192.0.2.2")));
+
+        let mut fib = FakeFib {
+            fail_apply: vec![FibApplyError::Unresolved],
+            ..FakeFib::default()
+        };
+        let mut owned = FibOwnedState::default();
+        let mut unresolved = UnresolvedHolds::default();
+        reconcile_for_test_with_holds(
+            vec![route(prefix, ip("192.0.2.1"))],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &metrics,
+        )
+        .await;
+        let (statuses, _) = reconcile_for_test_with_holds(
+            Vec::new(),
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &metrics,
+        )
+        .await;
+        assert!(unresolved.routes.is_empty());
+        assert!(statuses.is_empty());
+        assert_eq!(fib.applied.len(), 1, "withdrawal needs no kernel delete");
+    }
+
+    #[tokio::test]
+    async fn unresolved_replace_surfaces_desired_only_and_preserves_owned_until_recovery() {
+        let metrics = metrics();
+        let prefix = v4(24);
+        let old = route(prefix, ip("192.0.2.1"));
+        let desired = route(prefix, ip("192.0.2.2"));
+        let mut fib = FakeFib::default();
+        let mut owned = FibOwnedState::default();
+        let mut unresolved = UnresolvedHolds::default();
+
+        reconcile_for_test_with_holds(
+            vec![old],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &metrics,
+        )
+        .await;
+        fib.fail_apply.push(FibApplyError::Unresolved);
+        let (statuses, events) = reconcile_for_test_with_holds(
+            vec![desired.clone()],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &metrics,
+        )
+        .await;
+        assert_eq!(owned.routes[&key(prefix)].target.primary(), ip("192.0.2.1"));
+        assert_eq!(
+            fib.kernel.routes[&key(prefix)].target.primary(),
+            ip("192.0.2.1")
+        );
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, FibRuntimeState::Unresolved);
+        assert_eq!(statuses[0].next_hop, Some(ip("192.0.2.2")));
+        assert!(events.is_empty());
+
+        let (statuses, events) = reconcile_for_test_with_holds(
+            vec![desired],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::All,
+            &metrics,
+        )
+        .await;
+        assert_eq!(owned.routes[&key(prefix)].target.primary(), ip("192.0.2.2"));
+        assert_eq!(statuses[0].state, FibRuntimeState::Installed);
+        assert_eq!(events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unresolved_retry_becoming_ordinary_failure_drops_hold_and_reports_failed() {
+        let metrics = metrics();
+        let desired = route(v4(24), ip("192.0.2.1"));
+        let mut fib = FakeFib {
+            fail_apply: vec![FibApplyError::Unresolved],
+            ..FakeFib::default()
+        };
+        let mut owned = FibOwnedState::default();
+        let mut unresolved = UnresolvedHolds::default();
+        reconcile_for_test_with_holds(
+            vec![desired.clone()],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &metrics,
+        )
+        .await;
+
+        fib.fail_apply
+            .push(FibApplyError::Other("permission denied".to_string()));
+        let (statuses, events) = reconcile_for_test_with_holds(
+            vec![desired],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::All,
+            &metrics,
+        )
+        .await;
+
+        assert!(unresolved.routes.is_empty());
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, FibRuntimeState::Failed);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, FibRuntimeEventKind::Failed);
+    }
+
+    #[tokio::test]
+    async fn unresolved_replace_to_add_transition_retries_without_waiting() {
+        let metrics = metrics();
+        let prefix = v4(24);
+        let old = route(prefix, ip("192.0.2.1"));
+        let desired = route(prefix, ip("192.0.2.2"));
+        let mut fib = FakeFib::default();
+        let mut owned = FibOwnedState::default();
+        let mut unresolved = UnresolvedHolds::default();
+        reconcile_for_test_with_holds(
+            vec![old],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &metrics,
+        )
+        .await;
+        fib.fail_apply.push(FibApplyError::Unresolved);
+        reconcile_for_test_with_holds(
+            vec![desired.clone()],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &metrics,
+        )
+        .await;
+        assert_eq!(
+            unresolved.routes[&key(prefix)].op_kind,
+            UnresolvedOpKind::Replace
+        );
+
+        fib.kernel.routes.remove(&key(prefix));
+        let (statuses, _) = reconcile_for_test_with_holds(
+            vec![desired],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &metrics,
+        )
+        .await;
+        assert!(unresolved.routes.is_empty());
+        assert_eq!(statuses[0].state, FibRuntimeState::Installed);
+        assert_eq!(owned.routes[&key(prefix)].target.primary(), ip("192.0.2.2"));
+    }
+
+    #[tokio::test]
+    async fn foreign_row_appearance_clears_unresolved_add_hold() {
+        let metrics = metrics();
+        let prefix = v4(24);
+        let desired = route(prefix, ip("192.0.2.1"));
+        let mut fib = FakeFib {
+            fail_apply: vec![FibApplyError::Unresolved],
+            ..FakeFib::default()
+        };
+        let mut owned = FibOwnedState::default();
+        let mut unresolved = UnresolvedHolds::default();
+        reconcile_for_test_with_holds(
+            vec![desired.clone()],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &metrics,
+        )
+        .await;
+        fib.kernel.routes.insert(
+            key(prefix),
+            FibKernelRoute {
+                target: FibRouteTarget::single(ip("192.0.2.99")),
+                protocol: FibKernelProtocol::Other,
+            },
+        );
+        let (statuses, _) = reconcile_for_test_with_holds(
+            vec![desired],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &metrics,
+        )
+        .await;
+        assert!(unresolved.routes.is_empty());
+        assert_eq!(statuses[0].state, FibRuntimeState::Rejected);
+        assert_eq!(statuses[0].reason, "foreign_route_exists");
+    }
+
+    #[tokio::test]
+    async fn empty_table_set_clears_nonpersisted_unresolved_holds() {
+        let metrics = metrics();
+        let route = fib_route(v4(24), ip("192.0.2.1"));
+        let mut unresolved = unresolved_with(route);
+        let mut fib = FakeFib::default();
+        let mut owned = FibOwnedState::default();
+        let (status_tx, status_rx) = watch::channel(vec![status_for_route(
+            &unresolved.routes[&key(v4(24))].route,
+            FibRuntimeState::Unresolved,
+            "next_hop_unresolved".to_string(),
+        )]);
+        let (event_tx, _) = broadcast::channel(16);
+
+        let reached_apply = reconcile_once_with_events(
+            &config_with(Vec::new()),
+            &rib_with_routes(Vec::new()),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &event_tx,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(reached_apply);
+        assert!(unresolved.routes.is_empty());
+        assert!(status_rx.borrow().is_empty());
+        assert!(fib.applied.is_empty());
+    }
+
+    #[tokio::test]
+    async fn preplan_dump_failure_retains_unresolved_hold() {
+        let metrics = metrics();
+        let desired = route(v4(24), ip("192.0.2.1"));
+        let mut fib = FakeFib {
+            fail_apply: vec![FibApplyError::Unresolved],
+            ..FakeFib::default()
+        };
+        let mut owned = FibOwnedState::default();
+        let mut unresolved = UnresolvedHolds::default();
+        reconcile_for_test_with_holds(
+            vec![desired.clone()],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &metrics,
+        )
+        .await;
+        let held = unresolved.clone();
+        fib.fail_dump = Some("netlink unavailable".to_string());
+
+        reconcile_for_test_with_holds(
+            vec![desired],
+            &mut fib,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::All,
+            &metrics,
+        )
+        .await;
+
+        assert_eq!(unresolved, held);
+        assert_eq!(fib.applied.len(), 1);
+    }
+
+    #[tokio::test]
     async fn failed_install_publishes_dataplane_route_event() {
         let mut fib = FakeFib {
-            fail_apply: vec!["permission denied".to_string()],
+            fail_apply: vec![FibApplyError::Other("permission denied".to_string())],
             ..FakeFib::default()
         };
         let mut owned = FibOwnedState::default();
@@ -4431,7 +5190,7 @@ mod tests {
             path_id: 0,
         };
         let mut fib = FakeFib {
-            fail_apply: vec!["replace rejected".to_string()],
+            fail_apply: vec![FibApplyError::Other("replace rejected".to_string())],
             ..FakeFib::default()
         };
         fib.kernel.routes.insert(
@@ -4853,6 +5612,98 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[test]
+    fn unresolved_classifier_requires_structural_netlink_error_and_exact_op_family_errno() {
+        let v4_route = fib_route(v4(24), ip("192.0.2.1"));
+        let v6_route = fib_route(v6(64), ip("2001:db8::1"));
+        let v4_add = FibOp::Add(v4_route.clone());
+        let v6_add = FibOp::Add(v6_route.clone());
+
+        assert!(is_next_hop_unresolved(
+            &v4_add,
+            &netlink_error(-libc::ENETUNREACH)
+        ));
+        assert!(is_next_hop_unresolved(
+            &v6_add,
+            &netlink_error(-libc::EHOSTUNREACH)
+        ));
+        assert!(is_next_hop_unresolved(
+            &FibOp::Replace {
+                previous: v4_route.clone(),
+                desired: v4_route.clone(),
+            },
+            &netlink_error(-libc::ENETUNREACH)
+        ));
+        assert!(!is_next_hop_unresolved(
+            &v4_add,
+            &netlink_error(-libc::EHOSTUNREACH)
+        ));
+        assert!(!next_hop_unresolved_for_raw_errno(
+            &v4_route,
+            libc::ENETUNREACH
+        ));
+        assert!(!is_next_hop_unresolved(
+            &v6_add,
+            &netlink_error(-libc::ENETUNREACH)
+        ));
+        assert!(!is_next_hop_unresolved(
+            &v4_add,
+            &rtnetlink::Error::RequestFailed
+        ));
+        assert!(!is_next_hop_unresolved(
+            &FibOp::Remove(v4_route),
+            &netlink_error(-libc::ENETUNREACH)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unresolved_classifier_holds_complete_unscoped_ecmp_only() {
+        let mut ecmp = fib_route(v4(24), ip("192.0.2.1"));
+        ecmp.target = FibRouteTarget::from_set_with_best(
+            ip("192.0.2.1"),
+            [
+                FibNextHop::equal(ip("192.0.2.1")),
+                FibNextHop::equal(ip("192.0.2.2")),
+            ],
+        );
+        assert!(next_hop_unresolved_for_raw_errno(&ecmp, -libc::ENETUNREACH));
+
+        let mut mixed = ecmp.clone();
+        mixed.target = FibRouteTarget::from_set_with_best(
+            ip("192.0.2.1"),
+            [
+                FibNextHop::equal(ip("192.0.2.1")),
+                FibNextHop::equal(ip("2001:db8::1")),
+            ],
+        );
+        assert!(!next_hop_unresolved_for_raw_errno(
+            &mixed,
+            -libc::ENETUNREACH
+        ));
+
+        let mut scoped = fib_route(v6(64), ip("2001:db8::1"));
+        scoped.target = FibRouteTarget::from_set_with_best_hop(
+            FibNextHop::scoped(ip("fe80::1"), 7),
+            [FibNextHop::scoped(ip("fe80::1"), 7)],
+        );
+        assert!(!next_hop_unresolved_for_raw_errno(
+            &scoped,
+            -libc::EHOSTUNREACH
+        ));
+
+        let link_local = fib_route(v4(24), ip("169.254.1.1"));
+        assert!(!next_hop_unresolved_for_raw_errno(
+            &link_local,
+            -libc::ENETUNREACH
+        ));
+        let link_local = fib_route(v6(64), ip("fe80::1"));
+        assert!(!next_hop_unresolved_for_raw_errno(
+            &link_local,
+            -libc::EHOSTUNREACH
+        ));
+    }
+
     #[test]
     fn build_route_message_uses_configured_table_metric_gateway_and_no_onlink() {
         use netlink_packet_route::route::{
@@ -5278,6 +6129,105 @@ mod tests {
             extract_gateway(&multipath_msg),
             Some(FibRouteTarget::single(ip("192.0.2.1")))
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn netns_general_unicast_fib_unresolved_retry_on_covering_route_event() {
+        if !netns_gate() {
+            eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged unresolved FIB test");
+            return;
+        }
+        if !is_inner_netns() {
+            let ns = NetnsFixture::create("unresolved");
+            setup_unicast_netns(&ns);
+            run_inner_netns(
+                &ns,
+                "netns_general_unicast_fib_unresolved_retry_on_covering_route_event",
+            );
+            return;
+        }
+
+        let prefix = v4(24);
+        let prefix_text = "203.0.113.0/24";
+        let desired = route(prefix, ip("198.18.0.1"));
+        let metrics = metrics();
+        let mut fib = LinuxUnicastFib::connect(metrics.clone()).expect("LinuxUnicastFib::connect");
+        let mut kernel_events = fib.take_kernel_route_events();
+        let mut owned = FibOwnedState::default();
+        let mut unresolved = UnresolvedHolds::default();
+        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (event_tx, mut event_rx) = broadcast::channel(16);
+
+        reconcile_once_with_events(
+            &config(),
+            &rib_with_routes(vec![desired.clone()]),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &event_tx,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(route_show(1000, prefix_text).trim().is_empty());
+        assert!(owned.routes.is_empty());
+        assert_eq!(unresolved.routes.len(), 1);
+        assert_eq!(status_rx.borrow()[0].state, FibRuntimeState::Unresolved);
+        assert_eq!(status_rx.borrow()[0].reason, "next_hop_unresolved");
+        assert!(event_rx.try_recv().is_err());
+
+        run("ip", &["route", "add", "198.18.0.0/24", "dev", "fib0"]);
+        let coverage = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 18, 0, 0), 24));
+        let event = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = recv_kernel_route_event(&mut kernel_events)
+                    .await
+                    .expect("route event stream closed");
+                if event.prefix == Some(coverage) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("covering route notification");
+        let retry_keys = matching_unresolved_holds(&event, &unresolved);
+        assert_eq!(retry_keys, BTreeSet::from([key(prefix)]));
+
+        reconcile_once_with_events(
+            &config(),
+            &rib_with_routes(vec![desired]),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &event_tx,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::Keys(retry_keys),
+            &CancellationToken::new(),
+        )
+        .await;
+        let installed = route_show(1000, prefix_text);
+        assert!(
+            installed.contains("via 198.18.0.1"),
+            "route missing: {installed}"
+        );
+        assert!(unresolved.routes.is_empty());
+        assert_eq!(status_rx.borrow()[0].state, FibRuntimeState::Installed);
+
+        reconcile_once(
+            &config(),
+            &rib_with_routes(Vec::new()),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+            &CancellationToken::new(),
+        )
+        .await;
+        run("ip", &["route", "del", "198.18.0.0/24", "dev", "fib0"]);
     }
 
     #[cfg(target_os = "linux")]

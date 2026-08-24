@@ -54,7 +54,10 @@ fn count_fib_statuses(rows: &[proto::FibRouteStatus]) -> DataplaneSummary {
             Ok(proto::FibRouteState::Installed) => summary.installed += 1,
             Ok(proto::FibRouteState::Rejected) => summary.rejected += 1,
             Ok(proto::FibRouteState::Failed) => summary.failed += 1,
-            Ok(proto::FibRouteState::Unspecified) | Err(_) => {}
+            // The legacy dataplane summary intentionally remains a stable
+            // three-bucket installed/rejected/failed surface. Operators use
+            // ListFibRoutes and bgp_fib_routes_unresolved for held rows.
+            Ok(proto::FibRouteState::Unresolved | proto::FibRouteState::Unspecified) | Err(_) => {}
         }
     }
     summary
@@ -150,4 +153,28 @@ pub(crate) fn spawn_dataplane_poller(
             previous = current;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_three_bucket_summary_ignores_unresolved_rows() {
+        let summary = count_fib_statuses(&[
+            proto::FibRouteStatus {
+                state: proto::FibRouteState::Installed as i32,
+                ..Default::default()
+            },
+            proto::FibRouteStatus {
+                state: proto::FibRouteState::Unresolved as i32,
+                reason: "next_hop_unresolved".to_string(),
+                ..Default::default()
+            },
+        ]);
+
+        assert_eq!(summary.installed, 1);
+        assert_eq!(summary.rejected, 0);
+        assert_eq!(summary.failed, 0);
+    }
 }
