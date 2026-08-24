@@ -171,6 +171,54 @@ impl EffectivePeerModes {
     }
 }
 
+struct EffectiveHoldTimers(u16, Option<u16>, Option<u32>);
+
+impl EffectiveHoldTimers {
+    fn for_neighbor(neighbor: &Neighbor, group: Option<&PeerGroupConfig>) -> Self {
+        let group_hold = group.and_then(|group| group.hold_time);
+        let group_min = group.and_then(|group| group.min_hold_time);
+        let group_send = group.and_then(|group| group.send_hold_time);
+        Self(
+            neighbor
+                .hold_time
+                .or(group_hold)
+                .unwrap_or(DEFAULT_HOLD_TIME),
+            neighbor.min_hold_time.or(group_min),
+            neighbor.send_hold_time.or(group_send),
+        )
+    }
+
+    fn for_peer_group(group: &PeerGroupConfig) -> Self {
+        let hold_time = group.hold_time.unwrap_or(DEFAULT_HOLD_TIME);
+        Self(hold_time, group.min_hold_time, group.send_hold_time)
+    }
+
+    fn validate(self) -> Result<(), ConfigError> {
+        let Self(hold_time, min_hold_time, send_hold_time) = self;
+        if hold_time != 0 && hold_time < 3 {
+            return Err(ConfigError::InvalidHoldTime { value: hold_time });
+        }
+        if let Some(minimum) = min_hold_time {
+            if minimum < 3 {
+                return Err(ConfigError::InvalidMinHoldTime { value: minimum });
+            }
+            if hold_time == 0 || minimum > hold_time {
+                return Err(ConfigError::InvalidMinHoldTimeForHoldTime { minimum, hold_time });
+            }
+        }
+        // RFC 9687 §4.4: an explicit non-zero SendHoldTime must exceed the
+        // effective hold time. The derived default is not represented here
+        // and always satisfies this constraint.
+        if let Some(value) = send_hold_time
+            && value != 0
+            && value <= u32::from(hold_time)
+        {
+            return Err(ConfigError::InvalidSendHoldTime { value, hold_time });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 enum PeerModeViolation {
     RouteReflector(String),
@@ -595,37 +643,7 @@ impl Config {
                 validate_tcp_ao_config(&neighbor.address, tcp_ao)?;
             }
 
-            let hold_time = neighbor
-                .hold_time
-                .or_else(|| group.and_then(|g| g.hold_time))
-                .unwrap_or(DEFAULT_HOLD_TIME);
-            if hold_time != 0 && hold_time < 3 {
-                return Err(ConfigError::InvalidHoldTime { value: hold_time });
-            }
-            let min_hold_time = neighbor
-                .min_hold_time
-                .or_else(|| group.and_then(|g| g.min_hold_time));
-            if let Some(minimum) = min_hold_time {
-                if minimum < 3 {
-                    return Err(ConfigError::InvalidMinHoldTime { value: minimum });
-                }
-                if hold_time == 0 || minimum > hold_time {
-                    return Err(ConfigError::InvalidMinHoldTimeForHoldTime { minimum, hold_time });
-                }
-            }
-
-            // RFC 9687 §4.4: a non-zero SendHoldTime MUST be greater
-            // than the hold time. Checked on the effective (inherited)
-            // values; the derived default always satisfies this.
-            let send_hold_time = neighbor
-                .send_hold_time
-                .or_else(|| group.and_then(|g| g.send_hold_time));
-            if let Some(value) = send_hold_time
-                && value != 0
-                && value <= u32::from(hold_time)
-            {
-                return Err(ConfigError::InvalidSendHoldTime { value, hold_time });
-            }
+            EffectiveHoldTimers::for_neighbor(neighbor, group).validate()?;
 
             // Slow-peer backlog threshold is a fraction of the outbound
             // writer buffer: 0 would flag an empty queue and >100 could
@@ -2608,27 +2626,7 @@ fn validate_peer_group(
     peer_groups: &std::collections::HashMap<String, PeerGroupConfig>,
     local_asn: u32,
 ) -> Result<(), ConfigError> {
-    let hold_time = group.hold_time.unwrap_or(DEFAULT_HOLD_TIME);
-    if hold_time != 0 && hold_time < 3 {
-        return Err(ConfigError::InvalidHoldTime { value: hold_time });
-    }
-    if let Some(minimum) = group.min_hold_time {
-        if minimum < 3 {
-            return Err(ConfigError::InvalidMinHoldTime { value: minimum });
-        }
-        if hold_time == 0 || minimum > hold_time {
-            return Err(ConfigError::InvalidMinHoldTimeForHoldTime { minimum, hold_time });
-        }
-    }
-
-    // RFC 9687 §4.4 on the group's own values; neighbor-effective
-    // combinations are re-checked per neighbor.
-    if let Some(value) = group.send_hold_time
-        && value != 0
-        && value <= u32::from(hold_time)
-    {
-        return Err(ConfigError::InvalidSendHoldTime { value, hold_time });
-    }
+    EffectiveHoldTimers::for_peer_group(group).validate()?;
 
     if !group.families.is_empty() {
         parse_families(&group.families)?;

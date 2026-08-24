@@ -213,6 +213,39 @@ remote_asn = 65002
 }
 
 #[test]
+fn hold_timer_validation_matches_neighbor_and_peer_group() {
+    fn signature(error: ConfigError) -> (&'static str, u32, u16) {
+        match error {
+            ConfigError::InvalidHoldTime { value } => ("hold", u32::from(value), 0),
+            ConfigError::InvalidMinHoldTime { value } => ("minimum", u32::from(value), 0),
+            ConfigError::InvalidMinHoldTimeForHoldTime { minimum, hold_time } => {
+                ("minimum_for_hold", u32::from(minimum), hold_time)
+            }
+            ConfigError::InvalidSendHoldTime { value, hold_time } => ("send", value, hold_time),
+            other => panic!("expected a hold-timer error, got {other}"),
+        }
+    }
+    let direct_base = valid_toml().replace("hold_time = 90", "");
+    for (fields, expected) in [
+        ("hold_time = 1", ("hold", 1, 0)),
+        ("min_hold_time = 2", ("minimum", 2, 0)),
+        (
+            "hold_time = 30\nmin_hold_time = 31",
+            ("minimum_for_hold", 31, 30),
+        ),
+        ("send_hold_time = 90", ("send", 90, 90)),
+    ] {
+        let direct = format!("{direct_base}\n{fields}");
+        let group = format!("{}\n[peer_groups.validation]\n{fields}", valid_toml());
+        let direct_error = signature(parse(&direct).unwrap_err());
+        let group_error = signature(parse(&group).unwrap_err());
+        assert_eq!(direct_error, expected);
+        assert_eq!(group_error, expected);
+        assert_eq!(direct_error, group_error);
+    }
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "one end-to-end inheritance and negotiation matrix keeps the floor contract coherent"
