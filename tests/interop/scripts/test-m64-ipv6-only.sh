@@ -145,7 +145,7 @@ fi
 # FRR → rustbgpd
 got_v6=0
 for _ in $(seq 1 15); do
-    if grpc_routes_from_peer "$FRR_V6" | grep -q '"prefix": "2001:db8:64::"'; then
+    if grpc_routes_from_peer "$FRR_V6" | grep '"prefix": "2001:db8:64::"' >/dev/null; then
         got_v6=1
         break
     fi
@@ -198,7 +198,7 @@ fi
 # FRR → rustbgpd over the capability-less session
 got_v4=0
 for _ in $(seq 1 15); do
-    if grpc_routes_from_peer "$FRR_V4" | grep -q '"prefix": "10.99.1.0"'; then
+    if grpc_routes_from_peer "$FRR_V4" | grep '"prefix": "10.99.1.0"' >/dev/null; then
         got_v4=1
         break
     fi
