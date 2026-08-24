@@ -47,3 +47,8 @@ harness = false
 name = "route_paging"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "evpn_dataplane_query"
+harness = false
+required-features = ["bench-internals"]

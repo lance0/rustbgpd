@@ -56,6 +56,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The Linux EVPN dataplane supervisor now uses an actor-owned wrapping
+  generation token for its Type 1/2/5 projection input. Stable event and
+  five-second poll passes avoid the EVPN table walk and clone entirely;
+  relevant RIB changes return one atomic filtered snapshot, while local
+  instance, IP-VRF, quarantine, and same-ESI-bias changes force a durable full
+  re-projection. Type 3/4 RR, public API, protobuf, and CLI behavior is
+  unchanged, as are the 200 ms event debounce and BUM cached-republish path.
+  (LAN-1055)
+
 - The MRT `TABLE_DUMP_V2` reader now applies RFC 7606 revised path-attribute
   decoding with a conservative internal-neighbor default on incomplete session
   evidence. It continues only when every recovered issue is

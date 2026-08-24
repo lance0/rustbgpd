@@ -1,7 +1,11 @@
 #[cfg(feature = "bench-internals")]
 mod bench_support;
 #[cfg(feature = "bench-internals")]
-pub use bench_support::{AdjRibOutFanoutBenchReceipt, PolicyTransitionBenchReceipt};
+pub use bench_support::{
+    AdjRibOutFanoutBenchReceipt, EvpnDataplaneQueryBenchReceipt, PolicyTransitionBenchReceipt,
+    bench_evpn_dataplane_generation_query, bench_evpn_dataplane_generation_snapshot,
+    bench_evpn_dataplane_legacy_snapshot,
+};
 mod distribution;
 mod graceful_restart;
 mod helpers;
@@ -210,6 +214,18 @@ pub struct RibManager {
     /// See [`UnicastPrefixPeers`] for the maintenance contract.
     unicast_prefix_peers: UnicastPrefixPeers,
     loc_rib: LocRib,
+    /// Wrapping equality token for the Type 1/2/5 Loc-RIB projection consumed
+    /// by the daemon's EVPN dataplane supervisor.  Actor ownership makes the
+    /// token and a materialized snapshot one atomic observation.
+    evpn_dataplane_generation: u64,
+    /// Exact cardinality of Type 1/2/5 Loc-RIB rows. Maintained at the same
+    /// recompute seam as the generation token so an all-relevant table can
+    /// retain the pre-existing bulk-clone fast path.
+    evpn_dataplane_route_count: usize,
+    /// Deterministic proof that equality/cancellation branches do not walk
+    /// the Loc-RIB. Counts rows visited only by full internal snapshots.
+    #[cfg(test)]
+    evpn_dataplane_query_row_visits: usize,
     adj_ribs_out: HashMap<IpAddr, AdjRibOut>,
     /// Per-peer outbound unicast prefix admission state (ADR-0113). An entry
     /// exists only for a peer whose resolved `max_prefixes_out_ipv4` /
@@ -637,6 +653,27 @@ const SLOW_POLICY_TRANSITION: std::time::Duration = std::time::Duration::from_se
 /// once ownership is far beyond any legitimate transition receipt.
 pub(in crate::manager) const MAX_HEALTHY_POLICY_TRANSITION_AGE: std::time::Duration =
     std::time::Duration::from_secs(30);
+
+fn collect_evpn_dataplane_routes<'a>(
+    rows: impl Iterator<Item = &'a crate::route::EvpnRibRoute>,
+    known_generation: Option<u64>,
+    current_generation: u64,
+    total_rows: usize,
+    relevant_rows: usize,
+) -> Option<Vec<crate::route::EvpnRibRoute>> {
+    if known_generation == Some(current_generation) {
+        return None;
+    }
+    if relevant_rows == total_rows {
+        return Some(rows.cloned().collect());
+    }
+    let mut routes = Vec::with_capacity(relevant_rows);
+    routes.extend(
+        rows.filter(|route| matches!(route.route_type(), 1 | 2 | 5))
+            .cloned(),
+    );
+    Some(routes)
+}
 
 /// Aggregate pre-commit ownership budget for one clean policy transition:
 /// still short of `CommitMembers` at this age, the transition hands the
@@ -1110,6 +1147,10 @@ impl RibManager {
             attr_intern: crate::attr_intern::AttrInternTable::new(),
             unicast_prefix_peers: UnicastPrefixPeers::default(),
             loc_rib: LocRib::new(),
+            evpn_dataplane_generation: 0,
+            evpn_dataplane_route_count: 0,
+            #[cfg(test)]
+            evpn_dataplane_query_row_visits: 0,
             adj_ribs_out: HashMap::new(),
             outbound_prefix_limits: HashMap::new(),
             outbound_limit_control: outbound_prefix_limits::OutboundLimitControl::default(),
@@ -2420,6 +2461,32 @@ impl RibManager {
             }
             RibUpdate::QueryEvpnRoutes { filter, reply } => {
                 queries::send_filtered_rows(self.loc_rib.iter_evpn(), filter.as_ref(), reply);
+            }
+            RibUpdate::QueryEvpnDataplaneRoutes {
+                known_generation,
+                reply,
+            } => {
+                if reply.is_closed() {
+                    debug!("EVPN dataplane route query canceled before materialization");
+                    return;
+                }
+                #[cfg(test)]
+                if known_generation != Some(self.evpn_dataplane_generation) {
+                    self.evpn_dataplane_query_row_visits = self
+                        .evpn_dataplane_query_row_visits
+                        .saturating_add(self.loc_rib.evpn_len());
+                }
+                let routes = collect_evpn_dataplane_routes(
+                    self.loc_rib.iter_evpn(),
+                    known_generation,
+                    self.evpn_dataplane_generation,
+                    self.loc_rib.evpn_len(),
+                    self.evpn_dataplane_route_count,
+                );
+                let _ = reply.send(crate::update::EvpnDataplaneRoutesResponse {
+                    generation: self.evpn_dataplane_generation,
+                    routes,
+                });
             }
             RibUpdate::QueryBgpLsRoutes { filter, reply } => {
                 queries::send_filtered_rows(self.loc_rib.iter_bgpls(), filter.as_ref(), reply);

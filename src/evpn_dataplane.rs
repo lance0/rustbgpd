@@ -3,10 +3,9 @@
 //!
 //! ADR-0054 §1 forbids `rustbgpd-evpn-linux` from depending on
 //! `rustbgpd-rib` or `rustbgpd-transport`. The daemon binary owns the
-//! coordination between the two: it queries the RIB for current
-//! best-path EVPN Type 2 routes, projects them into a portable
-//! [`RemoteMacTable`] via [`rustbgpd_evpn::project_evpn_routes`],
-//! wraps the result in a [`DataplaneIntent`], and publishes via a
+//! coordination between the two: it generation-queries the RIB for current
+//! best-path EVPN Type 1/2/5 projection inputs, builds the portable L2 and L3
+//! intent tables, wraps them in a [`DataplaneIntent`], and publishes via a
 //! `tokio::sync::watch::Sender<Arc<DataplaneIntent>>` that the
 //! [`ReconcileActor`] consumes.
 //!
@@ -18,9 +17,8 @@
 //! [`EVPN_ROUTE_EVENT_DEBOUNCE`] after the last event of a burst —
 //! the same debounced trigger shape as the blackhole reconciler. Any
 //! EVPN best-path change (Type 1/2/3/4/5 add / withdraw / best-change)
-//! marks the supervisor dirty; the recompute is a full re-projection,
-//! so spurious triggers from route types the projection ignores are
-//! cheap no-ops absorbed by the unchanged-intent early return. This
+//! marks the supervisor dirty. Type 3/4 triggers and stable Type 1/2/5
+//! generations are O(1) equality responses without a RIB walk or clone. This
 //! makes the ADR-0083 single-active failover repair sub-second
 //! instead of poll-cadence-bound.
 //!
@@ -673,6 +671,10 @@ fn publish_remote_prefix_drop_counts(
 #[derive(Debug)]
 struct SupervisorIntentState {
     generation: u64,
+    /// Last Type 1/2/5 RIB equality token successfully materialized. `None`
+    /// forces a full actor snapshot after startup or any local projection
+    /// input change and stays invalid across query failures.
+    evpn_dataplane_generation: Option<u64>,
     last_instances: Arc<EvpnInstanceTable>,
     last_ip_vrfs: Arc<IpVrfTable>,
     managed_netdevs: Arc<ManagedNetdevTable>,
@@ -686,6 +688,7 @@ impl Default for SupervisorIntentState {
     fn default() -> Self {
         Self {
             generation: 0,
+            evpn_dataplane_generation: None,
             last_instances: Arc::new(EvpnInstanceTable::new()),
             last_ip_vrfs: Arc::new(IpVrfTable::new()),
             managed_netdevs: Arc::new(ManagedNetdevTable::new()),
@@ -698,12 +701,17 @@ impl Default for SupervisorIntentState {
 }
 
 impl SupervisorIntentState {
+    fn invalidate_evpn_dataplane_snapshot(&mut self) {
+        self.evpn_dataplane_generation = None;
+    }
+
     fn has_cached_projection_for(
         &self,
         instances: &EvpnInstanceTable,
         ip_vrfs: &IpVrfTable,
     ) -> bool {
         self.generation > 0
+            && self.evpn_dataplane_generation.is_some()
             && instances == self.last_instances.as_ref()
             && ip_vrfs == self.last_ip_vrfs.as_ref()
     }
@@ -729,14 +737,23 @@ async fn publish_dataplane_intent(
     // table itself, so the unchanged-intent early return below covers
     // bias changes through the projected-table comparison — no separate
     // last-bias field is needed.
-    let tables = build_intent_tables(
-        rib_tx,
+    let response = query_evpn_dataplane_routes(rib_tx, state.evpn_dataplane_generation).await?;
+    let Some(routes) = response.routes else {
+        // Equal actor-owned token: the RIB did not iterate or materialize its
+        // EVPN table, and no local projection input was invalidated.
+        return Ok(true);
+    };
+    let tables = project_intent_tables(
+        &routes,
         instances.as_ref(),
         ip_vrfs.as_ref(),
         quarantined_macs,
         same_esi_bias,
-    )
-    .await?;
+    );
+    // A successful full snapshot repairs startup/local invalidation. Set this
+    // before semantic intent deduplication: an unchanged projection is still
+    // a successfully materialized view of the new RIB generation.
+    state.evpn_dataplane_generation = Some(response.generation);
     // ADR-0083 slice 3: refresh the backup-window gauge on every
     // successful projection, BEFORE the unchanged-table early return —
     // the gauge derives from the same RIB snapshot and must converge
@@ -990,6 +1007,7 @@ async fn supervisor_loop(
                 // The bias snapshot is a projection input, so a change
                 // always requires a full re-projection — there is no
                 // cached-republish shortcut like the BUM arm's.
+                state.invalidate_evpn_dataplane_snapshot();
                 let instances = instances_rx.borrow().clone();
                 let ip_vrfs = ip_vrfs_rx.borrow().clone();
                 let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
@@ -1020,6 +1038,7 @@ async fn supervisor_loop(
                     duplicate_mac_quarantine_updates_open = false;
                     continue;
                 }
+                state.invalidate_evpn_dataplane_snapshot();
                 let instances = instances_rx.borrow().clone();
                 let ip_vrfs = ip_vrfs_rx.borrow().clone();
                 let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
@@ -1049,6 +1068,7 @@ async fn supervisor_loop(
                     debug!("EVPN instance model publisher gone; supervisor exiting");
                     return;
                 }
+                state.invalidate_evpn_dataplane_snapshot();
                 let instances = instances_rx.borrow_and_update().clone();
                 let ip_vrfs = ip_vrfs_rx.borrow().clone();
                 let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
@@ -1078,6 +1098,7 @@ async fn supervisor_loop(
                     debug!("EVPN IP-VRF model publisher gone; supervisor exiting");
                     return;
                 }
+                state.invalidate_evpn_dataplane_snapshot();
                 let instances = instances_rx.borrow().clone();
                 let ip_vrfs = ip_vrfs_rx.borrow_and_update().clone();
                 let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
@@ -1184,13 +1205,13 @@ async fn recv_evpn_route_event(
 /// for the same ESI. Active duplicate-MAC quarantine keys are also
 /// dropped from the remote-FDB intent so the dataplane stops forwarding
 /// toward a quarantined remote MAC while the RIB/RR surfaces remain
-/// visible. Other route types (Type 3 IMET, Type 4 ES, Type 5
-/// IP-Prefix) are ignored for Gate 7b — they're carried by the RR but
-/// the L2VNI dataplane boundary only programs Type 2 MACs.
-/// Outcome of one RIB query: the L2 (Type 2) remote-MAC table plus
-/// the L3 (Type 5) remote-IP-prefix table, projected from the same
-/// `QueryEvpnRoutes` snapshot. Single function so both tables come
-/// from a consistent best-path view.
+/// visible. Type 5 IP-Prefix routes feed the L3 IP-VRF table. Type 3 IMET and
+/// Type 4 ES routes remain available to the RR/public RIB surfaces but are
+/// excluded from this dataplane projection input.
+/// Outcome of one generation-filtered internal RIB snapshot: the L2 (Type 2,
+/// with Type 1 reachability/alias inputs) remote-MAC table plus the L3 (Type
+/// 5) remote-IP-prefix table. A single actor-atomic snapshot keeps both tables
+/// on one best-path generation.
 struct IntentTables {
     remote_macs: rustbgpd_evpn::RemoteMacTable,
     remote_ip_prefixes: rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable,
@@ -1201,6 +1222,22 @@ struct IntentTables {
     single_active_backup_active: usize,
 }
 
+async fn query_evpn_dataplane_routes(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    known_generation: Option<u64>,
+) -> Result<rustbgpd_rib::EvpnDataplaneRoutesResponse, RibQueryError> {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    rib_tx
+        .send(RibUpdate::QueryEvpnDataplaneRoutes {
+            known_generation,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| RibQueryError::SendFailed)?;
+    reply_rx.await.map_err(|_| RibQueryError::ReplyDropped)
+}
+
+#[cfg(test)]
 async fn build_intent_tables(
     rib_tx: &mpsc::Sender<RibUpdate>,
     instances: &EvpnInstanceTable,
@@ -1220,6 +1257,22 @@ async fn build_intent_tables(
         .map_err(|_| RibQueryError::SendFailed)?;
     let routes = reply_rx.await.map_err(|_| RibQueryError::ReplyDropped)?;
 
+    Ok(project_intent_tables(
+        &routes,
+        instances,
+        ip_vrfs,
+        quarantined_macs,
+        same_esi_bias,
+    ))
+}
+
+fn project_intent_tables(
+    routes: &[EvpnRibRoute],
+    instances: &EvpnInstanceTable,
+    ip_vrfs: &rustbgpd_evpn::ip_vrf::IpVrfTable,
+    quarantined_macs: &BTreeSet<DuplicateMacKey>,
+    same_esi_bias: &SameEsiBiasTable,
+) -> IntentTables {
     // Build a quick lookup of local VTEP IPs so the EAD-per-EVI
     // self-filter doesn't require a per-route instance-table scan.
     let local_vtep_ips: std::collections::BTreeSet<std::net::IpAddr> =
@@ -1237,12 +1290,12 @@ async fn build_intent_tables(
     // single-active (suppress all-active aliasing ECMP). A last-wins
     // `.collect()` would make this nondeterministic across duplicate or
     // transient (e.g. RD-changing) EAD-per-ES rows for the same key.
-    let ead_per_es_modes = fold_ead_per_es_modes(&routes);
+    let ead_per_es_modes = fold_ead_per_es_modes(routes);
     // Strict unanimous fold for the RFC 9136 §4.3 Type 5 overlay-index
     // import decision only — fail-closed on conflicting redundancy signals.
     // The OR-folded `ead_per_es_modes` above stays the L2 aliasing contract
     // and feeds every L2 consumer below unchanged.
-    let ead_per_es_modes_esi_type5 = fold_ead_per_es_modes_for_esi_type5_import(&routes);
+    let ead_per_es_modes_esi_type5 = fold_ead_per_es_modes_for_esi_type5_import(routes);
     let active_ead_per_es: std::collections::BTreeSet<(
         std::net::IpAddr,
         rustbgpd_wire::EthernetSegmentIdentifier,
@@ -1350,11 +1403,11 @@ async fn build_intent_tables(
         &single_active_index,
     );
 
-    Ok(IntentTables {
+    IntentTables {
         remote_macs,
         remote_ip_prefixes,
         single_active_backup_active,
-    })
+    }
 }
 
 /// ADR-0083 slice 3: returns the `(ESI, EthernetTag)` group key when
@@ -1786,6 +1839,38 @@ mod tests {
         SameEsiBiasTable::new()
     }
 
+    fn reply_dataplane_query(
+        known_generation: Option<u64>,
+        reply: tokio::sync::oneshot::Sender<rustbgpd_rib::EvpnDataplaneRoutesResponse>,
+        generation: u64,
+        routes: Vec<EvpnRibRoute>,
+    ) {
+        let routes = (known_generation != Some(generation)).then_some(routes);
+        let _ = reply.send(rustbgpd_rib::EvpnDataplaneRoutesResponse { generation, routes });
+    }
+
+    async fn publish_empty_models(
+        rib_tx: &mpsc::Sender<RibUpdate>,
+        state: &mut SupervisorIntentState,
+    ) -> Result<bool, RibQueryError> {
+        let (intent_tx, _intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let (drop_counts_tx, _drop_counts_rx) =
+            watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
+        publish_dataplane_intent(
+            rib_tx,
+            &intent_tx,
+            Arc::new(EvpnInstanceTable::new()),
+            Arc::new(IpVrfTable::new()),
+            BumEnforcementTable::new(),
+            &BTreeSet::new(),
+            &no_bias(),
+            &BgpMetrics::new(),
+            state,
+            &drop_counts_tx,
+        )
+        .await
+    }
+
     fn local_instance(v: u32, bridge: Option<&str>) -> EvpnInstance {
         evpn_instance(65001, v, v, bridge.map(String::from), false)
     }
@@ -2095,12 +2180,20 @@ mod tests {
     async fn remote_type5_projection_drop_metrics_track_current_snapshot() {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(2);
         let _rib_responder = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnDataplaneRoutes {
+                known_generation,
+                reply,
+            }) = rib_rx.recv().await
+            {
                 let route = evpn_ip_prefix_route("10.1.0.0/24", "192.0.2.10", "10.0.0.9", 5000);
-                let _ = reply.send(vec![route]);
+                reply_dataplane_query(known_generation, reply, 1, vec![route]);
             }
-            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
-                let _ = reply.send(vec![]);
+            if let Some(RibUpdate::QueryEvpnDataplaneRoutes {
+                known_generation,
+                reply,
+            }) = rib_rx.recv().await
+            {
+                reply_dataplane_query(known_generation, reply, 2, vec![]);
             }
         });
         let metrics = BgpMetrics::new();
@@ -2920,21 +3013,29 @@ mod tests {
         let esi = EthernetSegmentIdentifier::new([7; 10]);
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(2);
         let _responder = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnDataplaneRoutes {
+                known_generation,
+                reply,
+            }) = rib_rx.recv().await
+            {
                 let routes = vec![
                     evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
                     evpn_ead_per_es_route(esi, "10.0.0.3", true),
                     evpn_ead_per_evi_route(esi, 0, "10.0.0.3"),
                 ];
-                let _ = reply.send(routes);
+                reply_dataplane_query(known_generation, reply, 1, routes);
             }
-            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnDataplaneRoutes {
+                known_generation,
+                reply,
+            }) = rib_rx.recv().await
+            {
                 let routes = vec![
                     evpn_macip_route_with_esi(100, 1, "10.0.0.3", esi),
                     evpn_ead_per_es_route(esi, "10.0.0.3", true),
                     evpn_ead_per_evi_route(esi, 0, "10.0.0.3"),
                 ];
-                let _ = reply.send(routes);
+                reply_dataplane_query(known_generation, reply, 2, routes);
             }
         });
         let metrics = BgpMetrics::new();
@@ -3277,16 +3378,20 @@ mod tests {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(8);
         let shutdown = CancellationToken::new();
 
-        // Stub RIB responder: answer the first QueryEvpnRoutes with a
-        // fake MacIp route, the rest with nothing. The supervisor's
-        // event subscription is ignored (reply dropped → poll-only).
+        // Stub RIB responder: answer the first dataplane query with a fake
+        // MacIp route; later equal-token polls avoid materialization. The
+        // supervisor's event subscription is ignored (reply dropped →
+        // poll-only).
         let _rib_responder = tokio::spawn({
             let route = evpn_macip_route(100, 1, "10.0.0.2", Some(3));
             async move {
-                let mut first = Some(route);
                 while let Some(msg) = rib_rx.recv().await {
-                    if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
-                        let _ = reply.send(first.take().into_iter().collect());
+                    if let RibUpdate::QueryEvpnDataplaneRoutes {
+                        known_generation,
+                        reply,
+                    } = msg
+                    {
+                        reply_dataplane_query(known_generation, reply, 1, vec![route.clone()]);
                     }
                 }
             }
@@ -3332,14 +3437,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalidated_generation_stays_none_across_send_and_reply_failure() {
+        let mut state = SupervisorIntentState {
+            evpn_dataplane_generation: Some(41),
+            ..SupervisorIntentState::default()
+        };
+        state.invalidate_evpn_dataplane_snapshot();
+
+        let (send_failed_tx, send_failed_rx) = mpsc::channel(1);
+        drop(send_failed_rx);
+        assert!(matches!(
+            publish_empty_models(&send_failed_tx, &mut state).await,
+            Err(RibQueryError::SendFailed)
+        ));
+        assert_eq!(state.evpn_dataplane_generation, None);
+
+        let (reply_failed_tx, mut reply_failed_rx) = mpsc::channel(1);
+        let responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnDataplaneRoutes { reply, .. }) =
+                reply_failed_rx.recv().await
+            {
+                drop(reply);
+            }
+        });
+        assert!(matches!(
+            publish_empty_models(&reply_failed_tx, &mut state).await,
+            Err(RibQueryError::ReplyDropped)
+        ));
+        responder.await.unwrap();
+        assert_eq!(state.evpn_dataplane_generation, None);
+
+        let (success_tx, mut success_rx) = mpsc::channel(1);
+        let responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnDataplaneRoutes {
+                known_generation,
+                reply,
+            }) = success_rx.recv().await
+            {
+                assert_eq!(known_generation, None);
+                reply_dataplane_query(known_generation, reply, 42, vec![]);
+            }
+        });
+        assert!(publish_empty_models(&success_tx, &mut state).await.unwrap());
+        responder.await.unwrap();
+        assert_eq!(state.evpn_dataplane_generation, Some(42));
+    }
+
+    #[tokio::test]
     async fn supervisor_republishes_when_bum_enforcement_changes() {
         let instances = Arc::new(local_instance_table(100, Some("br100")));
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(8);
         let shutdown = CancellationToken::new();
         let _rib_responder = tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
-                if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
-                    let _ = reply.send(vec![]);
+                if let RibUpdate::QueryEvpnDataplaneRoutes {
+                    known_generation,
+                    reply,
+                } = msg
+                {
+                    reply_dataplane_query(known_generation, reply, 1, vec![]);
                 }
             }
         });
@@ -3425,14 +3581,17 @@ mod tests {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
         let shutdown = CancellationToken::new();
 
-        // Stub RIB responder: every QueryEvpnRoutes returns the
-        // same single route. The projection result is therefore
-        // identical across polls.
+        // Stub RIB responder: every changed-generation dataplane query returns
+        // the same single route; equal-token polls return no rows.
         let _rib_responder = tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
-                if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
+                if let RibUpdate::QueryEvpnDataplaneRoutes {
+                    known_generation,
+                    reply,
+                } = msg
+                {
                     let route = evpn_macip_route(100, 1, "10.0.0.2", Some(1));
-                    let _ = reply.send(vec![route]);
+                    reply_dataplane_query(known_generation, reply, 1, vec![route]);
                 }
             }
         });
@@ -3496,6 +3655,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn periodic_poll_recovers_a_relevant_generation_without_an_event() {
+        let instances = Arc::new(local_instance_table(100, Some("br100")));
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let shutdown = CancellationToken::new();
+        let rib_generation = Arc::new(AtomicUsize::new(1));
+        let responder_generation = rib_generation.clone();
+        let _rib_responder = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                if let RibUpdate::QueryEvpnDataplaneRoutes {
+                    known_generation,
+                    reply,
+                } = msg
+                {
+                    let generation = responder_generation.load(Ordering::SeqCst) as u64;
+                    let mut routes = vec![evpn_macip_route(100, 1, "10.0.0.2", Some(1))];
+                    if generation > 1 {
+                        routes.push(evpn_macip_route(100, 2, "10.0.0.3", Some(1)));
+                    }
+                    reply_dataplane_query(known_generation, reply, generation, routes);
+                }
+            }
+        });
+
+        let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (_bias_tx, bias_rx) = watch::channel(Arc::new(SameEsiBiasTable::new()));
+        let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let (drop_counts_tx, _drop_counts_rx) =
+            watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
+        let (_instances_tx, instances_rx) = watch::channel(instances);
+        let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
+        let (_managed_tx, managed_netdevs_rx) = watch::channel(Arc::new(ManagedNetdevTable::new()));
+        let join = tokio::spawn(super::supervisor_loop(
+            Duration::from_millis(20),
+            instances_rx,
+            ip_vrfs_rx,
+            managed_netdevs_rx.borrow().clone(),
+            rib_tx,
+            intent_tx,
+            bum_rx,
+            bias_rx,
+            quarantine_rx,
+            drop_counts_tx,
+            BgpMetrics::new(),
+            shutdown.clone(),
+        ));
+
+        tokio::time::timeout(Duration::from_millis(300), intent_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            intent_rx
+                .borrow_and_update()
+                .remote_macs
+                .get(vni(100), mac(1))
+                .is_some()
+        );
+
+        // No event is sent. The periodic equality probe must observe the new
+        // actor generation and materialize the changed snapshot.
+        rib_generation.store(2, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_millis(300), intent_rx.changed())
+            .await
+            .expect("periodic poll must recover a missed relevant event")
+            .unwrap();
+        assert!(
+            intent_rx
+                .borrow_and_update()
+                .remote_macs
+                .get(vni(100), mac(2))
+                .is_some()
+        );
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(Duration::from_millis(200), join).await;
+    }
+
+    #[tokio::test]
     async fn supervisor_reprojects_on_runtime_instance_table_change() {
         let initial_instances = Arc::new(local_instance_table(100, Some("br100")));
         let expanded_instances = Arc::new(local_instance_table_many(&[
@@ -3507,12 +3745,16 @@ mod tests {
 
         let _rib_responder = tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
-                if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
+                if let RibUpdate::QueryEvpnDataplaneRoutes {
+                    known_generation,
+                    reply,
+                } = msg
+                {
                     let routes = vec![
                         evpn_macip_route(100, 1, "10.0.0.2", Some(1)),
                         evpn_macip_route(200, 2, "10.0.0.3", Some(1)),
                     ];
-                    let _ = reply.send(routes);
+                    reply_dataplane_query(known_generation, reply, 1, routes);
                 }
             }
         });
@@ -3578,8 +3820,12 @@ mod tests {
 
         let _rib_responder = tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
-                if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
-                    let _ = reply.send(vec![]);
+                if let RibUpdate::QueryEvpnDataplaneRoutes {
+                    known_generation,
+                    reply,
+                } = msg
+                {
+                    reply_dataplane_query(known_generation, reply, 1, vec![]);
                 }
             }
         });
@@ -3645,8 +3891,17 @@ mod tests {
             // update must republish cached route projection instead
             // of depending on another RIB query.
             while let Some(msg) = rib_rx.recv().await {
-                if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
-                    let _ = reply.send(vec![evpn_macip_route(100, 1, "10.0.0.2", Some(1))]);
+                if let RibUpdate::QueryEvpnDataplaneRoutes {
+                    known_generation,
+                    reply,
+                } = msg
+                {
+                    reply_dataplane_query(
+                        known_generation,
+                        reply,
+                        1,
+                        vec![evpn_macip_route(100, 1, "10.0.0.2", Some(1))],
+                    );
                     break;
                 }
             }
@@ -3714,6 +3969,7 @@ mod tests {
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let mut state = SupervisorIntentState {
             generation: 1,
+            evpn_dataplane_generation: Some(7),
             last_instances: cached_instances.clone(),
             last_ip_vrfs: Arc::new(IpVrfTable::new()),
             managed_netdevs: Arc::new(ManagedNetdevTable::new()),
@@ -3753,9 +4009,13 @@ mod tests {
 
         let _rib_responder = tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
-                if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
+                if let RibUpdate::QueryEvpnDataplaneRoutes {
+                    known_generation,
+                    reply,
+                } = msg
+                {
                     let route = evpn_macip_route(100, 1, "10.0.0.2", Some(1));
-                    let _ = reply.send(vec![route]);
+                    reply_dataplane_query(known_generation, reply, 1, vec![route]);
                 }
             }
         });
@@ -3826,12 +4086,16 @@ mod tests {
 
         let _rib_responder = tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
-                if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
+                if let RibUpdate::QueryEvpnDataplaneRoutes {
+                    known_generation,
+                    reply,
+                } = msg
+                {
                     let routes = vec![
                         evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
                         evpn_ead_per_es_route(esi, "10.0.0.2", false),
                     ];
-                    let _ = reply.send(routes);
+                    reply_dataplane_query(known_generation, reply, 1, routes);
                 }
             }
         });
@@ -3907,7 +4171,7 @@ mod tests {
 
     /// Stub RIB endpoint for the event-trigger tests: answers
     /// `SubscribeEvpnRouteEvents` with a broadcast receiver, answers
-    /// every `QueryEvpnRoutes` with `routes`, and counts the queries.
+    /// every dataplane query with the actor-token response, and counts them.
     fn rib_with_evpn_events(
         routes: Vec<EvpnRibRoute>,
     ) -> (
@@ -3923,9 +4187,12 @@ mod tests {
         tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
                 match msg {
-                    RibUpdate::QueryEvpnRoutes { reply, .. } => {
+                    RibUpdate::QueryEvpnDataplaneRoutes {
+                        known_generation,
+                        reply,
+                    } => {
                         task_count.fetch_add(1, Ordering::SeqCst);
-                        let _ = reply.send(routes.clone());
+                        reply_dataplane_query(known_generation, reply, 1, routes.clone());
                     }
                     RibUpdate::SubscribeEvpnRouteEvents { reply } => {
                         let _ = reply.send(task_events.subscribe());
@@ -3970,13 +4237,16 @@ mod tests {
                     RibUpdate::SubscribeEvpnRouteEvents { reply } => {
                         let _ = reply.send(responder_events.subscribe());
                     }
-                    RibUpdate::QueryEvpnRoutes { reply, .. } => {
+                    RibUpdate::QueryEvpnDataplaneRoutes {
+                        known_generation,
+                        reply,
+                    } => {
                         queries += 1;
                         let mut routes = vec![evpn_macip_route(100, 1, "10.0.0.2", Some(1))];
                         if queries > 1 {
                             routes.push(evpn_macip_route(100, 2, "10.0.0.3", Some(1)));
                         }
-                        let _ = reply.send(routes);
+                        reply_dataplane_query(known_generation, reply, u64::from(queries), routes);
                     }
                     _ => {}
                 }

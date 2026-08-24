@@ -2391,6 +2391,18 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<Vec<EvpnRibRoute>>,
     },
+    /// Query the dataplane-relevant EVPN Loc-RIB projection input.
+    ///
+    /// This is an internal daemon/RIB seam.  The equality token lets the
+    /// dataplane supervisor avoid walking or materializing the table when no
+    /// Type 1, 2, or 5 best path changed since its last successful snapshot.
+    QueryEvpnDataplaneRoutes {
+        /// Last successfully materialized generation, or `None` to force a
+        /// complete snapshot after startup or local projection invalidation.
+        known_generation: Option<u64>,
+        /// Response channel.
+        reply: oneshot::Sender<EvpnDataplaneRoutesResponse>,
+    },
     /// Query BGP-LS routes from the Loc-RIB (RFC 9552).
     QueryBgpLsRoutes {
         /// Row filter evaluated inside the RIB task; `None` copies every row.
@@ -2481,6 +2493,16 @@ pub enum RibUpdate {
         /// Response channel: `(afi, safi, count)` per family.
         reply: oneshot::Sender<Vec<(u16, u8, u64)>>,
     },
+}
+
+/// Actor-atomic response for the internal EVPN dataplane snapshot query.
+#[derive(Debug)]
+pub struct EvpnDataplaneRoutesResponse {
+    /// Wrapping equality token owned by the RIB actor.
+    pub generation: u64,
+    /// Type 1, 2, and 5 Loc-RIB rows when the caller's token differs; `None`
+    /// when it is already current.
+    pub routes: Option<Vec<EvpnRibRoute>>,
 }
 
 /// Peer metadata for MRT `PEER_INDEX_TABLE`.

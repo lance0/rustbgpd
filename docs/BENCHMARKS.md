@@ -33,7 +33,7 @@ v0.61.0 release-tip real-daemon and single-revision absolute baseline:
 2026-07-26; RIB-ops prefix-fixture audit bounding the above-65,536 rows:
 2026-08; v0.64.0 release-tag bgperf2 spot-check (rustbgpd only, same host):
 2026-08-08; v0.66.0 release-tag bgperf2 spot-check (rustbgpd only, same
-host): 2026-08-23.
+host): 2026-08-23; EVPN dataplane generation-query controlled A/B: 2026-08-24.
 
 | Field | Value |
 |-------|-------|
@@ -171,14 +171,14 @@ measures nothing. `cargo bench --workspace` is not a substitute either: four
 targets are standalone CLIs rather than criterion harnesses and reject
 criterion's flags.
 
-Run each target explicitly with `-p <crate> --bench <name>`. Thirteen exist.
+Run each target explicitly with `-p <crate> --bench <name>`. Fourteen exist.
 Six build with default features (wire/`codec`, rib/`rib_ops`,
 policy/`policy_eval`, policy/`explain_snapshot`, rpki/`validate`,
-mrt/`snapshot_allocation`); seven are `bench-internals`-gated
+mrt/`snapshot_allocation`); eight are `bench-internals`-gated
 (transport/`fanout`, transport/`inbound_attrs`, rustbgpd/`fib_projection`,
-rib/`route_paging`, api/`event_history_producer`, api/`vpn_query_timing`,
-api/`vpn_query_allocation` — the last also requires the api crate's
-`vpn-query-allocation` feature). Four of the thirteen —
+rib/`route_paging`, rib/`evpn_dataplane_query`, api/`event_history_producer`,
+api/`vpn_query_timing`, api/`vpn_query_allocation` — the last also requires
+the api crate's `vpn-query-allocation` feature). Four of the fourteen —
 `snapshot_allocation`, `route_paging`, `vpn_query_timing`, and
 `vpn_query_allocation` — are standalone measurement CLIs with their own
 argument contracts (`snapshot_allocation` hard-errors without a
@@ -194,6 +194,9 @@ cargo bench -p rustbgpd-wire --bench codec
 
 # RIB only
 cargo bench -p rustbgpd-rib --bench rib_ops
+
+# EVPN dataplane generation query (requires bench-internals)
+cargo bench -p rustbgpd-rib --features bench-internals --bench evpn_dataplane_query
 
 # Root-daemon FIB projection internals (requires bench-internals)
 cargo bench --features bench-internals --bench fib_projection
@@ -216,6 +219,55 @@ cargo bench -p rustbgpd-rib --bench rib_ops -- "adj_rib_in_insert"
 ```
 
 HTML reports are generated to `target/criterion/`.
+
+### EVPN dataplane generation query
+
+The `evpn_dataplane_query` target isolates the internal query/materialization
+seam. Its legacy path is the exact pre-change whole-EVPN-table clone; the new
+changed path clones only Type 1/2/5 rows. The downstream intent projection is
+outside both timings, which conservatively omits the new path's smaller mixed
+input. Both sides receive the same input cardinality; mixed output cardinality
+differs because filtering in the actor is the shipped optimization. When every
+row is relevant, the actor's exact relevant-row cardinality preserves the
+prior bulk-clone path. The unchanged path compares the caller's token before
+constructing the iterator.
+
+The fixture covers 0, 1,000, and 50,000 rows in two distributions:
+`all-relevant` cycles Types 1/2/5, while `mixed-types-1-through-5` cycles all
+five route types (60% relevant). Before timed iterations, the target asserts
+the changed receipt visited every input row and returned the exact relevant
+cardinality; the unchanged receipt must be `routes=None` with zero row visits.
+Those are control-flow/materialization receipts, not allocator measurements;
+no allocation-count or byte claim is made here.
+
+Measured 2026-08-24 from the PR #1988 candidate based on
+`5871d4c2fb5583fe1dd1b24c28849f624fa68043`, with rustc 1.98.0, Linux
+6.17.0-35-generic, AMD Ryzen Threadripper 7970X, CPU 8 pinned under the
+`performance` governor, and the shared host lock held:
+
+```bash
+flock -n "$HOME/.local/state/rustbgpd-host.lock" \
+  taskset -c 8 cargo bench -p rustbgpd-rib --features bench-internals \
+  --bench evpn_dataplane_query -- --noplot
+```
+
+Criterion configuration was 1 s warm-up, 3 s measurement, 10 samples. Values
+are point estimates from the same controlled run; delta compares changed with
+legacy at the same input cardinality.
+
+| Distribution | Rows | Legacy clone | Generation changed | Changed delta | Generation unchanged |
+|---|---:|---:|---:|---:|---:|
+| all relevant | 0 | 7.1053 ns | 7.4148 ns | +4.36% | 1.1730 ns |
+| all relevant | 1,000 | 7.0841 us | 7.0540 us | -0.42% | 1.1728 ns |
+| all relevant | 50,000 | 367.27 us | 368.45 us | **+0.32%** | 1.1780 ns |
+| mixed Types 1-5 | 0 | 7.1043 ns | 7.4035 ns | +4.21% | 1.1742 ns |
+| mixed Types 1-5 | 1,000 | 7.1338 us | 5.7271 us | -19.72% | 1.1758 ns |
+| mixed Types 1-5 | 50,000 | 382.54 us | 293.94 us | -23.16% | 1.1746 ns |
+
+The preregistered production switch condition was that the changed 50,000-row
+all-relevant path be no more than 2% slower than legacy. The measured +0.32%
+passes. The 0-row percentage is nanosecond-scale fixed dispatch overhead, not
+a scale result.
 
 ## Comparing Two Refs
 

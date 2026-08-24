@@ -444,6 +444,23 @@ impl RibManager {
                 };
                 let previous_peer = previous_best.as_ref().map(|r| r.peer);
                 let peer = new_best.as_ref().map(|r| r.peer);
+                if matches!(key.route_type(), 1 | 2 | 5) {
+                    match (previous_best.is_some(), new_best.is_some()) {
+                        (false, true) => {
+                            self.evpn_dataplane_route_count = self
+                                .evpn_dataplane_route_count
+                                .checked_add(1)
+                                .expect("EVPN dataplane route count overflow");
+                        }
+                        (true, false) => {
+                            self.evpn_dataplane_route_count = self
+                                .evpn_dataplane_route_count
+                                .checked_sub(1)
+                                .expect("EVPN dataplane route count underflow");
+                        }
+                        _ => {}
+                    }
+                }
                 self.publish_evpn_route_event(crate::event::EvpnRouteEvent {
                     event_type,
                     key: *key,
@@ -456,6 +473,26 @@ impl RibManager {
                 changed_keys.insert(*key);
             }
         }
+
+        // This token covers exactly the projection input consumed by the
+        // daemon dataplane.  Type 3/4 changes remain visible through the
+        // public EVPN query and event stream, but cannot change that
+        // projection and therefore do not invalidate its snapshot.
+        if changed_keys
+            .iter()
+            .any(|key| matches!(key.route_type(), 1 | 2 | 5))
+        {
+            self.evpn_dataplane_generation = self.evpn_dataplane_generation.wrapping_add(1);
+        }
+
+        debug_assert_eq!(
+            self.evpn_dataplane_route_count,
+            self.loc_rib
+                .iter_evpn()
+                .filter(|route| matches!(route.route_type(), 1 | 2 | 5))
+                .count(),
+            "EVPN dataplane relevant-row cardinality drifted from the Loc-RIB"
+        );
 
         if changed_keys.is_empty() {
             return;

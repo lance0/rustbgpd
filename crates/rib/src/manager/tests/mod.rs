@@ -1131,6 +1131,7 @@ mod bgpls;
 mod bmp;
 mod events_metrics;
 mod evpn;
+mod evpn_dataplane_query;
 mod exact_export_lifecycle;
 mod explain_mrt;
 mod export_explain;
