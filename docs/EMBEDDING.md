@@ -440,7 +440,7 @@ To be the de facto Rust BGP codec, the concrete gaps:
    drives the FSM, and prints every received UPDATE. This is the "it works"
    receipt for consumers #1 and #3. The `event-bridge` example already proves the
    gRPC-client shape; this proves the library-embedding shape.
-2. **Add a `tokio_util::codec::Decoder/Encoder` impl.** Done on main for the
+2. **Add a `tokio_util::codec::Decoder/Encoder` impl.** Implemented for the
    next wire release: the default-off `tokio-codec` feature exports typed
    `BgpCodec` / `BgpCodecError` framing with independent inbound and outbound
    ceilings. It adds Tokio-util's codec support graph without enabling Tokio's

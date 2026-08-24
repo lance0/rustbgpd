@@ -156,6 +156,12 @@ impl Encoder<Message> for BgpCodec {
         // Encode transactionally into a temporary buffer so a validation
         // error cannot leave a partial frame in Tokio's write buffer.
         let encoded = encode_message_with_limit(&item, self.outbound_max_message_len)?;
+        if encoded.len() > usize::from(self.outbound_max_message_len) {
+            return Err(EncodeError::MessageTooLong {
+                size: encoded.len(),
+            }
+            .into());
+        }
         dst.reserve(encoded.len());
         dst.extend_from_slice(&encoded);
         Ok(())
@@ -341,6 +347,21 @@ mod tests {
 
         assert!(codec.encode(extended_notification(), &mut dst).is_err());
         assert_eq!(dst, original);
+    }
+
+    #[test]
+    fn custom_outbound_ceiling_also_rejects_open_and_keepalive_atomically() {
+        let mut codec = BgpCodec::with_max_message_lengths(MAX_MESSAGE_LEN, 18);
+        let open = representative_messages().remove(0);
+        for message in [Message::Keepalive, open] {
+            let mut dst = BytesMut::from(&b"existing"[..]);
+            let original = dst.clone();
+            assert!(matches!(
+                codec.encode(message, &mut dst),
+                Err(BgpCodecError::Encode(EncodeError::MessageTooLong { .. }))
+            ));
+            assert_eq!(dst, original);
+        }
     }
 
     #[test]
