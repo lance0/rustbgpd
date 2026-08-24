@@ -204,7 +204,8 @@ check_workflow_consumers() {
 self_test() (
     local repo_root fixture_dir source_dir base_archive valid_archive checksum
     local truncated_size wrong_source wrong_archive wrong_checksum counter
-    local cache_path target_path workflow setup_calls prepare_calls install_calls
+    local cache_path target_path workflow setup_calls producer_calls prepare_calls
+    local prepare_mode_calls install_calls
 
     repo_root=$(git rev-parse --show-toplevel)
     fixture_dir=$(mktemp -d)
@@ -379,11 +380,18 @@ EOF
     [[ "$setup_calls" -eq 1 ]] \
         || fail_self_test "setup-dataplane-host must have one grpcurl consumer"
     for workflow in interop.yml kernel-dataplane.yml; do
-        prepare_calls=$(grep -cF -- '.github/scripts/install-grpcurl.sh' \
+        producer_calls=$(grep -cF \
+            'uses: ./.github/actions/prepare-grpcurl-artifact' \
             "$repo_root/.github/workflows/$workflow")
-        [[ "$prepare_calls" -eq 1 ]] \
+        [[ "$producer_calls" -eq 1 ]] \
             || fail_self_test "$workflow must have exactly one grpcurl producer"
     done
+    prepare_calls=$(grep -cF -- '.github/scripts/install-grpcurl.sh' \
+        "$repo_root/.github/actions/prepare-grpcurl-artifact/action.yml")
+    prepare_mode_calls=$(grep -cF -- '--prepare-archive' \
+        "$repo_root/.github/actions/prepare-grpcurl-artifact/action.yml")
+    [[ "$prepare_calls" -eq 1 && "$prepare_mode_calls" -eq 1 ]] \
+        || fail_self_test "producer action must have one grpcurl prepare call"
     install_calls=$(grep -cF -- '--install-archive' \
         "$repo_root/.github/actions/install-grpcurl-artifact/action.yml")
     [[ "$install_calls" -eq 1 ]] \
