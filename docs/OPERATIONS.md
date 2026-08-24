@@ -1645,6 +1645,9 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 | `shutdown initiated via gRPC` | INFO | `Shutdown` RPC called |
 | `gRPC server exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `RIB manager exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
+| `peer manager task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
+| `BGP listener task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
+| `BGP accept-forwarding task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `config reloaded` | INFO | SIGHUP reload succeeded |
 | `config reload failed` | ERROR | SIGHUP reload failed — previous config kept |
 | `GR restart marker` | INFO | Restart marker written or read |
