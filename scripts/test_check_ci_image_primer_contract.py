@@ -93,6 +93,7 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
+                ".github/actions/prepare-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
@@ -136,6 +137,7 @@ class PrimerContractTests(unittest.TestCase):
             ".github/workflows",
             ".github/actions/install-gnmic-artifact",
             ".github/actions/install-grpcurl-artifact",
+            ".github/actions/prepare-grpcurl-artifact",
             ".github/actions/setup-dataplane-host",
             ".github/actions/stage-bird3-artifact",
             ".github/actions/stage-gobgp-artifact",
@@ -231,6 +233,7 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
+                ".github/actions/prepare-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
@@ -258,6 +261,7 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
+                ".github/actions/prepare-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
@@ -405,8 +409,6 @@ class PrimerContractTests(unittest.TestCase):
                     )
 
     def test_grpcurl_producers_are_load_bearing(self):
-        archive = "grpcurl_1.9.1_linux_x86_64.tar.gz"
-        checksum = "588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214"
         for workflow in ("interop.yml", "kernel-dataplane.yml"):
             relative = f".github/workflows/{workflow}"
             cases = (
@@ -417,38 +419,86 @@ class PrimerContractTests(unittest.TestCase):
                     "if: false",
                     0,
                 ),
+                (
+                    "name: Prepare exact grpcurl archive",
+                    "name: Prepare approximate grpcurl archive",
+                    0,
+                ),
+                ("runs-on: ubuntu-latest", "runs-on: ubuntu-24.04", 1),
                 ("timeout-minutes: 10", "timeout-minutes: 9", 0),
                 ("ref: ${{ github.sha }}", "ref: main", 0),
-                ("actions/cache@v6", "actions/cache@main", 0),
-                (f"key: grpcurl-v1.9.1-linux-x86_64-{checksum}", "key: grpcurl", 0),
-                ("--prepare-archive", "--install-archive", 0),
-                ("actions/upload-artifact@v7", "actions/upload-artifact@main", 0),
-                ("name: grpcurl-v1.9.1-linux-x86_64", "name: grpcurl-latest", 0),
-                ("if-no-files-found: error", "if-no-files-found: warn", 0),
-                ("retention-days: 1", "retention-days: 30", 0),
-                ("compression-level: 0", "compression-level: 6", 0),
                 (
-                    f"key: grpcurl-v1.9.1-linux-x86_64-{checksum}",
-                    f"key: grpcurl-v1.9.1-linux-x86_64-{checksum}\n          restore-keys: grpcurl-",
+                    "uses: ./.github/actions/prepare-grpcurl-artifact",
+                    "uses: ./.github/actions/install-grpcurl-artifact",
                     0,
                 ),
                 (
-                    "uses: actions/cache@v6",
-                    "uses: actions/cache@v6\n        continue-on-error: true",
+                    "uses: ./.github/actions/prepare-grpcurl-artifact",
+                    "uses: ./.github/actions/prepare-grpcurl-artifact\n"
+                    "        with:\n"
+                    "          mode: permissive",
+                    0,
+                ),
+                (
+                    "uses: ./.github/actions/prepare-grpcurl-artifact",
+                    "uses: ./.github/actions/prepare-grpcurl-artifact\n"
+                    "      - uses: actions/cache@v6",
                     0,
                 ),
             )
             for old, new, occurrence in cases:
                 with self.subTest(workflow=workflow, seam=old, occurrence=occurrence):
                     self.mutate(relative, old, new, occurrence=occurrence)
-            for occurrence in (0, 1):
-                with self.subTest(workflow=workflow, path=occurrence):
-                    self.mutate(
-                        relative,
-                        f"path: ${{{{ runner.temp }}}}/grpcurl-cache/{archive}",
-                        "path: ${{ runner.temp }}/grpcurl-cache/wrong.tar.gz",
-                        occurrence=occurrence,
-                    )
+
+    def test_grpcurl_producer_action_is_load_bearing(self):
+        relative = ".github/actions/prepare-grpcurl-artifact/action.yml"
+        archive = "grpcurl_1.9.1_linux_x86_64.tar.gz"
+        checksum = "588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214"
+        cases = (
+            ('using: "composite"', 'using: "docker"'),
+            ("actions/cache@v6", "actions/cache@main"),
+            (f"key: grpcurl-v1.9.1-linux-x86_64-{checksum}", "key: grpcurl"),
+            ("shell: bash", "shell: sh"),
+            ("--prepare-archive", "--install-archive"),
+            ("actions/upload-artifact@v7", "actions/upload-artifact@main"),
+            ("name: grpcurl-v1.9.1-linux-x86_64", "name: grpcurl-latest"),
+            ("if-no-files-found: error", "if-no-files-found: warn"),
+            ("retention-days: 1", "retention-days: 30"),
+            ("compression-level: 0", "compression-level: 6"),
+            (
+                f"key: grpcurl-v1.9.1-linux-x86_64-{checksum}",
+                f"key: grpcurl-v1.9.1-linux-x86_64-{checksum}\n"
+                "        restore-keys: grpcurl-",
+            ),
+            (
+                "uses: actions/cache@v6",
+                "uses: actions/cache@v6\n      continue-on-error: true",
+            ),
+            (
+                "runs:\n",
+                "inputs:\n  mode:\n    required: false\nruns:\n",
+            ),
+            (
+                "runs:\n",
+                "outputs:\n  archive:\n    value: latest\nruns:\n",
+            ),
+            (
+                ".github/scripts/install-grpcurl.sh \\",
+                "curl https://example.invalid/grpcurl\n"
+                "        .github/scripts/install-grpcurl.sh \\",
+            ),
+        )
+        for old, new in cases:
+            with self.subTest(seam=old):
+                self.mutate(relative, old, new)
+        for occurrence in (0, 1):
+            with self.subTest(path=occurrence):
+                self.mutate(
+                    relative,
+                    f"path: ${{{{ runner.temp }}}}/grpcurl-cache/{archive}",
+                    "path: ${{ runner.temp }}/grpcurl-cache/wrong.tar.gz",
+                    occurrence=occurrence,
+                )
 
     def test_grpcurl_offline_consumer_is_load_bearing(self):
         relative = ".github/actions/install-grpcurl-artifact/action.yml"
@@ -553,7 +603,7 @@ class PrimerContractTests(unittest.TestCase):
         checksum = "e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522"
         for workflow in ("interop.yml", "kernel-dataplane.yml"):
             relative = f".github/workflows/{workflow}"
-            producer_occurrence = 2 if workflow == "interop.yml" else 1
+            producer_occurrence = 1 if workflow == "interop.yml" else 0
             for old, new in (
                 ("  gobgp_archive:\n", "  removed_gobgp_archive:\n"),
                 (f"key: gobgp-v3.37.0-linux-amd64-{checksum}", "key: gobgp-latest"),
@@ -666,7 +716,7 @@ class PrimerContractTests(unittest.TestCase):
             ("actions/upload-artifact@v7", "actions/upload-artifact@main"),
         ):
             with self.subTest(seam=f"bird3 producer {seam}"):
-                self.mutate(relative, seam, replacement, occurrence=2)
+                self.mutate(relative, seam, replacement, occurrence=1)
         exact_path = (
             "path: ${{ runner.temp }}/bird3-cache/bird-3.3.1.tar.gz"
         )
@@ -733,6 +783,7 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
+                ".github/actions/prepare-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
@@ -766,6 +817,7 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
+                ".github/actions/prepare-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
@@ -799,6 +851,7 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
+                ".github/actions/prepare-grpcurl-artifact",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
                 ".github/actions/stage-gobgp-artifact",
