@@ -70,13 +70,13 @@ frr_has_type2() {
     # Two-line vtysh layout: MAC on one line, next-hop on the next.
     # `grep -A1 -iF "$mac"` pulls both, then check the next-hop is
     # rustbgpd's loopback.
-    echo "$out" | grep -A1 -iF "$mac" | grep -qF "$RUSTBGPD_IP"
+    echo "$out" | grep -A1 -iF "$mac" | grep -F "$RUSTBGPD_IP" >/dev/null
 }
 
 # Does FRR list a Type 3 IMET route originating from rustbgpd?
 frr_has_type3() {
     frr_vtysh "show bgp l2vpn evpn route type multicast" \
-        | grep -qF "$RUSTBGPD_IP"
+        | grep -F "$RUSTBGPD_IP" >/dev/null
 }
 
 # Absence checks succeed only when the FRR query itself succeeded AND the
@@ -86,13 +86,13 @@ frr_type2_absent() {
     local mac=${1:?}
     local out
     out=$(frr_vtysh_strict "show bgp l2vpn evpn route type macip") || return 1
-    ! echo "$out" | grep -A1 -iF "$mac" | grep -qF "$RUSTBGPD_IP"
+    ! echo "$out" | grep -A1 -iF "$mac" | grep -F "$RUSTBGPD_IP" >/dev/null
 }
 
 frr_type3_absent() {
     local out
     out=$(frr_vtysh_strict "show bgp l2vpn evpn route type multicast") || return 1
-    ! echo "$out" | grep -qF "$RUSTBGPD_IP"
+    ! echo "$out" | grep -F "$RUSTBGPD_IP" >/dev/null
 }
 
 # Inject a static MAC on the rustbgpd container's non-VXLAN bridge
