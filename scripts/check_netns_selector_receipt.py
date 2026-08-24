@@ -10,6 +10,7 @@ from pathlib import Path
 
 BASE = (
     "fdb_nhg", "fib_runtime", "bfd_runtime", "dataplane_vlan_fdb",
+    "dataplane_remote_mac", "vlan_local_mac_attribution",
     "macip_vlan_attribution", "svd_fdb_vni", "managed_bridge",
     "managed_vxlan", "managed_svd_vxlan", "managed_vlan_upper",
     "managed_ready", "link_carrier", "ac_gate", "nexthop_raw",
@@ -17,7 +18,8 @@ BASE = (
 )
 VRF = (
     "l3_multipath", "managed_ip_vrf_ready", "l3_all_active_writer",
-    "foreign_state_l3", "l3_route_event",
+    "foreign_state_l3", "l3_route_event", "l3_single_path_cycle",
+    "l3_foreign_route_cycle",
 )
 
 

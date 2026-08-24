@@ -34,11 +34,13 @@
 //!
 //! ## Why gated
 //!
-//! Creating a netns + VRF / L3VXLAN devices requires
-//! `CAP_NET_ADMIN`. PR-CI runners don't have it, so this test is
-//! gated by the `EVPN_LINUX_NETNS=1` environment variable. The
-//! current process must already hold the capability — the test
-//! does not attempt privilege escalation.
+//! Creating a netns + VRF / L3VXLAN devices requires `CAP_NET_ADMIN`,
+//! so direct `cargo test` execution is gated by the
+//! `EVPN_LINUX_NETNS=1` environment variable and the caller's capabilities.
+//! The Kernel Dataplane workflow runs exact tests from this binary inside a
+//! capability-bearing Docker container for lab-relevant PRs,
+//! non-documentation pushes to `main`, and manual dispatch. The test does not
+//! attempt privilege escalation.
 //!
 //! ```bash
 //! sudo -E env EVPN_LINUX_NETNS=1 \

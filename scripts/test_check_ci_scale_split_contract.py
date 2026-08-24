@@ -7,7 +7,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.check_ci_scale_split_contract import WORKFLOWS, _jobs, aggregate_shell, check
+from scripts.check_ci_scale_split_contract import (
+    RETIRED_PRIVILEGED_WORKFLOW,
+    WORKFLOWS,
+    _jobs,
+    aggregate_shell,
+    check,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ".github/workflows/ci.yml"
@@ -42,6 +48,21 @@ class ScaleSplitContractTests(unittest.TestCase):
 
     def test_live_contract(self) -> None:
         self.assertEqual([], check(ROOT))
+
+    def test_retired_privileged_workflow_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.copy_workflows(root)
+            retired = root / RETIRED_PRIVILEGED_WORKFLOW
+            retired.write_text(
+                "on:\n  workflow_dispatch:\n"
+                "jobs:\n  netns:\n    steps:\n"
+                "      - run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh all\n"
+            )
+            self.assertIn(
+                f"retired workflow must stay absent: {RETIRED_PRIVILEGED_WORKFLOW}",
+                "\n".join(check(root)),
+            )
 
     def test_comments_toolchain_selector_and_new_workflow_boundaries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

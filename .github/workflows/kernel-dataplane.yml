@@ -100,7 +100,7 @@ jobs:
   # hard-failed a release gate. So a *fetch* outage degrades to a loud,
   # non-blocking skip of m43; nothing else does. In particular bytes that DID
   # download and then failed the pinned checksum or source-version check are a
-  # supply-chain signal, not an outage, and stay hard-red. install-bird3.sh
+  # supply-chain signal, not an outage, and stay a required failure. install-bird3.sh
   # separates the two by exit code (3 = never fetched, 4 = fetched but
   # unverifiable) and this job republishes the call as bird3_status for the
   # m43 job gate and the check aggregate to read, so neither has to infer
@@ -801,10 +801,9 @@ jobs:
       # The Docker netns harness builds its own image and runs the privileged
       # tests inside `docker run --cap-add=NET_ADMIN --cap-add=SYS_ADMIN`, so the
       # netns never leaks to the host namespace. Most selectors are vrf-free and
-      # need no host setup beyond Docker (preinstalled); managed_ip_vrf_ready,
-      # l3_multipath, and l3_all_active_writer create a `vrf` device, so the step
-      # below loads the vrf module on the host kernel the containers share
-      # (skipping the L3 selectors if it cannot be loaded).
+      # need no host setup beyond Docker (preinstalled). The L3 selectors create
+      # a `vrf` device, so the step below loads the vrf module on the host kernel
+      # the containers share (skipping the L3 selectors if it cannot be loaded).
       - name: ADR-0059 FDB nexthop group netns tests
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg
 
@@ -821,6 +820,12 @@ jobs:
 
       - name: ADR-0089 VLAN-scoped FDB netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_vlan_fdb
+
+      - name: Remote MAC extern-learn netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_remote_mac
+
+      - name: VLAN local MAC attribution netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh vlan_local_mac_attribution
 
       - name: LAN-78 MAC+IP VLAN attribution netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh macip_vlan_attribution
@@ -907,6 +912,14 @@ jobs:
         if: steps.vrf.outputs.vrf-available == 'true'
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_route_event
 
+      - name: L3 route-neighbor-FDB lifecycle netns test
+        if: steps.vrf.outputs.vrf-available == 'true'
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_single_path_cycle
+
+      - name: L3 foreign-route preservation netns test
+        if: steps.vrf.outputs.vrf-available == 'true'
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_foreign_route_cycle
+
       - name: Finalize netns selector receipt
         if: always()
         env:
@@ -969,7 +982,8 @@ jobs:
           # The only tolerated deviation: m43 reporting skipped because the
           # bird3 producer succeeded and told us the pinned archive was
           # unavailable upstream. A producer that failed, a corrupt archive, or
-          # an m43 that actually ran and failed all stay red. The excuse prints
+          # an m43 that actually ran and failed all remain required failures.
+          # The excuse prints
           # next to the roster entry so a tolerated skip never reads like a
           # normal not-applicable one.
           bird3 = needs["bird3_archive"]

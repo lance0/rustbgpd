@@ -62,6 +62,10 @@
 #       (route-event wake proof; requires VRF)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_vlan_fdb
 #       (ADR-0089 VLAN-scoped single-dst FDB add/remove proof)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh dataplane_remote_mac
+#       (remote MAC add/remove plus foreign-entry preservation proof)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh vlan_local_mac_attribution
+#       (VLAN-scoped local MAC observation attribution proof)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh svd_fdb_vni
 #       (LAN-64 SVD collect-metadata explicit FDB VNI proof)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_multipath
@@ -80,6 +84,10 @@
 #       (ADR-0091 managed bridge + fixed-VNI VXLAN readiness proof)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh managed_ip_vrf_ready
 #       (ADR-0091 managed VRF + L3VXLAN readiness proof)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_single_path_cycle
+#       (single-path L3 route + neighbor + FDB install/withdraw proof)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh l3_foreign_route_cycle
+#       (foreign-route preservation through an L3 install/withdraw cycle)
 #
 # Exits 0 on green; surfaces the inner cargo exit code otherwise.
 
@@ -102,7 +110,10 @@ DOCKERFILE="$SCRIPT_DIR/Dockerfile"
 # runs the LAN-76 production actor all-active L3 writer proof;
 # `managed_bridge` / `managed_vxlan` / `managed_svd_vxlan` / `managed_vlan_upper` /
 # `managed_ip_vrf_ready` run the ADR-0091 managed netdev
-# lifecycle/readiness proofs.
+# lifecycle/readiness proofs. `dataplane_remote_mac` and
+# `vlan_local_mac_attribution` run exact netns_dataplane proofs;
+# `l3_single_path_cycle` and `l3_foreign_route_cycle` run exact VRF-dependent
+# netns_l3_install proofs.
 TEST_BIN="netns_bum_filter"
 EXACT_FILTER=1
 SELECTOR="${1:-all}"
@@ -127,6 +138,8 @@ case "${1:-all}" in
     foreign_state_l3)   TEST_BIN="netns_foreign_state"; FILTER="l3_foreign_takeover_triple_survives_withdrawal_and_shutdown" ;;
     l3_route_event)     TEST_BIN="netns_l3_install"; FILTER="linux_dataplane_route_event_wakes_within_2s" ;;
     dataplane_vlan_fdb) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_programs_vlan_scoped_remote_mac_add_remove" ;;
+    dataplane_remote_mac) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_programs_remote_mac_with_extern_learn" ;;
+    vlan_local_mac_attribution) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_attributes_vlan_local_mac_observations" ;;
     macip_vlan_attribution) TEST_BIN="netns_dataplane"; FILTER="linux_dataplane_attributes_vlan_mac_ip_observations" ;;
     svd_fdb_vni)        TEST_BIN="netns_svd"; FILTER="svd_topology_is_ready_and_programs_vni_scoped_fdb_rows" ;;
     l3_multipath)       TEST_BIN="netns_l3_install"; FILTER="l3vxlan_all_active_multipath_kernel_shape" ;;
@@ -137,8 +150,10 @@ case "${1:-all}" in
     managed_vlan_upper) TEST_BIN="netns_managed_netdev"; FILTER="managed_vlan_upper_create_adopt_and_reap_round_trip" ;;
     managed_ready)      TEST_BIN="netns_managed_netdev"; FILTER="managed_bridge_and_vxlan_make_instance_ready_round_trip" ;;
     managed_ip_vrf_ready) TEST_BIN="netns_managed_netdev"; FILTER="managed_vrf_and_l3vxlan_make_ip_vrf_ready_round_trip" ;;
+    l3_single_path_cycle) TEST_BIN="netns_l3_install"; FILTER="linux_dataplane_installs_and_withdraws_l3_triple" ;;
+    l3_foreign_route_cycle) TEST_BIN="netns_l3_install"; FILTER="linux_dataplane_foreign_route_survives_l3_cycle" ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier, ac_gate, nexthop_raw, foreign_state_l2, foreign_state_nhid, foreign_state_l3, l3_route_event, dataplane_vlan_fdb, macip_vlan_attribution, svd_fdb_vni, l3_multipath, l3_all_active_writer, managed_bridge, managed_vxlan, managed_svd_vxlan, managed_vlan_upper, managed_ready, managed_ip_vrf_ready" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier, ac_gate, nexthop_raw, foreign_state_l2, foreign_state_nhid, foreign_state_l3, l3_route_event, dataplane_vlan_fdb, dataplane_remote_mac, vlan_local_mac_attribution, macip_vlan_attribution, svd_fdb_vni, l3_multipath, l3_all_active_writer, managed_bridge, managed_vxlan, managed_svd_vxlan, managed_vlan_upper, managed_ready, managed_ip_vrf_ready, l3_single_path_cycle, l3_foreign_route_cycle" >&2
         exit 2
         ;;
 esac

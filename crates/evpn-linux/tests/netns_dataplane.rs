@@ -10,10 +10,12 @@
 //!
 //! ## Why gated
 //!
-//! Creating a netns and bridge requires `CAP_NET_ADMIN`. PR-CI
-//! runners don't have it, so this test is gated by the
-//! `EVPN_LINUX_NETNS=1` environment variable. It runs nightly on a
-//! dedicated Linux runner; PR-CI skips it cleanly.
+//! Creating a netns and bridge requires `CAP_NET_ADMIN`, so direct
+//! `cargo test` execution is gated by the `EVPN_LINUX_NETNS=1`
+//! environment variable and the caller's capabilities. The Kernel Dataplane
+//! workflow runs exact tests from this binary inside a capability-bearing
+//! Docker container for lab-relevant PRs, non-documentation pushes to `main`,
+//! and manual dispatch.
 //!
 //! Set the variable and run:
 //!
