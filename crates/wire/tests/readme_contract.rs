@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 const README: &str = include_str!("../README.md");
 const LIB_SOURCE: &str = include_str!("../src/lib.rs");
 const MESSAGE_SOURCE: &str = include_str!("../src/message.rs");
@@ -42,6 +44,57 @@ fn decode_message_has_bytes_signature(source: &str) -> bool {
 
 fn source_enum_is_public_and_non_exhaustive(source: &str, name: &str) -> bool {
     compact_whitespace(source).contains(&format!("#[non_exhaustive] pub enum {name}"))
+}
+
+fn error_enums_in_source(source: &str) -> Vec<String> {
+    let compact = compact_whitespace(source);
+    let marker = "#[non_exhaustive] pub enum ";
+    let mut remainder = compact.as_str();
+    let mut names = Vec::new();
+    while let Some(offset) = remainder.find(marker) {
+        let declaration = &remainder[offset + marker.len()..];
+        let end = declaration
+            .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .unwrap_or(declaration.len());
+        let name = &declaration[..end];
+        if name.ends_with("Error") {
+            names.push(name.to_string());
+        }
+        remainder = &declaration[end..];
+    }
+    names
+}
+
+fn collect_rust_sources(directory: &Path, paths: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", directory.display()))
+    {
+        let path = entry.expect("source directory entry").path();
+        if path.is_dir() {
+            collect_rust_sources(&path, paths);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            paths.push(path);
+        }
+    }
+}
+
+fn public_non_exhaustive_error_enum_roster() -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_rust_sources(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut paths,
+    );
+    let mut names = paths
+        .iter()
+        .flat_map(|path| {
+            let source = std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            error_enums_in_source(&source)
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn public_bytes_reexports(source: &str) -> Vec<&str> {
@@ -136,6 +189,17 @@ fn every_documented_public_error_enum_stays_non_exhaustive_in_source() {
 }
 
 #[test]
+fn enum_exhaustiveness_roster_covers_every_public_error_enum() {
+    let mut expected = ERROR_ENUM_NAMES.map(str::to_string).to_vec();
+    expected.sort();
+    assert_eq!(
+        public_non_exhaustive_error_enum_roster(),
+        expected,
+        "README roster must change whenever the public non-exhaustive error inventory changes"
+    );
+}
+
+#[test]
 fn contract_helpers_reject_independent_documentation_and_source_mutations() {
     let usage = section(README, "## Usage");
     let wrong_version = usage.replace(
@@ -180,4 +244,10 @@ fn contract_helpers_reject_independent_documentation_and_source_mutations() {
         );
         assert!(!source_enum_is_public_and_non_exhaustive(&exhaustive, name));
     }
+
+    assert_eq!(
+        error_enums_in_source("#[non_exhaustive]\npub enum FutureError { Example }"),
+        ["FutureError"],
+        "the inventory helper must detect a newly added public error enum"
+    );
 }
