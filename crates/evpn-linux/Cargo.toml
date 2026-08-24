@@ -14,7 +14,7 @@ description = "Linux netlink dataplane reconciler for EVPN VTEP — observes bri
 rustbgpd-evpn.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "macros", "rt"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 
 # Linux-only real netlink; cfg-gating preserves portable trait/test surfaces

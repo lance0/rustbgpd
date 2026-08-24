@@ -16,10 +16,13 @@
 //! - [`encode_message`] — encode a BGP message to bytes
 //! - [`peek_message_length`] — check if a
 //!   complete message is available (for transport framing)
+//! - `BgpCodec` — optional `tokio_util::codec` adapter, available with the
+//!   `tokio-codec` feature
 //!
 //! # Invariants
 //!
-//! - Maximum message size: 4096 bytes (RFC 4271 §4.1)
+//! - Message size is 4096 bytes by default (RFC 4271 §4.1), or up to 65535
+//!   bytes for eligible message types after RFC 8654 negotiation
 //! - No panics on malformed input — all paths return `Result`
 //! - No `unsafe` code
 //!
@@ -94,6 +97,9 @@ pub mod pmsi;
 pub mod route_refresh;
 /// RT-Constrain NLRI codec substrate (RFC 4684).
 pub mod rtc;
+/// Optional Tokio `Decoder`/`Encoder` adapter for BGP message streams.
+#[cfg(feature = "tokio-codec")]
+pub mod tokio_codec;
 /// UPDATE message struct, codec, and builder.
 pub mod update;
 /// UPDATE attribute semantic validation (RFC 4271 §6.3).
@@ -124,6 +130,8 @@ pub use rtc::{
     RTC_MAX_PREFIX_BITS, RTC_MIN_NON_DEFAULT_PREFIX_BITS, RTC_SAFI, RtcNlri, decode_rtc_nlri,
     encode_rtc_nlri,
 };
+#[cfg(feature = "tokio-codec")]
+pub use tokio_codec::{BgpCodec, BgpCodecError};
 pub use update::{Ipv4UnicastMode, UpdateMessage};
 pub use vpn::{
     LABELED_UNICAST_SAFI, MPLS_VPN_SAFI, MplsLabelEntry, VPNV4_AFI, VPNV6_AFI, VpnAddressFamily,
