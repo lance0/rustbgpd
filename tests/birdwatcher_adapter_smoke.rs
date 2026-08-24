@@ -706,6 +706,117 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
         );
     }
     let adapter = include_str!("../examples/birdwatcher-adapter/src/main.rs");
+    assert_eq!(adapter.matches("let app = Router::new()").count(), 1);
+    let router = adapter
+        .split_once("let app = Router::new()")
+        .unwrap()
+        .1
+        .split_once("axum::serve(listener, app).await?;")
+        .unwrap()
+        .0;
+    let route_calls: Vec<_> = router.split(".route(").skip(1).collect();
+    assert_eq!(
+        route_calls.len(),
+        14,
+        "adapter must retain 14 direct routes"
+    );
+    for alternate in [
+        ".route_service(",
+        ".nest(",
+        ".nest_service(",
+        ".fallback(",
+        ".fallback_service(",
+        ".method_not_allowed_fallback(",
+        ".merge(",
+    ] {
+        assert_eq!(
+            router.matches(alternate).count(),
+            0,
+            "adapter route inventory must not bypass direct GET registration: {alternate}"
+        );
+    }
+    let routed_paths: Vec<_> = route_calls
+        .iter()
+        .map(|call| {
+            let literal = call
+                .trim_start()
+                .strip_prefix('"')
+                .expect("router paths must remain direct string literals");
+            let (path, registration) = literal
+                .split_once('"')
+                .expect("router paths must remain terminated string literals");
+            let method = registration
+                .trim_start()
+                .strip_prefix(',')
+                .expect("router path must have a method registration")
+                .trim_start();
+            assert!(
+                method.starts_with("get("),
+                "adapter route must remain GET-only: {path}"
+            );
+            for extra_method in [
+                ".connect(",
+                ".connect_service(",
+                ".delete(",
+                ".delete_service(",
+                ".get(",
+                ".get_service(",
+                ".head(",
+                ".head_service(",
+                ".on(",
+                ".on_service(",
+                ".options(",
+                ".options_service(",
+                ".patch(",
+                ".patch_service(",
+                ".post(",
+                ".post_service(",
+                ".put(",
+                ".put_service(",
+                ".trace(",
+                ".trace_service(",
+            ] {
+                assert!(
+                    !registration.contains(extra_method),
+                    "adapter route gained another HTTP method: {path} {extra_method}"
+                );
+            }
+            path
+        })
+        .collect();
+    let expected_paths: Vec<_> = concat!(
+        "/status /protocols/bgp /protocol/{id} /symbols ",
+        "/routes/protocol/{id} /routes/export/{id} /routes/table/{table} ",
+        "/route/{prefix}/protocol/{id} /route/{prefix}/export/{id} ",
+        "/route/{prefix}/table/{table} /routes/peer/{peer} /routes/filtered/{id} ",
+        "/routes/lc-zwild/protocol/{id}/{x}/{y} /routes/noexport/{id}",
+    )
+    .split_ascii_whitespace()
+    .collect();
+    assert_eq!(
+        routed_paths, expected_paths,
+        "adapter route inventory drifted"
+    );
+
+    let security = include_str!("../docs/SECURITY.md");
+    assert_eq!(security.matches("## Looking glass adapter\n").count(), 1);
+    let disclosure = security
+        .split_once("## Looking glass adapter\n")
+        .unwrap()
+        .1
+        .split_once("\n## ")
+        .expect("looking-glass disclosure must have a following section")
+        .0;
+    let documented_paths: Vec<_> = disclosure
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter_map(|code| code.strip_prefix("GET "))
+        .collect();
+    assert_eq!(
+        documented_paths, routed_paths,
+        "security disclosure must exactly track every routed GET path"
+    );
     let causes = adapter
         .split_once("fn arouteserver_reject_cause(")
         .unwrap()
