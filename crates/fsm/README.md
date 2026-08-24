@@ -8,6 +8,19 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
 Requires Rust 1.95 or newer.
 
+## Usage
+
+Run the deterministic session-establishment walkthrough from the repository root:
+
+```sh
+cargo run -p rustbgpd-fsm --example establish
+```
+
+The example uses the public API to drive a session from `Idle` to `Established`
+without opening a socket. An embedding application owns I/O and timers: it turns
+transport and timer outcomes into `Event` values, handles each returned `Action`,
+and feeds the resulting outcomes back into the `Session`.
+
 ## Design
 
 The FSM is intentionally isolated from all I/O concerns. The transport
