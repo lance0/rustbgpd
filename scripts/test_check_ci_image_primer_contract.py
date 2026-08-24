@@ -641,6 +641,10 @@ class PrimerContractTests(unittest.TestCase):
                     self.mutate(relative, old, new)
 
         producer = ".github/actions/prepare-gobgp-artifact/action.yml"
+        verified_archive = (
+            '          "$RUNNER_TEMP/gobgp-cache/'
+            'gobgp_3.37.0_linux_amd64.tar.gz"\n'
+        )
         for old, new in (
             ('using: "composite"', 'using: "docker"'),
             ("actions/cache@v6", "actions/cache@main"),
@@ -673,6 +677,16 @@ class PrimerContractTests(unittest.TestCase):
                 ".github/scripts/install-gobgp.sh \\",
                 "curl https://example.invalid/gobgp\n"
                 "        .github/scripts/install-gobgp.sh \\",
+            ),
+            (
+                verified_archive + "\n    - name: Upload verified gobgp archive",
+                verified_archive
+                + "\n    - name: Replace verified archive\n"
+                + "      shell: bash\n"
+                + '      run: cp "$RUNNER_TEMP/unverified.tar.gz" '
+                + '"$RUNNER_TEMP/gobgp-cache/"*.tar.gz\n'
+                + "\n"
+                + "    - name: Upload verified gobgp archive",
             ),
         ):
             with self.subTest(seam=f"gobgp producer action {old}"):
@@ -733,6 +747,41 @@ class PrimerContractTests(unittest.TestCase):
         ):
             with self.subTest(seam=old):
                 self.mutate(installer, old, new)
+
+    def test_shared_job_envelopes_reject_additive_permissions(self):
+        producer = (
+            "  gobgp_archive:\n"
+            "    needs: classify_changes\n"
+            "    if: needs.classify_changes.outputs.run_labs == 'true'\n"
+            "    name: Prepare exact gobgp archive\n"
+            "    runs-on: ubuntu-latest\n"
+            "    timeout-minutes: 10\n"
+            "    steps:\n"
+        )
+        primer = (
+            "  prime_dev_image:\n"
+            "    needs: classify_changes\n"
+            "    if: needs.classify_changes.outputs.run_labs == 'true'\n"
+            "    name: Prime rustbgpd:dev build cache\n"
+            "    runs-on: ubuntu-latest\n"
+            "    timeout-minutes: 30\n"
+            "    concurrency:\n"
+            "      group: rustbgpd-dev-image-${{ github.sha }}\n"
+            "      cancel-in-progress: false\n"
+            "    steps:\n"
+        )
+        for workflow in ("interop.yml", "kernel-dataplane.yml"):
+            relative = f".github/workflows/{workflow}"
+            for job, envelope in (
+                ("gobgp_archive", producer),
+                ("prime_dev_image", primer),
+            ):
+                widened = envelope.replace(
+                    "    steps:\n",
+                    "    permissions: write-all\n    steps:\n",
+                )
+                with self.subTest(workflow=workflow, job=job):
+                    self.mutate(relative, envelope, widened)
 
     def test_bird3_producer_and_stage_consumer_are_load_bearing(self):
         checksum = "d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190"
@@ -1171,6 +1220,7 @@ class PrimerContractTests(unittest.TestCase):
         for old, new in (
             ('using: "composite"', 'using: "docker"'),
             ("load: false", "load: true"),
+            ("load: false", "load: false\n        no-cache: true"),
             ("context: .", "context: elsewhere"),
             ("tags: rustbgpd:dev", "tags: other:dev"),
             ("target: dev", "target: release"),
