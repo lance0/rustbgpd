@@ -13,7 +13,12 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 - **RTR client** (RFC 8210 / draft-ietf-sidrops-8210bis) — prefers RTR
   protocol v2 for ASPA, falls back to v1 on server rejection; persistent TCP
   sessions, Serial Query / Reset Query, Serial Notify handling,
-  expire_interval enforcement
+  `expire_interval` enforcement. `RtrClientConfig::max_expire_interval` adds an
+  optional operator freshness ceiling: it clamps both the configured
+  `expire_interval` and a cache-advertised End of Data expire down, never raises
+  a lower value, and when unset leaves the configured interval unchanged while
+  cache-advertised values retain the protocol ceiling. The crate exports the
+  RFC 8210 two-day ceiling as `RTR_EXPIRE_MAX_SECS` (`172800` seconds).
 - **ASPA path verification** — ASPA table + AS_PATH verification per
   draft-ietf-sidrops-aspa-verification (§6.2), fed over RTR v2
 - **Multi-cache merge** — `VrpManager` combines VRPs from multiple cache
