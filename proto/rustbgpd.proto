@@ -1452,7 +1452,7 @@ message ImportExplainMatch {
   // the denying member, or `chain_default_permit` when a nonempty
   // chain completed without rejection. Empty for an inline deny or
   // an absent / genuinely empty chain (read as "inline").
-  // Unset on NOT_SEEN / EVICTED outcomes.
+  // Empty on NOT_SEEN / EVICTED outcomes.
   string matched_policy        = 7;
 
   // RPKI origin-validation state at evaluation time, as a stable
