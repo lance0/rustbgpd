@@ -58,8 +58,8 @@ class MetricConsumerContractTests(unittest.TestCase):
         self.assertEqual(len(CHECK.PROCESS_FAMILIES), 7)
         self.assertEqual(len(self.dashboard_refs), 93)
         self.assertEqual(len(self.rule_refs), 39)
-        self.assertEqual(len(self.public_doc_refs), 176)
-        self.assertEqual(len(self.doc_refs), 176)
+        self.assertEqual(len(self.public_doc_refs), 178)
+        self.assertEqual(len(self.doc_refs), 178)
         consumers = self.dashboard_refs | self.rule_refs | self.doc_refs
         self.assertEqual(len(consumers), 183)
         self.assertEqual(set(self.inventory) - consumers, set(CHECK.ALLOWLIST))
@@ -73,8 +73,31 @@ class MetricConsumerContractTests(unittest.TestCase):
         with redirect_stdout(stdout):
             self.assertEqual(CHECK.main(), 0)
         self.assertIn("189 emitted families", stdout.getvalue())
-        self.assertIn("176 normative-doc families", stdout.getvalue())
+        self.assertIn("178 normative-doc families", stdout.getvalue())
         self.assertIn("183 consumed, 6 justified raw diagnostics", stdout.getvalue())
+
+    def test_blackhole_metric_inventory_has_one_operations_row_per_family(self):
+        prefix = "bgp_blackhole_discard_"
+        expected = {
+            "bgp_blackhole_discard_installed_total",
+            "bgp_blackhole_discard_withdrawn_total",
+            "bgp_blackhole_discard_adopted_total",
+            "bgp_blackhole_discard_reaped_total",
+            "bgp_blackhole_discard_rejected_total",
+            "bgp_blackhole_discard_kernel_failures_total",
+        }
+        registered = {name for name in self.inventory if name.startswith(prefix)}
+        self.assertEqual(registered, expected)
+
+        operations = (CHECK.ROOT / "docs/OPERATIONS.md").read_text(encoding="utf-8")
+        start = "### RFC 7999 BLACKHOLE discards"
+        end = "### General Unicast FIB"
+        self.assertEqual(operations.count(start), 1)
+        self.assertEqual(operations.count(end), 1)
+        section = operations.split(start, 1)[1].split(end, 1)[0]
+        for metric in registered:
+            with self.subTest(metric=metric):
+                self.assertEqual(section.count(metric), 1)
 
     def test_comments_literals_and_test_modules_are_not_definitions(self):
         source = r'''
