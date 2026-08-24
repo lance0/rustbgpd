@@ -193,8 +193,9 @@ bytes = "1"
 ```
 
 `decode_message` accepts `&mut bytes::Bytes`. The `bytes` crate is a public
-dependency of `rustbgpd-wire`, but it is not re-exported, so downstream
-projects must declare their own direct `bytes` dependency.
+dependency of `rustbgpd-wire`, but the crate root does not expose a stable
+`Bytes` re-export, so downstream projects should declare a direct `bytes`
+dependency.
 
 Decode a single BGP message from raw bytes:
 

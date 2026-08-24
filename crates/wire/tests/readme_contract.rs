@@ -299,7 +299,7 @@ fn usage_matches_the_published_wire_contract() {
     let usage = section(README, "## Usage");
     assert!(usage.contains(&expected_dependency_block(env!("CARGO_PKG_VERSION"))));
     assert!(usage.contains("`decode_message` accepts `&mut bytes::Bytes`"));
-    assert!(usage.contains("it is not re-exported"));
+    assert!(usage.contains("the crate root does not expose a stable\n`Bytes` re-export"));
     assert!(decode_message_has_documented_signature(MESSAGE_SOURCE));
     assert!(message_imports_bytes_type(MESSAGE_SOURCE));
     assert!(lib_has_no_root_bytes_reexport(LIB_SOURCE));
