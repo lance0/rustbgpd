@@ -99,7 +99,7 @@ wait_frr_type5_present() {
     local routes
     for _ in $(seq 1 "$attempts"); do
         if routes=$(frr_type5_routes); then
-            if printf '%s\n' "$routes" | grep -F "$prefix" >/dev/null; then
+            if printf '%s\n' "$routes" | grep -F -- "$prefix" >/dev/null; then
                 return 0
             fi
         fi
@@ -115,7 +115,7 @@ wait_frr_type5_absent() {
     local routes
     for _ in $(seq 1 "$attempts"); do
         if routes=$(frr_type5_routes); then
-            if ! printf '%s\n' "$routes" | grep -F "$prefix" >/dev/null; then
+            if ! printf '%s\n' "$routes" | grep -F -- "$prefix" >/dev/null; then
                 return 0
             fi
         fi
