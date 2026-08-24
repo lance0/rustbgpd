@@ -20,6 +20,24 @@ fn section_between_exact_headings(markdown: &str, start: &str, end: &str) -> Str
     lines[starts[0] + 1..ends[0]].join("\n")
 }
 
+fn expected_manager_roster(names: &[&str]) -> String {
+    let (last, leading) = names.split_last().expect("event roster must not be empty");
+    let roster = match leading {
+        [] => format!("`{last}`"),
+        [only] => format!("`{only}` and `{last}`"),
+        _ => format!(
+            "{}, and `{last}`",
+            leading
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+
+    format!("`BmpManager` receives every `BmpEvent` variant through an `mpsc` channel: {roster}.")
+}
+
 macro_rules! assert_bmp_event_roster {
     ($($variant:ident),+ $(,)?) => {{
         let assert_exhaustive = |event: &BmpEvent| match event {
@@ -27,11 +45,7 @@ macro_rules! assert_bmp_event_roster {
         };
         let _ = assert_exhaustive;
 
-        let names = [$(stringify!($variant)),+];
-        format!(
-            "`BmpManager` receives every `BmpEvent` variant through an `mpsc` channel: `{}`, `{}`, `{}`, `{}`, `{}`, and `{}`.",
-            names[0], names[1], names[2], names[3], names[4], names[5]
-        )
+        expected_manager_roster(&[$(stringify!($variant)),+])
     }};
 }
 
