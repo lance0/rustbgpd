@@ -1,8 +1,8 @@
 use super::{
     AdjRibIn, AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib,
-    NeighborPolicyStats, PolicyChain, Prefix, RibCommandError, RibManager, RouteContext,
-    RouteFamily, Safi, debug, evpn_routes_equal, gauge_val, record_export_policy_eval, route_type,
-    should_suppress_ibgp_inner, warn,
+    NeighborPolicyStats, OutboundCommitBatch, PolicyChain, Prefix, RibCommandError, RibManager,
+    RouteContext, RouteFamily, Safi, debug, evpn_routes_equal, gauge_val,
+    record_export_policy_eval, route_type, should_suppress_ibgp_inner, warn,
 };
 
 impl RibManager {
@@ -520,23 +520,11 @@ impl RibManager {
             if (!evpn_announce.is_empty() || !evpn_withdraw.is_empty())
                 && !self.try_send_and_commit_outbound_update(
                     peer,
-                    vec![].into(),
-                    vec![].into(),
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    evpn_announce,
-                    evpn_withdraw,
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
+                    OutboundCommitBatch {
+                        evpn_announce,
+                        evpn_withdraw,
+                        ..OutboundCommitBatch::default()
+                    },
                 )
             {
                 warn!(%peer, "outbound channel full — EVPN update deferred");

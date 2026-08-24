@@ -1,7 +1,8 @@
 use super::{
     AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, IpAddr, Ipv4Addr, LocRib, NeighborPolicyStats,
-    PolicyChain, Prefix, RibManager, RouteContext, RouteFamily, Safi, gauge_val,
-    record_export_policy_eval, route_type, rtc_routes_equal, should_suppress_ibgp_inner, warn,
+    OutboundCommitBatch, PolicyChain, Prefix, RibManager, RouteContext, RouteFamily, Safi,
+    gauge_val, record_export_policy_eval, route_type, rtc_routes_equal, should_suppress_ibgp_inner,
+    warn,
 };
 
 impl RibManager {
@@ -309,23 +310,11 @@ impl RibManager {
             if (!rtc_announce.is_empty() || !rtc_withdraw.is_empty())
                 && !self.try_send_and_commit_outbound_update(
                     peer,
-                    vec![].into(),
-                    vec![].into(),
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    rtc_announce,
-                    rtc_withdraw,
+                    OutboundCommitBatch {
+                        rtc_announce,
+                        rtc_withdraw,
+                        ..OutboundCommitBatch::default()
+                    },
                 )
             {
                 warn!(%peer, "outbound channel full — RTC update deferred");

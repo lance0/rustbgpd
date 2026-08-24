@@ -1,7 +1,8 @@
 use super::{
     AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, IpAddr, Ipv4Addr, LocRib, NeighborPolicyStats,
-    PolicyChain, Prefix, RibManager, RouteContext, Safi, bgpls_route_family, bgpls_routes_equal,
-    gauge_val, record_export_policy_eval, route_type, should_suppress_ibgp_inner, warn,
+    OutboundCommitBatch, PolicyChain, Prefix, RibManager, RouteContext, Safi, bgpls_route_family,
+    bgpls_routes_equal, gauge_val, record_export_policy_eval, route_type,
+    should_suppress_ibgp_inner, warn,
 };
 
 impl RibManager {
@@ -294,23 +295,11 @@ impl RibManager {
             if (!bgpls_announce.is_empty() || !bgpls_withdraw.is_empty())
                 && !self.try_send_and_commit_outbound_update(
                     peer,
-                    vec![].into(),
-                    vec![].into(),
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    bgpls_announce,
-                    bgpls_withdraw,
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
-                    vec![],
+                    OutboundCommitBatch {
+                        bgpls_announce,
+                        bgpls_withdraw,
+                        ..OutboundCommitBatch::default()
+                    },
                 )
             {
                 warn!(%peer, "outbound channel full — BGP-LS update deferred");

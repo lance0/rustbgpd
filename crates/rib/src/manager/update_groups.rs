@@ -43,6 +43,8 @@ use rustbgpd_wire::{
 use rustc_hash::FxHashMap;
 use tracing::{debug, info, warn};
 
+use super::distribution::OutboundCommitBatch;
+
 #[cfg(test)]
 use rustbgpd_wire::ExtendedCommunity;
 
@@ -1565,23 +1567,11 @@ impl RibManager {
         let withdraw_keys: Vec<VpnRouteKey> = vpn_withdraw.iter().map(|key| key.nlri_key).collect();
         if self.try_send_and_commit_outbound_update(
             peer,
-            vec![].into(),
-            vec![].into(),
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            vpn_announce,
-            vpn_withdraw,
-            vec![],
-            vec![],
-            vec![],
-            vec![],
+            OutboundCommitBatch {
+                vpn_announce,
+                vpn_withdraw,
+                ..OutboundCommitBatch::default()
+            },
         ) {
             self.bump_export_counters(peer, &permit_rows);
         } else {
