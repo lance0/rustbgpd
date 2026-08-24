@@ -124,8 +124,8 @@ exercised in every cycle.
 |---|---|
 | `evpn_fdb_nhg_drift_members_repaired_total` | 0 |
 | `evpn_fdb_nhg_drift_groups_replaced_total` | 0 |
-| `evpn_fdb_nhg_drift_orphans_cleaned_total` | 0 |
-| `evpn_fdb_nhg_drift_disabled` (gauge) | 0 |
+| `evpn_fdb_nhg_orphans_cleaned_total` | 0 |
+| `evpn_fdb_nhg_drift_disabled_total` (counter) | 0 |
 
 Zero drift events across 24 h, 69 cycles, ~478 K FDB ops
 (194 K adds + 194 K dels + 90 K moves). The drift recovery path

@@ -141,8 +141,8 @@ on both sides within the first sample after re-establishment.
 |---|---|---|
 | `evpn_fdb_nhg_drift_members_repaired_total` | 0 | 0 (samples while running) |
 | `evpn_fdb_nhg_drift_groups_replaced_total` | 0 | 0 |
-| `evpn_fdb_nhg_drift_orphans_cleaned_total` | 0 | 0 |
-| `evpn_fdb_nhg_drift_disabled` (gauge) | 0 | 0 |
+| `evpn_fdb_nhg_orphans_cleaned_total` | 0 | 0 |
+| `evpn_fdb_nhg_drift_disabled_total` (counter) | 0 | 0 |
 
 Zero drift events across the full hour, across 5 flip events and
 ~10 600 FDB ops (adds + dels + moves). The drift recovery path is

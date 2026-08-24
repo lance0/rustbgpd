@@ -19,6 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Check emitted metrics have a shipped consumer
+        run: |
+          python3 -m unittest -v scripts/test_check_metric_consumers.py
+          python3 scripts/check-metric-consumers.py
       - name: Check public documentation cites no private tracker IDs
         run: |
           python3 -m unittest -v scripts/test_check_public_tracker_ids.py
