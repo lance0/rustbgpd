@@ -91,8 +91,8 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 - **Additive API:** Added `AsPath::asns` and per-message `encode_with_limit`
   methods for NOTIFICATION and ROUTE-REFRESH. The existing
   `encode_message_with_limit` now applies the caller's ceiling to those message
-  types. Existing items and the default 4096-byte encoding ceiling are
-  unchanged.
+  types. No public item was removed or changed incompatibly, and the default
+  4096-byte encoding ceiling is unchanged.
 
 ## 0.14.0 - 2026-07-06
 
