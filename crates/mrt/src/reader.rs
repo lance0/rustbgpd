@@ -27,6 +27,7 @@ use bytes::Bytes;
 use rustbgpd_rib::update::MrtPeerEntry;
 use rustbgpd_wire::constants::{attr_flags, attr_type};
 use rustbgpd_wire::error::DecodeError;
+use rustbgpd_wire::notification::update_subcode;
 use rustbgpd_wire::{Afi, ErrorDisposition, Ipv4Prefix, Ipv6Prefix, PathAttribute, Prefix, Safi};
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -334,6 +335,21 @@ fn decode_entry_attributes(attrs: &[u8], base: usize) -> Result<EntryAttributes,
         if type_code == attr_type::MP_REACH_NLRI {
             if reduced.is_some() {
                 return Err(malformed(attr_offset, "duplicate MP_REACH_NLRI"));
+            }
+            let flags_mask = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+            if flags & flags_mask != attr_flags::OPTIONAL {
+                return Err(ReadError::AttributeDecode(
+                    DecodeError::UpdateAttributeError {
+                        subcode: update_subcode::ATTRIBUTE_FLAGS_ERROR,
+                        data: attrs[span_start..cur.rel_pos()].to_vec(),
+                        detail: format!(
+                            "type {} flags {:#04x} (expected {:#04x})",
+                            type_code,
+                            flags & flags_mask,
+                            attr_flags::OPTIONAL
+                        ),
+                    },
+                ));
             }
             reduced = Some(parse_reduced_mp_reach(value, attr_offset)?);
         } else {
@@ -1358,6 +1374,42 @@ mod tests {
                 DecodeError::UpdateAttributeError { .. }
             )))
         ));
+        assert!(reader.next().is_none());
+        assert_eq!(reader.discarded_path_attributes(), 0);
+        assert_eq!(reader.discarded_bgpls_nlris(), 0);
+    }
+
+    #[test]
+    fn reduced_mp_reach_flag_conflict_fails_and_fuses() {
+        let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
+        let mut data =
+            encode_snapshot(COLLECTOR, std::slice::from_ref(&peer), &[], &[], TS).unwrap();
+        let attr = [
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::MP_REACH_NLRI,
+            5,
+            4,
+            192,
+            0,
+            2,
+            1,
+        ];
+        let expected =
+            rustbgpd_wire::attribute::decode_path_attributes_revised(&attr, true, true, &[])
+                .unwrap_err();
+        assert!(matches!(
+            &expected,
+            DecodeError::UpdateAttributeError {
+                subcode: update_subcode::ATTRIBUTE_FLAGS_ERROR,
+                ..
+            }
+        ));
+        append_v4_rib_with_attributes(&mut data, &attr);
+        let mut reader = SnapshotReader::new(&data).unwrap();
+        let Some(Err(ReadError::AttributeDecode(actual))) = reader.next() else {
+            panic!("expected reduced MP_REACH attribute-flags failure");
+        };
+        assert_eq!(actual, expected);
         assert!(reader.next().is_none());
         assert_eq!(reader.discarded_path_attributes(), 0);
         assert_eq!(reader.discarded_bgpls_nlris(), 0);
