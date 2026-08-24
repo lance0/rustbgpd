@@ -590,7 +590,7 @@ impl Config {
         Ok(f)
     }
 
-    fn resolved_required_families(
+    pub(super) fn resolved_required_families(
         neighbor: &Neighbor,
         group: Option<&PeerGroupConfig>,
     ) -> Result<Vec<(Afi, Safi)>, ConfigError> {

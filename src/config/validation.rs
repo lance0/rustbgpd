@@ -835,13 +835,7 @@ impl Config {
                 }
             }
 
-            let required_families = if !neighbor.required_families.is_empty() {
-                parse_families(&neighbor.required_families)?
-            } else if let Some(group) = group.filter(|g| !g.required_families.is_empty()) {
-                parse_families(&group.required_families)?
-            } else {
-                Vec::new()
-            };
+            let required_families = Self::resolved_required_families(neighbor, group)?;
             if !required_families.is_empty() {
                 let peer_addr: IpAddr = neighbor.address.parse().expect("validated above");
                 let mut effective = Self::resolved_families(neighbor, group, peer_addr)?;
