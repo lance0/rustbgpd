@@ -968,8 +968,9 @@ pub(in crate::manager) struct ExportGateTrace {
     pub best_route_type: Option<RouteType>,
     /// Export-policy modifications of the permitting chain verdict.
     pub modifications: rustbgpd_policy::RouteModifications,
-    /// `"<policy>"` or `"<policy>:<term>"` label of the deciding chain
-    /// member (rpol term via the statement trace), `None` = no chain.
+    /// Attribution label: `chain_default_permit` for Permit from a nonempty
+    /// chain, or `"<policy>"` / `"<policy>:<term>"` for Deny. `None` means
+    /// the chain is absent or genuinely empty.
     pub policy_label: Option<String>,
     /// Post-modification next hop the route would be staged with.
     pub staged_next_hop: Option<IpAddr>,

@@ -2111,10 +2111,10 @@ impl RibManager {
         let (policy_result, evaluation) = target.evaluate_export_chain(export_pol, &ctx);
         target.record_eval(&evaluation, best.peer);
         if let Some(trace) = target.trace() {
-            // Enrich the deciding chain member with the rpol term name
-            // via the statement trace (explain-only re-walk, pinned to
-            // agree with the evaluation by the policy crate's agreement
-            // tests). TOML members carry no term name.
+            // Keep Permit on the chain-default label. For Deny, enrich the
+            // deciding rpol member with its term through an explain-only
+            // statement-trace re-walk, pinned to agree with the evaluation by
+            // policy-crate agreement tests. TOML members carry no term name.
             trace.policy_label = export_pol.map(|chain| {
                 policy_label_with_term(
                     Some(chain),
