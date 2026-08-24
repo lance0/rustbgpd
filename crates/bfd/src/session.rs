@@ -702,6 +702,42 @@ mod tests {
         })
     }
 
+    /// The crate README keeps the maintenance-versus-liveness contract in
+    /// its bounded RFC-reference table and names the public cause accessor.
+    #[test]
+    fn bfd_readme_pins_rfc5882_coupling_contract() {
+        const README: &str = include_str!("../README.md");
+        const START: &str = "## RFC references";
+        const END: &str = "## Design";
+
+        let _: fn(&Session) -> bool = Session::remote_admin_down;
+        assert_eq!(README.matches(START).count(), 1, "unique section start");
+        assert_eq!(README.matches(END).count(), 1, "unique section end");
+        let start = README.find(START).expect("RFC-reference section");
+        let relative_end = README[start..]
+            .find(END)
+            .expect("Design section follows RFC references");
+        let section = README[start..start + relative_end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert_eq!(
+            section.matches("| RFC 5882 |").count(),
+            1,
+            "exactly one RFC 5882 coverage row"
+        );
+        for clause in [
+            "BFD-client/BGP coupling (§3.2, §4.1/§4.2)",
+            "`Session::remote_admin_down()` distinguishes a peer's administrative disable from a genuine liveness failure",
+            "Cause-only flips emit `Action::StateChanged` even when the local state remains `Down`",
+            "callers can permit BGP during remote `AdminDown`",
+            "without hiding a later remote `Down` or detection timeout",
+        ] {
+            assert!(section.contains(clause), "missing README clause: {clause}");
+        }
+    }
+
     #[test]
     fn remote_admin_down_flip_while_down_is_published() {
         // Local goes Down via detection timeout: a genuine liveness failure.
