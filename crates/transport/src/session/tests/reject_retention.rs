@@ -533,6 +533,38 @@ async fn session_down_flushes_reject_retention_and_gauge() {
     assert_eq!(session.rejected_routes.evictions_since_reset(), 0);
 }
 
+/// The crate README must expose the current completeness contract in
+/// the one bounded feature bullet operators and embedders will read.
+#[test]
+fn transport_readme_pins_rejected_route_retention_completeness() {
+    const README: &str = include_str!("../../../README.md");
+    const START: &str = "- **Rejected-route retention**";
+    const END: &str = "- **Private AS removal**";
+
+    assert_eq!(README.matches(START).count(), 1, "unique section start");
+    assert_eq!(README.matches(END).count(), 1, "unique section end");
+    let start = README.find(START).expect("rejected-route retention bullet");
+    let relative_end = README[start..]
+        .find(END)
+        .expect("private-AS bullet follows rejected-route retention");
+    let section = README[start..start + relative_end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    for clause in [
+        "**On by default:** `TransportConfig::reject_retention_enabled` defaults to `true`",
+        "unlike the opt-in import-explain cache above",
+        "The `ListRejectedRoutes` reply reports `enabled`, `capacity`, and `evictions_since_reset`",
+        "`enabled = false` makes an empty result a configuration fact",
+        "zero evictions proves no retained rejection was displaced by capacity since the session reset",
+        "a nonzero count means the bounded listing may be incomplete",
+        "Entries and the eviction count are diagnostic state and reset with the session",
+    ] {
+        assert!(section.contains(clause), "missing README clause: {clause}");
+    }
+}
+
 /// LAN-472 pin: the `ListRejectedRoutes` session command returns the
 /// retained entries (sorted by key) with the enabled flag and the
 /// configured capacity, and is a read — it must not move the
@@ -553,14 +585,19 @@ async fn list_rejected_routes_command_returns_sorted_snapshot() {
         .handle_command(PeerCommand::ListRejectedRoutes { reply: reply_tx })
         .await;
     assert_eq!(flow, ControlFlow::Continue(()));
-    let reply = reply_rx.await.expect("session replied");
-    assert!(reply.enabled);
+    let super::rejected_routes::RejectedRoutesReply {
+        enabled,
+        capacity,
+        evictions_since_reset,
+        entries,
+    } = reply_rx.await.expect("session replied");
+    assert!(enabled);
     assert_eq!(
-        reply.capacity,
+        capacity,
         super::rejected_routes::DEFAULT_REJECT_RETENTION_CAPACITY
     );
-    assert_eq!(reply.evictions_since_reset, 0);
-    let keys: Vec<RetentionKey> = reply.entries.iter().map(|(k, _)| k.clone()).collect();
+    assert_eq!(evictions_since_reset, 0);
+    let keys: Vec<RetentionKey> = entries.iter().map(|(k, _)| k.clone()).collect();
     assert_eq!(
         keys,
         vec![retention_key(b), retention_key(a)],

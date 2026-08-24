@@ -44,8 +44,14 @@ before forwarding to the RIB — the FSM sees only payloadless events.
 - **Rejected-route retention** — a bounded per-session store of
   import-rejected routes with canonical reject reasons, backing
   `PolicyService.ListRejectedRoutes` / `rbgp rib received <peer>
-  --rejected` (`[policy.reject_retention]`); diagnostic state only,
-  resets on session reset
+  --rejected` (`[policy.reject_retention]`). **On by default:**
+  `TransportConfig::reject_retention_enabled` defaults to `true`, unlike the
+  opt-in import-explain cache above. The `ListRejectedRoutes` reply reports
+  `enabled`, `capacity`, and `evictions_since_reset`; `enabled = false` makes
+  an empty result a configuration fact, zero evictions proves no retained
+  rejection was displaced by capacity since the session reset, and a nonzero
+  count means the bounded listing may be incomplete. Entries and the eviction
+  count are diagnostic state and reset with the session.
 - **Private AS removal** — strip/replace private ASNs before eBGP export
 - **Route server transparency** — preserve original NEXT_HOP and skip
   local ASN prepend for route-server clients
