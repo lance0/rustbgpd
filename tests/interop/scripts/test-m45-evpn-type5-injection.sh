@@ -97,7 +97,7 @@ wait_frr_type5_present() {
     local prefix=${2:-$PREFIX}
     local attempts=$((timeout / 2))
     for _ in $(seq 1 "$attempts"); do
-        if frr_type5_routes | grep -q "$prefix"; then
+        if frr_type5_routes | grep "$prefix" >/dev/null; then
             return 0
         fi
         sleep 2
@@ -110,7 +110,7 @@ wait_frr_type5_absent() {
     local prefix=${2:-$PREFIX}
     local attempts=$((timeout / 2))
     for _ in $(seq 1 "$attempts"); do
-        if ! frr_type5_routes | grep -q "$prefix"; then
+        if ! frr_type5_routes | grep "$prefix" >/dev/null; then
             return 0
         fi
         sleep 2
