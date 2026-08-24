@@ -38,6 +38,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The MRT `TABLE_DUMP_V2` reader now applies RFC 7606 revised path-attribute
+  decoding with a conservative internal-neighbor default on incomplete session
+  evidence. It continues only when every recovered issue is
+  attribute-discard, retains the first ordinary duplicate, and exposes
+  separate counters for discarded path-attribute instances and BGP-LS NLRIs;
+  treat-as-withdraw and stronger outcomes still fail and fuse iteration. Warm
+  bundles remain lossless and fail closed by rejecting either nonzero count
+  with a typed error. Snapshot writer bytes and the warm-bundle manifest remain
+  unchanged. (LAN-1249)
+
 - Policy decision attribution now distinguishes a nonempty chain that
   completed without rejection from its final member. Import/export metrics,
   cached import explain, grouped export replay, and JSON/protobuf explain use

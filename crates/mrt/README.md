@@ -23,7 +23,11 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 - **TABLE_DUMP_V2 reader** — `SnapshotReader` parses `PEER_INDEX_TABLE` +
   `RIB_IPV4_UNICAST` / `RIB_IPV6_UNICAST` records into
   `SnapshotEntry` / `SnapshotNlri`, with gzip auto-detection
-  (`decompress_if_gzip`)
+  (`decompress_if_gzip`). Defensive revised attribute decoding keeps an entry
+  only when every recovered issue is attribute-discard, using the conservative
+  internal-neighbor classification when the snapshot lacks session evidence.
+  Separate path-attribute and BGP-LS NLRI discard counters make that bounded
+  interoperability recovery observable; stronger dispositions remain fatal
 - **Dump health metrics** — `MrtManager` records `mrt_dump_interval_seconds`,
   `mrt_last_dump_success_timestamp_seconds`,
   `mrt_last_dump_duration_milliseconds`, `mrt_dump_bytes_written_total`, and
@@ -53,6 +57,10 @@ Public entry points:
   rename).
 - `load_warm_bundle` — loads only an exact, fresh, byte- and
   semantically-valid bundle against an independently derived expectation.
+
+Warm bundles remain lossless and fail closed: publication and loading reject
+snapshots whose reader reports any discarded path attributes or BGP-LS NLRIs,
+with both counts preserved in the typed validation error.
 
 **Scope boundary:** this module stops at storage and identity validation. It
 never restores a route, mutates the RIB, runs selection, releases RFC 4724
