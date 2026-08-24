@@ -453,6 +453,69 @@ fn rib_supervision_is_fail_stop_and_uses_common_peer_teardown() {
 }
 
 #[test]
+fn operations_key_log_table_covers_supervised_failures() {
+    let production = include_str!("../src/main.rs")
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .unwrap()
+        .0;
+    let key_log_table = include_str!("../docs/OPERATIONS.md")
+        .split_once("## Key log messages")
+        .expect("operations guide must retain the Key log messages section")
+        .1
+        .split_once("\n---")
+        .expect("Key log messages table must retain its section boundary")
+        .0;
+
+    for (handle, diagnostic) in [
+        ("grpc_handle", "gRPC server exited unexpectedly"),
+        ("rib_handle", "RIB manager exited unexpectedly"),
+        (
+            "bgp_listener_handle",
+            "BGP listener task exited unexpectedly",
+        ),
+        (
+            "bgp_forwarder_handle",
+            "BGP accept-forwarding task exited unexpectedly",
+        ),
+        ("peer_mgr_handle", "peer manager task exited unexpectedly"),
+    ] {
+        let arm_header = format!("            result = &mut {handle} => {{");
+        assert_eq!(
+            production.matches(&arm_header).count(),
+            1,
+            "expected exactly one supervision arm for {handle}"
+        );
+        let arm = production
+            .split_once(&arm_header)
+            .unwrap_or_else(|| panic!("missing supervision arm for {handle}"))
+            .1
+            .split_once("\n            }")
+            .unwrap_or_else(|| panic!("unterminated supervision arm for {handle}"))
+            .0;
+        let exact_error = format!("                error!(?result, \"{diagnostic}\");");
+        assert!(
+            arm.lines().any(|line| line == exact_error),
+            "{handle} arm must emit exact diagnostic {diagnostic:?}:\n{arm}"
+        );
+        assert!(
+            arm.lines()
+                .any(|line| line == "                component_failed = true;"),
+            "{handle} arm must mark the component failure:\n{arm}"
+        );
+        assert!(
+            arm.lines().any(|line| line == "                break;"),
+            "{handle} arm must enter coordinated shutdown:\n{arm}"
+        );
+        let expected_row =
+            format!("| `{diagnostic}` | ERROR | Fatal — coordinated shutdown follows |");
+        assert!(
+            key_log_table.lines().any(|line| line == expected_row),
+            "missing exact operations row {expected_row:?}"
+        );
+    }
+}
+
+#[test]
 fn peer_manager_panic_uses_common_shutdown_and_exits_nonzero() {
     let temp = private_tempdir();
     let config_path = write_config(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES);
