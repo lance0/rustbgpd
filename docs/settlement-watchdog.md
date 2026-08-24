@@ -400,7 +400,7 @@ detached), with a few semantics of its own:
   condition-variable waits always recheck the registry and the shutdown
   wait returns only after the registry proves there is no owner. If the
   owner reaches its budget, the waiter fences it as `budget_expired`,
-  preserves the five-second recovery-fence grace, and invokes the same
+  preserves the configured recovery-fence grace, and invokes the same
   exit-70 boundary as the independent fatal clock. It never falls through
   to checkpointing or actor teardown with an active owner. This bounds the
   settlement wait itself; it does **not** establish a finite aggregate time

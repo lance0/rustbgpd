@@ -929,6 +929,16 @@ impl Registry {
             fatal.unpark();
         }
     }
+
+    fn unregister_settled_owner(&self) {
+        let idle = self
+            .idle_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.current.store(None);
+        drop(idle);
+        self.wake_threads();
+    }
 }
 
 struct RuntimeConfigSettlementCollector {
@@ -1531,8 +1541,7 @@ impl OwnedRuntimeConfigOperation {
             budget_seconds = self.inner.budget().as_secs(),
             "runtime config settlement settled"
         );
-        self.inner.registry.current.store(None);
-        self.inner.registry.wake_threads();
+        self.inner.registry.unregister_settled_owner();
         let resources = self
             .inner
             .resources
@@ -2561,6 +2570,33 @@ mod tests {
         assert!(receiver.try_recv().is_err());
         watchdog.registry.current.store(None);
         waiter.join().unwrap();
+        assert!(receiver.try_recv().is_err());
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn settled_unregister_synchronizes_with_the_idle_predicate() {
+        let (watchdog, receiver) =
+            isolated_test_watchdog(Duration::from_secs(5), Duration::from_secs(1));
+        let (operation, guard, _, _) = operation(&watchdog, false).await;
+        let idle = watchdog.registry.idle_lock.lock().unwrap();
+        let settler = {
+            let operation = operation.clone();
+            thread::spawn(move || operation.try_settle())
+        };
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while operation.terminal() != RuntimeConfigSettlementTerminal::Settled {
+            assert!(
+                Instant::now() < deadline,
+                "settlement did not become visible"
+            );
+            thread::yield_now();
+        }
+        assert!(!settler.is_finished());
+        assert!(watchdog.registry.current.load().is_some());
+        drop(idle);
+        assert!(settler.join().unwrap());
+        assert!(watchdog.registry.current.load().is_none());
         assert!(receiver.try_recv().is_err());
         drop(guard);
     }
