@@ -111,7 +111,7 @@ EVPN_REQUIRED_PANELS = {
         "evpn_duplicate_mac_moves_total",
         "evpn_duplicate_mac_threshold_exceeded_total",
     },
-    "Oldest active quarantine age": {
+    "Time since first recorded move for active quarantines": {
         "evpn_duplicate_mac_first_move_timestamp_seconds",
         "evpn_duplicate_mac_quarantine_active",
     },
@@ -145,6 +145,170 @@ EVPN_REQUIRED_PANELS = {
     },
     "Runtime decomposed fail-stops": {"evpn_runtime_decomposed_fail_stops_total"},
 }
+
+# These expressions are operator semantics, not presentation. Pinning them
+# keeps comparisons, aggregation, active-state joins, and the absence of
+# zero-fill fallbacks load-bearing without implementing a PromQL parser.
+EVPN_TARGETS: dict[tuple[str, str], tuple[str, str]] = {
+    ("EVPN Loc-RIB (all route types)", "A"): (
+        'sum by (instance) (bgp_rib_loc_prefixes{instance=~"$instance",afi_safi="evpn"})',
+        "{{instance}} all EVPN types",
+    ),
+    ("Type-2 local origination actions, errors, and drops", "A"): (
+        'sum by (instance, action) (rate(evpn_local_originations_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} success {{action}}/s",
+    ),
+    ("Type-2 local origination actions, errors, and drops", "B"): (
+        'sum by (instance, action) (rate(evpn_local_origination_errors_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} error {{action}}/s",
+    ),
+    ("Type-2 local origination actions, errors, and drops", "C"): (
+        'sum by (instance, reason) (rate(evpn_local_observations_dropped_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} observation drop {{reason}}/s",
+    ),
+    ("Type-5 IP-VRF route state", "A"): (
+        'sum by (instance, vrf) (evpn_ip_vrf_observed_routes{instance=~"$instance",vrf=~"$vrf"})',
+        "{{instance}} {{vrf}} observed",
+    ),
+    ("Type-5 IP-VRF route state", "B"): (
+        'sum by (instance, vrf) (evpn_ip_vrf_originated_routes{instance=~"$instance",vrf=~"$vrf"})',
+        "{{instance}} {{vrf}} originated",
+    ),
+    ("Type-5 IP-VRF route state", "C"): (
+        'sum by (instance, vrf) (evpn_ip_vrf_installed_routes{instance=~"$instance",vrf=~"$vrf"})',
+        "{{instance}} {{vrf}} installed",
+    ),
+    ("Type-5 filtering, suppression, and projection drops", "A"): (
+        'sum by (instance, vrf, reason) (rate(evpn_ip_vrf_observed_routes_filtered_total{instance=~"$instance",vrf=~"$vrf"}[$__rate_interval]))',
+        "{{instance}} {{vrf}} filtered {{reason}}/s",
+    ),
+    ("Type-5 filtering, suppression, and projection drops", "B"): (
+        'sum by (instance, vrf, reason) (rate(evpn_ip_vrf_origination_suppressed_total{instance=~"$instance",vrf=~"$vrf"}[$__rate_interval]))',
+        "{{instance}} {{vrf}} suppressed {{reason}}/s",
+    ),
+    ("Type-5 filtering, suppression, and projection drops", "C"): (
+        'sum by (instance, vrf, reason) (evpn_ip_vrf_remote_prefix_drops{instance=~"$instance",vrf=~"$vrf"})',
+        "{{instance}} {{vrf}} current drop {{reason}}",
+    ),
+    ("Active DF assignments", "A"): (
+        'sum by (instance, vni) (evpn_df_role{instance=~"$instance",role="df"} == 1)',
+        "{{instance}} VNI {{vni}} DF assignments",
+    ),
+    ("Attachment-circuit gate state", "A"): (
+        'sum by (instance, state) (evpn_es_ac_gate{instance=~"$instance"} == 1)',
+        "{{instance}} {{state}} segments",
+    ),
+    ("Ethernet-segment drain reasons", "A"): (
+        'sum by (instance, reason) (evpn_es_drained{instance=~"$instance"} == 1)',
+        "{{instance}} {{reason}} drains",
+    ),
+    ("DF role changes", "A"): (
+        'sum by (instance, vni) (rate(evpn_df_role_changes_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} VNI {{vni}} changes/s",
+    ),
+    ("Quarantined local Type-2 keys", "A"): (
+        'sum by (instance) (evpn_duplicate_mac_quarantine_active{instance=~"$instance"} == 1)',
+        "{{instance}} quarantined keys",
+    ),
+    ("Duplicate-MAC contention activity", "A"): (
+        'sum by (instance) (rate(evpn_duplicate_mac_moves_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} moves/s",
+    ),
+    ("Duplicate-MAC contention activity", "B"): (
+        'sum by (instance, action) (rate(evpn_duplicate_mac_threshold_exceeded_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} threshold {{action}}/s",
+    ),
+    ("Time since first recorded move for active quarantines", "A"): (
+        'max by (instance) (clamp_min(time() - evpn_duplicate_mac_first_move_timestamp_seconds{instance=~"$instance"}, 0) and on (instance, vni, mac) (evpn_duplicate_mac_quarantine_active{instance=~"$instance"} == 1))',
+        "{{instance}} since first recorded move",
+    ),
+    ("Managed netdev state", "A"): (
+        'sum by (instance, class, state) (evpn_managed_netdev_state{instance=~"$instance"} == 1)',
+        "{{instance}} {{class}} {{state}}",
+    ),
+    ("FDB-NHG repair and cleanup", "A"): (
+        'sum by (instance) (rate(evpn_fdb_nhg_drift_members_repaired_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} members repaired/s",
+    ),
+    ("FDB-NHG repair and cleanup", "B"): (
+        'sum by (instance) (rate(evpn_fdb_nhg_drift_groups_replaced_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} groups replaced/s",
+    ),
+    ("FDB-NHG repair and cleanup", "C"): (
+        'sum by (instance) (rate(evpn_fdb_nhg_orphans_cleaned_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} orphans cleaned/s",
+    ),
+    ("FDB-NHG repair and cleanup", "D"): (
+        'sum by (instance) (rate(evpn_fdb_nhg_drift_disabled_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} drift disabled/s",
+    ),
+    ("Startup adoption and deferred reap", "A"): (
+        'sum by (instance) (rate(evpn_fdb_single_dst_adopted_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} FDB adopted/s",
+    ),
+    ("Startup adoption and deferred reap", "B"): (
+        'sum by (instance) (rate(evpn_fdb_single_dst_reaped_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} FDB reaped/s",
+    ),
+    ("Startup adoption and deferred reap", "C"): (
+        'sum by (instance) (rate(evpn_l3_route_adopted_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} routes adopted/s",
+    ),
+    ("Startup adoption and deferred reap", "D"): (
+        'sum by (instance) (rate(evpn_l3_route_reaped_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} routes reaped/s",
+    ),
+    ("Startup adoption and deferred reap", "E"): (
+        'sum by (instance) (rate(evpn_l3_neighbor_adopted_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} neighbors adopted/s",
+    ),
+    ("Startup adoption and deferred reap", "F"): (
+        'sum by (instance) (rate(evpn_l3_neighbor_reaped_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} neighbors reaped/s",
+    ),
+    ("Startup adoption and deferred reap", "G"): (
+        'sum by (instance) (rate(evpn_l3vxlan_fdb_adopted_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} L3VXLAN FDB adopted/s",
+    ),
+    ("Startup adoption and deferred reap", "H"): (
+        'sum by (instance) (rate(evpn_l3vxlan_fdb_reaped_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} L3VXLAN FDB reaped/s",
+    ),
+    ("Single-active failover state", "A"): (
+        'sum by (instance) (evpn_single_active_backup_active{instance=~"$instance"})',
+        "{{instance}} backup active",
+    ),
+    ("Single-active failover state", "B"): (
+        'sum by (instance) (rate(evpn_single_active_backup_swaps_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} swaps/s",
+    ),
+    ("Single-active failover state", "C"): (
+        'sum by (instance) (rate(evpn_single_active_teardowns_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} teardowns/s",
+    ),
+    ("Foreign ownership conflicts", "A"): (
+        'sum by (instance) (rate(evpn_foreign_replaces_blocked_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} replace blocked/s",
+    ),
+    ("Foreign ownership conflicts", "B"): (
+        'sum by (instance) (rate(evpn_foreign_deletes_skipped_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} delete skipped/s",
+    ),
+    ("Foreign ownership conflicts", "C"): (
+        'sum by (instance) (rate(evpn_foreign_owned_relinquished_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} ownership relinquished/s",
+    ),
+    ("Foreign ownership conflicts", "D"): (
+        'sum by (instance) (rate(evpn_foreign_nhid_range_conflicts_total{instance=~"$instance"}[$__rate_interval]))',
+        "{{instance}} NHID conflicts/s",
+    ),
+    ("Runtime decomposed fail-stops", "A"): (
+        'sum by (instance) (increase(evpn_runtime_decomposed_fail_stops_total{instance=~"$instance"}[15m]))',
+        "{{instance}} fail-stops/15m",
+    ),
+}
+
+EVPN_TARGET_DATASOURCE = {"type": "prometheus", "uid": "${datasource}"}
 
 EVPN_DISCRETE_PANELS = {
     "Active DF assignments",
@@ -554,7 +718,7 @@ def check_evpn_promql_safety(
     definitions: dict[str, tuple[str, tuple[str, ...]]],
     context: str,
 ) -> None:
-    """Keep counter math and high-cardinality EVPN dimensions bounded."""
+    """Keep counter math correct and high-cardinality labels out of output."""
     names = expression_metric_names(expression)
     for name in names & definitions.keys():
         kind, labels = definitions[name]
@@ -655,7 +819,7 @@ def check_evpn_dashboard(
     for name, query in EVPN_VARIABLES.items():
         variable = query_variables[name]
         if variable.get("query") != query:
-            raise ValueError(f"EVPN ${name} does not use its exact bounded query")
+            raise ValueError(f"EVPN ${name} does not use its exact permitted query")
         if variable.get("multi") is not True or variable.get("includeAll") is not True:
             raise ValueError(f"EVPN ${name} must support multi-select and All")
         if variable.get("allValue") != ".*":
@@ -682,6 +846,7 @@ def check_evpn_dashboard(
         raise ValueError(f"EVPN dashboard is missing required operator rows {missing_rows}")
 
     by_title = {panel.get("title"): panel for panel in panels}
+    seen_targets: set[tuple[str, str]] = set()
     for title, required_metrics in EVPN_REQUIRED_PANELS.items():
         panel = by_title.get(title)
         if panel is None or panel.get("type") not in {"timeseries", "stat"}:
@@ -689,9 +854,31 @@ def check_evpn_dashboard(
         targets = panel.get("targets", [])
         actual_metrics: set[str] = set()
         for target in targets:
+            key = (title, target.get("refId"))
+            if key in seen_targets:
+                raise ValueError(f"duplicate EVPN target {title!r}/{key[1]}")
+            seen_targets.add(key)
             expression = target.get("expr")
             if not isinstance(expression, str) or not expression:
                 raise ValueError(f"EVPN panel {title!r} has an empty target")
+            expected = EVPN_TARGETS.get(key)
+            if expected is None:
+                raise ValueError(f"unexpected EVPN target {title!r}/{key[1]}")
+            expected_expression, expected_legend = expected
+            if normalized(expression) != normalized(expected_expression):
+                raise ValueError(
+                    f"EVPN target {title!r}/{key[1]} must retain its exact expression"
+                )
+            if target.get("legendFormat") != expected_legend:
+                raise ValueError(
+                    f"EVPN target {title!r}/{key[1]} must retain legend "
+                    f"{expected_legend!r}"
+                )
+            if target.get("datasource") != EVPN_TARGET_DATASOURCE:
+                raise ValueError(
+                    f"EVPN target {title!r}/{key[1]} must bind the Prometheus "
+                    "${datasource} template"
+                )
             actual_metrics.update(expression_metric_names(expression))
             check_evpn_promql_safety(
                 expression,
@@ -704,6 +891,11 @@ def check_evpn_dashboard(
                 f"EVPN panel {title!r} metrics must be {sorted(required_metrics)}; "
                 f"got {sorted(actual_metrics)}"
             )
+
+    if seen_targets != set(EVPN_TARGETS):
+        missing = sorted(set(EVPN_TARGETS) - seen_targets)
+        extra = sorted(seen_targets - set(EVPN_TARGETS))
+        raise ValueError(f"EVPN target roster drifted: missing={missing}, extra={extra}")
 
     for title in EVPN_DISCRETE_PANELS:
         panel = by_title[title]

@@ -170,9 +170,9 @@ let families = self.allocated.collect();'''
         panel = self.evpn_panel(dashboard, "Active DF assignments")
         expression = panel["targets"][0]["expr"]
         for replacement, error in (
-            (expression.replace("evpn_df_role", "evpn_df_roles"), "evpn_df_roles"),
+            (expression.replace("evpn_df_role", "evpn_df_roles"), "exact expression"),
             (expression.replace('role="df"', 'role="df",mac="00:00:00:00:00:01"'),
-             "invalid labels.*mac"),
+             "exact expression"),
         ):
             with self.subTest(replacement=replacement):
                 panel["targets"][0]["expr"] = replacement
@@ -203,7 +203,12 @@ let families = self.allocated.collect();'''
             "sum by (instance, vni)", "sum by (instance, vni, esi)"
         )
         with self.assertRaisesRegex(ValueError, "unsafe aggregation.*esi"):
-            self.check_evpn(dashboard)
+            CHECK.check_evpn_promql_safety(
+                panel["targets"][0]["expr"],
+                panel["targets"][0]["legendFormat"],
+                CHECK.EVPN_METRICS,
+                "test",
+            )
 
         dashboard = self.evpn_dashboard()
         panel = self.evpn_panel(dashboard, "FDB-NHG repair and cleanup")
@@ -211,7 +216,12 @@ let families = self.allocated.collect();'''
             "rate(", "("
         )
         with self.assertRaisesRegex(ValueError, "counter.*must use rate/increase"):
-            self.check_evpn(dashboard)
+            CHECK.check_evpn_promql_safety(
+                panel["targets"][0]["expr"],
+                panel["targets"][0]["legendFormat"],
+                CHECK.EVPN_METRICS,
+                "test",
+            )
 
         dashboard = self.evpn_dashboard()
         panel = self.evpn_panel(dashboard, "Type-5 IP-VRF route state")
@@ -220,7 +230,12 @@ let families = self.allocated.collect();'''
             '[$__rate_interval])'
         )
         with self.assertRaisesRegex(ValueError, "gauge.*must not use rate/increase"):
-            self.check_evpn(dashboard)
+            CHECK.check_evpn_promql_safety(
+                panel["targets"][0]["expr"],
+                panel["targets"][0]["legendFormat"],
+                CHECK.EVPN_METRICS,
+                "test",
+            )
 
     def test_evpn_multi_value_vrf_uses_regex_matching(self):
         dashboard = self.evpn_dashboard()
@@ -229,7 +244,48 @@ let families = self.allocated.collect();'''
             'vrf=~"$vrf"', 'vrf="$vrf"'
         )
         with self.assertRaisesRegex(ValueError, "multi-value.*must use the =~"):
-            self.check_evpn(dashboard)
+            CHECK.check_evpn_promql_safety(
+                panel["targets"][0]["expr"],
+                panel["targets"][0]["legendFormat"],
+                CHECK.EVPN_METRICS,
+                "test",
+            )
+
+    def test_evpn_load_bearing_promql_mutations_fail_closed(self):
+        mutations = (
+            ("Active DF assignments", ' == 1)', ' >= 0)'),
+            ("Type-5 IP-VRF route state", "sum by", "avg by"),
+            (
+                "Time since first recorded move for active quarantines",
+                " and on (instance, vni, mac) ",
+                " + on (instance, vni, mac) ",
+            ),
+            ("Quarantined local Type-2 keys", " == 1)", " == 1) or vector(0)"),
+        )
+        for title, old, new in mutations:
+            with self.subTest(panel=title):
+                dashboard = self.evpn_dashboard()
+                target = self.evpn_panel(dashboard, title)["targets"][0]
+                self.assertIn(old, target["expr"])
+                target["expr"] = target["expr"].replace(old, new, 1)
+                with self.assertRaisesRegex(ValueError, "exact expression"):
+                    self.check_evpn(dashboard)
+
+    def test_evpn_target_legend_and_datasource_are_exact(self):
+        for field, replacement, error in (
+            ("legendFormat", "{{instance}} vague", "retain legend"),
+            (
+                "datasource",
+                {"type": "prometheus", "uid": "prometheus-fixed"},
+                "bind the Prometheus.*datasource",
+            ),
+        ):
+            with self.subTest(field=field):
+                dashboard = self.evpn_dashboard()
+                target = self.evpn_panel(dashboard, "Active DF assignments")["targets"][0]
+                target[field] = replacement
+                with self.assertRaisesRegex(ValueError, error):
+                    self.check_evpn(dashboard)
 
     def test_live_dashboard_presentation_mutations_pass_full_check(self):
         dashboard = json.loads(CHECK.DASHBOARD.read_text())

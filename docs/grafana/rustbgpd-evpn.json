@@ -254,7 +254,7 @@
       "id": 12,
       "type": "timeseries",
       "title": "Quarantined local Type-2 keys",
-      "description": "Current local Type-2 origination suppressions. VNI and MAC are aggregated away to keep the dashboard bounded.",
+      "description": "Current local Type-2 origination suppressions. The rendered result aggregates VNI and MAC away, but the daemon-lifetime per-MAC source series remain in Prometheus and the query scan can grow.",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 7, "w": 8, "x": 0, "y": 25},
       "fieldConfig": {"defaults": {"unit": "short", "min": 0, "decimals": 0, "custom": {"lineInterpolation": "stepAfter"}}, "overrides": []},
@@ -293,8 +293,8 @@
     {
       "id": 14,
       "type": "stat",
-      "title": "Oldest active quarantine age",
-      "description": "Age of the oldest first-contention timestamp whose key is still quarantined. MAC/VNI labels participate only in the exact join and are removed by max aggregation.",
+      "title": "Time since first recorded move for active quarantines",
+      "description": "Time since the process-lifetime first recorded move among keys that are currently quarantined. Clearing and re-quarantining a key does not reset or reap its first-move timestamp. MAC and VNI are used for the exact active-state join and removed only from rendered output; the underlying per-MAC series and query scan can grow for the daemon lifetime.",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 7, "w": 8, "x": 16, "y": 25},
       "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []},
@@ -303,7 +303,7 @@
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
           "expr": "max by (instance) (clamp_min(time() - evpn_duplicate_mac_first_move_timestamp_seconds{instance=~\"$instance\"}, 0) and on (instance, vni, mac) (evpn_duplicate_mac_quarantine_active{instance=~\"$instance\"} == 1))",
-          "legendFormat": "{{instance}} oldest quarantine",
+          "legendFormat": "{{instance}} since first recorded move",
           "refId": "A"
         }
       ]

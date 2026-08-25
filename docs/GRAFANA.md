@@ -78,10 +78,12 @@ Per-peer series are reaped when a peer is deleted, so stale values age out after
 the next scrape.
 
 The EVPN dashboard intentionally offers only **Instance** and configured
-**VRF** selectors. Both support multiple values and All through bounded regex
+**VRF** selectors. Both support multiple values and All through simple regex
 matching. It does not expose MAC, ESI, netdevice name, peer, or IP selectors;
-panels aggregate those dimensions away before rendering to avoid turning
-operator navigation into an unbounded-cardinality query.
+panels aggregate those dimensions away from rendered output and navigation.
+The underlying per-MAC move, first-move timestamp, and quarantine series persist
+for the daemon lifetime, however, so their Prometheus storage cardinality and
+the query scan can grow even though the displayed result is aggregated.
 
 ## Alert rules
 
@@ -211,6 +213,10 @@ inside the bounded window does.
   total, or generic reconcile-report metric today. Type-3 is therefore visible
   only inside the aggregate EVPN Loc-RIB count; the dashboard does not infer
   unsupported per-route-type or installed-object totals.
+- **Time since first recorded move for active quarantines** joins current
+  quarantine state to a process-lifetime first-move timestamp. Clearing or
+  re-quarantining the same key does not reset that timestamp, so the panel is
+  not the age of the current quarantine interval.
 
 ## Validation and load-bearing proofs
 
