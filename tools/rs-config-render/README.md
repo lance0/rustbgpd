@@ -72,12 +72,14 @@ same generated-file hashes and immutable activation generation as
 and send it `SIGHUP` after successful activation. The renderer and activation
 helper deliberately do not discover or signal adapter processes.
 
-Each client also has deterministic, sorted `datasets/client-<id>-origins.list`
-and `datasets/client-<id>-prefixes.list` artifacts. The generated policy
-declares those external datasets and `config.toml` binds them with safe paths
-relative to the candidate root. IRR members therefore stay out of `.rpol`
-source while the receipt hashes the dataset files alongside every other
-candidate artifact.
+Each client also has deterministic, sorted dataset artifacts for its enabled
+checks: `datasets/client-<id>-origins.list` for origin enforcement,
+`datasets/client-<id>-prefixes.list` for prefix enforcement, and an additional
+`datasets/client-<id>-blackhole-cover.list` when blackhole filtering is active.
+The generated policy declares only those external datasets and `config.toml`
+binds them with safe paths relative to the candidate root. IRR members
+therefore stay out of `.rpol` source while the receipt hashes the dataset files
+alongside every other candidate artifact.
 
 `ixp-manager-v2` preserves ordered UI-filter rows. Advertise AS_IS is a no-op;
 deny and prepend actions add the exact IXP Manager route-server control large
@@ -300,10 +302,11 @@ suppress:
 ```
 
 Sizing: a generation is the rendered candidate copied verbatim — `config.toml`,
-the shared hygiene policy, one `.rpol` and two IRR dataset files per member, the
-alias and reject maps, and the receipt. Dataset bytes scale with the actual IRR
-roster. Use `du` on representative retained generations when selecting
-`--keep`; pruning bounds generation count, not bytes.
+the shared hygiene policy, one `.rpol` plus the dataset files required by each
+member's enabled IRR and blackhole checks, the alias and reject maps, and the
+receipt. Dataset bytes scale with the actual IRR roster. Use `du` on
+representative retained generations when selecting `--keep`; pruning bounds
+generation count, not bytes.
 
 ### Inspecting activation and lifecycle state
 
