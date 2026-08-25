@@ -318,6 +318,30 @@ impl UpdateMessage {
         add_path: bool,
         ipv4_unicast_mode: Ipv4UnicastMode,
     ) -> Result<Self, EncodeError> {
+        Self::try_build_from_attribute_iter(
+            announced,
+            withdrawn,
+            attributes.iter(),
+            four_octet_as,
+            add_path,
+            ipv4_unicast_mode,
+        )
+    }
+
+    /// Build an `UpdateMessage` from a single-pass iterator of borrowed path
+    /// attributes without first materializing a temporary attribute vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncodeError`] under the same conditions as [`Self::try_build`].
+    pub fn try_build_from_attribute_iter<'a>(
+        announced: &[Ipv4NlriEntry],
+        withdrawn: &[Ipv4NlriEntry],
+        attributes: impl IntoIterator<Item = &'a PathAttribute>,
+        four_octet_as: bool,
+        add_path: bool,
+        ipv4_unicast_mode: Ipv4UnicastMode,
+    ) -> Result<Self, EncodeError> {
         let mut withdrawn_buf = Vec::new();
         if matches!(ipv4_unicast_mode, Ipv4UnicastMode::Body) {
             if add_path {
@@ -328,14 +352,12 @@ impl UpdateMessage {
             }
         }
         let mut attrs_buf = Vec::new();
-        if !attributes.is_empty() {
-            crate::attribute::encode_path_attributes(
-                attributes,
-                &mut attrs_buf,
-                four_octet_as,
-                add_path,
-            )?;
-        }
+        crate::attribute::encode_path_attributes_iter(
+            attributes,
+            &mut attrs_buf,
+            four_octet_as,
+            add_path,
+        )?;
         let mut nlri_buf = Vec::new();
         if matches!(ipv4_unicast_mode, Ipv4UnicastMode::Body) {
             if add_path {
@@ -651,6 +673,241 @@ mod tests {
         assert_eq!(parsed.announced, announced);
         assert_eq!(parsed.withdrawn, withdrawn);
         assert_eq!(parsed.attributes, attrs);
+    }
+
+    fn assert_slice_iterator_build_equivalent(
+        announced: &[Ipv4NlriEntry],
+        withdrawn: &[Ipv4NlriEntry],
+        attributes: &[PathAttribute],
+        four_octet_as: bool,
+        add_path: bool,
+        mode: Ipv4UnicastMode,
+    ) {
+        let slice = UpdateMessage::try_build(
+            announced,
+            withdrawn,
+            attributes,
+            four_octet_as,
+            add_path,
+            mode,
+        );
+        let iter = UpdateMessage::try_build_from_attribute_iter(
+            announced,
+            withdrawn,
+            attributes.iter(),
+            four_octet_as,
+            add_path,
+            mode,
+        );
+        assert_eq!(iter, slice);
+        if let (Ok(slice), Ok(iter)) = (&slice, &iter) {
+            assert_eq!(iter.withdrawn_routes, slice.withdrawn_routes);
+            assert_eq!(iter.path_attributes, slice.path_attributes);
+            assert_eq!(iter.nlri, slice.nlri);
+            assert_eq!(iter.encoded_len(), slice.encoded_len());
+            let mut slice_wire = BytesMut::new();
+            let mut iter_wire = BytesMut::new();
+            slice.encode_with_limit(&mut slice_wire, 65_535).unwrap();
+            iter.encode_with_limit(&mut iter_wire, 65_535).unwrap();
+            assert_eq!(iter_wire, slice_wire);
+        }
+    }
+
+    fn update_digest(message: &UpdateMessage) -> u64 {
+        let mut wire = BytesMut::new();
+        message.encode_with_limit(&mut wire, 65_535).unwrap();
+        wire.iter().fold(0xcbf2_9ce4_8422_2325_u64, |digest, byte| {
+            (digest ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one matrix pins rich bytes, decoding, sidecars, Add-Path, and both ASN widths"
+    )]
+    fn attribute_iterator_build_matches_slice_bytes_order_and_filtering() {
+        use crate::attribute::{
+            Aggregator, AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, Origin,
+            RawAttribute,
+        };
+        let announced = [Ipv4NlriEntry {
+            path_id: 0x0102_0304,
+            prefix: Ipv4Prefix::new(std::net::Ipv4Addr::new(203, 0, 113, 0), 24),
+        }];
+        let withdrawn = [Ipv4NlriEntry {
+            path_id: 0x0506_0708,
+            prefix: Ipv4Prefix::new(std::net::Ipv4Addr::new(198, 51, 100, 0), 24),
+        }];
+        let rich = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65_000, 70_000])],
+            }),
+            PathAttribute::NextHop(std::net::Ipv4Addr::new(192, 0, 2, 1)),
+            PathAttribute::Aggregator(Aggregator {
+                asn: 70_000,
+                router_id: std::net::Ipv4Addr::new(192, 0, 2, 2),
+                partial: false,
+            }),
+            PathAttribute::Communities(vec![0xFDE8_0001, 0xFDE8_0002]),
+            PathAttribute::ExtendedCommunities(vec![ExtendedCommunity::new(7)]),
+            PathAttribute::LargeCommunities(vec![LargeCommunity::new(65_000, 1, 2)]),
+            PathAttribute::ClusterList(vec![std::net::Ipv4Addr::new(192, 0, 2, 3)]),
+            PathAttribute::Unknown(RawAttribute {
+                flags: 0xC0,
+                type_code: 99,
+                data: Bytes::from_static(&[1, 2, 3, 4]),
+            }),
+            // Derived compatibility sidecars must be filtered identically.
+            PathAttribute::Unknown(RawAttribute {
+                flags: 0xC0,
+                type_code: crate::constants::attr_type::AS4_PATH,
+                data: Bytes::from_static(&[9, 9]),
+            }),
+        ];
+        for four_octet_as in [true, false] {
+            for add_path in [true, false] {
+                assert_slice_iterator_build_equivalent(
+                    &announced,
+                    &withdrawn,
+                    &rich,
+                    four_octet_as,
+                    add_path,
+                    Ipv4UnicastMode::Body,
+                );
+            }
+        }
+        let mut golden_digests = Vec::new();
+        let mut golden_lengths = Vec::new();
+        for four_octet_as in [true, false] {
+            for add_path in [true, false] {
+                let message = UpdateMessage::try_build_from_attribute_iter(
+                    &announced,
+                    &withdrawn,
+                    rich.iter(),
+                    four_octet_as,
+                    add_path,
+                    Ipv4UnicastMode::Body,
+                )
+                .unwrap();
+                golden_digests.push(update_digest(&message));
+                golden_lengths.push(message.encoded_len());
+            }
+        }
+        assert_eq!(
+            golden_digests,
+            [
+                0x08ab_9317_1bca_ea81,
+                0x55b2_88d2_e7b8_b161,
+                0x6b55_d07f_52e8_7e83,
+                0x1f42_d453_dc4e_1353,
+            ],
+            "rich 4/2-octet and Add-Path wire bytes must match the pre-change oracle"
+        );
+        assert_eq!(
+            golden_lengths,
+            [125, 117, 143, 135],
+            "rich 4/2-octet and Add-Path lengths must match the pre-change oracle"
+        );
+        let parsed = UpdateMessage::try_build_from_attribute_iter(
+            &announced,
+            &withdrawn,
+            rich.iter(),
+            true,
+            true,
+            Ipv4UnicastMode::Body,
+        )
+        .unwrap()
+        .parse(true, true, &[])
+        .unwrap();
+        assert_eq!(parsed.announced, announced);
+        assert_eq!(parsed.withdrawn, withdrawn);
+        assert_eq!(
+            parsed
+                .attributes
+                .iter()
+                .map(PathAttribute::type_code)
+                .collect::<Vec<_>>(),
+            rich[..9]
+                .iter()
+                .map(PathAttribute::type_code)
+                .collect::<Vec<_>>(),
+            "golden decode must preserve semantic attribute order while filtering the sidecar"
+        );
+        assert_slice_iterator_build_equivalent(
+            &announced,
+            &withdrawn,
+            &[],
+            true,
+            true,
+            Ipv4UnicastMode::Body,
+        );
+    }
+
+    #[test]
+    fn attribute_iterator_build_preserves_as_set_error() {
+        use crate::attribute::{AsPath, AsPathSegment};
+        let attributes = [PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSet(vec![65_000, 65_001])],
+        })];
+        assert_slice_iterator_build_equivalent(
+            &[],
+            &[],
+            &attributes,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        );
+    }
+
+    #[test]
+    fn attribute_iterator_build_preserves_oversized_flowspec_error() {
+        use crate::flowspec::{FlowSpecComponent, FlowSpecRule, NumericMatch};
+        use std::net::{IpAddr, Ipv4Addr};
+        let mut operations = (0..2_200)
+            .map(|value| NumericMatch {
+                end_of_list: false,
+                and_bit: value != 0,
+                lt: false,
+                gt: false,
+                eq: true,
+                value,
+            })
+            .collect::<Vec<_>>();
+        operations.last_mut().unwrap().end_of_list = true;
+        let rule = FlowSpecRule {
+            components: vec![FlowSpecComponent::Port(operations)],
+        };
+        let attributes = [PathAttribute::MpReachNlri(crate::MpReachNlri {
+            afi: Afi::Ipv4,
+            safi: Safi::FlowSpec,
+            next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![rule.clone()],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        })];
+        let error = UpdateMessage::try_build_from_attribute_iter(
+            &[],
+            &[],
+            attributes.iter(),
+            true,
+            false,
+            Ipv4UnicastMode::MpReach,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            EncodeError::ValueOutOfRange {
+                field: "FlowSpec NLRI rule length",
+                value: rule.encoded_len(Afi::Ipv4).to_string(),
+            }
+        );
     }
     #[test]
     fn reject_message_too_long() {

@@ -1,5 +1,114 @@
 use super::*;
 
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one oracle pins rich IPv6 MP bytes, length, decoding, and attribute order"
+)]
+fn rich_ipv6_mp_iterator_build_matches_legacy_oracle() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65_001, 65_002);
+    let mut negotiated = negotiated_session(65_002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    session.negotiated = Some(Arc::new(negotiated));
+    let profile = session.publish_export_profile();
+    let entries = [rustbgpd_wire::NlriEntry {
+        path_id: 0,
+        prefix: Prefix::V6(Ipv6Prefix::new(
+            Ipv6Addr::new(0x2001, 0xdb8, 0x1000, 0, 0, 0, 0, 0),
+            64,
+        )),
+    }];
+    let base_attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![
+                AsPathSegment::AsSequence(vec![65_000, 65_001, 65_002]),
+                AsPathSegment::AsSequence(vec![65_010, 65_011]),
+            ],
+        }),
+        PathAttribute::Communities((0..32).map(|value| 0xFDE8_0000 + value).collect()),
+        PathAttribute::ExtendedCommunities(vec![rustbgpd_wire::ExtendedCommunity::new(
+            0x0002_FDE8_0000_0007,
+        )]),
+        PathAttribute::LargeCommunities(vec![rustbgpd_wire::LargeCommunity::new(65_000, 7, 9)]),
+        PathAttribute::ClusterList(vec![
+            Ipv4Addr::new(192, 0, 2, 10),
+            Ipv4Addr::new(192, 0, 2, 11),
+        ]),
+        PathAttribute::Unknown(RawAttribute {
+            flags: 0xE0,
+            type_code: 99,
+            data: Bytes::from(vec![0x5A; 96]),
+        }),
+    ];
+    let next_hop = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0xffff, 0, 0, 0, 0, 1));
+    let actual = profile
+        .build_mp_reach(
+            Afi::Ipv6,
+            Safi::Unicast,
+            next_hop,
+            None,
+            &base_attrs,
+            export::ReachNlri::Unicast(&entries),
+            rustbgpd_wire::Ipv4UnicastMode::MpReach,
+        )
+        .unwrap();
+    let mut legacy_attrs = base_attrs;
+    legacy_attrs.push(PathAttribute::MpReachNlri(rustbgpd_wire::MpReachNlri {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        next_hop,
+        link_local_next_hop: None,
+        announced: entries.to_vec(),
+        flowspec_announced: vec![],
+        evpn_announced: vec![],
+        bgpls_announced: vec![],
+        labeled_announced: vec![],
+        vpn_announced: vec![],
+        rtc_announced: vec![],
+    }));
+    let expected = rustbgpd_wire::UpdateMessage::try_build(
+        &[],
+        &[],
+        &legacy_attrs,
+        true,
+        false,
+        rustbgpd_wire::Ipv4UnicastMode::MpReach,
+    )
+    .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.path_attributes, expected.path_attributes);
+    assert_eq!(actual.encoded_len(), expected.encoded_len());
+    let mut actual_wire = Vec::new();
+    let mut expected_wire = Vec::new();
+    actual.encode_with_limit(&mut actual_wire, 65_535).unwrap();
+    expected
+        .encode_with_limit(&mut expected_wire, 65_535)
+        .unwrap();
+    assert_eq!(actual_wire, expected_wire);
+    let digest = actual_wire
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |digest, byte| {
+            (digest ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    assert_eq!(
+        digest, 0x0a05_bb56_4cca_06e9,
+        "rich IPv6 MP bytes must match the pre-change transport oracle"
+    );
+    assert_eq!(
+        actual_wire.len(),
+        354,
+        "rich IPv6 MP length must match the pre-change transport oracle"
+    );
+    let parsed = actual.parse(true, false, &[]).unwrap();
+    assert_eq!(parsed.attributes.len(), 8);
+    assert!(matches!(
+        parsed.attributes.last(),
+        Some(PathAttribute::MpReachNlri(mp))
+            if mp.afi == Afi::Ipv6 && mp.safi == Safi::Unicast && mp.announced == entries
+    ));
+}
+
 #[tokio::test]
 async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);

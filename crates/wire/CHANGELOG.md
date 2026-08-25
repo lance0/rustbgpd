@@ -5,6 +5,12 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- **Additive borrowed-attribute builder:** Added
+  `UpdateMessage::try_build_from_attribute_iter`, which consumes one
+  single-pass iterator of borrowed path attributes in yielded order and
+  returns the same encoding errors as `try_build`. The existing slice builder
+  remains available and delegates to the new path; wire output is unchanged.
+
 - **Assigned attribute framing and class fences:** Added registry constants and
   fail-closed Optional/Transitive class recognition for D-PATH, SFP, BFD
   Discriminator, NHC, BIER, and Edge Metadata. Attributes 36-41 remain opaque
