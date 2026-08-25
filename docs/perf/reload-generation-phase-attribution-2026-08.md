@@ -1,8 +1,9 @@
 # Reload-generation phase attribution (August 2026)
 
-LAN-1165 asked why reloads 2–4 were slower than reload 1. Two fresh, sequential
-full campaigns reproduced the curve and localized it, but did not establish the
-internal mechanism. The decision is therefore **instrumentation only**.
+A performance follow-up asked why reloads 2–4 were slower than reload 1. Two
+fresh, sequential full campaigns reproduced the curve and localized it, but did
+not establish the internal mechanism. The decision is therefore
+**instrumentation only**.
 
 The workload was identical in both roots: 320 members, 183,040 prefixes, seed
 61, changed fraction 0.10, overlap 0, and four SIGHUP reloads. Both roots used

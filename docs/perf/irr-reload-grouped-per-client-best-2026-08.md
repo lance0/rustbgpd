@@ -402,9 +402,9 @@ check is a `cmp` of each comparison root's
 `rustbgpd-sighup/received-view.tsv` against the sealed realistic-mix
 baseline capture at the same overlap point and repeat.
 
-## LAN-1165 phase-attribution follow-up
+## Phase-attribution follow-up
 
-The later LAN-1165 receipt adds phase attribution without changing this
+The later phase-attribution receipt adds timing detail without changing this
 workload's correctness boundaries. Two full per-client-best roots reproduced
 the reload-1 versus reload-2–4 curve and placed more than 98% of the delta in
 the synchronous batched authoritative RIB transition. The result is
