@@ -380,6 +380,7 @@ jobs:
           # renderer, so make that prerequisite explicit on a clean runner.
           cargo build --locked -p rs-config-render
           cargo test --locked --test reloadstall_scenario_emitted_check
+          python3 bench/scale/irrreload/verify-receipt.py self-test
           bash -n bench/compare-criterion.sh bench/tests/test-compare-criterion-harness.sh
           shellcheck bench/compare-criterion.sh bench/tests/test-compare-criterion-harness.sh
           shellcheck bench/smoke-benches.sh

@@ -84,6 +84,28 @@ byte-for-byte (no new files or manifest keys; the seed-61 canonical dataset
 digest is unchanged and pinned in
 `tests/reloadstall_scenario_emitted_check.rs`).
 
+## LAN-1165 authoritative discriminator campaign
+
+The measurement-only `full-rustbgpd-sighup` campaign is a single-cell
+`rustbgpd-sighup` run, never a cross-daemon table. Its frozen shape is 320
+members, 183,040 prefixes, list range 1,000–40,000, four reloads, changed
+fraction 0.1, seed 61, and overlap 0. Run two fresh roots sequentially under
+the quiet-host lock; never overlap their heavy work:
+
+```sh
+candidate=$(git rev-parse HEAD)
+SMOKE= SKIP_PREFLIGHT= CONFIRM_NO_MAIN_PUSHES=1 MEASUREMENT_CANDIDATE_SHA="$candidate" N_MEMBERS=320 TOTAL_PREFIXES=183040 RELOADS=4 CHANGED_FRACTION=0.1 SEED=61 OVERLAP_FRACTION=0 MIN_LIST=1000 MAX_LIST=40000 ARTIFACTS_DIR=/tmp/lan1165-discriminator-A bench/scale/irrreload/run-irr-reload.sh rustbgpd-sighup
+SMOKE= SKIP_PREFLIGHT= CONFIRM_NO_MAIN_PUSHES=1 MEASUREMENT_CANDIDATE_SHA="$candidate" N_MEMBERS=320 TOTAL_PREFIXES=183040 RELOADS=4 CHANGED_FRACTION=0.1 SEED=61 OVERLAP_FRACTION=0 MIN_LIST=1000 MAX_LIST=40000 ARTIFACTS_DIR=/tmp/lan1165-discriminator-B bench/scale/irrreload/run-irr-reload.sh rustbgpd-sighup
+```
+
+Each reload binds exactly one outer reload-generation timing record to one
+terminal authoritative-transition discriminator record. Phase sums close
+exactly; counters describe work already performed and introduce no telemetry
+surface or extra production scans. Two-root causal attribution requires the
+same phase direction to explain at least 70% of the reload-1-to-later delta in
+both roots; later reloads must exceed reload 1 by at least 20% in both roots.
+No threshold licenses a production correction without a separate review.
+
 Model limits, stated plainly: every overlapped prefix has exactly two
 announcers (real route servers see heavier tails), the second announcer is
 uniform over members (real overlap concentrates in large transit/CDN

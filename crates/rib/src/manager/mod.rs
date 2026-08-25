@@ -80,6 +80,59 @@ struct PolicyTransitionStats {
     max_authoritative_peer_apply: std::time::Duration,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct AuthoritativeTransitionReceipt {
+    outcome: &'static str,
+    classification: &'static str,
+    failure_stage: &'static str,
+    precondition_us: u64,
+    registration_membership_us: u64,
+    cohort_partition_us: u64,
+    cohort_precheck_us: u64,
+    destination_build_us: u64,
+    inventory_build_us: u64,
+    membership_commit_us: u64,
+    filtered_scope_build_us: u64,
+    member_emit_state_us: u64,
+    cohort_finalize_us: u64,
+    fallback_regroup_us: u64,
+    distribution_us: u64,
+    duplicate_fallback_us: u64,
+    total_us: u64,
+    remainder_us: u64,
+    input_peers: usize,
+    present_peers: usize,
+    skipped_peers: usize,
+    duplicate_peers: usize,
+    candidate_cohorts: usize,
+    shared_cohorts: usize,
+    shared_members: usize,
+    fallback_members: usize,
+    destination_ensures: usize,
+    destination_builds: usize,
+    destination_adoptions: usize,
+    membership_moves: usize,
+    inventory_announces: usize,
+    inventory_withdraws: usize,
+    inventory_supplements: usize,
+    tombstones: usize,
+    lagging_members: usize,
+    filtered_scope_prefixes: usize,
+    filtered_scope_member_visits: usize,
+    emits_attempted: usize,
+    emits_succeeded: usize,
+    emits_degraded: usize,
+    distribution_passes: usize,
+    filtered_state_before: usize,
+    filtered_state_after: usize,
+    dirty_before: usize,
+    dirty_after: usize,
+    pending_before: usize,
+    pending_after: usize,
+    groups_before: usize,
+    groups_after: usize,
+}
+
 /// Test/benchmark-only receipt from the authoritative outbound commit path.
 ///
 /// The counters live on the production path but compile out of normal builds.
@@ -770,6 +823,8 @@ pub struct RibManager {
     /// Test/benchmark-only evidence for the explicit clean policy transition.
     #[cfg(any(test, feature = "bench-internals"))]
     policy_transition_stats: PolicyTransitionStats,
+    #[cfg(test)]
+    authoritative_transition_receipts: Vec<AuthoritativeTransitionReceipt>,
     /// Test/benchmark-only evidence from the authoritative outbound commit.
     #[cfg(any(test, feature = "bench-internals"))]
     adj_rib_out_commit_stats: AdjRibOutCommitStats,
@@ -1373,6 +1428,8 @@ impl RibManager {
             test_exact_export_full_prune_calls: 0,
             #[cfg(any(test, feature = "bench-internals"))]
             policy_transition_stats: PolicyTransitionStats::default(),
+            #[cfg(test)]
+            authoritative_transition_receipts: Vec::new(),
             #[cfg(any(test, feature = "bench-internals"))]
             adj_rib_out_commit_stats: AdjRibOutCommitStats::default(),
             #[cfg(feature = "bench-internals")]
