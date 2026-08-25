@@ -287,6 +287,39 @@ let families = self.allocated.collect();'''
                 with self.assertRaisesRegex(ValueError, error):
                     self.check_evpn(dashboard)
 
+    def test_evpn_extra_data_panel_fails_closed(self):
+        dashboard = self.evpn_dashboard()
+        dashboard["panels"].append(
+            {
+                "id": 999,
+                "type": "timeseries",
+                "title": "Unsafe per-MAC quarantine detail",
+                "targets": [
+                    {
+                        "refId": "A",
+                        "expr": (
+                            "evpn_duplicate_mac_quarantine_active"
+                            '{instance=~"$instance"}'
+                        ),
+                        "legendFormat": "{{mac}}",
+                        "datasource": CHECK.EVPN_TARGET_DATASOURCE,
+                    }
+                ],
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "unexpected data panels.*Unsafe per-MAC"):
+            self.check_evpn(dashboard)
+
+    def test_evpn_duplicate_required_panel_title_fails_closed(self):
+        dashboard = self.evpn_dashboard()
+        duplicate = json.loads(
+            json.dumps(self.evpn_panel(dashboard, "Active DF assignments"))
+        )
+        duplicate["id"] = 999
+        dashboard["panels"].append(duplicate)
+        with self.assertRaisesRegex(ValueError, "exactly one.*counts=.*Active DF"):
+            self.check_evpn(dashboard)
+
     def test_live_dashboard_presentation_mutations_pass_full_check(self):
         dashboard = json.loads(CHECK.DASHBOARD.read_text())
         for index, panel in enumerate(CHECK.all_panels(dashboard["panels"])):

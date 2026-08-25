@@ -845,7 +845,27 @@ def check_evpn_dashboard(
     if missing_rows:
         raise ValueError(f"EVPN dashboard is missing required operator rows {missing_rows}")
 
-    by_title = {panel.get("title"): panel for panel in panels}
+    data_panels = [panel for panel in panels if panel.get("type") != "row"]
+    data_titles = [panel.get("title") for panel in data_panels]
+    panel_titles = [panel.get("title") for panel in panels]
+    unexpected_titles = sorted(
+        {title for title in data_titles if title not in EVPN_REQUIRED_PANELS},
+        key=str,
+    )
+    if unexpected_titles:
+        raise ValueError(f"EVPN dashboard has unexpected data panels {unexpected_titles}")
+    invalid_counts = {
+        title: panel_titles.count(title)
+        for title in EVPN_REQUIRED_PANELS
+        if panel_titles.count(title) != 1
+    }
+    if invalid_counts:
+        raise ValueError(
+            "EVPN dashboard must contain exactly one of every required data panel; "
+            f"counts={invalid_counts}"
+        )
+
+    by_title = {panel.get("title"): panel for panel in data_panels}
     seen_targets: set[tuple[str, str]] = set()
     for title, required_metrics in EVPN_REQUIRED_PANELS.items():
         panel = by_title.get(title)
