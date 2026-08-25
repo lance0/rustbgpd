@@ -3,8 +3,8 @@ mod bench_support;
 #[cfg(feature = "bench-internals")]
 pub use bench_support::{
     AdjRibOutFanoutBenchReceipt, EvpnDataplaneQueryBenchReceipt, PolicyTransitionBenchReceipt,
-    bench_evpn_dataplane_generation_query, bench_evpn_dataplane_generation_snapshot,
-    bench_evpn_dataplane_legacy_snapshot,
+    UnicastPrefixPeersMemoryReceipt, bench_evpn_dataplane_generation_query,
+    bench_evpn_dataplane_generation_snapshot, bench_evpn_dataplane_legacy_snapshot,
 };
 mod distribution;
 mod graceful_restart;
@@ -26,6 +26,7 @@ use crate::ERR_REFRESH_TIMEOUT;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasher, Hasher};
 use std::net::{IpAddr, Ipv4Addr};
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use rustbgpd_policy::PolicyChain;
@@ -163,11 +164,151 @@ fn permissive_test_exact_export_encoder() -> Arc<dyn ExactExportEncoder> {
 /// from best-path selection. Every seam that inserts a unicast route into
 /// an Adj-RIB-In must call [`RibManager::register_unicast_announcer`]
 /// (announce chunks, local injection, bench seeding — the only three
-/// insert sites). Removal seams (withdraw, session down, GR/LLGR sweeps,
-/// `EoR` clears, max-prefix teardown) need no hook: a peer that no longer
-/// holds the prefix is pruned lazily by the next `recompute_best` probe,
-/// costing one wasted Adj-RIB-In lookup until then.
-type UnicastPrefixPeers = rustc_hash::FxHashMap<Prefix, smallvec::SmallVec<[IpAddr; 1]>>;
+/// insert sites). Per-prefix removal seams (withdraw, GR/LLGR sweeps, `EoR`
+/// clears, max-prefix teardown) need no eager hook: a peer that no longer
+/// holds the prefix is pruned lazily by the next `recompute_best` probe.
+/// Destructive peer teardown retires its incarnation epoch before recompute;
+/// GR/LLGR retention deliberately preserves that epoch while routes remain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct AdjRibInEpoch(NonZeroU32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrefixAnnouncers {
+    Inline(AdjRibInEpoch),
+    Spill(NonZeroU32),
+}
+
+#[derive(Default)]
+struct UnicastPrefixPeers {
+    prefixes: rustc_hash::FxHashMap<Prefix, PrefixAnnouncers>,
+    spills: Vec<smallvec::SmallVec<[AdjRibInEpoch; 2]>>,
+    free_spills: Vec<u32>,
+    peer_epochs: HashMap<IpAddr, AdjRibInEpoch>,
+    epoch_peers: rustc_hash::FxHashMap<AdjRibInEpoch, IpAddr>,
+    next_epoch: u32,
+}
+
+impl UnicastPrefixPeers {
+    fn epoch_for_peer(&mut self, peer: IpAddr) -> AdjRibInEpoch {
+        if let Some(&epoch) = self.peer_epochs.get(&peer) {
+            return epoch;
+        }
+        self.next_epoch = self
+            .next_epoch
+            .checked_add(1)
+            .expect("Adj-RIB-In epoch space exhausted");
+        let epoch = AdjRibInEpoch(NonZeroU32::new(self.next_epoch).expect("epoch starts at one"));
+        self.peer_epochs.insert(peer, epoch);
+        self.epoch_peers.insert(epoch, peer);
+        epoch
+    }
+
+    fn retire_peer(&mut self, peer: IpAddr) {
+        if let Some(epoch) = self.peer_epochs.remove(&peer) {
+            self.epoch_peers.remove(&epoch);
+        }
+    }
+
+    fn register(&mut self, peer: IpAddr, prefix: Prefix) {
+        let epoch = self.epoch_for_peer(peer);
+        match self.prefixes.get(&prefix).copied() {
+            None => {
+                self.prefixes
+                    .insert(prefix, PrefixAnnouncers::Inline(epoch));
+            }
+            Some(PrefixAnnouncers::Inline(existing)) if existing == epoch => {}
+            Some(PrefixAnnouncers::Inline(existing)) => {
+                let slot = if let Some(slot) = self.free_spills.pop() {
+                    let peers = &mut self.spills[slot as usize];
+                    debug_assert!(peers.is_empty());
+                    peers.extend([existing, epoch]);
+                    slot
+                } else {
+                    let slot = u32::try_from(self.spills.len())
+                        .expect("unicast announcer spill slot space exhausted");
+                    self.spills.push(smallvec::smallvec![existing, epoch]);
+                    slot
+                };
+                let handle = NonZeroU32::new(slot.checked_add(1).expect("spill handle exhausted"))
+                    .expect("one-based spill handle");
+                self.prefixes
+                    .insert(prefix, PrefixAnnouncers::Spill(handle));
+            }
+            Some(PrefixAnnouncers::Spill(handle)) => {
+                let peers = &mut self.spills[(handle.get() - 1) as usize];
+                if !peers.contains(&epoch) {
+                    peers.push(epoch);
+                }
+            }
+        }
+    }
+
+    fn epochs(&self, prefix: &Prefix) -> impl Iterator<Item = AdjRibInEpoch> + '_ {
+        let slice: &[AdjRibInEpoch] = match self.prefixes.get(prefix) {
+            None => &[],
+            Some(PrefixAnnouncers::Inline(epoch)) => std::slice::from_ref(epoch),
+            Some(PrefixAnnouncers::Spill(handle)) => &self.spills[(handle.get() - 1) as usize],
+        };
+        slice.iter().copied()
+    }
+
+    fn peers(&self, prefix: &Prefix) -> impl Iterator<Item = IpAddr> + '_ {
+        self.epochs(prefix)
+            .filter_map(|epoch| self.epoch_peers.get(&epoch).copied())
+    }
+
+    fn prune_to_live(&mut self, prefix: &Prefix, mut live: impl FnMut(IpAddr) -> bool) {
+        let Some(value) = self.prefixes.get(prefix).copied() else {
+            return;
+        };
+        let live_epoch = |epoch: &AdjRibInEpoch, live: &mut dyn FnMut(IpAddr) -> bool| {
+            self.epoch_peers.get(epoch).copied().is_some_and(live)
+        };
+        match value {
+            PrefixAnnouncers::Inline(epoch) if !live_epoch(&epoch, &mut live) => {
+                self.prefixes.remove(prefix);
+            }
+            PrefixAnnouncers::Inline(_) => {}
+            PrefixAnnouncers::Spill(handle) => {
+                let peers = &mut self.spills[(handle.get() - 1) as usize];
+                peers.retain(|epoch| live_epoch(epoch, &mut live));
+                match peers.as_slice() {
+                    [] => {
+                        self.prefixes.remove(prefix);
+                        self.release_spill(handle);
+                    }
+                    [epoch] => {
+                        self.prefixes
+                            .insert(*prefix, PrefixAnnouncers::Inline(*epoch));
+                        self.release_spill(handle);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn release_spill(&mut self, handle: NonZeroU32) {
+        let slot = handle.get() - 1;
+        let peers = &mut self.spills[slot as usize];
+        peers.clear();
+        peers.shrink_to_fit();
+        self.free_spills.push(slot);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn len(&self) -> usize {
+        self.prefixes.len()
+    }
+    #[cfg(feature = "bench-internals")]
+    fn capacity(&self) -> usize {
+        self.prefixes.capacity()
+    }
+    #[cfg(feature = "bench-internals")]
+    fn is_empty(&self) -> bool {
+        self.prefixes.is_empty()
+    }
+}
 
 #[cfg(test)]
 use helpers::{LOCAL_PEER, validate_route_rpki};
@@ -2628,12 +2769,10 @@ impl RibManager {
     fn exact_export_nlri_is_live(&self, key: &ExactExportKey) -> bool {
         match key {
             ExactExportKey::Unicast(prefix, _) => {
-                self.unicast_prefix_peers.get(prefix).is_some_and(|peers| {
-                    peers.iter().any(|peer| {
-                        self.ribs
-                            .get(peer)
-                            .is_some_and(|rib| rib.iter_prefix(prefix).next().is_some())
-                    })
+                self.unicast_prefix_peers.peers(prefix).any(|peer| {
+                    self.ribs
+                        .get(&peer)
+                        .is_some_and(|rib| rib.iter_prefix(prefix).next().is_some())
                 })
             }
             ExactExportKey::FlowSpec(key) => self.ribs.values().any(|rib| {

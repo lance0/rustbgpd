@@ -3915,10 +3915,7 @@ impl RibManager {
     /// index. MUST be called by every seam that inserts a unicast route
     /// into an Adj-RIB-In — see the [`UnicastPrefixPeers`] contract.
     pub(in crate::manager) fn register_unicast_announcer(&mut self, peer: IpAddr, prefix: Prefix) {
-        let peers = self.unicast_prefix_peers.entry(prefix).or_default();
-        if !peers.contains(&peer) {
-            peers.push(peer);
-        }
+        self.unicast_prefix_peers.register(peer, prefix);
     }
 
     /// All Adj-RIB-In candidates for `prefix`, collected via the announcing-
@@ -3932,10 +3929,8 @@ impl RibManager {
         prefix: &'a Prefix,
     ) -> impl Iterator<Item = &'a crate::route::Route> {
         prefix_peers
-            .get(prefix)
-            .into_iter()
-            .flatten()
-            .filter_map(move |peer| ribs.get(peer))
+            .peers(prefix)
+            .filter_map(move |peer| ribs.get(&peer))
             .flat_map(move |rib| rib.iter_prefix(prefix))
     }
 
@@ -4105,19 +4100,14 @@ impl RibManager {
                 // eager hook by design, see the `UnicastPrefixPeers` contract).
                 let mut candidates: smallvec::SmallVec<[&crate::route::Route; 8]> =
                     smallvec::SmallVec::new();
-                if let Some(peers) = self.unicast_prefix_peers.get_mut(prefix) {
-                    let ribs = &self.ribs;
-                    peers.retain(|peer| {
-                        let before = candidates.len();
-                        if let Some(rib) = ribs.get(peer) {
-                            candidates.extend(rib.iter_prefix(prefix));
-                        }
-                        candidates.len() > before
-                    });
-                    if peers.is_empty() {
-                        self.unicast_prefix_peers.remove(prefix);
+                let ribs = &self.ribs;
+                self.unicast_prefix_peers.prune_to_live(prefix, |peer| {
+                    let before = candidates.len();
+                    if let Some(rib) = ribs.get(&peer) {
+                        candidates.extend(rib.iter_prefix(prefix));
                     }
-                }
+                    candidates.len() > before
+                });
                 let did_change = self.loc_rib.recompute(*prefix, candidates.iter().copied());
                 if did_change {
                     // RFC 9069 Loc-RIB tap: any change to the best is a

@@ -349,6 +349,7 @@ impl RibManager {
     /// whose previous session was never torn down must not inherit its
     /// predecessor's received routes).
     fn clear_peer_adj_rib_in(&mut self, peer: IpAddr) {
+        self.unicast_prefix_peers.retire_peer(peer);
         let Some(rib) = self.ribs.remove(&peer) else {
             return;
         };
