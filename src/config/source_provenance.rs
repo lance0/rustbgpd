@@ -172,6 +172,7 @@ pub(super) fn load_dataset_captured(
     name: &str,
     kind: DatasetKind,
     existing: Option<&Arc<DatasetHandle>>,
+    accepted: Option<&Arc<DatasetHandle>>,
     prior_manifest: Option<&SourceManifest>,
 ) -> Result<CapturedDatasetRead, CapturedDatasetError> {
     let failure = |reason| CapturedDatasetError {
@@ -213,13 +214,19 @@ pub(super) fn load_dataset_captured(
     let source_rebound = prior.is_some_and(|prior| prior.path != source.canonical_path);
     if prior
         .is_some_and(|prior| prior.length == source.raw_len && prior.sha256 == source.raw_sha256)
-        && let Some(handle) = existing.filter(|handle| handle.kind() == kind)
+        && let Some((live, accepted)) = existing
+            .filter(|handle| handle.kind() == kind)
+            .zip(accepted.filter(|handle| handle.kind() == kind))
     {
-        return Ok(CapturedDatasetRead {
-            load: CapturedDatasetLoad::ExactContent(handle.pin()),
-            source,
-            source_rebound,
-        });
+        let live = live.pin();
+        let accepted = accepted.pin();
+        if Arc::ptr_eq(&live, &accepted) || live.data == accepted.data {
+            return Ok(CapturedDatasetRead {
+                load: CapturedDatasetLoad::ExactContent(live),
+                source,
+                source_rebound,
+            });
+        }
     }
 
     let text = String::from_utf8(bytes).map_err(|error| CapturedDatasetError {
@@ -317,6 +324,7 @@ impl AcceptedConfigSnapshot {
             DatasetBindMode::Stage,
             Some(&mut capture),
             None,
+            None,
         )?;
         config.file_path = Some(config_path.to_path_buf());
         after_capture();
@@ -392,6 +400,7 @@ impl AcceptedConfigSnapshot {
             DatasetBindMode::Stage,
             Some(&mut capture),
             prior.map(|snapshot| &snapshot.manifest),
+            prior.map(|snapshot| &snapshot.config.policy.dataset_bindings),
         )?;
         config.file_path = Some(path.to_path_buf());
         after_capture();
@@ -748,6 +757,7 @@ import_policy_chain = ["inbound"]
             "customers",
             DatasetKind::Asn,
             Some(&handle),
+            Some(&handle),
             Some(&prior),
         )
         .unwrap();
@@ -768,6 +778,7 @@ import_policy_chain = ["inbound"]
                 "customers",
                 DatasetKind::Asn,
                 Some(&handle),
+                Some(&handle),
                 Some(&prior)
             )
             .unwrap()
@@ -779,6 +790,7 @@ import_policy_chain = ["inbound"]
             &second_path,
             "customers",
             DatasetKind::Asn,
+            Some(&handle),
             Some(&handle),
             Some(&prior),
         )
@@ -793,6 +805,7 @@ import_policy_chain = ["inbound"]
                 "vendors",
                 DatasetKind::Asn,
                 Some(&handle),
+                Some(&handle),
                 Some(&prior)
             )
             .unwrap()
@@ -803,6 +816,7 @@ import_policy_chain = ["inbound"]
             &second_path,
             "customers",
             DatasetKind::Prefix,
+            Some(&handle),
             Some(&handle),
             Some(&prior),
         )
@@ -859,6 +873,78 @@ import_policy_chain = ["inbound"]
         assert_eq!(
             compiled.evaluate(&reuse_ctx(64501)).action,
             rustbgpd_policy::PolicyAction::Deny
+        );
+    }
+
+    #[test]
+    fn retry_after_accepted_effect_before_dataset_commit_reparses_live_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = reuse_fixture(dir.path());
+        let accepted_a = AcceptedConfigSnapshot::load(&path, None).unwrap();
+        let live_bindings = accepted_a.policy.dataset_bindings.detached_clone();
+        let live_config = accepted_a
+            .runtime_config_without_sources(
+                accepted_a.normalized_toml(),
+                &accepted_a.policy.rpol_files,
+                accepted_a.policy.rpol.clone(),
+                &live_bindings,
+            )
+            .unwrap();
+        let live_resolved = live_config.resolved_neighbors().unwrap();
+        let installed = live_resolved[0].import_policy.as_ref().unwrap();
+        assert_eq!(
+            installed.evaluate(&reuse_ctx(64500)).action,
+            rustbgpd_policy::PolicyAction::Permit
+        );
+
+        fs::write(dir.path().join("customers.txt"), "64502\n").unwrap();
+        let accepted_b =
+            AcceptedConfigSnapshot::load_for_reload(&path, &accepted_a, &live_bindings).unwrap();
+        assert_eq!(accepted_b.policy.dataset_events.swapped, ["customers"]);
+        // Model a later pre-commit failure: desired provenance advanced to B,
+        // but the running handle and every installed dependent still serve A.
+        assert_eq!(
+            installed.evaluate(&reuse_ctx(64500)).action,
+            rustbgpd_policy::PolicyAction::Permit
+        );
+
+        let retry =
+            AcceptedConfigSnapshot::load_for_reload(&path, &accepted_b, &live_bindings).unwrap();
+        let retry_handle = dataset(&retry);
+        assert_eq!(retry.policy.dataset_events.swapped, ["customers"]);
+        assert!(!Arc::ptr_eq(
+            &retry_handle.pin(),
+            &dataset(&accepted_b).pin()
+        ));
+        assert_eq!(
+            retry.manifest.datasets[0].sha256,
+            <[u8; 32]>::from(Sha256::digest(b"64502\n"))
+        );
+        assert_eq!(
+            retry.resolved_neighbors().unwrap()[0]
+                .import_policy
+                .as_ref()
+                .unwrap()
+                .evaluate(&reuse_ctx(64500))
+                .action,
+            rustbgpd_policy::PolicyAction::Deny
+        );
+
+        let mut retry_config = retry.config();
+        let commit = retry_config.prepare_staged_datasets(&live_bindings);
+        assert!(!commit.is_empty());
+        assert_eq!(
+            installed.evaluate(&reuse_ctx(64500)).action,
+            rustbgpd_policy::PolicyAction::Permit
+        );
+        commit.commit();
+        assert_eq!(
+            installed.evaluate(&reuse_ctx(64500)).action,
+            rustbgpd_policy::PolicyAction::Deny
+        );
+        assert_eq!(
+            live_bindings.get("customers").unwrap().pin().data,
+            retry_handle.pin().data
         );
     }
 

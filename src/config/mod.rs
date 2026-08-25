@@ -166,9 +166,14 @@ impl Config {
             dataset_bind_mode,
             None,
             None,
+            None,
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "captured reload keeps live handles, accepted evidence, and source provenance explicit"
+    )]
     fn load_from_toml_source_with_capture(
         content: &str,
         source_name: &str,
@@ -177,6 +182,7 @@ impl Config {
         dataset_bind_mode: DatasetBindMode,
         mut capture: Option<&mut source_provenance::SourceCapture>,
         prior_manifest: Option<&source_provenance::SourceManifest>,
+        accepted_datasets: Option<&rustbgpd_policy::datasets::DatasetBindings>,
     ) -> Result<Self, String> {
         let load_started = std::time::Instant::now();
         let mut config: Config = match toml::from_str(content) {
@@ -226,6 +232,7 @@ impl Config {
                 dataset_bind_mode,
                 Some(capture),
                 prior_manifest,
+                accepted_datasets,
             ),
             None => config.bind_datasets(base_dir, prior_datasets, dataset_bind_mode),
         };
@@ -423,7 +430,7 @@ impl Config {
         prior: Option<&rustbgpd_policy::datasets::DatasetBindings>,
         mode: DatasetBindMode,
     ) -> Result<DatasetLoadSummary, ConfigError> {
-        self.bind_datasets_capturing(base_dir, prior, mode, None, None)
+        self.bind_datasets_capturing(base_dir, prior, mode, None, None, None)
     }
 
     #[expect(
@@ -437,6 +444,7 @@ impl Config {
         mode: DatasetBindMode,
         mut capture: Option<&mut source_provenance::SourceCapture>,
         prior_manifest: Option<&source_provenance::SourceManifest>,
+        accepted_datasets: Option<&rustbgpd_policy::datasets::DatasetBindings>,
     ) -> Result<DatasetLoadSummary, ConfigError> {
         use rustbgpd_policy::datasets::{
             DatasetBindings, DatasetHandle, DatasetKind, load_dataset_file,
@@ -513,12 +521,16 @@ impl Config {
             let existing = prior
                 .and_then(|bindings| bindings.get(name))
                 .filter(|handle| handle.kind() == kind);
+            let accepted = accepted_datasets
+                .and_then(|bindings| bindings.get(name))
+                .filter(|handle| handle.kind() == kind);
             let loaded = if let Some(capture) = capture.as_deref_mut() {
                 match source_provenance::load_dataset_captured(
                     &path,
                     name,
                     kind,
                     existing,
+                    accepted,
                     prior_manifest,
                 ) {
                     Ok(read) => {
@@ -553,12 +565,16 @@ impl Config {
                     }
                 }
             } else {
-                summary.parsed += 1;
-                load_dataset_file(&path, kind)
-                    .map(source_provenance::CapturedDatasetLoad::Parsed)
-                    .inspect_err(|_| {
+                match load_dataset_file(&path, kind) {
+                    Ok(data) => {
+                        summary.parsed += 1;
+                        Ok(source_provenance::CapturedDatasetLoad::Parsed(data))
+                    }
+                    Err(reason) => {
                         summary.failed += 1;
-                    })
+                        Err(reason)
+                    }
+                }
             };
             match (existing, loaded, mode) {
                 (
