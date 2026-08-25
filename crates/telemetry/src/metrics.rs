@@ -319,6 +319,7 @@ struct BgpMetricsInner {
     fib_routes_installed: IntCounter,
     fib_routes_withdrawn: IntCounter,
     fib_routes_rejected: IntCounterVec,
+    fib_routes_unresolved: IntGauge,
     fib_kernel_failures: IntCounterVec,
     kernel_route_notify_dropped: IntCounterVec,
     kernel_route_notify_subscription_failures: IntCounterVec,
@@ -1310,6 +1311,12 @@ impl BgpMetrics {
                 "General unicast FIB route candidates rejected before kernel install by reason.",
             ),
             &["reason"],
+        )
+        .expect("valid metric definition");
+
+        let fib_routes_unresolved = IntGauge::new(
+            "bgp_fib_routes_unresolved",
+            "General unicast FIB Add/Replace targets held after Linux returned the family-specific route-level unreachable errno for an all-unscoped, same-family, non-link-local target.",
         )
         .expect("valid metric definition");
 
@@ -2361,6 +2368,9 @@ impl BgpMetrics {
             .register(Box::new(fib_routes_rejected.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(fib_routes_unresolved.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(fib_kernel_failures.clone()))
             .expect("metric not already registered");
         registry
@@ -2723,6 +2733,7 @@ impl BgpMetrics {
             fib_routes_installed,
             fib_routes_withdrawn,
             fib_routes_rejected,
+            fib_routes_unresolved,
             fib_kernel_failures,
             kernel_route_notify_dropped,
             kernel_route_notify_subscription_failures,
@@ -3906,6 +3917,15 @@ impl BgpMetrics {
             .fib_routes_rejected
             .with_label_values(&[reason])
             .inc();
+    }
+
+    /// Set the number of desired general-FIB routes currently held because
+    /// Linux returned the family-specific route-level unreachable errno for
+    /// their unscoped, same-family, non-link-local next-hops.
+    pub fn set_fib_routes_unresolved(&self, count: usize) {
+        self.0
+            .fib_routes_unresolved
+            .set(i64::try_from(count).unwrap_or(i64::MAX));
     }
 
     /// Record a kernel apply failure for general unicast FIB state.
@@ -5665,6 +5685,10 @@ mod tests {
     #[test]
     fn fib_route_counters_register_expected_labels() {
         let m = BgpMetrics::new();
+        assert_eq!(m.0.fib_routes_unresolved.get(), 0);
+        m.set_fib_routes_unresolved(2);
+        assert_eq!(m.0.fib_routes_unresolved.get(), 2);
+        m.set_fib_routes_unresolved(0);
         m.record_fib_route_installed();
         m.record_fib_route_withdrawn();
         m.record_fib_route_rejected("foreign_route_exists");
@@ -5673,6 +5697,7 @@ mod tests {
 
         assert_eq!(m.0.fib_routes_installed.get(), 1);
         assert_eq!(m.0.fib_routes_withdrawn.get(), 1);
+        assert_eq!(m.0.fib_routes_unresolved.get(), 0);
         assert_eq!(
             m.0.fib_routes_rejected
                 .with_label_values(&["foreign_route_exists"])

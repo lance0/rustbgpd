@@ -4868,6 +4868,9 @@ async fn run<T>(
                                 fib_runtime::FibRuntimeState::Failed => {
                                     rustbgpd_api::proto::FibRouteState::Failed as i32
                                 }
+                                fib_runtime::FibRuntimeState::Unresolved => {
+                                    rustbgpd_api::proto::FibRouteState::Unresolved as i32
+                                }
                             },
                             reason: status.reason.clone(),
                             sampling_sampled_rows: sampling.map_or(0, |s| s.sampled_rows),

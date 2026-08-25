@@ -218,8 +218,9 @@ fn parse_fib_state(s: &str) -> Result<i32, CliError> {
         "installed" => Ok(FibRouteState::Installed as i32),
         "rejected" => Ok(FibRouteState::Rejected as i32),
         "failed" => Ok(FibRouteState::Failed as i32),
+        "unresolved" => Ok(FibRouteState::Unresolved as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported FIB route state {other:?}; expected installed, rejected, or failed"
+            "unsupported FIB route state {other:?}; expected installed, rejected, failed, or unresolved"
         ))),
     }
 }
@@ -1114,6 +1115,7 @@ fn fib_state_label(state: i32) -> &'static str {
         Ok(FibRouteState::Installed) => "installed",
         Ok(FibRouteState::Rejected) => "rejected",
         Ok(FibRouteState::Failed) => "failed",
+        Ok(FibRouteState::Unresolved) => "unresolved",
         Ok(FibRouteState::Unspecified) | Err(_) => "unknown",
     }
 }
@@ -2667,6 +2669,27 @@ mod tests {
         assert_eq!(request.peer_address, "fe80::2");
         assert_eq!(request.page_size, 50);
         assert_eq!(request.page_token, "100");
+    }
+
+    #[test]
+    fn fib_unresolved_state_filter_and_label_are_supported() {
+        let request = make_fib_request(&FibRouteFilterOpts {
+            table: None,
+            state: Some("unresolved".to_string()),
+            reason: Some("next_hop_unresolved".to_string()),
+            prefix: None,
+            peer: None,
+            page_size: None,
+            page_token: None,
+        })
+        .unwrap();
+
+        assert_eq!(request.state, FibRouteState::Unresolved as i32);
+        assert_eq!(request.reason, "next_hop_unresolved");
+        assert_eq!(
+            fib_state_label(FibRouteState::Unresolved as i32),
+            "unresolved"
+        );
     }
 
     #[test]

@@ -399,7 +399,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from blackholes" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from blackholes" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l table -d 'FIB table-name filter' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l state -d 'FIB route state filter: installed, rejected, failed' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l state -d 'FIB route state filter: installed, rejected, failed, unresolved' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l reason -d 'Exact reason-code filter, e.g. owned or route_limit_exceeded' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l prefix -d 'Exact prefix filter, e.g. 203.0.113.0/24' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l neighbor -l peer -d 'Source neighbor-address filter' -r

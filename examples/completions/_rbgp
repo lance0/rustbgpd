@@ -799,7 +799,7 @@ _arguments "${_arguments_options[@]}" : \
 (fib)
 _arguments "${_arguments_options[@]}" : \
 '--table=[FIB table-name filter]:TABLE:_default' \
-'--state=[FIB route state filter\: installed, rejected, failed]:STATE:_default' \
+'--state=[FIB route state filter\: installed, rejected, failed, unresolved]:STATE:_default' \
 '--reason=[Exact reason-code filter, e.g. owned or route_limit_exceeded]:REASON:_default' \
 '--prefix=[Exact prefix filter, e.g. 203.0.113.0/24]:PREFIX:_default' \
 '--neighbor=[Source neighbor-address filter]:NEIGHBOR:_default' \
