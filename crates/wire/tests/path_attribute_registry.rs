@@ -108,7 +108,7 @@ fn assigned_payload_contract(code: u8) -> &'static str {
             "exact one-octet-type/two-octet-length TLVs; Label-Index length 7; Originator SRGB length `2 + nonzero*6`"
         }
         41 => {
-            "zero or more exact two-octet-type/length TLVs; known containers consume nested length framing only when their four-octet fixed prefix is present; semantic field shapes remain opaque"
+            "non-empty exact two-octet-type/length TLV stream; known containers consume nested length framing only when their four-octet fixed prefix is present; semantic field shapes remain opaque"
         }
         42 => "no payload validation; exact registered class is dropped before value decoding",
         _ => panic!("no assigned framing contract for code {code}"),
@@ -698,12 +698,32 @@ fn assigned_rows_36_through_42_enforce_class_framing_and_disposition() {
     let mut expected = input;
     expected[0] |= 0x20;
     assert_eq!(emitted, expected);
-    let empty =
-        decode_path_attributes_revised(&attribute(0xc0, 41, &[]), true, false, &[]).unwrap();
-    assert!(empty.malformed.is_empty());
-    assert!(
-        matches!(empty.attributes.as_slice(), [PathAttribute::Unknown(raw)] if raw.data.is_empty())
+    let empty = attribute(0xc0, 41, &[]);
+    assert!(matches!(
+        decode_path_attributes(&empty, true, &[]),
+        Err(DecodeError::UpdateAttributeError { subcode, .. })
+            if subcode == update_subcode::ATTRIBUTE_LENGTH_ERROR
+    ));
+    let empty = decode_path_attributes_revised(&empty, true, false, &[]).unwrap();
+    assert!(empty.attributes.is_empty());
+    assert_eq!(empty.malformed.len(), 1);
+    assert_eq!(
+        empty.malformed[0].disposition,
+        ErrorDisposition::AttributeDiscard
     );
+
+    let unknown_value = [0, 99, 0, 0];
+    let unknown_input = attribute(0xc0, 41, &unknown_value);
+    let unknown = decode_path_attributes_revised(&unknown_input, true, false, &[]).unwrap();
+    assert!(unknown.malformed.is_empty());
+    assert!(
+        matches!(unknown.attributes.as_slice(), [PathAttribute::Unknown(raw)] if raw.data.as_ref() == unknown_value)
+    );
+    let mut emitted = Vec::new();
+    encode_path_attributes(&unknown.attributes, &mut emitted, true, false).unwrap();
+    let mut expected = unknown_input;
+    expected[0] |= 0x20;
+    assert_eq!(emitted, expected);
 }
 
 #[test]

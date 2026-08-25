@@ -130,6 +130,9 @@ fn prefix_sid(mut value: &[u8]) -> Result<(), &'static str> {
 }
 
 fn bier(mut value: &[u8]) -> Result<(), &'static str> {
+    if value.is_empty() {
+        return Err("BIER attribute contains no TLVs");
+    }
     while !value.is_empty() {
         let (kind, body, rest) = tlv_u16_u16(value)?;
         if kind == 1 && body.len() >= 4 {

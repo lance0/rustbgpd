@@ -132,7 +132,7 @@ stateful lookup, policy, or attribute semantics. Unknown TLVs remain opaque.
 | 38 | optional transitive; flags `0xc0` | five-octet base, exact one-octet-type/length optional TLVs, and a Source IP TLV of length 4 or 16 | attribute-discard |
 | 39 | optional transitive; flags `0xc0` | AFI/SAFI/next-hop-length boundary followed by one or more exact two-octet-type/two-octet-length characteristic TLVs | attribute-discard |
 | 40 | optional transitive; flags `0xc0` | exact one-octet-type/two-octet-length TLVs; Label-Index length 7; Originator SRGB length `2 + nonzero*6` | attribute-discard |
-| 41 | optional transitive; flags `0xc0` | zero or more exact two-octet-type/length TLVs; known containers consume nested length framing only when their four-octet fixed prefix is present; semantic field shapes remain opaque | attribute-discard |
+| 41 | optional transitive; flags `0xc0` | non-empty exact two-octet-type/length TLV stream; known containers consume nested length framing only when their four-octet fixed prefix is present; semantic field shapes remain opaque | attribute-discard |
 | 42 | optional non-transitive; flags `0x80` | no payload validation; exact registered class is dropped before value decoding | class conflict is treat-as-withdraw |
 <!-- assigned-framing:end -->
 
