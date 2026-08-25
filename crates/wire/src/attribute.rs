@@ -2844,6 +2844,15 @@ pub fn encode_path_attributes(
     four_octet_as: bool,
     add_path_mp: bool,
 ) -> Result<(), EncodeError> {
+    encode_path_attributes_iter(attrs.iter(), buf, four_octet_as, add_path_mp)
+}
+
+pub(crate) fn encode_path_attributes_iter<'a>(
+    attrs: impl IntoIterator<Item = &'a PathAttribute>,
+    buf: &mut Vec<u8>,
+    four_octet_as: bool,
+    add_path_mp: bool,
+) -> Result<(), EncodeError> {
     let mut value_scratch = Vec::new();
     encode_path_attributes_with_scratch(attrs, buf, four_octet_as, add_path_mp, &mut value_scratch)
 }
@@ -2852,8 +2861,8 @@ pub fn encode_path_attributes(
     clippy::too_many_lines,
     reason = "dispatch arms are inherently O(variants); each new path attribute adds a small block"
 )]
-fn encode_path_attributes_with_scratch(
-    attrs: &[PathAttribute],
+fn encode_path_attributes_with_scratch<'a>(
+    attrs: impl IntoIterator<Item = &'a PathAttribute>,
     buf: &mut Vec<u8>,
     four_octet_as: bool,
     add_path_mp: bool,

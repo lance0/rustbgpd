@@ -1,8 +1,6 @@
 #[cfg(feature = "codec-allocation-diagnostics")]
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::net::Ipv4Addr;
-#[cfg(not(feature = "codec-allocation-diagnostics"))]
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[cfg(feature = "codec-allocation-diagnostics")]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -14,14 +12,14 @@ use rustbgpd_wire::attribute::{decode_path_attributes, encode_path_attributes};
 #[cfg(not(feature = "codec-allocation-diagnostics"))]
 use rustbgpd_wire::nlri::{decode_nlri, encode_nlri};
 use rustbgpd_wire::validate::validate_update_attributes;
-#[cfg(not(feature = "codec-allocation-diagnostics"))]
 use rustbgpd_wire::{
-    Afi, ErrorDisposition, Ipv4NlriEntry, Ipv4Prefix, Ipv4UnicastMode, Ipv6Prefix, MpReachNlri,
-    MpUnreachNlri, NlriEntry, Prefix, Safi, UpdateMessage,
+    Afi, Ipv4UnicastMode, Ipv6Prefix, MpReachNlri, NlriEntry, Prefix, Safi, UpdateMessage,
 };
 use rustbgpd_wire::{
     Aggregator, AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, Origin, PathAttribute,
 };
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
+use rustbgpd_wire::{ErrorDisposition, Ipv4NlriEntry, Ipv4Prefix, MpUnreachNlri};
 
 #[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn generate_ipv4_prefixes(count: usize) -> Vec<Ipv4Prefix> {
@@ -698,6 +696,147 @@ fn run_attr_encode_diagnostic() -> DiagnosticRow {
 }
 
 #[cfg(feature = "codec-allocation-diagnostics")]
+fn rich_mp_tail() -> PathAttribute {
+    PathAttribute::MpReachNlri(MpReachNlri {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        next_hop: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0xffff, 0, 0, 0, 0, 1)),
+        link_local_next_hop: None,
+        announced: vec![NlriEntry {
+            path_id: 0,
+            prefix: Prefix::V6(Ipv6Prefix::new(
+                Ipv6Addr::new(0x2001, 0xdb8, 0x1000, 0, 0, 0, 0, 0),
+                64,
+            )),
+        }],
+        flowspec_announced: Vec::new(),
+        evpn_announced: Vec::new(),
+        bgpls_announced: Vec::new(),
+        labeled_announced: Vec::new(),
+        vpn_announced: Vec::new(),
+        rtc_announced: Vec::new(),
+    })
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
+fn encoded_update(message: &UpdateMessage) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(message.encoded_len());
+    message
+        .encode_with_limit(&mut wire, 65_535)
+        .expect("diagnostic UPDATE must encode");
+    wire
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
+fn run_mp_build_iterator_diagnostic() {
+    const OPERATIONS: usize = 50;
+    let base_attrs = rich_attributes();
+    let tail = rich_mp_tail();
+
+    let mut legacy_attrs = base_attrs.clone();
+    legacy_attrs.push(tail.clone());
+    let expected = UpdateMessage::try_build(
+        &[],
+        &[],
+        &legacy_attrs,
+        true,
+        false,
+        Ipv4UnicastMode::MpReach,
+    )
+    .expect("legacy rich MP fixture must build");
+    let iter_expected = UpdateMessage::try_build_from_attribute_iter(
+        &[],
+        &[],
+        base_attrs.iter().chain(std::iter::once(&tail)),
+        true,
+        false,
+        Ipv4UnicastMode::MpReach,
+    )
+    .expect("iterator rich MP fixture must build");
+    assert_eq!(
+        iter_expected, expected,
+        "iterator fixture bytes must be exact"
+    );
+    let expected_wire = encoded_update(&expected);
+    let digest = fnv1a64(&expected_wire);
+
+    ALLOCATOR.reset();
+    for _ in 0..OPERATIONS {
+        ALLOCATOR.enable();
+        let tail = rich_mp_tail();
+        let mut attrs = base_attrs.clone();
+        attrs.push(tail);
+        let message =
+            UpdateMessage::try_build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
+        ALLOCATOR.disable();
+        assert_eq!(
+            message.expect("legacy measured build must succeed"),
+            expected
+        );
+    }
+    let legacy = ALLOCATOR.receipt();
+
+    ALLOCATOR.reset();
+    for _ in 0..OPERATIONS {
+        ALLOCATOR.enable();
+        let tail = rich_mp_tail();
+        let message = UpdateMessage::try_build_from_attribute_iter(
+            &[],
+            &[],
+            base_attrs.iter().chain(std::iter::once(&tail)),
+            true,
+            false,
+            Ipv4UnicastMode::MpReach,
+        );
+        ALLOCATOR.disable();
+        assert_eq!(
+            message.expect("iterator measured build must succeed"),
+            expected
+        );
+    }
+    let iterator = ALLOCATOR.receipt();
+    let saved_calls = legacy
+        .allocation_calls
+        .checked_sub(iterator.allocation_calls)
+        .expect("iterator must not add allocation calls");
+    let saved_bytes = legacy
+        .requested_bytes
+        .checked_sub(iterator.requested_bytes)
+        .expect("iterator must not add requested bytes");
+    assert!(
+        saved_calls >= OPERATIONS * 5,
+        "must save at least five calls/build"
+    );
+    assert!(
+        saved_bytes >= OPERATIONS * 512,
+        "must save at least 512 requested bytes/build"
+    );
+    println!(
+        concat!(
+            "{{\"schema_version\":1,\"benchmark\":\"update_build/rich_mp/50\",",
+            "\"operations\":{},\"fixture_digest\":\"fnv1a64:{:016x}\",",
+            "\"fixture_len_bytes\":{},",
+            "\"legacy_allocation_calls\":{},\"legacy_requested_bytes\":{},",
+            "\"iterator_allocation_calls\":{},\"iterator_requested_bytes\":{},",
+            "\"saved_allocation_calls\":{},\"saved_requested_bytes\":{},",
+            "\"saved_allocation_calls_per_build\":{},",
+            "\"saved_requested_bytes_per_build\":{}}}"
+        ),
+        OPERATIONS,
+        digest,
+        expected_wire.len(),
+        legacy.allocation_calls,
+        legacy.requested_bytes,
+        iterator.allocation_calls,
+        iterator.requested_bytes,
+        saved_calls,
+        saved_bytes,
+        saved_calls / OPERATIONS,
+        saved_bytes / OPERATIONS,
+    );
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
 fn run_validate_update_diagnostic() -> DiagnosticRow {
     let attrs = typical_attributes();
     validate_update_attributes(&attrs, true, true, true)
@@ -811,6 +950,7 @@ fn main() {
     attr_encode.write_json();
     attr_decode_revised.write_json();
     validate_update.write_json();
+    run_mp_build_iterator_diagnostic();
 }
 
 #[cfg(not(feature = "codec-allocation-diagnostics"))]

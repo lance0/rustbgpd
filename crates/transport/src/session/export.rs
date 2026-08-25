@@ -1326,17 +1326,16 @@ impl SessionExportProfile {
         nlri: ReachNlri<'_>,
         ipv4_mode: Ipv4UnicastMode,
     ) -> Result<ExactExportProbe, EncodeError> {
-        let mut attrs = base_attrs.to_vec();
-        attrs.push(PathAttribute::MpReachNlri(nlri.into_mp_reach(
+        let mp_reach = PathAttribute::MpReachNlri(nlri.into_mp_reach(
             afi,
             safi,
             next_hop,
             link_local_next_hop,
-        )));
-        let message = UpdateMessage::try_build(
+        ));
+        let message = UpdateMessage::try_build_from_attribute_iter(
             &[],
             &[],
-            &attrs,
+            base_attrs.iter().chain(std::iter::once(&mp_reach)),
             self.four_octet_as(),
             self.add_path_send((afi, safi)),
             ipv4_mode,
