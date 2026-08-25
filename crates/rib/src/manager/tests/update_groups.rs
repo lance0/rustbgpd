@@ -6338,6 +6338,16 @@ fn register_direct_pcb_peer(
     export_policy: Option<PolicyChain>,
     encoder: Arc<dyn crate::update::ExactExportEncoder>,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
+    register_direct_pcb_peer_capacity(manager, peer, export_policy, encoder, 32)
+}
+
+fn register_direct_pcb_peer_capacity(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    export_policy: Option<PolicyChain>,
+    encoder: Arc<dyn crate::update::ExactExportEncoder>,
+    capacity: usize,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
     manager.handle_update(RibUpdate::SetPeerExportEncoder {
         peer,
         session_id: 0,
@@ -6351,7 +6361,7 @@ fn register_direct_pcb_peer(
         session_id: 0,
         local_role: Some(rustbgpd_wire::BgpRole::RouteServer),
     });
-    let (outbound_tx, mut outbound_rx) = mpsc::channel(32);
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(capacity);
     manager.handle_update(RibUpdate::PeerUp {
         peer,
         session_id: 0,
@@ -6392,20 +6402,27 @@ struct BatchedPcbFleet {
     reuses: Arc<AtomicUsize>,
 }
 
-/// Four grouped per-client-best members, each announcing an own /24;
+/// Grouped per-client-best members, each announcing an own /24;
 /// members 0 and 1 both announce `shared_prefix`, so the group's
 /// exception lane holds one runner-up. Setup envelopes are drained.
-fn batched_pcb_fleet(export_policy: Option<&PolicyChain>) -> BatchedPcbFleet {
+fn batched_pcb_fleet_n(export_policy: Option<&PolicyChain>, member_count: u16) -> BatchedPcbFleet {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
-    let members: Vec<IpAddr> = (1..=4)
-        .map(|host| IpAddr::V4(Ipv4Addr::new(10, 40, 0, host)))
+    let members: Vec<IpAddr> = (0..member_count)
+        .map(|index| {
+            IpAddr::V4(Ipv4Addr::new(
+                10,
+                40,
+                u8::try_from(index / 254).unwrap(),
+                u8::try_from(index % 254 + 1).unwrap(),
+            ))
+        })
         .collect();
     let mut receivers = Vec::new();
     for (index, &peer) in members.iter().enumerate() {
-        receivers.push(register_direct_pcb_peer(
+        receivers.push(register_direct_pcb_peer_capacity(
             &mut manager,
             peer,
             export_policy.cloned(),
@@ -6418,20 +6435,28 @@ fn batched_pcb_fleet(export_policy: Option<&PolicyChain>) -> BatchedPcbFleet {
                 probes: Arc::clone(&probes),
                 reuses: Arc::clone(&reuses),
             }),
+            usize::from(member_count) + 8,
         ));
     }
     for (index, &peer) in members.iter().enumerate() {
         let IpAddr::V4(source) = peer else {
             unreachable!()
         };
-        let index = u8::try_from(index).unwrap();
         distribute_direct_route(
             &mut manager,
             source,
-            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 110 + index, 0), 24),
+            Ipv4Prefix::new(
+                Ipv4Addr::new(
+                    203,
+                    u8::try_from(index / 256).unwrap(),
+                    u8::try_from(index % 256).unwrap(),
+                    0,
+                ),
+                24,
+            ),
         );
     }
-    let shared_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 199, 0), 24);
+    let shared_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     for &peer in &members[..2] {
         let IpAddr::V4(source) = peer else {
             unreachable!()
@@ -6451,6 +6476,10 @@ fn batched_pcb_fleet(export_policy: Option<&PolicyChain>) -> BatchedPcbFleet {
     }
 }
 
+fn batched_pcb_fleet(export_policy: Option<&PolicyChain>) -> BatchedPcbFleet {
+    batched_pcb_fleet_n(export_policy, 4)
+}
+
 fn batch_replacements(
     members: &[IpAddr],
     export_policy: &PolicyChain,
@@ -6464,26 +6493,62 @@ fn batch_replacements(
         .collect()
 }
 
+fn rpol_community_chain(community: u32) -> PolicyChain {
+    use rustbgpd_policy::NamedPolicy;
+    use rustbgpd_policy::rpol::RpolFile;
+    use rustbgpd_policy::sets::SetStore;
+
+    let mut prefixes = vec!["0.0.0.0/0 le 32".to_string()];
+    prefixes.extend((0..255).map(|index| format!("10.0.{index}.0/24")));
+    let source = format!(
+        "prefix-set all {{ {} }}\n\
+         policy export {{ term tag {{ if route.prefix in all {{ add community {}:{}; accept }} }} }}",
+        prefixes.join(", "),
+        community >> 16,
+        community & 0xffff
+    );
+    let compiled = RpolFile::parse(&source)
+        .expect("clean rpol")
+        .compile_policy("export", &[], &mut SetStore::new())
+        .expect("policy exists");
+    PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+        "export".to_string(),
+        Arc::new(compiled),
+    )])
+}
+
+fn detached_rpol_replacements(
+    members: &[IpAddr],
+    community: u32,
+) -> Vec<crate::update::PeerExportPolicyReplacement> {
+    let policy = rpol_community_chain(community);
+    batch_replacements(members, &policy)
+}
+
 fn authoritative_receipt_closes(r: &AuthoritativeTransitionReceipt) -> bool {
-    r.total_us
-        == r.remainder_us
-            + [
-                r.precondition_us,
-                r.registration_membership_us,
-                r.cohort_partition_us,
-                r.cohort_precheck_us,
-                r.destination_build_us,
-                r.inventory_build_us,
-                r.membership_commit_us,
-                r.filtered_scope_build_us,
-                r.member_emit_state_us,
-                r.cohort_finalize_us,
-                r.fallback_regroup_us,
-                r.distribution_us,
-                r.duplicate_fallback_us,
-            ]
-            .into_iter()
-            .sum::<u64>()
+    r.registration_membership_us
+        == r.registered_peer_source_membership_scan_us
+            + r.policy_compare_install_us
+            + r.destination_membership_us
+        && r.total_us
+            == r.remainder_us
+                + [
+                    r.precondition_us,
+                    r.registration_membership_us,
+                    r.cohort_partition_us,
+                    r.cohort_precheck_us,
+                    r.destination_build_us,
+                    r.inventory_build_us,
+                    r.membership_commit_us,
+                    r.filtered_scope_build_us,
+                    r.member_emit_state_us,
+                    r.cohort_finalize_us,
+                    r.fallback_regroup_us,
+                    r.distribution_us,
+                    r.duplicate_fallback_us,
+                ]
+                .into_iter()
+                .sum::<u64>()
 }
 
 #[test]
@@ -6492,36 +6557,45 @@ fn authoritative_receipt_closes(r: &AuthoritativeTransitionReceipt) -> bool {
     reason = "four generations pin the full receipt and wire contract"
 )]
 fn batched_authoritative_four_generations_emit_exact_terminal_receipts() {
-    let a = community_chain(0xFDE8_0001);
-    let b = community_chain(0xFDE8_0002);
-    let mut fleet = batched_pcb_fleet(Some(&a));
-    for (policy, community) in [
-        (&b, 0xFDE8_0002),
-        (&a, 0xFDE8_0001),
-        (&b, 0xFDE8_0002),
-        (&a, 0xFDE8_0001),
-    ] {
+    let a = rpol_community_chain(0xFDE8_0001);
+    let b = rpol_community_chain(0xFDE8_0002);
+    let mut fleet = batched_pcb_fleet_n(Some(&a), 320);
+    for (generation, (policy, community, detached)) in [
+        (&b, 0xFDE8_0002, false),
+        (&b, 0xFDE8_0002, false),
+        (&b, 0xFDE8_0002, true),
+        (&a, 0xFDE8_0001, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let before = fleet.manager.authoritative_transition_receipts.len();
+        let replacements = if detached {
+            detached_rpol_replacements(&fleet.members, community)
+        } else {
+            batch_replacements(&fleet.members, policy)
+        };
         fleet
             .manager
-            .apply_export_policy_replacements_synchronously(batch_replacements(
-                &fleet.members,
-                policy,
-            ))
+            .apply_export_policy_replacements_synchronously(replacements)
             .unwrap();
         assert_eq!(
             fleet.manager.authoritative_transition_receipts.len(),
             before + 1
         );
         let r = &fleet.manager.authoritative_transition_receipts[before];
-        assert_eq!((r.outcome, r.classification), ("committed", "shared"));
+        let changed = matches!(generation, 0 | 3);
+        assert_eq!(
+            (r.outcome, r.classification),
+            ("committed", if changed { "shared" } else { "fallback" })
+        );
         assert_eq!(
             (r.input_peers, r.present_peers, r.shared_cohorts),
-            (4, 4, 1)
+            (320, 320, usize::from(changed))
         );
         assert_eq!(
             (r.shared_members, r.fallback_members, r.distribution_passes),
-            (4, 0, 1)
+            if changed { (320, 0, 1) } else { (0, 320, 1) }
         );
         assert_eq!(
             (
@@ -6530,7 +6604,11 @@ fn batched_authoritative_four_generations_emit_exact_terminal_receipts() {
                 r.destination_adoptions,
                 r.membership_moves
             ),
-            (1, 1, 0, 4)
+            if changed {
+                (1, 1, 0, 320)
+            } else {
+                (0, 0, 0, 0)
+            }
         );
         assert_eq!(
             (
@@ -6538,15 +6616,48 @@ fn batched_authoritative_four_generations_emit_exact_terminal_receipts() {
                 r.inventory_withdraws,
                 r.inventory_supplements
             ),
-            (5, 0, 1)
+            if changed { (321, 0, 1) } else { (0, 0, 0) }
         );
         assert_eq!(
             (r.filtered_scope_prefixes, r.filtered_scope_member_visits),
-            (5, 20)
+            if changed { (321, 102_720) } else { (0, 0) }
         );
         assert_eq!(
             (r.emits_attempted, r.emits_succeeded, r.emits_degraded),
-            (4, 4, 0)
+            if changed { (320, 320, 0) } else { (0, 0, 0) }
+        );
+        assert_eq!(
+            (
+                r.policy_equality_attempts,
+                r.policy_equality_equal,
+                r.policy_equality_changed,
+                r.membership_grouped,
+                r.membership_ungrouped
+            ),
+            if changed {
+                (320, 0, 320, 320, 0)
+            } else {
+                (320, 320, 0, 320, 0)
+            }
+        );
+        assert_eq!(
+            (
+                r.rpol_shared_backing,
+                r.rpol_detached_backing,
+                r.detached_prefix_set_entries
+            ),
+            match generation {
+                1 => (320, 0, 0),
+                _ => (0, 320, 81_920),
+            }
+        );
+        assert_eq!(
+            (r.intern_candidates, r.intern_hits, r.intern_misses),
+            match generation {
+                0 => (639, 319, 1),
+                3 => (320, 320, 0),
+                _ => (640, 320, 0),
+            }
         );
         assert_eq!(
             (
@@ -6577,7 +6688,14 @@ fn batched_authoritative_four_generations_emit_exact_terminal_receipts() {
             .peer;
         for (peer, receiver) in fleet.members.iter().zip(&mut fleet.receivers) {
             let updates: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
-            assert_eq!(updates.len(), if *peer == winner { 2 } else { 1 });
+            assert_eq!(
+                updates.len(),
+                if changed {
+                    if *peer == winner { 2 } else { 1 }
+                } else {
+                    0
+                }
+            );
             assert!(updates.iter().flat_map(|update| update.announce.iter()).all(|route| {
                 route.attributes.iter().any(|attribute| {
                     matches!(attribute, PathAttribute::Communities(values) if values.contains(&community))

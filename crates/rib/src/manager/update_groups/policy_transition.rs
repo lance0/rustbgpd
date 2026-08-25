@@ -227,7 +227,22 @@ impl RibManager {
         peer: IpAddr,
     ) -> GroupMembership {
         let chain = self.export_policy_for(peer).cloned();
-        self.compute_update_group_membership_for_policy(peer, chain.as_ref())
+        self.compute_update_group_membership_for_policy(peer, chain.as_ref(), None)
+    }
+
+    pub(in crate::manager) fn compute_update_group_membership_with_receipt(
+        &mut self,
+        peer: IpAddr,
+        receipt: &mut crate::manager::AuthoritativeTransitionReceipt,
+    ) -> GroupMembership {
+        let chain = self.export_policy_for(peer).cloned();
+        let membership =
+            self.compute_update_group_membership_for_policy(peer, chain.as_ref(), Some(receipt));
+        match membership {
+            GroupMembership::Grouped(_) => receipt.membership_grouped += 1,
+            _ => receipt.membership_ungrouped += 1,
+        }
+        membership
     }
 
     /// Classify a prospective policy without changing the peer's installed
@@ -237,6 +252,7 @@ impl RibManager {
         &mut self,
         peer: IpAddr,
         chain: Option<&PolicyChain>,
+        receipt: Option<&mut crate::manager::AuthoritativeTransitionReceipt>,
     ) -> GroupMembership {
         // Differential-oracle hook: force every peer onto the per-peer
         // fallback path so identical scenarios can be compared grouped
@@ -280,7 +296,7 @@ impl RibManager {
 
         // Clone released before the &mut intern below; chains are small
         // and this runs at config/session-lifecycle frequency only.
-        let chain_idx = chain.map(|chain| self.update_groups.intern_chain(chain));
+        let chain_idx = chain.map(|chain| self.update_groups.intern_chain(chain, receipt));
         let key = GroupKey {
             chain: chain_idx,
             target_is_ebgp: fingerprint.target_is_ebgp,
@@ -324,7 +340,7 @@ impl RibManager {
             return None;
         }
         let GroupMembership::Grouped(destination) =
-            self.compute_update_group_membership_for_policy(peer, policy)
+            self.compute_update_group_membership_for_policy(peer, policy, None)
         else {
             return None;
         };

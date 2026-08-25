@@ -354,9 +354,24 @@ pub(super) struct UpdateGroupRegistry {
 
 impl UpdateGroupRegistry {
     /// Intern a chain by content, returning its stable index.
-    fn intern_chain(&mut self, chain: &PolicyChain) -> usize {
-        if let Some(idx) = self.chains.iter().position(|c| c == chain) {
-            return idx;
+    fn intern_chain(
+        &mut self,
+        chain: &PolicyChain,
+        mut receipt: Option<&mut super::AuthoritativeTransitionReceipt>,
+    ) -> usize {
+        for (idx, candidate) in self.chains.iter().enumerate() {
+            if let Some(r) = receipt.as_deref_mut() {
+                r.intern_candidates += 1;
+            }
+            if candidate == chain {
+                if let Some(r) = receipt {
+                    r.intern_hits += 1;
+                }
+                return idx;
+            }
+        }
+        if let Some(r) = receipt {
+            r.intern_misses += 1;
         }
         self.chains.push(chain.clone());
         self.chains.len() - 1

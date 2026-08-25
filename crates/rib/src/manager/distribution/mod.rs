@@ -3060,6 +3060,9 @@ impl RibManager {
         info!(target: "authoritative_batch_phase", outcome=r.outcome, classification=r.classification,
             failure_stage=r.failure_stage, total_us=r.total_us, remainder_us=r.remainder_us,
             precondition_us=r.precondition_us, registration_membership_us=r.registration_membership_us,
+            registered_peer_source_membership_scan_us=r.registered_peer_source_membership_scan_us,
+            policy_compare_install_us=r.policy_compare_install_us,
+            destination_membership_us=r.destination_membership_us,
             cohort_partition_us=r.cohort_partition_us, cohort_precheck_us=r.cohort_precheck_us,
             destination_build_us=r.destination_build_us, inventory_build_us=r.inventory_build_us,
             membership_commit_us=r.membership_commit_us, filtered_scope_build_us=r.filtered_scope_build_us,
@@ -3081,6 +3084,15 @@ impl RibManager {
             dirty_before=r.dirty_before, dirty_after=r.dirty_after,
             pending_before=r.pending_before, pending_after=r.pending_after,
             groups_before=r.groups_before, groups_after=r.groups_after,
+            policy_equality_attempts=r.policy_equality_attempts,
+            policy_equality_equal=r.policy_equality_equal,
+            policy_equality_changed=r.policy_equality_changed,
+            rpol_shared_backing=r.rpol_shared_backing,
+            rpol_detached_backing=r.rpol_detached_backing,
+            detached_prefix_set_entries=r.detached_prefix_set_entries,
+            intern_candidates=r.intern_candidates, intern_hits=r.intern_hits,
+            intern_misses=r.intern_misses, membership_grouped=r.membership_grouped,
+            membership_ungrouped=r.membership_ungrouped,
             "authoritative_batch_phase");
         #[cfg(test)]
         self.authoritative_transition_receipts.push(r);
@@ -3162,35 +3174,70 @@ impl RibManager {
                 n_skipped_unregistered += 1;
             }
         }
-
         // Previous memberships, captured before any mutation.
         let previous: Vec<Option<usize>> = present
             .iter()
             .map(|replacement| self.grouped_member_of(replacement.peer))
             .collect();
+        receipt.registered_peer_source_membership_scan_us =
+            u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let phase = std::time::Instant::now();
         // Install the new chains (content-equal INSTANCE guard — see
         // `replace_peer_export_policy_synchronously` for the ADR-0096
         // term-hit rationale), then classify each member's destination.
         for replacement in &present {
-            if self.peer_export_policies.get(&replacement.peer) != Some(&replacement.export_policy)
-            {
+            receipt.policy_equality_attempts += 1;
+            let equal = self.peer_export_policies.get(&replacement.peer)
+                == Some(&replacement.export_policy);
+            if equal {
+                receipt.policy_equality_equal += 1;
+            } else {
+                receipt.policy_equality_changed += 1;
+            }
+            if let (Some(Some(old)), Some(new)) = (
+                self.peer_export_policies.get(&replacement.peer),
+                replacement.export_policy.as_ref(),
+            ) {
+                for (old_policy, new_policy) in old.policies.iter().zip(&new.policies) {
+                    if let (Some(old_rpol), Some(new_rpol)) = (&old_policy.rpol, &new_policy.rpol) {
+                        if std::sync::Arc::ptr_eq(old_rpol, new_rpol) {
+                            receipt.rpol_shared_backing += 1;
+                        } else {
+                            receipt.rpol_detached_backing += 1;
+                            receipt.detached_prefix_set_entries += new_rpol
+                                .prefix_sets
+                                .iter()
+                                .map(|set| set.entries().len())
+                                .sum::<usize>();
+                        }
+                    }
+                }
+            }
+            if !equal {
                 self.peer_export_policies
                     .insert(replacement.peer, replacement.export_policy.clone());
             }
         }
+        receipt.policy_compare_install_us =
+            u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let phase = std::time::Instant::now();
         let destinations: Vec<Option<usize>> = present
             .iter()
-            .map(
-                |replacement| match self.compute_update_group_membership(replacement.peer) {
+            .map(|replacement| {
+                match self.compute_update_group_membership_with_receipt(replacement.peer, receipt) {
                     super::update_groups::GroupMembership::Grouped(gid) => Some(gid),
                     _ => None,
-                },
-            )
+                }
+            })
             .collect();
+        receipt.destination_membership_us =
+            u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
         receipt.present_peers = present.len();
         receipt.skipped_peers = n_skipped_unregistered;
-        receipt.registration_membership_us =
-            u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
+        receipt.registration_membership_us = receipt
+            .registered_peer_source_membership_scan_us
+            .saturating_add(receipt.policy_compare_install_us)
+            .saturating_add(receipt.destination_membership_us);
 
         // Candidate cohorts: batched movers of one source group whose
         // destinations agree. A source group with mixed or ungrouped
