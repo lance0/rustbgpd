@@ -110,7 +110,7 @@ use rustbgpd_wire::{
     AsPath, AsPathSegment, Ipv4NlriEntry, Ipv4Prefix, Origin, PathAttribute, RouteRefreshMessage,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpSocket;
+use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::mpsc;
 
 const CHURNERS: u32 = 8;
@@ -162,6 +162,147 @@ const TRIP_TEARDOWN_WINDOW: Duration = Duration::from_secs(60);
 const TRIP_ATTEMPT_WINDOW: Duration = Duration::from_secs(30);
 const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(15);
 const PRE_CHURN_EVIDENCE_TIMEOUT: Duration = Duration::from_secs(60);
+const METRICS_DEADLINE: Duration = Duration::from_secs(5);
+const METRICS_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct NotificationDepth {
+    current: u64,
+    high: u64,
+}
+
+fn metric_value(body: &str, name: &str) -> Result<u64, String> {
+    let mut found = None;
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split_ascii_whitespace();
+        let Some(metric) = fields.next() else {
+            continue;
+        };
+        if metric.starts_with(name) && metric.as_bytes().get(name.len()) == Some(&b'{') {
+            return Err(format!("labeled {name} sample is forbidden"));
+        }
+        if metric != name {
+            continue;
+        }
+        let value = fields
+            .next()
+            .ok_or_else(|| format!("missing value for {name}"))?;
+        if fields.next().is_some() || value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(format!(
+                "{name} must be one unlabeled unsigned integer without timestamp"
+            ));
+        }
+        let value = value
+            .parse()
+            .map_err(|_| format!("{name} is out of range"))?;
+        if found.replace(value).is_some() {
+            return Err(format!("duplicate {name}"));
+        }
+    }
+    found.ok_or_else(|| format!("missing {name}"))
+}
+
+async fn fetch_notification_depth(
+    addr: SocketAddr,
+    deadline: Instant,
+) -> Result<NotificationDepth, String> {
+    let work = async {
+        let mut stream = TcpStream::connect(addr).await.map_err(|e| e.to_string())?;
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut response = Vec::new();
+        stream
+            .take((METRICS_MAX_BYTES + 1) as u64)
+            .read_to_end(&mut response)
+            .await
+            .map_err(|e| e.to_string())?;
+        if response.len() > METRICS_MAX_BYTES {
+            return Err("metrics response exceeds 32 MiB".into());
+        }
+        let text = std::str::from_utf8(&response).map_err(|_| "metrics response is not UTF-8")?;
+        let (head, body) = text
+            .split_once("\r\n\r\n")
+            .ok_or("malformed HTTP response")?;
+        let mut lines = head.lines();
+        let status = lines.next().ok_or("missing HTTP status")?;
+        if status.split_ascii_whitespace().nth(1) != Some("200") {
+            return Err("metrics HTTP status is not 200".into());
+        }
+        let mut length = None;
+        for line in lines {
+            let (key, value) = line.split_once(':').ok_or("malformed HTTP header")?;
+            if key.eq_ignore_ascii_case("transfer-encoding") {
+                return Err("chunked metrics response is forbidden".into());
+            }
+            if key.eq_ignore_ascii_case("content-length")
+                && length
+                    .replace(
+                        value
+                            .trim()
+                            .parse::<usize>()
+                            .map_err(|_| "invalid Content-Length")?,
+                    )
+                    .is_some()
+            {
+                return Err("duplicate Content-Length".into());
+            }
+        }
+        if length != Some(body.len()) {
+            return Err("truncated or overlong metrics body".into());
+        }
+        let current = metric_value(body, "bgp_session_notification_outstanding")?;
+        let high = metric_value(body, "bgp_session_notification_outstanding_high_watermark")?;
+        if current > high {
+            return Err("current exceeds high-water mark".into());
+        }
+        Ok(NotificationDepth { current, high })
+    };
+    tokio::time::timeout_at(deadline.into(), work)
+        .await
+        .map_err(|_| "metrics checkpoint exceeded 5 seconds".to_string())?
+}
+
+async fn notification_checkpoint(
+    addr: SocketAddr,
+    checkpoint: (&str, u32, usize, usize, u32, u64),
+    prior_high: &mut u64,
+) {
+    let (stage, round, sessions, completions, target, parse_errors) = checkpoint;
+    let started = Instant::now();
+    let deadline = started + METRICS_DEADLINE;
+    loop {
+        let depth = fetch_notification_depth(addr, deadline)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("FAIL: session notification metrics: {e}");
+                std::process::exit(1)
+            });
+        if depth.high == 0 || depth.high < *prior_high {
+            eprintln!("FAIL: session notification high-water is zero or decreased");
+            std::process::exit(1);
+        }
+        *prior_high = depth.high;
+        if depth.current == 0 {
+            println!("session_notification_receipt,stage={stage},round={round},sessions={sessions},completions={completions},target={target},current=0,high_watermark={},parse_errors={parse_errors},drain_wait_us={}", depth.high, started.elapsed().as_micros());
+            return;
+        }
+        if Instant::now() >= deadline {
+            eprintln!("FAIL: session notification dequeue did not drain within 5 seconds");
+            std::process::exit(1);
+        }
+        tokio::time::sleep(
+            Duration::from_millis(25).min(deadline.saturating_duration_since(Instant::now())),
+        )
+        .await;
+    }
+}
 
 /// iBGP-RR mode (`RELOADSTALL_IBGP_RR_ASN`): 0 = off, the frozen eBGP
 /// route-server contract. Set exactly once in `main` before the runtime
@@ -1053,7 +1194,14 @@ fn disarm_survivors(ctx: &Ctx, first: usize) {
 /// `--flapstorm K` mode: the alternative to the reload loop (see the crate
 /// doc). The flapped cohort is the first K stubs — never the churners,
 /// which are the last CHURNERS.
-async fn run_flapstorm(ctx: &Arc<Ctx>, stubs: &mut [Stub], k: u32, pid: i32) {
+async fn run_flapstorm(
+    ctx: &Arc<Ctx>,
+    stubs: &mut [Stub],
+    k: u32,
+    pid: i32,
+    metrics_addr: Option<SocketAddr>,
+    prior_high: &mut u64,
+) {
     let n_peers = ctx.n_peers;
     let total = n_peers * ctx.per_peer;
     let flap_prefixes = k * ctx.per_peer;
@@ -1065,6 +1213,22 @@ async fn run_flapstorm(ctx: &Arc<Ctx>, stubs: &mut [Stub], k: u32, pid: i32) {
          rss_mib,sessions_up,parse_errors"
     );
     for round in 1..=FLAP_ROUNDS {
+        if let Some(addr) = metrics_addr {
+            let up = ctx
+                .obs
+                .iter()
+                .filter(|o| o.established.load(Ordering::Relaxed))
+                .count();
+            let errors = ctx.parse_errors.load(Ordering::Relaxed);
+            if up != 700 || errors != 0 {
+                eprintln!(
+                    "FAIL: round-start receipt integrity: sessions={up}, parse_errors={errors}"
+                );
+                std::process::exit(1);
+            }
+            notification_checkpoint(addr, ("round_start", round, up, 0, 0, errors), prior_high)
+                .await;
+        }
         // Arm before closing so no withdrawal is missed.
         arm_survivors(ctx, k, flap_prefixes, total, FLAP_TRACK_WITHDRAWS);
         println!("flap {round} close wall_us={}", wall_us());
@@ -1078,6 +1242,35 @@ async fn run_flapstorm(ctx: &Arc<Ctx>, stubs: &mut [Stub], k: u32, pid: i32) {
             observer.established.store(false, Ordering::Relaxed);
         }
         wait_flap_completion(ctx, k as usize, round, "withdraw").await;
+        if let Some(addr) = metrics_addr {
+            let up = ctx
+                .obs
+                .iter()
+                .filter(|o| o.established.load(Ordering::Relaxed))
+                .count();
+            let completed = survivors
+                .clone()
+                .filter(|&i| completion_us(ctx, i).is_some())
+                .count();
+            let errors = ctx.parse_errors.load(Ordering::Relaxed);
+            if up != 650 || completed != 650 || errors != 0 {
+                eprintln!("FAIL: withdraw receipt integrity: sessions={up}, completions={completed}, parse_errors={errors}");
+                std::process::exit(1);
+            }
+            notification_checkpoint(
+                addr,
+                (
+                    "withdraw_drained",
+                    round,
+                    up,
+                    completed,
+                    flap_prefixes,
+                    errors,
+                ),
+                prior_high,
+            )
+            .await;
+        }
         let withdraw_s: Vec<f64> = survivors
             .clone()
             .filter_map(|i| completion_us(ctx, i))
@@ -1148,6 +1341,29 @@ async fn run_flapstorm(ctx: &Arc<Ctx>, stubs: &mut [Stub], k: u32, pid: i32) {
                  sessions_up={up}/{n_peers}, parse_errors={parse_errors}"
             );
             std::process::exit(1);
+        }
+        if let Some(addr) = metrics_addr {
+            let completed = survivors
+                .clone()
+                .filter(|&i| completion_us(ctx, i).is_some())
+                .count();
+            if completed != 650 {
+                eprintln!("FAIL: reannounce receipt completions={completed}/650");
+                std::process::exit(1);
+            }
+            notification_checkpoint(
+                addr,
+                (
+                    "reannounce_drained",
+                    round,
+                    up,
+                    completed,
+                    flap_prefixes,
+                    parse_errors,
+                ),
+                prior_high,
+            )
+            .await;
         }
         println!(
             "flapstorm_csv,{round},{n_peers},{k},{total},{flap_prefixes},\
@@ -1615,6 +1831,20 @@ fn main() {
         std::env::var_os("RELOADSTALL_PRE_CHURN_EVIDENCE_DIR").map(PathBuf::from);
     let overlap_file = std::env::var_os("RELOADSTALL_OVERLAP_FILE").map(PathBuf::from);
     let received_view_file = std::env::var_os("RELOADSTALL_RECEIVED_VIEW_FILE").map(PathBuf::from);
+    let notification_metrics_addr = std::env::var("RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR")
+        .ok()
+        .map(|value| value.parse::<SocketAddr>())
+        .transpose()
+        .unwrap_or_else(|_| {
+            eprintln!("RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR must be a loopback SocketAddr with nonzero port");
+            std::process::exit(2);
+        });
+    if notification_metrics_addr.is_some_and(|addr| !addr.ip().is_loopback() || addr.port() == 0)
+        || notification_metrics_addr.is_some() && flapstorm.is_none()
+    {
+        eprintln!("RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR requires --flapstorm and a loopback SocketAddr with nonzero port");
+        std::process::exit(2);
+    }
     // Soak-mode knobs; every default reproduces the frozen one-shot contract.
     let cycle_quiesce_secs = env_u64("RELOADSTALL_CYCLE_QUIESCE_SECS", 20);
     let trip_every = u32::try_from(env_u64("RELOADSTALL_TRIP_EVERY", 0)).unwrap();
@@ -2019,7 +2249,19 @@ fn main() {
 
         // --- Flapstorm mode: an alternative to the reload loop. ---
         if let Some(k) = flapstorm {
-            run_flapstorm(&ctx, &mut stubs, k, pid).await;
+            let mut prior_high = 0;
+            if let Some(addr) = notification_metrics_addr {
+                if n_peers != 700 || total != 400_400 || k != 50 {
+                    eprintln!("RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR requires the 700-peer, 400400-prefix, 50-flap receipt shape");
+                    std::process::exit(2);
+                }
+                let up = ctx.obs.iter().filter(|o| o.established.load(Ordering::Relaxed)).count();
+                let completed = unique.iter().zip(&targets).filter(|(count, target)| count >= target).count();
+                let errors = ctx.parse_errors.load(Ordering::Relaxed);
+                if up != 700 || completed != 700 || errors != 0 { eprintln!("FAIL: initial receipt integrity: sessions={up}, completions={completed}, parse_errors={errors}"); std::process::exit(1); }
+                notification_checkpoint(addr, ("initial_drained", 0, up, completed, expected as u32, errors), &mut prior_high).await;
+            }
+            run_flapstorm(&ctx, &mut stubs, k, pid, notification_metrics_addr, &mut prior_high).await;
             println!("done rss_mib={}", rss_mib(pid));
             let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
             if parse_errors > 0 {
@@ -2369,6 +2611,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_metric_parser_fails_closed() {
+        let n = "bgp_session_notification_outstanding";
+        assert_eq!(metric_value(&format!("{n} 1\n"), n), Ok(1));
+        assert!(metric_value(&format!("{n}{{x=\"y\"}} 1\n{n} 1\n"), n).is_err());
+        assert!(metric_value(&format!("{n} 1\n{n} 2\n"), n).is_err());
+        for value in ["-1", "1.0", "1e2", "NaN", "1 2"] {
+            assert!(metric_value(&format!("{n} {value}\n"), n).is_err());
+        }
+    }
 
     fn evidence_test_dir(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

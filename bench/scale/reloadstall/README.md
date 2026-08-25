@@ -99,6 +99,13 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
   timestamps receipt of all `K` slices' withdrawals, the `K` reconnect after
   10 s and re-announce, and survivors timestamp re-announce completion.
   3 rounds, per-round percentiles plus `flapstorm_csv` records.
+- `RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR` — optional B2 receipt seam,
+  valid only with `--flapstorm`. It must be a loopback socket address with a
+  nonzero port. The exact 700-peer/400400-prefix/50-flap shape polls the
+  daemon's Prometheus endpoint at ten phase boundaries and emits
+  `session_notification_receipt` rows after the notification population has
+  reached zero. This proves dequeue accounting only: the monotonic lifetime
+  high-water value is not a per-round peak, capacity, latency, or bound.
 - `--convergence-only` — fail-closed capture mode. It requires `reloads=0`, `control_secs=0`, no flapstorm or
   reload command, an empty `RELOADSTALL_EVIDENCE_DIR`, and no `RELOADSTALL_PRE_CHURN_EVIDENCE_DIR`.
   It verifies exact table-minus-own-slice coverage, healthy sessions, and zero parse errors; signals `ready`;
