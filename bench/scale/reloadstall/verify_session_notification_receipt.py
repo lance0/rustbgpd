@@ -79,6 +79,7 @@ def verify(root):
     if not required <= paths or any(path not in required and path != "rustbgpd/rss.csv" and not path.startswith("rustbgpd/scenario/") for path in paths): raise ValueError("raw layout changed")
     if logs[2].read_text() != "pass\n": raise ValueError("raw status is not lowercase pass")
     raw_harness = logs[0].read_text(); extract = lambda prefix: "\n".join(line for line in raw_harness.splitlines() if line.startswith(prefix)) + "\n"
+    if parse_rows((root / "harness.log").read_text()) != parse_rows(raw_harness): raise ValueError("compact harness rows differ from raw harness log")
     if (root / "initial.csv").read_text() != extract("first_exact_bitmap,") or (root / "checkpoints.csv").read_text() != extract("session_notification_receipt,") or (root / "flapstorm.csv").read_text() != extract("flapstorm_csv,"): raise ValueError("compact CSV differs from raw harness log")
     text = "\n".join(path.read_text(errors="replace") for path in logs).lower()
     sends = len(re.findall(r"send[^\n]*(?:error|fail)|(?:error|fail)[^\n]*send", text)); correctness = sum(text.count(token) for token in ("panicked", "panic", "correctness error", "fail:"))
