@@ -52,7 +52,11 @@ pub fn malformed_attr_disposition(type_code: u8, is_ibgp: bool) -> ErrorDisposit
         | attr_type::AGGREGATOR
         | attr_type::AS4_PATH
         | attr_type::AS4_AGGREGATOR
-        | attr_type::BGP_LS => ErrorDisposition::AttributeDiscard,
+        | attr_type::BGP_LS
+        | attr_type::BFD_DISCRIMINATOR
+        | attr_type::NHC
+        | attr_type::PREFIX_SID
+        | attr_type::BIER => ErrorDisposition::AttributeDiscard,
         attr_type::LOCAL_PREF | attr_type::ORIGINATOR_ID | attr_type::CLUSTER_LIST if !is_ibgp => {
             ErrorDisposition::AttributeDiscard
         }

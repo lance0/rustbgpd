@@ -171,8 +171,20 @@ pub mod attr_type {
     pub const BGPSEC_PATH: u8 = 33;
     /// RFC 9234 §5: Only-to-Customer (OTC).
     pub const ONLY_TO_CUSTOMER: u8 = 35;
+    /// D-PATH (draft-ietf-bess-evpn-ipvpn-interworking).
+    pub const DOMAIN_PATH: u8 = 36;
+    /// RFC 9015: Service Function Path attribute.
+    pub const SFP: u8 = 37;
+    /// RFC 9026: BFD Discriminator attribute.
+    pub const BFD_DISCRIMINATOR: u8 = 38;
+    /// Next Hop Dependent Characteristics attribute.
+    pub const NHC: u8 = 39;
     /// RFC 8669: BGP Prefix-SID attribute.
     pub const PREFIX_SID: u8 = 40;
+    /// RFC 9793: BIER attribute.
+    pub const BIER: u8 = 41;
+    /// Edge Metadata Path Attribute.
+    pub const EDGE_METADATA: u8 = 42;
     /// RFC 6368: `ATTR_SET` attribute.
     pub const ATTR_SET: u8 = 128;
 }

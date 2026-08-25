@@ -5,6 +5,14 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- **Assigned attribute framing and class fences:** Added registry constants and
+  fail-closed Optional/Transitive class recognition for D-PATH, SFP, BFD
+  Discriminator, NHC, BIER, and Edge Metadata. Attributes 36-41 remain opaque
+  but now receive bounded syntax-only framing checks and their specified RFC
+  7606 dispositions; correct Edge Metadata is ignored as optional
+  non-transitive, including on egress. Partial and other class conflicts are
+  typed strict-decoder flag errors and revised treat-as-withdraw outcomes.
+
 - **MP framing and flags:** Visible truncated MP_REACH_NLRI /
   MP_UNREACH_NLRI attributes now return Optional Attribute Error with the exact
   received bytes, while incomplete ordinary attributes retain RFC 7606

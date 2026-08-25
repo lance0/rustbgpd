@@ -61,6 +61,60 @@ fn extended_attribute(flags: u8, code: u8, value: &[u8]) -> Vec<u8> {
     bytes
 }
 
+fn assigned_value(code: u8) -> Vec<u8> {
+    match code {
+        36 => vec![1, 0, 0, 0, 0, 0, 0, 0],
+        37 => vec![2, 0, 4, 1, 99, 0, 0],
+        38 => vec![1, 0, 0, 0, 1, 1, 4, 192, 0, 2, 1],
+        39 => vec![0, 1, 1, 4, 192, 0, 2, 1, 0, 1, 0, 0],
+        40 => vec![99, 0, 0],
+        41 => vec![0, 1, 0, 12, 0, 0, 0, 0, 0, 4, 0, 4, 192, 0, 2, 1],
+        42 => vec![0xaa],
+        _ => vec![0xde, 0xad, 0xbe, 0xef],
+    }
+}
+
+fn assigned_malformed(code: u8) -> Option<(Vec<u8>, ErrorDisposition)> {
+    match code {
+        36 => Some((vec![0; 8], ErrorDisposition::TreatAsWithdraw)),
+        37 => Some((vec![2, 0, 1, 1], ErrorDisposition::TreatAsWithdraw)),
+        38 => Some((vec![1, 0, 0, 0, 1], ErrorDisposition::AttributeDiscard)),
+        39 => Some((
+            vec![0, 1, 1, 4, 192, 0, 2, 1],
+            ErrorDisposition::AttributeDiscard,
+        )),
+        40 => Some((vec![1, 0, 6, 0], ErrorDisposition::AttributeDiscard)),
+        41 => Some((
+            vec![0, 1, 0, 8, 0, 0, 0, 0, 0, 2, 0, 1],
+            ErrorDisposition::AttributeDiscard,
+        )),
+        _ => None,
+    }
+}
+
+fn assigned_payload_contract(code: u8) -> &'static str {
+    match code {
+        36 => "non-empty sequence of nonzero-count domain segments, each exactly `1 + 7*n` octets",
+        37 => {
+            "exact one-octet-type/two-octet-length TLVs, at least one Hop TLV, and at least one exactly framed sub-TLV after every Hop service index"
+        }
+        38 => {
+            "five-octet base, exact one-octet-type/length optional TLVs, and a Source IP TLV of length 4 or 16"
+        }
+        39 => {
+            "AFI/SAFI/next-hop-length boundary followed by one or more exact two-octet-type/two-octet-length characteristic TLVs"
+        }
+        40 => {
+            "exact one-octet-type/two-octet-length TLVs; Label-Index length 7; Originator SRGB length `2 + nonzero*6`"
+        }
+        41 => {
+            "zero or more exact two-octet-type/length TLVs; known containers consume nested length framing only when their four-octet fixed prefix is present; semantic field shapes remain opaque"
+        }
+        42 => "no payload validation; exact registered class is dropped before value decoding",
+        _ => panic!("no assigned framing contract for code {code}"),
+    }
+}
+
 fn disposition(value: &str) -> ErrorDisposition {
     match value {
         "attribute-discard" => ErrorDisposition::AttributeDiscard,
@@ -312,14 +366,15 @@ fn assigned_and_unknown_behavior_fences_are_explicit() {
         .unwrap();
     assert!(aigp.attributes.is_empty() && aigp.malformed.is_empty());
 
-    let prefix_sid = attribute(0xc0, 40, &[1, 0, 0]);
+    let prefix_sid_value = assigned_value(40);
+    let prefix_sid = attribute(0xc0, 40, &prefix_sid_value);
     let decoded = decode_path_attributes_revised(&prefix_sid, true, false, &[]).unwrap();
     assert!(
         matches!(&decoded.attributes[..], [PathAttribute::Unknown(raw)] if raw.type_code == 40)
     );
     let mut emitted = Vec::new();
     encode_path_attributes(&decoded.attributes, &mut emitted, true, false).unwrap();
-    assert_eq!(emitted, attribute(0xe0, 40, &[1, 0, 0]));
+    assert_eq!(emitted, attribute(0xe0, 40, &prefix_sid_value));
 
     let unknown =
         decode_path_attributes_revised(&attribute(0x40, 200, &[0xaa]), true, false, &[]).unwrap();
@@ -368,9 +423,8 @@ fn assigned_unsupported_class_matrix_is_fail_closed_without_semantic_support() {
             transitive_conflict: ErrorDisposition::TreatAsWithdraw,
         },
     ];
-    let value = [0xde, 0xad, 0xbe, 0xef];
-
     for case in cases {
+        let value = assigned_value(case.code);
         let canonical = attribute(case.canonical, case.code, &value);
         let decoded = decode_path_attributes_revised(&canonical, true, false, &[]).unwrap();
         assert!(decoded.malformed.is_empty(), "canonical type {}", case.code);
@@ -438,8 +492,8 @@ fn assigned_unsupported_class_matrix_is_fail_closed_without_semantic_support() {
 
 #[test]
 fn assigned_unsupported_opaque_flags_and_neighboring_fences_stay_orthogonal() {
-    let value = [0xaa, 0xbb, 0xcc];
     for code in [23, 27, 40, 128] {
+        let value = assigned_value(code);
         for flags in [0xe0, 0xf0] {
             let input = if flags == 0xf0 {
                 extended_attribute(flags, code, &value)
@@ -475,5 +529,264 @@ fn assigned_unsupported_opaque_flags_and_neighboring_fences_stay_orthogonal() {
     assert_eq!(
         wrong_pmsi.malformed[0].disposition,
         ErrorDisposition::TreatAsWithdraw
+    );
+}
+
+#[test]
+fn assigned_rows_36_through_42_enforce_class_framing_and_disposition() {
+    for code in 36_u8..=42 {
+        let canonical = if code == 42 { 0x80 } else { 0xc0 };
+        let value = assigned_value(code);
+        let flag_inputs: &[u8] = if code == 42 { &[0x80] } else { &[0xc0, 0xe0] };
+        for (&input_flags, extended) in flag_inputs
+            .iter()
+            .flat_map(|flags| [(flags, false), (flags, true)])
+        {
+            let input = if extended {
+                extended_attribute(input_flags, code, &value)
+            } else {
+                attribute(input_flags, code, &value)
+            };
+            let strict = decode_path_attributes(&input, true, &[]).unwrap();
+            let revised = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
+            assert!(revised.malformed.is_empty(), "canonical type {code}");
+            if code == 42 {
+                assert!(strict.is_empty() && revised.attributes.is_empty());
+            } else {
+                let [PathAttribute::Unknown(raw)] = strict.as_slice() else {
+                    panic!("type {code} must remain opaque");
+                };
+                assert_eq!(raw.data.as_ref(), value);
+                assert_eq!(raw.flags, input[0]);
+                let mut emitted = Vec::new();
+                encode_path_attributes(&revised.attributes, &mut emitted, true, false).unwrap();
+                let mut expected = input.clone();
+                expected[0] |= 0x20;
+                assert_eq!(emitted, expected, "type {code} exact opaque egress");
+            }
+        }
+
+        for flags in [canonical ^ 0x80, canonical ^ 0x40, canonical ^ 0xc0] {
+            let input = attribute(flags, code, &value);
+            let error = decode_path_attributes(&input, true, &[]).unwrap_err();
+            assert!(
+                matches!(error, DecodeError::UpdateAttributeError { subcode, .. }
+                if subcode == update_subcode::ATTRIBUTE_FLAGS_ERROR)
+            );
+            let revised = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
+            assert!(revised.attributes.is_empty());
+            assert_eq!(revised.malformed.len(), 1);
+            assert_eq!(
+                revised.malformed[0].disposition,
+                ErrorDisposition::TreatAsWithdraw,
+                "wrong class type {code} flags {flags:#x}"
+            );
+        }
+    }
+
+    for code in [26_u8, 33, 42] {
+        let partial = attribute(0xa0, code, &assigned_value(code));
+        assert!(matches!(
+            decode_path_attributes(&partial, true, &[]),
+            Err(DecodeError::UpdateAttributeError { subcode, .. })
+                if subcode == update_subcode::ATTRIBUTE_FLAGS_ERROR
+        ));
+        let revised = decode_path_attributes_revised(&partial, true, false, &[]).unwrap();
+        assert_eq!(revised.malformed.len(), 1, "type {code}");
+        assert_eq!(
+            revised.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw,
+            "type {code}"
+        );
+    }
+    let mut defensive = Vec::new();
+    encode_path_attributes(
+        &[PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
+            flags: 0xe0,
+            type_code: 42,
+            data: bytes::Bytes::from_static(&[0xaa]),
+        })],
+        &mut defensive,
+        true,
+        false,
+    )
+    .unwrap();
+    assert!(defensive.is_empty(), "type 42 must never egress");
+
+    let wrong_class_and_payload = attribute(0x80, 38, &[1]);
+    assert!(matches!(
+        decode_path_attributes(&wrong_class_and_payload, true, &[]),
+        Err(DecodeError::UpdateAttributeError { subcode, .. })
+            if subcode == update_subcode::ATTRIBUTE_FLAGS_ERROR
+    ));
+    let revised =
+        decode_path_attributes_revised(&wrong_class_and_payload, true, false, &[]).unwrap();
+    assert_eq!(revised.malformed.len(), 1);
+    assert_eq!(
+        revised.malformed[0].disposition,
+        ErrorDisposition::TreatAsWithdraw
+    );
+
+    for code in 36_u8..=41 {
+        let (value, expected) = assigned_malformed(code).unwrap();
+        let input = attribute(0xc0, code, &value);
+        assert!(matches!(
+            decode_path_attributes(&input, true, &[]),
+            Err(DecodeError::UpdateAttributeError { subcode, .. })
+                if subcode == update_subcode::ATTRIBUTE_LENGTH_ERROR
+        ));
+        let revised = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
+        assert!(revised.attributes.is_empty());
+        assert_eq!(revised.malformed.len(), 1);
+        assert_eq!(revised.malformed[0].disposition, expected, "type {code}");
+    }
+
+    for (code, value) in [
+        (38_u8, vec![1, 0, 0, 0, 1, 2, 4, 192, 0, 2, 1]),
+        (38, vec![1, 0, 0, 0, 1, 1, 3, 192, 0, 2]),
+        (40, vec![1, 0, 6, 0, 0, 0, 0, 0, 0]),
+        (40, vec![3, 0, 7, 0, 0, 0, 0, 0, 0, 0]),
+    ] {
+        let revised =
+            decode_path_attributes_revised(&attribute(0xc0, code, &value), true, false, &[])
+                .unwrap();
+        assert!(revised.attributes.is_empty());
+        assert_eq!(revised.malformed.len(), 1);
+        assert_eq!(
+            revised.malformed[0].disposition,
+            ErrorDisposition::AttributeDiscard
+        );
+    }
+
+    let unknown_mode_without_source = [99, 0, 0, 0, 1, 2, 4, 0, 0, 0, 0];
+    let revised = decode_path_attributes_revised(
+        &attribute(0xc0, 38, &unknown_mode_without_source),
+        true,
+        false,
+        &[],
+    )
+    .unwrap();
+    assert!(revised.attributes.is_empty());
+    assert_eq!(revised.malformed.len(), 1);
+    assert_eq!(
+        revised.malformed[0].disposition,
+        ErrorDisposition::AttributeDiscard
+    );
+    let unknown_mode_with_source = [99, 0, 0, 0, 1, 1, 4, 192, 0, 2, 1];
+    let decoded = decode_path_attributes_revised(
+        &attribute(0xc0, 38, &unknown_mode_with_source),
+        true,
+        false,
+        &[],
+    )
+    .unwrap();
+    assert!(decoded.malformed.is_empty());
+    assert!(
+        matches!(decoded.attributes.as_slice(), [PathAttribute::Unknown(raw)] if raw.type_code == 38)
+    );
+
+    let semantically_invalid_bier = vec![
+        0, 1, 0, 1, 0xaa, // known BIER TLV without its fixed prefix
+        0, 4, 0, 1, 0xbb, // known nexthop with a semantic-invalid length
+        0, 99, 0, 1, 0xcc, // unknown TLV preserved
+    ];
+    let input = attribute(0xc0, 41, &semantically_invalid_bier);
+    let decoded = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
+    assert!(decoded.malformed.is_empty());
+    let mut emitted = Vec::new();
+    encode_path_attributes(&decoded.attributes, &mut emitted, true, false).unwrap();
+    let mut expected = input;
+    expected[0] |= 0x20;
+    assert_eq!(emitted, expected);
+    let empty =
+        decode_path_attributes_revised(&attribute(0xc0, 41, &[]), true, false, &[]).unwrap();
+    assert!(empty.malformed.is_empty());
+    assert!(
+        matches!(empty.attributes.as_slice(), [PathAttribute::Unknown(raw)] if raw.data.is_empty())
+    );
+}
+
+#[test]
+fn assigned_framing_documentation_matches_executable_cases() {
+    let framing = rows(
+        section(
+            "<!-- assigned-framing:start -->",
+            "<!-- assigned-framing:end -->",
+        ),
+        4,
+    );
+    assert_eq!(framing.len(), 7);
+    for (index, row) in framing.iter().enumerate() {
+        let code = u8::try_from(index + 36).unwrap();
+        assert_eq!(row[0], code.to_string());
+        let canonical = if code == 42 { 0x80 } else { 0xc0 };
+        assert!(row[1].contains(&format!("flags `{canonical:#04x}`")));
+        assert_eq!(
+            row[2],
+            assigned_payload_contract(code),
+            "payload contract drift for row {code}"
+        );
+        let expected = if matches!(code, 38..=41) {
+            "attribute-discard"
+        } else {
+            "treat-as-withdraw"
+        };
+        assert!(row[3].contains(expected), "row {code}");
+
+        let decoded = decode_path_attributes_revised(
+            &attribute(canonical, code, &assigned_value(code)),
+            true,
+            false,
+            &[],
+        )
+        .unwrap();
+        assert!(decoded.malformed.is_empty(), "documented valid row {code}");
+
+        if let Some((malformed, expected_disposition)) = assigned_malformed(code) {
+            let decoded = decode_path_attributes_revised(
+                &attribute(canonical, code, &malformed),
+                true,
+                false,
+                &[],
+            )
+            .unwrap();
+            assert_eq!(decoded.malformed.len(), 1);
+            assert_eq!(decoded.malformed[0].disposition, expected_disposition);
+        } else {
+            let decoded = decode_path_attributes_revised(
+                &attribute(0xc0, code, &assigned_value(code)),
+                true,
+                false,
+                &[],
+            )
+            .unwrap();
+            assert_eq!(decoded.malformed.len(), 1);
+            assert_eq!(
+                decoded.malformed[0].disposition,
+                ErrorDisposition::TreatAsWithdraw
+            );
+        }
+    }
+}
+
+#[test]
+fn deeply_nested_bier_framing_is_bounded_and_non_recursive() {
+    let mut nested = vec![0, 4, 0, 4, 192, 0, 2, 1];
+    for _ in 0..2_000 {
+        let mut container = vec![0, 2];
+        container.extend_from_slice(&u16::try_from(4 + nested.len()).unwrap().to_be_bytes());
+        container.extend_from_slice(&[0; 4]);
+        container.extend_from_slice(&nested);
+        nested = container;
+    }
+    let mut value = vec![0, 1];
+    value.extend_from_slice(&u16::try_from(4 + nested.len()).unwrap().to_be_bytes());
+    value.extend_from_slice(&[0; 4]);
+    value.extend_from_slice(&nested);
+    let input = extended_attribute(0xc0, 41, &value);
+    let decoded = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
+    assert!(decoded.malformed.is_empty());
+    assert!(
+        matches!(decoded.attributes.as_slice(), [PathAttribute::Unknown(raw)] if raw.type_code == 41)
     );
 }
