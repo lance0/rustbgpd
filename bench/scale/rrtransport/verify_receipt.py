@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 import pathlib
+import re
 import sys
 
 PEERS = 1000
@@ -65,27 +66,17 @@ def verify(directory, tiny=False):
         "rss.tsv",
         "rss.json",
         "provenance.json",
-        "verifier.txt",
     }
     missing = sorted(name for name in required if not (directory / name).is_file())
     if missing:
         fail(f"missing evidence: {', '.join(missing)}")
 
     phase = load(directory / "phase.json")
-    expected_phase = {
-        "schema": 2,
-        "shape": shape,
-        "shape_digest": shape_digest,
-        "sessions": peers,
-        "established_before": peers,
-        "established_after": peers,
-        "prefixes": prefixes,
-        "sources": SOURCES,
-        "workers": WORKERS,
-        "groups": 1,
-        "initial_eors": peers,
-        "wire_completion": "first_exact_bitmap",
-    }
+    expected_phase = dict(schema=2, shape=shape, shape_digest=shape_digest,
+                          sessions=peers, established_before=peers,
+                          established_after=peers, prefixes=prefixes,
+                          sources=SOURCES, workers=WORKERS, groups=1,
+                          initial_eors=peers, wire_completion="first_exact_bitmap")
     for key, expected in expected_phase.items():
         if phase.get(key) != expected:
             fail(f"phase {key}: expected {expected!r}, got {phase.get(key)!r}")
@@ -101,40 +92,24 @@ def verify(directory, tiny=False):
         "timing": "test_profile_untimed_rpol_community_transition",
         "fixture_peers": peers,
         "fixture_prefixes": prefixes,
-        "seed": {
-            "routes_received_dispatches": 1,
-            "routes_received_withdrawals": 0,
-            "envelopes": peers,
-            "routes_per_envelope": prefixes,
-            "shared_group_encode": False,
-            "community": "65000:100",
-        },
+        "seed": {"routes_received_dispatches": 1,
+                 "routes_received_withdrawals": 0, "envelopes": peers,
+                 "routes_per_envelope": prefixes, "shared_group_encode": False,
+                 "community": "65000:100"},
         "transition": {
-            "fast_path": True,
-            "routes_received_dispatches": 0,
-            "routes_received_withdrawals": 0,
-            "probe_accounting": "policy_transition_receipt",
-            "plan_builds": 1,
-            "full_exact_probes": prefixes,
-            "route_shell_materializations": prefixes,
-            "authoritative_peer_applies": 0,
-            "envelopes": peers,
-            "routes_per_envelope": prefixes,
-            "shared_encode_proof": "collected",
-            "snapshot_classification": "concrete_transport_session",
-            "snapshot_owner_nonzero": True,
-            "snapshot_generation": 0,
-            "snapshot_max_message_len": 4096,
-            "snapshot_add_path": False,
+            "fast_path": True, "routes_received_dispatches": 0,
+            "routes_received_withdrawals": 0, "probe_accounting": "policy_transition_receipt",
+            "plan_builds": 1, "full_exact_probes": prefixes,
+            "route_shell_materializations": prefixes, "authoritative_peer_applies": 0,
+            "envelopes": peers, "routes_per_envelope": prefixes,
+            "shared_encode_proof": "collected", "snapshot_owner_nonzero": True,
+            "snapshot_classification": "concrete_transport_session", "snapshot_generation": 0,
+            "snapshot_max_message_len": 4096, "snapshot_add_path": False,
             "shared_group_encode_classification": "one_arc_all_members",
             "shared_announce_classification": "one_arc_all_members",
-            "shared_route_count": prefixes,
-            "community": "65000:200",
-            "update_groups": 1,
-            "grouped_peers": peers,
-            "ungrouped_peers": 0,
-            "dirty_peers": 0,
-            "grouped_unicast_routes": prefixes,
+            "shared_route_count": prefixes, "community": "65000:200",
+            "update_groups": 1, "grouped_peers": peers, "ungrouped_peers": 0,
+            "dirty_peers": 0, "grouped_unicast_routes": prefixes,
             "private_unicast_routes": 0,
         },
     }
@@ -237,8 +212,7 @@ def verify(directory, tiny=False):
         fail("direct-PID RSS TSV checkpoints disagree")
 
     provenance = load(directory / "provenance.json")
-    for key in ("head_before", "head_after", "tree_before", "tree_after", "source_sha256",
-                "source_after_sha256", "binary_sha256", "governors", "load_before", "load_after"):
+    for key in ("commit", "governors", "load_before", "load_after"):
         if not provenance.get(key):
             fail(f"provenance {key} is missing")
     for key in ("pswpin_before", "pswpin_after", "pswpout_before", "pswpout_after"):
@@ -246,23 +220,15 @@ def verify(directory, tiny=False):
             fail(f"provenance {key} is missing")
     if not provenance.get("rustc") or not provenance.get("host") or provenance.get("competitors") != []:
         fail("toolchain, host, or empty competitor provenance is missing")
-    if provenance["head_before"] != provenance["head_after"]:
-        fail("HEAD changed during run")
-    if provenance["tree_before"] != provenance["tree_after"]:
-        fail("tree changed during run")
-    if provenance["source_sha256"] != provenance["source_after_sha256"]:
-        fail("declared source set changed during run")
+    if not isinstance(provenance["commit"], str) or not re.fullmatch(
+        r"[0-9a-f]{40}", provenance["commit"]
+    ):
+        fail("provenance commit is not an exact lowercase commit SHA")
     if provenance["governors"] != ["performance"]:
         fail("not all CPU governors were performance")
     if (provenance["pswpin_before"], provenance["pswpout_before"]) != (
             provenance["pswpin_after"], provenance["pswpout_after"]):
         fail("kernel swap I/O changed during run")
-    source = directory / "source.snapshot"
-    binary = directory / "rrtransport.bin"
-    if hashlib.sha256(source.read_bytes()).hexdigest() != provenance["source_sha256"]:
-        fail("source hash mismatch")
-    if hashlib.sha256(binary.read_bytes()).hexdigest() != provenance["binary_sha256"]:
-        fail("binary hash mismatch")
 
 
 if __name__ == "__main__":

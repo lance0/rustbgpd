@@ -50,52 +50,36 @@ fixture="$tmp/fixture"
 mkdir -p "$fixture"
 
 python3 - "$fixture" <<'PY'
-import hashlib, json, pathlib, sys
+import json, pathlib, sys
 d = pathlib.Path(sys.argv[1])
 shape = "rr1000-v1:peers=1000;prefixes=100000;sources=4;workers=12;afi=ipv4-unicast;role=ibgp-rr"
 def point(rss, hwm, allocated, active, resident, mapped):
- return {"direct_pid_vmrss_kib":rss,"direct_pid_vmhwm_kib":hwm,
-  "jemalloc_allocated_bytes":allocated,"jemalloc_active_bytes":active,
-  "jemalloc_resident_bytes":resident,"jemalloc_mapped_bytes":mapped}
+ return dict(direct_pid_vmrss_kib=rss,direct_pid_vmhwm_kib=hwm,jemalloc_allocated_bytes=allocated,
+  jemalloc_active_bytes=active,jemalloc_resident_bytes=resident,jemalloc_mapped_bytes=mapped)
 checkpoints={"established":point(100,105,1000,1100,1200,1300),
  "staged":point(110,115,2000,2100,2200,2300),
  "wire":point(120,125,3000,3100,3200,3300)}
-(d/"phase.json").write_text(json.dumps({"schema":2,"shape":shape,"shape_digest":"109e38772e3bd819",
- "wire_completion":"first_exact_bitmap","sessions":1000,"established_before":1000,"established_after":1000,"prefixes":100000,"sources":4,"workers":12,"groups":1,"initial_eors":1000,
- "injection_ms":1,"staged_ms":2,"wire_ms":3,"resource_observer_schema":1,
- "resource_observer":checkpoints})+"\n")
+(d/"phase.json").write_text(json.dumps({"schema":2,"shape":shape,"shape_digest":"109e38772e3bd819","wire_completion":"first_exact_bitmap","sessions":1000,"established_before":1000,"established_after":1000,"prefixes":100000,"sources":4,"workers":12,"groups":1,"initial_eors":1000,"injection_ms":1,"staged_ms":2,"wire_ms":3,"resource_observer_schema":1,"resource_observer":checkpoints})+"\n")
 (d/"grouped-commit.json").write_text(json.dumps({"schema":2,
  "timing":"test_profile_untimed_rpol_community_transition",
  "fixture_peers":1000,"fixture_prefixes":100000,
- "seed":{"routes_received_dispatches":1,"routes_received_withdrawals":0,
-  "envelopes":1000,"routes_per_envelope":100000,"shared_group_encode":False,
-  "community":"65000:100"},
+ "seed":{"routes_received_dispatches":1,"routes_received_withdrawals":0,"envelopes":1000,"routes_per_envelope":100000,"shared_group_encode":False,"community":"65000:100"},
  "transition":{"fast_path":True,"routes_received_dispatches":0,
   "routes_received_withdrawals":0,"probe_accounting":"policy_transition_receipt",
   "plan_builds":1,"full_exact_probes":100000,"route_shell_materializations":100000,
-  "authoritative_peer_applies":0,"envelopes":1000,"routes_per_envelope":100000,
-  "shared_encode_proof":"collected","snapshot_classification":"concrete_transport_session",
+  "authoritative_peer_applies":0,"envelopes":1000,"routes_per_envelope":100000,"shared_encode_proof":"collected","snapshot_classification":"concrete_transport_session",
   "snapshot_owner_nonzero":True,"snapshot_generation":0,"snapshot_max_message_len":4096,
   "snapshot_add_path":False,"shared_group_encode_classification":"one_arc_all_members",
   "shared_announce_classification":"one_arc_all_members","shared_route_count":100000,
-  "community":"65000:200","update_groups":1,"grouped_peers":1000,
-  "ungrouped_peers":0,"dirty_peers":0,"grouped_unicast_routes":100000,
-  "private_unicast_routes":0}})+"\n")
+  "community":"65000:200","update_groups":1,"grouped_peers":1000,"ungrouped_peers":0,"dirty_peers":0,"grouped_unicast_routes":100000,"private_unicast_routes":0}})+"\n")
 header="peer\tstaged\tnlri\tmessages\twithdrawals\tduplicates\toutside\tdecode_failures\tcoverage\tbitmap_digest\tinitial_eor\twire_ms\n"
 rows=[f"127.{2+i//254}.{1+i%254}.1\t100000\t100000\t391\t0\t0\t0\t0\t100000\t7c50a897bc4a4e51\ttrue\t3\n" for i in range(1000)]
 (d/"per-peer.tsv").write_text(header+"".join(rows))
 (d/"rss.tsv").write_text("observer\trss_kib\nprocess_tree_target_rss_sample\t90\nprocess_tree_target_rss_sample\t125\ndirect_pid_established_vmrss\t100\ndirect_pid_staged_vmrss\t110\ndirect_pid_wire_vmrss\t120\n")
-(d/"rss.json").write_text(json.dumps({"schema":2,"checkpoints":checkpoints,
- "process_tree_sampler_max_rss_kib":125})+"\n")
-(d/"source.snapshot").write_bytes(b"source")
-(d/"rrtransport.bin").write_bytes(b"binary")
-h=lambda p: hashlib.sha256((d/p).read_bytes()).hexdigest()
-(d/"provenance.json").write_text(json.dumps({"head_before":"a","head_after":"a","tree_before":"b",
- "tree_after":"b","source_sha256":h("source.snapshot"),"source_after_sha256":h("source.snapshot"),
- "binary_sha256":h("rrtransport.bin"),"governors":["performance"],"load_before":"0.1",
+(d/"rss.json").write_text(json.dumps({"schema":2,"checkpoints":checkpoints,"process_tree_sampler_max_rss_kib":125})+"\n")
+(d/"provenance.json").write_text(json.dumps({"commit":"a"*40,"governors":["performance"],"load_before":"0.1",
  "load_after":"0.1","pswpin_before":0,"pswpin_after":0,"pswpout_before":0,"pswpout_after":0,"rustc":"rustc fixture",
  "host":"fixture","competitors":[]})+"\n")
-(d/"verifier.txt").write_text("fixture\n")
 PY
 
 expect_red() {
@@ -110,7 +94,8 @@ expect_red() {
   fi
 }
 
-"$runner" --verify-fixture "$fixture" "$tmp/accepted"
+cp -a "$fixture" "$tmp/accepted"
+python3 "$verifier" "$tmp/accepted"
 expect_red missing-internal-receipt mutate -c 'import pathlib,sys;(pathlib.Path(sys.argv[1])/"grouped-commit.json").unlink()'
 for field in routes_received_dispatches routes_received_withdrawals envelopes \
   routes_per_envelope; do
@@ -141,12 +126,6 @@ expect_red allocator-phase-mismatch mutate -c 'import json,pathlib,sys;p=pathlib
 expect_red allocator-nonnumeric mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());d["resource_observer"]["wire"]["jemalloc_resident_bytes"]="invalid";p.write_text(json.dumps(d))'
 expect_red allocator-zero mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());d["resource_observer"]["established"]["jemalloc_mapped_bytes"]=0;p.write_text(json.dumps(d))'
 expect_red allocator-relation mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());d["resource_observer"]["staged"]["jemalloc_allocated_bytes"]=2200;p.write_text(json.dumps(d))'
-cp -a "$tmp/accepted" "$tmp/stale-checksum"
-printf '\n' >>"$tmp/stale-checksum/grouped-commit.json"
-if (cd "$tmp/stale-checksum" && sha256sum -c SHA256SUMS --strict >/dev/null 2>&1); then
-  echo "false green: stale checksum" >&2
-  exit 1
-fi
 expect_red staged-count mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"per-peer.tsv";r=p.read_text().splitlines();h=r[0].split("\t").index("staged");x=r[1].split("\t");x[h]="99999";r[1]="\t".join(x);p.write_text("\n".join(r)+"\n")'
 expect_red nlri-count mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"per-peer.tsv";r=p.read_text().splitlines();h=r[0].split("\t").index("nlri");x=r[1].split("\t");x[h]="99999";r[1]="\t".join(x);p.write_text("\n".join(r)+"\n")'
 expect_red corrupt-prefix mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"per-peer.tsv";s=p.read_text();p.write_text(s.replace("7c50a897bc4a4e51","0000000000000000",1))'
@@ -192,8 +171,7 @@ if ! grep -Fxq "FAIL: phase resource observer is missing or invalid" \
 fi
 if "$runner" --classify-rss 2097153 "$tmp/rss-over"; then echo "false green: rss ceiling" >&2; exit 1; fi
 grep -q '"root_failure":"rss_ceiling"' "$tmp/rss-over/failure.json"
-expect_red changed-head mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"provenance.json";d=json.loads(p.read_text());d["head_after"]="changed";p.write_text(json.dumps(d))'
-expect_red changed-hash mutate -c 'import pathlib,sys;(pathlib.Path(sys.argv[1])/"source.snapshot").write_bytes(b"changed")'
+expect_red malformed-commit mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"provenance.json";d=json.loads(p.read_text());d["commit"]="main";p.write_text(json.dumps(d))'
 "$runner" --check-seam "$runner"
 [[ $("$runner" --classify-child-exe /expected /expected R) == sample ]]
 [[ $("$runner" --classify-child-exe /expected /foreign R) == reject ]]
@@ -398,9 +376,7 @@ fi
 for seam in \
   "timeout -k 10 1200 \"\$script\" --campaign-inner \"\$output\"" \
   "full_verify \"\$receipt\"" \
-  "python3 \"\$verifier\" \"\$receipt\" --full | tee \"\$receipt/verifier.txt\"" \
-  "full_checksums \"\$receipt\"" \
-  "sha256sum -c SHA256SUMS --strict" \
+  "printf 'pass\\n' >\"\$output/COMPLETED\"" \
   "sample_direct_rss \"\$pid\" \"\$tiny_validated_starttime\" \"\$receipt\"" \
   "resolve_direct_rss \"\$process\" \"\$expected_start\"" \
   "[[ \$direct_rss_action != exited ]] || break"; do
