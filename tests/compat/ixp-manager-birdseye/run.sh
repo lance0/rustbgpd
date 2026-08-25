@@ -226,6 +226,8 @@ test former-default-accepts { route { prefix 77.72.72.0/21; as-path "174"; rpki 
 '
 check_policy "$candidate_full/policy/client-1.rpol" "$tmp/full-client-1.rpol" '
 test full-advertise-accumulates {
+    dataset client-1-origins { 1213 }
+    dataset client-1-prefixes { 77.72.72.0/21 }
     route { prefix 77.72.72.0/21; as-path "1213" }
     expect client-1 == accept with large-community 65501:0:0, large-community 65501:102:112
 }
@@ -235,6 +237,8 @@ test full-receive-denies-first {
 }'
 check_policy "$candidate_supported/policy/client-1.rpol" "$tmp/supported-client-1.rpol" '
 test supported-advertise-prefix-direction {
+    dataset client-1-origins { 1213 }
+    dataset client-1-prefixes { 77.72.72.0/21 }
     route { prefix 77.72.72.0/21; as-path "1213" }
     expect client-1 == accept with large-community 65501:102:112
 }
