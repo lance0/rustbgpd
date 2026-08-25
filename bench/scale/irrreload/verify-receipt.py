@@ -128,7 +128,11 @@ def validate_reload_phases(daemon_log: Path, reload_log: Path, output: Path) -> 
             fail(f"{daemon_log}: negative phase/count field")
         if counts["cohort_targets"] + counts["remainder_targets"] != counts["total_targets"]:
             fail(f"{daemon_log}: target counts do not close")
-        if fields["outcome"] not in {"committed", "failed"} or not isinstance(fields["authoritative_fallback"], bool):
+        if (
+            not isinstance(fields["outcome"], str)
+            or fields["outcome"] not in {"committed", "failed"}
+            or not isinstance(fields["authoritative_fallback"], bool)
+        ):
             fail(f"{daemon_log}: invalid outcome/fallback field")
         phases = sum(numeric[key] for key in PHASE_FIELDS if key != "total_us")
         if abs(phases - numeric["total_us"]) > max(2_000, numeric["total_us"] // 100):
@@ -2083,12 +2087,15 @@ def self_test() -> None:
         original = daemon_log.read_text()
         non_numeric = json.loads(phase_line(0, "committed", False))
         non_numeric["fields"]["preflight_us"] = None
+        non_string_outcome = json.loads(phase_line(0, "committed", False))
+        non_string_outcome["fields"]["outcome"] = []
         for broken in (
             phase_line(0, "committed", False),
             original + phase_line(1, "failed", True),
             "null\n" + original,
             json.dumps({"fields": []}) + "\n" + original,
             json.dumps(non_numeric) + "\n" + phase_line(1, "failed", True),
+            json.dumps(non_string_outcome) + "\n" + phase_line(1, "failed", True),
         ):
             daemon_log.write_text(broken)
             try:
