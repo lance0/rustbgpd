@@ -87,6 +87,9 @@ struct AuthoritativeTransitionReceipt {
     failure_stage: &'static str,
     precondition_us: u64,
     registration_membership_us: u64,
+    registered_peer_source_membership_scan_us: u64,
+    policy_compare_install_us: u64,
+    destination_membership_us: u64,
     cohort_partition_us: u64,
     cohort_precheck_us: u64,
     destination_build_us: u64,
@@ -131,6 +134,17 @@ struct AuthoritativeTransitionReceipt {
     pending_after: usize,
     groups_before: usize,
     groups_after: usize,
+    policy_equality_attempts: usize,
+    policy_equality_equal: usize,
+    policy_equality_changed: usize,
+    rpol_shared_backing: usize,
+    rpol_detached_backing: usize,
+    detached_prefix_set_entries: usize,
+    intern_candidates: usize,
+    intern_hits: usize,
+    intern_misses: usize,
+    membership_grouped: usize,
+    membership_ungrouped: usize,
 }
 
 /// Test/benchmark-only receipt from the authoritative outbound commit path.
