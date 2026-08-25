@@ -59,6 +59,16 @@ enum DatasetBindMode {
     Stage,
 }
 
+#[derive(Default)]
+struct DatasetLoadSummary {
+    hashed: usize,
+    parsed: usize,
+    exact_content_reused: usize,
+    source_rebound: usize,
+    dataset_changed: usize,
+    failed: usize,
+}
+
 pub(crate) struct StagedDatasetCommit {
     updates: Vec<StagedDatasetUpdate>,
 }
@@ -219,9 +229,7 @@ impl Config {
             ),
             None => config.bind_datasets(base_dir, prior_datasets, dataset_bind_mode),
         };
-        if let Err(error) = dataset_result {
-            return Err(format!("error: {error}"));
-        }
+        let dataset_summary = dataset_result.map_err(|error| format!("error: {error}"))?;
         let dataset_bind_ms = elapsed_ms(phase_started);
         let phase_started = std::time::Instant::now();
         if let Err(error) = config.validate() {
@@ -240,6 +248,12 @@ impl Config {
             rpol_load_ms,
             dataset_bind_ms,
             validate_ms,
+            dataset_hashed = dataset_summary.hashed,
+            dataset_parsed = dataset_summary.parsed,
+            dataset_exact_content_reused = dataset_summary.exact_content_reused,
+            dataset_source_rebound = dataset_summary.source_rebound,
+            dataset_changed = dataset_summary.dataset_changed,
+            dataset_failed = dataset_summary.failed,
             "config source loaded"
         );
         // Canonicalize static neighbor address spellings. Reload diffs and
@@ -408,7 +422,7 @@ impl Config {
         base_dir: Option<&std::path::Path>,
         prior: Option<&rustbgpd_policy::datasets::DatasetBindings>,
         mode: DatasetBindMode,
-    ) -> Result<(), ConfigError> {
+    ) -> Result<DatasetLoadSummary, ConfigError> {
         self.bind_datasets_capturing(base_dir, prior, mode, None, None)
     }
 
@@ -423,10 +437,12 @@ impl Config {
         mode: DatasetBindMode,
         mut capture: Option<&mut source_provenance::SourceCapture>,
         prior_manifest: Option<&source_provenance::SourceManifest>,
-    ) -> Result<(), ConfigError> {
+    ) -> Result<DatasetLoadSummary, ConfigError> {
         use rustbgpd_policy::datasets::{
-            DatasetHandle, DatasetKind, load_dataset_file, load_dataset_file_captured,
+            DatasetBindings, DatasetHandle, DatasetKind, load_dataset_file,
         };
+
+        let mut summary = DatasetLoadSummary::default();
 
         // Declarations across every loaded unit: name → (kind, owner
         // path), kind conflicts rejected. Iterate registry entries
@@ -497,28 +513,83 @@ impl Config {
             let existing = prior
                 .and_then(|bindings| bindings.get(name))
                 .filter(|handle| handle.kind() == kind);
-            let loaded = if capture.is_some() {
-                load_dataset_file_captured(&path, kind).map(|(data, source)| (data, Some(source)))
-            } else {
-                load_dataset_file(&path, kind)
-                    .map(|data| (data, None))
-                    .map_err(|reason| (reason, None))
-            };
-            if let Some(capture) = capture.as_deref_mut() {
-                match &loaded {
-                    Ok((_, Some(source))) => capture.push_dataset(name, kind, source),
-                    Err(_) if existing.is_some() => capture
-                        .retain_dataset(name, prior_manifest)
-                        .map_err(|reason| ConfigError::InvalidPolicyEntry {
-                            reason: format!("dataset {name:?}: {reason}"),
-                        })?,
-                    _ => {}
+            let loaded = if let Some(capture) = capture.as_deref_mut() {
+                match source_provenance::load_dataset_captured(
+                    &path,
+                    name,
+                    kind,
+                    existing,
+                    prior_manifest,
+                ) {
+                    Ok(read) => {
+                        summary.hashed += 1;
+                        summary.source_rebound += usize::from(read.source_rebound);
+                        capture.push_dataset(name, kind, &read.source);
+                        match read.load {
+                            source_provenance::CapturedDatasetLoad::Parsed(data) => {
+                                summary.parsed += 1;
+                                Ok(source_provenance::CapturedDatasetLoad::Parsed(data))
+                            }
+                            source_provenance::CapturedDatasetLoad::ExactContent(snapshot) => {
+                                summary.exact_content_reused += 1;
+                                Ok(source_provenance::CapturedDatasetLoad::ExactContent(
+                                    snapshot,
+                                ))
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        summary.hashed += usize::from(error.source.is_some());
+                        summary.source_rebound += usize::from(error.source_rebound);
+                        summary.failed += 1;
+                        if existing.is_some() {
+                            capture
+                                .retain_dataset(name, prior_manifest)
+                                .map_err(|reason| ConfigError::InvalidPolicyEntry {
+                                    reason: format!("dataset {name:?}: {reason}"),
+                                })?;
+                        }
+                        Err(error.reason)
+                    }
                 }
-            }
+            } else {
+                summary.parsed += 1;
+                load_dataset_file(&path, kind)
+                    .map(source_provenance::CapturedDatasetLoad::Parsed)
+                    .inspect_err(|_| {
+                        summary.failed += 1;
+                    })
+            };
             match (existing, loaded, mode) {
-                (Some(handle), Ok((data, _)), DatasetBindMode::Stage) => {
+                (
+                    Some(handle),
+                    Ok(source_provenance::CapturedDatasetLoad::ExactContent(snapshot)),
+                    DatasetBindMode::Stage,
+                ) => {
+                    debug_assert!(Arc::ptr_eq(&snapshot, &handle.pin()));
+                    let mut binding = DatasetBindings::new();
+                    binding.insert(Arc::clone(handle));
+                    let detached = binding.detached_clone();
+                    self.policy
+                        .dataset_bindings
+                        .insert(Arc::clone(detached.get(name).unwrap()));
+                }
+                (
+                    Some(handle),
+                    Ok(source_provenance::CapturedDatasetLoad::ExactContent(snapshot)),
+                    DatasetBindMode::Apply,
+                ) => {
+                    debug_assert!(Arc::ptr_eq(&snapshot, &handle.pin()));
+                    self.policy.dataset_bindings.insert(Arc::clone(handle));
+                }
+                (
+                    Some(handle),
+                    Ok(source_provenance::CapturedDatasetLoad::Parsed(data)),
+                    DatasetBindMode::Stage,
+                ) => {
                     if handle.pin().data != data {
                         self.policy.dataset_events.swapped.push(name.clone());
+                        summary.dataset_changed += 1;
                     }
                     // Validate the candidate against its proposed snapshot,
                     // but do not mutate the live handle until the complete
@@ -527,7 +598,7 @@ impl Config {
                         .dataset_bindings
                         .insert(Arc::new(DatasetHandle::new(name, kind, data)));
                 }
-                (Some(handle), Err((reason, _)), DatasetBindMode::Stage) => {
+                (Some(handle), Err(reason), DatasetBindMode::Stage) => {
                     // A failed reload read retains the prior snapshot. Defer
                     // recording the operational error on the live handle too:
                     // an otherwise rejected config must have no side effects.
@@ -537,7 +608,11 @@ impl Config {
                         .push((name.clone(), reason));
                     self.policy.dataset_bindings.insert(Arc::clone(handle));
                 }
-                (Some(handle), Ok((data, _)), DatasetBindMode::Apply) => {
+                (
+                    Some(handle),
+                    Ok(source_provenance::CapturedDatasetLoad::Parsed(data)),
+                    DatasetBindMode::Apply,
+                ) => {
                     if let Some(generation) = handle.refresh(data) {
                         tracing::info!(
                             dataset = %name,
@@ -545,10 +620,11 @@ impl Config {
                             "dataset content swapped; scoped peer refresh follows"
                         );
                         self.policy.dataset_events.swapped.push(name.clone());
+                        summary.dataset_changed += 1;
                     }
                     self.policy.dataset_bindings.insert(Arc::clone(handle));
                 }
-                (Some(handle), Err((reason, _)), DatasetBindMode::Apply) => {
+                (Some(handle), Err(reason), DatasetBindMode::Apply) => {
                     // Keep the prior snapshot serving probes; surface
                     // the failure (WARN here, counter + `rbgp policy
                     // stats` via the recorded error).
@@ -564,12 +640,15 @@ impl Config {
                         .push((name.clone(), reason));
                     self.policy.dataset_bindings.insert(Arc::clone(handle));
                 }
-                (None, Ok((data, _)), _) => {
+                (None, Ok(source_provenance::CapturedDatasetLoad::Parsed(data)), _) => {
                     self.policy
                         .dataset_bindings
                         .insert(Arc::new(DatasetHandle::new(name, kind, data)));
                 }
-                (None, Err((reason, _)), _) => {
+                (None, Ok(source_provenance::CapturedDatasetLoad::ExactContent(_)), _) => {
+                    unreachable!("exact content reuse requires a compatible prior handle")
+                }
+                (None, Err(reason), _) => {
                     return Err(ConfigError::InvalidPolicyEntry {
                         reason: format!(
                             "dataset {name:?}: cannot load {}: {reason}",
@@ -579,7 +658,7 @@ impl Config {
                 }
             }
         }
-        Ok(())
+        Ok(summary)
     }
 
     /// Load config from TOML text and render diagnostics against `source_name`.
@@ -688,13 +767,15 @@ impl Config {
                     reason: (*reason).to_string(),
                 });
             } else {
-                let data = staged.pin().data.clone();
-                let content_changed = live.pin().data != data;
+                let staged_snapshot = staged.pin();
+                let live_snapshot = live.pin();
+                let content_changed = !Arc::ptr_eq(&staged_snapshot, &live_snapshot)
+                    && staged_snapshot.data != live_snapshot.data;
                 let clears_error = live.status().last_error.is_some();
                 if content_changed || clears_error {
                     updates.push(StagedDatasetUpdate::Refresh {
                         handle: Arc::clone(live),
-                        data,
+                        data: staged_snapshot.data.clone(),
                     });
                 }
             }
