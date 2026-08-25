@@ -16,7 +16,7 @@ log_format = "json"
     );
     let candidate = toml::to_string_pretty(&config).unwrap();
     let (_tx, rx) = mpsc::channel(4);
-    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (_internal_tx, internal_rx) = mpsc::channel(1);
     let (rib_tx, mut rib_rx) = mpsc::channel(4);
     let mut mgr = PeerManager::new_with_config(
         rx,
@@ -120,7 +120,7 @@ remote_asn = 65002
 "#,
     );
     let (_tx, rx) = mpsc::channel(4);
-    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (_internal_tx, internal_rx) = mpsc::channel(1);
     let (rib_tx, mut rib_rx) = mpsc::channel(4);
     let mut mgr = PeerManager::new_with_config(
         rx,
@@ -213,7 +213,7 @@ import_policy_chain = ["edge-in"]
     candidate.neighbors[0].description = Some("after".to_string());
     let candidate = toml::to_string_pretty(&candidate).unwrap();
     let (_tx, rx) = mpsc::channel(4);
-    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (_internal_tx, internal_rx) = mpsc::channel(1);
     let (rib_tx, mut rib_rx) = mpsc::channel(4);
     let mut mgr = PeerManager::new_with_config(
         rx,
@@ -346,7 +346,7 @@ export_policy_chain = ["dataset-export"]
     };
     let live_classification = rustbgpd_rib::classify_update_group(live_input.clone());
     let (tx, rx) = mpsc::channel(4);
-    let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (internal_tx, internal_rx) = mpsc::channel(1);
     let (rib_tx, mut rib_rx) = mpsc::channel(4);
     let raw_prior = current.clone();
     let mut mgr = PeerManager::new_with_config(
@@ -499,6 +499,7 @@ export_policy_chain = ["dataset-export"]
             expected_runtime_snapshot_token: None,
             reply: reply_tx,
         })
+        .await
         .unwrap();
     let preloaded = reply_rx.await.unwrap().unwrap();
     assert_eq!(
@@ -531,6 +532,7 @@ export_policy_chain = ["dataset-export"]
             scope: TransactionConfigScope::Full,
             reply: stage_tx,
         })
+        .await
         .unwrap();
     let rollback = stage_rx.await.unwrap().unwrap();
     let (snapshot_tx, snapshot_rx) = oneshot::channel();
@@ -546,6 +548,7 @@ export_policy_chain = ["dataset-export"]
             rollback,
             reply: restore_tx,
         })
+        .await
         .unwrap();
     restore_rx.await.unwrap();
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
@@ -556,7 +559,7 @@ export_policy_chain = ["dataset-export"]
 #[tokio::test]
 async fn transaction_fib_stage_overlays_only_tables_and_posture_and_restores_raw_prior() {
     let (tx, rx) = mpsc::channel(8);
-    let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (internal_tx, internal_rx) = mpsc::channel(1);
     let (rib_tx, _rib_rx) = mpsc::channel(8);
     let mut live = make_dynamic_manager_config();
     live.policy.rpol_files = vec!["live-source.rpol".to_string()];
@@ -590,6 +593,7 @@ async fn transaction_fib_stage_overlays_only_tables_and_posture_and_restores_raw
             scope: TransactionConfigScope::FibTablesOnly,
             reply: stage_tx,
         })
+        .await
         .unwrap();
     let rollback = stage_rx.await.unwrap().unwrap();
     assert_eq!(rollback.previous().config_epoch, None);
@@ -613,6 +617,7 @@ async fn transaction_fib_stage_overlays_only_tables_and_posture_and_restores_raw
             rollback,
             reply: restore_tx,
         })
+        .await
         .unwrap();
     restore_rx.await.unwrap();
     let (snapshot_tx, snapshot_rx) = oneshot::channel();
@@ -631,7 +636,7 @@ async fn transaction_fib_stage_overlays_only_tables_and_posture_and_restores_raw
 #[tokio::test]
 async fn stage_config_snapshot_rebuilds_matcher_and_returns_previous_toml() {
     let (tx, rx) = mpsc::channel(16);
-    let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (internal_tx, internal_rx) = mpsc::channel(1);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let config = make_dynamic_manager_config();
     let mut replacement = config.clone();
@@ -665,6 +670,7 @@ async fn stage_config_snapshot_rebuilds_matcher_and_returns_previous_toml() {
             scope: TransactionConfigScope::Full,
             reply: reply_tx,
         })
+        .await
         .unwrap();
     let rollback = reply_rx.await.unwrap().unwrap();
     assert_eq!(
@@ -693,7 +699,7 @@ async fn stage_config_snapshot_rebuilds_matcher_and_returns_previous_toml() {
 )]
 async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynamic_peer() {
     let (tx, rx) = mpsc::channel(16);
-    let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (internal_tx, internal_rx) = mpsc::channel(1);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let mut initial = make_dynamic_manager_config();
     initial.dynamic_neighbors.clear();
@@ -729,6 +735,7 @@ async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynam
             scope: TransactionConfigScope::Full,
             reply: stage_tx,
         })
+        .await
         .unwrap();
     let rollback = stage_rx.await.unwrap().unwrap();
 
@@ -791,6 +798,7 @@ async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynam
             rollback,
             reply: restore_tx,
         })
+        .await
         .unwrap();
     restore_rx.await.unwrap();
 
@@ -812,7 +820,7 @@ async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynam
 #[tokio::test]
 async fn runtime_config_snapshot_returns_current_staged_config() {
     let (tx, rx) = mpsc::channel(16);
-    let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (internal_tx, internal_rx) = mpsc::channel(1);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let config = make_dynamic_manager_config();
     let mut replacement = config.clone();
@@ -846,6 +854,7 @@ async fn runtime_config_snapshot_returns_current_staged_config() {
             scope: TransactionConfigScope::Full,
             reply: stage_tx,
         })
+        .await
         .unwrap();
     stage_rx.await.unwrap().unwrap();
 
@@ -890,7 +899,7 @@ md5_password = "old-secret"
     );
     let mgr = PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,
@@ -995,7 +1004,7 @@ log_format = "json"
     let drift_candidate_toml = toml::to_string_pretty(&drift_candidate).unwrap();
 
     let (_tx, rx) = mpsc::channel(4);
-    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (_internal_tx, internal_rx) = mpsc::channel(1);
     let (rib_tx, mut rib_rx) = mpsc::channel(4);
     let mut mgr = PeerManager::new_with_config(
         rx,

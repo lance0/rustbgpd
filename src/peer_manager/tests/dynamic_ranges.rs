@@ -433,7 +433,7 @@ fn runtime_dynamic_add_rejects_static_tcp_ao_neighbor_coverage() {
 #[tokio::test]
 async fn dynamic_tcp_ao_snapshot_reports_protected_from_explicit_range_keyring() {
     let (tx, rx) = mpsc::channel(16);
-    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (_internal_tx, internal_rx) = mpsc::channel(1);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let mut config = make_dynamic_manager_config();
     config.dynamic_neighbors[0].tcp_ao = Some(test_tcp_ao().into());
@@ -549,7 +549,7 @@ fn delete_dynamic_range_unknown_returns_error() {
 #[tokio::test]
 async fn replace_config_snapshot_rebuilds_dynamic_range_matcher() {
     let (tx, rx) = mpsc::channel(16);
-    let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (internal_tx, internal_rx) = mpsc::channel(1);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let config = make_dynamic_manager_config();
     let mut replacement = config.clone();
@@ -582,6 +582,7 @@ async fn replace_config_snapshot_rebuilds_dynamic_range_matcher() {
             config: Box::new(replacement),
             ack: Some(ack_tx),
         })
+        .await
         .unwrap();
     ack_rx.await.unwrap();
 

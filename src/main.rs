@@ -3778,7 +3778,7 @@ async fn run<T>(
     let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
     let (peer_mgr_readiness_tx, peer_mgr_readiness_rx) =
         mpsc::channel::<PeerManagerReadinessQuery>(64);
-    let (peer_mgr_internal_tx, peer_mgr_internal_rx) = mpsc::unbounded_channel();
+    let (peer_mgr_internal_tx, peer_mgr_internal_rx) = mpsc::channel(1);
 
     // Spawn RPKI subsystem (VRP manager + per-cache RTR clients)
     if let Some(ref rpki_config) = config.rpki
@@ -3970,7 +3970,7 @@ async fn run<T>(
     {
         let (event_tx, event_rx) = mpsc::channel::<rustbgpd_api::peer_types::ConfigEvent>(64);
         let (mutation_tx, mutation_rx) = mpsc::channel::<ConfigMutation>(64);
-        let (bridge_replace_tx, bridge_replace_rx) = mpsc::unbounded_channel();
+        let (bridge_replace_tx, bridge_replace_rx) = mpsc::channel(1);
         let (accepted_tx, accepted_rx) = watch::channel(Arc::clone(&accepted));
         let persister = ConfigPersister::new_accepted(
             mutation_rx,

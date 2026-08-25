@@ -402,7 +402,7 @@ async fn effective_posture_snapshot_keeps_dynamic_inheritance_at_static_parity()
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let mut mgr = PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,

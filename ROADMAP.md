@@ -2210,8 +2210,7 @@ branch is between features.
   documentation/policy drift, all low-risk. The documentation and lint-policy
   sub-items are closed:
   - ARCHITECTURE.md design-invariant #3 re-enumerates the intentional
-    unbounded-channel set (collision notifications, `peer_manager` internals,
-    the `reload.rs` coordinator, the transport writer's priority channel, BFD
+    unbounded-channel set (collision notifications, the transport writer's priority channel, BFD
     state-change fan-out), so the invariant reads as a usable review gate.
   - The ARCHITECTURE.md ownership table is trued up against the actors at HEAD:
     the BLACKHOLE reconciler, EVPN runtime converger, EVPN dataplane supervisor,
@@ -2227,6 +2226,11 @@ branch is between features.
     FFI allow, the daemon binary's `cfg_attr` gate under the `jemalloc` /
     `dhat-heap` allocator features, and the test/bench targets that carry
     justified `unsafe` outside any shipped path.
+  - LAN-1162 tranche A bounds the peer-manager private command lane and the
+    config-bridge replacement lane at capacity one with lossless FIFO sends.
+    LAN-1162 remains open for tranche B observability and sustained-flap proof;
+    `session_notify` remains intentionally unbounded for the `QueryState`
+    collision-resolution deadlock constraint.
 
   Dependency-hygiene note, not a work item: the lockfile resolves both
   `thiserror` 1.x and 2.x. Every first-party crate that derives with it

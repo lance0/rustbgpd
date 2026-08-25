@@ -4,7 +4,7 @@ use super::*;
 async fn closed_internal_command_lane_disables_after_first_poll() {
     // Load-bearing: removing the close-to-disabled transition leaves the
     // receiver present and makes every later receive immediately ready.
-    let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (internal_tx, internal_rx) = mpsc::channel(1);
     drop(internal_tx);
     let mut internal_rx = Some(internal_rx);
 
@@ -517,7 +517,7 @@ log_format = "json"
     let (rib_tx, mut rib_rx) = mpsc::channel(8);
     let manager = PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,
