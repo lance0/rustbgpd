@@ -34,13 +34,8 @@ class VerifyTests(unittest.TestCase):
 
     def test_full_receipt_is_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); repo = root / "repo"; repo.mkdir()
-            subprocess.run(["git", "init", "-q", repo], check=True)
-            subprocess.run(["git", "-C", repo, "config", "user.email", "test@example.invalid"], check=True)
-            subprocess.run(["git", "-C", repo, "config", "user.name", "test"], check=True)
-            source = repo / "main.rs"; source.write_text("fn main() {}\n")
-            subprocess.run(["git", "-C", repo, "add", "."], check=True)
-            subprocess.run(["git", "-C", repo, "commit", "-qm", "fixture"], check=True)
+            root = Path(directory); repo = root / "repo"
+            subprocess.run(["git", "clone", "-q", HERE.parents[2], repo], check=True)
             commit = subprocess.check_output(["git", "-C", repo, "rev-parse", "HEAD"], text=True).strip()
             tree = subprocess.check_output(["git", "-C", repo, "rev-parse", "HEAD^{tree}"], text=True).strip()
             binary = root / "reloadstall"; binary.write_bytes(b"binary")
@@ -48,18 +43,19 @@ class VerifyTests(unittest.TestCase):
             (root / "initial.csv").write_text("first_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828\n")
             (root / "checkpoints.csv").write_text(lines())
             (root / "flapstorm.csv").write_text("".join(f"flapstorm_csv,{i},700,50,400400,28600,0,0,0,0,0,0,0,700,0\n" for i in range(1, 4)))
-            raw = root.parent / f"{root.name}-raw"; raw.mkdir(); self.addCleanup(lambda: __import__("shutil").rmtree(raw, ignore_errors=True))
-            for name in ("daemon.log", "harness.log"): (raw / name).write_text("healthy\n")
-            (raw / "status").write_text("PASS\n")
-            raw_text = "\n".join((raw / name).read_text() for name in sorted(("daemon.log", "harness.log", "status"))).lower()
+            raw = root.parent / f"{root.name}-raw"; run = raw / "rustbgpd"; run.mkdir(parents=True); self.addCleanup(lambda: __import__("shutil").rmtree(raw, ignore_errors=True))
+            (run / "reloadstall.log").write_text((root / "initial.csv").read_text() + lines() + (root / "flapstorm.csv").read_text())
+            (run / "daemon.log").write_text("healthy\n"); (run / "status").write_text("pass\n")
+            (run / "rss.csv").write_text("rss\n"); (run / "scenario").mkdir(); (run / "scenario" / "config.toml").write_text("scenario\n")
+            raw_text = "\n".join((run / name).read_text() for name in ("reloadstall.log", "daemon.log", "status")).lower()
             (root / "daemon-summary.json").write_text(json.dumps({"notification_send_errors":0,"correctness_errors":0,"raw_logs_sha256":hashlib.sha256(raw_text.encode()).hexdigest()}))
             (root / "README.md").write_text("fixture\n"); (root / "verification.json").write_text(json.dumps({"commit":commit,"verdict":"verified"}))
             names = {name: V.sha(root / name) for name in V.FILES}
             (root / "SHA256SUMS").write_text("".join(f"{digest}  {name}\n" for name, digest in sorted(names.items())))
             receipt = {
-                "repo": str(repo), "commit": commit, "tree": tree, "base": commit, "base_tree": tree,
+                "repo": str(repo), "commit": commit, "tree": tree, "base": V.BASE, "base_tree": V.BASE_TREE,
                 "binaries": {name: {"path": str(binary), "sha256": V.sha(binary)} for name in ("daemon", "harness")},
-                "sources": {name: {"path": str(source), "sha256": V.sha(source)} for name in V.SOURCES},
+                "sources": {name: {"path": str(repo / path), "sha256": V.sha(repo / path)} for name, path in V.SOURCE_PATHS.items()},
                 "artifacts": names, "workload": V.WORKLOAD, "command": ["bash", "bench/scale/matrix/run-matrix.sh", "rustbgpd"],
                 "environment": {"N_PEERS":"700", "TOTAL_PREFIXES":"400400", "RELOADS":"0", "CONTROL_SECS":"30", "FLAPSTORM":"50", "ARTIFACTS_DIR":str(raw), "RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR": "127.0.0.1:9179"},
                 "system": {"rustc":"1", "cargo":"1", "kernel":"k", "cpu":"c", "captured_at":"2026-08-25T00:00:00Z"},
@@ -68,7 +64,7 @@ class VerifyTests(unittest.TestCase):
             (root / "receipt.json").write_text(json.dumps(receipt))
             V.verify(root)
             mutations = [
-                ("commit", "A" * 40), ("tree", "0" * 40), ("base", "0" * 40), ("base_tree", "0" * 40),
+                ("commit", "A" * 40), ("tree", "0" * 40), ("base", "0" * 40), ("base", subprocess.check_output(["git", "-C", repo, "rev-parse", V.BASE + "^"], text=True).strip()), ("base_tree", "0" * 40),
                 ("workload", {**V.WORKLOAD, "peers": 699}),
                 ("environment", {}), ("raw_root_sha256", "0" * 64),
                 ("artifacts", {**names, "harness.log": "0" * 64}),
@@ -79,5 +75,26 @@ class VerifyTests(unittest.TestCase):
                 broken = dict(receipt); broken[key] = value
                 (root / "receipt.json").write_text(json.dumps(broken))
                 with self.subTest(key=key), self.assertRaises(Exception): V.verify(root)
+            copied = root / "same.rs"; copied.write_bytes((repo / V.SOURCE_PATHS["harness_main"]).read_bytes())
+            broken = json.loads(json.dumps(receipt)); broken["sources"]["harness_main"]["path"] = str(copied)
+            (root / "receipt.json").write_text(json.dumps(broken))
+            with self.assertRaises(ValueError): V.verify(root)
+            source = repo / V.SOURCE_PATHS["harness_main"]; original = source.read_bytes(); source.write_bytes(original + b"\n")
+            (root / "receipt.json").write_text(json.dumps(receipt))
+            with self.assertRaises(ValueError): V.verify(root)
+            source.write_bytes(original)
+            def reseal():
+                receipt["artifacts"] = {name: V.sha(root / name) for name in V.FILES}
+                (root / "SHA256SUMS").write_text("".join(f"{digest}  {name}\n" for name, digest in sorted(receipt["artifacts"].items())))
+                receipt["raw_campaign_root"]["sha256"] = V.directory_digest(raw)
+                (root / "receipt.json").write_text(json.dumps(receipt))
+            (root / "checkpoints.csv").write_text(lines().replace("drain_wait_us=1", "drain_wait_us=2", 1)); reseal()
+            with self.assertRaises(ValueError): V.verify(root)
+            (root / "checkpoints.csv").write_text(lines()); (run / "status").write_text("PASS\n"); reseal()
+            with self.assertRaises(ValueError): V.verify(root)
+            (run / "status").write_text("pass\n"); (run / "daemon.log").write_text("generic send failed\n"); reseal()
+            with self.assertRaises(ValueError): V.verify(root)
+            (run / "daemon.log").write_text("healthy\n"); (raw / "daemon.log").write_text("wrong location\n"); (run / "daemon.log").unlink(); reseal()
+            with self.assertRaises(ValueError): V.verify(root)
 
 if __name__ == "__main__": unittest.main()

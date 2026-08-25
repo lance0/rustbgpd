@@ -6,6 +6,9 @@ ROWS = [("initial_drained", 0, 700, 700, 399828)] + [row for r in range(1, 4) fo
 WORKLOAD = {"peers": 700, "prefixes": 400400, "flapped": 50, "rounds": 3}
 FILES = {"harness.log", "initial.csv", "checkpoints.csv", "flapstorm.csv", "daemon-summary.json", "README.md", "verification.json"}
 SOURCES = {"harness_main", "verifier", "harness_lock", "workspace_lock", "matrix_runner", "scenario_generator"}
+BASE = "32664ee2e4a87052685b036befefdaa20ae8ef19"
+BASE_TREE = "428101e3d6324667a75842bb1c9d851dc1768efd"
+SOURCE_PATHS = {"harness_main":"bench/scale/reloadstall/src/main.rs", "verifier":"bench/scale/reloadstall/verify_session_notification_receipt.py", "harness_lock":"bench/scale/Cargo.lock", "workspace_lock":"Cargo.lock", "matrix_runner":"bench/scale/matrix/run-matrix.sh", "scenario_generator":"bench/scale/reloadstall/gen-scenario.py"}
 def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
 def directory_digest(root):
     files = sorted(path for path in root.rglob("*") if path.is_file())
@@ -36,7 +39,7 @@ def exact_hash_map(items, keys, label):
 def verify(root):
     receipt = json.loads((root / "receipt.json").read_text())
     required = {"repo", "commit", "tree", "base", "base_tree", "binaries", "sources", "artifacts", "workload", "command", "environment", "system", "raw_campaign_root"}
-    if set(receipt) != required or receipt["workload"] != WORKLOAD: raise ValueError("receipt schema or workload changed")
+    if set(receipt) != required or receipt["workload"] != WORKLOAD or receipt["base"] != BASE or receipt["base_tree"] != BASE_TREE: raise ValueError("receipt schema, workload, or base changed")
     for key in ("commit", "tree", "base", "base_tree"):
         value = receipt[key]
         if len(value) != 40 or any(c not in "0123456789abcdef" for c in value): raise ValueError("provenance must use lowercase full object IDs")
@@ -44,7 +47,11 @@ def verify(root):
     def git(*args): return subprocess.run(["git", "-C", repo, *args], check=True, text=True, capture_output=True).stdout.strip()
     if git("rev-parse", f"{commit}^{{commit}}") != commit or git("rev-parse", f"{commit}^{{tree}}") != receipt["tree"] or git("rev-parse", f"{receipt['base']}^{{tree}}") != receipt["base_tree"]: raise ValueError("commit/tree provenance mismatch")
     subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", receipt["base"], commit], check=True)
-    exact_hash_map(receipt["binaries"], {"daemon", "harness"}, "binary"); exact_hash_map(receipt["sources"], SOURCES, "source")
+    exact_hash_map(receipt["binaries"], {"daemon", "harness"}, "binary")
+    if set(receipt["sources"]) != SOURCES: raise ValueError("source roster changed")
+    for name, relative in SOURCE_PATHS.items():
+        item, expected = receipt["sources"][name], (repo / relative).resolve()
+        if set(item) != {"path", "sha256"} or Path(item["path"]).resolve() != expected or sha(expected) != item["sha256"] or hashlib.sha256(subprocess.run(["git", "-C", repo, "show", f"{commit}:{relative}"], check=True, capture_output=True).stdout).hexdigest() != item["sha256"]: raise ValueError(f"source path/blob mismatch: {name}")
     command = ["bash", "bench/scale/matrix/run-matrix.sh", "rustbgpd"]
     if receipt["command"] != command: raise ValueError("command changed")
     expected_env = {"N_PEERS":"700", "TOTAL_PREFIXES":"400400", "RELOADS":"0", "CONTROL_SECS":"30", "FLAPSTORM":"50", "ARTIFACTS_DIR":receipt["raw_campaign_root"]["path"], "RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR":receipt["environment"].get("RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR")}
@@ -57,8 +64,6 @@ def verify(root):
     sums = {name.removeprefix("*"): digest for digest, name in (line.split(None, 1) for line in (root / "SHA256SUMS").read_text().splitlines())}
     if sums != artifacts: raise ValueError("SHA256SUMS roster changed")
     parse_rows((root / "harness.log").read_text())
-    checkpoint_text = (root / "checkpoints.csv").read_text()
-    if parse_rows(checkpoint_text) != parse_rows((root / "harness.log").read_text()): raise ValueError("checkpoint extraction differs from harness log")
     initial = (root / "initial.csv").read_text().splitlines()
     if initial != ["first_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828"]: raise ValueError("initial convergence CSV changed")
     flaps = (root / "flapstorm.csv").read_text().splitlines()
@@ -69,10 +74,14 @@ def verify(root):
         if any(not math.isfinite(float(token)) for token in tokens[6:13]): raise ValueError("non-finite flapstorm statistic")
     raw = receipt["raw_campaign_root"]; raw_path = Path(raw["path"]).resolve()
     if set(raw) != {"path", "sha256"} or raw_path == root.resolve() or root.resolve() in raw_path.parents or raw_path == repo.resolve() or repo.resolve() in raw_path.parents or directory_digest(raw_path) != raw["sha256"]: raise ValueError("raw campaign root/digest mismatch")
-    logs = sorted(path for path in raw_path.rglob("*") if path.is_file() and path.name in {"daemon.log", "harness.log", "status"})
-    if not {"daemon.log", "harness.log", "status"} <= {path.name for path in logs}: raise ValueError("raw log roster incomplete")
+    run = raw_path / "rustbgpd"; logs = [run / "reloadstall.log", run / "daemon.log", run / "status"]
+    paths = {path.relative_to(raw_path).as_posix() for path in raw_path.rglob("*") if path.is_file()}; required = {"rustbgpd/reloadstall.log", "rustbgpd/daemon.log", "rustbgpd/status"}
+    if not required <= paths or any(path not in required and path != "rustbgpd/rss.csv" and not path.startswith("rustbgpd/scenario/") for path in paths): raise ValueError("raw layout changed")
+    if logs[2].read_text() != "pass\n": raise ValueError("raw status is not lowercase pass")
+    raw_harness = logs[0].read_text(); extract = lambda prefix: "\n".join(line for line in raw_harness.splitlines() if line.startswith(prefix)) + "\n"
+    if (root / "initial.csv").read_text() != extract("first_exact_bitmap,") or (root / "checkpoints.csv").read_text() != extract("session_notification_receipt,") or (root / "flapstorm.csv").read_text() != extract("flapstorm_csv,"): raise ValueError("compact CSV differs from raw harness log")
     text = "\n".join(path.read_text(errors="replace") for path in logs).lower()
-    sends = len(re.findall(r"session notification.*send.*(?:error|fail)", text)); correctness = sum(text.count(token) for token in ("panicked", "correctness error", "fail:")) + int((raw_path / "status").read_text().strip() != "PASS")
+    sends = len(re.findall(r"send[^\n]*(?:error|fail)|(?:error|fail)[^\n]*send", text)); correctness = sum(text.count(token) for token in ("panicked", "panic", "correctness error", "fail:"))
     summary = {"notification_send_errors": sends, "correctness_errors": correctness, "raw_logs_sha256": hashlib.sha256(text.encode()).hexdigest()}
     if sends or correctness or json.loads((root / "daemon-summary.json").read_text()) != summary: raise ValueError("daemon summary/log scan reports errors")
     if json.loads((root / "verification.json").read_text()) != {"commit": commit, "verdict": "verified"}: raise ValueError("verification finalization changed")
