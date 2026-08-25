@@ -78,6 +78,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- On Linux kernels that accept strict netlink dump checking, general-unicast
+  FIB reconciliation now requests each unique managed table from the kernel
+  instead of dumping every IPv4 and IPv6 route and discarding unrelated rows
+  in userspace. Foreign routes inside managed tables remain visible; kernels
+  without strict checking retain the existing global-dump path. (LAN-1193)
+
 - The Linux EVPN dataplane supervisor now uses an actor-owned wrapping
   generation token for its Type 1/2/5 projection input. Stable event and
   five-second poll passes avoid the EVPN table walk and clone entirely;

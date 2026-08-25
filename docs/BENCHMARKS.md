@@ -269,6 +269,17 @@ all-relevant path be no more than 2% slower than legacy. The measured +0.32%
 passes. The 0-row percentage is nanosecond-scale fixed dispatch overhead, not
 a scale result.
 
+### Linux FIB kernel-dump scaling
+
+`bench/run-fib-kernel-dump.py` is the privileged raw-rtnetlink harness for
+global versus strict table-filtered `RTM_GETROUTE` scaling. Its August 2026
+receipt covers 64 managed tables, 0 to 20,000 unrelated IPv4 rows, and 25
+timed passes at each K=1..64 table shape, with exact response-cardinality and
+`NLM_F_DUMP_FILTERED` fences. See the
+[`Linux FIB kernel-dump receipt`](perf/fib-kernel-dump-2026-08.md) and its
+machine-readable [`results.json`](perf/artifacts/fib-kernel-dump-2026-08/results.json).
+The fixture is raw IPv4 blackhole `/32` traffic, not whole-daemon latency.
+
 ## Comparing Two Refs
 
 Use `bench/compare-criterion.sh` when judging a performance PR locally. It

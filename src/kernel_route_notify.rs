@@ -38,6 +38,19 @@ use tokio::sync::mpsc;
 /// on the next pass rather than lost (the #476 evpn-linux pattern).
 const KERNEL_ROUTE_EVENT_BUFFER: usize = 64;
 
+/// Kernel-side filtering available for route dump requests made on a
+/// `NETLINK_ROUTE` socket.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouteDumpCapability {
+    /// The kernel rejected `NETLINK_GET_STRICT_CHK`; callers must retain the
+    /// legacy full-family dump and filter responses in userspace.
+    GlobalOnly,
+    /// Strict dump checking is enabled, so `RTM_GETROUTE` table filters are
+    /// enforced by the kernel.
+    KernelTableFiltered,
+}
+
 /// Multicast group ID for IPv4 route-table changes — enum value
 /// `RTNLGRP_IPV4_ROUTE` from `<linux/rtnetlink.h>` (value `7`).
 ///
@@ -129,11 +142,71 @@ pub(crate) fn connect_with_route_notifications(
     subscriber: NetlinkSubscriber,
     metrics: BgpMetrics,
 ) -> Result<(rtnetlink::Handle, mpsc::Receiver<KernelRouteEvent>), String> {
+    let (handle, events, _) = connect_route_notifications(subscriber, metrics, false)?;
+    Ok((handle, events))
+}
+
+/// Open the general-FIB actor's route socket and best-effort enable kernel-side
+/// table filtering for its route dumps.
+///
+/// Older kernels may reject `NETLINK_GET_STRICT_CHK`. That is not a setup
+/// failure: the returned capability tells the caller to preserve the legacy
+/// full IPv4 + IPv6 dump path instead. This connector is intentionally
+/// separate from [`connect_with_route_notifications`] so the BLACKHOLE actor's
+/// socket and dump behavior remain unchanged.
+#[cfg(target_os = "linux")]
+pub(crate) fn connect_with_filtered_route_notifications(
+    subscriber: NetlinkSubscriber,
+    metrics: BgpMetrics,
+) -> Result<
+    (
+        rtnetlink::Handle,
+        mpsc::Receiver<KernelRouteEvent>,
+        RouteDumpCapability,
+    ),
+    String,
+> {
+    connect_route_notifications(subscriber, metrics, true)
+}
+
+#[cfg(target_os = "linux")]
+fn connect_route_notifications(
+    subscriber: NetlinkSubscriber,
+    metrics: BgpMetrics,
+    enable_kernel_table_filter: bool,
+) -> Result<
+    (
+        rtnetlink::Handle,
+        mpsc::Receiver<KernelRouteEvent>,
+        RouteDumpCapability,
+    ),
+    String,
+> {
     use rtnetlink::sys::AsyncSocket;
 
     let actor = subscriber.as_str();
     let (mut connection, handle, messages) =
         rtnetlink::new_connection().map_err(|e| format!("open NETLINK_ROUTE: {e}"))?;
+    let route_dump_capability = if enable_kernel_table_filter {
+        match connection
+            .socket_mut()
+            .socket_mut()
+            .set_netlink_get_strict_chk(true)
+        {
+            Ok(()) => RouteDumpCapability::KernelTableFiltered,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    actor,
+                    "kernel rejected strict netlink dump checking; general FIB route snapshots \
+                     degrade to full IPv4 and IPv6 dumps"
+                );
+                RouteDumpCapability::GlobalOnly
+            }
+        }
+    } else {
+        RouteDumpCapability::GlobalOnly
+    };
     for (group, name, label) in [
         (RTNLGRP_IPV4_ROUTE, "RTNLGRP_IPV4_ROUTE", "ipv4_route"),
         (RTNLGRP_IPV6_ROUTE, "RTNLGRP_IPV6_ROUTE", "ipv6_route"),
@@ -154,7 +227,7 @@ pub(crate) fn connect_with_route_notifications(
     tokio::spawn(forward_route_notifications(
         messages, event_tx, subscriber, metrics,
     ));
-    Ok((handle, event_rx))
+    Ok((handle, event_rx, route_dump_capability))
 }
 
 /// Drain the connection's unsolicited-message stream, forwarding
