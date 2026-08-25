@@ -1575,6 +1575,24 @@ impl RibManager {
         // Skipped when the VPN dump was replayed from the group table
         // above (VPN-staging group member — design §4: join pays no
         // per-key staging walk).
+        let vpn_labeled_context = super::VpnLabeledStagingContext {
+            loc_rib,
+            ribs: &self.ribs,
+            rib_out: &initial_view,
+            peer_is_rr_client: &self.peer_is_rr_client,
+            target_is_ebgp,
+            interpret_rfc1997,
+            target_is_rr_client,
+            cluster_id,
+            sendable: sendable.as_ref(),
+            llgr: llgr.as_ref(),
+            orr_ctx,
+            add_path_send_max: peer_add_path_send_max,
+            add_path_send_limits: self.peer_add_path_send_limits.get(&peer),
+            add_path_send_families: &peer_add_path_send_families,
+            export_pol: export_pol.as_ref(),
+            force: false, // initial dump — equality check is correct
+        };
         if !all_l3vpn_keys.is_empty() && !vpn_group_replayed {
             let mut target = super::distribution::ExportTarget::Peer {
                 peer,
@@ -1585,27 +1603,12 @@ impl RibManager {
                 peer_label: &target_peer_label,
             };
             Self::stage_vpn_routes(
-                loc_rib,
-                &self.ribs,
-                &initial_view,
-                &self.peer_is_rr_client,
+                &vpn_labeled_context,
                 &all_l3vpn_keys,
                 &mut target,
-                target_is_ebgp,
-                interpret_rfc1997,
-                target_is_rr_client,
-                cluster_id,
-                sendable.as_ref(),
-                llgr.as_ref(),
                 rtc_filter.as_ref(),
-                orr_ctx,
-                peer_add_path_send_max,
-                self.peer_add_path_send_limits.get(&peer),
-                &peer_add_path_send_families,
-                export_pol.as_ref(),
                 &mut vpn_announce,
                 &mut vpn_withdraw,
-                false, // initial dump — equality check is correct
             );
         }
 
@@ -1637,26 +1640,11 @@ impl RibManager {
                 peer_label: &target_peer_label,
             };
             Self::stage_labeled_routes(
-                loc_rib,
-                &self.ribs,
-                &initial_view,
-                &self.peer_is_rr_client,
+                &vpn_labeled_context,
                 &all_labeled_keys,
                 &mut target,
-                target_is_ebgp,
-                interpret_rfc1997,
-                target_is_rr_client,
-                cluster_id,
-                sendable.as_ref(),
-                llgr.as_ref(),
-                orr_ctx,
-                peer_add_path_send_max,
-                self.peer_add_path_send_limits.get(&peer),
-                &peer_add_path_send_families,
-                export_pol.as_ref(),
                 &mut labeled_announce,
                 &mut labeled_withdraw,
-                false, // initial dump — equality check is correct
             );
         }
 

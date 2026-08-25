@@ -898,6 +898,24 @@ impl RibManager {
                     }
                 }
                 if !vpn_keys.is_empty() {
+                    let context = super::VpnLabeledStagingContext {
+                        loc_rib,
+                        ribs: &self.ribs,
+                        rib_out: &refresh_view,
+                        peer_is_rr_client: &self.peer_is_rr_client,
+                        target_is_ebgp,
+                        interpret_rfc1997,
+                        target_is_rr_client,
+                        cluster_id,
+                        sendable: sendable.as_ref(),
+                        llgr: llgr.as_ref(),
+                        orr_ctx,
+                        add_path_send_max: peer_add_path_send_max,
+                        add_path_send_limits: self.peer_add_path_send_limits.get(&peer),
+                        add_path_send_families: &peer_add_path_send_families,
+                        export_pol: export_pol.as_ref(),
+                        force: false, // route refresh re-emits via empty refresh_view
+                    };
                     let mut target = super::distribution::ExportTarget::Peer {
                         peer,
                         peer_asn: target_peer_asn,
@@ -907,27 +925,12 @@ impl RibManager {
                         peer_label: &target_peer_label,
                     };
                     Self::stage_vpn_routes(
-                        loc_rib,
-                        &self.ribs,
-                        &refresh_view,
-                        &self.peer_is_rr_client,
+                        &context,
                         &vpn_keys,
                         &mut target,
-                        target_is_ebgp,
-                        interpret_rfc1997,
-                        target_is_rr_client,
-                        cluster_id,
-                        sendable.as_ref(),
-                        llgr.as_ref(),
                         rtc_filter.as_ref(),
-                        orr_ctx,
-                        peer_add_path_send_max,
-                        self.peer_add_path_send_limits.get(&peer),
-                        &peer_add_path_send_families,
-                        export_pol.as_ref(),
                         &mut vpn_announce,
                         &mut vpn_withdraw,
-                        false, // route refresh re-emits via empty refresh_view
                     );
                 }
             }
@@ -954,6 +957,24 @@ impl RibManager {
                 }
             }
             if !labeled_keys.is_empty() {
+                let context = super::VpnLabeledStagingContext {
+                    loc_rib,
+                    ribs: &self.ribs,
+                    rib_out: &refresh_view,
+                    peer_is_rr_client: &self.peer_is_rr_client,
+                    target_is_ebgp,
+                    interpret_rfc1997,
+                    target_is_rr_client,
+                    cluster_id,
+                    sendable: sendable.as_ref(),
+                    llgr: llgr.as_ref(),
+                    orr_ctx,
+                    add_path_send_max: peer_add_path_send_max,
+                    add_path_send_limits: self.peer_add_path_send_limits.get(&peer),
+                    add_path_send_families: &peer_add_path_send_families,
+                    export_pol: export_pol.as_ref(),
+                    force: false, // route refresh re-emits via empty refresh_view
+                };
                 let mut target = super::distribution::ExportTarget::Peer {
                     peer,
                     peer_asn: target_peer_asn,
@@ -963,26 +984,11 @@ impl RibManager {
                     peer_label: &target_peer_label,
                 };
                 Self::stage_labeled_routes(
-                    loc_rib,
-                    &self.ribs,
-                    &refresh_view,
-                    &self.peer_is_rr_client,
+                    &context,
                     &labeled_keys,
                     &mut target,
-                    target_is_ebgp,
-                    interpret_rfc1997,
-                    target_is_rr_client,
-                    cluster_id,
-                    sendable.as_ref(),
-                    llgr.as_ref(),
-                    orr_ctx,
-                    peer_add_path_send_max,
-                    self.peer_add_path_send_limits.get(&peer),
-                    &peer_add_path_send_families,
-                    export_pol.as_ref(),
                     &mut labeled_announce,
                     &mut labeled_withdraw,
-                    false, // route refresh re-emits via empty refresh_view
                 );
             }
         } else if safi == Safi::RtConstrain {

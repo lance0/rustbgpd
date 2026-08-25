@@ -407,6 +407,30 @@ impl RtcMembership {
     }
 }
 
+/// Shared immutable inputs for VPN and labeled-unicast export staging.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the context preserves existing independent export flags without changing their semantics"
+)]
+struct VpnLabeledStagingContext<'a> {
+    loc_rib: &'a LocRib,
+    ribs: &'a HashMap<IpAddr, AdjRibIn>,
+    rib_out: &'a AdjRibOut,
+    peer_is_rr_client: &'a HashMap<IpAddr, bool>,
+    target_is_ebgp: bool,
+    interpret_rfc1997: bool,
+    target_is_rr_client: bool,
+    cluster_id: Option<Ipv4Addr>,
+    sendable: Option<&'a Vec<(Afi, Safi)>>,
+    llgr: Option<&'a Vec<(Afi, Safi)>>,
+    orr_ctx: Option<(&'a crate::orr::OrrTopology, &'a crate::orr::SpfResult)>,
+    add_path_send_max: u32,
+    add_path_send_limits: Option<&'a HashMap<(Afi, Safi), u32>>,
+    add_path_send_families: &'a [(Afi, Safi)],
+    export_pol: Option<&'a PolicyChain>,
+    force: bool,
+}
+
 /// Central RIB manager that owns all Adj-RIB-In, Loc-RIB, and Adj-RIB-Out state.
 ///
 /// Runs as a single tokio task, receiving updates via an mpsc channel.
