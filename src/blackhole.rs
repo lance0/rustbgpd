@@ -13,6 +13,7 @@
 //! foreign. Only private receipt evidence authorizes
 //! adoption, withdrawal, or reaping; an operator marker remains foreign.
 
+mod limits;
 mod owned_state;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
@@ -96,7 +97,7 @@ fn adoption_reap_deferral() -> Duration {
 }
 
 /// Runtime knobs resolved from `[global]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BlackholeConfig {
     /// Whether the BLACKHOLE FIB reconciler should run. The daemon
     /// passes `honor_blackhole && install_blackhole_discard` here so
@@ -106,6 +107,9 @@ pub struct BlackholeConfig {
     /// Permit non-host prefixes. When false, only IPv4 `/32` and IPv6
     /// `/128` are eligible.
     pub allow_broad_prefixes: bool,
+    pub max_active: Option<u32>,
+    pub install_rate_per_minute: Option<u32>,
+    pub install_burst: Option<u32>,
 }
 
 impl BlackholeConfig {
@@ -197,16 +201,30 @@ struct ReconcilerState {
     rejected: HashSet<RejectedBlackhole>,
     adoption: AdoptionSweep,
     ownership: OwnershipState,
+    limits: limits::InstallLimits,
 }
 
 impl ReconcilerState {
-    fn new(reap_after: tokio::time::Instant, ownership: OwnershipState) -> Self {
+    fn new(
+        config: BlackholeConfig,
+        reap_after: tokio::time::Instant,
+        ownership: OwnershipState,
+    ) -> Self {
         Self {
             owned: HashMap::new(),
             rejected: HashSet::new(),
             adoption: AdoptionSweep::new(reap_after),
             ownership,
+            limits: limits::InstallLimits::new(
+                config.max_active,
+                config.install_rate_per_minute,
+                config.install_burst,
+            ),
         }
+    }
+
+    fn active_count(&self) -> usize {
+        self.owned.len() + self.adoption.pending.len()
     }
 }
 
@@ -333,6 +351,7 @@ async fn run_loop<F>(
     F: BlackholeFib,
 {
     let mut state = ReconcilerState::new(
+        config,
         tokio::time::Instant::now() + adoption_reap_deferral(),
         ownership,
     );
@@ -341,10 +360,14 @@ async fn run_loop<F>(
     interval.tick().await;
     let mut event_debounce = Box::pin(tokio::time::sleep(ROUTE_EVENT_DEBOUNCE));
     let mut route_event_dirty = false;
+    let mut limit_wake = Box::pin(tokio::time::sleep(Duration::from_hours(8760)));
 
     let mut route_events = subscribe_route_events(&rib_tx).await;
     let mut kernel_route_events = fib.take_kernel_route_events();
     reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
+    if let Some(wake) = state.limits.next_wake {
+        limit_wake.as_mut().reset(wake);
+    }
 
     loop {
         tokio::select! {
@@ -360,10 +383,16 @@ async fn run_loop<F>(
             }
             _ = interval.tick() => {
                 reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
+                if let Some(wake) = state.limits.next_wake { limit_wake.as_mut().reset(wake); }
+            }
+            () = &mut limit_wake, if state.limits.next_wake.is_some() => {
+                reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
+                limit_wake.as_mut().reset(state.limits.next_wake.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_hours(8760)));
             }
             () = &mut event_debounce, if route_event_dirty => {
                 route_event_dirty = false;
                 reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
+                if let Some(wake) = state.limits.next_wake { limit_wake.as_mut().reset(wake); }
             }
             maybe_event = recv_route_event(&mut route_events) => {
                 match maybe_event {
@@ -523,10 +552,14 @@ async fn reconcile_once<F>(
 ) where
     F: BlackholeFib,
 {
+    state.limits.begin_pass();
     let Some(routes) = query_best_routes(rib_tx).await else {
         return;
     };
-    let derived = derive_desired(config, &routes);
+    let mut derived = derive_desired(config, &routes);
+    state
+        .limits
+        .order(&mut derived, |candidate| candidate.prefix);
     let desired: HashMap<Prefix, &Route> = derived
         .iter()
         .filter_map(|candidate| {
@@ -689,6 +722,7 @@ async fn reconcile_once<F>(
                     continue;
                 }
                 state.adoption.pending.remove(&candidate.prefix);
+                debug_assert!(!state.adoption.pending.contains(&candidate.prefix));
                 state.owned.insert(
                     candidate.prefix,
                     OwnedBlackhole {
@@ -728,12 +762,35 @@ async fn reconcile_once<F>(
             }
         }
 
+        if let Err(reason) = state
+            .limits
+            .admit(state.active_count(), tokio::time::Instant::now())
+        {
+            let rejected_key = RejectedBlackhole {
+                prefix: candidate.prefix,
+                reason,
+            };
+            current_rejected.insert(rejected_key);
+            if !state.rejected.contains(&rejected_key) {
+                metrics.record_blackhole_discard_rejected(reason);
+            }
+            statuses.push(BlackholeStatus {
+                prefix: candidate.prefix,
+                peer: candidate.route.peer,
+                state: BlackholeState::Rejected,
+                reason: reason.to_string(),
+            });
+            continue;
+        }
+
+        state.limits.attempted(candidate.prefix);
         match fib.install(candidate.prefix).await {
             Ok(()) => {
                 if !state.ownership.add(candidate.prefix) {
                     statuses.push(ownership_unavailable_status(&candidate));
                     continue;
                 }
+                debug_assert!(!state.adoption.pending.contains(&candidate.prefix));
                 state.owned.insert(
                     candidate.prefix,
                     OwnedBlackhole {
@@ -784,6 +841,8 @@ async fn reconcile_once<F>(
     .await;
 
     state.rejected = current_rejected;
+    metrics.set_blackhole_discard_active(state.active_count());
+    statuses.sort_by_key(|status| status.prefix);
     status_tx.send_replace(statuses);
 }
 
@@ -1012,6 +1071,8 @@ async fn degraded_pass_without_dump<F>(
     }
 
     state.rejected = current_rejected;
+    metrics.set_blackhole_discard_active(state.active_count());
+    statuses.sort_by_key(|status| status.prefix);
     status_tx.send_replace(statuses);
 }
 
@@ -1029,6 +1090,7 @@ where
             Removal::OwnershipUnavailable => return,
         }
     }
+    metrics.set_blackhole_discard_active(state.active_count());
 }
 
 #[derive(Debug)]
@@ -1299,7 +1361,7 @@ fn netlink_errno(err: &rtnetlink::Error) -> Option<i32> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use prometheus::Registry;
     use rustbgpd_rib::RouteEvent;
@@ -1309,7 +1371,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
     use std::time::Instant;
@@ -1318,7 +1380,7 @@ mod tests {
     /// leftovers — the dump cannot tell), `foreign` holds non-marker
     /// rows for the same table.
     #[derive(Default)]
-    struct FakeFib {
+    pub(super) struct FakeFib {
         installed: HashSet<Prefix>,
         foreign: HashSet<Prefix>,
         fail_install: HashMap<Prefix, String>,
@@ -1331,9 +1393,27 @@ mod tests {
         remove_receipt_after_dump: bool,
         drain_after_reconcile: bool,
         install_calls: Vec<Prefix>,
+        install_counter: Option<Arc<AtomicUsize>>,
+        install_log: Option<Arc<Mutex<Vec<Prefix>>>>,
         remove_calls: Vec<Prefix>,
         dump_calls: usize,
         kernel_events: Option<mpsc::Receiver<KernelRouteEvent>>,
+    }
+
+    impl FakeFib {
+        pub(super) fn rate_test(
+            counter: Arc<AtomicUsize>,
+            log: Arc<Mutex<Vec<Prefix>>>,
+            fail_prefix: Prefix,
+        ) -> Self {
+            let mut fib = Self {
+                install_counter: Some(counter),
+                install_log: Some(log),
+                ..Self::default()
+            };
+            fib.fail_install.insert(fail_prefix, "denied".to_string());
+            fib
+        }
     }
 
     impl BlackholeFib for FakeFib {
@@ -1371,6 +1451,12 @@ mod tests {
             prefix: Prefix,
         ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
             self.install_calls.push(prefix);
+            if let Some(counter) = &self.install_counter {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+            if let Some(log) = &self.install_log {
+                log.lock().unwrap().push(prefix);
+            }
             Box::pin(async move {
                 assert!(!receipt_has(self.receipt_path.as_deref(), prefix));
                 if let Some(error) = self.fail_install.get(&prefix) {
@@ -1418,7 +1504,7 @@ mod tests {
         tx
     }
 
-    fn rib_with_events(
+    pub(super) fn rib_with_events(
         routes: Vec<Route>,
     ) -> (
         mpsc::Sender<RibUpdate>,
@@ -1458,13 +1544,14 @@ mod tests {
         AdoptionSweep::new(tokio::time::Instant::now())
     }
 
-    async fn reconcile_for_test_with_adoption(
+    async fn reconcile_for_test_with_config_and_adoption(
         routes: Vec<Route>,
         fib: &mut FakeFib,
         owned: &mut HashMap<Prefix, OwnedBlackhole>,
         rejected: &mut HashSet<RejectedBlackhole>,
         metrics: &BgpMetrics,
         adoption: &mut AdoptionSweep,
+        config: BlackholeConfig,
     ) -> Vec<BlackholeStatus> {
         let rib_tx = rib_with_routes(routes);
         let (status_tx, status_rx) = watch::channel(Vec::new());
@@ -1498,19 +1585,13 @@ mod tests {
                 prefixes: receipt,
                 available: true,
             },
+            limits: limits::InstallLimits::new(
+                config.max_active,
+                config.install_rate_per_minute,
+                config.install_burst,
+            ),
         };
-        reconcile_once(
-            BlackholeConfig {
-                enabled: true,
-                allow_broad_prefixes: false,
-            },
-            &rib_tx,
-            fib,
-            metrics,
-            &status_tx,
-            &mut state,
-        )
-        .await;
+        reconcile_once(config, &rib_tx, fib, metrics, &status_tx, &mut state).await;
         if fib.drain_after_reconcile {
             drain_owned(fib, metrics, &mut state).await;
         }
@@ -1525,6 +1606,30 @@ mod tests {
         fib.receipt = Some(state.ownership.prefixes);
         fib.receipt_path = None;
         status_rx.borrow().clone()
+    }
+
+    async fn reconcile_for_test_with_adoption(
+        routes: Vec<Route>,
+        fib: &mut FakeFib,
+        owned: &mut HashMap<Prefix, OwnedBlackhole>,
+        rejected: &mut HashSet<RejectedBlackhole>,
+        metrics: &BgpMetrics,
+        adoption: &mut AdoptionSweep,
+    ) -> Vec<BlackholeStatus> {
+        reconcile_for_test_with_config_and_adoption(
+            routes,
+            fib,
+            owned,
+            rejected,
+            metrics,
+            adoption,
+            BlackholeConfig {
+                enabled: true,
+                allow_broad_prefixes: false,
+                ..BlackholeConfig::default()
+            },
+        )
+        .await
     }
 
     async fn reconcile_for_test(
@@ -1561,7 +1666,24 @@ mod tests {
             .unwrap_or(0.0)
     }
 
-    fn route(prefix: Prefix, origin_type: RouteOrigin, communities: Vec<u32>) -> Route {
+    fn gauge_value(metrics: &BgpMetrics, name: &str) -> f64 {
+        metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == name)
+            .and_then(|family| {
+                family.get_metric().first().and_then(|metric| {
+                    metric
+                        .get_gauge()
+                        .as_ref()
+                        .map(prometheus::proto::Gauge::value)
+                })
+            })
+            .unwrap_or(0.0)
+    }
+
+    pub(super) fn route(prefix: Prefix, origin_type: RouteOrigin, communities: Vec<u32>) -> Route {
         Route {
             prefix,
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
@@ -1592,6 +1714,18 @@ mod tests {
         Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 66), len))
     }
 
+    fn capped(max_active: u32) -> BlackholeConfig {
+        BlackholeConfig {
+            enabled: true,
+            max_active: Some(max_active),
+            ..BlackholeConfig::default()
+        }
+    }
+
+    fn v4_host(last: u8) -> Prefix {
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, last), 32))
+    }
+
     fn v6(len: u8) -> Prefix {
         Prefix::V6(Ipv6Prefix::new(
             Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x66),
@@ -1610,6 +1744,7 @@ mod tests {
             BlackholeConfig {
                 enabled: true,
                 allow_broad_prefixes: false,
+                ..BlackholeConfig::default()
             },
             &routes,
         );
@@ -1629,6 +1764,7 @@ mod tests {
             BlackholeConfig {
                 enabled: true,
                 allow_broad_prefixes: false,
+                ..BlackholeConfig::default()
             },
             &routes,
         );
@@ -1648,6 +1784,7 @@ mod tests {
             BlackholeConfig {
                 enabled: true,
                 allow_broad_prefixes: true,
+                ..BlackholeConfig::default()
             },
             &routes,
         );
@@ -1665,6 +1802,7 @@ mod tests {
             BlackholeConfig {
                 enabled: true,
                 allow_broad_prefixes: false,
+                ..BlackholeConfig::default()
             },
             &routes,
         );
@@ -1679,6 +1817,7 @@ mod tests {
             BlackholeConfig {
                 enabled: true,
                 allow_broad_prefixes: false,
+                ..BlackholeConfig::default()
             },
             &routes,
         );
@@ -1690,6 +1829,7 @@ mod tests {
         let config = BlackholeConfig {
             enabled: true,
             allow_broad_prefixes: false,
+            ..BlackholeConfig::default()
         };
         for (prefix, origin_type, expected_installable, expected_reason) in [
             (v4(32), RouteOrigin::Ebgp, true, "eligible"),
@@ -1839,6 +1979,7 @@ mod tests {
                 BlackholeConfig {
                     enabled: true,
                     allow_broad_prefixes: false,
+                    ..BlackholeConfig::default()
                 },
                 rib_tx,
                 FakeFib::default(),
@@ -1901,6 +2042,7 @@ mod tests {
                 BlackholeConfig {
                     enabled: true,
                     allow_broad_prefixes: false,
+                    ..BlackholeConfig::default()
                 },
                 rib_tx,
                 FakeFib::default(),
@@ -2083,6 +2225,7 @@ mod tests {
                 BlackholeConfig {
                     enabled: true,
                     allow_broad_prefixes: false,
+                    ..BlackholeConfig::default()
                 },
                 rib_tx,
                 FakeFib {
@@ -2232,6 +2375,226 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adopted_pending_consumes_cap_and_is_preserved() {
+        let pending = v4_host(65);
+        let over_cap = v4_host(64);
+        let candidate = v4_host(66);
+        let mut fib = FakeFib::default();
+        fib.installed.insert(pending);
+        fib.installed.insert(over_cap);
+        fib.receipt = Some([pending, over_cap].into());
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+        let mut adoption = deferred_adoption();
+        let statuses = reconcile_for_test_with_config_and_adoption(
+            vec![route(
+                candidate,
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            )],
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+            capped(1),
+        )
+        .await;
+        assert!(adoption.pending.contains(&pending));
+        assert!(adoption.pending.contains(&over_cap));
+        assert!(fib.installed.contains(&pending));
+        assert!(fib.installed.contains(&over_cap));
+        assert!(fib.install_calls.is_empty());
+        assert!(
+            statuses
+                .iter()
+                .any(|s| s.prefix == candidate && s.reason == "active_limit_exceeded")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn active_limit_to_rate_limit_transitions_count_once_per_reason() {
+        let old = v4_host(65);
+        let next = v4_host(66);
+        let peer = OwnedBlackhole {
+            peer: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+        };
+        let mut fib = FakeFib::default();
+        fib.installed.insert(old);
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let mut state = ReconcilerState::new(
+            BlackholeConfig {
+                enabled: true,
+                max_active: Some(1),
+                install_rate_per_minute: Some(4),
+                install_burst: Some(1),
+                ..BlackholeConfig::default()
+            },
+            tokio::time::Instant::now() + Duration::from_hours(1),
+            OwnershipState::ephemeral([old]),
+        );
+        state.adoption.swept = true;
+        state.owned.insert(old, peer);
+        assert_eq!(state.limits.admit(0, tokio::time::Instant::now()), Ok(()));
+        let both = rib_with_routes(vec![
+            route(
+                old,
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            ),
+            route(
+                next,
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            ),
+        ]);
+        reconcile_once(capped(1), &both, &mut fib, &metrics, &status_tx, &mut state).await;
+        let only_next = rib_with_routes(vec![route(
+            next,
+            RouteOrigin::Ebgp,
+            vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+        )]);
+        reconcile_once(
+            capped(1),
+            &only_next,
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut state,
+        )
+        .await;
+        reconcile_once(
+            capped(1),
+            &only_next,
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut state,
+        )
+        .await;
+        assert!(
+            (counter_value(
+                &metrics,
+                "bgp_blackhole_discard_rejected_total",
+                "reason",
+                "active_limit_exceeded"
+            ) - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (counter_value(
+                &metrics,
+                "bgp_blackhole_discard_rejected_total",
+                "reason",
+                "install_rate_limited"
+            ) - 1.0)
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_removal_retains_cap_while_successful_withdrawal_frees_it() {
+        let old = v4_host(65);
+        let next = v4_host(66);
+        let desired = vec![route(
+            next,
+            RouteOrigin::Ebgp,
+            vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+        )];
+        let peer = OwnedBlackhole {
+            peer: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+        };
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut fib = FakeFib::default();
+        fib.installed.insert(old);
+        fib.fail_remove.insert(old, "busy".to_string());
+        let mut owned = HashMap::from([(old, peer)]);
+        let mut rejected = HashSet::new();
+        let mut adoption = deferred_adoption();
+        let statuses = reconcile_for_test_with_config_and_adoption(
+            desired.clone(),
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+            capped(1),
+        )
+        .await;
+        assert!(owned.contains_key(&old));
+        assert!(
+            statuses
+                .iter()
+                .any(|s| s.prefix == next && s.reason == "active_limit_exceeded")
+        );
+
+        fib.fail_remove.clear();
+        let statuses = reconcile_for_test_with_config_and_adoption(
+            desired,
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+            capped(1),
+        )
+        .await;
+        assert!(!owned.contains_key(&old));
+        assert!(owned.contains_key(&next));
+        assert!(
+            statuses
+                .iter()
+                .any(|s| s.prefix == next && s.state == BlackholeState::Installed)
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_and_foreign_candidates_do_not_consume_active_capacity() {
+        let first = v4_host(65);
+        let second = v4_host(66);
+        let routes = vec![
+            route(
+                first,
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            ),
+            route(
+                second,
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            ),
+        ];
+        for foreign in [false, true] {
+            let mut fib = FakeFib::default();
+            if foreign {
+                fib.foreign.insert(first);
+            } else {
+                fib.fail_install.insert(first, "denied".to_string());
+            }
+            let metrics = BgpMetrics::with_registry(Registry::new());
+            let mut owned = HashMap::new();
+            let mut rejected = HashSet::new();
+            let mut adoption = deferred_adoption();
+            let _ = reconcile_for_test_with_config_and_adoption(
+                routes.clone(),
+                &mut fib,
+                &mut owned,
+                &mut rejected,
+                &metrics,
+                &mut adoption,
+                capped(1),
+            )
+            .await;
+            assert!(owned.contains_key(&second));
+            assert!(!owned.contains_key(&first));
+        }
+    }
+
+    #[tokio::test]
     async fn reconcile_preserves_foreign_existing_route() {
         let prefix = v4(32);
         let mut fib = FakeFib::default();
@@ -2378,6 +2741,10 @@ mod tests {
         assert_eq!(fib.receipt_disk, Some([prefix].into()));
         let adopted = plain_counter_value(&metrics, "bgp_blackhole_discard_adopted_total");
         assert!((adopted - 1.0).abs() < f64::EPSILON, "got {adopted}");
+        assert!(
+            (gauge_value(&metrics, "bgp_blackhole_discard_active") - 1.0).abs() < f64::EPSILON,
+            "claim transition must not double count"
+        );
     }
 
     /// ADR-0079: a claimed adopted row is owned like any other — a later
@@ -2863,6 +3230,31 @@ mod tests {
             "dump",
         );
         assert!((failures - 1.0).abs() < f64::EPSILON, "got {failures}");
+    }
+
+    #[tokio::test]
+    async fn first_dump_failure_does_not_report_unswept_receipts_active() {
+        let prefix = v4(32);
+        let mut fib = FakeFib {
+            fail_dump: Some("netlink down".to_string()),
+            receipt: Some([prefix].into()),
+            ..FakeFib::default()
+        };
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+        let mut adoption = deferred_adoption();
+        let _ = reconcile_for_test_with_adoption(
+            Vec::new(),
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+        assert!(!adoption.swept);
+        assert!(gauge_value(&metrics, "bgp_blackhole_discard_active").abs() < f64::EPSILON);
     }
 
     /// ADR-0079 rule 4: a second sweep over the same kernel state (the

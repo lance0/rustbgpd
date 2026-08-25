@@ -2958,9 +2958,9 @@
       "id": 72,
       "type": "timeseries",
       "title": "BLACKHOLE discard activity",
-      "description": "Successful RFC 7999 kernel discard install and removal event rates per instance. These counters reset on restart and do not report the current number of installed discard routes; inspect current kernel state for population.",
+      "description": "Successful RFC 7999 discard install/removal event rates per instance.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 192 },
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 192 },
       "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -2975,6 +2975,32 @@
           "expr": "rate(bgp_blackhole_discard_withdrawn_total{instance=~\"$instance\"}[$__rate_interval])",
           "legendFormat": "{{instance}} withdrawn/s",
           "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 73,
+      "type": "stat",
+      "title": "BLACKHOLE active rows",
+      "description": "Current receipt-authorized owned and adopted-pending discard rows.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 192 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "decimals": 0 }, "overrides": [] },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_blackhole_discard_active{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} active",
+          "refId": "A"
         }
       ]
     }

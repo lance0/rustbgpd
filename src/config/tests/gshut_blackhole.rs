@@ -227,6 +227,37 @@ fn blackhole_fib_discard_defaults_off() {
     let cfg = parse(&blackhole_toml(false, 65002)).unwrap();
     assert!(!cfg.global.install_blackhole_discard);
     assert!(!cfg.global.allow_blackhole_broad_prefixes);
+    assert_eq!(cfg.global.blackhole_discard_max_active, None);
+    assert_eq!(cfg.global.blackhole_discard_install_rate_per_minute, None);
+    assert_eq!(cfg.global.blackhole_discard_install_burst, None);
+}
+
+#[test]
+fn blackhole_discard_limits_validate_pair_and_positive_values() {
+    for invalid in [
+        "blackhole_discard_max_active = 0\n",
+        "blackhole_discard_install_rate_per_minute = 1\n",
+        "blackhole_discard_install_burst = 1\n",
+        "blackhole_discard_install_rate_per_minute = 0\nblackhole_discard_install_burst = 1\n",
+        "blackhole_discard_install_rate_per_minute = 1\nblackhole_discard_install_burst = 0\n",
+    ] {
+        let toml = valid_toml().replace(
+            "listen_port = 179\n",
+            &format!("listen_port = 179\n{invalid}"),
+        );
+        assert!(parse(&toml).is_err(), "accepted invalid limits: {invalid}");
+    }
+    let toml = valid_toml().replace(
+        "listen_port = 179\n",
+        "listen_port = 179\nblackhole_discard_max_active = 2\nblackhole_discard_install_rate_per_minute = 3\nblackhole_discard_install_burst = 4\n",
+    );
+    let cfg = parse(&toml).unwrap();
+    assert_eq!(cfg.global.blackhole_discard_max_active, Some(2));
+    assert_eq!(
+        cfg.global.blackhole_discard_install_rate_per_minute,
+        Some(3)
+    );
+    assert_eq!(cfg.global.blackhole_discard_install_burst, Some(4));
 }
 
 #[test]
@@ -266,6 +297,20 @@ fn blackhole_fib_discard_diff_marks_restart_required() {
 
     assert!(diff.blackhole_fib_discard_changed);
     assert!(diff.has_restart_required_changes());
+}
+
+#[test]
+fn blackhole_discard_limit_diff_marks_restart_required() {
+    let old = parse(valid_toml()).unwrap();
+    let new = parse(&valid_toml().replace(
+        "listen_port = 179\n",
+        "listen_port = 179\nblackhole_discard_max_active = 10\n",
+    ))
+    .unwrap();
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.blackhole_fib_discard_changed);
+    assert!(diff.has_restart_required_changes());
+    assert!(!diff.global_changed);
 }
 
 #[test]

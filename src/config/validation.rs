@@ -450,6 +450,7 @@ impl Config {
         }
 
         validate_listen_addresses(self)?;
+        validate_blackhole_discard_limits(self)?;
 
         // Validate cluster_id if present
         if let Some(ref cid) = self.global.cluster_id {
@@ -1482,6 +1483,28 @@ impl Config {
         }
 
         advisories
+    }
+}
+
+fn validate_blackhole_discard_limits(config: &Config) -> Result<(), ConfigError> {
+    let global = &config.global;
+    if global.blackhole_discard_max_active == Some(0) {
+        return Err(ConfigError::InvalidBlackholeDiscardLimits {
+            reason: "blackhole_discard_max_active must be greater than zero".to_string(),
+        });
+    }
+    match (
+        global.blackhole_discard_install_rate_per_minute,
+        global.blackhole_discard_install_burst,
+    ) {
+        (None, None) => Ok(()),
+        (Some(rate), Some(burst)) if rate > 0 && burst > 0 => Ok(()),
+        (Some(_), Some(_)) => Err(ConfigError::InvalidBlackholeDiscardLimits {
+            reason: "blackhole_discard_install_rate_per_minute and blackhole_discard_install_burst must both be greater than zero".to_string(),
+        }),
+        _ => Err(ConfigError::InvalidBlackholeDiscardLimits {
+            reason: "blackhole_discard_install_rate_per_minute and blackhole_discard_install_burst must be configured together".to_string(),
+        }),
     }
 }
 

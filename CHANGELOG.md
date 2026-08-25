@@ -35,6 +35,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Add startup-only `blackhole_discard_max_active`,
+  `blackhole_discard_install_rate_per_minute`, and
+  `blackhole_discard_install_burst`: existing receipt-authorized rows remain
+  installed above the cap, removals bypass limits, actual install attempts
+  consume cursor-fair tokens, and `bgp_blackhole_discard_active` reports the
+  live owned plus adopted-pending population.
+
 - `rustbgpd-wire` gains an optional, default-off `tokio-codec` feature with a
   typed `tokio_util::codec::Decoder` / `Encoder` adapter. Inbound and outbound
   message ceilings remain independently configurable so asymmetric RFC 8654

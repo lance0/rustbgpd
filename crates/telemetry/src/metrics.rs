@@ -316,6 +316,7 @@ struct BgpMetricsInner {
     blackhole_discard_reaped: IntCounter,
     blackhole_discard_rejected: IntCounterVec,
     blackhole_discard_kernel_failures: IntCounterVec,
+    blackhole_discard_active: IntGauge,
     fib_routes_installed: IntCounter,
     fib_routes_withdrawn: IntCounter,
     fib_routes_rejected: IntCounterVec,
@@ -1290,6 +1291,12 @@ impl BgpMetrics {
                 "Kernel failures while applying RFC 7999 BLACKHOLE discard routes by action.",
             ),
             &["action"],
+        )
+        .expect("valid metric definition");
+
+        let blackhole_discard_active = IntGauge::new(
+            "bgp_blackhole_discard_active",
+            "Receipt-authorized RFC 7999 BLACKHOLE discard rows currently active, including adopted rows pending reaping.",
         )
         .expect("valid metric definition");
 
@@ -2359,6 +2366,9 @@ impl BgpMetrics {
             .register(Box::new(blackhole_discard_kernel_failures.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(blackhole_discard_active.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(fib_routes_installed.clone()))
             .expect("metric not already registered");
         registry
@@ -2730,6 +2740,7 @@ impl BgpMetrics {
             blackhole_discard_reaped,
             blackhole_discard_rejected,
             blackhole_discard_kernel_failures,
+            blackhole_discard_active,
             fib_routes_installed,
             fib_routes_withdrawn,
             fib_routes_rejected,
@@ -3883,7 +3894,8 @@ impl BgpMetrics {
 
     /// Record a rejected RFC 7999 kernel-discard candidate.
     ///
-    /// `reason` is expected to be `broad_prefix` or `not_ebgp`.
+    /// `reason` is expected to be `broad_prefix`, `not_ebgp`,
+    /// `active_limit_exceeded`, or `install_rate_limited`.
     pub fn record_blackhole_discard_rejected(&self, reason: &str) {
         self.0
             .blackhole_discard_rejected
@@ -3899,6 +3911,13 @@ impl BgpMetrics {
             .blackhole_discard_kernel_failures
             .with_label_values(&[action])
             .inc();
+    }
+
+    /// Set the number of receipt-authorized BLACKHOLE rows.
+    pub fn set_blackhole_discard_active(&self, active: usize) {
+        self.0
+            .blackhole_discard_active
+            .set(i64::try_from(active).unwrap_or(i64::MAX));
     }
 
     /// Record a successful general unicast FIB route install or replace.
@@ -5680,6 +5699,13 @@ mod tests {
                 .get(),
             1
         );
+    }
+
+    #[test]
+    fn blackhole_active_gauge_tracks_receipt_authorized_rows() {
+        let m = BgpMetrics::new();
+        m.set_blackhole_discard_active(7);
+        assert_eq!(m.0.blackhole_discard_active.get(), 7);
     }
 
     #[test]

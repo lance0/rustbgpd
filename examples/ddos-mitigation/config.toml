@@ -19,10 +19,14 @@ listen_port = 179
 # the route is not propagated beyond this mitigation domain.
 #
 # This example leaves FIB enforcement off: it scopes BLACKHOLE in the
-# control plane only. To install local host-route kernel discards, explicitly
-# set install_blackhole_discard = true; broad prefixes remain rejected unless
-# allow_blackhole_broad_prefixes is also enabled.
+# control plane only. The following startup-only opt-in installs local
+# host-route kernel discards with bounded active rows and install attempts;
+# broad prefixes remain rejected unless allow_blackhole_broad_prefixes is set.
 honor_blackhole = true
+# install_blackhole_discard = true
+# blackhole_discard_max_active = 1000
+# blackhole_discard_install_rate_per_minute = 60
+# blackhole_discard_install_burst = 20
 # RFC 8212: an eBGP neighbor with no explicit policy carries nothing in
 # that direction. Deleting either chain below stops mitigation rules
 # reaching the edge routers — visibly — instead of silently reverting to

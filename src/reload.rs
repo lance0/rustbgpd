@@ -2393,16 +2393,30 @@ pub(crate) async fn reload_config_with_tcp_ao(
     if new_config.global.install_blackhole_discard != current.global.install_blackhole_discard
         || new_config.global.allow_blackhole_broad_prefixes
             != current.global.allow_blackhole_broad_prefixes
+        || new_config.global.blackhole_discard_max_active
+            != current.global.blackhole_discard_max_active
+        || new_config.global.blackhole_discard_install_rate_per_minute
+            != current.global.blackhole_discard_install_rate_per_minute
+        || new_config.global.blackhole_discard_install_burst
+            != current.global.blackhole_discard_install_burst
     {
         error!(
             "[global] BLACKHOLE FIB discard settings differ from the live config: \
              the RFC 7999 kernel-discard reconciler is spawned only at startup. \
-             Restart rustbgpd to apply install_blackhole_discard or \
-             allow_blackhole_broad_prefixes edits."
+             Restart rustbgpd to apply install_blackhole_discard, \
+             allow_blackhole_broad_prefixes, blackhole_discard_max_active, \
+             blackhole_discard_install_rate_per_minute, or \
+             blackhole_discard_install_burst edits."
         );
         new_config.global.install_blackhole_discard = current.global.install_blackhole_discard;
         new_config.global.allow_blackhole_broad_prefixes =
             current.global.allow_blackhole_broad_prefixes;
+        new_config.global.blackhole_discard_max_active =
+            current.global.blackhole_discard_max_active;
+        new_config.global.blackhole_discard_install_rate_per_minute =
+            current.global.blackhole_discard_install_rate_per_minute;
+        new_config.global.blackhole_discard_install_burst =
+            current.global.blackhole_discard_install_burst;
     }
     if blackhole_fib_reload_touches_spawn_gate && honor_blackhole_changed {
         error!(
@@ -5935,7 +5949,7 @@ log_format = "json"
     }
 
     #[tokio::test]
-    async fn reload_pins_honor_blackhole_when_fib_discard_enabled() {
+    async fn reload_pins_blackhole() {
         let path = unique_temp_path("reload-pins-honor-blackhole-with-fib");
 
         std::fs::write(
@@ -5947,6 +5961,9 @@ router_id = "10.0.0.1"
 listen_port = 179
 honor_blackhole = true
 install_blackhole_discard = true
+blackhole_discard_max_active = 10
+blackhole_discard_install_rate_per_minute = 20
+blackhole_discard_install_burst = 5
 
 [global.telemetry]
 log_format = "json"
@@ -5971,6 +5988,9 @@ router_id = "10.0.0.1"
 listen_port = 179
 honor_blackhole = false
 install_blackhole_discard = true
+blackhole_discard_max_active = 11
+blackhole_discard_install_rate_per_minute = 21
+blackhole_discard_install_burst = 6
 
 [global.telemetry]
 log_format = "json"
@@ -6001,6 +6021,12 @@ hold_time = 90
             "honor_blackhole must stay pinned while the FIB reconciler is running"
         );
         assert!(returned.global.install_blackhole_discard);
+        assert_eq!(returned.global.blackhole_discard_max_active, Some(10));
+        assert_eq!(
+            returned.global.blackhole_discard_install_rate_per_minute,
+            Some(20)
+        );
+        assert_eq!(returned.global.blackhole_discard_install_burst, Some(5));
 
         std::fs::remove_file(&path).ok();
     }

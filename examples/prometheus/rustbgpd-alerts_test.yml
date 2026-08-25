@@ -691,6 +691,47 @@ tests:
         alertname: BgpBlackholeDiscardInstallActivity
         exp_alerts: []
 
+  # ── BgpBlackholeDiscardAdmissionLimited ───────────────────────
+  - interval: 1m
+    input_series:
+      - series: 'bgp_blackhole_discard_rejected_total{instance="edge1:9179",reason="active_limit_exceeded"}'
+        values: "0 0 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_blackhole_discard_rejected_total{instance="edge2:9179",reason="install_rate_limited"}'
+        values: "9 9 9 0 1 1 1 1 1 1 1 1"
+      - series: 'bgp_blackhole_discard_rejected_total{instance="edge3:9179",reason="broad_prefix"}'
+        values: "0 0 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_blackhole_discard_rejected_total{instance="edge4:9179",reason="active_limit_exceeded"}'
+        values: "4x12"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: BgpBlackholeDiscardAdmissionLimited
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BgpBlackholeDiscardAdmissionLimited
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: edge1:9179
+              reason: active_limit_exceeded
+            exp_annotations:
+              summary: "BLACKHOLE discard admission limited on edge1:9179"
+              description: >-
+                rustbgpd recorded 1 retryable BLACKHOLE discard admission
+                transition(s) for active_limit_exceeded on edge1:9179 in the
+                last 10 minutes. Inspect the active population, configured
+                cap, and install token-bucket settings.
+          - exp_labels:
+              severity: warning
+              instance: edge2:9179
+              reason: install_rate_limited
+            exp_annotations:
+              summary: "BLACKHOLE discard admission limited on edge2:9179"
+              description: >-
+                rustbgpd recorded 1 retryable BLACKHOLE discard admission
+                transition(s) for install_rate_limited on edge2:9179 in the
+                last 10 minutes. Inspect the active population, configured
+                cap, and install token-bucket settings.
+
   # ── RpkiVrpTableEmpty ─────────────────────────────────────────
   - interval: 1m
     input_series:
