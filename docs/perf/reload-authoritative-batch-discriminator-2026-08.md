@@ -39,4 +39,4 @@ The exact rows, retained full-root adjudicator output, and sanitized verificatio
 [`authoritative-pair.json`](artifacts/reload-authoritative-batch-discriminator-2026-08/authoritative-pair.json),
 and [`verification.json`](artifacts/reload-authoritative-batch-discriminator-2026-08/verification.json).
 Validate the checked publication without the raw roots with
-`python3 bench/scale/irrreload/verify-receipt.py authoritative-publication --artifact-dir docs/perf/artifacts/reload-authoritative-batch-discriminator-2026-08`.
+`python3 bench/scale/irrreload/verify-receipt.py authoritative-publication --repo . --artifact-dir docs/perf/artifacts/reload-authoritative-batch-discriminator-2026-08`.
