@@ -927,11 +927,78 @@ fn route_key(route: &proto::Route) -> (String, u32, String, u32) {
     )
 }
 
+type RouteCaptureVersion = (u64, u64);
+const CAPTURE_ATTEMPTS: usize = 3;
+
+#[derive(Debug)]
+enum CaptureError {
+    Retry,
+    Fatal(HttpError),
+}
+
+fn capture_error(what: &'static str, error: tonic::Status) -> CaptureError {
+    if error.code() == tonic::Code::Aborted {
+        CaptureError::Retry
+    } else {
+        CaptureError::Fatal(bad_gateway(what, &error))
+    }
+}
+
+fn capture_version(
+    expected: &mut Option<RouteCaptureVersion>,
+    actual: Option<&proto::RoutePageVersion>,
+) -> Result<(), CaptureError> {
+    let actual = actual
+        .map(|version| (version.epoch, version.generation))
+        .ok_or_else(|| CaptureError::Fatal(invalid_table_snapshot()))?;
+    if expected.is_some_and(|expected| expected != actual) {
+        return Err(CaptureError::Retry);
+    }
+    *expected = Some(actual);
+    Ok(())
+}
+
 /// Loc-RIB best-route identity keys, used to report `primary` truthfully
 /// in the received and export views (Bird's Eye marks the selected route
 /// in every view). `prefix` narrows the walk to one exact prefix for the
 /// exact-route lookups; `None` walks the whole table — the same
 /// per-request full-table read the atomic table view already performs.
+async fn capture_best_route_keys(
+    state: &AppState,
+    prefix: Option<ExactPrefix>,
+) -> Result<(HashSet<(String, u32, String, u32)>, RouteCaptureVersion), CaptureError> {
+    let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
+    let mut keys = HashSet::new();
+    let mut page_token = String::new();
+    let mut version = None;
+    loop {
+        let response = client
+            .list_best_routes(proto::ListRoutesRequest {
+                afi_safi: proto::AddressFamily::Unspecified as i32,
+                page_size: 1000,
+                page_token,
+                prefix_filter: prefix.map(|p| p.address.to_string()).unwrap_or_default(),
+                prefix_filter_length: prefix.map_or(0, |p| p.length),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| capture_error("ListBestRoutes", error))?
+            .into_inner();
+        capture_version(&mut version, response.page_version.as_ref())?;
+        // Marker set, not a served view: the max-routes cap applies to
+        // the view being rendered, not to this lookup.
+        keys.extend(response.routes.iter().map(route_key));
+        if response.next_page_token.is_empty() {
+            break;
+        }
+        page_token = response.next_page_token;
+    }
+    Ok((
+        keys,
+        version.expect("a completed capture has at least one versioned page"),
+    ))
+}
+
 async fn best_route_keys(
     state: &AppState,
     prefix: Option<ExactPrefix>,
@@ -952,8 +1019,6 @@ async fn best_route_keys(
             .await
             .map_err(|error| bad_gateway("ListBestRoutes", &error))?
             .into_inner();
-        // Marker set, not a served view: the max-routes cap applies to
-        // the view being rendered, not to this lookup.
         keys.extend(response.routes.iter().map(route_key));
         if response.next_page_token.is_empty() {
             break;
@@ -989,53 +1054,89 @@ async fn serve_routes_for_peer(
     peer: IpAddr,
     wildcard: Option<(u64, u64)>,
 ) -> Result<Json<Value>, HttpError> {
-    let best = best_route_keys(state, None).await?;
-    let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
-    let mut routes: Vec<Value> = Vec::new();
-    let mut page_token = String::new();
-    loop {
-        let resp = client
-            .list_received_routes(proto::ListRoutesRequest {
-                neighbor_address: peer.to_string(),
-                // UNSPECIFIED = all unicast families, matching the
-                // in-daemon server's unfiltered per-peer query.
-                afi_safi: proto::AddressFamily::Unspecified as i32,
-                page_size: 1000,
-                page_token: page_token.clone(),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| bad_gateway("ListReceivedRoutes", &e))?
-            .into_inner();
-        // The generic cap applies to the rows this view renders: the whole
-        // received view, or only the wildcard matches (Bird's Eye's
-        // MAX_ROUTES likewise counts parsed result rows).
-        if page_token.is_empty() && wildcard.is_none() {
-            enforce_max(resp.total_count, state.max_routes)?;
+    for _ in 0..CAPTURE_ATTEMPTS {
+        let (best, best_version) = match capture_best_route_keys(state, None).await {
+            Ok(capture) => capture,
+            Err(CaptureError::Retry) => continue,
+            Err(CaptureError::Fatal(error)) => return Err(error),
+        };
+        let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
+        let mut captured = Vec::new();
+        let mut page_token = String::new();
+        let mut received_version = None;
+        loop {
+            let resp = match client
+                .list_received_routes(proto::ListRoutesRequest {
+                    neighbor_address: peer.to_string(),
+                    // UNSPECIFIED = all unicast families, matching the
+                    // in-daemon server's unfiltered per-peer query.
+                    afi_safi: proto::AddressFamily::Unspecified as i32,
+                    page_size: 1000,
+                    page_token: page_token.clone(),
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok(response) => response.into_inner(),
+                Err(error) if error.code() == tonic::Code::Aborted => break,
+                Err(error) => return Err(bad_gateway("ListReceivedRoutes", &error)),
+            };
+            match capture_version(&mut received_version, resp.page_version.as_ref()) {
+                Ok(()) => {}
+                Err(CaptureError::Retry) => break,
+                Err(CaptureError::Fatal(error)) => return Err(error),
+            }
+            // The generic cap applies to the rows this view renders: the whole
+            // received view, or only the wildcard matches (Bird's Eye's
+            // MAX_ROUTES likewise counts parsed result rows).
+            if page_token.is_empty() && wildcard.is_none() {
+                enforce_max(resp.total_count, state.max_routes)?;
+            }
+            retain_received_page(&mut captured, resp.routes, wildcard, state.max_routes)?;
+            if resp.next_page_token.is_empty() {
+                if received_version == Some(best_version) {
+                    let routes = captured
+                        .iter()
+                        .map(|route| {
+                            route_to_birdwatcher_with_primary(
+                                route,
+                                &state.identities,
+                                best.contains(&route_key(route)),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    enforce_max(routes.len() as u64, state.max_routes)?;
+                    return Ok(Json(serde_json::json!({
+                        "api": api_block(state.max_routes),
+                        "routes": routes,
+                    })));
+                }
+                break;
+            }
+            page_token = resp.next_page_token;
         }
-        routes.extend(
-            resp.routes
-                .iter()
-                .filter(|route| wildcard.is_none_or(|(x, y)| carries_large_community(route, x, y)))
-                .map(|route| {
-                    route_to_birdwatcher_with_primary(
-                        route,
-                        &state.identities,
-                        best.contains(&route_key(route)),
-                    )
-                }),
-        );
-        enforce_max(routes.len() as u64, state.max_routes)?;
-        if resp.next_page_token.is_empty() {
-            break;
-        }
-        page_token = resp.next_page_token;
     }
+    Err(invalid_table_snapshot())
+}
 
-    Ok(Json(serde_json::json!({
-        "api": api_block(state.max_routes),
-        "routes": routes,
-    })))
+fn retain_received_page(
+    captured: &mut Vec<proto::Route>,
+    routes: Vec<proto::Route>,
+    wildcard: Option<(u64, u64)>,
+    max_routes: u64,
+) -> Result<(), HttpError> {
+    let retained = if let Some((x, y)) = wildcard {
+        routes
+            .into_iter()
+            .filter(|route| carries_large_community(route, x, y))
+            .collect::<Vec<_>>()
+    } else {
+        routes
+    };
+    let accumulated = (captured.len() as u64).saturating_add(retained.len() as u64);
+    enforce_max(accumulated, max_routes)?;
+    captured.extend(retained);
+    Ok(())
 }
 
 type TableRouteKey = (ExactPrefix, IpAddr, u32);
@@ -1052,12 +1153,12 @@ impl TableRouteSet {
     fn check_version(
         &mut self,
         version: Option<&proto::RoutePageVersion>,
-    ) -> Result<(), HttpError> {
+    ) -> Result<(), CaptureError> {
         let version = version
             .map(|version| (version.epoch, version.generation))
-            .ok_or_else(invalid_table_snapshot)?;
+            .ok_or_else(|| CaptureError::Fatal(invalid_table_snapshot()))?;
         if self.version.is_some_and(|expected| expected != version) {
-            return Err(invalid_table_snapshot());
+            return Err(CaptureError::Retry);
         }
         self.version = Some(version);
         Ok(())
@@ -1149,67 +1250,88 @@ async fn routes_table(
     Path(table): Path<String>,
 ) -> Result<Json<Value>, HttpError> {
     let family = table_address_family(list_neighbors(&state).await?, &state.identities, &table)?;
-    let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
-    let mut routes = TableRouteSet::default();
-    for best in [false, true] {
-        let mut page_token = String::new();
-        let mut seen_tokens = HashSet::new();
-        let mut expected_total = None;
-        let mut rows_seen = 0_u64;
-        loop {
-            let request = proto::ListRoutesRequest {
-                neighbor_address: String::new(),
-                afi_safi: family,
-                page_size: 1000,
-                page_token: page_token.clone(),
-                ..Default::default()
-            };
-            let response = if best {
-                client.list_best_routes(request).await
-            } else {
-                client.list_received_routes(request).await
-            }
-            .map_err(|error| {
-                bad_gateway(
-                    if best {
-                        "ListBestRoutes"
-                    } else {
-                        "ListReceivedRoutes"
-                    },
-                    &error,
-                )
-            })?
-            .into_inner();
-            routes.check_version(response.page_version.as_ref())?;
-            if expected_total.is_some_and(|total| total != response.total_count) {
-                return Err(invalid_table_snapshot());
-            }
-            if expected_total.is_none() {
-                enforce_max(response.total_count, state.max_routes)?;
-                expected_total = Some(response.total_count);
-            }
-            rows_seen += response.routes.len() as u64;
-            if rows_seen > response.total_count {
-                return Err(invalid_table_snapshot());
-            }
-            for route in response.routes {
-                routes.insert(route, best, family, state.max_routes)?;
-            }
-            if response.next_page_token.is_empty() {
-                if rows_seen != response.total_count {
+    for _ in 0..CAPTURE_ATTEMPTS {
+        let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
+        let mut routes = TableRouteSet::default();
+        let mut retry = false;
+        for best in [false, true] {
+            let mut page_token = String::new();
+            let mut seen_tokens = HashSet::new();
+            let mut expected_total = None;
+            let mut rows_seen = 0_u64;
+            loop {
+                let request = proto::ListRoutesRequest {
+                    neighbor_address: String::new(),
+                    afi_safi: family,
+                    page_size: 1000,
+                    page_token: page_token.clone(),
+                    ..Default::default()
+                };
+                let response = match if best {
+                    client.list_best_routes(request).await
+                } else {
+                    client.list_received_routes(request).await
+                } {
+                    Ok(response) => response.into_inner(),
+                    Err(error) if error.code() == tonic::Code::Aborted => {
+                        retry = true;
+                        break;
+                    }
+                    Err(error) => {
+                        return Err(bad_gateway(
+                            if best {
+                                "ListBestRoutes"
+                            } else {
+                                "ListReceivedRoutes"
+                            },
+                            &error,
+                        ));
+                    }
+                };
+                match routes.check_version(response.page_version.as_ref()) {
+                    Ok(()) => {}
+                    Err(CaptureError::Retry) => {
+                        retry = true;
+                        break;
+                    }
+                    Err(CaptureError::Fatal(error)) => return Err(error),
+                }
+                if expected_total.is_some_and(|total| total != response.total_count) {
                     return Err(invalid_table_snapshot());
                 }
+                if expected_total.is_none() {
+                    enforce_max(response.total_count, state.max_routes)?;
+                    expected_total = Some(response.total_count);
+                }
+                rows_seen += response.routes.len() as u64;
+                if rows_seen > response.total_count {
+                    return Err(invalid_table_snapshot());
+                }
+                for route in response.routes {
+                    routes.insert(route, best, family, state.max_routes)?;
+                }
+                if response.next_page_token.is_empty() {
+                    if rows_seen != response.total_count {
+                        return Err(invalid_table_snapshot());
+                    }
+                    break;
+                }
+                if rows_seen == response.total_count
+                    || !seen_tokens.insert(response.next_page_token.clone())
+                {
+                    return Err(invalid_table_snapshot());
+                }
+                page_token = response.next_page_token;
+            }
+            if retry {
                 break;
             }
-            if rows_seen == response.total_count
-                || !seen_tokens.insert(response.next_page_token.clone())
-            {
-                return Err(invalid_table_snapshot());
-            }
-            page_token = response.next_page_token;
+        }
+        if !retry {
+            return Ok(Json(routes.body(&state.identities, state.max_routes)));
         }
     }
-    Ok(Json(routes.body(&state.identities, state.max_routes)))
+    Err(invalid_table_snapshot())
 }
 
 async fn routes_export(
@@ -1506,6 +1628,9 @@ async fn serve_exact_route(
     let Some(prefix) = prefix else {
         return Ok(Json(empty_routes_body(state.max_routes)));
     };
+    if source == ExactRouteSource::Received {
+        return serve_exact_received_route(state, peer, prefix).await;
+    }
     let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
     let mut routes = Vec::new();
     let mut page_token = String::new();
@@ -1563,6 +1688,120 @@ async fn serve_exact_route(
             })
             .collect::<Vec<_>>(),
     })))
+}
+
+async fn serve_exact_received_route(
+    state: &AppState,
+    peer: IpAddr,
+    prefix: ExactPrefix,
+) -> Result<Json<Value>, HttpError> {
+    for _ in 0..CAPTURE_ATTEMPTS {
+        let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
+        let mut routes = Vec::new();
+        let mut page_token = String::new();
+        let mut received_version = None;
+        let mut retry = false;
+        loop {
+            let response = match client
+                .list_received_routes(exact_route_request(
+                    peer,
+                    prefix,
+                    page_token,
+                    ExactRouteSource::Received,
+                ))
+                .await
+            {
+                Ok(response) => response.into_inner(),
+                Err(error) if error.code() == tonic::Code::Aborted => {
+                    retry = true;
+                    break;
+                }
+                Err(error) => return Err(bad_gateway("ListReceivedRoutes", &error)),
+            };
+            match capture_version(&mut received_version, response.page_version.as_ref()) {
+                Ok(()) => {}
+                Err(CaptureError::Retry) => {
+                    retry = true;
+                    break;
+                }
+                Err(CaptureError::Fatal(error)) => return Err(error),
+            }
+            append_exact_routes(&mut routes, response.routes, prefix, state.max_routes)?;
+            if response.next_page_token.is_empty() {
+                break;
+            }
+            page_token = response.next_page_token;
+        }
+        if retry {
+            continue;
+        }
+
+        let mut matched = prefix;
+        if routes.is_empty() {
+            let mut view = Vec::new();
+            page_token = String::new();
+            loop {
+                let remaining = state.max_lpm_scan_routes.saturating_sub(view.len() as u64);
+                let response = match client
+                    .list_received_routes(view_route_request(peer, prefix, page_token, remaining))
+                    .await
+                {
+                    Ok(response) => response.into_inner(),
+                    Err(error) if error.code() == tonic::Code::Aborted => {
+                        retry = true;
+                        break;
+                    }
+                    Err(error) => return Err(bad_gateway("ListReceivedRoutes", &error)),
+                };
+                match capture_version(&mut received_version, response.page_version.as_ref()) {
+                    Ok(()) => {}
+                    Err(CaptureError::Retry) => {
+                        retry = true;
+                        break;
+                    }
+                    Err(CaptureError::Fatal(error)) => return Err(error),
+                }
+                let next = response.next_page_token;
+                append_view_page(&mut view, response.routes, &next, state.max_lpm_scan_routes)?;
+                if next.is_empty() {
+                    break;
+                }
+                page_token = next;
+            }
+            if retry {
+                continue;
+            }
+            if let Some(covering) = longest_match(&view, prefix) {
+                routes = view
+                    .into_iter()
+                    .filter(|route| {
+                        ExactPrefix::from_route(&route.prefix, route.prefix_length)
+                            == Some(covering)
+                    })
+                    .collect();
+                enforce_max(routes.len() as u64, state.max_routes)?;
+                matched = covering;
+            }
+        }
+
+        let (best, best_version) = match capture_best_route_keys(state, Some(matched)).await {
+            Ok(capture) => capture,
+            Err(CaptureError::Retry) => continue,
+            Err(CaptureError::Fatal(error)) => return Err(error),
+        };
+        if received_version != Some(best_version) {
+            continue;
+        }
+        return Ok(Json(serde_json::json!({
+            "api": api_block(state.max_routes),
+            "routes": routes.iter().map(|route| route_to_birdwatcher_with_primary(
+                route,
+                &state.identities,
+                best.contains(&route_key(route)),
+            )).collect::<Vec<_>>(),
+        })));
+    }
+    Err(invalid_table_snapshot())
 }
 
 // ---------------------------------------------------------------------------
@@ -3193,6 +3432,40 @@ mod tests {
         assert!(!carries_large_community(&route(&["64496:1"]), 64496, 1));
         assert!(!carries_large_community(&route(&["64496:one:1"]), 64496, 1));
         assert!(!carries_large_community(&route(&[]), 64496, 1));
+
+        let mut retained = Vec::new();
+        retain_received_page(
+            &mut retained,
+            vec![route(&["64497:1:1"]), route(&["64496:1:1"])],
+            Some((64496, 1)),
+            1,
+        )
+        .unwrap();
+        assert_eq!(retained.len(), 1);
+        assert!(carries_large_community(&retained[0], 64496, 1));
+
+        let error = retain_received_page(
+            &mut retained,
+            vec![route(&["64497:1:2"]), route(&["64496:1:2"])],
+            Some((64496, 1)),
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.1.0["message"],
+            "Number of routes exceeds maximum allowed (2/1)"
+        );
+        assert_eq!(retained.len(), 1);
+
+        let mut ordinary = vec![route(&[])];
+        let error = retain_received_page(&mut ordinary, vec![route(&[])], None, 1).unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.1.0["message"],
+            "Number of routes exceeds maximum allowed (2/1)"
+        );
+        assert_eq!(ordinary.len(), 1);
     }
 
     /// Retention disabled and enabled-but-empty both produce the full
@@ -3965,6 +4238,60 @@ mod tests {
             serde_json::json!({"message":"Upstream daemon request failed"})
         );
         assert!(!body.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn received_best_capture_retry_contract_is_bounded_and_path_id_exact() {
+        let version = |generation| proto::RoutePageVersion {
+            epoch: 7,
+            generation,
+        };
+        let mut expected = None;
+        capture_version(&mut expected, Some(&version(1))).unwrap();
+        assert!(matches!(
+            capture_version(&mut expected, Some(&version(2))),
+            Err(CaptureError::Retry)
+        ));
+        assert!(matches!(
+            capture_version(&mut None, None),
+            Err(CaptureError::Fatal(_))
+        ));
+        for _ in 0..CAPTURE_ATTEMPTS {
+            assert!(matches!(
+                capture_error(
+                    "ListReceivedRoutes",
+                    tonic::Status::aborted("generation moved")
+                ),
+                CaptureError::Retry
+            ));
+        }
+        assert_eq!(CAPTURE_ATTEMPTS, 3);
+
+        let mut attempts = 0;
+        let winner = loop {
+            attempts += 1;
+            if attempts == 1 {
+                assert!(matches!(
+                    capture_version(&mut Some((7, 1)), Some(&version(2))),
+                    Err(CaptureError::Retry)
+                ));
+                continue;
+            }
+            break "same-version-winner";
+        };
+        assert_eq!(attempts, 2);
+        assert_eq!(winner, "same-version-winner");
+
+        let mut first = proto::Route {
+            prefix: "203.0.113.0".into(),
+            prefix_length: 24,
+            peer_address: "192.0.2.1".into(),
+            path_id: 10,
+            ..Default::default()
+        };
+        let first_key = route_key(&first);
+        first.path_id = 20;
+        assert_ne!(first_key, route_key(&first));
     }
 
     #[test]

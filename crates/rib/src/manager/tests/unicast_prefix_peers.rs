@@ -56,6 +56,82 @@ fn seed_route(manager: &mut RibManager, source: IpAddr, p: Prefix) {
     manager.register_unicast_announcer(source, p);
 }
 
+fn make_add_path_route(source: IpAddr, p: Prefix, path_id: u32, med: u32) -> Route {
+    let IpAddr::V4(source) = source else {
+        unreachable!()
+    };
+    let Prefix::V4(prefix) = p else {
+        unreachable!()
+    };
+    let mut route = make_route(prefix, source);
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::Med(med));
+    route.path_id = path_id;
+    route
+}
+
+fn routes_received(
+    manager: &mut RibManager,
+    source: IpAddr,
+    session_id: u64,
+    announced: Vec<Route>,
+    withdrawn: Vec<(Prefix, u32)>,
+) {
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: source,
+        session_id,
+        announced,
+        withdrawn,
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    drain_route_chunks(manager);
+}
+
+fn route_identity(route: &Route) -> (IpAddr, u32, u32) {
+    (route.peer, route.path_id, route.med())
+}
+
+fn assert_prefix_state(
+    manager: &RibManager,
+    p: Prefix,
+    expected: &[(IpAddr, u32, u32)],
+    expected_best: Option<(IpAddr, u32, u32)>,
+) {
+    let mut full = manager
+        .ribs
+        .values()
+        .flat_map(|rib| rib.iter_prefix(&p))
+        .map(route_identity)
+        .collect::<Vec<_>>();
+    full.sort_unstable();
+    let mut indexed =
+        RibManager::unicast_candidates(&manager.ribs, &manager.unicast_prefix_peers, &p)
+            .map(route_identity)
+            .collect::<Vec<_>>();
+    indexed.sort_unstable();
+    let mut expected = expected.to_vec();
+    expected.sort_unstable();
+    assert_eq!(full, expected);
+    assert_eq!(indexed, full);
+    for (source, _, _) in &full {
+        assert!(
+            manager
+                .unicast_prefix_peers
+                .peers(&p)
+                .any(|peer| peer == *source)
+        );
+    }
+    let mut oracle = crate::LocRib::new();
+    oracle.recompute(p, manager.ribs.values().flat_map(|rib| rib.iter_prefix(&p)));
+    assert_eq!(
+        oracle.get(&p).map(route_identity),
+        manager.loc_rib.get(&p).map(route_identity)
+    );
+    assert_eq!(manager.loc_rib.get(&p).map(route_identity), expected_best);
+}
+
 #[test]
 fn representation_sizes_are_frozen() {
     assert_eq!(size_of::<AdjRibInEpoch>(), 4);
@@ -243,4 +319,95 @@ fn production_gr_and_llgr_reestablishment_preserve_epoch() {
             [source]
         );
     }
+}
+
+#[test]
+fn production_add_path_replacement_lifecycle_matches_full_scan() {
+    let a = peer(1);
+    let b = peer(2);
+    let p = prefix(1);
+    let a10 = (a, 10, 10);
+    let a20 = (a, 20, 20);
+    let b30 = (b, 0, 30);
+    let mut manager = manager();
+    peer_up(&mut manager, a, 1);
+    peer_up(&mut manager, b, 10);
+    routes_received(
+        &mut manager,
+        b,
+        10,
+        vec![make_add_path_route(b, p, 0, 30)],
+        vec![],
+    );
+    routes_received(
+        &mut manager,
+        a,
+        1,
+        vec![
+            make_add_path_route(a, p, 10, 10),
+            make_add_path_route(a, p, 20, 20),
+        ],
+        vec![],
+    );
+    assert_prefix_state(&manager, p, &[a10, a20, b30], Some(a10));
+
+    let old_epoch = manager.unicast_prefix_peers.peer_epochs[&a];
+    peer_up(&mut manager, a, 2);
+    assert!(
+        !manager
+            .unicast_prefix_peers
+            .epoch_peers
+            .contains_key(&old_epoch)
+    );
+    assert_prefix_state(&manager, p, &[b30], Some(b30));
+    routes_received(
+        &mut manager,
+        a,
+        2,
+        vec![
+            make_add_path_route(a, p, 10, 10),
+            make_add_path_route(a, p, 20, 20),
+        ],
+        vec![],
+    );
+    assert_prefix_state(&manager, p, &[a10, a20, b30], Some(a10));
+
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: a,
+        session_id: 1,
+    });
+    assert_prefix_state(&manager, p, &[a10, a20, b30], Some(a10));
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: a,
+        session_id: 2,
+    });
+    assert_prefix_state(&manager, p, &[b30], Some(b30));
+
+    peer_up(&mut manager, a, 3);
+    routes_received(
+        &mut manager,
+        a,
+        3,
+        vec![
+            make_add_path_route(a, p, 10, 10),
+            make_add_path_route(a, p, 20, 20),
+        ],
+        vec![],
+    );
+    routes_received(&mut manager, a, 3, vec![], vec![(p, 20)]);
+    assert_prefix_state(&manager, p, &[a10, b30], Some(a10));
+    routes_received(
+        &mut manager,
+        a,
+        3,
+        vec![make_add_path_route(a, p, 20, 20)],
+        vec![],
+    );
+    routes_received(&mut manager, a, 3, vec![], vec![(p, 10)]);
+    assert_prefix_state(&manager, p, &[a20, b30], Some(a20));
+    routes_received(&mut manager, a, 3, vec![], vec![(p, 20)]);
+    assert_prefix_state(&manager, p, &[b30], Some(b30));
+    routes_received(&mut manager, b, 10, vec![], vec![(p, 0)]);
+    assert_prefix_state(&manager, p, &[], None);
+    assert!(manager.unicast_prefix_peers.peers(&p).next().is_none());
 }
