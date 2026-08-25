@@ -15,6 +15,25 @@ SPEC.loader.exec_module(CHECK)
 
 
 class DashboardMetricLinkTests(unittest.TestCase):
+    def evpn_dashboard(self):
+        return json.loads(CHECK.EVPN_DASHBOARD.read_text())
+
+    def check_evpn(self, dashboard):
+        source = CHECK.METRICS.read_text()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evpn.json"
+            path.write_text(json.dumps(dashboard))
+            CHECK.check_evpn_dashboard(
+                path, CHECK.rust_metric_inventory(source), source
+            )
+
+    def evpn_panel(self, dashboard, title):
+        return next(
+            panel
+            for panel in CHECK.all_panels(dashboard["panels"])
+            if panel.get("title") == title
+        )
+
     def remove_panel(self, panels, panel_id):
         for index, panel in enumerate(panels):
             if panel.get("id") == panel_id:
@@ -133,6 +152,84 @@ let families = self.allocated.collect();'''
         source = f'let text = "{escaped}"; let raw = r#"{fake}"#;'
         with self.assertRaisesRegex(ValueError, "no registered Rust metrics"):
             CHECK.rust_metric_inventory(source)
+
+    def test_live_evpn_dashboard_and_frozen_source_inventory(self):
+        source = CHECK.METRICS.read_text()
+        self.assertEqual(
+            {
+                name: definition
+                for name, definition in CHECK.registered_metric_definitions(source).items()
+                if name.startswith("evpn_")
+            },
+            CHECK.EVPN_METRICS,
+        )
+        self.check_evpn(self.evpn_dashboard())
+
+    def test_evpn_metric_typo_and_invalid_label_fail_closed(self):
+        dashboard = self.evpn_dashboard()
+        panel = self.evpn_panel(dashboard, "Active DF assignments")
+        expression = panel["targets"][0]["expr"]
+        for replacement, error in (
+            (expression.replace("evpn_df_role", "evpn_df_roles"), "evpn_df_roles"),
+            (expression.replace('role="df"', 'role="df",mac="00:00:00:00:00:01"'),
+             "invalid labels.*mac"),
+        ):
+            with self.subTest(replacement=replacement):
+                panel["targets"][0]["expr"] = replacement
+                with self.assertRaisesRegex(ValueError, error):
+                    self.check_evpn(dashboard)
+                panel["targets"][0]["expr"] = expression
+
+    def test_evpn_alpha_marker_and_required_row_fail_closed(self):
+        dashboard = self.evpn_dashboard()
+        dashboard["title"] = "rustbgpd EVPN Operations"
+        with self.assertRaisesRegex(ValueError, "title.*Alpha marker"):
+            self.check_evpn(dashboard)
+
+        dashboard = self.evpn_dashboard()
+        dashboard["panels"] = [
+            panel
+            for panel in dashboard["panels"]
+            if panel.get("title") != "Duplicate-MAC quarantine"
+        ]
+        with self.assertRaisesRegex(ValueError, "missing required operator rows.*Duplicate-MAC"):
+            self.check_evpn(dashboard)
+
+    def test_evpn_kind_and_cardinality_guards_fail_closed(self):
+        dashboard = self.evpn_dashboard()
+        panel = self.evpn_panel(dashboard, "DF role changes")
+        expression = panel["targets"][0]["expr"]
+        panel["targets"][0]["expr"] = expression.replace(
+            "sum by (instance, vni)", "sum by (instance, vni, esi)"
+        )
+        with self.assertRaisesRegex(ValueError, "unsafe aggregation.*esi"):
+            self.check_evpn(dashboard)
+
+        dashboard = self.evpn_dashboard()
+        panel = self.evpn_panel(dashboard, "FDB-NHG repair and cleanup")
+        panel["targets"][0]["expr"] = panel["targets"][0]["expr"].replace(
+            "rate(", "("
+        )
+        with self.assertRaisesRegex(ValueError, "counter.*must use rate/increase"):
+            self.check_evpn(dashboard)
+
+        dashboard = self.evpn_dashboard()
+        panel = self.evpn_panel(dashboard, "Type-5 IP-VRF route state")
+        panel["targets"][0]["expr"] = (
+            'rate(evpn_ip_vrf_observed_routes{instance=~"$instance",vrf=~"$vrf"}'
+            '[$__rate_interval])'
+        )
+        with self.assertRaisesRegex(ValueError, "gauge.*must not use rate/increase"):
+            self.check_evpn(dashboard)
+
+    def test_evpn_multi_value_vrf_uses_regex_matching(self):
+        dashboard = self.evpn_dashboard()
+        panel = self.evpn_panel(dashboard, "Type-5 IP-VRF route state")
+        panel["targets"][0]["expr"] = panel["targets"][0]["expr"].replace(
+            'vrf=~"$vrf"', 'vrf="$vrf"'
+        )
+        with self.assertRaisesRegex(ValueError, "multi-value.*must use the =~"):
+            self.check_evpn(dashboard)
 
     def test_live_dashboard_presentation_mutations_pass_full_check(self):
         dashboard = json.loads(CHECK.DASHBOARD.read_text())

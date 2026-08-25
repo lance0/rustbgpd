@@ -10,6 +10,15 @@ BMP/event-outbox health, RPKI/ASPA state, and core operations. Every panel
 references metrics the daemon actually exports from
 `crates/telemetry/src/metrics.rs` — no speculative series.
 
+An explicitly **Alpha** EVPN operations dashboard lives at
+[`grafana/rustbgpd-evpn.json`](grafana/rustbgpd-evpn.json)
+(uid `rustbgpd-evpn-alpha`). It covers the currently exported Type-2 local
+origination signals, aggregate Type-3-inclusive Loc-RIB state, Type-5/IP-VRF
+state, DF and attachment-circuit state, duplicate-MAC quarantine, dataplane
+repair/adoption/reap activity, ownership conflicts, and decomposed-runtime
+fail-stops. Alpha means its panels and variable contract may change with the
+VTEP surface.
+
 ## Enable the metrics endpoint
 
 Metrics are served by the daemon's built-in Prometheus listener,
@@ -48,7 +57,8 @@ scrape_configs:
 ## Import the dashboard
 
 1. Grafana → **Dashboards → New → Import**.
-2. Upload `docs/grafana/rustbgpd-overview.json` (or paste its contents).
+2. Upload `docs/grafana/rustbgpd-overview.json` or the Alpha
+   `docs/grafana/rustbgpd-evpn.json` (or paste its contents).
 3. Pick your Prometheus data source when prompted (the dashboard uses a
    `datasource` template variable, so it binds at import time).
 
@@ -66,6 +76,12 @@ Template variables:
 
 Per-peer series are reaped when a peer is deleted, so stale values age out after
 the next scrape.
+
+The EVPN dashboard intentionally offers only **Instance** and configured
+**VRF** selectors. Both support multiple values and All through bounded regex
+matching. It does not expose MAC, ESI, netdevice name, peer, or IP selectors;
+panels aggregate those dimensions away before rendering to avoid turning
+operator navigation into an unbounded-cardinality query.
 
 ## Alert rules
 
@@ -189,9 +205,12 @@ inside the bounded window does.
 - The "Memory (jemalloc)" panel shows data only for builds with the
   `jemalloc` feature (the release container image); other builds do not
   export the `jemalloc_*` gauges.
-- EVPN metrics (the `evpn_*` families) are intentionally not on this
-  overview dashboard; they are VTEP-alpha surface with per-VNI/MAC/ESI
-  cardinality better served by a dedicated dashboard.
+- EVPN metrics (the `evpn_*` families) remain off the overview dashboard; the
+  dedicated Alpha dashboard aggregates MAC, ESI, and netdevice-name dimensions.
+  There is no dedicated Type-3, VTEP-reachability, generic FDB/NHG installed
+  total, or generic reconcile-report metric today. Type-3 is therefore visible
+  only inside the aggregate EVPN Loc-RIB count; the dashboard does not infer
+  unsupported per-route-type or installed-object totals.
 
 ## Validation and load-bearing proofs
 
@@ -204,8 +223,9 @@ promtool check rules examples/prometheus/rustbgpd-alerts.yml
 (cd examples/prometheus && promtool test rules rustbgpd-alerts_test.yml)
 ```
 
-The dashboard checker parses JSON, rejects non-integer and duplicate panel IDs,
-and links every target and query-variable metric to a registered constructor in
+The dashboard checker validates both dashboards independently, parses JSON,
+rejects non-integer and duplicate panel IDs, and links every target and
+query-variable metric to a registered constructor in
 `crates/telemetry/src/metrics.rs`. Histogram `_bucket`, `_count`, and `_sum`
 series resolve only from registered histograms; aliases, empty discovery,
 unregistered constructors, comments, free strings, and test literals fail
@@ -214,6 +234,13 @@ and legends, panel types, discrete state rendering, RFC 8212 mappings,
 outbound-blocking axis and exclusion, and dynamic-neighbor capacity/rejection
 semantics. Descriptions, layout, row collapsed state, and particular unique IDs
 are intentionally presentation choices rather than validation contracts.
+
+For the EVPN Alpha dashboard, the checker additionally freezes all 38 current
+`evpn_*` family names, metric kinds, and constructor labels. Counter panels must
+use `rate` or `increase` before aggregation; gauges must remain raw. It rejects
+unknown selector labels, unsafe retention of MAC/ESI/name-style dimensions,
+non-regex use of multi-value variables, metric typos, missing Alpha or operator
+rows, and loss of any required source-backed signal.
 
 The slow-peer fixture is red if its `== 1` predicate or five-minute hold is
 changed. The RFC 8212 matrix covers import-only, export-only, and healthy peers;
