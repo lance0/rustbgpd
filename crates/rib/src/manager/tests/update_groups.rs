@@ -6464,6 +6464,186 @@ fn batch_replacements(
         .collect()
 }
 
+fn authoritative_receipt_closes(r: &AuthoritativeTransitionReceipt) -> bool {
+    r.total_us
+        == r.remainder_us
+            + [
+                r.precondition_us,
+                r.registration_membership_us,
+                r.cohort_partition_us,
+                r.cohort_precheck_us,
+                r.destination_build_us,
+                r.inventory_build_us,
+                r.membership_commit_us,
+                r.filtered_scope_build_us,
+                r.member_emit_state_us,
+                r.cohort_finalize_us,
+                r.fallback_regroup_us,
+                r.distribution_us,
+                r.duplicate_fallback_us,
+            ]
+            .into_iter()
+            .sum::<u64>()
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "four generations pin the full receipt and wire contract"
+)]
+fn batched_authoritative_four_generations_emit_exact_terminal_receipts() {
+    let a = community_chain(0xFDE8_0001);
+    let b = community_chain(0xFDE8_0002);
+    let mut fleet = batched_pcb_fleet(Some(&a));
+    for (policy, community) in [
+        (&b, 0xFDE8_0002),
+        (&a, 0xFDE8_0001),
+        (&b, 0xFDE8_0002),
+        (&a, 0xFDE8_0001),
+    ] {
+        let before = fleet.manager.authoritative_transition_receipts.len();
+        fleet
+            .manager
+            .apply_export_policy_replacements_synchronously(batch_replacements(
+                &fleet.members,
+                policy,
+            ))
+            .unwrap();
+        assert_eq!(
+            fleet.manager.authoritative_transition_receipts.len(),
+            before + 1
+        );
+        let r = &fleet.manager.authoritative_transition_receipts[before];
+        assert_eq!((r.outcome, r.classification), ("committed", "shared"));
+        assert_eq!(
+            (r.input_peers, r.present_peers, r.shared_cohorts),
+            (4, 4, 1)
+        );
+        assert_eq!(
+            (r.shared_members, r.fallback_members, r.distribution_passes),
+            (4, 0, 1)
+        );
+        assert_eq!(
+            (
+                r.destination_ensures,
+                r.destination_builds,
+                r.destination_adoptions,
+                r.membership_moves
+            ),
+            (1, 1, 0, 4)
+        );
+        assert_eq!(
+            (
+                r.inventory_announces,
+                r.inventory_withdraws,
+                r.inventory_supplements
+            ),
+            (5, 0, 1)
+        );
+        assert_eq!(
+            (r.filtered_scope_prefixes, r.filtered_scope_member_visits),
+            (5, 20)
+        );
+        assert_eq!(
+            (r.emits_attempted, r.emits_succeeded, r.emits_degraded),
+            (4, 4, 0)
+        );
+        assert_eq!(
+            (
+                r.tombstones,
+                r.lagging_members,
+                r.dirty_after,
+                r.pending_after,
+                r.filtered_state_before,
+                r.filtered_state_after
+            ),
+            (0, 0, 0, 0, 0, 0)
+        );
+        assert_eq!(
+            (
+                r.dirty_before,
+                r.pending_before,
+                r.groups_before,
+                r.groups_after
+            ),
+            (0, 0, 1, 1)
+        );
+        assert!(authoritative_receipt_closes(r));
+        let destination = fleet.manager.grouped_member_of(fleet.members[0]).unwrap();
+        let winner = fleet.manager.group_ribs[&destination]
+            .table
+            .get(&Prefix::V4(fleet.shared_prefix), 0)
+            .unwrap()
+            .peer;
+        for (peer, receiver) in fleet.members.iter().zip(&mut fleet.receivers) {
+            let updates: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
+            assert_eq!(updates.len(), if *peer == winner { 2 } else { 1 });
+            assert!(updates.iter().flat_map(|update| update.announce.iter()).all(|route| {
+                route.attributes.iter().any(|attribute| {
+                    matches!(attribute, PathAttribute::Communities(values) if values.contains(&community))
+                })
+            }));
+        }
+        assert!(
+            fleet
+                .members
+                .iter()
+                .all(|peer| !fleet.manager.dirty_peers.contains(peer))
+        );
+        assert!(fleet.manager.pending_regroup_baseline.is_empty());
+        assert!(fleet.manager.pending_extra_withdraws.is_empty());
+    }
+    assert_eq!(fleet.manager.authoritative_transition_receipts.len(), 4);
+}
+
+#[test]
+fn authoritative_rejected_and_duplicate_paths_emit_one_terminal_each() {
+    let a = community_chain(0xFDE8_0001);
+    let b = community_chain(0xFDE8_0002);
+    let mut fleet = batched_pcb_fleet(Some(&a));
+    fleet.manager.pending_clean_policy_transition =
+        Some(super::distribution::PendingCleanPolicyTransition::new(
+            batch_replacements(&fleet.members, &b),
+            None,
+        ));
+    assert!(
+        fleet
+            .manager
+            .apply_export_policy_replacements_synchronously(Vec::new())
+            .is_err()
+    );
+    fleet.manager.pending_clean_policy_transition = None;
+    let peer = fleet.members[0];
+    fleet
+        .manager
+        .apply_export_policy_replacements_synchronously(vec![
+            crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(b.clone()),
+            },
+            crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(a.clone()),
+            },
+        ])
+        .unwrap();
+    let receipts = &fleet.manager.authoritative_transition_receipts;
+    assert_eq!(receipts.len(), 2);
+    assert_eq!(
+        (
+            receipts[0].outcome,
+            receipts[0].classification,
+            receipts[0].failure_stage
+        ),
+        ("failed", "rejected", "precondition")
+    );
+    assert_eq!(
+        (receipts[1].outcome, receipts[1].classification),
+        ("committed", "duplicate-fallback")
+    );
+    assert!(receipts.iter().all(authoritative_receipt_closes));
+}
+
 /// The canonical batched cohort: every member of one per-client-best
 /// group moves to a fresh chain in ONE command with ZERO per-member
 /// resync passes — the shared payload is one `Arc` and one encode cell

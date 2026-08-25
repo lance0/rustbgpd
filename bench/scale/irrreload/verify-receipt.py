@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -28,6 +29,13 @@ PHASE_FIELDS = (
     "cohort_rib_transition_us", "authoritative_remainder_apply_us",
     "deferred_refresh_dispatch_us", "convergence_check_us", "total_us",
     "unattributed_us",
+)
+AUTHORITATIVE_PHASES = (
+    "precondition_us", "registration_membership_us", "cohort_partition_us",
+    "cohort_precheck_us", "destination_build_us", "inventory_build_us",
+    "membership_commit_us", "filtered_scope_build_us", "member_emit_state_us",
+    "cohort_finalize_us", "fallback_regroup_us", "distribution_us",
+    "duplicate_fallback_us",
 )
 CANONICAL_SHAPE = (320, 183040, 1000, 40000, 61)
 CANONICAL_FULL_INPUTS = {
@@ -158,6 +166,262 @@ def validate_reload_phases(daemon_log: Path, reload_log: Path, output: Path) -> 
             writer.writerow((reload_number, epoch_us, counts["total_targets"], counts["cohort_targets"],
                              counts["remainder_targets"], counts["refresh_count"], fields["outcome"],
                              str(fields["authoritative_fallback"]).lower(), *(numeric[key] for key in PHASE_FIELDS)))
+
+
+def validate_authoritative_discriminator(daemon_log: Path, reload_log: Path, output: Path) -> None:
+    triggers = [(int(number), int(wall)) for number, wall in re.findall(
+        r"^reload (\d+) SIGHUP wall_us=(\d+)", reload_log.read_text(), re.MULTILINE)]
+    if triggers != [(number, wall) for number, (_, wall) in enumerate(triggers, 1)] or len(triggers) != 4:
+        fail("authoritative discriminator requires four ordered SIGHUP reloads")
+    if any(left[1] >= right[1] for left, right in zip(triggers, triggers[1:])):
+        fail("authoritative discriminator triggers are not strictly ordered")
+    records, outers = [], []
+    counter_names = ("input_peers", "present_peers", "skipped_peers", "duplicate_peers",
+        "candidate_cohorts", "shared_cohorts", "shared_members", "fallback_members",
+        "destination_ensures", "destination_builds", "destination_adoptions", "membership_moves",
+        "inventory_announces", "inventory_withdraws", "inventory_supplements", "tombstones",
+        "lagging_members", "filtered_scope_prefixes", "filtered_scope_member_visits",
+        "emits_attempted", "emits_succeeded", "emits_degraded", "distribution_passes",
+        "filtered_state_before", "filtered_state_after", "dirty_before", "dirty_after",
+        "pending_before", "pending_after", "groups_before", "groups_after")
+    for raw in daemon_log.read_text(errors="replace").splitlines():
+        try: event = json.loads(raw)
+        except json.JSONDecodeError: continue
+        if not isinstance(event, dict): fail("authoritative discriminator event is not an object")
+        fields = event.get("fields", {})
+        if not isinstance(fields, dict): fail("authoritative discriminator fields are not an object")
+        message = fields.get("message")
+        if message not in {"authoritative_batch_phase", "reload generation phase timing"}: continue
+        try:
+            parsed = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
+            if parsed.utcoffset() is None: raise ValueError
+            delta = parsed - datetime(1970, 1, 1, tzinfo=timezone.utc)
+            epoch_us = (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
+        except (ValueError, KeyError, AttributeError, TypeError, OverflowError):
+            fail("authoritative discriminator timestamp is malformed")
+        if message == "reload generation phase timing":
+            if fields.get("target") != "reload_generation_phase": fail("outer phase target changed")
+            if type(fields.get("total_us")) is not int or fields["total_us"] <= 0: fail("outer total is not positive integer")
+            outers.append((epoch_us, fields))
+            continue
+        if event.get("target", fields.get("target")) != "authoritative_batch_phase":
+            fail("authoritative discriminator structured target changed")
+        required = set(AUTHORITATIVE_PHASES) | {"total_us", "remainder_us", "outcome",
+            "classification", "failure_stage", *counter_names}
+        if not required <= set(fields): fail("authoritative discriminator fields are incomplete")
+        numeric_names = required - {"outcome", "classification", "failure_stage"}
+        if any(type(fields[key]) is not int for key in numeric_names): fail("non-integer discriminator field")
+        numeric = {key: fields[key] for key in numeric_names}
+        if any(value < 0 for value in numeric.values()): fail("negative discriminator field")
+        if sum(numeric[key] for key in AUTHORITATIVE_PHASES) + numeric["remainder_us"] != numeric["total_us"]:
+            fail("authoritative discriminator phases do not close exactly")
+        if not isinstance(fields["failure_stage"], str) or fields["failure_stage"] not in {"none", "precondition", "duplicate_fallback", "registration_membership", "cohort_partition", "cohort_precheck", "destination_build", "inventory_build", "membership_commit", "filtered_scope_build", "member_emit_state", "cohort_finalize", "fallback_regroup", "distribution"}:
+            fail("authoritative discriminator failure stage changed")
+        if fields["outcome"] != "committed" or fields["classification"] != "shared" or fields["failure_stage"] != "none":
+            fail("authoritative discriminator outcome changed")
+        exact = {"input_peers":320, "present_peers":320, "skipped_peers":0, "duplicate_peers":0,
+            "candidate_cohorts":1, "shared_cohorts":1, "shared_members":320, "fallback_members":0,
+            "destination_ensures":1, "membership_moves":320, "lagging_members":0,
+            "emits_attempted":320, "emits_succeeded":320, "emits_degraded":0,
+            "distribution_passes":1, "dirty_after":0, "pending_after":0}
+        if any(numeric[key] != value for key, value in exact.items()) or numeric["destination_builds"] + numeric["destination_adoptions"] != 1:
+            fail("authoritative discriminator canonical counts changed")
+        records.append((epoch_us, fields, numeric))
+    if len(records) != 4 or len(outers) != 4: fail("expected exactly four inner and outer terminals")
+    if any(a[0] >= b[0] for a, b in zip(records, records[1:])): fail("inner terminals reordered")
+    if any(a[0] >= b[0] for a, b in zip(outers, outers[1:])): fail("outer terminals reordered")
+    bound = []
+    for index, (number, start) in enumerate(triggers):
+        end = triggers[index + 1][1] if index + 1 < len(triggers) else None
+        matches = [record for record in records if record[0] >= start and (end is None or record[0] < end)]
+        outer = [record for record in outers if record[0] >= start and (end is None or record[0] < end)]
+        if len(matches) != 1 or len(outer) != 1 or matches[0][0] > outer[0][0]:
+            fail(f"reload {number}: authoritative inner/outer binding changed")
+        bound.append((number, matches[0]))
+    outer_totals = [outer[0][1]["total_us"] for index, (_, start) in enumerate(triggers)
+        for outer in [[record for record in outers if record[0] >= start and
+            (index + 1 == len(triggers) or record[0] < triggers[index + 1][1])]]]
+    later_total = sorted(outer_totals[1:])[1]
+    delta = later_total - outer_totals[0]
+    owned = {"destination_build_us":("destination_builds", "destination_adoptions"),
+        "inventory_build_us":("inventory_announces", "inventory_withdraws", "inventory_supplements"),
+        "membership_commit_us":("membership_moves",),
+        "filtered_scope_build_us":("filtered_scope_prefixes",),
+        "member_emit_state_us":("filtered_scope_member_visits", "emits_attempted"),
+        "fallback_regroup_us":("fallback_members",),
+        "duplicate_fallback_us":("duplicate_peers",)}
+    witness = ("", "")
+    if delta * 5 >= outer_totals[0]:
+        for phase, counters in owned.items():
+            phase_delta = sorted([record[2][phase] for _, record in bound[1:]])[1] - bound[0][1][2][phase]
+            for counter in counters:
+                later = [record[2][counter] for _, record in bound[1:]]
+                if phase_delta * 10 >= delta * 7 and len(set(later)) == 1 and later[0] > bound[0][1][2][counter]:
+                    witness = (phase, counter); break
+            if witness[0]: break
+    with output.open("w", newline="") as stream:
+        header = ("reload", "timestamp_epoch_us", "outcome", "classification", "failure_stage",
+            "total_us", "remainder_us", *AUTHORITATIVE_PHASES, *counter_names,
+            "causal_phase", "owned_counter")
+        writer = csv.writer(stream); writer.writerow(header)
+        for number, (epoch, fields, numeric) in bound:
+            writer.writerow((number, epoch, fields["outcome"], fields["classification"],
+                fields["failure_stage"], numeric["total_us"], numeric["remainder_us"],
+                *(numeric[key] for key in AUTHORITATIVE_PHASES), *(numeric[key] for key in counter_names), *witness))
+
+
+def validate_authoritative_pair(repo: Path, roots: list[Path], output: Path) -> None:
+    runs = [validate_root(root, "sighup") for root in roots]
+    if runs[0]["completed"] >= runs[1]["started"] or runs[0]["identities"] == runs[1]["identities"]:
+        fail("pair chronology or daemon identity is not independent")
+    equal = ("commit", "dataset", "shape", "git", "scripts", "binaries", "environment", "inputs")
+    if any(runs[0][key] != runs[1][key] for key in equal): fail("pair provenance/workload differs")
+    git = runs[0]["git"]
+    def git_bytes(*args: str) -> bytes:
+        try: return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True).stdout
+        except subprocess.CalledProcessError as error: fail(f"git provenance check failed: {error}")
+    if git_bytes("rev-parse", f'{git["commit"]}^{{tree}}').decode().strip() != git["tree"]:
+        fail("candidate tree does not resolve")
+    if subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", git["origin_main"], git["commit"]]).returncode:
+        fail("candidate ancestry is not valid")
+    paths = {"runner":"bench/scale/irrreload/run-irr-reload.sh",
+        "verifier":"bench/scale/irrreload/verify-receipt.py", "generator":"bench/scale/reloadstall/gen-irr-scenario.py",
+        "rss_sampler":"bench/scale/matrix/rss-sampler.sh", "txn_apply":"bench/scale/irrreload/txn-apply.sh",
+        "txn_lifecycle":"bench/scale/irrreload/txn-lifecycle.sh"}
+    if any(hashlib.sha256(git_bytes("show", f'{git["commit"]}:{path}')).hexdigest() != runs[0]["scripts"][name]
+           for name, path in paths.items()): fail("tracked script blob identity differs")
+    tables = []
+    for root in roots:
+        cell = root / "rustbgpd-sighup"
+        with tempfile.NamedTemporaryFile() as rebuilt:
+            validate_authoritative_discriminator(cell / "daemon.log", cell / "reloadstall.log", Path(rebuilt.name))
+            if Path(rebuilt.name).read_bytes() != (cell / "authoritative-phase-timings.csv").read_bytes():
+                fail("authoritative CSV does not re-extract byte-identically")
+            validate_reload_phases(cell / "daemon.log", cell / "reloadstall.log", Path(rebuilt.name))
+            if Path(rebuilt.name).read_bytes() != (cell / "phase-timings.csv").read_bytes():
+                fail("outer phase CSV does not re-extract byte-identically")
+        tables.append(list(csv.DictReader((cell / "authoritative-phase-timings.csv").open())))
+    eligible = {("destination_build_us", counter) for counter in ("destination_builds", "destination_adoptions")}
+    eligible |= {("inventory_build_us", counter) for counter in ("inventory_announces", "inventory_withdraws", "inventory_supplements")}
+    eligible |= {("membership_commit_us", "membership_moves"),
+        ("filtered_scope_build_us", "filtered_scope_prefixes"),
+        ("member_emit_state_us", "filtered_scope_member_visits"),
+        ("member_emit_state_us", "emits_attempted"), ("fallback_regroup_us", "fallback_members"),
+        ("duplicate_fallback_us", "duplicate_peers")}
+    pairs = [{(row["causal_phase"], row["owned_counter"]) for row in table} for table in tables]
+    pair = next(iter(pairs[0])) if len(pairs[0]) == 1 and pairs[0] == pairs[1] and pairs[0] <= eligible else ("", "")
+    phase, counter = pair
+    verdict, details = "negative_result", {}
+    witnesses = []
+    for label, run, rows in zip(("A", "B"), runs, tables, strict=True):
+        outer = list(csv.DictReader((run["root"] / "rustbgpd-sighup/phase-timings.csv").open()))
+        totals = [int(row["total_us"]) for row in outer]
+        phases = [int(row[phase]) for row in rows] if phase else [0] * 4
+        counts = [int(row[counter]) for row in rows] if counter else [0] * 4
+        delta = sorted(totals[1:])[1] - totals[0]
+        witnesses.append(bool(phase) and delta > 0 and delta * 5 >= totals[0] and
+            (sorted(phases[1:])[1] - phases[0]) * 10 >= delta * 7 and
+            len(set(counts[1:])) == 1 and counts[1] > counts[0])
+        details[label] = {"totals_us":totals, "phase_us":phases, "owned_counts":counts}
+    if all(witnesses) and [int(row[counter]) for row in tables[0]] == [int(row[counter]) for row in tables[1]]:
+        verdict = "mechanism_witness"
+    if verdict == "negative_result": phase = counter = ""
+    output.write_text(json.dumps({"verdict":verdict, "phase":phase, "counter":counter,
+        "commit":runs[0]["commit"], "tree":git["tree"], "roots":details}, sort_keys=True) + "\n")
+
+
+def validate_authoritative_publication(artifact: Path, repo: Path) -> None:
+    content = {"authoritative-pair.json", "authoritative-batch-phases.csv", "verification.json"}
+    if {path.name for path in artifact.iterdir()} != content | {"SHA256SUMS"}: fail("publication roster changed")
+    if any((artifact / name).is_symlink() or not (artifact / name).is_file() for name in content | {"SHA256SUMS"}): fail("publication contains a non-regular file")
+    sealed = parse_digest_roster(artifact / "SHA256SUMS", content)
+    if any(sha256(artifact / name) != digest for name, digest in sealed.items()): fail("publication seal mismatch")
+    pair, verification = read_json(artifact / "authoritative-pair.json"), read_json(artifact / "verification.json")
+    if set(pair) != {"commit", "counter", "phase", "roots", "tree", "verdict"} or pair["verdict"] != "negative_result" or pair["phase"] != "" or pair["counter"] != "" or set(pair["roots"]) != {"A", "B"}:
+        fail("pair output is not a strict negative result")
+    if any(not isinstance(pair[key], str) or not re.fullmatch(r"[0-9a-f]{40}", pair[key]) for key in ("commit", "tree")):
+        fail("pair source identity is malformed")
+    for value in pair["roots"].values():
+        if set(value) != {"owned_counts", "phase_us", "totals_us"} or any(
+            not isinstance(items, list) or len(items) != 4 or any(type(item) is not int or item < 0 for item in items)
+            for items in value.values()) or value["owned_counts"] != [0] * 4 or value["phase_us"] != [0] * 4:
+            fail("pair output retained an owned witness")
+        if any(total <= 0 for total in value["totals_us"]): fail("pair totals are not positive")
+    expected_header = "repeat,reload,timestamp_epoch_us,outcome,classification,failure_stage,total_us,remainder_us,precondition_us,registration_membership_us,cohort_partition_us,cohort_precheck_us,destination_build_us,inventory_build_us,membership_commit_us,filtered_scope_build_us,member_emit_state_us,cohort_finalize_us,fallback_regroup_us,distribution_us,duplicate_fallback_us,input_peers,present_peers,skipped_peers,duplicate_peers,candidate_cohorts,shared_cohorts,shared_members,fallback_members,destination_ensures,destination_builds,destination_adoptions,membership_moves,inventory_announces,inventory_withdraws,inventory_supplements,tombstones,lagging_members,filtered_scope_prefixes,filtered_scope_member_visits,emits_attempted,emits_succeeded,emits_degraded,distribution_passes,filtered_state_before,filtered_state_after,dirty_before,dirty_after,pending_before,pending_after,groups_before,groups_after,causal_phase,owned_counter".split(",")
+    with (artifact / "authoritative-batch-phases.csv").open(newline="") as stream:
+        reader = csv.DictReader(stream); rows = list(reader)
+    if reader.fieldnames != expected_header or [(row["repeat"], row["reload"]) for row in rows] != [(repeat, str(number)) for repeat in "AB" for number in range(1, 5)]:
+        fail("publication rows are missing, extra, or reordered")
+    if any(set(row) != set(expected_header) for row in rows):
+        fail("publication row field roster changed")
+    phases = (*AUTHORITATIVE_PHASES,)
+    timestamps, root_timestamps, registration = [], {"A": [], "B": []}, {"A": [], "B": []}
+    for row in rows:
+        numeric_names = [key for key in expected_header if key not in {"repeat", "outcome", "classification", "failure_stage", "causal_phase", "owned_counter"}]
+        if any(not re.fullmatch(r"0|[1-9][0-9]*", row[key]) for key in numeric_names): fail("publication row has non-canonical integer")
+        integers = {key:int(row[key]) for key in numeric_names}
+        if any(value < 0 for value in integers.values()) or row["outcome"] != "committed" or row["classification"] != "shared" or row["failure_stage"] != "none" or row["causal_phase"] or row["owned_counter"]:
+            fail("publication row outcome/type changed")
+        exact = {"input_peers":320, "present_peers":320, "skipped_peers":0, "duplicate_peers":0,
+            "candidate_cohorts":1, "shared_cohorts":1, "shared_members":320, "fallback_members":0,
+            "destination_ensures":1, "membership_moves":320, "lagging_members":0,
+            "emits_attempted":320, "emits_succeeded":320, "emits_degraded":0,
+            "distribution_passes":1, "tombstones":0, "filtered_state_before":0,
+            "filtered_state_after":0, "dirty_before":0, "dirty_after":0,
+            "pending_before":0, "pending_after":0, "groups_before":1, "groups_after":1}
+        if any(integers[key] != value for key, value in exact.items()) or integers["destination_builds"] + integers["destination_adoptions"] != 1 or sum(integers[key] for key in phases) + integers["remainder_us"] != integers["total_us"]:
+            fail("publication count/phase invariant changed")
+        if integers["timestamp_epoch_us"] <= 0 or integers["total_us"] <= 0: fail("publication timing is not positive")
+        timestamps.append(integers["timestamp_epoch_us"])
+        root_timestamps[row["repeat"]].append(integers["timestamp_epoch_us"])
+        registration[row["repeat"]].append(integers["registration_membership_us"])
+    if any(left >= right for left, right in zip(timestamps, timestamps[1:])): fail("publication chronology changed")
+    if set(verification) != {"schema", "verdict", "candidate_commit", "candidate_tree", "origin_main", "source_identity_sha256", "system_environment_sha256", "dataset_sha256", "shape", "roots", "validation", "attribution", "decision", "artifacts"}:
+        fail("verification schema changed")
+    if verification["schema"] != 1 or verification["verdict"] != pair["verdict"] or verification["candidate_commit"] != pair["commit"] or verification["candidate_tree"] != pair["tree"]:
+        fail("verification does not bind pair identity")
+    frozen_source = {"commit":"09c1a1342c86c118e34a62d30c53d1cf159b3ade",
+        "tree":"f7e638f7bb6ba455aa72e83c855e5c00f698e1d7",
+        "origin_main":"9fc3286dcea4c8f1a5d371a782931a416e30a4b6"}
+    if pair["commit"] != frozen_source["commit"] or pair["tree"] != frozen_source["tree"] or verification["origin_main"] != frozen_source["origin_main"]:
+        fail("publication source identity changed")
+    try:
+        resolved_tree = subprocess.run(["git", "-C", str(repo), "rev-parse", f'{pair["commit"]}^{{tree}}'], check=True, capture_output=True, text=True).stdout.strip()
+        ancestry = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", verification["origin_main"], pair["commit"]]).returncode
+    except subprocess.CalledProcessError as error: fail(f"publication git identity failed: {error}")
+    if resolved_tree != pair["tree"] or ancestry: fail("publication git tree/ancestry changed")
+    digests = (verification["source_identity_sha256"], verification["system_environment_sha256"], verification["dataset_sha256"])
+    if not re.fullmatch(r"[0-9a-f]{40}", verification["origin_main"]) or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in digests):
+        fail("publication provenance hashes are malformed")
+    if verification["shape"] != {"members":320, "prefixes":183040, "reloads":4, "changed_fraction":0.1, "overlap_fraction":0}:
+        fail("publication workload changed")
+    if verification["artifacts"] != {"authoritative_batch_phases_sha256":sealed["authoritative-batch-phases.csv"], "frozen_pair_output_sha256":sealed["authoritative-pair.json"]}:
+        fail("verification artifact binding changed")
+    expected_validation = {"checksum_rosters":"pass", "pair_verifier":"pass", "raw_csv_reextraction":"byte-identical",
+        "sessions":"320/320", "rows_per_root":4, "parse_errors":0, "session_loss":0,
+        "outcomes":"committed", "shared_members":320, "fallback_members":0}
+    if verification["validation"] != expected_validation: fail("published validation summary changed")
+    if set(verification["roots"]) != {"A", "B"} or verification["roots"]["A"]["completed_at_epoch_ns"] >= verification["roots"]["B"]["started_at_epoch_ns"] or (verification["roots"]["A"]["daemon_pid"], verification["roots"]["A"]["daemon_start_ticks"]) == (verification["roots"]["B"]["daemon_pid"], verification["roots"]["B"]["daemon_start_ticks"]):
+        fail("published root chronology/identity changed")
+    for label, root in verification["roots"].items():
+        if set(root) != {"fingerprint", "sha256sums_sha256", "inner_csv_sha256", "outer_csv_sha256", "daemon_pid", "daemon_start_ticks", "started_at_epoch_ns", "completed_at_epoch_ns"} or any(not re.fullmatch(r"[0-9a-f]{64}", root[key]) for key in ("fingerprint", "sha256sums_sha256", "inner_csv_sha256", "outer_csv_sha256")) or any(type(root[key]) is not int or root[key] <= 0 for key in ("daemon_pid", "daemon_start_ticks", "started_at_epoch_ns", "completed_at_epoch_ns")) or root["started_at_epoch_ns"] >= root["completed_at_epoch_ns"]:
+            fail("published root identity/hash changed")
+        if any(not root["started_at_epoch_ns"] <= timestamp * 1000 <= root["completed_at_epoch_ns"] for timestamp in root_timestamps[label]):
+            fail("publication timestamp is outside its root interval")
+    for label in "AB":
+        totals = pair["roots"][label]["totals_us"]; later, first = sorted(totals[1:])[1], totals[0]
+        reg_later = sorted(registration[label][1:])[1]
+        delta, registration_delta = later - first, reg_later - registration[label][0]
+        if delta * 5 < first or registration_delta * 10 < delta * 7:
+            fail("published attribution no longer meets the frozen gates")
+        expected = {"outer_total_us":totals, "later_median_us":later,
+            "increase_percent":round((later-first)*100/first, 2), "registration_membership_us":registration[label],
+            "registration_delta_share_percent":round((reg_later-registration[label][0])*100/(later-first), 2)}
+        if verification["attribution"].get(label) != expected: fail("published attribution arithmetic changed")
+    if set(verification["attribution"]) != {"A", "B"}: fail("published attribution roster changed")
+    decision = verification["decision"]
+    if set(decision) != {"localized_phase", "owned_counter_witness", "mechanism", "reason"} or decision.get("localized_phase") != "registration_membership_us" or decision.get("owned_counter_witness") is not None or decision.get("mechanism") is not None or not isinstance(decision.get("reason"), str) or not decision["reason"]:
+        fail("negative decision was promoted")
 
 
 def quoted(text: str, position: int) -> tuple[str, int]:
@@ -1383,11 +1647,13 @@ def validate_root(root: Path, kind: str):
         "comparison": COMPARISON_CELLS,
         "grouped": (GROUPED_CELL,),
         "transaction": (TRANSACTION_CELL,),
+        "sighup": ("rustbgpd-sighup",),
     }[kind]
     expected_kind = {
         "comparison": "full-cross-daemon",
         "grouped": "full-grouped-control",
         "transaction": "full-transaction",
+        "sighup": "full-rustbgpd-sighup",
     }[kind]
     scripts = provenance.get("scripts")
     binaries = provenance.get("binaries")
@@ -1421,7 +1687,7 @@ def validate_root(root: Path, kind: str):
             "inputs",
             "fingerprint",
         }
-        or provenance.get("schema") != 3
+        or provenance.get("schema") != 4
         or not isinstance(provenance.get("started_at_epoch_ns"), int)
         or provenance.get("started_at_epoch_ns", -1) <= 0
         or not isinstance(fingerprint, str)
@@ -1459,6 +1725,7 @@ def validate_root(root: Path, kind: str):
         not isinstance(inputs_overlap, str)
         or not re.fullmatch(r"[0-9]+([.][0-9]+)?", inputs_overlap)
         or not 0 <= float(inputs_overlap) < 1
+        or kind == "sighup" and inputs_overlap != "0"
     ):
         fail(f"{root}: overlap_fraction input is not a decimal in [0, 1)")
     selected_image = re.compile(r"sha256:[0-9a-f]{64}")
@@ -1481,6 +1748,7 @@ def validate_root(root: Path, kind: str):
     if actual_shape != CANONICAL_SHAPE or int(inputs.get("reloads", -1)) != 4:
         fail(f"{root}: noncanonical full shape/seed/reload count")
     commit = git.get("commit")
+    tree = git.get("tree")
     origin_main = git.get("origin_main")
     measurement_mode = git.get("measurement_mode")
     source_relation_valid = (
@@ -1494,6 +1762,8 @@ def validate_root(root: Path, kind: str):
     if (
         not isinstance(commit, str)
         or not re.fullmatch(r"[0-9a-f]{40}", commit)
+        or not isinstance(tree, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", tree)
         or not isinstance(origin_main, str)
         or not re.fullmatch(r"[0-9a-f]{40}", origin_main)
         or git.get("dirty") is not False
@@ -1503,6 +1773,7 @@ def validate_root(root: Path, kind: str):
         or set(git)
         != {
             "commit",
+            "tree",
             "dirty",
             "dirty_state_sha256",
             "origin_main",
@@ -1860,22 +2131,23 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
         "comparison": COMPARISON_CELLS,
         "grouped": (GROUPED_CELL,),
         "transaction": (TRANSACTION_CELL,),
+        "sighup": ("rustbgpd-sighup",),
     }[kind]
     root.mkdir()
     dataset = "a" * 64
     (root / "dataset.sha256").write_text(dataset + "\n")
     image_id = "sha256:" + "a" * 64
     provenance = {
-        "schema": 3,
+        "schema": 4,
         "started_at_epoch_ns": started,
-        "git": {"commit": "c" * 40, "dirty": False, "dirty_state_sha256": "d" * 64, "origin_main": "c" * 40, "head_matches_origin_main": True, "measurement_mode": "main", "ancestry_verified": True},
+        "git": {"commit": "c" * 40, "tree": "b" * 40, "dirty": False, "dirty_state_sha256": "d" * 64, "origin_main": "c" * 40, "head_matches_origin_main": True, "measurement_mode": "main", "ancestry_verified": True},
         "scripts": {"runner": "1" * 64, "verifier": "2" * 64, "generator": "3" * 64, "rss_sampler": "4" * 64, "txn_apply": "5" * 64, "txn_lifecycle": "a" * 64},
         "binaries": {"reloadstall": "6" * 64, "rustbgpd": "7" * 64, "rbgp": "8" * 64, "rs_config_render": "9" * 64},
         "environment": {key: "fixture" for key in ("rustc", "cargo", "python", "jq", "docker", "kernel", "cpu_model")},
         "inputs": {
             **CANONICAL_FULL_INPUTS,
             "overlap_fraction": "0",
-            "campaign_kind": {"comparison": "full-cross-daemon", "grouped": "full-grouped-control", "transaction": "full-transaction"}[kind],
+            "campaign_kind": {"comparison": "full-cross-daemon", "grouped": "full-grouped-control", "transaction": "full-transaction", "sighup": "full-rustbgpd-sighup"}[kind],
             "cells": ",".join(cells),
             "bird_image_id": image_id if kind == "comparison" else "not-selected",
             "openbgpd_image_id": image_id if kind == "comparison" else "not-selected",
@@ -2104,6 +2376,162 @@ def self_test() -> None:
                 pass
             else:
                 fail("reload phase self-test accepted a missing/duplicate record")
+
+        reload_log.write_text("".join(
+            f"reload {number} SIGHUP wall_us={8635464000000000 + number * 1000000} policy=x\n"
+            for number in range(1, 5)))
+        def discriminator_lines(number: int) -> str:
+            distribution = 10 if number == 1 else 250
+            phases = {key: (distribution if key == "member_emit_state_us" else 1) for key in AUTHORITATIVE_PHASES}
+            fields = {"message":"authoritative_batch_phase", "outcome":"committed",
+                "classification":"shared", "failure_stage":"none",
+                "total_us":sum(phases.values()) + 1, "remainder_us":1, **phases,
+                "input_peers":320, "present_peers":320, "skipped_peers":0, "duplicate_peers":0,
+                "candidate_cohorts":1, "shared_cohorts":1, "shared_members":320,
+                "fallback_members":0, "destination_ensures":1, "destination_builds":1,
+                "destination_adoptions":0, "membership_moves":320, "inventory_announces":10,
+                "inventory_withdraws":10, "inventory_supplements":0, "tombstones":0,
+                "lagging_members":0, "filtered_scope_prefixes":10,
+                "filtered_scope_member_visits":3200 if number == 1 else 6400, "emits_attempted":320,
+                "emits_succeeded":320, "emits_degraded":0, "distribution_passes":1,
+                "filtered_state_before":1 if number == 1 else 2, "filtered_state_after":1, "dirty_before":0,
+                "dirty_after":0, "pending_before":0, "pending_after":0,
+                "groups_before":1, "groups_after":1}
+            inner = {"timestamp":f"2243-08-25T12:00:0{number}.000001Z",
+                "fields":fields, "target":"authoritative_batch_phase"}
+            outer = {"timestamp":f"2243-08-25T12:00:0{number}.500001Z",
+                "fields":{"message":"reload generation phase timing",
+                    "target":"reload_generation_phase", "total_targets":320, "cohort_targets":320,
+                    "remainder_targets":0, "refresh_count":0, "outcome":"committed",
+                    "authoritative_fallback":True, "preflight_us":10, "cohort_selection_us":10,
+                    "cohort_prestage_session_apply_us":10, "cohort_rib_transition_us":10 if number == 1 else 310,
+                    "authoritative_remainder_apply_us":10, "deferred_refresh_dispatch_us":10,
+                    "convergence_check_us":10, "unattributed_us":30,
+                    "total_us":100 if number == 1 else 400}}
+            return json.dumps(inner) + "\n" + json.dumps(outer) + "\n"
+        daemon_log.write_text("".join(discriminator_lines(number) for number in range(1, 5)))
+        validate_authoritative_discriminator(daemon_log, reload_log, output)
+        original = daemon_log.read_text()
+        assert {row["causal_phase"] for row in csv.DictReader(output.open())} == {"member_emit_state_us"}
+        daemon_log.write_text(original.replace('"filtered_scope_member_visits": 6400', '"filtered_scope_member_visits": 3200'))
+        validate_authoritative_discriminator(daemon_log, reload_log, output)
+        assert {row["causal_phase"] for row in csv.DictReader(output.open())} == {""}
+        daemon_log.write_text(original)
+        lines = original.splitlines()
+        mutations = ["\n".join(lines[2:]) + "\n", original + lines[-2] + "\n",
+            "[]\n" + original, "1\n" + original, "null\n" + original,
+            original.replace('"target": "authoritative_batch_phase"', '"target": "wrong"', 1),
+            original.replace('"input_peers": 320', '"input_peers": true', 1),
+            original.replace('"failure_stage": "none"', '"failure_stage": []', 1),
+            original.replace('"shared_members": 320', '"shared_members": 319', 1),
+            original.replace('"remainder_us": 1', '"remainder_us": 2', 1),
+            original.replace('"total_us": 100', '"total_us": 0', 1),
+            original.replace('"total_us": 100', '"total_us": -1', 1),
+            original.replace(".000001Z", ".900001Z", 1),
+            original.replace("12:00:02.000001Z", "12:00:01.000001Z", 1),
+            original.replace("12:00:02.000001Z", "12:00:00.900001Z", 1),
+            original.replace("12:00:02.500001Z", "12:00:01.500001Z", 1),
+            original.replace("12:00:02.500001Z", "12:00:00.500001Z", 1),
+            "\n".join([lines[0], *lines[2:]]) + "\n"]
+        for mutation, broken in enumerate(mutations):
+            daemon_log.write_text(broken)
+            try: validate_authoritative_discriminator(daemon_log, reload_log, output)
+            except InvalidReceipt: pass
+            else: fail(f"discriminator self-test accepted mutation {mutation}")
+        daemon_log.write_text(original)
+        canonical_reload = reload_log.read_text()
+        for changed in (canonical_reload.replace("8635464002000000", "8635464001000000"),
+            canonical_reload.replace("8635464002000000", "8635464000500000")):
+            reload_log.write_text(changed)
+            try: validate_authoritative_discriminator(daemon_log, reload_log, output)
+            except InvalidReceipt: pass
+            else: fail("discriminator self-test accepted non-strict trigger timestamps")
+
+        repo = root / "pair-repo"; repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "fixture@example.invalid"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "fixture"], check=True)
+        script_paths = {"runner":"bench/scale/irrreload/run-irr-reload.sh",
+            "verifier":"bench/scale/irrreload/verify-receipt.py", "generator":"bench/scale/reloadstall/gen-irr-scenario.py",
+            "rss_sampler":"bench/scale/matrix/rss-sampler.sh", "txn_apply":"bench/scale/irrreload/txn-apply.sh",
+            "txn_lifecycle":"bench/scale/irrreload/txn-lifecycle.sh"}
+        for name, relative in script_paths.items():
+            path = repo / relative; path.parent.mkdir(parents=True, exist_ok=True); path.write_text(name + "\n")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+        commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+        tree = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"], check=True, capture_output=True, text=True).stdout.strip()
+        roots = [root / "pair-a", root / "pair-b"]
+        canonical_triggers = "".join(f"reload {n} SIGHUP wall_us={8635464000000000+n*1000000} policy=x\n" for n in range(1, 5))
+        for index, pair_root in enumerate(roots):
+            make_fixture(pair_root, "sighup", 100 + index * 100, 900 + index)
+            thaw(pair_root); cdir = pair_root / "rustbgpd-sighup"
+            cdir.joinpath("reloadstall.log").write_text(cdir.joinpath("reloadstall.log").read_text() + canonical_triggers)
+            cdir.joinpath("daemon.log").write_text("".join(discriminator_lines(n) for n in range(1, 5)))
+            validate_authoritative_discriminator(cdir / "daemon.log", cdir / "reloadstall.log", cdir / "authoritative-phase-timings.csv")
+            validate_reload_phases(cdir / "daemon.log", cdir / "reloadstall.log", cdir / "phase-timings.csv")
+            provenance = read_json(pair_root / "provenance.json")
+            provenance["git"].update(commit=commit, tree=tree, origin_main=commit)
+            provenance["scripts"] = {name:hashlib.sha256((repo / path).read_bytes()).hexdigest() for name, path in script_paths.items()}
+            pair_root.joinpath("provenance.json").write_text(json.dumps(provenance)); rebind_provenance(pair_root)
+            reseal_cell_evidence(pair_root); reseal(pair_root); freeze(pair_root)
+        validate_authoritative_pair(repo, roots, output)
+        if read_json(output)["verdict"] != "mechanism_witness": fail("pair fixture missed witness")
+        print("red-proof authoritative-pair-positive=pass")
+        for name, old, new in (("threshold", '"total_us": 400', '"total_us": 110'),
+            ("witness", '"filtered_scope_member_visits": 6400', '"filtered_scope_member_visits": 6500')):
+            copied = root / f"pair-{name}"; shutil.copytree(roots[1], copied); thaw(copied); cdir = copied / "rustbgpd-sighup"
+            cdir.joinpath("daemon.log").write_text(cdir.joinpath("daemon.log").read_text().replace(old, new))
+            if name == "threshold": cdir.joinpath("daemon.log").write_text(cdir.joinpath("daemon.log").read_text().replace('"cohort_rib_transition_us": 310', '"cohort_rib_transition_us": 20'))
+            validate_authoritative_discriminator(cdir / "daemon.log", cdir / "reloadstall.log", cdir / "authoritative-phase-timings.csv")
+            validate_reload_phases(cdir / "daemon.log", cdir / "reloadstall.log", cdir / "phase-timings.csv")
+            reseal_cell_evidence(copied); reseal(copied); freeze(copied)
+            validate_authoritative_pair(repo, [roots[0], copied], output)
+            if read_json(output)["verdict"] != "negative_result" or read_json(output)["phase"]:
+                fail(f"pair fixture did not publish negative {name}")
+            print(f"red-proof authoritative-pair-negative-{name}=pass")
+        for name, mutate in (
+            ("schema", lambda value: value.update(schema=3)),
+            ("binary", lambda value: value["binaries"].update(rustbgpd="a" * 64)),
+            ("input", lambda value: value["inputs"].update(overlap_fraction="0.1"))):
+            copied = root / f"pair-{name}"; shutil.copytree(roots[1], copied); thaw(copied)
+            value = read_json(copied / "provenance.json"); mutate(value); copied.joinpath("provenance.json").write_text(json.dumps(value))
+            rebind_provenance(copied); reseal_cell_evidence(copied); reseal(copied); freeze(copied)
+            try: validate_authoritative_pair(repo, [roots[0], copied], output)
+            except InvalidReceipt: pass
+            else: fail(f"pair self-test accepted {name} mutation")
+            print(f"red-proof authoritative-pair-{name}=pass")
+        for name, mutate in (("tree", lambda value: value["git"].update(tree="a" * 40)),
+            ("blob", lambda value: value["scripts"].update(runner="a" * 64)),
+            ("same-overlap", lambda value: value["inputs"].update(overlap_fraction="0.1"))):
+            changed = []
+            for index, source in enumerate(roots):
+                copied = root / f"pair-{name}-{index}"; shutil.copytree(source, copied); thaw(copied)
+                value = read_json(copied / "provenance.json"); mutate(value); copied.joinpath("provenance.json").write_text(json.dumps(value))
+                rebind_provenance(copied); reseal_cell_evidence(copied); reseal(copied); freeze(copied); changed.append(copied)
+            try: validate_authoritative_pair(repo, changed, output)
+            except InvalidReceipt: pass
+            else: fail(f"pair self-test accepted same-{name} mutation")
+            print(f"red-proof authoritative-pair-{name}=pass")
+        copied = root / "pair-csv"; shutil.copytree(roots[1], copied); thaw(copied)
+        path = copied / "rustbgpd-sighup/authoritative-phase-timings.csv"; path.write_text(path.read_text() + "x\n")
+        reseal_cell_evidence(copied); reseal(copied); freeze(copied)
+        for name, pair_roots in (("csv", [roots[0], copied]), ("reversal", roots[::-1])):
+            try: validate_authoritative_pair(repo, pair_roots, output)
+            except InvalidReceipt: pass
+            else: fail(f"pair self-test accepted {name} mutation")
+            print(f"red-proof authoritative-pair-{name}=pass")
+        for name, source in (("identity", roots[0]), ("chronology", roots[1])):
+            copied = root / f"pair-{name}"; shutil.copytree(roots[1], copied); thaw(copied)
+            if name == "identity": shutil.copyfile(source / "rustbgpd-sighup/process.tsv", copied / "rustbgpd-sighup/process.tsv")
+            else:
+                value = read_json(copied / "provenance.json"); value["started_at_epoch_ns"] = 50
+                copied.joinpath("provenance.json").write_text(json.dumps(value))
+            rebind_provenance(copied); reseal_cell_evidence(copied); reseal(copied); freeze(copied)
+            try: validate_authoritative_pair(repo, [roots[0], copied], output)
+            except InvalidReceipt: pass
+            else: fail(f"pair self-test accepted {name} mutation")
+            print(f"red-proof authoritative-pair-{name}=pass")
 
     proofs = {}
     with tempfile.TemporaryDirectory() as directory:
@@ -2843,6 +3271,79 @@ transaction-mixed-binary transaction-process-reuse transaction-file-tamper trans
         missing = expected - proofs.keys()
         if missing:
             fail(f"self-test proofs did not reject: {sorted(missing)}")
+        source_repo = Path(__file__).resolve().parents[3]
+        publication = source_repo / "docs/perf/artifacts/reload-authoritative-batch-discriminator-2026-08"
+        validate_authoritative_publication(publication, source_repo)
+        def publication_rejected(name, mutate, reseal=True):
+            copied = base / f"publication-{name}"; shutil.copytree(publication, copied); mutate(copied)
+            if reseal:
+                names = ("authoritative-pair.json", "authoritative-batch-phases.csv", "verification.json")
+                copied.joinpath("SHA256SUMS").write_text("".join(f"{sha256(copied / item)}  {item}\n" for item in names))
+            try: validate_authoritative_publication(copied, source_repo)
+            except InvalidReceipt: print(f"red-proof authoritative-publication-{name}=pass")
+            else: fail(f"publication self-test accepted {name}")
+        publication_rejected("missing", lambda root: root.joinpath("authoritative-pair.json").unlink(), False)
+        publication_rejected("extra", lambda root: root.joinpath("extra").write_text("x"), False)
+        publication_rejected("ordering", lambda root: root.joinpath("authoritative-batch-phases.csv").write_text("\n".join([root.joinpath("authoritative-batch-phases.csv").read_text().splitlines()[0], *reversed(root.joinpath("authoritative-batch-phases.csv").read_text().splitlines()[1:])]) + "\n"))
+        def alter_publication(root, section, key, value):
+            path = root / "verification.json"; document = read_json(path); document[section][key] = value; path.write_text(json.dumps(document))
+        def promote_pair_witness(root):
+            path = root / "authoritative-pair.json"; document = read_json(path)
+            document["phase"] = "member_emit_state_us"; path.write_text(json.dumps(document))
+        def alter_publication_source(root, field):
+            pair_path, verification_path = root / "authoritative-pair.json", root / "verification.json"
+            pair, verification = read_json(pair_path), read_json(verification_path)
+            if field in {"commit", "tree"}:
+                pair[field] = "a" * 40; pair_path.write_text(json.dumps(pair))
+                verification[{"commit":"candidate_commit", "tree":"candidate_tree"}[field]] = "a" * 40
+                verification["artifacts"]["frozen_pair_output_sha256"] = sha256(pair_path)
+            else: verification["origin_main"] = "a" * 40
+            verification_path.write_text(json.dumps(verification))
+        def alter_publication_csv(root, row_index, key, value):
+            path = root / "authoritative-batch-phases.csv"
+            with path.open(newline="") as stream:
+                reader = csv.DictReader(stream); fieldnames, rows = reader.fieldnames, list(reader)
+            rows[row_index][key] = value
+            with path.open("w", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=fieldnames); writer.writeheader(); writer.writerows(rows)
+        def append_publication_csv_value(root):
+            path = root / "authoritative-batch-phases.csv"; lines = path.read_text().splitlines()
+            lines[1] += ",extra"; path.write_text("\n".join(lines) + "\n")
+        def alter_publication_attribution(root, totals=None, registrations=None):
+            pair_path, csv_path, verification_path = (root / name for name in ("authoritative-pair.json", "authoritative-batch-phases.csv", "verification.json"))
+            pair, verification = read_json(pair_path), read_json(verification_path)
+            if totals is not None:
+                pair["roots"]["A"]["totals_us"] = totals; pair_path.write_text(json.dumps(pair))
+            if registrations is not None:
+                with csv_path.open(newline="") as stream:
+                    old_rows = list(csv.DictReader(stream))
+                for index, value in enumerate(registrations):
+                    old_registration, old_remainder = (int(old_rows[index][key]) for key in ("registration_membership_us", "remainder_us"))
+                    alter_publication_csv(root, index, "registration_membership_us", str(value))
+                    alter_publication_csv(root, index, "remainder_us", str(old_remainder + old_registration - value))
+            totals = pair["roots"]["A"]["totals_us"]; later, first = sorted(totals[1:])[1], totals[0]
+            registrations = [int(row["registration_membership_us"]) for row in csv.DictReader(csv_path.open()) if row["repeat"] == "A"]
+            reg_later = sorted(registrations[1:])[1]
+            verification["artifacts"] = {"authoritative_batch_phases_sha256":sha256(csv_path),
+                "frozen_pair_output_sha256":sha256(pair_path)}
+            verification["attribution"]["A"] = {"outer_total_us":totals, "later_median_us":later,
+                "increase_percent":round((later-first)*100/first, 2), "registration_membership_us":registrations,
+                "registration_delta_share_percent":round((reg_later-registrations[0])*100/(later-first), 2)}
+            verification_path.write_text(json.dumps(verification))
+        publication_rejected("arithmetic", lambda root: alter_publication(root, "attribution", "A", {}))
+        publication_rejected("csv-arithmetic", lambda root: alter_publication_csv(root, 0, "total_us", "1"))
+        publication_rejected("csv-chronology", lambda root: alter_publication_csv(root, 1, "timestamp_epoch_us", "1787669377204703"))
+        publication_rejected("csv-extra-value", append_publication_csv_value)
+        publication_rejected("clean-state", lambda root: alter_publication_csv(root, 0, "dirty_before", "1"))
+        publication_rejected("out-of-root-timestamp", lambda root: alter_publication_csv(root, 0, "timestamp_epoch_us", "1"))
+        publication_rejected("sub-20-growth", lambda root: alter_publication_attribution(root, totals=[100, 110, 110, 110]))
+        publication_rejected("sub-70-attribution", lambda root: alter_publication_attribution(root, registrations=[1294, 1300, 1300, 1300]))
+        publication_rejected("pair-witness", promote_pair_witness)
+        for field in ("commit", "tree", "origin_main"):
+            publication_rejected(f"source-{field}", lambda root, field=field: alter_publication_source(root, field))
+        publication_rejected("binding", lambda root: alter_publication(root, "artifacts", "frozen_pair_output_sha256", "a" * 64))
+        publication_rejected("decision", lambda root: alter_publication(root, "decision", "mechanism", "claimed"))
+        publication_rejected("chronology", lambda root: root.joinpath("verification.json").write_text(json.dumps({**read_json(root / "verification.json"), "roots":{**read_json(root / "verification.json")["roots"], "B":{**read_json(root / "verification.json")["roots"]["B"], "started_at_epoch_ns":1}}})))
         for name in sorted(expected):
             print(f"red-proof {name}=pass")
         print("SELF_TEST pass")
@@ -2886,6 +3387,17 @@ def main() -> int:
     phases.add_argument("--daemon-log", required=True, type=Path)
     phases.add_argument("--reload-log", required=True, type=Path)
     phases.add_argument("--output", required=True, type=Path)
+    discriminator = subparsers.add_parser("authoritative-discriminator")
+    discriminator.add_argument("--daemon-log", required=True, type=Path)
+    discriminator.add_argument("--reload-log", required=True, type=Path)
+    discriminator.add_argument("--output", required=True, type=Path)
+    pair = subparsers.add_parser("authoritative-pair")
+    pair.add_argument("--repo", required=True, type=Path)
+    pair.add_argument("--output", required=True, type=Path)
+    pair.add_argument("roots", nargs=2, type=Path)
+    publication = subparsers.add_parser("authoritative-publication")
+    publication.add_argument("--artifact-dir", required=True, type=Path)
+    publication.add_argument("--repo", required=True, type=Path)
     subparsers.add_parser("self-test")
     args = parser.parse_args()
     try:
@@ -2918,6 +3430,12 @@ def main() -> int:
             print(generation_marker(args.config))
         elif args.command == "reload-phases":
             validate_reload_phases(args.daemon_log, args.reload_log, args.output)
+        elif args.command == "authoritative-discriminator":
+            validate_authoritative_discriminator(args.daemon_log, args.reload_log, args.output)
+        elif args.command == "authoritative-pair":
+            validate_authoritative_pair(args.repo, args.roots, args.output)
+        elif args.command == "authoritative-publication":
+            validate_authoritative_publication(args.artifact_dir, args.repo)
         else:
             self_test()
     except (InvalidReceipt, OSError, KeyError, TypeError, ValueError) as error:

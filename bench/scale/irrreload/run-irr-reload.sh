@@ -72,6 +72,10 @@ TXN_ONLY=false
 if [ ${#CELLS[@]} -eq 1 ] && [ "${CELLS[0]}" = rustbgpd-txn ]; then
     TXN_ONLY=true
 fi
+SIGHUP_ONLY=false
+if [ ${#CELLS[@]} -eq 1 ] && [ "${CELLS[0]}" = rustbgpd-sighup ]; then
+    SIGHUP_ONLY=true
+fi
 if [ -z "$SMOKE" ] && [[ " ${CELLS[*]} " == *" rustbgpd-txn "* ]] &&
     [ "$TXN_ONLY" != true ]; then
     echo "rustbgpd-txn must use a separate measured campaign and ARTIFACTS_DIR" >&2
@@ -137,8 +141,14 @@ elif [ "$TXN_ONLY" = true ]; then
     CAMPAIGN_KIND=full-transaction
 elif [ "$GROUPED_ONLY" = true ]; then
     CAMPAIGN_KIND=full-grouped-control
+elif [ "$SIGHUP_ONLY" = true ]; then
+    CAMPAIGN_KIND=full-rustbgpd-sighup
 else
     CAMPAIGN_KIND=full-cross-daemon
+fi
+if [ "$SIGHUP_ONLY" = true ] && [ -z "$SMOKE" ] && [ "$OVERLAP_FRACTION" != 0 ]; then
+    echo "full rustbgpd-sighup measurement requires OVERLAP_FRACTION=0" >&2
+    exit 2
 fi
 
 if [[ " ${CELLS[*]} " == *" rustbgpd-sighup "* || "$GROUPED_ONLY" = true ]] &&
@@ -184,7 +194,6 @@ validate_full_measurement_source() {
         [ "$head" = "$origin" ] || return 1
     fi
     [ -z "$(git -C "$repo" status --porcelain=v1)" ] || return 1
-    HEAD_COMMIT=$head
     ORIGIN_MAIN=$origin
 }
 
@@ -295,6 +304,7 @@ OPENBGPD_IMAGE_ID=$(image_id_for_cells openbgpd "$OPENBGPD_IMAGE") || exit 1
 DOCKER_VERSION=$(docker --version)
 
 COMMIT=$(git -C "$REPO" rev-parse HEAD) || exit 1
+COMMIT_TREE=$(git -C "$REPO" rev-parse 'HEAD^{tree}') || exit 1
 # Full provenance binds source, tools, binaries, images, and campaign inputs;
 # dirty smoke runs include tracked diffs and untracked content hashes.
 ORIGIN_MAIN=$(git -C "$REPO" rev-parse origin/main 2>/dev/null || printf unavailable)
@@ -317,7 +327,7 @@ DIRTY_STATE_SHA256=$(
 ) || exit 1
 DIRTY_STATE_SHA256=$(printf '%s' "$DIRTY_STATE_SHA256" | sha256sum | cut -d' ' -f1) || exit 1
 CAMPAIGN_PROVENANCE=$(jq -cn \
-    --arg commit "$COMMIT" --argjson dirty "$DIRTY" \
+    --arg commit "$COMMIT" --arg tree "$COMMIT_TREE" --argjson dirty "$DIRTY" \
     --arg dirty_state_sha256 "$DIRTY_STATE_SHA256" \
     --arg origin_main "$ORIGIN_MAIN" --argjson head_matches_origin_main "$HEAD_MATCHES_ORIGIN_MAIN" \
     --arg measurement_mode "$MEASUREMENT_MODE" --argjson ancestry_verified "$ANCESTRY_VERIFIED" \
@@ -350,7 +360,7 @@ CAMPAIGN_PROVENANCE=$(jq -cn \
     --arg cpu_model "$(awk -F: '/^model name/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }' /proc/cpuinfo)" \
     --arg bird_image "$BIRD_IMAGE" --arg bird_image_id "$BIRD_IMAGE_ID" \
     --arg openbgpd_image "$OPENBGPD_IMAGE" --arg openbgpd_image_id "$OPENBGPD_IMAGE_ID" \
-    '{schema:3,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,dirty:$dirty,dirty_state_sha256:$dirty_state_sha256,origin_main:$origin_main,head_matches_origin_main:$head_matches_origin_main,measurement_mode:$measurement_mode,ancestry_verified:$ancestry_verified},scripts:{runner:$run_script_sha256,verifier:$verifier_sha256,generator:$generator_sha256,rss_sampler:$sampler_sha256,txn_apply:$txn_apply_sha256,txn_lifecycle:$txn_lifecycle_sha256},binaries:{reloadstall:$harness_sha256,rustbgpd:$daemon_sha256,rbgp:$cli_sha256,rs_config_render:$renderer_sha256},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,overlap_fraction:$overlap_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
+    '{schema:4,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,tree:$tree,dirty:$dirty,dirty_state_sha256:$dirty_state_sha256,origin_main:$origin_main,head_matches_origin_main:$head_matches_origin_main,measurement_mode:$measurement_mode,ancestry_verified:$ancestry_verified},scripts:{runner:$run_script_sha256,verifier:$verifier_sha256,generator:$generator_sha256,rss_sampler:$sampler_sha256,txn_apply:$txn_apply_sha256,txn_lifecycle:$txn_lifecycle_sha256},binaries:{reloadstall:$harness_sha256,rustbgpd:$daemon_sha256,rbgp:$cli_sha256,rs_config_render:$renderer_sha256},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,overlap_fraction:$overlap_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
 CAMPAIGN_FINGERPRINT=$(printf '%s' "$CAMPAIGN_PROVENANCE" | jq -cS . | sha256sum | cut -d' ' -f1) || exit 1
 SEALED_CAMPAIGN_PROVENANCE=$(printf '%s\n' "$CAMPAIGN_PROVENANCE" | jq -cS \
     --arg fingerprint "$CAMPAIGN_FINGERPRINT" '. + {fingerprint:$fingerprint}') || exit 1
@@ -465,6 +475,7 @@ seal_cell_evidence() {
         ;;
     rustbgpd-sighup | "$GROUPED_CELL")
         evidence_files+=(config.toml topology.json topology.tsv metrics-1.prom metrics-2.prom metrics-3.prom metrics-mid.prom phase-timings.csv pre-churn/ready pre-churn/ack received-view.tsv)
+        [ "$CAMPAIGN_KIND" != full-rustbgpd-sighup ] || evidence_files+=(authoritative-phase-timings.csv)
         ;;
     esac
     : >"$cdir/evidence.sha256.tmp"
@@ -957,6 +968,12 @@ run_cell() {
             --reload-log "$cdir/reloadstall.log" --output "$cdir/phase-timings.csv"; then
         echo "cell $cell: reload phase attribution validation failed" >&2
         rc=90
+    fi
+    if [ "$CAMPAIGN_KIND" = full-rustbgpd-sighup ] && [ "$rc" -eq 0 ] &&
+        ! python3 "$VERIFY" authoritative-discriminator --daemon-log "$cdir/daemon.log" \
+            --reload-log "$cdir/reloadstall.log" --output "$cdir/authoritative-phase-timings.csv"; then
+        echo "cell $cell: authoritative discriminator validation failed" >&2
+        rc=89
     fi
     local sampler_rc=0
     wait "$sampler_pid" || sampler_rc=$?

@@ -22,8 +22,8 @@ use super::helpers::{
     validate_route_rpki, vpn_route_family, vpn_routes_equal,
 };
 use super::{
-    PendingRouteChunk, PendingRoutesReceived, PolicyFilteredRouteKey, RibManager,
-    UnicastPrefixPeers,
+    AuthoritativeTransitionReceipt, PendingRouteChunk, PendingRoutesReceived,
+    PolicyFilteredRouteKey, RibManager, UnicastPrefixPeers,
 };
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
@@ -2991,48 +2991,137 @@ impl RibManager {
     /// longer registered are skipped (serial-loop parity); a member
     /// whose emission cannot be prepared is marked dirty and healed by
     /// the ordinary resync from the committed state.
+    pub(in crate::manager) fn apply_export_policy_replacements_synchronously(
+        &mut self,
+        replacements: Vec<PeerExportPolicyReplacement>,
+    ) -> Result<(), RibCommandError> {
+        let started = std::time::Instant::now();
+        let mut r = AuthoritativeTransitionReceipt {
+            input_peers: replacements.len(),
+            outcome: "failed",
+            classification: "rejected",
+            failure_stage: "none",
+            ..Default::default()
+        };
+        r.filtered_state_before = self.policy_filtered_routes.len();
+        r.dirty_before = self.dirty_peers.len();
+        r.pending_before = self.pending_regroup_baseline.len();
+        r.groups_before = self.group_ribs.len();
+        let result =
+            self.apply_export_policy_replacements_synchronously_inner(replacements, &mut r);
+        r.total_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let phases = [
+            r.precondition_us,
+            r.registration_membership_us,
+            r.cohort_partition_us,
+            r.cohort_precheck_us,
+            r.destination_build_us,
+            r.inventory_build_us,
+            r.membership_commit_us,
+            r.filtered_scope_build_us,
+            r.member_emit_state_us,
+            r.cohort_finalize_us,
+            r.fallback_regroup_us,
+            r.distribution_us,
+            r.duplicate_fallback_us,
+        ];
+        r.remainder_us = r.total_us.saturating_sub(phases.into_iter().sum());
+        r.filtered_state_after = self.policy_filtered_routes.len();
+        r.dirty_after = self.dirty_peers.len();
+        r.pending_after = self.pending_regroup_baseline.len();
+        r.groups_after = self.group_ribs.len();
+        info!(target: "authoritative_batch_phase", outcome=r.outcome, classification=r.classification,
+            failure_stage=r.failure_stage, total_us=r.total_us, remainder_us=r.remainder_us,
+            precondition_us=r.precondition_us, registration_membership_us=r.registration_membership_us,
+            cohort_partition_us=r.cohort_partition_us, cohort_precheck_us=r.cohort_precheck_us,
+            destination_build_us=r.destination_build_us, inventory_build_us=r.inventory_build_us,
+            membership_commit_us=r.membership_commit_us, filtered_scope_build_us=r.filtered_scope_build_us,
+            member_emit_state_us=r.member_emit_state_us, cohort_finalize_us=r.cohort_finalize_us,
+            fallback_regroup_us=r.fallback_regroup_us, distribution_us=r.distribution_us,
+            duplicate_fallback_us=r.duplicate_fallback_us, input_peers=r.input_peers,
+            present_peers=r.present_peers, skipped_peers=r.skipped_peers, duplicate_peers=r.duplicate_peers,
+            candidate_cohorts=r.candidate_cohorts, shared_cohorts=r.shared_cohorts,
+            shared_members=r.shared_members, fallback_members=r.fallback_members,
+            destination_ensures=r.destination_ensures, destination_builds=r.destination_builds,
+            destination_adoptions=r.destination_adoptions, membership_moves=r.membership_moves,
+            inventory_announces=r.inventory_announces,
+            inventory_withdraws=r.inventory_withdraws, inventory_supplements=r.inventory_supplements,
+            tombstones=r.tombstones, lagging_members=r.lagging_members,
+            filtered_scope_prefixes=r.filtered_scope_prefixes, filtered_scope_member_visits=r.filtered_scope_member_visits,
+            emits_attempted=r.emits_attempted, emits_succeeded=r.emits_succeeded,
+            emits_degraded=r.emits_degraded, distribution_passes=r.distribution_passes,
+            filtered_state_before=r.filtered_state_before, filtered_state_after=r.filtered_state_after,
+            dirty_before=r.dirty_before, dirty_after=r.dirty_after,
+            pending_before=r.pending_before, pending_after=r.pending_after,
+            groups_before=r.groups_before, groups_after=r.groups_after,
+            "authoritative_batch_phase");
+        #[cfg(test)]
+        self.authoritative_transition_receipts.push(r);
+        result
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "the batch keeps validation, cohort selection, and the single \
                   distribution pass in one auditable transaction body"
     )]
-    pub(in crate::manager) fn apply_export_policy_replacements_synchronously(
+    fn apply_export_policy_replacements_synchronously_inner(
         &mut self,
         replacements: Vec<PeerExportPolicyReplacement>,
+        receipt: &mut AuthoritativeTransitionReceipt,
     ) -> Result<(), RibCommandError> {
+        let phase = std::time::Instant::now();
         if self.pending_clean_policy_transition.is_some() {
+            receipt.precondition_us =
+                u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
+            receipt.failure_stage = "precondition";
             return Err(RibCommandError::internal(
                 "internal RIB sequencing error: policy transition already in progress",
             ));
         }
-        let started = std::time::Instant::now();
         let n_replacements = replacements.len();
         // Duplicate targets: the cohort math below assumes one
         // replacement per peer. Apply duplicates in caller order through
         // the single-peer seam instead — last-writer-wins, exactly the
         // serial loop's shape (a departed peer is skipped identically).
         let mut seen: HashSet<IpAddr> = HashSet::new();
-        if replacements
+        receipt.duplicate_peers = replacements
             .iter()
-            .any(|replacement| !seen.insert(replacement.peer))
-        {
+            .filter(|replacement| !seen.insert(replacement.peer))
+            .count();
+        if receipt.duplicate_peers != 0 {
+            receipt.precondition_us =
+                u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
+            let duplicate_started = std::time::Instant::now();
             for replacement in replacements {
                 match self.replace_peer_export_policy_synchronously(
                     replacement.peer,
                     replacement.export_policy,
                 ) {
                     Ok(()) | Err(RibCommandError::NotFound(_)) => {}
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        receipt.failure_stage = "duplicate_fallback";
+                        receipt.duplicate_fallback_us =
+                            u64::try_from(duplicate_started.elapsed().as_micros())
+                                .unwrap_or(u64::MAX);
+                        return Err(error);
+                    }
                 }
             }
+            receipt.duplicate_fallback_us =
+                u64::try_from(duplicate_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            receipt.outcome = "committed";
+            receipt.classification = "duplicate-fallback";
             return Ok(());
         }
+        receipt.precondition_us = u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
         // A still-running destination preparation cannot be trusted
         // mid-walk (same guard as the cohort transition command).
         if let Some(prestage) = self.pending_destination_prestage.take() {
             let _ = self.discard_uncommitted_policy_transition_group(prestage.destination);
         }
 
+        let phase = std::time::Instant::now();
         let mut present: Vec<PeerExportPolicyReplacement> = Vec::with_capacity(replacements.len());
         let mut n_skipped_unregistered = 0_usize;
         for replacement in replacements {
@@ -3071,10 +3160,15 @@ impl RibManager {
                 },
             )
             .collect();
+        receipt.present_peers = present.len();
+        receipt.skipped_peers = n_skipped_unregistered;
+        receipt.registration_membership_us =
+            u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         // Candidate cohorts: batched movers of one source group whose
         // destinations agree. A source group with mixed or ungrouped
         // destinations degrades wholesale to the per-member machinery.
+        let phase = std::time::Instant::now();
         let mut cohorts: Vec<(usize, usize, Vec<IpAddr>)> = Vec::new();
         let mut residual: Vec<IpAddr> = Vec::new();
         {
@@ -3121,11 +3215,14 @@ impl RibManager {
                 }
             }
         }
+        receipt.candidate_cohorts = cohorts.len();
+        receipt.cohort_partition_us =
+            u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         let mut n_shared_members = 0_usize;
         let mut n_destination_groups = 0_usize;
         for (source, destination, members) in cohorts {
-            if self.apply_batched_group_transition(source, destination, &members) {
+            if self.apply_batched_group_transition(source, destination, &members, receipt) {
                 n_shared_members += members.len();
                 n_destination_groups += 1;
             } else {
@@ -3137,6 +3234,7 @@ impl RibManager {
         // snapshot + dirty), drained by the one pass below — the exact
         // body of the single-peer seam, minus its per-call pass.
         let n_fallback_members = residual.len();
+        let phase = std::time::Instant::now();
         for peer in residual {
             let before = self.grouped_member_of(peer);
             self.recompute_update_group(peer);
@@ -3145,6 +3243,8 @@ impl RibManager {
                 self.mark_outbound_dirty(peer);
             }
         }
+        receipt.fallback_regroup_us =
+            u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         // Group tables and memberships moved above without a staging
         // pass; advertised-query continuations must not survive that.
@@ -3152,7 +3252,19 @@ impl RibManager {
         // ONE distribution pass: drains every fallback/dirty member and
         // owns the global retry opportunity, exactly like the single-peer
         // seam's per-call pass.
+        let phase = std::time::Instant::now();
         self.distribute_changes(&HashSet::new(), &HashSet::new());
+        receipt.distribution_us = u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
+        receipt.distribution_passes = 1;
+        receipt.shared_cohorts = n_destination_groups;
+        receipt.shared_members = n_shared_members;
+        receipt.fallback_members = n_fallback_members;
+        receipt.outcome = "committed";
+        receipt.classification = if n_shared_members > 0 && n_fallback_members == 0 {
+            "shared"
+        } else {
+            "fallback"
+        };
         #[cfg(any(test, feature = "bench-internals"))]
         {
             self.policy_transition_stats.batched_authoritative_batches = self
@@ -3177,7 +3289,6 @@ impl RibManager {
             n_shared_members,
             n_fallback_members,
             n_skipped_unregistered,
-            elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "authoritative export-policy batch applied"
         );
         Ok(())
@@ -3200,12 +3311,17 @@ impl RibManager {
         source: usize,
         destination: usize,
         members: &[IpAddr],
+        receipt: &mut AuthoritativeTransitionReceipt,
     ) -> bool {
+        let phase = std::time::Instant::now();
         // The shared delta covers unicast-only, chain-only moves — the
         // same narrow shape as the clean transition, with the
         // authoritative per-member path as the complete fallback for
         // everything else.
         if !self.batched_transition_keys_qualify(source, destination) {
+            receipt.cohort_precheck_us = receipt
+                .cohort_precheck_us
+                .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
             return false;
         }
         // The destination must be memberless: an owned destination's
@@ -3216,6 +3332,9 @@ impl RibManager {
             .get(&destination)
             .is_some_and(|group| !group.members.is_empty())
         {
+            receipt.cohort_precheck_us = receipt
+                .cohort_precheck_us
+                .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
             return false;
         }
         // Consume the completed-prestage record exactly like the clean
@@ -3227,16 +3346,37 @@ impl RibManager {
             let _ = self.discard_uncommitted_policy_transition_group(prepared);
         }
         let Some(&exemplar) = members.first() else {
+            receipt.cohort_precheck_us = receipt
+                .cohort_precheck_us
+                .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
             return false;
         };
+        receipt.cohort_precheck_us = receipt
+            .cohort_precheck_us
+            .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
         // Build (or adopt) the destination table — the join-time build
         // pass, run once for the whole cohort.
+        let phase = std::time::Instant::now();
+        let destination_existed = self.group_ribs.contains_key(&destination);
         self.ensure_group_table(destination, exemplar);
+        receipt.destination_ensures += 1;
+        if destination_existed {
+            receipt.destination_adoptions += 1;
+        } else {
+            receipt.destination_builds += 1;
+        }
+        receipt.destination_build_us = receipt
+            .destination_build_us
+            .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
+        let phase = std::time::Instant::now();
         let inventory = {
             let (Some(source_group), Some(destination_group)) = (
                 self.group_ribs.get(&source),
                 self.group_ribs.get(&destination),
             ) else {
+                receipt.inventory_build_us = receipt
+                    .inventory_build_us
+                    .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
                 return false;
             };
             // RFC 9234 OTC enforcement rides inside the inventory build:
@@ -3255,10 +3395,19 @@ impl RibManager {
             let Some(inventory) =
                 Self::batched_transition_inventory(source_group, destination_group, &rs_asns)
             else {
+                receipt.inventory_build_us = receipt
+                    .inventory_build_us
+                    .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
                 return false;
             };
             inventory
         };
+        receipt.inventory_build_us = receipt
+            .inventory_build_us
+            .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
+        receipt.inventory_announces += inventory.announce.len();
+        receipt.inventory_withdraws += inventory.withdraw.len();
+        receipt.inventory_supplements += inventory.supplements.len();
 
         // Everything below commits: no fallible step touches shared
         // state before this point.
@@ -3267,6 +3416,7 @@ impl RibManager {
             .get(&source)
             .map(|group| group.tombstones.iter().copied().collect())
             .unwrap_or_default();
+        receipt.tombstones += source_tombstones.len();
         // A member whose wire lags its table (dirty, or carrying regroup
         // residue) cannot take the shared delta — its resync owns the
         // heal. It still moves with the cohort, carrying the source
@@ -3281,21 +3431,28 @@ impl RibManager {
                     || self.pending_extra_withdraws.contains_key(member)
             })
             .collect();
+        receipt.lagging_members += lagging.len();
+        let phase = std::time::Instant::now();
         for &peer in members {
             if lagging.contains(&peer) && !source_tombstones.is_empty() {
                 let extras = self.pending_extra_withdraws.entry(peer).or_default();
                 extras.unicast.extend(source_tombstones.iter().copied());
             }
             self.commit_clean_policy_transition_member(peer, source, destination);
+            receipt.membership_moves += 1;
             if lagging.contains(&peer) {
                 // Re-flag into the destination's dirty set (the leave
                 // above dropped the source-side flag).
                 self.mark_outbound_dirty(peer);
             }
         }
+        receipt.membership_commit_us = receipt
+            .membership_commit_us
+            .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
 
         // The prefix scope of the per-member policy-denial restamp: every
         // prefix whose verdict this transition may have moved.
+        let phase = std::time::Instant::now();
         let mut filtered_scope: HashSet<Prefix> =
             self.loc_rib.iter().map(|route| route.prefix).collect();
         if let Some(group) = self.group_ribs.get(&destination) {
@@ -3303,14 +3460,20 @@ impl RibManager {
         }
         filtered_scope.extend(source_tombstones.iter().map(|(prefix, _)| *prefix));
         filtered_scope.extend(inventory.withdraw.iter().map(|(prefix, _)| *prefix));
+        receipt.filtered_scope_prefixes += filtered_scope.len();
+        receipt.filtered_scope_build_us = receipt
+            .filtered_scope_build_us
+            .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
 
         let shared_encode = (!inventory.announce.is_empty())
             .then(|| Arc::new(crate::update::SharedGroupEncode::default()));
         let mut probe_cache = SharedUnicastProbeCache::default();
+        let phase = std::time::Instant::now();
         for &peer in members {
             if lagging.contains(&peer) {
                 continue;
             }
+            receipt.emits_attempted += 1;
             if let Err(reason) = self.emit_batched_member_envelopes(
                 peer,
                 destination,
@@ -3324,8 +3487,10 @@ impl RibManager {
                     "batched authoritative transition member emission degraded to dirty resync"
                 );
                 self.mark_outbound_dirty(peer);
+                receipt.emits_degraded += 1;
                 continue;
             }
+            receipt.emits_succeeded += 1;
             self.apply_batched_transition_counters(peer, &inventory);
             let current: HashSet<PolicyFilteredRouteKey> = self
                 .group_ribs
@@ -3338,11 +3503,19 @@ impl RibManager {
                 })
                 .unwrap_or_default();
             self.update_policy_filtered_routes_for_prefixes(peer, &filtered_scope, &current);
+            receipt.filtered_scope_member_visits += filtered_scope.len();
             let advertised = self.grouped_advertised_count(peer).unwrap_or(0);
             self.metrics
                 .set_adj_rib_out_prefixes(&peer.to_string(), "all", gauge_val(advertised));
         }
+        receipt.member_emit_state_us = receipt
+            .member_emit_state_us
+            .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
+        let phase = std::time::Instant::now();
         self.finish_clean_policy_transition_commit();
+        receipt.cohort_finalize_us = receipt
+            .cohort_finalize_us
+            .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
         info!(
             source_group = source,
             destination_group = destination,

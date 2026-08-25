@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "verdict": "negative_result",
+  "candidate_commit": "09c1a1342c86c118e34a62d30c53d1cf159b3ade",
+  "candidate_tree": "f7e638f7bb6ba455aa72e83c855e5c00f698e1d7",
+  "origin_main": "9fc3286dcea4c8f1a5d371a782931a416e30a4b6",
+  "source_identity_sha256": "911bab856c8e3b2905c9ba3649aa9ba56cf86cbdd982211ed3dea95cfcb4bfe5",
+  "system_environment_sha256": "a6e4f03a017c4dfbf318be8e7a72274aeb4f8a27053cd1ebcb6b91886d93355d",
+  "dataset_sha256": "fad37b701fcd3f7f51884906f66052325f3f1e57a02528a039535ed08907c56b",
+  "shape": {"members": 320, "prefixes": 183040, "reloads": 4, "changed_fraction": 0.1, "overlap_fraction": 0},
+  "roots": {
+    "A": {"fingerprint": "9aa94c10168520d3d84db45b6a720913eb8fb2e172905ac940e17c005b857ac0", "sha256sums_sha256": "18c57c4eb58afed732f9f098c916f55bc5e7a097defd66177dbab166d385c37c", "inner_csv_sha256": "b58cbad3f6c510f4316481e40ed0a795d97a5a395eb83566306f79c190094a65", "outer_csv_sha256": "c83f9f19521e3aac8e2d9de6a20320e14b652257932e930f81b7d09239dcf75d", "daemon_pid": 400972, "daemon_start_ticks": 449983976, "started_at_epoch_ns": 1787669282708304695, "completed_at_epoch_ns": 1787669778399206752},
+    "B": {"fingerprint": "89b0d8e6e628e930e5470ed81d2c7dec876e564473f1a1b7803a850df722fbaa", "sha256sums_sha256": "c41ef3b4605c1b9d8d22a0313d4f5da2a7d6744d775d207cc164f59198e855cb", "inner_csv_sha256": "44c209687d9d776a0180922c1aebfaae5fa616ef6451dfdec277477c1140b701", "outer_csv_sha256": "020427316d7f6c3a4a556b6e2f956e4bd34d78a3f7885a0b6f44185aaf3e6f1e", "daemon_pid": 403710, "daemon_start_ticks": 450038586, "started_at_epoch_ns": 1787669828809130836, "completed_at_epoch_ns": 1787670324468740215}
+  },
+  "validation": {"checksum_rosters": "pass", "pair_verifier": "pass", "raw_csv_reextraction": "byte-identical", "sessions": "320/320", "rows_per_root": 4, "parse_errors": 0, "session_loss": 0, "outcomes": "committed", "shared_members": 320, "fallback_members": 0},
+  "attribution": {"A": {"outer_total_us": [476553, 1788155, 1772219, 1754961], "later_median_us": 1772219, "increase_percent": 271.88, "registration_membership_us": [1294, 1300435, 1323944, 1316790], "registration_delta_share_percent": 101.53}, "B": {"outer_total_us": [467851, 1750832, 1791971, 1809864], "later_median_us": 1791971, "increase_percent": 283.02, "registration_membership_us": [1333, 1267820, 1330590, 1317455], "registration_delta_share_percent": 99.40}},
+  "decision": {"localized_phase": "registration_membership_us", "owned_counter_witness": null, "mechanism": null, "reason": "the stage reproduces but input and present peer counts remain fixed at 320"},
+  "artifacts": {"authoritative_batch_phases_sha256": "c974bcbb75afbb90ba6da3c5ddf028db53503baf89f7fe5167932177ea6390f3", "frozen_pair_output_sha256": "97405eb637b150a9a55b4f1e0cd594bb3bcc3bec1aadd61532b8acc77775b97c"}
+}
