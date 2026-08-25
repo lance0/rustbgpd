@@ -1,0 +1,11 @@
+cpu_model: AMD Ryzen Threadripper 7970X 32-Cores
+generated_utc: 2026-08-25T04:22:13.396692+00:00
+harness_sha256: 478f1507b8856a9133200185545b5e17476fd72b9d2cbd03747d460007e49826
+kernel: 6.17.0-35-generic
+machine: x86_64
+measurement_toolchain: Python 3.13.5
+namespace_isolation: os.unshare(CLONE_NEWNET); namespace lifetime is the harness process
+provenance: rustbgpd-netns-tests@sha256:49a954d0ed9bc5413983184f33314706626e5f42fc2185f0117abd8ee0c433d8
+results_sha256: 2dcaa4e1a5c2ec0b93600c0e174a009cf896a2804dc7ea3e6edab8c6c8206acc
+rust_toolchain: rustc 1.98.0 (88d9e12ae 2026-08-18)
+source_sha: 8f1c920e0f0b9d0adefdc1874ef867c3454a21f9

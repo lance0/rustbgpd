@@ -30,6 +30,8 @@ use crate::fib::{
     project_fib_intent_with_peer_groups, record_fib_success,
 };
 use crate::fib_common::{prefix_and_nexthop_same_family, table_allows_prefix};
+#[cfg(target_os = "linux")]
+use crate::kernel_route_notify::RouteDumpCapability;
 use crate::kernel_route_notify::{
     KernelRouteEvent, KernelRouteEventKind, KernelRouteType, recv_kernel_route_event,
 };
@@ -2106,18 +2108,21 @@ trait UnicastFib {
 struct LinuxUnicastFib {
     handle: rtnetlink::Handle,
     kernel_route_events: Option<mpsc::Receiver<KernelRouteEvent>>,
+    route_dump_capability: RouteDumpCapability,
 }
 
 #[cfg(target_os = "linux")]
 impl LinuxUnicastFib {
     fn connect(metrics: BgpMetrics) -> Result<Self, String> {
-        let (handle, events) = crate::kernel_route_notify::connect_with_route_notifications(
-            rustbgpd_telemetry::metrics::NetlinkSubscriber::GeneralFib,
-            metrics,
-        )?;
+        let (handle, events, route_dump_capability) =
+            crate::kernel_route_notify::connect_with_filtered_route_notifications(
+                rustbgpd_telemetry::metrics::NetlinkSubscriber::GeneralFib,
+                metrics,
+            )?;
         Ok(Self {
             handle,
             kernel_route_events: Some(events),
+            route_dump_capability,
         })
     }
 }
@@ -2128,7 +2133,9 @@ impl UnicastFib for LinuxUnicastFib {
         &'a mut self,
         tables: &'a [FibTableConfig],
     ) -> Pin<Box<dyn Future<Output = Result<FibKernelSnapshot, String>> + Send + 'a>> {
-        Box::pin(async move { dump_configured_routes(&self.handle, tables).await })
+        Box::pin(async move {
+            dump_configured_routes(&self.handle, tables, self.route_dump_capability).await
+        })
     }
 
     fn apply<'a>(
@@ -2224,33 +2231,86 @@ fn next_hop_unresolved_for_raw_errno(route: &FibRoute, raw_errno: i32) -> bool {
 async fn dump_configured_routes(
     handle: &rtnetlink::Handle,
     tables: &[FibTableConfig],
+    capability: RouteDumpCapability,
 ) -> Result<FibKernelSnapshot, String> {
     use futures::TryStreamExt;
     use rtnetlink::RouteMessageBuilder;
 
     let mut snapshot = FibKernelSnapshot::default();
 
-    let v4_query = RouteMessageBuilder::<std::net::Ipv4Addr>::new().build();
-    let mut v4 = handle.route().get(v4_query).execute();
-    while let Some(msg) = v4
-        .try_next()
-        .await
-        .map_err(|e| format!("kernel IPv4 route dump: {e}"))?
-    {
-        ingest_route_message(&msg, tables, &mut snapshot);
-    }
-
-    let v6_query = RouteMessageBuilder::<std::net::Ipv6Addr>::new().build();
-    let mut v6 = handle.route().get(v6_query).execute();
-    while let Some(msg) = v6
-        .try_next()
-        .await
-        .map_err(|e| format!("kernel IPv6 route dump: {e}"))?
-    {
-        ingest_route_message(&msg, tables, &mut snapshot);
+    match route_dump_plan(tables, capability) {
+        RouteDumpPlan::GlobalFamilies => {
+            for (family, query) in [
+                (
+                    "IPv4",
+                    RouteMessageBuilder::<std::net::Ipv4Addr>::new().build(),
+                ),
+                (
+                    "IPv6",
+                    RouteMessageBuilder::<std::net::Ipv6Addr>::new().build(),
+                ),
+            ] {
+                let mut routes = handle.route().get(query).execute();
+                while let Some(msg) = routes
+                    .try_next()
+                    .await
+                    .map_err(|e| format!("kernel {family} route dump: {e}"))?
+                {
+                    ingest_route_message(&msg, tables, &mut snapshot);
+                }
+            }
+        }
+        RouteDumpPlan::KernelTables(table_ids) => {
+            for table_id in table_ids {
+                let query = kernel_table_filtered_route_query(table_id);
+                let mut routes = handle.route().get(query).execute();
+                while let Some(msg) = routes
+                    .try_next()
+                    .await
+                    .map_err(|e| format!("kernel table {table_id} route dump: {e}"))?
+                {
+                    ingest_route_message(&msg, tables, &mut snapshot);
+                }
+            }
+        }
     }
 
     Ok(snapshot)
+}
+
+#[cfg(target_os = "linux")]
+fn kernel_table_filtered_route_query(table_id: u32) -> netlink_packet_route::route::RouteMessage {
+    use netlink_packet_route::route::{RouteProtocol, RouteScope, RouteType};
+    use rtnetlink::RouteMessageBuilder;
+
+    RouteMessageBuilder::<IpAddr>::new()
+        .table_id(table_id)
+        .protocol(RouteProtocol::Unspec)
+        .scope(RouteScope::Universe)
+        .kind(RouteType::Unspec)
+        .build()
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+enum RouteDumpPlan {
+    GlobalFamilies,
+    KernelTables(Vec<u32>),
+}
+
+#[cfg(target_os = "linux")]
+fn route_dump_plan(tables: &[FibTableConfig], capability: RouteDumpCapability) -> RouteDumpPlan {
+    match capability {
+        RouteDumpCapability::GlobalOnly => RouteDumpPlan::GlobalFamilies,
+        RouteDumpCapability::KernelTableFiltered => RouteDumpPlan::KernelTables(
+            tables
+                .iter()
+                .map(|table| table.table_id)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        ),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -5762,6 +5822,60 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn route_dump_plan_uses_filtered_deduplicated_tables_only_when_capable() {
+        let tables = vec![
+            table("later", 1001, 200, &["ipv4_unicast"]),
+            table("edge", 1000, 200, &["ipv4_unicast", "ipv6_unicast"]),
+            table("duplicate", 1001, 300, &["ipv6_unicast"]),
+        ];
+
+        assert_eq!(
+            route_dump_plan(&tables, RouteDumpCapability::GlobalOnly),
+            RouteDumpPlan::GlobalFamilies,
+            "strict-unavailable fallback preserves the two global family dumps"
+        );
+        assert_eq!(
+            route_dump_plan(&tables, RouteDumpCapability::KernelTableFiltered),
+            RouteDumpPlan::KernelTables(vec![1000, 1001]),
+            "strict mode makes one deterministic request per unique table"
+        );
+        assert_eq!(
+            route_dump_plan(&[], RouteDumpCapability::KernelTableFiltered),
+            RouteDumpPlan::KernelTables(Vec::new()),
+            "an empty configured set performs no filtered dump"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn filtered_route_query_pins_kernel_table_filter_shape() {
+        use netlink_packet_route::AddressFamily;
+        use netlink_packet_route::route::{RouteAttribute, RouteProtocol, RouteScope, RouteType};
+
+        let query = kernel_table_filtered_route_query(1000);
+
+        assert_eq!(query.header.address_family, AddressFamily::Unspec);
+        assert_eq!(query.header.destination_prefix_length, 0);
+        assert_eq!(query.header.protocol, RouteProtocol::Unspec);
+        assert_eq!(query.header.scope, RouteScope::Universe);
+        assert_eq!(query.header.kind, RouteType::Unspec);
+        assert!(
+            query
+                .attributes
+                .iter()
+                .any(|attribute| matches!(attribute, RouteAttribute::Table(1000)))
+        );
+        assert!(
+            query.attributes.iter().all(|attribute| !matches!(
+                attribute,
+                RouteAttribute::Destination(_) | RouteAttribute::Source(_)
+            )),
+            "a dump request must not accidentally become a prefix lookup"
+        );
+    }
+
     #[test]
     fn build_route_message_uses_configured_table_metric_gateway_and_no_onlink() {
         use netlink_packet_route::route::{
@@ -6396,21 +6510,129 @@ mod tests {
             installed.contains("metric 200"),
             "metric missing: {installed}"
         );
-        let dumped = dump_configured_routes(&fib.handle, &config().tables)
-            .await
-            .expect("dump_configured_routes");
-        let key = key(prefix);
+        let dumped =
+            dump_configured_routes(&fib.handle, &config().tables, fib.route_dump_capability)
+                .await
+                .expect("dump_configured_routes");
+        let installed_key = key(prefix);
         assert_eq!(
-            dumped.routes.get(&key).map(|r| r.target.primary()),
+            dumped
+                .routes
+                .get(&installed_key)
+                .map(|r| r.target.primary()),
             Some(ip("192.0.2.1"))
         );
         assert_eq!(
-            dumped.routes.get(&key).map(|r| r.protocol),
+            dumped.routes.get(&installed_key).map(|r| r.protocol),
             Some(FibKernelProtocol::Bgp)
         );
 
         // Withdraw removes owned rows only; unrelated foreign rows survive.
         add_static_route(1000, foreign_prefix);
+
+        // The strict AF_UNSPEC table request retains both address families and
+        // both owned/foreign protocols inside a managed table, while excluding
+        // an identically shaped row from an unrelated table. Compare it with a
+        // separate legacy (non-strict) socket's userspace-filtered snapshot so
+        // the optimized path proves identical final semantics.
+        let bgp_v6 = Prefix::V6(Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 64));
+        let static_v6 = Prefix::V6(Ipv6Prefix::new("2001:db8:200::".parse().unwrap(), 64));
+        run(
+            "ip",
+            &[
+                "-6",
+                "route",
+                "add",
+                "table",
+                "1000",
+                "2001:db8:100::/64",
+                "dev",
+                "fib0",
+                "metric",
+                "200",
+                "proto",
+                "bgp",
+            ],
+        );
+        run(
+            "ip",
+            &[
+                "-6",
+                "route",
+                "add",
+                "table",
+                "1000",
+                "2001:db8:200::/64",
+                "dev",
+                "fib0",
+                "metric",
+                "200",
+                "proto",
+                "static",
+            ],
+        );
+        add_static_route(2000, "192.0.2.128/25");
+
+        let filtered =
+            dump_configured_routes(&fib.handle, &config().tables, fib.route_dump_capability)
+                .await
+                .expect("filtered dump");
+        assert_eq!(
+            fib.route_dump_capability,
+            RouteDumpCapability::KernelTableFiltered,
+            "the netns receipt requires strict kernel table filtering"
+        );
+        let (legacy_connection, legacy_handle, _) =
+            rtnetlink::new_connection().expect("legacy NETLINK_ROUTE socket");
+        let legacy_task = tokio::spawn(legacy_connection);
+        let legacy = dump_configured_routes(
+            &legacy_handle,
+            &config().tables,
+            RouteDumpCapability::GlobalOnly,
+        )
+        .await
+        .expect("legacy global dump");
+        drop(legacy_handle);
+        legacy_task.abort();
+
+        assert_eq!(filtered, legacy);
+        assert_eq!(filtered.routes.len(), 4);
+        assert_eq!(
+            filtered
+                .routes
+                .get(&key(bgp_v6))
+                .map(|route| route.protocol),
+            Some(FibKernelProtocol::Bgp)
+        );
+        assert_eq!(
+            filtered
+                .routes
+                .get(&key(static_v6))
+                .map(|route| route.protocol),
+            Some(FibKernelProtocol::Other)
+        );
+        assert!(!filtered.routes.contains_key(&FibRouteKey {
+            table_id: 2000,
+            metric: 200,
+            prefix: Prefix::V4(Ipv4Prefix::new("192.0.2.128".parse().unwrap(), 25)),
+        }));
+        assert!(
+            dump_configured_routes(&fib.handle, &[], RouteDumpCapability::KernelTableFiltered,)
+                .await
+                .expect("empty filtered dump")
+                .routes
+                .is_empty()
+        );
+
+        try_run(
+            "ip",
+            &["-6", "route", "del", "table", "1000", "2001:db8:100::/64"],
+        );
+        try_run(
+            "ip",
+            &["-6", "route", "del", "table", "1000", "2001:db8:200::/64"],
+        );
+        delete_route(2000, "192.0.2.128/25");
         reconcile_once(
             &config(),
             &rib_with_routes(Vec::new()),
@@ -6592,9 +6814,10 @@ mod tests {
             installed.contains("metric 200"),
             "metric missing: {installed}"
         );
-        let dumped = dump_configured_routes(&fib.handle, &config().tables)
-            .await
-            .expect("dump_configured_routes");
+        let dumped =
+            dump_configured_routes(&fib.handle, &config().tables, fib.route_dump_capability)
+                .await
+                .expect("dump_configured_routes");
         let dumped_target = &dumped
             .routes
             .get(&key(prefix))
