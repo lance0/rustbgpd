@@ -679,20 +679,30 @@ impl PeerManager {
         else {
             // Defensive invariant fallback: no mutation occurs before this
             // helper returns `None`, so preserve original authoritative order.
+            // Report the path that actually executed rather than the cohort
+            // mask that selected the attempted fast path.
+            phases.cohort_targets = 0;
+            phases.remainder_targets = total_targets;
+            let authoritative_started = Instant::now();
             let captured = self
                 .apply_resolved_policy_snapshot_authoritatively(
                     targets,
                     &mut rollback_rib_budget,
                     require_clean_convergence,
                 )
-                .await?;
-            return self
+                .await;
+            phases.authoritative_remainder_apply_us = elapsed_us(authoritative_started);
+            let captured = captured?;
+            let convergence_started = Instant::now();
+            let outcome = self
                 .complete_policy_snapshot(
                     captured,
                     &mut rollback_rib_budget,
                     require_clean_convergence,
                 )
                 .await;
+            phases.convergence_check_us = elapsed_us(convergence_started);
+            return outcome;
         };
         let mut captured = cohort_result?;
         drop(cohort);
