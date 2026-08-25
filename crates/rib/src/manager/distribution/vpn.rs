@@ -1,7 +1,6 @@
 use super::{
-    AdjRibIn, AdjRibOut, Afi, HashMap, HashSet, IpAddr, Ipv4Addr, LocRib, OutboundCommitBatch,
-    PolicyChain, RibManager, RouteContext, Safi, gauge_val, route_type, should_suppress_ibgp_inner,
-    vpn_route_family, vpn_routes_equal, warn,
+    Afi, HashSet, IpAddr, OutboundCommitBatch, PolicyChain, RibManager, RouteContext, Safi,
+    gauge_val, route_type, should_suppress_ibgp_inner, vpn_route_family, vpn_routes_equal, warn,
 };
 use crate::loc_rib::vpn_tiebreak_orr;
 use crate::route::{VpnRibRoute, VpnRibRouteKey};
@@ -77,34 +76,35 @@ impl RibManager {
     /// a vantage is resolved — and staged with outbound path IDs `1..=N`.
     /// Otherwise the single best is staged with `path_id = 0`.
     #[expect(
-        clippy::fn_params_excessive_bools,
-        clippy::too_many_arguments,
         clippy::too_many_lines,
         reason = "VPN staging mirrors unicast multipath/single-best distribution context for RR/export parity"
     )]
     pub(in crate::manager) fn stage_vpn_routes(
-        loc_rib: &LocRib,
-        ribs: &HashMap<IpAddr, AdjRibIn>,
-        rib_out: &AdjRibOut,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        context: &crate::manager::VpnLabeledStagingContext<'_>,
         keys: &HashSet<VpnRouteKey>,
         target: &mut super::ExportTarget<'_>,
-        target_is_ebgp: bool,
-        interpret_rfc1997: bool,
-        target_is_rr_client: bool,
-        cluster_id: Option<Ipv4Addr>,
-        sendable: Option<&Vec<(Afi, Safi)>>,
-        llgr: Option<&Vec<(Afi, Safi)>>,
         rtc_filter: Option<&crate::manager::RtcMembership>,
-        orr_ctx: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult)>,
-        add_path_send_max: u32,
-        add_path_send_limits: Option<&HashMap<(Afi, Safi), u32>>,
-        add_path_send_families: &[(Afi, Safi)],
-        export_pol: Option<&PolicyChain>,
         vpn_announce: &mut Vec<VpnRibRoute>,
         vpn_withdraw: &mut Vec<VpnRibRouteKey>,
-        force: bool,
     ) {
+        let &crate::manager::VpnLabeledStagingContext {
+            loc_rib,
+            ribs,
+            rib_out,
+            peer_is_rr_client,
+            target_is_ebgp,
+            interpret_rfc1997,
+            target_is_rr_client,
+            cluster_id,
+            sendable,
+            llgr,
+            orr_ctx,
+            add_path_send_max,
+            add_path_send_limits,
+            add_path_send_families,
+            export_pol,
+            force,
+        } = context;
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         // `None` for group staging: split horizon is applied per member
         // at emit time by the VPN source-flip matrix.
@@ -980,6 +980,25 @@ impl RibManager {
                 .or_insert_with(|| crate::adj_rib_out::AdjRibOut::with_capacity(peer, loc_rib_len));
             let policy_stats = self.export_policy_stats.entry(peer).or_default();
 
+            let context = crate::manager::VpnLabeledStagingContext {
+                loc_rib: &self.loc_rib,
+                ribs: &self.ribs,
+                rib_out,
+                peer_is_rr_client: &self.peer_is_rr_client,
+                target_is_ebgp,
+                interpret_rfc1997,
+                target_is_rr_client,
+                cluster_id: self.cluster_id,
+                sendable: sendable.as_ref(),
+                llgr: llgr.as_ref(),
+                orr_ctx,
+                add_path_send_max,
+                add_path_send_limits: self.peer_add_path_send_limits.get(&peer),
+                add_path_send_families: &add_path_send_families,
+                export_pol: export_pol.as_ref(),
+                force: false,
+            };
+
             let mut vpn_announce = Vec::new();
             let mut vpn_withdraw = Vec::new();
             let mut target = super::ExportTarget::Peer {
@@ -991,27 +1010,12 @@ impl RibManager {
                 peer_label: &target_peer_label,
             };
             Self::stage_vpn_routes(
-                &self.loc_rib,
-                &self.ribs,
-                rib_out,
-                &self.peer_is_rr_client,
+                &context,
                 staged_keys,
                 &mut target,
-                target_is_ebgp,
-                interpret_rfc1997,
-                target_is_rr_client,
-                self.cluster_id,
-                sendable.as_ref(),
-                llgr.as_ref(),
                 rtc_filter.as_ref(),
-                orr_ctx,
-                add_path_send_max,
-                self.peer_add_path_send_limits.get(&peer),
-                &add_path_send_families,
-                export_pol.as_ref(),
                 &mut vpn_announce,
                 &mut vpn_withdraw,
-                false,
             );
 
             if (!vpn_announce.is_empty() || !vpn_withdraw.is_empty())

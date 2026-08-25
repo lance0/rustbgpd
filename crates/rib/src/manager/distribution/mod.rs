@@ -5388,6 +5388,25 @@ impl RibManager {
                 );
             }
 
+            let vpn_labeled_context = super::VpnLabeledStagingContext {
+                loc_rib,
+                ribs: &self.ribs,
+                rib_out,
+                peer_is_rr_client: &self.peer_is_rr_client,
+                target_is_ebgp,
+                interpret_rfc1997,
+                target_is_rr_client,
+                cluster_id,
+                sendable: sendable.as_ref(),
+                llgr: llgr.as_ref(),
+                orr_ctx,
+                add_path_send_max: peer_add_path_send_max,
+                add_path_send_limits: self.peer_add_path_send_limits.get(&peer),
+                add_path_send_families: &peer_add_path_send_families,
+                export_pol: export_pol.as_ref(),
+                force: is_force,
+            };
+
             // A VPN-staging group member's VPN resync was assembled from
             // the group table above — no per-peer staging, no policy
             // re-evaluation.
@@ -5401,27 +5420,12 @@ impl RibManager {
                     peer_label: &target_peer_label,
                 };
                 Self::stage_vpn_routes(
-                    loc_rib,
-                    &self.ribs,
-                    rib_out,
-                    &self.peer_is_rr_client,
+                    &vpn_labeled_context,
                     &effective_l3vpn_keys,
                     &mut target,
-                    target_is_ebgp,
-                    interpret_rfc1997,
-                    target_is_rr_client,
-                    cluster_id,
-                    sendable.as_ref(),
-                    llgr.as_ref(),
                     rtc_filter.as_ref(),
-                    orr_ctx,
-                    peer_add_path_send_max,
-                    self.peer_add_path_send_limits.get(&peer),
-                    &peer_add_path_send_families,
-                    export_pol.as_ref(),
                     &mut vpn_announce,
                     &mut vpn_withdraw,
-                    is_force,
                 );
             }
 
@@ -5435,26 +5439,11 @@ impl RibManager {
                     peer_label: &target_peer_label,
                 };
                 Self::stage_labeled_routes(
-                    loc_rib,
-                    &self.ribs,
-                    rib_out,
-                    &self.peer_is_rr_client,
+                    &vpn_labeled_context,
                     &effective_labeled_keys,
                     &mut target,
-                    target_is_ebgp,
-                    interpret_rfc1997,
-                    target_is_rr_client,
-                    cluster_id,
-                    sendable.as_ref(),
-                    llgr.as_ref(),
-                    orr_ctx,
-                    peer_add_path_send_max,
-                    self.peer_add_path_send_limits.get(&peer),
-                    &peer_add_path_send_families,
-                    export_pol.as_ref(),
                     &mut labeled_announce,
                     &mut labeled_withdraw,
-                    is_force,
                 );
             }
 

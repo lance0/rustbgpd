@@ -413,6 +413,24 @@ impl RibManager {
             let mut announce: Vec<VpnRibRoute> = Vec::new();
             let mut withdraw: Vec<VpnRibRouteKey> = Vec::new();
             let mut ignored_otc_blocked = Vec::new();
+            let context = crate::manager::VpnLabeledStagingContext {
+                loc_rib: &self.loc_rib,
+                ribs: &self.ribs,
+                rib_out: &group.table,
+                peer_is_rr_client: &self.peer_is_rr_client,
+                target_is_ebgp: group.is_ebgp,
+                interpret_rfc1997: group.interpret_rfc1997,
+                target_is_rr_client: group.is_rr_client,
+                cluster_id: self.cluster_id,
+                sendable: Some(&group.sendable),
+                llgr: Some(&group.llgr),
+                orr_ctx: None,              // ORR disqualifies from grouping.
+                add_path_send_max: 0,       // Add-Path send disqualifies from grouping.
+                add_path_send_limits: None, // Effective cap is inapplicable to grouped peers.
+                add_path_send_families: &[],
+                export_pol: chain.as_ref(),
+                force: false,
+            };
             // Reused single-key set: the staging body iterates a key set,
             // but the delta needs per-key `old` capture and eval labels.
             let mut key_set: HashSet<VpnRouteKey> = HashSet::with_capacity(1);
@@ -425,30 +443,15 @@ impl RibManager {
                     otc_blocked: &mut ignored_otc_blocked,
                 };
                 Self::stage_vpn_routes(
-                    &self.loc_rib,
-                    &self.ribs,
-                    &group.table,
-                    &self.peer_is_rr_client,
+                    &context,
                     &key_set,
                     &mut target,
-                    group.is_ebgp,
-                    group.interpret_rfc1997,
-                    group.is_rr_client,
-                    self.cluster_id,
-                    Some(&group.sendable),
-                    Some(&group.llgr),
                     // RT gate deferred to member emit: Φ is per-member
                     // state, applied by the RT-pass matrix (the delta
                     // carries `old` for exactly that).
                     None,
-                    None, // ORR disqualifies from grouping
-                    0,    // Add-Path send disqualifies from grouping
-                    None, // Effective cap is inapplicable to grouped peers.
-                    &[],
-                    chain.as_ref(),
                     &mut announce,
                     &mut withdraw,
-                    false,
                 );
                 // Single-best stages at most one eval per key: a Permit
                 // labels the staged entry; a Deny lands in the persistent

@@ -1162,6 +1162,24 @@ impl RibManager {
             empty_rib_out = AdjRibOut::new(peer);
             &empty_rib_out
         };
+        let context = super::VpnLabeledStagingContext {
+            loc_rib: &self.loc_rib,
+            ribs: &self.ribs,
+            rib_out,
+            peer_is_rr_client: &self.peer_is_rr_client,
+            target_is_ebgp,
+            interpret_rfc1997,
+            target_is_rr_client,
+            cluster_id: self.cluster_id,
+            sendable,
+            llgr,
+            orr_ctx,
+            add_path_send_max,
+            add_path_send_limits: self.peer_add_path_send_limits.get(&peer),
+            add_path_send_families: &add_path_send_families,
+            export_pol: self.export_policy_for(peer),
+            force: false,
+        };
 
         let mut trace = distribution::ExportGateTrace::default();
         let mut target = distribution::ExportTarget::Explain {
@@ -1176,27 +1194,12 @@ impl RibManager {
         let mut vpn_announce = Vec::new();
         let mut vpn_withdraw = Vec::new();
         Self::stage_vpn_routes(
-            &self.loc_rib,
-            &self.ribs,
-            rib_out,
-            &self.peer_is_rr_client,
+            &context,
             &keys,
             &mut target,
-            target_is_ebgp,
-            interpret_rfc1997,
-            target_is_rr_client,
-            self.cluster_id,
-            sendable,
-            llgr,
             rtc_filter.as_ref(),
-            orr_ctx,
-            add_path_send_max,
-            self.peer_add_path_send_limits.get(&peer),
-            &add_path_send_families,
-            self.export_policy_for(peer),
             &mut vpn_announce,
             &mut vpn_withdraw,
-            false,
         );
         let explanation =
             trace.into_explain(peer, prefix, Some(rd), vpn_grouped.map(|gid| gid as u64));
@@ -1256,6 +1259,24 @@ impl RibManager {
             empty_rib_out = AdjRibOut::new(peer);
             &empty_rib_out
         };
+        let context = super::VpnLabeledStagingContext {
+            loc_rib: &self.loc_rib,
+            ribs: &self.ribs,
+            rib_out,
+            peer_is_rr_client: &self.peer_is_rr_client,
+            target_is_ebgp,
+            interpret_rfc1997,
+            target_is_rr_client,
+            cluster_id: self.cluster_id,
+            sendable,
+            llgr,
+            orr_ctx,
+            add_path_send_max,
+            add_path_send_limits: self.peer_add_path_send_limits.get(&peer),
+            add_path_send_families: &add_path_send_families,
+            export_pol: self.export_policy_for(peer),
+            force: false,
+        };
 
         let mut trace = distribution::ExportGateTrace::default();
         let mut target = distribution::ExportTarget::Explain {
@@ -1270,26 +1291,11 @@ impl RibManager {
         let mut labeled_announce = Vec::new();
         let mut labeled_withdraw = Vec::new();
         Self::stage_labeled_routes(
-            &self.loc_rib,
-            &self.ribs,
-            rib_out,
-            &self.peer_is_rr_client,
+            &context,
             &keys,
             &mut target,
-            target_is_ebgp,
-            interpret_rfc1997,
-            target_is_rr_client,
-            self.cluster_id,
-            sendable,
-            llgr,
-            orr_ctx,
-            add_path_send_max,
-            self.peer_add_path_send_limits.get(&peer),
-            &add_path_send_families,
-            self.export_policy_for(peer),
             &mut labeled_announce,
             &mut labeled_withdraw,
-            false,
         );
         let explanation = trace.into_explain(peer, prefix, None, None);
         self.apply_exact_export_overlay_to_explain(
