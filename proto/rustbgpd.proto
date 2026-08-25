@@ -2260,8 +2260,8 @@ message BlackholeDiscard {
   uint32 prefix_length = 2;
   string peer_address = 3;
   BlackholeDiscardState state = 4;
-  // Human-readable reason: installed/owned, broad_prefix, not_ebgp, or
-  // a kernel error summary.
+  // Human-readable reason: installed/owned, broad_prefix, not_ebgp,
+  // active_limit_exceeded, install_rate_limited, or a kernel error summary.
   string reason = 5;
 }
 

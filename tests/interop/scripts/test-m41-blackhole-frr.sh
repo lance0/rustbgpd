@@ -134,8 +134,9 @@ wait_blackhole_status() {
     local prefix=$1
     local expected_state=$2
     local expected_reason=${3:-}
+    local attempts=${4:-30}
     log "Waiting for BLACKHOLE status $prefix -> $expected_state ${expected_reason:+($expected_reason)}..."
-    for i in $(seq 1 30); do
+    for i in $(seq 1 "$attempts"); do
         local status
         status=$(blackhole_status "$prefix")
         local state=${status%%|*}
@@ -150,6 +151,16 @@ wait_blackhole_status() {
     fail "$prefix BLACKHOLE status did not become $expected_state/${expected_reason:-*} (last: $(blackhole_status "$prefix"))"
     dump_state_on_failure
     return 1
+}
+
+announce_frr_network() {
+    local prefix=$1
+    log "Announcing $prefix from FRR..."
+    docker exec "$FRR" vtysh \
+        -c 'configure terminal' \
+        -c 'router bgp 65002' \
+        -c 'address-family ipv4 unicast' \
+        -c "network $prefix" >/dev/null 2>&1
 }
 
 kernel_route_exact() {
@@ -219,10 +230,24 @@ withdraw_frr_network() {
 }
 
 wait_route_present "203.0.113.66/32"
+tagged_comms=$(route_communities "203.0.113.66/32")
+wait_blackhole_status "203.0.113.66/32" "installed"
+wait_kernel_blackhole_route "203.0.113.66/32"
+announce_frr_network "203.0.113.68/32"
+wait_route_present "203.0.113.68/32"
+wait_blackhole_status "203.0.113.68/32" "rejected" "active_limit_exceeded"
+assert_no_kernel_route "203.0.113.68/32"
+withdraw_frr_network "203.0.113.66/32"
+wait_no_kernel_route "203.0.113.66/32"
+wait_blackhole_status "203.0.113.68/32" "rejected" "install_rate_limited"
+wait_blackhole_status "203.0.113.68/32" "installed" "" 75
+wait_kernel_blackhole_route "203.0.113.68/32"
+
+announce_frr_network "203.0.113.67/32"
+announce_frr_network "198.51.100.0/24"
 wait_route_present "203.0.113.67/32"
 wait_route_present "198.51.100.0/24"
 
-tagged_comms=$(route_communities "203.0.113.66/32")
 log "203.0.113.66/32 communities: $tagged_comms"
 if has_community "$tagged_comms" "$BLACKHOLE_VALUE" \
     && has_community "$tagged_comms" "$NO_ADVERTISE_VALUE"; then
@@ -255,13 +280,11 @@ else
     exit 1
 fi
 
-wait_blackhole_status "203.0.113.66/32" "installed"
-wait_kernel_blackhole_route "203.0.113.66/32"
 assert_no_kernel_route "203.0.113.67/32"
 wait_blackhole_status "198.51.100.0/24" "rejected" "broad_prefix"
 assert_no_kernel_route "198.51.100.0/24"
 
-withdraw_frr_network "203.0.113.66/32"
-wait_no_kernel_route "203.0.113.66/32"
+withdraw_frr_network "203.0.113.68/32"
+wait_no_kernel_route "203.0.113.68/32"
 
 print_summary

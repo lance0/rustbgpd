@@ -3678,6 +3678,10 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
     let blackhole_fib_discard_changed = old.global.install_blackhole_discard
         != new.global.install_blackhole_discard
         || old.global.allow_blackhole_broad_prefixes != new.global.allow_blackhole_broad_prefixes
+        || old.global.blackhole_discard_max_active != new.global.blackhole_discard_max_active
+        || old.global.blackhole_discard_install_rate_per_minute
+            != new.global.blackhole_discard_install_rate_per_minute
+        || old.global.blackhole_discard_install_burst != new.global.blackhole_discard_install_burst
         || ((old.global.install_blackhole_discard || new.global.install_blackhole_discard)
             && old.global.honor_blackhole != new.global.honor_blackhole);
     let evpn_runtime_change_class = classify_evpn_runtime_change(old, new);
@@ -4370,6 +4374,10 @@ fn global_restart_required_changed(old: &Config, new: &Config) -> bool {
     new_global.honor_blackhole = old_global.honor_blackhole;
     new_global.install_blackhole_discard = old_global.install_blackhole_discard;
     new_global.allow_blackhole_broad_prefixes = old_global.allow_blackhole_broad_prefixes;
+    new_global.blackhole_discard_max_active = old_global.blackhole_discard_max_active;
+    new_global.blackhole_discard_install_rate_per_minute =
+        old_global.blackhole_discard_install_rate_per_minute;
+    new_global.blackhole_discard_install_burst = old_global.blackhole_discard_install_burst;
 
     old_global != new_global
 }

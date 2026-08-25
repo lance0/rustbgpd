@@ -201,6 +201,9 @@ Required. Defines the local BGP speaker identity.
 | `honor_blackhole`   | bool   | no       | `false`              | Enable RFC 7999 receiver scoping on EBGP imports — see below |
 | `install_blackhole_discard` | bool | no | `false`              | Install kernel blackhole routes for accepted RFC 7999 host routes — see below |
 | `allow_blackhole_broad_prefixes` | bool | no | `false`           | Permit non-host BLACKHOLE discard installs when the FIB slice is enabled |
+| `blackhole_discard_max_active` | u32 | no | unlimited | Cap receipt-authorized discard rows; existing rows remain installed above the cap |
+| `blackhole_discard_install_rate_per_minute` | u32 | no | disabled | Sustained install-attempt rate; requires non-zero burst |
+| `blackhole_discard_install_burst` | u32 | no | disabled | Install-attempt bucket capacity; requires non-zero rate |
 | `ebgp_requires_policy` | bool | no       | epoch-dependent (`false` at epoch 1, `true` at epoch 2) | RFC 8212: require explicit operator import/export policy on eBGP sessions. Raw omission is retained alongside `config_epoch`: epoch-less/epoch-1 omission remains effective false, while omission under `config_epoch = 2` resolves to the activated secure default, effective true (source `epoch_2_default`). An explicit value always keeps its stated meaning. **Restart-required** — see below |
 | `multipath_relax`   | bool   | no       | `false`              | ADR-0066 multipath-relax: group unicast ECMP candidates by `AS_PATH` *length* instead of an exact `AS_PATH` match (FRR's `bgp bestpath as-path multipath-relax`). Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
 | `link_bandwidth_weighted` | bool | no   | `false`              | ADR-0068 weighted multipath: weight unicast ECMP next-hops by the lowest finite nonnegative RFC 10005 Link Bandwidth value when the whole equal-cost group carries a positive one; zero, missing, or unusable values fall back to equal cost. Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
@@ -225,6 +228,9 @@ honor_graceful_shutdown = true
 honor_blackhole = true
 install_blackhole_discard = false
 allow_blackhole_broad_prefixes = false
+blackhole_discard_max_active = 1000
+blackhole_discard_install_rate_per_minute = 60
+blackhole_discard_install_burst = 20
 ```
 
 `runtime_state_dir` must be writable by the rustbgpd process. In containers or
@@ -408,6 +414,18 @@ from EBGP, and only installs IPv4 `/32` or IPv6 `/128` host routes unless
 routes for the same prefix are treated as install failures rather than
 overwritten, so operator/static or other-daemon routes are preserved.
 
+The optional guardrails are startup-only, and every configured guardrail must
+be greater than zero; zero is invalid. Omitting the active cap means unlimited
+active rows. Omitting both rate and burst disables install rate limiting. The
+active cap counts unique
+receipt-authorized owned and adopted-pending rows, preserves rows already
+above the cap, and blocks only new installs. Rate and burst must be configured
+together. Their actor-wide monotonic token bucket starts
+full and charges one token per actual kernel install attempt, including failed
+repairs. Withdrawals/removals run first and bypass both limits. Limited routes
+remain retryable as `rejected/active_limit_exceeded` or
+`rejected/install_rate_limited`.
+
 Each successful install records its canonical prefix in private
 `<runtime_state_dir>/blackhole-owned.json`. Restart adopts only receipt∩marker;
 unreceipted marker-identical rows remain foreign. Unclaimed receipt rows stay
@@ -423,7 +441,7 @@ replacement by an identical marker remains the value-identity limit.
 `rbgp rib blackholes` shows the current discard status for every
 BLACKHOLE-marked best route the daemon has observed: `installed`
 (`installed` / `owned` / `adopted` / `adopted_pending_reap`), `rejected`
-(`broad_prefix` / `not_ebgp`), or `failed` (`foreign_route_exists`,
+(`broad_prefix` / `not_ebgp` / `active_limit_exceeded` / `install_rate_limited`), or `failed` (`foreign_route_exists`,
 `dump_failed`, `remove_failed`, `reap_failed`, `ownership_state_unavailable`, or the kernel install
 error). The same surface is available as JSON with
 `rbgp -j rib blackholes`. Adoption and reaping are counted by
@@ -439,7 +457,7 @@ semantics as `honor_graceful_shutdown`: rustbgpd recomputes runtime policies
 for EBGP peers, advances the live snapshot, and retries transient per-peer
 refresh failures through the existing pending-refresh path.
 
-`install_blackhole_discard`, `allow_blackhole_broad_prefixes`, and the
+`install_blackhole_discard`, `allow_blackhole_broad_prefixes`, the three discard guardrails, and the
 `honor_blackhole` component of an enabled or requested FIB-discard spawn gate
 are startup-only in this slice because the kernel-discard reconciler is
 spawned once at daemon boot. A SIGHUP that edits those fields logs an error

@@ -113,8 +113,10 @@ The first FIB slice is deliberately conservative:
   `<runtime_state_dir>/blackhole-owned.json`. Only receipt-backed marker rows
   are adopted or deleted after a restart; marker-identical operator rows are
   foreign.
-- **Blast-radius controls:** rate limits, maximum active blackholes,
-  and a richer operator-visible audit trail remain follow-ups.
+- **Blast-radius controls:** optional `blackhole_discard_max_active` and the
+  paired `blackhole_discard_install_rate_per_minute` / `_burst` token bucket
+  bound new kernel install attempts without delaying removals. Admission is
+  canonical and cursor-fair; existing receipt-authorized rows are preserved.
 - **Idempotent cleanup:** withdrawal, reap, and shutdown durably release the
   receipt before deleting a kernel row. A failed delete attempts durable
   restoration; restoration failure makes ownership unavailable.
@@ -126,7 +128,8 @@ routes surface as `foreign_route_exists` / `EEXIST` failures rather
 than overwrites, preserving static routes and other routing daemons'
 FIB ownership.
 
-`install_blackhole_discard`, `allow_blackhole_broad_prefixes`, and the
+`install_blackhole_discard`, `allow_blackhole_broad_prefixes`, the three
+discard guardrails, and the
 `honor_blackhole` component of an enabled or requested FIB-discard spawn
 gate are startup-only. SIGHUP pins them to the live snapshot and asks
 the operator to restart, matching the reconciler's one-shot spawn model.
@@ -149,8 +152,8 @@ Negative:
 
 - `honor_blackhole` alone does not mitigate traffic on the local host;
   operators must enable `install_blackhole_discard` separately.
-- The first FIB slice does not implement rate limits or per-peer
-  allow-lists beyond EBGP + import-policy acceptance.
+- The FIB slice does not implement per-peer allow-lists beyond EBGP +
+  import-policy acceptance; active/rate guardrails are actor-wide.
 
 Neutral:
 

@@ -860,6 +860,21 @@ pub struct Global {
     /// `install_blackhole_discard = true`.
     #[serde(default)]
     pub allow_blackhole_broad_prefixes: bool,
+    /// Maximum receipt-authorized BLACKHOLE discard rows. Existing rows are
+    /// preserved above the limit; only new installs are rejected. Unset means unlimited.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub blackhole_discard_max_active: Option<u32>,
+    /// Sustained actor-wide BLACKHOLE kernel-install attempt rate per minute.
+    /// Must be configured together with `blackhole_discard_install_burst`.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub blackhole_discard_install_rate_per_minute: Option<u32>,
+    /// Maximum BLACKHOLE install-attempt token-bucket burst. Must be configured
+    /// together with `blackhole_discard_install_rate_per_minute`.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub blackhole_discard_install_burst: Option<u32>,
     /// Require explicit operator import/export policy on EBGP sessions
     /// (RFC 8212). Raw omission is retained alongside `config_epoch`; an
     /// explicit value always keeps its stated meaning. Epoch-less and
@@ -2992,6 +3007,8 @@ pub enum ConfigError {
     InvalidRouteServerConfig { reason: String },
     #[error("invalid runtime_state_dir {value:?}: {reason}")]
     InvalidRuntimeStateDir { value: String, reason: String },
+    #[error("invalid BLACKHOLE discard limits: {reason}")]
+    InvalidBlackholeDiscardLimits { reason: String },
     #[error("invalid event_history config: {reason}")]
     InvalidEventHistoryConfig { reason: String },
     #[error("invalid inbound_admission config: {reason}")]

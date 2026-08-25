@@ -1196,6 +1196,9 @@ route changes through `EventService.WatchEvents` or `EventService.SubscribeFromE
 | `DeleteFibTable` | Remove a `[[fib_tables]]` entry by name at runtime; `NOT_FOUND` if absent (`mutating`) |
 | `ListRouteEvents` | Recent unicast route add / withdraw / best-change / export-policy-filtered event history from the bounded in-memory RIB ring |
 
+Limit-blocked `ListBlackholeDiscards` rows reuse `REJECTED` with stable reason
+text `active_limit_exceeded` or `install_rate_limited`; both are retryable.
+
 The three unicast route-listing RPCs return raw ordered
 `extended_communities`, the ASPA verification string in `aspa_state`, and
 `received_at_epoch_seconds` on every `Route` (`0` means unknown). Native
@@ -1219,7 +1222,7 @@ through one RPC shape.
 | Recent policy mutation summaries | `EventService.ListPolicyEvents` / `rbgp events policy` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
 | Live EVPN route best-path deltas | `EventService.WatchEvents` with `EVENT_CATEGORY_EVPN` | Streaming event feed | Live-only; slow subscribers can lag and miss events |
 | Recent EVPN route timeline | `EventService.ListEvpnEvents` / `rbgp events evpn` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
-| RFC 7999 discard programming | `ListBlackholeDiscards` / `rbgp rib blackholes` | Snapshot | Current reconcile snapshot only |
+| RFC 7999 discard programming | `ListBlackholeDiscards` / `rbgp rib blackholes` | Snapshot | Current reconcile snapshot only; retryable limit blocks are `REJECTED` with `active_limit_exceeded` or `install_rate_limited` |
 | ADR-0061 general Linux FIB programming | `ListFibRoutes` / `rbgp rib fib` | Snapshot | Current reconcile snapshot plus persisted owned-state semantics |
 | ADR-0061 FIB route apply outcomes | `EventService.WatchEvents` with `EVENT_CATEGORY_DATAPLANE` and `BGP_EVENT_TYPE_DATAPLANE_ROUTE_*` / `rbgp events watch --category dataplane` | Streaming event feed | Live via `WatchEvents`; durable replay via `SubscribeFromEvent` when `[event_history].enabled = true`; no bounded `List*` history API |
 | EVPN L2/L3 dataplane readiness and managed-netdev ownership status | `EvpnService` (`ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`) / `rbgp evpn ...` | Snapshot | Latest daemon or dataplane report snapshot |
@@ -1519,8 +1522,10 @@ Returns one row per currently observed best route carrying the RFC 7999
 `BlackholeDiscardState` enum (`BLACKHOLE_DISCARD_STATE_INSTALLED`,
 `BLACKHOLE_DISCARD_STATE_REJECTED`, or `BLACKHOLE_DISCARD_STATE_FAILED`);
 `reason` carries values such as `installed`, `owned`, `broad_prefix`,
-`not_ebgp`, `foreign_route_exists`, `lookup_failed`, `remove_failed`, or
-the kernel install error string.
+`not_ebgp`, `active_limit_exceeded`, `install_rate_limited`,
+`foreign_route_exists`, `lookup_failed`, `remove_failed`, or the kernel
+install error string. Both limit reasons are retryable and may transition to
+installed when active capacity or a token becomes available.
 An empty list means either the reconciler is disabled or no BLACKHOLE-marked
 best routes are currently visible.
 

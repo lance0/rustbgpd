@@ -2910,6 +2910,14 @@ mod tests {
         assert_eq!(value["peer_address"], "192.0.2.1");
         assert_eq!(value["state"], "rejected");
         assert_eq!(value["reason"], "not_ebgp");
+
+        for reason in ["active_limit_exceeded", "install_rate_limited"] {
+            let mut limited = discard.clone();
+            limited.reason = reason.to_string();
+            let value = serde_json::to_value(blackhole_discard_to_json(&limited)).unwrap();
+            assert_eq!(value["state"], "rejected");
+            assert_eq!(value["reason"], reason);
+        }
     }
 
     #[test]

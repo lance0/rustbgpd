@@ -9,6 +9,10 @@ honor_blackhole = true
 # FIB leg: accepted EBGP BLACKHOLE host routes install kernel
 # RTN_BLACKHOLE rows. Broad prefixes remain rejected by default.
 install_blackhole_discard = true
+# Bound proof: one active row and one install attempt per minute with one-token burst.
+blackhole_discard_max_active = 1
+blackhole_discard_install_rate_per_minute = 1
+blackhole_discard_install_burst = 1
 
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"

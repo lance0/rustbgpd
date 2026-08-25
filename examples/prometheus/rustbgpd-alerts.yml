@@ -284,6 +284,19 @@ groups:
             10 minutes. Confirm the activity matches expected policy and
             inspect current kernel discard state.
 
+      - alert: BgpBlackholeDiscardAdmissionLimited
+        expr: increase(bgp_blackhole_discard_rejected_total{reason=~"active_limit_exceeded|install_rate_limited"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BLACKHOLE discard admission limited on {{ $labels.instance }}"
+          description: >-
+            rustbgpd recorded {{ $value | printf "%.0f" }} retryable BLACKHOLE
+            discard admission transition(s) for {{ $labels.reason }} on
+            {{ $labels.instance }} in the last 10 minutes. Inspect the active
+            population, configured cap, and install token-bucket settings.
+
       - alert: RpkiVrpTableEmpty
         # Series only exist once an RTR cache has delivered data, so
         # this cannot fire on deployments without RPKI configured. An

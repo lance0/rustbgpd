@@ -148,6 +148,9 @@ TARGETS = {
         "rate(bgp_blackhole_discard_withdrawn_total"
         '{instance=~"$instance"}[$__rate_interval])'
     ),
+    ("BLACKHOLE active rows", "A"): (
+        'bgp_blackhole_discard_active{instance=~"$instance"}'
+    ),
 }
 
 REQUIRED_LEGENDS = {
@@ -182,6 +185,7 @@ REQUIRED_LEGENDS = {
     ("ORR SPF activity and topology", "C"): "{{instance}} usable links",
     ("BLACKHOLE discard activity", "A"): "{{instance}} installed/s",
     ("BLACKHOLE discard activity", "B"): "{{instance}} withdrawn/s",
+    ("BLACKHOLE active rows", "A"): "{{instance}} active",
 }
 
 ROUTE_SAFETY_PANELS = {
@@ -600,8 +604,35 @@ def main() -> None:
             "with exactly targets A and B"
         )
     blackhole_position = blackhole_panel.get("gridPos", {})
-    if blackhole_position.get("w") != 24 or blackhole_position.get("x") != 0:
-        fail("BLACKHOLE discard activity must retain its full-width layout")
+    if blackhole_position.get("w") != 16 or blackhole_position.get("x") != 0:
+        fail("BLACKHOLE discard activity must retain its x=0, w=16 layout")
+    blackhole_active = next(
+        (panel for panel in panels if panel.get("title") == "BLACKHOLE active rows"),
+        None,
+    )
+    if blackhole_active is None:
+        fail("BLACKHOLE active rows panel must exist")
+    active_refs = [target.get("refId") for target in blackhole_active.get("targets", [])]
+    if blackhole_active.get("type") != "stat" or active_refs != ["A"]:
+        fail("BLACKHOLE active rows must be a stat with exactly target A")
+    active_position = blackhole_active.get("gridPos", {})
+    if active_position.get("x") != 16 or active_position.get("w") != 8:
+        fail("BLACKHOLE active rows must retain its x=16, w=8 layout")
+    active_defaults = blackhole_active.get("fieldConfig", {}).get("defaults", {})
+    if active_defaults != {"unit": "short", "min": 0, "decimals": 0}:
+        fail("BLACKHOLE active rows must render as a nonnegative integer count")
+    active_options = blackhole_active.get("options", {})
+    expected_active_options = {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+            "calcs": ["lastNotNull"],
+            "fields": "",
+            "values": False,
+        },
+    }
+    if active_options != expected_active_options:
+        fail("BLACKHOLE active rows must retain its exact stat reduction options")
 
     try:
         references = dashboard_metric_references(dashboard)

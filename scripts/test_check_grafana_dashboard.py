@@ -140,7 +140,7 @@ let families = self.allocated.collect();'''
             changes = {"description": "changed",
                        "collapsed": not panel.get("collapsed", False),
                        "id": panel["id"] + 1000}
-            if panel["title"] == "BLACKHOLE discard activity":
+            if panel["title"] in {"BLACKHOLE discard activity", "BLACKHOLE active rows"}:
                 changes["gridPos"] = {**panel["gridPos"], "h": 9, "y": 17}
             else:
                 changes["gridPos"] = {"x": index % 24}
@@ -182,6 +182,22 @@ let families = self.allocated.collect();'''
                              (blackhole["targets"][0], "legendFormat", "broken"),
                              (blackhole, "gridPos", {"x": 0}))
                 for subject, field, replacement in mutations:
+                    saved = subject[field]
+                    subject[field] = replacement
+                    copy.write_text(json.dumps(dashboard))
+                    with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                        CHECK.main()
+                    subject[field] = saved
+                active = next(
+                    panel for panel in CHECK.all_panels(dashboard["panels"])
+                    if panel["title"] == "BLACKHOLE active rows"
+                )
+                for subject, field, replacement in (
+                    (active["targets"][0], "expr", "broken"),
+                    (active, "gridPos", {"x": 0, "w": 8}),
+                    (active["fieldConfig"], "defaults", {"unit": "ops"}),
+                    (active, "options", {"reduceOptions": {"calcs": ["last"]}}),
+                ):
                     saved = subject[field]
                     subject[field] = replacement
                     copy.write_text(json.dumps(dashboard))

@@ -1006,6 +1006,36 @@
           "format": "uint32",
           "minimum": 0
         },
+        "blackhole_discard_install_burst": {
+          "description": "Maximum BLACKHOLE install-attempt token-bucket burst. Must be configured\ntogether with `blackhole_discard_install_rate_per_minute`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 1
+        },
+        "blackhole_discard_install_rate_per_minute": {
+          "description": "Sustained actor-wide BLACKHOLE kernel-install attempt rate per minute.\nMust be configured together with `blackhole_discard_install_burst`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 1
+        },
+        "blackhole_discard_max_active": {
+          "description": "Maximum receipt-authorized BLACKHOLE discard rows. Existing rows are\npreserved above the limit; only new installs are rejected. Unset means unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 1
+        },
         "cluster_id": {
           "description": "Cluster ID for route reflection (RFC 4456). Defaults to `router_id`\nwhen any neighbor is configured as a route reflector client.",
           "type": [
