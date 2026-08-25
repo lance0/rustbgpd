@@ -16,6 +16,16 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
+### Unreleased compatibility note
+
+The unreleased API addition is non-breaking:
+`UpdateMessage::try_build_from_attribute_iter` accepts an `IntoIterator` that
+yields borrowed `PathAttribute` values. The iterator is consumed once, in
+yielded order, without requiring `Clone`, `ExactSizeIterator`, or a rewind.
+Encoding retains the existing attribute filtering, compatibility sidecars,
+wire order, and `EncodeError` behavior. `UpdateMessage::try_build` remains the
+slice-oriented entry point and delegates to the same encoder.
+
 ## Supported RFCs
 
 | RFC | Feature |
@@ -297,7 +307,10 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
 - **`Message`** — top-level enum: `Open`, `Update`, `Keepalive`, `Notification`, `RouteRefresh`
 - **`BgpCodec` / `BgpCodecError`** — optional Tokio `Decoder` / `Encoder`
   adapter and typed I/O/decode/encode errors, gated by `tokio-codec`
-- **`UpdateMessage`** / **`ParsedUpdate`** — raw wire form and parsed routes + attributes
+- **`UpdateMessage`** / **`ParsedUpdate`** — raw wire form and parsed routes +
+  attributes; build from a slice with `UpdateMessage::try_build` or from one
+  ordered pass over borrowed attributes with
+  `UpdateMessage::try_build_from_attribute_iter`
 - **`PathAttribute`** — typed variants plus `Unknown` pass-through, including `AsPath`, `Aggregator`, `AtomicAggregate`, `NextHop`, canonical/Partial pairs `Communities` / `CommunitiesPartial`, `ExtendedCommunities` / `ExtendedCommunitiesPartial`, `LargeCommunities` / `LargeCommunitiesPartial`, and `PmsiTunnel` / `PmsiTunnelPartial`, plus `MpReachNlri` and canonical/Partial `OnlyToCustomer` (RFC 9234)
 - **`Prefix`** — `V4(Ipv4Prefix)` / `V6(Ipv6Prefix)` enum
 - **`RpkiValidation` / `AspaValidation` / `AspaValidationContext`** — shared

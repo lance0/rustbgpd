@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "benchmark": "update_build/rich_mp/50",
+  "operations": 50,
+  "fixture_digest": "fnv1a64:b2a66b877515c858",
+  "fixture_len_bytes": 687,
+  "legacy_allocation_calls": 1200,
+  "legacy_requested_bytes": 524050,
+  "iterator_allocation_calls": 750,
+  "iterator_requested_bytes": 149250,
+  "saved_allocation_calls": 450,
+  "saved_requested_bytes": 374800,
+  "saved_allocation_calls_per_build": 9,
+  "saved_requested_bytes_per_build": 7496
+}

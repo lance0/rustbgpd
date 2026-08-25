@@ -33,7 +33,8 @@ v0.61.0 release-tip real-daemon and single-revision absolute baseline:
 2026-07-26; RIB-ops prefix-fixture audit bounding the above-65,536 rows:
 2026-08; v0.64.0 release-tag bgperf2 spot-check (rustbgpd only, same host):
 2026-08-08; v0.66.0 release-tag bgperf2 spot-check (rustbgpd only, same
-host): 2026-08-23; EVPN dataplane generation-query controlled A/B: 2026-08-24.
+host): 2026-08-23; EVPN dataplane generation-query controlled A/B: 2026-08-24;
+MP_REACH borrowed-attribute exact-export controlled A/B: 2026-08-25.
 
 | Field | Value |
 |-------|-------|
@@ -279,6 +280,35 @@ timed passes at each K=1..64 table shape, with exact response-cardinality and
 [`Linux FIB kernel-dump receipt`](perf/fib-kernel-dump-2026-08.md) and its
 machine-readable [`results.json`](perf/artifacts/fib-kernel-dump-2026-08/results.json).
 The fixture is raw IPv4 blackhole `/32` traffic, not whole-daemon latency.
+
+### MP_REACH borrowed-attribute exact-export probes
+
+The production IPv6 MP_REACH exact-export path now appends its locally built
+MP_REACH attribute to prepared attributes through the wire crate's borrowed
+attribute iterator. A fixed-harness, six-attempt controlled A/B measured all
+four production exact-probe shapes faster: `same_shape/1` by 21.17%,
+`same_shape/64` by 7.35%, `distinct_shape/64` by 27.45%, and
+`rich_scalar/50` by 22.52%. The same-production harness control bounds the
+host/shape noise separately.
+
+The deterministic rich-MP allocation diagnostic measured 50 builds. The
+iterator path made 750 allocation requests for 149,250 requested bytes versus
+1,200 requests for 524,050 bytes through the legacy temporary-vector path,
+saving 9 requests and 7,496 requested bytes per build for that fixture. These
+are `System` allocator request counters around the exact build window, not RSS,
+retained-heap, or a zero-allocation claim.
+
+See the
+[`MP_REACH borrowed-attribute receipt`](perf/probe-mp-reach-borrowed-attrs-2026-08.md),
+machine-readable [`timing rows`](perf/artifacts/probe-mp-reach-borrowed-attrs-2026-08/results.csv),
+and [`allocation row`](perf/artifacts/probe-mp-reach-borrowed-attrs-2026-08/allocation.json).
+The receipt deliberately keeps the direct MP proof separate from the broad
+IPv4-body non-regression sweep. The sealed six-cell sweep passed
+after rejudge: the candidate's combined re-announcement p50 mean was 0.446157 s
+versus 0.454703 s on current base, with exact delivery, 700/700 sessions, and
+zero decode errors in every round. Exact-tag controls reproduced below the
+historical lower bound, so the receipt treats that band as stale calibration
+rather than a current-host acceptance floor; S3 does not prove the MP speedup.
 
 ## Comparing Two Refs
 

@@ -42,6 +42,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rustbgpd-wire` adds a borrowed, single-pass path-attribute iterator builder;
+  IPv6 MP_REACH exact-export probes use it to append their transient MP
+  attribute without cloning the prepared attribute vector. Existing slice
+  callers remain source-compatible, and the production integration is limited
+  to MP_REACH exact probes. (LAN-1030)
+
 - Add startup-only `blackhole_discard_max_active`,
   `blackhole_discard_install_rate_per_minute`, and
   `blackhole_discard_install_burst`: existing receipt-authorized rows remain
