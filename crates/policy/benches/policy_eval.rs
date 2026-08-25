@@ -753,6 +753,104 @@ fn bench_dataset_parity(c: &mut Criterion) {
     group.finish();
 }
 
+/// LAN-1165 reload identity: 320 separately compiled chains whose source file
+/// is reused share large set-table Arcs, while detached equal files take the
+/// structural equality path. Both arms retain identical policy semantics.
+fn bench_rpol_reload_equality(c: &mut Criterion) {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use rustbgpd_policy::NamedPolicy;
+    use rustbgpd_policy::datasets::DatasetBindings;
+    use rustbgpd_policy::rpol::RpolFile;
+
+    fn source(changed_first: bool) -> String {
+        let first = if changed_first {
+            "11.0.0.0/24".to_string()
+        } else {
+            "10.0.0.0/24".to_string()
+        };
+        let members = std::iter::once(first)
+            .chain((1..4_096_u32).map(|i| format!("10.{}.{}.0/24", i / 256, i % 256)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "prefix-set large {{ {members} }}\n\
+             policy p {{ term hit {{ if route.prefix in large {{ accept }} }} term rest {{ reject }} }}"
+        )
+    }
+
+    fn chain(file: &RpolFile) -> PolicyChain {
+        let compiled = file
+            .compile_policy_bound_cached_tables(
+                "p",
+                &[],
+                &mut SetStore::new(),
+                &DatasetBindings::new(),
+            )
+            .expect("policy exists")
+            .expect("no datasets");
+        PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+            "p".to_string(),
+            Arc::new(compiled),
+        )])
+    }
+
+    fn outer(chain: &PolicyChain) -> &Arc<CompiledChain> {
+        chain.policies[0].rpol.as_ref().unwrap()
+    }
+
+    let unchanged = source(false);
+    let reused_file = RpolFile::parse(&unchanged).expect("reused file parses");
+    let reused_left = chain(&reused_file);
+    let reused_right = chain(&reused_file);
+    let detached_left = chain(&RpolFile::parse(&unchanged).expect("left parses"));
+    let detached_right = chain(&RpolFile::parse(&unchanged).expect("right parses"));
+    let changed = chain(&RpolFile::parse(&source(true)).expect("changed parses"));
+
+    assert!(!Arc::ptr_eq(outer(&reused_left), outer(&reused_right)));
+    assert!(Arc::ptr_eq(
+        &outer(&reused_left).prefix_sets[0],
+        &outer(&reused_right).prefix_sets[0]
+    ));
+    assert!(!Arc::ptr_eq(
+        &outer(&detached_left).prefix_sets[0],
+        &outer(&detached_right).prefix_sets[0]
+    ));
+    assert_eq!(reused_left, reused_right);
+    assert_eq!(detached_left, detached_right);
+    assert_ne!(reused_left, changed);
+
+    let communities = Vec::new();
+    let as_path = String::new();
+    let ctx = predicate_ctx(
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 5, 6, 0), 24)),
+        &communities,
+        &as_path,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+    );
+    assert_eq!(reused_left.evaluate(&ctx), detached_left.evaluate(&ctx));
+
+    let roster = |chain: &PolicyChain| (0..320).map(|_| chain.clone()).collect::<Vec<_>>();
+    let reused = (roster(&reused_left), roster(&reused_right));
+    let detached = (roster(&detached_left), roster(&detached_right));
+    let mut group = c.benchmark_group("rpol_reload_equality_320");
+    group
+        .sample_size(20)
+        .measurement_time(Duration::from_secs(3));
+    for (name, pair) in [("reused", &reused), ("detached", &detached)] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                std::hint::black_box(&pair.0)
+                    .iter()
+                    .zip(std::hint::black_box(&pair.1))
+                    .all(|(left, right)| left == right)
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_policy_eval,
@@ -761,6 +859,7 @@ criterion_group!(
     bench_value_expr,
     bench_loop_eval,
     bench_fn_eval,
-    bench_dataset_parity
+    bench_dataset_parity,
+    bench_rpol_reload_equality
 );
 criterion_main!(benches);

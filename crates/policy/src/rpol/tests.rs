@@ -54,6 +54,133 @@ test bogons-rejected {
 }
 ";
 
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one matrix keeps every atomic source-identity rejection beside the reuse control"
+)]
+fn accepted_file_reuse_requires_every_source_identity_axis() {
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::Path;
+
+    use super::{DEFAULT_MAX_GRAPH_BYTES, RpolPolicyEntry, RpolPolicySet};
+
+    fn write_graph(dir: &Path, main: &str, leaf: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("main.rpol"), main).unwrap();
+        fs::write(dir.join("leaf.rpol"), leaf).unwrap();
+    }
+
+    fn load(dir: &Path) -> Arc<RpolFile> {
+        Arc::new(
+            RpolFile::load(&dir.join("main.rpol"), &[], DEFAULT_MAX_GRAPH_BYTES)
+                .expect("graph loads"),
+        )
+    }
+
+    fn policy_set(file: Arc<RpolFile>, name: &str, params: usize, path: &str) -> RpolPolicySet {
+        RpolPolicySet {
+            policies: HashMap::from([(
+                name.to_string(),
+                RpolPolicyEntry {
+                    file,
+                    params,
+                    path: path.to_string(),
+                },
+            )]),
+        }
+    }
+
+    fn unit_set(file: Arc<RpolFile>, q_params: usize, q_path: &str) -> RpolPolicySet {
+        RpolPolicySet {
+            policies: HashMap::from([
+                (
+                    "p".to_string(),
+                    RpolPolicyEntry {
+                        file: Arc::clone(&file),
+                        params: 0,
+                        path: "main.rpol".to_string(),
+                    },
+                ),
+                (
+                    "q".to_string(),
+                    RpolPolicyEntry {
+                        file,
+                        params: q_params,
+                        path: q_path.to_string(),
+                    },
+                ),
+            ]),
+        }
+    }
+
+    let main = "import \"leaf.rpol\"\npolicy p { term t { accept } }\n";
+    let leaf = "policy q { term t { accept } }\n";
+    let dir = tempfile::tempdir().unwrap();
+    write_graph(dir.path(), main, leaf);
+    let prior_file = load(dir.path());
+    let prior = policy_set(Arc::clone(&prior_file), "p", 0, "main.rpol");
+
+    let same_file = load(dir.path());
+    let mut same = policy_set(Arc::clone(&same_file), "p", 0, "main.rpol");
+    same.reuse_unchanged_files_from(&prior);
+    assert!(Arc::ptr_eq(&same.policies["p"].file, &prior_file));
+
+    let prior_unit = unit_set(Arc::clone(&prior_file), 0, "main.rpol");
+    let exact_unit_file = load(dir.path());
+    let mut exact_unit = unit_set(Arc::clone(&exact_unit_file), 0, "main.rpol");
+    exact_unit.reuse_unchanged_files_from(&prior_unit);
+    assert!(Arc::ptr_eq(&exact_unit.policies["p"].file, &prior_file));
+    assert!(Arc::ptr_eq(&exact_unit.policies["q"].file, &prior_file));
+
+    let partial_unit_file = load(dir.path());
+    let mut partial_unit = unit_set(Arc::clone(&partial_unit_file), 1, "main.rpol");
+    partial_unit.reuse_unchanged_files_from(&prior_unit);
+    assert!(Arc::ptr_eq(
+        &partial_unit.policies["p"].file,
+        &partial_unit_file
+    ));
+    assert!(Arc::ptr_eq(
+        &partial_unit.policies["q"].file,
+        &partial_unit_file
+    ));
+
+    fs::write(
+        dir.path().join("main.rpol"),
+        "import \"leaf.rpol\"\npolicy p { term t { reject } }\n",
+    )
+    .unwrap();
+    let changed_main = load(dir.path());
+    let mut candidate = policy_set(Arc::clone(&changed_main), "p", 0, "main.rpol");
+    candidate.reuse_unchanged_files_from(&prior);
+    assert!(Arc::ptr_eq(&candidate.policies["p"].file, &changed_main));
+
+    write_graph(dir.path(), main, "policy q { term t { reject } }\n");
+    let changed_leaf = load(dir.path());
+    let mut candidate = policy_set(Arc::clone(&changed_leaf), "p", 0, "main.rpol");
+    candidate.reuse_unchanged_files_from(&prior);
+    assert!(Arc::ptr_eq(&candidate.policies["p"].file, &changed_leaf));
+
+    let moved = tempfile::tempdir().unwrap();
+    write_graph(moved.path(), main, leaf);
+    let moved_file = load(moved.path());
+    let mut candidate = policy_set(Arc::clone(&moved_file), "p", 0, "main.rpol");
+    candidate.reuse_unchanged_files_from(&prior);
+    assert!(Arc::ptr_eq(&candidate.policies["p"].file, &moved_file));
+
+    for (name, params, path) in [
+        ("renamed", 0, "main.rpol"),
+        ("p", 1, "main.rpol"),
+        ("p", 0, "other.rpol"),
+    ] {
+        let fresh = Arc::clone(&same_file);
+        let mut candidate = policy_set(Arc::clone(&fresh), name, params, path);
+        candidate.reuse_unchanged_files_from(&prior);
+        assert!(Arc::ptr_eq(&candidate.policies[name].file, &fresh));
+    }
+}
+
 fn route_ctx(prefix: Prefix, communities: &[u32], rpki: RpkiValidation) -> RouteContext<'static> {
     RouteContext {
         prefix: Some(prefix),
