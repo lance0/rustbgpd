@@ -407,6 +407,8 @@ jobs:
           bash bench/tests/test-rrharness-driver.sh
           python3 -m unittest discover \
             -s bench/scale/enhanced-route-refresh -p 'test_*.py'
+          python3 -m unittest -v \
+            bench/scale/reloadstall/test_verify_session_notification_receipt.py
           python3 -m unittest -v tests/soak/test_intern_churn_analyzers.py
           python3 -m unittest -v tests/soak/test_gate8b_recovery_contract.py
           python3 -m unittest -v tests/soak/test_m67_link_drain_analyzer.py

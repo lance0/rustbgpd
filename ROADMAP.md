@@ -2229,10 +2229,13 @@ branch is between features.
   - LAN-1162 tranche A bounds the peer-manager private command lane and the
     config-bridge replacement lane at capacity one with lossless FIFO sends.
     LAN-1162 B1 adds daemon-lifetime current/high-water depth accounting around
-    `session_notify` without changing delivery semantics. LAN-1162 remains open
-    for B2's optional handshake and real 700/400400 three-round flap proof;
-    `session_notify` remains intentionally unbounded for the `QueryState`
-    collision-resolution deadlock constraint.
+    `session_notify` without changing delivery semantics. LAN-1162 B2 records
+    a sealed one-host 700-session/400,400-prefix, three-round flap receipt: all
+    ten accounting checkpoints drained to zero and daemon-lifetime high-water
+    rose from 8 to 30 with zero parse/send/correctness errors. This is dequeue
+    accounting only, not a per-round peak, capacity, latency, memory, bound, or
+    optimization claim. `session_notify` remains intentionally unbounded for
+    the `QueryState` collision-resolution deadlock constraint.
 
   Dependency-hygiene note, not a work item: the lockfile resolves both
   `thiserror` 1.x and 2.x. Every first-party crate that derives with it
