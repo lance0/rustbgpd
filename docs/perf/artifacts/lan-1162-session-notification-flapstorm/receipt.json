@@ -1,0 +1,47 @@
+{
+  "repo": ".",
+  "commit": "cdc9966ffbca9a3f4902484e75c9bd703bdb1322",
+  "tree": "51e56d5b1b19ee52fe6312cd89d4bef336f64ca8",
+  "base": "32664ee2e4a87052685b036befefdaa20ae8ef19",
+  "base_tree": "428101e3d6324667a75842bb1c9d851dc1768efd",
+  "binaries": {
+    "daemon": {"path": "target/release/rustbgpd", "sha256": "b6c8d91038dffaa5defc4b6737ace17155bf5a0cc683d56dc12a1b34952e04c2"},
+    "harness": {"path": "bench/scale/target/release/reloadstall", "sha256": "2ff6c209f330f63b28cb2409ad4a3a70936d89f1b0dabd61e3474537ed249291"}
+  },
+  "sources": {
+    "harness_main": {"path": "bench/scale/reloadstall/src/main.rs", "sha256": "daccd4c28c595ca4d7b95475c28c4d2fd2d5eeac19daaba1525120f8517d0b53"},
+    "verifier": {"path": "bench/scale/reloadstall/verify_session_notification_receipt.py", "sha256": "7211380bfc2297b8e15ef227b59913648fb01bb11b2a2c3412977738fd057e0e"},
+    "harness_lock": {"path": "bench/scale/Cargo.lock", "sha256": "3ca19b6f5624f6da66b655f86c27140d6c7240de9af965809c53555184db85a3"},
+    "workspace_lock": {"path": "Cargo.lock", "sha256": "a53eca2faf0139a735e68d297faadf9ca1fc278e5151c6ea18a6f665c3028ef9"},
+    "matrix_runner": {"path": "bench/scale/matrix/run-matrix.sh", "sha256": "c0ae05f3bf1d48a2e25a646c07f7316b20841b271056d0b0f570f07c2569e3b2"},
+    "scenario_generator": {"path": "bench/scale/reloadstall/gen-scenario.py", "sha256": "f4103d88c2df4cc43db05b7b36f0ea1ccfa64605dad29d330c8dd46927bd2f32"}
+  },
+  "artifacts": {
+    "harness.log": "95f80782772fe4cc32a1ec32e249dda478eeb464a4b21f19a268437e84b9b465",
+    "initial.csv": "c8d9e5c699058c308324ae3a71529658cc25da0747835d8595beb0c8b1560383",
+    "checkpoints.csv": "95f80782772fe4cc32a1ec32e249dda478eeb464a4b21f19a268437e84b9b465",
+    "flapstorm.csv": "e8eaa75b5a519ec39eaccf366cacb2cb7dda80737f9e66e4927110724b5cd173",
+    "daemon-summary.json": "e055080a05e5703d4f54f52985407f572343ce7293557fcc8be8b56f77b1eebf",
+    "README.md": "c9a9255c3a5273e806105c9656f5faf70b71c724ebdeb39434116da40a2fdf69",
+    "verification.json": "94f466489412c06ba08738af336b38925ffe9b5f17ae08d48743af7d092b8b62"
+  },
+  "workload": {"peers": 700, "prefixes": 400400, "flapped": 50, "rounds": 3},
+  "command": ["bash", "bench/scale/matrix/run-matrix.sh", "rustbgpd"],
+  "environment": {
+    "N_PEERS": "700",
+    "TOTAL_PREFIXES": "400400",
+    "RELOADS": "0",
+    "CONTROL_SECS": "30",
+    "FLAPSTORM": "50",
+    "ARTIFACTS_DIR": "/tmp/lan1162-b2-20260825T1305Z",
+    "RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR": "127.0.0.1:9179"
+  },
+  "system": {
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+    "kernel": "Linux 6.17.0-35-generic x86_64 GNU/Linux",
+    "cpu": "AMD Ryzen Threadripper 7970X 32-Cores",
+    "captured_at": "2026-08-25T13:10:21Z"
+  },
+  "raw_campaign_root": {"path": "/tmp/lan1162-b2-20260825T1305Z", "sha256": "fdf81db0f657838a83df899a85f4ff94c9689b09f9135a6781ffe5fb946d0885"}
+}
