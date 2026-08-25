@@ -1317,7 +1317,7 @@ peer_group = "edge"
 "#,
     );
     let (_tx, rx) = mpsc::channel(16);
-    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (_internal_tx, internal_rx) = mpsc::channel(1);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let metrics = BgpMetrics::new();
     let mut mgr = PeerManager::new_with_config(

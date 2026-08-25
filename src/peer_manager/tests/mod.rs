@@ -273,7 +273,7 @@ fn dynamic_test_manager() -> PeerManager {
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,

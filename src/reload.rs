@@ -1451,7 +1451,7 @@ pub(crate) struct AcceptedBridgeReplacement {
 )]
 pub(crate) async fn run_config_bridge_accepted(
     mut event_rx: mpsc::Receiver<rustbgpd_api::peer_types::ConfigEvent>,
-    mut bridge_replace_rx: mpsc::UnboundedReceiver<AcceptedBridgeReplacement>,
+    mut bridge_replace_rx: mpsc::Receiver<AcceptedBridgeReplacement>,
     mutation_tx: mpsc::Sender<ConfigMutation>,
     accepted_tx: watch::Sender<Arc<AcceptedConfigSnapshot>>,
 ) {
@@ -1597,7 +1597,7 @@ pub(crate) async fn run_config_bridge(
 ) {
     let initial = AcceptedConfigSnapshot::from_config_for_test(initial);
     let (accepted_tx, _accepted_rx) = watch::channel(Arc::clone(&initial));
-    let (replace_tx, accepted_replace_rx) = mpsc::unbounded_channel();
+    let (replace_tx, accepted_replace_rx) = mpsc::channel(1);
     tokio::spawn(async move {
         let mut bridge_replace_rx = bridge_replace_rx;
         while let Some(config) = bridge_replace_rx.recv().await {
@@ -1609,6 +1609,7 @@ pub(crate) async fn run_config_bridge(
                         .expect("test config serializes"),
                     adopted,
                 })
+                .await
                 .is_err()
             {
                 break;
@@ -1620,11 +1621,9 @@ pub(crate) async fn run_config_bridge(
 
 /// Acknowledge a freshly reloaded authority across every runtime consumer.
 ///
-/// Order matters. `peer_mgr_internal_tx` is unbounded and can only fail
-/// on receiver-drop (peer manager task is dead — fatal anyway). The
-/// bridge channel is also unbounded; it can only fail on receiver-drop
-/// (bridge task is dead — same fatality class as a dead persister, since
-/// the bridge owns the persister-facing channel). Sending the peer
+/// Order matters. Both private control lanes are lossless capacity-one
+/// channels; a send can fail only on receiver-drop (the owning peer-manager
+/// or bridge task is dead). Sending the peer
 /// manager first means the authoritative runtime view always advances
 /// first.
 ///
@@ -1647,8 +1646,8 @@ pub(crate) async fn run_config_bridge(
 pub(crate) async fn finalize_sighup_authority(
     operation: &OwnedRuntimeConfigOperation,
     authority: SighupAuthority,
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
-    bridge_replace_tx: &mpsc::UnboundedSender<AcceptedBridgeReplacement>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
+    bridge_replace_tx: &mpsc::Sender<AcceptedBridgeReplacement>,
     dialout_manager: &Arc<tokio::sync::Mutex<rustbgpd_api::gnmi_dialout::DialoutManager>>,
 ) -> OwnedRuntimeConfigOutcome<SighupAuthority, SighupReloadError> {
     operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
@@ -1671,6 +1670,7 @@ pub(crate) async fn finalize_sighup_authority(
             config: Box::new(authority.runtime.clone()),
             ack: Some(ack_tx),
         })
+        .await
         .is_err()
     {
         return fenced(
@@ -1692,6 +1692,7 @@ pub(crate) async fn finalize_sighup_authority(
             snapshot: Arc::clone(&authority.desired),
             adopted,
         })
+        .await
         .is_err()
     {
         return fenced(
@@ -3995,13 +3996,112 @@ local_vtep_ip = "10.0.0.1"
 "#;
 
     #[tokio::test]
+    async fn bounded_control_lanes_apply_capacity_one_fifo_backpressure() {
+        use tokio::time::{Duration, timeout};
+
+        let config = load_config_from_toml("bounded-control-lane", baseline_toml());
+        let (internal_tx, mut internal_rx) = mpsc::channel(1);
+        let (first_ack, first_ack_rx) = oneshot::channel();
+        internal_tx
+            .send(InternalCommand::ReplaceConfigSnapshot {
+                config: Box::new(config.clone()),
+                ack: Some(first_ack),
+            })
+            .await
+            .unwrap();
+        let (second_ack, second_ack_rx) = oneshot::channel();
+        let mut second = Box::pin(internal_tx.send(InternalCommand::ReplaceConfigSnapshot {
+            config: Box::new(config.clone()),
+            ack: Some(second_ack),
+        }));
+        assert!(
+            timeout(Duration::from_millis(10), &mut second)
+                .await
+                .is_err()
+        );
+        let InternalCommand::ReplaceConfigSnapshot { ack, .. } = internal_rx.recv().await.unwrap()
+        else {
+            panic!("first internal command must retain its identity");
+        };
+        ack.unwrap().send(()).unwrap();
+        second.await.unwrap();
+        let InternalCommand::ReplaceConfigSnapshot { ack, .. } = internal_rx.recv().await.unwrap()
+        else {
+            panic!("second internal command must retain its identity");
+        };
+        ack.unwrap().send(()).unwrap();
+        first_ack_rx.await.unwrap();
+        second_ack_rx.await.unwrap();
+
+        let snapshot = AcceptedConfigSnapshot::from_config_for_test(config);
+        let (replace_tx, mut replace_rx) = mpsc::channel(1);
+        let (first_adopted, first_adopted_rx) = oneshot::channel();
+        replace_tx
+            .send(AcceptedBridgeReplacement {
+                snapshot: Arc::clone(&snapshot),
+                adopted: first_adopted,
+            })
+            .await
+            .unwrap();
+        let (second_adopted, second_adopted_rx) = oneshot::channel();
+        let mut second = Box::pin(replace_tx.send(AcceptedBridgeReplacement {
+            snapshot,
+            adopted: second_adopted,
+        }));
+        assert!(
+            timeout(Duration::from_millis(10), &mut second)
+                .await
+                .is_err()
+        );
+        let first = replace_rx.recv().await.unwrap();
+        first.adopted.send(ReloadDispatch::Replied(())).unwrap();
+        second.await.unwrap();
+        let second = replace_rx.recv().await.unwrap();
+        second.adopted.send(ReloadDispatch::Replied(())).unwrap();
+        assert!(matches!(
+            first_adopted_rx.await.unwrap(),
+            ReloadDispatch::Replied(())
+        ));
+        assert!(matches!(
+            second_adopted_rx.await.unwrap(),
+            ReloadDispatch::Replied(())
+        ));
+    }
+
+    #[test]
+    fn bounded_control_lane_source_inventory_is_closed() {
+        let main = include_str!("main.rs");
+        let reload = include_str!("reload.rs");
+        let transaction = include_str!("config_transaction_control.rs");
+        assert!(
+            main.contains("let (peer_mgr_internal_tx, peer_mgr_internal_rx) = mpsc::channel(1)")
+        );
+        assert!(main.contains("let (bridge_replace_tx, bridge_replace_rx) = mpsc::channel(1)"));
+        assert!(reload.contains("mpsc::Receiver<AcceptedBridgeReplacement>"));
+        assert!(reload.contains("mpsc::Sender<AcceptedBridgeReplacement>"));
+        assert!(!reload.contains(concat!(
+            "mpsc::Unbounded",
+            "Sender<AcceptedBridgeReplacement>"
+        )));
+        assert!(!reload.contains(concat!(
+            "mpsc::Unbounded",
+            "Receiver<AcceptedBridgeReplacement>"
+        )));
+        assert!(!transaction.contains(concat!("mpsc::Unbounded", "Sender<InternalCommand>")));
+        assert!(!transaction.contains(concat!("mpsc::Unbounded", "Receiver<InternalCommand>")));
+        assert!(!reload.contains(concat!("try_", "send(AcceptedBridgeReplacement")));
+        assert!(!transaction.contains(concat!("try_", "send(InternalCommand")));
+        assert!(reload.contains(concat!("mpsc::Unbounded", "Receiver<Box<Config>>")));
+    }
+
+    #[tokio::test]
     async fn sighup_runtime_baseline_reads_peer_manager_snapshot_after_typed_stage() {
         let initial = load_config_from_toml("runtime-baseline-initial", baseline_toml());
         let mut candidate = initial.clone();
         candidate.neighbors[0].hold_time = Some(45);
 
         let (tx, rx) = mpsc::channel(16);
-        let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+        let (internal_tx, internal_rx) = mpsc::channel(1);
         let (rib_tx, _rib_rx) = mpsc::channel(64);
         let manager = PeerManager::new_with_config(
             rx,
@@ -4025,6 +4125,7 @@ local_vtep_ip = "10.0.0.1"
                 scope: TransactionConfigScope::Full,
                 reply: stage_tx,
             })
+            .await
             .unwrap();
         let rollback_token = stage_rx.await.unwrap().unwrap();
         drop(rollback_token);
@@ -8883,7 +8984,7 @@ peer_group = "secure"
         );
 
         let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(8);
-        let (replace_tx, replace_rx) = mpsc::unbounded_channel::<AcceptedBridgeReplacement>();
+        let (replace_tx, replace_rx) = mpsc::channel(1);
         let (mutation_tx, mut mutation_rx) = mpsc::channel::<ConfigMutation>(8);
         let initial = AcceptedConfigSnapshot::from_config_for_test(stale);
         let (accepted_tx, _accepted_rx) = watch::channel(initial);
@@ -8902,6 +9003,7 @@ peer_group = "secure"
                 snapshot: AcceptedConfigSnapshot::from_config_for_test(reloaded.clone()),
                 adopted,
             })
+            .await
             .unwrap();
         let replace_msg = mutation_rx.recv().await.expect("replacement forwarded");
         let ConfigMutation::AdoptReloadSnapshot {
@@ -9078,7 +9180,7 @@ peer_group = "secure"
         let initial = Arc::new(AcceptedConfigSnapshot::load(&path, None).unwrap());
         std::fs::remove_file(&path).ok();
         let (event_tx, event_rx) = mpsc::channel(4);
-        let (replace_tx, replace_rx) = mpsc::unbounded_channel();
+        let (replace_tx, replace_rx) = mpsc::channel(1);
         let (mutation_tx, mut mutation_rx) = mpsc::channel(4);
         let (accepted_tx, mut accepted_rx) = watch::channel(Arc::clone(&initial));
         let bridge = tokio::spawn(run_config_bridge_accepted(
@@ -9662,7 +9764,7 @@ remote_asn = 65002
         let initial_accepted = AcceptedConfigSnapshot::from_config_for_test(initial.clone());
 
         let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(8);
-        let (replace_tx, replace_rx) = mpsc::unbounded_channel::<AcceptedBridgeReplacement>();
+        let (replace_tx, replace_rx) = mpsc::channel(1);
         let (mutation_tx, mutation_rx) = mpsc::channel::<ConfigMutation>(8);
         let persister = tokio::spawn(
             ConfigPersister::new_accepted(
@@ -9702,6 +9804,7 @@ remote_asn = 65002
                 snapshot: Arc::clone(&reloaded.desired),
                 adopted,
             })
+            .await
             .unwrap();
         assert!(matches!(
             adopted_rx.await.unwrap(),

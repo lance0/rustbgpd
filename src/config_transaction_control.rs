@@ -71,7 +71,7 @@ pub struct ConfigTransactionController {
     metrics: BgpMetrics,
     state: Arc<Mutex<ConfirmedState>>,
     accepted_rx: Option<watch::Receiver<Arc<AcceptedConfigSnapshot>>>,
-    peer_mgr_internal_tx: Option<mpsc::UnboundedSender<InternalCommand>>,
+    peer_mgr_internal_tx: Option<mpsc::Sender<InternalCommand>>,
     confirm_v3_launch: Option<crate::confirm_journal::v3::LaunchIdentity>,
     v3_residue_cleanup_active: Arc<AtomicBool>,
     settlement: Option<(RuntimeConfigSettlementWatchdog, DaemonGate)>,
@@ -325,10 +325,7 @@ impl ConfigTransactionController {
     }
 
     #[must_use]
-    pub(crate) fn with_preloaded_planner(
-        mut self,
-        tx: mpsc::UnboundedSender<InternalCommand>,
-    ) -> Self {
+    pub(crate) fn with_preloaded_planner(mut self, tx: mpsc::Sender<InternalCommand>) -> Self {
         self.peer_mgr_internal_tx = Some(tx);
         self
     }
@@ -374,6 +371,7 @@ impl ConfigTransactionController {
             expected_runtime_snapshot_token: Some(expected_runtime_snapshot_token),
             reply: reply_tx,
         })
+        .await
         .map_err(|_| {
             ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
         })?;
@@ -2195,7 +2193,7 @@ async fn apply_config_transaction(
 async fn apply_config_transaction_with_internal(
     deps: Arc<FibTableControlDeps>,
     request: proto::ApplyConfigTransactionRequest,
-    peer_mgr_internal_tx: mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: mpsc::Sender<InternalCommand>,
 ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
     validate_apply_request(&request)?;
     let join = tokio::spawn(async move {
@@ -2219,7 +2217,7 @@ async fn apply_config_transaction_with_internal(
 async fn apply_config_transaction_locked(
     deps: &FibTableControlDeps,
     request: proto::ApplyConfigTransactionRequest,
-    peer_mgr_internal_tx: Option<&mpsc::UnboundedSender<InternalCommand>>,
+    peer_mgr_internal_tx: Option<&mpsc::Sender<InternalCommand>>,
     progress: &RuntimeConfigMutationProgress,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     apply_config_transaction_locked_with_preloaded(
@@ -2240,7 +2238,7 @@ async fn apply_config_transaction_locked_with_preloaded(
     deps: &FibTableControlDeps,
     request: proto::ApplyConfigTransactionRequest,
     preloaded: Option<PlannedTransactionConfig>,
-    peer_mgr_internal_tx: Option<&mpsc::UnboundedSender<InternalCommand>>,
+    peer_mgr_internal_tx: Option<&mpsc::Sender<InternalCommand>>,
     progress: &RuntimeConfigMutationProgress,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     let (plan, candidate, typed_plan) = if let Some(planned) = preloaded {
@@ -2365,7 +2363,7 @@ async fn apply_config_transaction_locked_with_preloaded(
 )]
 async fn commit_apply_family(
     deps: &FibTableControlDeps,
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     config_tx: &mpsc::Sender<ConfigEvent>,
     family: ApplyFamily,
     candidate_toml: String,
@@ -2471,7 +2469,7 @@ async fn finish_outbound_prefix_limit_transaction(
 )]
 async fn commit_apply_family_inner(
     deps: &FibTableControlDeps,
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     config_tx: &mpsc::Sender<ConfigEvent>,
     family: ApplyFamily,
     candidate_toml: String,
@@ -2600,7 +2598,7 @@ async fn commit_apply_family_inner(
 )]
 async fn commit_fib_transaction(
     deps: &FibTableControlDeps,
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate_toml: String,
     candidate: Config,
@@ -2679,7 +2677,7 @@ async fn commit_fib_transaction(
 }
 
 async fn stage_preloaded_config_snapshot(
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     candidate: Box<Config>,
     scope: TransactionConfigScope,
 ) -> Result<TransactionConfigRollbackToken, ApplyFailure> {
@@ -2690,6 +2688,7 @@ async fn stage_preloaded_config_snapshot(
             scope,
             reply: reply_tx,
         })
+        .await
         .map_err(|_| {
             ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
         })?;
@@ -2708,7 +2707,7 @@ async fn stage_preloaded_config_snapshot(
 }
 
 async fn restore_preloaded_config_snapshot(
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     rollback: TransactionConfigRollbackToken,
 ) -> Result<(), ConfigTransactionApplyError> {
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -2717,6 +2716,7 @@ async fn restore_preloaded_config_snapshot(
             rollback,
             reply: reply_tx,
         })
+        .await
         .map_err(|_| {
             ConfigTransactionApplyError::Unavailable(
                 "peer manager is unavailable during config transaction rollback".to_string(),
@@ -2732,7 +2732,7 @@ async fn restore_preloaded_config_snapshot(
 }
 
 async fn restore_preloaded_snapshot_after_error(
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     rollback: TransactionConfigRollbackToken,
     original: ApplyFailure,
 ) -> ApplyFailure {
@@ -2753,7 +2753,7 @@ async fn restore_preloaded_snapshot_after_error(
 
 async fn rollback_fib_transaction_after_error(
     fib_cmd_tx: &mpsc::Sender<crate::fib_runtime::FibRuntimeCommand>,
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     previous_tables: Vec<crate::config::FibTableConfig>,
     rollback: TransactionConfigRollbackToken,
     original: ApplyFailure,
@@ -2856,7 +2856,7 @@ fn apply_family(sections: &[String]) -> Option<ApplyFamily> {
 }
 
 async fn plan_loaded_candidate(
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     candidate: Box<Config>,
     expected_runtime_snapshot_token: String,
 ) -> Result<PlannedTransactionConfig, ConfigTransactionApplyError> {
@@ -2867,6 +2867,7 @@ async fn plan_loaded_candidate(
             expected_runtime_snapshot_token: Some(expected_runtime_snapshot_token),
             reply: reply_tx,
         })
+        .await
         .map_err(|_| {
             ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
         })?;
@@ -2908,7 +2909,7 @@ async fn plan_candidate(
 
 async fn commit_candidate_snapshot_locked(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate_toml: String,
     candidate: &Config,
@@ -2949,7 +2950,7 @@ async fn commit_candidate_snapshot_locked(
 /// a protection boundary).
 async fn commit_dynamic_neighbors_locked(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate_toml: String,
     candidate: &Config,
@@ -2996,7 +2997,7 @@ async fn commit_dynamic_neighbors_locked(
 )]
 async fn commit_static_neighbors_locked(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate_toml: String,
     candidate: &Config,
@@ -3137,7 +3138,7 @@ async fn commit_static_neighbors_locked(
 /// snapshot on failure. Returns the number of live sessions re-evaluated.
 async fn commit_live_policy_impact_locked(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate_toml: String,
     candidate: &Config,
@@ -3246,7 +3247,7 @@ fn peer_session_reshape_commit_message(commit: &PeerSessionReshapeCommit) -> Str
 /// already-durable transaction.
 async fn commit_peer_session_reshape_locked(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate_toml: String,
     candidate: &Config,
@@ -3644,7 +3645,7 @@ async fn send_apply_peer_reshape_snapshot(
 
 async fn rollback_live_policy_and_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     priors: Vec<ResolvedPeerPolicy>,
     rollback: TransactionConfigRollbackToken,
     original: ApplyFailure,
@@ -3669,7 +3670,7 @@ async fn rollback_live_policy_and_snapshot(
 
 async fn rollback_peer_reshape_and_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     priors: Vec<PeerManagerNeighborConfig>,
     rollback: TransactionConfigRollbackToken,
     original: ApplyFailure,
@@ -3820,7 +3821,7 @@ async fn commit_config_snapshot_stage(
 }
 
 async fn rollback_snapshot_after_error(
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     rollback: TransactionConfigRollbackToken,
     original: ApplyFailure,
 ) -> ApplyFailure {
@@ -4006,7 +4007,7 @@ async fn rollback_static_ops(
 
 async fn rollback_static_and_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     applied: Vec<AppliedStaticOp>,
     rollback: TransactionConfigRollbackToken,
     original: ApplyFailure,
@@ -5698,7 +5699,7 @@ peer_group = "edge"
     fn spawn_typed_transaction_manager(
         snapshot_toml: Arc<Mutex<String>>,
         response: RuntimeConfigTransactionPlan,
-    ) -> mpsc::UnboundedSender<InternalCommand> {
+    ) -> mpsc::Sender<InternalCommand> {
         spawn_typed_transaction_manager_controlled(
             snapshot_toml,
             response,
@@ -5718,7 +5719,7 @@ peer_group = "edge"
         snapshot_toml: Arc<Mutex<String>>,
         response: RuntimeConfigTransactionPlan,
         control: TypedTransactionFakeControl,
-    ) -> mpsc::UnboundedSender<InternalCommand> {
+    ) -> mpsc::Sender<InternalCommand> {
         let initial = Config::load_toml_with_diagnostics(
             snapshot_toml
                 .try_lock()
@@ -5728,7 +5729,7 @@ peer_group = "edge"
         )
         .expect("typed transaction fake initial config must load");
         let current = Arc::new(Mutex::new(initial));
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(1);
         tokio::spawn(fake_typed_transaction_manager_actor(
             rx,
             current,
@@ -5742,7 +5743,7 @@ peer_group = "edge"
     fn spawn_typed_transaction_manager_with_current(
         current: Arc<Mutex<Config>>,
         response: RuntimeConfigTransactionPlan,
-    ) -> mpsc::UnboundedSender<InternalCommand> {
+    ) -> mpsc::Sender<InternalCommand> {
         let snapshot_toml = Arc::new(Mutex::new(
             crate::config::persisted_config_document(
                 &current
@@ -5751,7 +5752,7 @@ peer_group = "edge"
             )
             .expect("typed transaction fake config must serialize"),
         ));
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(1);
         tokio::spawn(fake_typed_transaction_manager_actor(
             rx,
             current,
@@ -5763,7 +5764,7 @@ peer_group = "edge"
     }
 
     async fn fake_typed_transaction_manager_actor(
-        mut rx: mpsc::UnboundedReceiver<InternalCommand>,
+        mut rx: mpsc::Receiver<InternalCommand>,
         current: Arc<Mutex<Config>>,
         snapshot_toml: Arc<Mutex<String>>,
         response: RuntimeConfigTransactionPlan,
@@ -7480,7 +7481,7 @@ families = ["ipv4_unicast"]
         let seen_preloaded = Arc::new(Mutex::new(None));
         let seen = seen_preloaded.clone();
         let current = runtime_config.clone();
-        let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = mpsc::channel(1);
         tokio::spawn(async move {
             while let Some(command) = internal_rx.recv().await {
                 match command {
@@ -11333,7 +11334,7 @@ families = ["ipv4_unicast"]
                 "stage rejection must precede typed FIB replacement"
             );
         });
-        let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = mpsc::channel(1);
         tokio::spawn(async move {
             let Some(InternalCommand::StageTransactionConfig { reply, .. }) =
                 internal_rx.recv().await
@@ -11632,7 +11633,7 @@ peer_group = "ge"
         let rib_task = tokio::spawn(rib_manager.run());
 
         let (peer_tx, peer_rx) = mpsc::channel(64);
-        let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+        let (internal_tx, internal_rx) = mpsc::channel(1);
         let mut peer_manager = crate::peer_manager::PeerManager::new_with_config(
             peer_rx,
             internal_rx,
@@ -12003,7 +12004,7 @@ log_format = "json"
             rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new()).run(),
         );
         let (peer_tx, peer_rx) = mpsc::channel(64);
-        let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+        let (internal_tx, internal_rx) = mpsc::channel(1);
         let mut peer_manager = crate::peer_manager::PeerManager::new_with_config(
             peer_rx,
             internal_rx,
@@ -12220,7 +12221,7 @@ log_format = "json"
         let config = Config::load_toml_with_diagnostics(&base_toml(""), "barrier test").unwrap();
         let snapshot = AcceptedConfigSnapshot::from_config_for_test(config);
         let (peer_tx, mut peer_rx) = mpsc::channel(2);
-        let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
+        let (internal_tx, mut internal_rx) = mpsc::channel(1);
         let controller = ConfigTransactionController::new(
             deps_value(None, peer_tx, None, Vec::new()),
             BgpMetrics::new(),

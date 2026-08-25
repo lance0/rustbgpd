@@ -45,7 +45,7 @@ fn peer_group_reshape_manager(config: Config) -> PeerManager {
     Box::leak(Box::new(rib_rx));
     PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,

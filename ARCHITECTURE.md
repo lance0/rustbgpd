@@ -142,7 +142,7 @@ These are not negotiable. Every contributor and every PR is measured against the
 
 2. **The wire crate is independently usable.** Zero internal dependencies. `cargo add rustbgpd-wire` works without the daemon.
 
-3. **No accidental unbounded channels.** Channels are bounded by default. A small, documented set of intentional unbounded channels exists where a bounded `send().await` would deadlock the owning session/state task — collision-resolution notifications (`peer_manager`, `transport`), peer-manager internal commands, the config/reload coordinator (`reload.rs`), the transport writer's priority channel, and BFD state-change fan-out. Each is justified in an inline comment at its construction.
+3. **No accidental unbounded channels.** Channels are bounded by default. The peer-manager private command lane and config-bridge replacement lane are lossless capacity-one channels. A small, documented set of intentional unbounded channels remains where a bounded `send().await` would deadlock the owning session/state task — collision-resolution notifications (`peer_manager`, `transport`), the transport writer's priority channel, and BFD state-change fan-out. Each is justified in an inline comment at its construction.
 
 4. **No silent attribute drops.** Every ignored, filtered, or rejected attribute emits a structured event. Operators can explain every routing decision from logs alone.
 
@@ -396,7 +396,7 @@ All inter-task communication uses bounded `tokio::mpsc` channels (capacity 4096 
 | PeerManager commands | API | PeerManager | `send().await` blocks. gRPC call waits. |
 | BMP events | Transport | BmpManager | `try_send()` — event dropped, warning logged. |
 
-The small set of intentional unbounded channels is enumerated in Design Invariant #3 above; the session-notification channel used for TCP collision detection exists because a bounded send would deadlock with synchronous peer-state queries during collision resolution.
+The small set of intentional unbounded channels is enumerated in Design Invariant #3 above; the `session_notify` channel used for TCP collision detection remains intentionally unbounded because a bounded send would deadlock with synchronous `QueryState` peer-state queries during collision resolution.
 
 ### Dirty-peer resync
 

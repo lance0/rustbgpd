@@ -1341,7 +1341,7 @@ async fn peer_presence_dynamic_inbound_added_then_back_to_idle_removed_fifo() {
     let metrics_view = metrics.clone();
     let mut mgr = PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,
@@ -1446,7 +1446,7 @@ async fn saturated_dynamic_neighbor_accept_counts_rejection_without_consuming_ca
     config.global.dynamic_neighbor_limit = Some(1);
     let mut mgr = PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,

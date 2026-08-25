@@ -18,7 +18,7 @@ fn dynamic_tcp_ao_test_manager(protected: bool) -> PeerManager {
     }
     PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,
@@ -141,7 +141,7 @@ async fn unmatched_inbound_source_counts_unconfigured_drop() {
     config.dynamic_neighbors.clear();
     let mut mgr = PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,
@@ -181,7 +181,7 @@ async fn inbound_admission_disabled_by_default_admits_rapid_dynamic_reaccepts() 
     let metrics_view = metrics.clone();
     let mut mgr = PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,
@@ -241,7 +241,7 @@ async fn enabled_inbound_admission_rate_limits_dynamic_source_but_exempts_static
     };
     let mut mgr = PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,
@@ -347,7 +347,7 @@ async fn dynamic_inbound_peer_records_most_specific_accepted_range() {
     ];
     let mut mgr = PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,
@@ -426,7 +426,7 @@ async fn fresh_dynamic_tcp_ao_inbound_seeds_selected_owner_keyring_for_manager_a
     ]));
     let mut manager = PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,
@@ -564,7 +564,7 @@ async fn queued_dynamic_selection_accept_reconciles_metadata_and_rotation_status
     ]));
     let mut manager = PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,
@@ -686,7 +686,7 @@ async fn inbound_link_local_is_not_accepted_as_dynamic_peer() {
     }];
     let mut mgr = PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,
@@ -785,7 +785,7 @@ async fn dead_lettered_pending_survives_dynamic_peer_auto_removal_and_re_establi
     let metrics = BgpMetrics::new();
     let mut mgr = PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,
@@ -883,7 +883,7 @@ async fn dead_lettered_gshut_survives_dynamic_peer_auto_removal_and_re_establish
     let metrics = BgpMetrics::new();
     let mut mgr = PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,
@@ -971,7 +971,7 @@ async fn dead_lettered_pending_over_cap_evicts_oldest_entry() {
     config.global.dynamic_neighbor_limit = Some(2);
     let mut mgr = PeerManager::new_with_config(
         rx,
-        mpsc::unbounded_channel().1,
+        mpsc::channel(1).1,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
         None,
