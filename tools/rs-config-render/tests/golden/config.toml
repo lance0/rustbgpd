@@ -63,6 +63,18 @@ rpol_files = [
 ]
 export_chain = ["rs-transparent-export"]
 
+[policy.datasets.client-as4242-1-origins]
+path = "datasets/client-as4242-1-origins.list"
+
+[policy.datasets.client-as4242-1-prefixes]
+path = "datasets/client-as4242-1-prefixes.list"
+
+[policy.datasets.client-as197000-1-origins]
+path = "datasets/client-as197000-1-origins.list"
+
+[policy.datasets.client-as197000-1-prefixes]
+path = "datasets/client-as197000-1-prefixes.list"
+
 [[neighbors]]
 address = "192.0.2.11"
 remote_asn = 4242

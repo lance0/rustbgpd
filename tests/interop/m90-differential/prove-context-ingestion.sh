@@ -10,7 +10,7 @@
 #   2. `rs-config-render` directly on that dump (the sectioned report
 #      arouteserver 1.23.2 emits);
 #   3. `rustbgpd --check --strict` + `rbgp policy check` on the rendered
-#      output;
+#      output, with the generated `datasets/` tree beside `policy/`;
 #
 # and asserts:
 #   - the fresh dump matches the checked-in context-sectioned.yml
@@ -109,6 +109,14 @@ for render in render-real render-hand; do
         || die "$render reject-community artifact has the wrong peers or configured values"
 done
 ok "receipts, configs, and startup artifacts carry exact member data"
+
+for render in render-real render-hand; do
+    [ "$(find "$WORK/$render/datasets" -type f | wc -l)" -eq 6 ] \
+        || die "$render does not carry exactly two datasets for each of three members"
+    [ "$(grep -c '^\[policy.datasets.client-' "$WORK/$render/config.toml")" -eq 6 ] \
+        || die "$render config does not bind all six per-client datasets"
+done
+ok "dataset directories and all six relative bindings are retained"
 
 step "pipeline gates on the real-dump render"
 cargo run -q -p rustbgpd --manifest-path "$REPO_DIR/Cargo.toml" -- \
