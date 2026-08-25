@@ -776,7 +776,11 @@ def check_evpn_dashboard(
     try:
         dashboard = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"cannot parse {path.relative_to(ROOT)}: {error}") from error
+        try:
+            display_path = path.relative_to(ROOT)
+        except ValueError:
+            display_path = path
+        raise ValueError(f"cannot parse {display_path}: {error}") from error
 
     if dashboard.get("title") != "rustbgpd EVPN Operations (Alpha)":
         raise ValueError("EVPN dashboard title must retain its explicit Alpha marker")

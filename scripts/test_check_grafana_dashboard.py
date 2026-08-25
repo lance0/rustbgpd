@@ -154,7 +154,7 @@ let families = self.allocated.collect();'''
             CHECK.rust_metric_inventory(source)
 
     def test_live_evpn_dashboard_and_frozen_source_inventory(self):
-        source = CHECK.METRICS.read_text()
+        source = CHECK.METRICS.read_text(encoding="utf-8")
         self.assertEqual(
             {
                 name: definition
@@ -164,6 +164,15 @@ let families = self.allocated.collect();'''
             CHECK.EVPN_METRICS,
         )
         self.check_evpn(self.evpn_dashboard())
+
+    def test_evpn_temp_json_parse_error_keeps_its_context(self):
+        source = CHECK.METRICS.read_text(encoding="utf-8")
+        inventory = CHECK.rust_metric_inventory(source)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evpn-invalid.json"
+            path.write_text("{", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "cannot parse .*evpn-invalid.json"):
+                CHECK.check_evpn_dashboard(path, inventory, source)
 
     def test_evpn_metric_typo_and_invalid_label_fail_closed(self):
         dashboard = self.evpn_dashboard()
@@ -321,7 +330,7 @@ let families = self.allocated.collect();'''
             self.check_evpn(dashboard)
 
     def test_live_dashboard_presentation_mutations_pass_full_check(self):
-        dashboard = json.loads(CHECK.DASHBOARD.read_text())
+        dashboard = json.loads(CHECK.DASHBOARD.read_text(encoding="utf-8"))
         for index, panel in enumerate(CHECK.all_panels(dashboard["panels"])):
             changes = {"description": "changed",
                        "collapsed": not panel.get("collapsed", False),
@@ -345,7 +354,7 @@ let families = self.allocated.collect();'''
         blackhole_row["panels"].append(blackhole)
         with tempfile.TemporaryDirectory() as directory:
             copy = Path(directory) / "dashboard.json"
-            copy.write_text(json.dumps(dashboard))
+            copy.write_text(json.dumps(dashboard), encoding="utf-8")
             original, CHECK.DASHBOARD = CHECK.DASHBOARD, copy
             try:
                 with redirect_stdout(io.StringIO()):
@@ -355,7 +364,7 @@ let families = self.allocated.collect();'''
                 for field in ("expr", "legendFormat"):
                     saved = orr["targets"][0][field]
                     orr["targets"][0][field] = "broken"
-                    copy.write_text(json.dumps(dashboard))
+                    copy.write_text(json.dumps(dashboard), encoding="utf-8")
                     with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
                         CHECK.main()
                     orr["targets"][0][field] = saved
@@ -370,7 +379,7 @@ let families = self.allocated.collect();'''
                 for subject, field, replacement in mutations:
                     saved = subject[field]
                     subject[field] = replacement
-                    copy.write_text(json.dumps(dashboard))
+                    copy.write_text(json.dumps(dashboard), encoding="utf-8")
                     with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
                         CHECK.main()
                     subject[field] = saved
@@ -386,12 +395,12 @@ let families = self.allocated.collect();'''
                 ):
                     saved = subject[field]
                     subject[field] = replacement
-                    copy.write_text(json.dumps(dashboard))
+                    copy.write_text(json.dumps(dashboard), encoding="utf-8")
                     with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
                         CHECK.main()
                     subject[field] = saved
                 self.assertTrue(self.remove_panel(dashboard["panels"], blackhole["id"]))
-                copy.write_text(json.dumps(dashboard))
+                copy.write_text(json.dumps(dashboard), encoding="utf-8")
                 stderr = io.StringIO()
                 targets = CHECK.TARGETS
                 legends = CHECK.REQUIRED_LEGENDS
