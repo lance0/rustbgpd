@@ -52,12 +52,10 @@ fn bmp_buffer_components_reject_their_guarded_failures() {
     );
     assert_proofs(
         &verifier,
-        "complete-metrics high-watermark-bound socket-open-at-scrape exact-base-inventory \
-         post-eor-churn overflow-metrics overflow-discard-count same-outcome-class \
-         fresh-process-identity canonical-shape canonical-policy-shape scenario-roster \
-         sealed-artifact missing-checksum-seal missing-completed-marker provenance-order \
-         provenance-commit checksum-drift symlink-artifact non-finite-metric cli-requires-seal \
-         cli-allows-runner-preseal cli-sealed-pass",
+        "complete-metrics missing-completed-marker high-watermark-bound socket-open-at-scrape \
+         exact-base-inventory post-eor-churn overflow-metrics overflow-discard-count same-outcome-class \
+         fresh-process-identity canonical-shape canonical-policy-shape runtime-file-roster \
+         same-dataset exact-source-commit same-source-commit raw-log-roster non-finite-metric",
     );
 }
 

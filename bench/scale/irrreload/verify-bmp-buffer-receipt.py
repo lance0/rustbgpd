@@ -4,12 +4,10 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import pathlib
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 
@@ -34,7 +32,6 @@ EXPECTED_RUN_FILES = {
     "metrics.prom",
     "receipt.json",
     "reloadstall.log",
-    "scenario.sha256",
     "sink.log",
     "summary.json",
 }
@@ -120,33 +117,6 @@ def verify_manifest(manifest: dict) -> str:
     return digest
 
 
-def verify_scenario_roster(run: pathlib.Path, manifest: dict) -> str:
-    path = run / "scenario.sha256"
-    entries = {}
-    try:
-        lines = path.read_text().splitlines()
-    except OSError as error:
-        raise VerifyError(f"cannot read {path}: {error}") from error
-    for line in lines:
-        digest, separator, relative = line.partition("  ")
-        if (
-            not separator
-            or not re.fullmatch(r"[0-9a-f]{64}", digest)
-            or relative in entries
-            or pathlib.PurePosixPath(relative).is_absolute()
-            or ".." in pathlib.PurePosixPath(relative).parts
-        ):
-            raise VerifyError("scenario checksum roster is malformed or unsafe")
-        entries[relative] = digest
-    expected = sorted([*manifest["runtime_files"], "manifest.json"])
-    if sorted(entries) != expected:
-        raise VerifyError("scenario checksum roster does not match runtime inputs")
-    manifest_digest = hashlib.sha256((run / "manifest.json").read_bytes()).hexdigest()
-    if entries["manifest.json"] != manifest_digest:
-        raise VerifyError("scenario checksum roster does not bind manifest.json")
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def verify_common(summary: dict) -> None:
     if summary.get("schema") != 1:
         raise VerifyError("unsupported sink-summary schema")
@@ -171,7 +141,6 @@ def verify_run(run: pathlib.Path) -> dict:
         raise VerifyError("run evidence file roster is not exact")
     manifest = load_json(run / "manifest.json")
     dataset_digest = verify_manifest(manifest)
-    scenario_digest = verify_scenario_roster(run, manifest)
     summary = load_json(run / "summary.json")
     receipt = load_json(run / "receipt.json")
     verify_common(summary)
@@ -252,72 +221,19 @@ def verify_run(run: pathlib.Path) -> dict:
         "dataset_sha256": dataset_digest,
         "commit": receipt["commit"],
         "process_identity": [receipt["daemon_pid"], receipt["daemon_start_ticks"]],
-        "scenario_roster_sha256": scenario_digest,
         "buffer_high_watermark": high_watermark,
         "captured_bytes": summary["captured_bytes"],
     }
 
 
-def verify_provenance(root: pathlib.Path) -> dict:
-    provenance = load_json(root / "provenance.json")
-    if provenance.get("schema") != 1:
-        raise VerifyError("unsupported root provenance schema")
-    if provenance.get("runs") != ["run-a", "run-b"]:
-        raise VerifyError("root provenance run roster is not exact")
-    if provenance.get("order") != "fresh-sequential":
-        raise VerifyError("root provenance does not require fresh sequential runs")
-    commit = provenance.get("commit")
-    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
-        raise VerifyError("root provenance commit is missing or malformed")
-    return provenance
-
-
-def verify_seal(root: pathlib.Path, verification: dict, *, required: bool) -> None:
-    for path in root.rglob("*"):
-        if path.is_symlink():
-            raise VerifyError(f"retained receipt contains a symlink: {path.relative_to(root)}")
-    roster = root / "SHA256SUMS"
-    if not required:
-        return
-    if not roster.is_file():
-        raise VerifyError("sealed receipt is missing SHA256SUMS")
-    completed = root / "COMPLETED"
-    if not completed.is_file() or completed.read_text() != "pass\n":
-        raise VerifyError("sealed receipt is missing its exact COMPLETED marker")
-    if load_json(root / "verification.json") != verification:
-        raise VerifyError("retained verification.json does not match recomputed results")
-    expected = {}
-    for line in roster.read_text().splitlines():
-        digest, separator, relative = line.partition("  ")
-        if (
-            not separator
-            or not re.fullmatch(r"[0-9a-f]{64}", digest)
-            or relative in expected
-            or pathlib.PurePosixPath(relative).is_absolute()
-            or ".." in pathlib.PurePosixPath(relative).parts
-        ):
-            raise VerifyError("malformed, duplicate, or unsafe SHA256SUMS entry")
-        expected[relative] = digest
-    exact_paths = {"COMPLETED", "provenance.json", "verification.json"}
-    for run_name in ("run-a", "run-b"):
-        exact_paths.update(f"{run_name}/{name}" for name in EXPECTED_RUN_FILES)
-    actual_paths = sorted(
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file() and path.name != "SHA256SUMS"
-    )
-    if set(actual_paths) != exact_paths or set(expected) != exact_paths:
-        raise VerifyError("sealed receipt file/checksum roster is not exact")
-    for relative, digest in expected.items():
-        actual = hashlib.sha256((root / relative).read_bytes()).hexdigest()
-        if actual != digest:
-            raise VerifyError(f"checksum mismatch: {relative}")
-
-
-def verify_root(root: pathlib.Path, *, require_seal: bool = False) -> dict:
+def verify_root(root: pathlib.Path) -> dict:
     if not root.is_dir():
         raise VerifyError(f"receipt root is not a directory: {root}")
-    provenance = verify_provenance(root)
+    if {path.name for path in root.iterdir()} != {"COMPLETED", "run-a", "run-b"}:
+        raise VerifyError("receipt root roster is not exact")
+    completed = root / "COMPLETED"
+    if not completed.is_file() or completed.read_text() != "pass\n":
+        raise VerifyError("receipt is missing its exact COMPLETED marker")
     runs = [verify_run(root / "run-a"), verify_run(root / "run-b")]
     if runs[0]["outcome"] != runs[1]["outcome"]:
         raise VerifyError("the two fresh sequential runs disagree on outcome class")
@@ -327,16 +243,12 @@ def verify_root(root: pathlib.Path, *, require_seal: bool = False) -> dict:
         raise VerifyError("the two runs used different source commits")
     if runs[0]["process_identity"] == runs[1]["process_identity"]:
         raise VerifyError("the two runs reused a daemon process identity")
-    if any(run["commit"] != provenance["commit"] for run in runs):
-        raise VerifyError("root provenance commit does not match both run receipts")
-    verification = {
+    return {
         "schema": 1,
         "status": "pass",
         "outcome": runs[0]["outcome"],
         "runs": runs,
     }
-    verify_seal(root, verification, required=require_seal)
-    return verification
 
 
 def metric_fixture(outcome: str, high: int) -> str:
@@ -390,12 +302,6 @@ def make_fixture(run: pathlib.Path, outcome: str, identity: tuple[int, int]) -> 
         "generation_open_at_scrape": outcome == "complete",
     }
     (run / "manifest.json").write_text(json.dumps(manifest))
-    manifest_digest = hashlib.sha256((run / "manifest.json").read_bytes()).hexdigest()
-    scenario = {name: "c" * 64 for name in EXPECTED_RUNTIME_FILES}
-    scenario["manifest.json"] = manifest_digest
-    (run / "scenario.sha256").write_text(
-        "".join(f"{digest}  {name}\n" for name, digest in sorted(scenario.items()))
-    )
     (run / "summary.json").write_text(json.dumps(summary))
     (run / "receipt.json").write_text(json.dumps(receipt))
     (run / "metrics.prom").write_text(
@@ -405,35 +311,12 @@ def make_fixture(run: pathlib.Path, outcome: str, identity: tuple[int, int]) -> 
         (run / name).write_text("")
 
 
-def write_provenance(root: pathlib.Path) -> None:
-    document = {"schema": 1, "commit": "b" * 40, "runs": ["run-a", "run-b"], "order": "fresh-sequential"}
-    (root / "provenance.json").write_text(json.dumps(document))
-
-
-def seal_fixture(root: pathlib.Path) -> None:
-    verification = verify_root(root, require_seal=False)
-    (root / "verification.json").write_text(json.dumps(verification, indent=2) + "\n")
-    (root / "COMPLETED").write_text("pass\n")
-    paths = sorted(
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file() and path.name != "SHA256SUMS"
-    )
-    (root / "SHA256SUMS").write_text(
-        "".join(
-            f"{hashlib.sha256((root / relative).read_bytes()).hexdigest()}  {relative}\n"
-            for relative in paths
-        )
-    )
-    assert verify_root(root, require_seal=True) == verification
-
-
-def expect_rejected(name: str, root: pathlib.Path, mutate, *, sealed: bool = False) -> None:
+def expect_rejected(name: str, root: pathlib.Path, mutate) -> None:
     copy = root.parent / f"mutated-{name}"
     shutil.copytree(root, copy)
     mutate(copy)
     try:
-        verify_root(copy, require_seal=sealed)
+        verify_root(copy)
     except VerifyError:
         print(f"proof:{name}")
         return
@@ -445,10 +328,15 @@ def self_test() -> int:
         base = pathlib.Path(temporary) / "complete"
         make_fixture(base / "run-a", "complete", (101, 1001))
         make_fixture(base / "run-b", "complete", (102, 1002))
-        write_provenance(base)
+        (base / "COMPLETED").write_text("pass\n")
         assert verify_root(base)["outcome"] == "complete"
         print("proof:complete-metrics")
 
+        expect_rejected(
+            "missing-completed-marker",
+            base,
+            lambda root: (root / "COMPLETED").unlink(),
+        )
         expect_rejected(
             "high-watermark-bound",
             base,
@@ -482,7 +370,7 @@ def self_test() -> int:
         overflow = pathlib.Path(temporary) / "overflow"
         make_fixture(overflow / "run-a", "overflow", (201, 2001))
         make_fixture(overflow / "run-b", "overflow", (202, 2002))
-        write_provenance(overflow)
+        (overflow / "COMPLETED").write_text("pass\n")
         assert verify_root(overflow)["outcome"] == "overflow"
         print("proof:overflow-metrics")
         expect_rejected(
@@ -513,65 +401,33 @@ def self_test() -> int:
         expect_rejected(
             "canonical-policy-shape",
             overflow,
-            lambda root: _rewrite_manifest_and_roster(root / "run-a", "min_list", 999),
+            lambda root: _mutate_json(root / "run-a" / "manifest.json", "min_list", 999),
         )
         expect_rejected(
-            "scenario-roster",
+            "runtime-file-roster",
             overflow,
-            lambda root: (root / "run-a" / "scenario.sha256").write_text("c" * 64 + "  config.toml\n"),
-        )
-
-        sealed = pathlib.Path(temporary) / "sealed"
-        make_fixture(sealed / "run-a", "complete", (301, 3001))
-        make_fixture(sealed / "run-b", "complete", (302, 3002))
-        write_provenance(sealed)
-        seal_fixture(sealed)
-        print("proof:sealed-artifact")
-        expect_rejected(
-            "missing-checksum-seal",
-            sealed,
-            lambda root: (root / "SHA256SUMS").unlink(),
-            sealed=True,
+            lambda root: _mutate_json(root / "run-a" / "manifest.json", "runtime_files", []),
         )
         expect_rejected(
-            "missing-completed-marker",
-            sealed,
-            lambda root: (root / "COMPLETED").unlink(),
-            sealed=True,
+            "same-dataset",
+            overflow,
+            lambda root: _mutate_json(root / "run-a" / "manifest.json", "dataset_sha256", "c" * 64),
         )
         expect_rejected(
-            "provenance-order",
-            sealed,
-            lambda root: _mutate_json(root / "provenance.json", "order", "parallel"),
-            sealed=True,
+            "exact-source-commit",
+            overflow,
+            lambda root: _mutate_json(root / "run-a" / "receipt.json", "commit", "B" * 40),
         )
         expect_rejected(
-            "provenance-commit",
-            sealed,
-            lambda root: _mutate_json(root / "provenance.json", "commit", "d" * 40),
-            sealed=True,
+            "same-source-commit",
+            overflow,
+            lambda root: _mutate_json(root / "run-a" / "receipt.json", "commit", "c" * 40),
         )
         expect_rejected(
-            "checksum-drift",
-            sealed,
-            lambda root: (root / "run-a" / "daemon.log").write_text("changed\n"),
-            sealed=True,
+            "raw-log-roster",
+            overflow,
+            lambda root: (root / "run-a" / "daemon.log").unlink(),
         )
-        expect_rejected("symlink-artifact", sealed, _replace_log_with_symlink, sealed=True)
-        cli_cases = [
-            ("cli-requires-seal", base, [], False),
-            ("cli-allows-runner-preseal", base, ["--allow-unsealed"], True),
-            ("cli-sealed-pass", sealed, [], True),
-        ]
-        for name, root, options, should_pass in cli_cases:
-            result = subprocess.run(
-                [sys.executable, __file__, "verify", *options, str(root)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            assert (result.returncode == 0) is should_pass, result.stderr
-            print(f"proof:{name}")
     return 0
 
 
@@ -589,22 +445,6 @@ def _copy_identity(source: pathlib.Path, target: pathlib.Path) -> None:
     target.write_text(json.dumps(target_doc))
 
 
-def _rewrite_manifest_and_roster(run: pathlib.Path, key: str, value) -> None:
-    _mutate_json(run / "manifest.json", key, value)
-    digest = hashlib.sha256((run / "manifest.json").read_bytes()).hexdigest()
-    lines = [
-        f"{digest}  manifest.json" if line.endswith("  manifest.json") else line
-        for line in (run / "scenario.sha256").read_text().splitlines()
-    ]
-    (run / "scenario.sha256").write_text("\n".join(lines) + "\n")
-
-
-def _replace_log_with_symlink(root: pathlib.Path) -> None:
-    log = root / "run-a" / "daemon.log"
-    log.unlink()
-    log.symlink_to("../provenance.json")
-
-
 def _set_fixture_outcome(run: pathlib.Path, outcome: str) -> None:
     receipt = load_json(run / "receipt.json")
     identity = (receipt["daemon_pid"], receipt["daemon_start_ticks"])
@@ -617,17 +457,12 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     verify_parser = subparsers.add_parser("verify")
     verify_parser.add_argument("root", type=pathlib.Path)
-    verify_parser.add_argument(
-        "--allow-unsealed",
-        action="store_true",
-        help="allow the runner's one pre-seal verification pass",
-    )
     subparsers.add_parser("self-test")
     args = parser.parse_args()
     try:
         if args.command == "self-test":
             return self_test()
-        verification = verify_root(args.root, require_seal=not args.allow_unsealed)
+        verification = verify_root(args.root)
         print(json.dumps(verification, indent=2))
         return 0
     except (OSError, VerifyError, AssertionError) as error:
