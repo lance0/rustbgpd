@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "candidate_commit": "e5cd75b604a4988a57ffa7875694e82c4f964126",
+  "origin_main": "3da4e43017d73a89a2a0c23a05fd5afd2b1374b2",
+  "source_identity_sha256": "197588b8b81d456b3eb2381a2331eded738048fae40cb775df0044748ba8e45b",
+  "shape": {"members": 320, "prefixes": 183040, "reloads": 4, "changed_fraction": 0.10, "overlap_fraction": 0},
+  "roots": {
+    "A": {"artifact_root": "/tmp/lan1165-phase-A-e5cd75b6", "sha256sums_sha256": "9152c640d981c90b77c4c5f9a305952f57dfa02368e652e49f84bbaf728afc7b", "phase_csv_sha256": "90b55e3550600724a64223c8aa83935aa2a1c1fcf5e008398b1bb899f19b6561", "daemon_pid": 3748158, "daemon_start_ticks": 447625530},
+    "B": {"artifact_root": "/tmp/lan1165-phase-B-e5cd75b6", "sha256sums_sha256": "09632c4d38e9762ff1f763fdec9453ffda1f08204047aca79bf44c4364b40604", "phase_csv_sha256": "ea8448a0b53c65e8acf2f724a337492b4c537dfa0d2889b042471aefeeb8b135", "daemon_pid": 3751141, "daemon_start_ticks": 447678353}
+  },
+  "validation": {"checksum_rosters": "pass", "sessions": "320/320", "rows_per_root": 4, "decode_errors": 0, "session_loss": 0, "all_outcomes": "committed", "all_authoritative_fallback": true, "all_inner_fallback_members": 0},
+  "attribution": {
+    "A": {"reload1_total_us": 478614, "later_total_median_us": 1787955, "delta_us": 1309341, "increase_percent": 273.57, "rib_transition_delta_us": 1294534, "rib_transition_delta_share_percent": 98.87},
+    "B": {"reload1_total_us": 462544, "later_total_median_us": 1819660, "delta_us": 1357116, "increase_percent": 293.40, "rib_transition_delta_us": 1349294, "rib_transition_delta_share_percent": 99.42}
+  },
+  "decision": "instrumentation_only",
+  "mechanism": "unresolved"
+}

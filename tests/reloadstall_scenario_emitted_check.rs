@@ -102,6 +102,47 @@ fn irr_reload_phase_receipt_is_sealed_and_fail_closed() {
 }
 
 #[test]
+fn reload_generation_phase_attribution_receipt_is_sealed() {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let artifact =
+        format!("{root}/docs/perf/artifacts/reload-generation-phase-attribution-2026-08");
+    let status = std::process::Command::new("sha256sum")
+        .args(["--check", "--strict", "SHA256SUMS"])
+        .current_dir(&artifact)
+        .status()
+        .expect("check phase receipt hashes");
+    assert!(status.success());
+
+    let csv = std::fs::read_to_string(format!("{artifact}/phase-timings.csv"))
+        .expect("phase timing rows");
+    let rows = csv.lines().skip(1).collect::<Vec<_>>();
+    assert_eq!(rows.len(), 8);
+    for (index, row) in rows.iter().enumerate() {
+        let fields = row.split(',').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 17);
+        assert_eq!(fields[1], (index % 4 + 1).to_string());
+        assert_eq!(&fields[2..6], ["320", "320", "0", "320"]);
+        assert_eq!(&fields[6..8], ["committed", "true"]);
+        let phases = fields[8..15]
+            .iter()
+            .map(|value| value.parse::<u64>().expect("nonnegative phase"))
+            .sum::<u64>();
+        let total = fields[15].parse::<u64>().expect("total");
+        let unattributed = fields[16].parse::<u64>().expect("unattributed");
+        assert_eq!(phases + unattributed, total);
+    }
+
+    let verification: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(format!("{artifact}/verification.json"))
+            .expect("verification metadata"),
+    )
+    .expect("verification JSON");
+    assert_eq!(verification["decision"], "instrumentation_only");
+    assert_eq!(verification["mechanism"], "unresolved");
+    assert_eq!(verification["validation"]["all_inner_fallback_members"], 0);
+}
+
+#[test]
 /// Parse every shell script exercised by this integration target.
 fn irr_reload_shell_scripts_parse_as_bash() {
     let root = env!("CARGO_MANIFEST_DIR");
