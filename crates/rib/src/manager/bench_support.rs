@@ -30,6 +30,19 @@ use crate::update::{
     RouteQueryKey, RouteQueryScope,
 };
 
+/// Structural receipt for the production prefix-to-announcing-peers index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnicastPrefixPeersMemoryReceipt {
+    pub entries: usize,
+    pub capacity: usize,
+    pub announcers_per_prefix: usize,
+    pub prefix_size: usize,
+    pub peer_address_size: usize,
+    pub primary_value_size: usize,
+    pub epoch_size: usize,
+    pub spill_slots: usize,
+}
+
 static POLICY_TRANSITION_RECEIPT_PRINTED: AtomicBool = AtomicBool::new(false);
 static PCB_ENUMERATION_PHASES: AtomicUsize = AtomicUsize::new(0);
 static PCB_ENUMERATED_PREFIXES: AtomicUsize = AtomicUsize::new(0);
@@ -275,6 +288,42 @@ pub struct AdjRibOutFanoutBenchReceipt {
 }
 
 impl RibManager {
+    /// Populate the manager's actual production prefix-to-announcing-peers
+    /// index from prebuilt keys. The caller can therefore place prefix/input
+    /// construction before an allocator baseline and isolate index growth.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless the index starts empty or `announcers_per_prefix` is one
+    /// or two; those constraints keep memory receipts structurally comparable.
+    pub fn bench_populate_unicast_prefix_peers(
+        &mut self,
+        prefixes: &[Prefix],
+        announcers_per_prefix: usize,
+    ) -> UnicastPrefixPeersMemoryReceipt {
+        assert!(self.unicast_prefix_peers.is_empty());
+        assert!((1..=2).contains(&announcers_per_prefix));
+        let peers = [
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+        ];
+        for &prefix in prefixes {
+            for &peer in &peers[..announcers_per_prefix] {
+                self.register_unicast_announcer(peer, prefix);
+            }
+        }
+        UnicastPrefixPeersMemoryReceipt {
+            entries: self.unicast_prefix_peers.len(),
+            capacity: self.unicast_prefix_peers.capacity(),
+            announcers_per_prefix,
+            prefix_size: std::mem::size_of::<Prefix>(),
+            peer_address_size: std::mem::size_of::<IpAddr>(),
+            primary_value_size: std::mem::size_of::<super::PrefixAnnouncers>(),
+            epoch_size: std::mem::size_of::<super::AdjRibInEpoch>(),
+            spill_slots: self.unicast_prefix_peers.spills.len(),
+        }
+    }
+
     /// Synthetic peer address used by [`Self::bench_register_peers`].
     ///
     /// Keeping address construction in one helper lets paging benchmarks

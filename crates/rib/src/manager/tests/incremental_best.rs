@@ -144,6 +144,7 @@ fn apply(manager: &mut RibManager, op: &Op, received_at: Instant) {
         }
         Op::SessionDown { peer } => {
             if let Some(rib) = manager.ribs.remove(&peer_addr(*peer)) {
+                manager.unicast_prefix_peers.retire_peer(peer_addr(*peer));
                 let affected: HashSet<Prefix> = rib.iter().map(|r| r.prefix).collect();
                 manager.recompute_best(&affected);
             }
@@ -204,8 +205,8 @@ fn check_invariants(manager: &RibManager, step: usize) {
             assert!(
                 manager
                     .unicast_prefix_peers
-                    .get(&route.prefix)
-                    .is_some_and(|peers| peers.contains(peer)),
+                    .peers(&route.prefix)
+                    .any(|indexed| indexed == *peer),
                 "step {step}: index under-counts: peer {peer} holds {} but is not indexed",
                 route.prefix,
             );

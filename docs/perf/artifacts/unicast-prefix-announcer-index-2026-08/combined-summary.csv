@@ -1,0 +1,5 @@
+mode,clients,candidates,prefixes,pairs,mean_improvement_percent,regression_ucl_percent,maximum_regression_ucl_percent,verdict
+churn,256,256,3000,6,9.891469,-3.771671,5.000000,pass
+churn,1000,1000,3000,6,10.184938,-7.347941,5.000000,pass
+flood,256,0,100000,6,0.352383,0.625726,5.000000,pass
+flood,1000,0,100000,6,0.785550,1.744210,5.000000,pass

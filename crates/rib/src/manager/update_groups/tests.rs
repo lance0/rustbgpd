@@ -757,13 +757,7 @@ fn cand(p: Prefix, src: IpAddr, lp: u32) -> Route {
 /// Seed one Adj-RIB-In candidate plus the announcing-peers reverse
 /// index — everything the per-client-best walk reads.
 fn seed(manager: &mut RibManager, route: Route) {
-    let peers = manager
-        .unicast_prefix_peers
-        .entry(route.prefix)
-        .or_default();
-    if !peers.contains(&route.peer) {
-        peers.push(route.peer);
-    }
+    manager.register_unicast_announcer(route.peer, route.prefix);
     manager
         .ribs
         .entry(route.peer)
@@ -774,9 +768,6 @@ fn seed(manager: &mut RibManager, route: Route) {
 fn unseed(manager: &mut RibManager, peer: IpAddr, p: Prefix) {
     if let Some(rib) = manager.ribs.get_mut(&peer) {
         rib.withdraw(&p, 0);
-    }
-    if let Some(peers) = manager.unicast_prefix_peers.get_mut(&p) {
-        peers.retain(|entry| *entry != peer);
     }
 }
 
