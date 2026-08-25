@@ -4,6 +4,9 @@ use crate::constants::attr_type;
 
 pub(crate) fn validate(type_code: u8, value: &[u8]) -> Result<(), &'static str> {
     match type_code {
+        attr_type::IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY => {
+            ipv6_address_specific_extended_community(value)
+        }
         attr_type::DOMAIN_PATH => domain_path(value),
         attr_type::SFP => sfp(value),
         attr_type::BFD_DISCRIMINATOR => bfd_discriminator(value),
@@ -12,6 +15,15 @@ pub(crate) fn validate(type_code: u8, value: &[u8]) -> Result<(), &'static str> 
         attr_type::BIER => bier(value),
         _ => Ok(()),
     }
+}
+
+fn ipv6_address_specific_extended_community(value: &[u8]) -> Result<(), &'static str> {
+    if value.is_empty() || !value.len().is_multiple_of(20) {
+        return Err(
+            "IPv6 Address Specific Extended Community length is not a non-zero multiple of 20",
+        );
+    }
+    Ok(())
 }
 
 fn domain_path(mut value: &[u8]) -> Result<(), &'static str> {

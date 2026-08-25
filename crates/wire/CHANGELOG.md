@@ -5,6 +5,14 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- **Traffic Engineering and IPv6-specific community fences:** Registered path
+  attributes 24 and 25 now enforce their Optional/Transitive classes. Traffic
+  Engineering remains payload-opaque and is ignored as optional
+  non-transitive; the IPv6 Address Specific Extended Community remains opaque
+  and propagates with Partial, but its payload must be a non-empty multiple of
+  20 octets. Flag and length conflicts receive RFC 7606 treat-as-withdraw
+  handling without resetting the session.
+
 - **BIER minimum cardinality:** Zero-length BIER attributes are now rejected
   and receive RFC 7606 attribute-discard handling. Non-empty unknown TLVs and
   supported framing remain opaque and continue to propagate unchanged.

@@ -63,6 +63,7 @@ fn extended_attribute(flags: u8, code: u8, value: &[u8]) -> Vec<u8> {
 
 fn assigned_value(code: u8) -> Vec<u8> {
     match code {
+        25 => (0_u8..20).collect(),
         36 => vec![1, 0, 0, 0, 0, 0, 0, 0],
         37 => vec![2, 0, 4, 1, 99, 0, 0],
         38 => vec![1, 0, 0, 0, 1, 1, 4, 192, 0, 2, 1],
@@ -398,6 +399,16 @@ fn assigned_unsupported_class_matrix_is_fail_closed_without_semantic_support() {
             transitive_conflict: ErrorDisposition::TreatAsWithdraw,
         },
         Case {
+            code: 24,
+            canonical: 0x80,
+            transitive_conflict: ErrorDisposition::TreatAsWithdraw,
+        },
+        Case {
+            code: 25,
+            canonical: 0xc0,
+            transitive_conflict: ErrorDisposition::TreatAsWithdraw,
+        },
+        Case {
             code: 26,
             canonical: 0x80,
             transitive_conflict: ErrorDisposition::AttributeDiscard,
@@ -492,7 +503,7 @@ fn assigned_unsupported_class_matrix_is_fail_closed_without_semantic_support() {
 
 #[test]
 fn assigned_unsupported_opaque_flags_and_neighboring_fences_stay_orthogonal() {
-    for code in [23, 27, 40, 128] {
+    for code in [23, 25, 27, 40, 128] {
         let value = assigned_value(code);
         for flags in [0xe0, 0xf0] {
             let input = if flags == 0xf0 {
@@ -530,6 +541,68 @@ fn assigned_unsupported_opaque_flags_and_neighboring_fences_stay_orthogonal() {
         wrong_pmsi.malformed[0].disposition,
         ErrorDisposition::TreatAsWithdraw
     );
+
+    let traffic_engineering = rustbgpd_wire::RawAttribute {
+        flags: 0x80,
+        type_code: 24,
+        data: bytes::Bytes::from_static(&[0xaa]),
+    };
+    let mut defensive = Vec::new();
+    encode_path_attributes(
+        &[PathAttribute::Unknown(traffic_engineering)],
+        &mut defensive,
+        true,
+        false,
+    )
+    .unwrap();
+    assert!(
+        defensive.is_empty(),
+        "assigned optional non-transitive type 24 must never egress"
+    );
+}
+
+#[test]
+fn ipv6_specific_extended_community_enforces_length_and_opaque_propagation() {
+    for length in [20_usize, 40] {
+        let value: Vec<u8> = (0..length)
+            .map(|octet| u8::try_from(octet).unwrap())
+            .collect();
+        for (flags, extended) in [(0xc0, false), (0xe0, false), (0xc0, true), (0xe0, true)] {
+            let input = if extended {
+                extended_attribute(flags, 25, &value)
+            } else {
+                attribute(flags, 25, &value)
+            };
+            let strict = decode_path_attributes(&input, true, &[]).unwrap();
+            let revised = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
+            assert!(revised.malformed.is_empty());
+            let [PathAttribute::Unknown(raw)] = strict.as_slice() else {
+                panic!("type 25 must remain opaque");
+            };
+            assert_eq!(raw.data.as_ref(), value);
+            let mut emitted = Vec::new();
+            encode_path_attributes(&revised.attributes, &mut emitted, true, false).unwrap();
+            let mut expected = input;
+            expected[0] |= 0x20;
+            assert_eq!(emitted, expected);
+        }
+    }
+
+    for length in [0_usize, 19, 21, 39] {
+        let input = attribute(0xc0, 25, &vec![0; length]);
+        assert!(matches!(
+            decode_path_attributes(&input, true, &[]),
+            Err(DecodeError::UpdateAttributeError { subcode, .. })
+                if subcode == update_subcode::ATTRIBUTE_LENGTH_ERROR
+        ));
+        let revised = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
+        assert!(revised.attributes.is_empty());
+        assert_eq!(revised.malformed.len(), 1);
+        assert_eq!(
+            revised.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
+    }
 }
 
 #[test]
@@ -584,7 +657,7 @@ fn assigned_rows_36_through_42_enforce_class_framing_and_disposition() {
         }
     }
 
-    for code in [26_u8, 33, 42] {
+    for code in [24_u8, 26, 33, 42] {
         let partial = attribute(0xa0, code, &assigned_value(code));
         assert!(matches!(
             decode_path_attributes(&partial, true, &[]),

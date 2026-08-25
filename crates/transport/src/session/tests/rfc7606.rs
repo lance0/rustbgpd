@@ -218,6 +218,7 @@ async fn assigned_opaque_attributes_reach_rib_while_edge_metadata_is_absent() {
     rfc7606_drain(&mut rib_rx);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 42), 32);
     let values = [
+        (25_u8, (0_u8..20).collect::<Vec<_>>()),
         (36_u8, vec![1, 0, 0, 0, 0, 0, 0, 0]),
         (37, vec![2, 0, 4, 1, 99, 0, 0]),
         (38, vec![1, 0, 0, 0, 1, 1, 4, 192, 0, 2, 1]),
@@ -229,6 +230,7 @@ async fn assigned_opaque_attributes_reach_rib_while_edge_metadata_is_absent() {
         extra.extend([0xc0, *code, u8::try_from(value.len()).unwrap()]);
         extra.extend(value);
     }
+    extra.extend([0x80, 24, 1, 0xbb]);
     extra.extend([0x80, 42, 1, 0xaa]);
     session
         .process_update(rfc7606_update(rfc7606_attr_bytes(&extra), &[prefix]))
@@ -247,6 +249,12 @@ async fn assigned_opaque_attributes_reach_rib_while_edge_metadata_is_absent() {
             "assigned type {code} did not reach the RIB"
         );
     }
+    assert!(
+        announced[0]
+            .attributes
+            .iter()
+            .all(|attribute| attribute.type_code() != 24)
+    );
     assert!(
         announced[0]
             .attributes
@@ -282,6 +290,73 @@ async fn assigned_opaque_attributes_reach_rib_while_edge_metadata_is_absent() {
             .all(|attribute| attribute.type_code() != 42)
     );
     assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
+#[tokio::test]
+async fn traffic_engineering_transitive_conflict_withdraws_route_and_keeps_session() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 24), 32);
+    session
+        .process_update(rfc7606_update(rfc7606_attr_bytes(&[]), &[prefix]))
+        .await;
+    let _ = rib_rx.try_recv().expect("initial route");
+
+    session
+        .process_update(rfc7606_update(
+            rfc7606_attr_bytes(&[0xc0, 24, 1, 0xaa]),
+            &[prefix],
+        ))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx.try_recv().expect("treat-as-withdraw update")
+    else {
+        panic!("expected route withdrawal");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)]);
+    assert_eq!(session.known_prefix_count(), 0);
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+}
+
+#[tokio::test]
+async fn malformed_ipv6_specific_community_withdraws_route_and_keeps_session() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 25), 32);
+    session
+        .process_update(rfc7606_update(rfc7606_attr_bytes(&[]), &[prefix]))
+        .await;
+    let _ = rib_rx.try_recv().expect("initial route");
+
+    let mut malformed = vec![0xc0, 25, 19];
+    malformed.extend([0xaa; 19]);
+    session
+        .process_update(rfc7606_update(rfc7606_attr_bytes(&malformed), &[prefix]))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx.try_recv().expect("treat-as-withdraw update")
+    else {
+        panic!("expected route withdrawal");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)]);
+    assert_eq!(session.known_prefix_count(), 0);
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
 }
 
 #[tokio::test]

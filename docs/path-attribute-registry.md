@@ -52,8 +52,8 @@ octet from 0 through 255 to appear exactly once with no blank cell.
 | 21 | AS_PATHLIMIT (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 22 | PMSI_TUNNEL | optional transitive; flags `0xc0`; RFC 6514 §5 / RFC 7385 | typed canonical + Partial round-trip; Extended Length and reserved low bits canonicalize; malformed tunnel type or identifier is treat-as-withdraw | typed-Partial and PMSI tunnel-type matrices |
 | 23 | Tunnel Encapsulation | optional transitive; flags `0xc0`; RFC 9012 | payload semantics unsupported; correct class retained opaque and emitted with Partial; wrong class is treat-as-withdraw | assigned-class matrix below |
-| 24 | Traffic Engineering | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 25 | IPv6 Address Specific Extended Community | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
+| 24 | Traffic Engineering | optional non-transitive; flags `0x80`; RFC 5543 §3 / RFC 7606 §7.13 | payload semantics unsupported; correct class ignored and never emitted; class or Partial conflict is treat-as-withdraw | assigned-class matrix below |
+| 25 | IPv6 Address Specific Extended Community | optional transitive; flags `0xc0`; values are non-empty multiples of 20 octets; RFC 5701 §2 / RFC 7606 §7.15 | opaque retention with Partial on egress; zero or non-multiple-of-20 length and class conflicts are treat-as-withdraw | assigned-class and IPv6-community length matrices below |
 | 26 | AIGP | optional non-transitive; flags `0x80`; RFC 7311 §3 | payload semantics unsupported; correct class ignored; Transitive-set conflicts are attribute-discard, other class conflicts are treat-as-withdraw | assigned-class matrix below |
 | 27 | PE Distinguisher Labels | optional transitive; flags `0xc0`; RFC 6514 | payload semantics unsupported; correct class retained opaque and emitted with Partial; wrong class is treat-as-withdraw | assigned-class matrix below |
 | 28 | BGP Entropy Label Capability Attribute (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
@@ -114,10 +114,20 @@ negotiation. "Wrong O" toggles Optional, "wrong T" toggles Transitive, and
 
 | Codes | Class | Correct-class retention and egress | Wrong O | Wrong T | Both wrong | Legacy decoder |
 |---|---|---|---|---|---|---|
-| 23, 27, 36-41, 128 | optional transitive (`0xc0`) | opaque retention; Partial set on egress; input Partial and Extended Length preserved | treat-as-withdraw | treat-as-withdraw | treat-as-withdraw | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
+| 23, 25, 27, 36-41, 128 | optional transitive (`0xc0`) | opaque retention; Partial set on egress; input Partial and Extended Length preserved | treat-as-withdraw | treat-as-withdraw | treat-as-withdraw | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
 | 26 | optional non-transitive (`0x80`) | ignored; no retention or egress | treat-as-withdraw | attribute-discard | attribute-discard | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
-| 33 | optional non-transitive (`0x80`) | ignored; no retention or egress | treat-as-withdraw | treat-as-withdraw | treat-as-withdraw | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
-| 42 | optional non-transitive (`0x80`) | ignored; no retention or egress; Partial rejected | treat-as-withdraw | treat-as-withdraw | treat-as-withdraw | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
+| 24, 33, 42 | optional non-transitive (`0x80`) | ignored; no retention or egress; Partial rejected | treat-as-withdraw | treat-as-withdraw | treat-as-withdraw | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
+
+## IPv6 Address Specific Extended Community length matrix
+
+The type-25 payload remains opaque: only the RFC 5701/RFC 7606 cardinality
+boundary is enforced, and unrecognized community types or sub-types are not
+errors.
+
+| Payload length | Result |
+|---|---|
+| 20, 40, ... | retained opaquely and propagated with Partial |
+| 0 or any non-multiple of 20 | Attribute Length Error; revised treat-as-withdraw |
 
 ## Assigned framing matrix (36-42)
 

@@ -161,6 +161,10 @@ pub mod attr_type {
     pub const PMSI_TUNNEL: u8 = 22;
     /// RFC 9012: Tunnel Encapsulation attribute.
     pub const TUNNEL_ENCAPSULATION: u8 = 23;
+    /// RFC 5543: Traffic Engineering attribute.
+    pub const TRAFFIC_ENGINEERING: u8 = 24;
+    /// RFC 5701: IPv6 Address Specific Extended Community attribute.
+    pub const IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY: u8 = 25;
     /// RFC 7311: Accumulated IGP Metric attribute.
     pub const AIGP: u8 = 26;
     /// RFC 6514: PE Distinguisher Labels attribute.

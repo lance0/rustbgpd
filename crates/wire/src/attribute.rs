@@ -1278,10 +1278,12 @@ fn is_assigned_unsupported_optional_non_transitive(type_code: u8) -> bool {
 /// prevents registry recognition from becoming a typed-codec support claim.
 fn assigned_unsupported_flags(type_code: u8) -> Option<u8> {
     match type_code {
-        attr_type::AIGP | attr_type::BGPSEC_PATH | attr_type::EDGE_METADATA => {
-            Some(attr_flags::OPTIONAL)
-        }
+        attr_type::TRAFFIC_ENGINEERING
+        | attr_type::AIGP
+        | attr_type::BGPSEC_PATH
+        | attr_type::EDGE_METADATA => Some(attr_flags::OPTIONAL),
         attr_type::TUNNEL_ENCAPSULATION
+        | attr_type::IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY
         | attr_type::PE_DISTINGUISHER_LABELS
         | attr_type::DOMAIN_PATH
         | attr_type::SFP
@@ -1646,7 +1648,8 @@ fn decode_attribute_value(
     }
     if matches!(
         type_code,
-        attr_type::DOMAIN_PATH
+        attr_type::IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY
+            | attr_type::DOMAIN_PATH
             | attr_type::SFP
             | attr_type::BFD_DISCRIMINATOR
             | attr_type::NHC
@@ -1954,15 +1957,16 @@ fn decode_attribute_value(
         }
         // Correctly-classed assigned optional non-transitive attributes whose
         // payload semantics are unsupported are ignored, never retained.
-        attr_type::AIGP | attr_type::BGPSEC_PATH | attr_type::EDGE_METADATA => {
-            Err(DecodeError::UpdateAttributeError {
-                subcode: update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
-                data: attr_error_data(flags, type_code, value),
-                detail: format!(
-                    "assigned optional non-transitive attribute type {type_code} reached value decoding"
-                ),
-            })
-        }
+        attr_type::TRAFFIC_ENGINEERING
+        | attr_type::AIGP
+        | attr_type::BGPSEC_PATH
+        | attr_type::EDGE_METADATA => Err(DecodeError::UpdateAttributeError {
+            subcode: update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+            data: attr_error_data(flags, type_code, value),
+            detail: format!(
+                "assigned optional non-transitive attribute type {type_code} reached value decoding"
+            ),
+        }),
         // Any unknown type -> RawAttribute. AS4_PATH and AS4_AGGREGATOR are
         // kept raw only until the shared post-decode RFC 6793 normalizer
         // consumes them.
