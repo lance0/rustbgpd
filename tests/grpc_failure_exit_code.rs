@@ -670,6 +670,14 @@ fn bgp_ingress_tasks_are_retained_unconditionally_supervised_and_torn_down() {
             .count(),
         1
     );
+    assert_eq!(production.matches("accept_tx.clone()").count(), 0);
+    assert_eq!(
+        production
+            .matches("BgpForwarderOutcome::AcceptChannelClosed")
+            .count(),
+        2
+    );
+    assert!(production.contains("let result = (&mut bgp_listener_handle).await;"));
     let teardown = production
         .find("send(PeerManagerCommand::Shutdown)")
         .unwrap();
@@ -733,6 +741,11 @@ fn bound_bgp_listener_panic_uses_common_shutdown_and_exits_nonzero() {
         logs.contains("initiating shutdown due to BGP listener task failure"),
         "{logs}"
     );
+    assert!(
+        !logs.contains("BGP accept-forwarding task exited unexpectedly"),
+        "{logs}"
+    );
+    assert!(!logs.contains("AcceptChannelClosed"), "{logs}");
 }
 
 #[test]
@@ -749,6 +762,10 @@ fn accepted_connection_forwarder_return_uses_common_shutdown_and_exits_nonzero()
     );
     assert!(
         logs.contains("initiating shutdown due to BGP accept-forwarding task failure"),
+        "{logs}"
+    );
+    assert!(
+        !logs.contains("BGP listener task exited unexpectedly"),
         "{logs}"
     );
     assert_eq!(logs.matches("shutdown requested").count(), 1, "{logs}");
@@ -777,6 +794,10 @@ fn accepted_connection_forwarder_panic_drains_half_admitted_candidate_and_exits_
     ] {
         assert!(logs.contains(message), "missing {message:?}\n{logs}");
     }
+    assert!(
+        !logs.contains("BGP listener task exited unexpectedly"),
+        "{logs}"
+    );
     let peer_shutdown = logs.find("peer manager shutting down 1 peers").unwrap();
     let exit = logs.find("rustbgpd exiting").unwrap();
     let shutdowns = logs

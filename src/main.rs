@@ -3002,6 +3002,12 @@ enum TestBgpIngressExit {
     ForwarderPanic,
 }
 
+#[derive(Debug)]
+enum BgpForwarderOutcome {
+    AcceptChannelClosed,
+    Returned,
+}
+
 fn parse_test_bgp_ingress_exit(raw: Option<&str>) -> Result<Option<TestBgpIngressExit>, ()> {
     match raw {
         None => Ok(None),
@@ -5077,7 +5083,7 @@ async fn run<T>(
                 continue;
             }
             if test_bgp_ingress_exit == Some(TestBgpIngressExit::ForwarderReturn) {
-                return;
+                return BgpForwarderOutcome::Returned;
             }
             let result = listener_peer_mgr_tx
                 .send(PeerManagerCommand::AcceptInbound {
@@ -5097,6 +5103,7 @@ async fn run<T>(
                 );
             }
         }
+        BgpForwarderOutcome::AcceptChannelClosed
     });
     let mut bgp_listener_handle = tokio::spawn(async move {
         if initial_peer_boot_failed {
@@ -5218,6 +5225,19 @@ async fn run<T>(
                 break;
             }
             result = &mut bgp_forwarder_handle => {
+                let result = match result {
+                    Ok(BgpForwarderOutcome::AcceptChannelClosed) => {
+                        // The listener owns the sole accept sender. Its exit
+                        // closed the channel, so its JoinHandle is ready and
+                        // owns the exact failure attribution.
+                        let result = (&mut bgp_listener_handle).await;
+                        error!(?result, "BGP listener task exited unexpectedly");
+                        info!("initiating shutdown due to BGP listener task failure");
+                        component_failed = true;
+                        break;
+                    }
+                    result => result,
+                };
                 error!(?result, "BGP accept-forwarding task exited unexpectedly");
                 info!("initiating shutdown due to BGP accept-forwarding task failure");
                 component_failed = true;
