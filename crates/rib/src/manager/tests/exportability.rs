@@ -344,8 +344,6 @@ fn commit_batch(manager: &mut RibManager, peer: IpAddr, batch: ExactBatch) -> bo
     manager.try_send_and_commit_outbound_update(
         peer,
         OutboundCommitBatch {
-            next_hop_override,
-            announce: batch.announce.into(),
             withdraw: batch.withdraw,
             flowspec_announce: batch.flowspec_announce,
             flowspec_withdraw: batch.flowspec_withdraw,
@@ -359,7 +357,7 @@ fn commit_batch(manager: &mut RibManager, peer: IpAddr, batch: ExactBatch) -> bo
             labeled_withdraw: batch.labeled_withdraw,
             rtc_announce: batch.rtc_announce,
             rtc_withdraw: batch.rtc_withdraw,
-            ..OutboundCommitBatch::default()
+            ..OutboundCommitBatch::with_unicast(batch.announce.into(), next_hop_override)
         },
     )
 }
@@ -394,11 +392,7 @@ fn commit_shared_unicast_with_precommit(
 ) -> bool {
     manager.try_send_and_commit_outbound_update_with_group_prior(
         peer,
-        OutboundCommitBatch {
-            next_hop_override,
-            announce,
-            ..OutboundCommitBatch::default()
-        },
+        OutboundCommitBatch::with_unicast(announce, next_hop_override),
         group_prior,
         Some(crate::manager::distribution::SharedUnicastPrecommit {
             group_id: 7,
@@ -763,6 +757,38 @@ fn route_bearing_commit_without_encoder_fails_closed() {
         }
     ));
     assert!(!manager.adj_ribs_out.contains_key(&peer));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn mismatched_unicast_payload_is_unrepresentable_and_nonretryable() {
+    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 34));
+    let route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(10, 0, 34, 0), 24),
+        Ipv4Addr::new(198, 51, 100, 34),
+    );
+    let encoder = MockExactExportEncoder::accepting(34);
+    let mut manager = test_manager();
+    let mut rx = register_exact_target(&mut manager, peer, encoder.clone());
+
+    let announcements_longer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        manager.try_send_and_commit_outbound_update(
+            peer,
+            OutboundCommitBatch::with_unicast(vec![route].into(), Arc::from([])),
+        )
+    }));
+    assert!(announcements_longer.is_err());
+
+    let overrides_longer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        manager.try_send_and_commit_outbound_update(
+            peer,
+            OutboundCommitBatch::with_unicast(Arc::from([]), vec![None].into()),
+        )
+    }));
+    assert!(overrides_longer.is_err());
+    assert!(encoder.probed().is_empty());
+    assert!(!manager.adj_ribs_out.contains_key(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
     assert!(rx.try_recv().is_err());
 }
 

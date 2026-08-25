@@ -449,7 +449,6 @@ impl RibManager {
             .flat_map(|family| family.verdict.blocked.iter().copied())
             .collect();
         if !blocked.is_empty() {
-            debug_assert_eq!(announce.len(), next_hop_override.len());
             let (kept_routes, kept_next_hops): (Vec<_>, Vec<_>) = announce
                 .iter()
                 .zip(next_hop_override.iter())
