@@ -34,6 +34,9 @@ authorization to optimize. Any next tranche must add deterministic work counts
 inside registration/membership and pass the same two-root gate; this receipt
 does not license a speculative correction or an opportunistic rerun.
 
-The exact rows and sanitized verification record are
-[`authoritative-batch-phases.csv`](artifacts/reload-authoritative-batch-discriminator-2026-08/authoritative-batch-phases.csv)
+The exact rows, retained full-root adjudicator output, and sanitized verification record are
+[`authoritative-batch-phases.csv`](artifacts/reload-authoritative-batch-discriminator-2026-08/authoritative-batch-phases.csv),
+[`authoritative-pair.json`](artifacts/reload-authoritative-batch-discriminator-2026-08/authoritative-pair.json),
 and [`verification.json`](artifacts/reload-authoritative-batch-discriminator-2026-08/verification.json).
+Validate the checked publication without the raw roots with
+`python3 bench/scale/irrreload/verify-receipt.py authoritative-publication --artifact-dir docs/perf/artifacts/reload-authoritative-batch-discriminator-2026-08`.

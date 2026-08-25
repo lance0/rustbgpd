@@ -330,6 +330,88 @@ def validate_authoritative_pair(repo: Path, roots: list[Path], output: Path) -> 
         "commit":runs[0]["commit"], "tree":git["tree"], "roots":details}, sort_keys=True) + "\n")
 
 
+def validate_authoritative_publication(artifact: Path) -> None:
+    content = {"authoritative-pair.json", "authoritative-batch-phases.csv", "verification.json"}
+    if {path.name for path in artifact.iterdir()} != content | {"SHA256SUMS"}: fail("publication roster changed")
+    if any((artifact / name).is_symlink() or not (artifact / name).is_file() for name in content | {"SHA256SUMS"}): fail("publication contains a non-regular file")
+    sealed = parse_digest_roster(artifact / "SHA256SUMS", content)
+    if any(sha256(artifact / name) != digest for name, digest in sealed.items()): fail("publication seal mismatch")
+    pair, verification = read_json(artifact / "authoritative-pair.json"), read_json(artifact / "verification.json")
+    if set(pair) != {"commit", "counter", "phase", "roots", "tree", "verdict"} or pair["verdict"] != "negative_result" or pair["phase"] != "" or pair["counter"] != "" or set(pair["roots"]) != {"A", "B"}:
+        fail("pair output is not a strict negative result")
+    if any(not isinstance(pair[key], str) or not re.fullmatch(r"[0-9a-f]{40}", pair[key]) for key in ("commit", "tree")):
+        fail("pair source identity is malformed")
+    for value in pair["roots"].values():
+        if set(value) != {"owned_counts", "phase_us", "totals_us"} or any(
+            not isinstance(items, list) or len(items) != 4 or any(type(item) is not int or item < 0 for item in items)
+            for items in value.values()) or value["owned_counts"] != [0] * 4 or value["phase_us"] != [0] * 4:
+            fail("pair output retained an owned witness")
+        if any(total <= 0 for total in value["totals_us"]): fail("pair totals are not positive")
+    expected_header = "repeat,reload,timestamp_epoch_us,outcome,classification,failure_stage,total_us,remainder_us,precondition_us,registration_membership_us,cohort_partition_us,cohort_precheck_us,destination_build_us,inventory_build_us,membership_commit_us,filtered_scope_build_us,member_emit_state_us,cohort_finalize_us,fallback_regroup_us,distribution_us,duplicate_fallback_us,input_peers,present_peers,skipped_peers,duplicate_peers,candidate_cohorts,shared_cohorts,shared_members,fallback_members,destination_ensures,destination_builds,destination_adoptions,membership_moves,inventory_announces,inventory_withdraws,inventory_supplements,tombstones,lagging_members,filtered_scope_prefixes,filtered_scope_member_visits,emits_attempted,emits_succeeded,emits_degraded,distribution_passes,filtered_state_before,filtered_state_after,dirty_before,dirty_after,pending_before,pending_after,groups_before,groups_after,causal_phase,owned_counter".split(",")
+    with (artifact / "authoritative-batch-phases.csv").open(newline="") as stream:
+        reader = csv.DictReader(stream); rows = list(reader)
+    if reader.fieldnames != expected_header or [(row["repeat"], row["reload"]) for row in rows] != [(repeat, str(number)) for repeat in "AB" for number in range(1, 5)]:
+        fail("publication rows are missing, extra, or reordered")
+    if any(set(row) != set(expected_header) for row in rows):
+        fail("publication row field roster changed")
+    phases = (*AUTHORITATIVE_PHASES,)
+    timestamps, root_timestamps, registration = [], {"A": [], "B": []}, {"A": [], "B": []}
+    for row in rows:
+        numeric_names = [key for key in expected_header if key not in {"repeat", "outcome", "classification", "failure_stage", "causal_phase", "owned_counter"}]
+        if any(not re.fullmatch(r"0|[1-9][0-9]*", row[key]) for key in numeric_names): fail("publication row has non-canonical integer")
+        integers = {key:int(row[key]) for key in numeric_names}
+        if any(value < 0 for value in integers.values()) or row["outcome"] != "committed" or row["classification"] != "shared" or row["failure_stage"] != "none" or row["causal_phase"] or row["owned_counter"]:
+            fail("publication row outcome/type changed")
+        exact = {"input_peers":320, "present_peers":320, "skipped_peers":0, "duplicate_peers":0,
+            "candidate_cohorts":1, "shared_cohorts":1, "shared_members":320, "fallback_members":0,
+            "destination_ensures":1, "membership_moves":320, "lagging_members":0,
+            "emits_attempted":320, "emits_succeeded":320, "emits_degraded":0,
+            "distribution_passes":1, "dirty_after":0, "pending_after":0}
+        if any(integers[key] != value for key, value in exact.items()) or integers["destination_builds"] + integers["destination_adoptions"] != 1 or sum(integers[key] for key in phases) + integers["remainder_us"] != integers["total_us"]:
+            fail("publication count/phase invariant changed")
+        if integers["timestamp_epoch_us"] <= 0 or integers["total_us"] <= 0: fail("publication timing is not positive")
+        timestamps.append(integers["timestamp_epoch_us"])
+        root_timestamps[row["repeat"]].append(integers["timestamp_epoch_us"])
+        registration[row["repeat"]].append(integers["registration_membership_us"])
+    if any(left >= right for left, right in zip(timestamps, timestamps[1:])): fail("publication chronology changed")
+    if set(verification) != {"schema", "verdict", "candidate_commit", "candidate_tree", "origin_main", "source_identity_sha256", "system_environment_sha256", "dataset_sha256", "shape", "roots", "validation", "attribution", "decision", "artifacts"}:
+        fail("verification schema changed")
+    if verification["schema"] != 1 or verification["verdict"] != pair["verdict"] or verification["candidate_commit"] != pair["commit"] or verification["candidate_tree"] != pair["tree"]:
+        fail("verification does not bind pair identity")
+    digests = (verification["source_identity_sha256"], verification["system_environment_sha256"], verification["dataset_sha256"])
+    if not re.fullmatch(r"[0-9a-f]{40}", verification["origin_main"]) or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in digests):
+        fail("publication provenance hashes are malformed")
+    if verification["shape"] != {"members":320, "prefixes":183040, "reloads":4, "changed_fraction":0.1, "overlap_fraction":0}:
+        fail("publication workload changed")
+    if verification["artifacts"] != {"authoritative_batch_phases_sha256":sealed["authoritative-batch-phases.csv"], "frozen_pair_output_sha256":sealed["authoritative-pair.json"]}:
+        fail("verification artifact binding changed")
+    expected_validation = {"checksum_rosters":"pass", "pair_verifier":"pass", "raw_csv_reextraction":"byte-identical",
+        "sessions":"320/320", "rows_per_root":4, "parse_errors":0, "session_loss":0,
+        "outcomes":"committed", "shared_members":320, "fallback_members":0}
+    if verification["validation"] != expected_validation: fail("published validation summary changed")
+    if set(verification["roots"]) != {"A", "B"} or verification["roots"]["A"]["completed_at_epoch_ns"] >= verification["roots"]["B"]["started_at_epoch_ns"] or (verification["roots"]["A"]["daemon_pid"], verification["roots"]["A"]["daemon_start_ticks"]) == (verification["roots"]["B"]["daemon_pid"], verification["roots"]["B"]["daemon_start_ticks"]):
+        fail("published root chronology/identity changed")
+    for label, root in verification["roots"].items():
+        if set(root) != {"fingerprint", "sha256sums_sha256", "inner_csv_sha256", "outer_csv_sha256", "daemon_pid", "daemon_start_ticks", "started_at_epoch_ns", "completed_at_epoch_ns"} or any(not re.fullmatch(r"[0-9a-f]{64}", root[key]) for key in ("fingerprint", "sha256sums_sha256", "inner_csv_sha256", "outer_csv_sha256")) or any(type(root[key]) is not int or root[key] <= 0 for key in ("daemon_pid", "daemon_start_ticks", "started_at_epoch_ns", "completed_at_epoch_ns")) or root["started_at_epoch_ns"] >= root["completed_at_epoch_ns"]:
+            fail("published root identity/hash changed")
+        if any(not root["started_at_epoch_ns"] <= timestamp * 1000 <= root["completed_at_epoch_ns"] for timestamp in root_timestamps[label]):
+            fail("publication timestamp is outside its root interval")
+    for label in "AB":
+        totals = pair["roots"][label]["totals_us"]; later, first = sorted(totals[1:])[1], totals[0]
+        reg_later = sorted(registration[label][1:])[1]
+        delta, registration_delta = later - first, reg_later - registration[label][0]
+        if delta * 5 < first or registration_delta * 10 < delta * 7:
+            fail("published attribution no longer meets the frozen gates")
+        expected = {"outer_total_us":totals, "later_median_us":later,
+            "increase_percent":round((later-first)*100/first, 2), "registration_membership_us":registration[label],
+            "registration_delta_share_percent":round((reg_later-registration[label][0])*100/(later-first), 2)}
+        if verification["attribution"].get(label) != expected: fail("published attribution arithmetic changed")
+    if set(verification["attribution"]) != {"A", "B"}: fail("published attribution roster changed")
+    decision = verification["decision"]
+    if set(decision) != {"localized_phase", "owned_counter_witness", "mechanism", "reason"} or decision.get("localized_phase") != "registration_membership_us" or decision.get("owned_counter_witness") is not None or decision.get("mechanism") is not None or not isinstance(decision.get("reason"), str) or not decision["reason"]:
+        fail("negative decision was promoted")
+
+
 def quoted(text: str, position: int) -> tuple[str, int]:
     if position >= len(text) or text[position] != '"':
         fail("expected quoted string")
@@ -3177,6 +3259,66 @@ transaction-mixed-binary transaction-process-reuse transaction-file-tamper trans
         missing = expected - proofs.keys()
         if missing:
             fail(f"self-test proofs did not reject: {sorted(missing)}")
+        publication = Path(__file__).resolve().parents[3] / "docs/perf/artifacts/reload-authoritative-batch-discriminator-2026-08"
+        validate_authoritative_publication(publication)
+        def publication_rejected(name, mutate, reseal=True):
+            copied = base / f"publication-{name}"; shutil.copytree(publication, copied); mutate(copied)
+            if reseal:
+                names = ("authoritative-pair.json", "authoritative-batch-phases.csv", "verification.json")
+                copied.joinpath("SHA256SUMS").write_text("".join(f"{sha256(copied / item)}  {item}\n" for item in names))
+            try: validate_authoritative_publication(copied)
+            except InvalidReceipt: print(f"red-proof authoritative-publication-{name}=pass")
+            else: fail(f"publication self-test accepted {name}")
+        publication_rejected("missing", lambda root: root.joinpath("authoritative-pair.json").unlink(), False)
+        publication_rejected("extra", lambda root: root.joinpath("extra").write_text("x"), False)
+        publication_rejected("ordering", lambda root: root.joinpath("authoritative-batch-phases.csv").write_text("\n".join([root.joinpath("authoritative-batch-phases.csv").read_text().splitlines()[0], *reversed(root.joinpath("authoritative-batch-phases.csv").read_text().splitlines()[1:])]) + "\n"))
+        def alter_publication(root, section, key, value):
+            path = root / "verification.json"; document = read_json(path); document[section][key] = value; path.write_text(json.dumps(document))
+        def promote_pair_witness(root):
+            path = root / "authoritative-pair.json"; document = read_json(path)
+            document["phase"] = "member_emit_state_us"; path.write_text(json.dumps(document))
+        def alter_publication_csv(root, row_index, key, value):
+            path = root / "authoritative-batch-phases.csv"
+            with path.open(newline="") as stream:
+                reader = csv.DictReader(stream); fieldnames, rows = reader.fieldnames, list(reader)
+            rows[row_index][key] = value
+            with path.open("w", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=fieldnames); writer.writeheader(); writer.writerows(rows)
+        def append_publication_csv_value(root):
+            path = root / "authoritative-batch-phases.csv"; lines = path.read_text().splitlines()
+            lines[1] += ",extra"; path.write_text("\n".join(lines) + "\n")
+        def alter_publication_attribution(root, totals=None, registrations=None):
+            pair_path, csv_path, verification_path = (root / name for name in ("authoritative-pair.json", "authoritative-batch-phases.csv", "verification.json"))
+            pair, verification = read_json(pair_path), read_json(verification_path)
+            if totals is not None:
+                pair["roots"]["A"]["totals_us"] = totals; pair_path.write_text(json.dumps(pair))
+            if registrations is not None:
+                with csv_path.open(newline="") as stream:
+                    old_rows = list(csv.DictReader(stream))
+                for index, value in enumerate(registrations):
+                    old_registration, old_remainder = (int(old_rows[index][key]) for key in ("registration_membership_us", "remainder_us"))
+                    alter_publication_csv(root, index, "registration_membership_us", str(value))
+                    alter_publication_csv(root, index, "remainder_us", str(old_remainder + old_registration - value))
+            totals = pair["roots"]["A"]["totals_us"]; later, first = sorted(totals[1:])[1], totals[0]
+            registrations = [int(row["registration_membership_us"]) for row in csv.DictReader(csv_path.open()) if row["repeat"] == "A"]
+            reg_later = sorted(registrations[1:])[1]
+            verification["artifacts"] = {"authoritative_batch_phases_sha256":sha256(csv_path),
+                "frozen_pair_output_sha256":sha256(pair_path)}
+            verification["attribution"]["A"] = {"outer_total_us":totals, "later_median_us":later,
+                "increase_percent":round((later-first)*100/first, 2), "registration_membership_us":registrations,
+                "registration_delta_share_percent":round((reg_later-registrations[0])*100/(later-first), 2)}
+            verification_path.write_text(json.dumps(verification))
+        publication_rejected("arithmetic", lambda root: alter_publication(root, "attribution", "A", {}))
+        publication_rejected("csv-arithmetic", lambda root: alter_publication_csv(root, 0, "total_us", "1"))
+        publication_rejected("csv-chronology", lambda root: alter_publication_csv(root, 1, "timestamp_epoch_us", "1787669377204703"))
+        publication_rejected("csv-extra-value", append_publication_csv_value)
+        publication_rejected("out-of-root-timestamp", lambda root: alter_publication_csv(root, 0, "timestamp_epoch_us", "1"))
+        publication_rejected("sub-20-growth", lambda root: alter_publication_attribution(root, totals=[100, 110, 110, 110]))
+        publication_rejected("sub-70-attribution", lambda root: alter_publication_attribution(root, registrations=[1294, 1300, 1300, 1300]))
+        publication_rejected("pair-witness", promote_pair_witness)
+        publication_rejected("binding", lambda root: alter_publication(root, "artifacts", "frozen_pair_output_sha256", "a" * 64))
+        publication_rejected("decision", lambda root: alter_publication(root, "decision", "mechanism", "claimed"))
+        publication_rejected("chronology", lambda root: root.joinpath("verification.json").write_text(json.dumps({**read_json(root / "verification.json"), "roots":{**read_json(root / "verification.json")["roots"], "B":{**read_json(root / "verification.json")["roots"]["B"], "started_at_epoch_ns":1}}})))
         for name in sorted(expected):
             print(f"red-proof {name}=pass")
         print("SELF_TEST pass")
@@ -3228,6 +3370,8 @@ def main() -> int:
     pair.add_argument("--repo", required=True, type=Path)
     pair.add_argument("--output", required=True, type=Path)
     pair.add_argument("roots", nargs=2, type=Path)
+    publication = subparsers.add_parser("authoritative-publication")
+    publication.add_argument("--artifact-dir", required=True, type=Path)
     subparsers.add_parser("self-test")
     args = parser.parse_args()
     try:
@@ -3264,6 +3408,8 @@ def main() -> int:
             validate_authoritative_discriminator(args.daemon_log, args.reload_log, args.output)
         elif args.command == "authoritative-pair":
             validate_authoritative_pair(args.repo, args.roots, args.output)
+        elif args.command == "authoritative-publication":
+            validate_authoritative_publication(args.artifact_dir)
         else:
             self_test()
     except (InvalidReceipt, OSError, KeyError, TypeError, ValueError) as error:
