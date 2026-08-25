@@ -64,15 +64,17 @@ transport-session encoder. Its schema-2 receipt separates the one-dispatch
 transition records its native shared plan, exact probes, route-shell
 materialization, and zero authoritative per-peer fallback. Concrete transport
 snapshots plus common group-token and announce-vector identities prove the
-shared envelope path. The full-shape leg runs once and its immutable receipt is
+shared envelope path. The full-shape leg runs once and its result is
 copied into each attempt.
 
 Each measured target records direct-PID `VmRSS`/`VmHWM` and jemalloc allocated,
 active, resident, and mapped bytes at established, staged, and wire
 checkpoints. The runner's process-tree target sampler remains separately named
-and reported. Receipts also retain per-peer evidence, logs, source/binary
-provenance, verifier output, and checksums. Results are not comparable to the
-historical unavailable scratch harness and must not be published as an A/B.
+and reported. Receipts also retain per-peer evidence, logs, the exact source
+commit, workload and host conditions. A `COMPLETED` file containing `pass` is
+written only after all three attempts pass the semantic verifier. Results are
+not comparable to the historical unavailable scratch harness and must not be
+published as an A/B.
 
 CI never runs the scale shape. It runs the original smoke, a 4×100 real-TCP
 fixture through the same scale collector/verifier/RSS seams, and destructive

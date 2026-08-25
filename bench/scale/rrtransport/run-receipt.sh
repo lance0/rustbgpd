@@ -6,21 +6,6 @@ verifier="$root/bench/scale/rrtransport/verify_receipt.py"
 manifest="$root/bench/scale/rrtransport/Cargo.toml"
 binary="$root/bench/scale/target/release/rrtransport"
 rss_limit_kib=$((2 * 1024 * 1024))
-sources=(
-  bench/scale/rrtransport/src/main.rs
-  bench/scale/rrtransport/src/rr1000.rs
-  bench/scale/rrtransport/src/rr1000_support.rs
-  bench/scale/rrtransport/Cargo.toml
-  bench/scale/Cargo.toml
-  bench/scale/Cargo.lock
-  bench/scale/rrtransport/run-receipt.sh
-  bench/scale/rrtransport/verify_receipt.py
-)
-
-source_snapshot() {
-  (cd "$root" && sha256sum "${sources[@]}")
-}
-
 classify_rss() {
   local rss=$1 output=$2
   mkdir -p "$output"
@@ -613,35 +598,30 @@ stop_reap_fixture() {
 }
 
 check_seam() {
-  local script=$1 outer verify_call verify_body checksums_call checksums_body
+  local script=$1 outer verify_call completion
   local direct_rss_call direct_rss_exit direct_rss_resolver
   outer="timeout -k 10 1200 \"\$scr"
   outer+="ipt\" --campaign-inner \"\$output\""
   verify_call="full_ver"
   verify_call+="ify \"\$receipt\""
-  verify_body="python3 \"\$ver"
-  verify_body+="ifier\" \"\$receipt\" --full | tee \"\$receipt/verifier.txt\""
-  checksums_call="full_check"
-  checksums_call+="sums \"\$receipt\""
-  checksums_body="sha256sum -c SHA"
-  checksums_body+="256SUMS --strict"
+  completion="printf 'pass\\n' >\"\$output/COMPLETED\""
   direct_rss_call="sample_direct_rss \"\$pid\" \"\$tiny_validated_starttime\" \"\$receipt\""
   direct_rss_exit="[[ \$direct_rss_action != exited ]] || break"
   direct_rss_resolver='resolve_direct_'
   direct_rss_resolver+="rss \"\$process\" \"\$expected_start\""
   if ! grep -Fq "$outer" "$script" || ! grep -Fq "$verify_call" "$script" ||
-    ! grep -Fq "$verify_body" "$script" || ! grep -Fq "$checksums_call" "$script" ||
-    ! grep -Fq "$checksums_body" "$script" || ! grep -Fq "$direct_rss_call" "$script" ||
+    ! grep -Fq "$completion" "$script" ||
+    ! grep -Fq "$direct_rss_call" "$script" ||
     ! grep -Fq "$direct_rss_exit" "$script" ||
     ! grep -Fq "$direct_rss_resolver" "$script"; then
-    echo "runner lacks production verifier/checksum/RSS seam" >&2
+    echo "runner lacks production verifier/completion/RSS seam" >&2
     return 1
   fi
 }
 
 full_verify() {
   local receipt=$1
-  python3 "$verifier" "$receipt" --full | tee "$receipt/verifier.txt"
+  python3 "$verifier" "$receipt" --full
 }
 
 run_grouped_commit_fixture() {
@@ -650,13 +630,6 @@ run_grouped_commit_fixture() {
     cargo test --manifest-path "$manifest" --locked \
       rr1000::tests::grouped_commit_receipt_fixture -- --exact
   [[ -s $1/grouped-commit.json ]]
-}
-
-full_checksums() {
-  local receipt=$1
-  (cd "$receipt" && sha256sum phase.json grouped-commit.json per-peer.tsv rss.json rss.tsv \
-    provenance.json source.snapshot rrtransport.bin verifier.txt harness.log >SHA256SUMS &&
-    sha256sum -c SHA256SUMS --strict)
 }
 
 host_state() {
@@ -781,17 +754,6 @@ case ${1:-} in
     startup_gate_fixture "$2" "$3"
     exit
     ;;
-  --verify-fixture)
-    [[ $# == 3 ]] || exit 2
-    rm -rf "$3"
-    cp -a "$2" "$3"
-    receipt=$3
-    python3 "$verifier" "$receipt" | tee "$receipt/verifier.txt"
-    (cd "$receipt" && sha256sum phase.json grouped-commit.json per-peer.tsv rss.json rss.tsv \
-      provenance.json source.snapshot rrtransport.bin verifier.txt >SHA256SUMS &&
-      sha256sum -c SHA256SUMS --strict)
-    exit
-    ;;
   --real-smoke)
     [[ $# == 2 ]] || exit 2
     cargo build --manifest-path "$manifest" --locked
@@ -826,17 +788,12 @@ case ${1:-} in
     fi
     pid=
     rm -f "$tiny_ready" "$tiny_go"
-    cp "$tiny_binary" "$receipt/rrtransport.bin"
-    source_snapshot >"$receipt/source.snapshot"
     cp "$receipt/phase.json" "$receipt/phase.saved"
     python3 "$verifier" "$receipt" --write-rss "$max_rss"
-    head=$(git -C "$root" rev-parse HEAD); tree=$(git -C "$root" write-tree)
-    source_hash=$(sha256sum "$receipt/source.snapshot"|cut -d' ' -f1)
-    binary_hash=$(sha256sum "$receipt/rrtransport.bin"|cut -d' ' -f1)
-    printf '{"head_before":"%s","head_after":"%s","tree_before":"%s","tree_after":"%s","source_sha256":"%s","source_after_sha256":"%s","binary_sha256":"%s","governors":["performance"],"load_before":"fixture","load_after":"fixture","pswpin_before":0,"pswpin_after":0,"pswpout_before":0,"pswpout_after":0,"rustc":"fixture","host":"fixture","competitors":[]}\n' \
-      "$head" "$head" "$tree" "$tree" "$source_hash" "$source_hash" "$binary_hash" >"$receipt/provenance.json"
-    : >"$receipt/verifier.txt"
-    python3 "$verifier" "$receipt" --tiny | tee "$receipt/verifier.txt"
+    head=$(git -C "$root" rev-parse HEAD)
+    printf '{"commit":"%s","governors":["performance"],"load_before":"fixture","load_after":"fixture","pswpin_before":0,"pswpin_after":0,"pswpout_before":0,"pswpout_after":0,"rustc":"fixture","host":"fixture","competitors":[]}\n' \
+      "$head" >"$receipt/provenance.json"
+    python3 "$verifier" "$receipt" --tiny
     exit
     ;;
   --campaign-inner)
@@ -863,8 +820,7 @@ available=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)
 (( available >= 16 * 1024 * 1024 )) || { echo "need 16 GiB available" >&2; exit 1; }
 [[ -z $(git -C "$root" status --porcelain) ]] || { echo "tree must be clean" >&2; exit 1; }
 
-head_before=$(git -C "$root" rev-parse HEAD); tree_before=$(git -C "$root" write-tree)
-source_before=$(source_snapshot)
+head_before=$(git -C "$root" rev-parse HEAD)
 timeout -k 10 300 cargo build --manifest-path "$manifest" --locked --release
 mkdir -p "$output"; campaign_started=$SECONDS
 run_grouped_commit_fixture "$output" 1000 100000
@@ -880,7 +836,6 @@ for run in 1 2 3; do
   host_state before
   require_quiet before || { echo "host not quiet before attempt" >&2; exit 1; }
   receipt="$output/run-$run"; mkdir -p "$receipt"
-  printf '%s\n' "$source_before" >"$receipt/source.snapshot"; cp "$binary" "$receipt/rrtransport.bin"
   cp "$output/grouped-commit.json" "$receipt/grouped-commit.json"
   printf 'observer\trss_kib\n' >"$receipt/rss.tsv"
   launch_supervised "$receipt/harness.log" timeout -k 10 300 "$binary" rr1000 "$receipt"
@@ -888,19 +843,14 @@ for run in 1 2 3; do
   sampler_observation_reader=read_live_sampler_observation
   sample_supervisor "$binary" "$receipt" "$run" || exit 1
   python3 "$verifier" "$receipt" --write-rss "$max_rss"
-  head_after=$(git -C "$root" rev-parse HEAD); tree_after=$(git -C "$root" write-tree)
-  source_after=$(source_snapshot)
+  head_after=$(git -C "$root" rev-parse HEAD)
   [[ -z $(git -C "$root" status --porcelain) ]] || { echo "tree dirtied during run" >&2; exit 1; }
-  source_hash=$(sha256sum "$receipt/source.snapshot"|cut -d' ' -f1)
-  source_after_hash=$(printf '%s\n' "$source_after"|sha256sum|cut -d' ' -f1)
-  binary_hash=$(sha256sum "$receipt/rrtransport.bin"|cut -d' ' -f1)
+  [[ $head_before == "$head_after" ]] || { echo "HEAD changed during run" >&2; exit 1; }
   host_state after
   require_quiet after || { echo "host not quiet after attempt" >&2; exit 1; }
   [[ $before_pswpin == "$after_pswpin" && $before_pswpout == "$after_pswpout" ]] || { echo "swap I/O changed" >&2; exit 1; }
-  printf '{"head_before":"%s","head_after":"%s","tree_before":"%s","tree_after":"%s","source_sha256":"%s","source_after_sha256":"%s","binary_sha256":"%s","governors":["performance"],"load_before":"%s","load_after":"%s","pswpin_before":%s,"pswpin_after":%s,"pswpout_before":%s,"pswpout_after":%s,"rustc":"%s","host":"%s","competitors":[]}\n' \
-    "$head_before" "$head_after" "$tree_before" "$tree_after" "$source_hash" "$source_after_hash" "$binary_hash" "$before_load" "$after_load" "$before_pswpin" "$after_pswpin" "$before_pswpout" "$after_pswpout" "$(rustc -V)" "$(uname -srvmo)" >"$receipt/provenance.json"
-  [[ $source_before == "$source_after" ]] || { echo "declared sources changed" >&2; exit 1; }
-  : >"$receipt/verifier.txt"
+  printf '{"commit":"%s","governors":["performance"],"load_before":"%s","load_after":"%s","pswpin_before":%s,"pswpin_after":%s,"pswpout_before":%s,"pswpout_after":%s,"rustc":"%s","host":"%s","competitors":[]}\n' \
+    "$head_before" "$before_load" "$after_load" "$before_pswpin" "$after_pswpin" "$before_pswpout" "$after_pswpout" "$(rustc -V)" "$(uname -srvmo)" >"$receipt/provenance.json"
   full_verify "$receipt"
-  full_checksums "$receipt"
 done
+printf 'pass\n' >"$output/COMPLETED"

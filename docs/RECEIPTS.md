@@ -241,3 +241,9 @@ Write the detailed source document first (interop procedure in
 [`INTEROP.md`](INTEROP.md), soak postmortem as `docs/soaks/soak-*.md` with artifacts
 under `docs/artifacts/soak/<run-id>/`, perf receipt under `docs/perf/`), then
 add the row here and in [`OPERATIONAL_PROOF.md`](OPERATIONAL_PROOF.md).
+
+Keep the evidence proportional to the claim: retain the raw CSV or log, exact
+source commit, workload and environment, and an explicit sentence bounding
+what the result proves. Runtime acceptance checks should validate the measured
+behavior directly; binary copies, source snapshots, checksum rosters, and
+self-referential verification files are not part of the receipt convention.
