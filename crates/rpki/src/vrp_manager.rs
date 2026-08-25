@@ -67,6 +67,7 @@ pub struct VrpManager {
     rib_tx: mpsc::Sender<RpkiTableUpdate>,
     /// Sender for ASPA table snapshots to the RIB manager.
     aspa_rib_tx: Option<mpsc::Sender<AspaTableUpdate>>,
+    readiness_observer: Option<Box<dyn Fn(SocketAddr, bool) + Send + Sync>>,
 }
 
 impl VrpManager {
@@ -84,6 +85,7 @@ impl VrpManager {
             update_rx,
             rib_tx,
             aspa_rib_tx: None,
+            readiness_observer: None,
         }
     }
 
@@ -91,6 +93,17 @@ impl VrpManager {
     #[must_use]
     pub fn with_aspa_tx(mut self, tx: mpsc::Sender<AspaTableUpdate>) -> Self {
         self.aspa_rib_tx = Some(tx);
+        self
+    }
+
+    /// Observe per-cache readiness after its retained contribution and both
+    /// merged validation tables have been updated.
+    #[must_use]
+    pub fn with_readiness_observer(
+        mut self,
+        observer: impl Fn(SocketAddr, bool) + Send + Sync + 'static,
+    ) -> Self {
+        self.readiness_observer = Some(Box::new(observer));
         self
     }
 
@@ -103,7 +116,7 @@ impl VrpManager {
     }
 
     async fn handle_update(&mut self, update: VrpUpdate) {
-        let (vrp_delta, changed_customer_asns) = match update {
+        let (server, ready, vrp_delta, changed_customer_asns) = match update {
             VrpUpdate::FullTable {
                 server,
                 entries,
@@ -128,7 +141,7 @@ impl VrpManager {
                 );
                 // A full snapshot replaces the server's whole set — there is
                 // no bounded changed-entry list, so downstream must rescan.
-                (None, None)
+                (server, true, None, None)
             }
             VrpUpdate::IncrementalUpdate {
                 server,
@@ -179,7 +192,7 @@ impl VrpManager {
                 for a in aspa_announced {
                     aspa_table.insert(a.customer_asn, a.provider_asns);
                 }
-                (Some(delta), Some(changed_customer_asns))
+                (server, true, Some(delta), Some(changed_customer_asns))
             }
             VrpUpdate::ServerDown { server } => {
                 info!(%server, "cache server down — removing entries");
@@ -188,13 +201,16 @@ impl VrpManager {
                 // ponytail: the removed set IS the exact delta, but server
                 // loss is rare and multi-cache overlap makes it usually a
                 // no-op distribution; wire it through if it ever shows up.
-                (None, None)
+                (server, false, None, None)
             }
         };
 
         self.rebuild_and_distribute_vrp(vrp_delta).await;
         self.rebuild_and_distribute_aspa(changed_customer_asns)
             .await;
+        if let Some(observer) = &self.readiness_observer {
+            observer(server, ready);
+        }
     }
 
     // Full rebuild (clone + sort of every entry) on every update, even a
@@ -279,6 +295,7 @@ impl VrpManager {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::{Arc, Mutex};
 
     use super::*;
 
@@ -297,6 +314,46 @@ mod tests {
 
     fn server2() -> SocketAddr {
         "10.0.0.2:3323".parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn readiness_follows_completed_retained_contribution_lifecycle() {
+        let (_vrp_tx, vrp_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let (aspa_tx, mut aspa_rx) = mpsc::channel(16);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&observed);
+        let mut mgr = VrpManager::new(vrp_rx, rib_tx)
+            .with_aspa_tx(aspa_tx)
+            .with_readiness_observer(move |server, ready| {
+                sink.lock().unwrap().push((server, ready));
+            });
+
+        mgr.handle_update(VrpUpdate::FullTable {
+            server: server1(),
+            entries: vec![],
+            aspa_records: vec![],
+        })
+        .await;
+        assert_eq!(*observed.lock().unwrap(), [(server1(), true)]);
+
+        mgr.handle_update(VrpUpdate::IncrementalUpdate {
+            server: server1(),
+            announced: vec![entry(Ipv4Addr::new(10, 0, 0, 0), 24, 24, 65001)],
+            withdrawn: vec![],
+            aspa_announced: vec![],
+            aspa_withdrawn: vec![],
+        })
+        .await;
+        let _ = rib_rx.try_recv();
+        let _ = aspa_rx.try_recv();
+        assert_eq!(observed.lock().unwrap().last(), Some(&(server1(), true)));
+
+        mgr.handle_update(VrpUpdate::ServerDown { server: server1() })
+            .await;
+        assert!(!mgr.server_tables.contains_key(&server1()));
+        assert!(!mgr.server_aspa_tables.contains_key(&server1()));
+        assert_eq!(observed.lock().unwrap().last(), Some(&(server1(), false)));
     }
 
     #[tokio::test]

@@ -3797,8 +3797,12 @@ async fn run<T>(
         let (aspa_table_tx, mut aspa_table_rx) = mpsc::channel(16);
 
         // Spawn VRP + ASPA manager
+        let readiness_metrics = metrics.clone();
         let vrp_mgr = rustbgpd_rpki::VrpManager::new(vrp_update_rx, rpki_table_tx)
-            .with_aspa_tx(aspa_table_tx);
+            .with_aspa_tx(aspa_table_tx)
+            .with_readiness_observer(move |server, ready| {
+                readiness_metrics.set_rpki_cache_end_of_data_ready(&server.to_string(), ready);
+            });
         tokio::spawn(vrp_mgr.run());
 
         // Forward VRP table updates to RIB manager + validation watch
@@ -3869,6 +3873,7 @@ async fn run<T>(
             };
             let expire_metrics = metrics.clone();
             let cache_label = addr.to_string();
+            metrics.set_rpki_cache_end_of_data_ready(&cache_label, false);
             let client = rustbgpd_rpki::RtrClient::new(client_config, vrp_update_tx.clone())
                 .with_expire_observer(move |secs| {
                     expire_metrics.set_rpki_cache_effective_expire_seconds(&cache_label, secs);

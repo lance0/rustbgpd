@@ -761,6 +761,35 @@ tests:
                 expired, or delivering no data; prefix origin validation
                 is not filtering anything.
 
+  # ── RpkiCacheEndOfDataNotReady ────────────────────────────────
+  - interval: 1m
+    input_series:
+      - series: 'bgp_rpki_cache_end_of_data_ready{cache="192.0.2.10:3323", instance="edge1:9179"}'
+        values: "0x16 1x4"
+      - series: 'bgp_rpki_cache_end_of_data_ready{cache="192.0.2.11:3323", instance="edge1:9179"}'
+        values: "1x20"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RpkiCacheEndOfDataNotReady
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: RpkiCacheEndOfDataNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cache: "192.0.2.10:3323"
+              instance: "edge1:9179"
+            exp_annotations:
+              summary: "RPKI cache 192.0.2.10:3323 has no validated End of Data"
+              description: >-
+                RPKI cache 192.0.2.10:3323 on edge1:9179 has had no usable
+                retained contribution for 15 minutes. Check this cache
+                independently; other configured caches may still be ready and
+                contributing to the merged validation table.
+      - eval_time: 18m
+        alertname: RpkiCacheEndOfDataNotReady
+        exp_alerts: []
+
   # ── BgpEventOutboxDegraded ────────────────────────────────────
   - interval: 1m
     input_series:
