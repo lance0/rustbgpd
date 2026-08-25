@@ -84,7 +84,7 @@ byte-for-byte (no new files or manifest keys; the seed-61 canonical dataset
 digest is unchanged and pinned in
 `tests/reloadstall_scenario_emitted_check.rs`).
 
-## LAN-1165 authoritative discriminator campaign
+## Authoritative discriminator campaign
 
 The measurement-only `full-rustbgpd-sighup` campaign is a single-cell
 `rustbgpd-sighup` run, never a cross-daemon table. Its frozen shape is 320
@@ -94,8 +94,8 @@ the quiet-host lock; never overlap their heavy work:
 
 ```sh
 candidate=$(git rev-parse HEAD)
-SMOKE= SKIP_PREFLIGHT= CONFIRM_NO_MAIN_PUSHES=1 MEASUREMENT_CANDIDATE_SHA="$candidate" N_MEMBERS=320 TOTAL_PREFIXES=183040 RELOADS=4 CHANGED_FRACTION=0.1 SEED=61 OVERLAP_FRACTION=0 MIN_LIST=1000 MAX_LIST=40000 ARTIFACTS_DIR=/tmp/lan1165-discriminator-A bench/scale/irrreload/run-irr-reload.sh rustbgpd-sighup
-SMOKE= SKIP_PREFLIGHT= CONFIRM_NO_MAIN_PUSHES=1 MEASUREMENT_CANDIDATE_SHA="$candidate" N_MEMBERS=320 TOTAL_PREFIXES=183040 RELOADS=4 CHANGED_FRACTION=0.1 SEED=61 OVERLAP_FRACTION=0 MIN_LIST=1000 MAX_LIST=40000 ARTIFACTS_DIR=/tmp/lan1165-discriminator-B bench/scale/irrreload/run-irr-reload.sh rustbgpd-sighup
+SMOKE= SKIP_PREFLIGHT= CONFIRM_NO_MAIN_PUSHES=1 MEASUREMENT_CANDIDATE_SHA="$candidate" N_MEMBERS=320 TOTAL_PREFIXES=183040 RELOADS=4 CHANGED_FRACTION=0.1 SEED=61 OVERLAP_FRACTION=0 MIN_LIST=1000 MAX_LIST=40000 ARTIFACTS_DIR=/tmp/authoritative-discriminator-A bench/scale/irrreload/run-irr-reload.sh rustbgpd-sighup
+SMOKE= SKIP_PREFLIGHT= CONFIRM_NO_MAIN_PUSHES=1 MEASUREMENT_CANDIDATE_SHA="$candidate" N_MEMBERS=320 TOTAL_PREFIXES=183040 RELOADS=4 CHANGED_FRACTION=0.1 SEED=61 OVERLAP_FRACTION=0 MIN_LIST=1000 MAX_LIST=40000 ARTIFACTS_DIR=/tmp/authoritative-discriminator-B bench/scale/irrreload/run-irr-reload.sh rustbgpd-sighup
 ```
 
 Each reload binds exactly one outer reload-generation timing record to one
