@@ -401,3 +401,14 @@ the `verify-receipt.py campaigns` and
 check is a `cmp` of each comparison root's
 `rustbgpd-sighup/received-view.tsv` against the sealed realistic-mix
 baseline capture at the same overlap point and repeat.
+
+## Phase-attribution follow-up
+
+The later phase-attribution receipt adds timing detail without changing this
+workload's correctness boundaries. Two full per-client-best roots reproduced
+the reload-1 versus reload-2–4 curve and placed more than 98% of the delta in
+the synchronous batched authoritative RIB transition. The result is
+instrumentation-only: it claims no speedup and does not identify the internal
+mechanism. See
+[`reload-generation-phase-attribution-2026-08.md`](reload-generation-phase-attribution-2026-08.md)
+for the sealed rows, provenance, interpretation, and next discriminator.

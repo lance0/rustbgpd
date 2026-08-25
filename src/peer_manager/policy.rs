@@ -35,6 +35,26 @@ use super::{
 /// lines instead of either silence or one line per peer.
 const COHORT_SETUP_PROGRESS_INTERVAL: usize = 64;
 
+#[derive(Default)]
+struct PolicySnapshotPhaseTimings {
+    total_targets: usize,
+    cohort_targets: usize,
+    remainder_targets: usize,
+    preflight_us: u64,
+    cohort_selection_us: u64,
+    cohort_prestage_session_apply_us: u64,
+    cohort_rib_transition_us: u64,
+    authoritative_remainder_apply_us: u64,
+    deferred_refresh_dispatch_us: u64,
+    convergence_check_us: u64,
+    refresh_count: usize,
+    authoritative_fallback: bool,
+}
+
+fn elapsed_us(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
 /// How `update_runtime_policies_for_peer_key` reacts when the Route Refresh
 /// send fails after the session already acked the new policy.
 ///
@@ -509,61 +529,137 @@ impl PeerManager {
             .map_err(|failure| failure.message)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the partitioned policy transaction keeps cohort commit and cross-partition rollback ownership together"
-    )]
     async fn apply_resolved_policy_snapshot_classified(
         &mut self,
         targets: Vec<ResolvedPeerPolicy>,
         require_clean_convergence: bool,
     ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
+        let snapshot_started = Instant::now();
+        let mut phases = PolicySnapshotPhaseTimings {
+            total_targets: targets.len(),
+            remainder_targets: targets.len(),
+            ..PolicySnapshotPhaseTimings::default()
+        };
+        let outcome = self
+            .apply_resolved_policy_snapshot_classified_inner(
+                targets,
+                require_clean_convergence,
+                &mut phases,
+            )
+            .await;
+        let total_us = elapsed_us(snapshot_started);
+        let attributed_us = phases
+            .preflight_us
+            .saturating_add(phases.cohort_selection_us)
+            .saturating_add(phases.cohort_prestage_session_apply_us)
+            .saturating_add(phases.cohort_rib_transition_us)
+            .saturating_add(phases.authoritative_remainder_apply_us)
+            .saturating_add(phases.deferred_refresh_dispatch_us)
+            .saturating_add(phases.convergence_check_us);
+        info!(
+            target = "reload_generation_phase",
+            total_targets = phases.total_targets,
+            cohort_targets = phases.cohort_targets,
+            remainder_targets = phases.remainder_targets,
+            refresh_count = phases.refresh_count,
+            outcome = if outcome.is_ok() {
+                "committed"
+            } else {
+                "failed"
+            },
+            authoritative_fallback = phases.authoritative_fallback,
+            preflight_us = phases.preflight_us,
+            cohort_selection_us = phases.cohort_selection_us,
+            cohort_prestage_session_apply_us = phases.cohort_prestage_session_apply_us,
+            cohort_rib_transition_us = phases.cohort_rib_transition_us,
+            authoritative_remainder_apply_us = phases.authoritative_remainder_apply_us,
+            deferred_refresh_dispatch_us = phases.deferred_refresh_dispatch_us,
+            convergence_check_us = phases.convergence_check_us,
+            total_us,
+            unattributed_us = total_us.saturating_sub(attributed_us),
+            "reload generation phase timing"
+        );
+        outcome
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the partitioned policy transaction keeps cohort commit and cross-partition rollback ownership together"
+    )]
+    async fn apply_resolved_policy_snapshot_classified_inner(
+        &mut self,
+        targets: Vec<ResolvedPeerPolicy>,
+        require_clean_convergence: bool,
+        phases: &mut PolicySnapshotPhaseTimings,
+    ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
         // ADR-0112: qualify RFC 8212 import-presence transitions before
         // anything below can touch a peer, so one incapable peer rejects the
         // whole edit rather than being discovered mid-fanout and unwound.
-        self.preflight_rfc8212_import_transitions(&targets)
-            .await
-            .map_err(PolicySnapshotFailure::rejected)?;
+        let preflight_started = Instant::now();
+        let preflight = self.preflight_rfc8212_import_transitions(&targets).await;
+        phases.preflight_us = elapsed_us(preflight_started);
+        preflight.map_err(PolicySnapshotFailure::rejected)?;
         let mut rollback_rib_budget = PolicyRollbackRibBudget::default();
         let total_targets = targets.len();
+        let cohort_selection_started = Instant::now();
         let mut seen = BTreeSet::new();
         let has_duplicate = targets
             .iter()
             .any(|target| !seen.insert(PeerKey::new(target.address, target.interface.clone())));
         if has_duplicate {
+            phases.cohort_selection_us = elapsed_us(cohort_selection_started);
+            let authoritative_started = Instant::now();
             let captured = self
                 .apply_resolved_policy_snapshot_authoritatively(
                     targets,
                     &mut rollback_rib_budget,
                     require_clean_convergence,
                 )
-                .await?;
-            return self
+                .await;
+            phases.authoritative_remainder_apply_us = elapsed_us(authoritative_started);
+            let captured = captured?;
+            let convergence_started = Instant::now();
+            let outcome = self
                 .complete_policy_snapshot(
                     captured,
                     &mut rollback_rib_budget,
                     require_clean_convergence,
                 )
                 .await;
+            phases.convergence_check_us = elapsed_us(convergence_started);
+            return outcome;
         }
 
         let cohort_mask = self.export_only_policy_cohort_mask(&targets).await;
+        phases.cohort_selection_us = elapsed_us(cohort_selection_started);
         let cohort_targets = cohort_mask.iter().filter(|&&selected| selected).count();
+        phases.cohort_targets = cohort_targets;
+        phases.remainder_targets = total_targets - cohort_targets;
         if cohort_targets < 2 {
+            // The selected set is too small to execute as a cohort. Report
+            // the full authoritative path that actually runs.
+            phases.cohort_targets = 0;
+            phases.remainder_targets = total_targets;
+            let authoritative_started = Instant::now();
             let captured = self
                 .apply_resolved_policy_snapshot_authoritatively(
                     targets,
                     &mut rollback_rib_budget,
                     require_clean_convergence,
                 )
-                .await?;
-            return self
+                .await;
+            phases.authoritative_remainder_apply_us = elapsed_us(authoritative_started);
+            let captured = captured?;
+            let convergence_started = Instant::now();
+            let outcome = self
                 .complete_policy_snapshot(
                     captured,
                     &mut rollback_rib_budget,
                     require_clean_convergence,
                 )
                 .await;
+            phases.convergence_check_us = elapsed_us(convergence_started);
+            return outcome;
         }
 
         let cohort = targets
@@ -583,25 +679,36 @@ impl PeerManager {
                 &cohort,
                 &mut rollback_rib_budget,
                 require_clean_convergence,
+                phases,
             )
             .await
         else {
             // Defensive invariant fallback: no mutation occurs before this
             // helper returns `None`, so preserve original authoritative order.
+            // Report the path that actually executed rather than the cohort
+            // mask that selected the attempted fast path.
+            phases.cohort_targets = 0;
+            phases.remainder_targets = total_targets;
+            let authoritative_started = Instant::now();
             let captured = self
                 .apply_resolved_policy_snapshot_authoritatively(
                     targets,
                     &mut rollback_rib_budget,
                     require_clean_convergence,
                 )
-                .await?;
-            return self
+                .await;
+            phases.authoritative_remainder_apply_us = elapsed_us(authoritative_started);
+            let captured = captured?;
+            let convergence_started = Instant::now();
+            let outcome = self
                 .complete_policy_snapshot(
                     captured,
                     &mut rollback_rib_budget,
                     require_clean_convergence,
                 )
                 .await;
+            phases.convergence_check_us = elapsed_us(convergence_started);
+            return outcome;
         };
         let mut captured = cohort_result?;
         drop(cohort);
@@ -610,14 +717,16 @@ impl PeerManager {
             .zip(cohort_mask)
             .filter_map(|(target, selected)| (!selected).then_some(target))
             .collect();
-        match self
+        let authoritative_remainder_started = Instant::now();
+        let authoritative_remainder = self
             .apply_resolved_policy_snapshot_authoritatively(
                 remainder,
                 &mut rollback_rib_budget,
                 require_clean_convergence,
             )
-            .await
-        {
+            .await;
+        phases.authoritative_remainder_apply_us = elapsed_us(authoritative_remainder_started);
+        match authoritative_remainder {
             Ok(mut remainder_captured) => {
                 captured.append(&mut remainder_captured);
                 info!(
@@ -627,12 +736,16 @@ impl PeerManager {
                     elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                     "committed partitioned resolved policy snapshot"
                 );
-                self.complete_policy_snapshot(
-                    captured,
-                    &mut rollback_rib_budget,
-                    require_clean_convergence,
-                )
-                .await
+                let convergence_started = Instant::now();
+                let outcome = self
+                    .complete_policy_snapshot(
+                        captured,
+                        &mut rollback_rib_budget,
+                        require_clean_convergence,
+                    )
+                    .await;
+                phases.convergence_check_us = elapsed_us(convergence_started);
+                outcome
             }
             Err(remainder_error) => {
                 let rollback = self
@@ -930,6 +1043,7 @@ impl PeerManager {
         targets: &[&ResolvedPeerPolicy],
         rollback_rib_budget: &mut PolicyRollbackRibBudget,
         require_clean_convergence: bool,
+        phase_timings: &mut PolicySnapshotPhaseTimings,
     ) -> Option<Result<Vec<CapturedResolvedPolicy>, PolicySnapshotFailure>> {
         if targets.len() < 2 {
             return None;
@@ -1265,7 +1379,9 @@ impl PeerManager {
             }
             self.drain_readiness_queries().await;
         }
+        phase_timings.cohort_prestage_session_apply_us = elapsed_us(setup_started);
 
+        let rib_transition_started = Instant::now();
         let replacements: Vec<_> = targets
             .iter()
             .map(|target| PeerExportPolicyReplacement {
@@ -1288,6 +1404,7 @@ impl PeerManager {
         let rib_result = match cohort_result {
             Ok(ExportPolicyCohortOutcome::Committed) => Ok(()),
             Ok(ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply) => {
+                phase_timings.authoritative_fallback = true;
                 // A fallback that never reached the transition's staging
                 // phase leaves the prepared destination unowned; remove it
                 // before the per-peer applies rebuild membership through the
@@ -1301,6 +1418,7 @@ impl PeerManager {
             }
             Err(error) => Err(error),
         };
+        phase_timings.cohort_rib_transition_us = elapsed_us(rib_transition_started);
         if let Err(error) = rib_result {
             if prestaged {
                 self.discard_prepared_export_destination(targets[0]).await;
@@ -1330,6 +1448,7 @@ impl PeerManager {
         // change does not alter stored routes (LocRib suppresses
         // interned-attr-equal replacements). Members whose import chain was
         // unchanged get no refresh at all, exactly as today.
+        let deferred_refresh_started = Instant::now();
         for (index, (target, peer_key)) in targets.iter().zip(&peer_keys).enumerate() {
             if !import_deltas[index] {
                 captured[index].adj_rib_in_may_have_moved = true;
@@ -1350,6 +1469,7 @@ impl PeerManager {
                 .is_some_and(|state| state.fsm_state == SessionState::Established);
             self.drain_readiness_queries().await;
             if established {
+                phase_timings.refresh_count += 1;
                 if let Err(failure) = self
                     .soft_reset_in_reporting_delivery(peer_key.clone(), Vec::new())
                     .await
@@ -1419,6 +1539,7 @@ impl PeerManager {
             }
             captured[index].adj_rib_in_may_have_moved = true;
         }
+        phase_timings.deferred_refresh_dispatch_us = elapsed_us(deferred_refresh_started);
         Some(Ok(captured))
     }
 

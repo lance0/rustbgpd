@@ -23,6 +23,12 @@ from pathlib import Path
 COMPARISON_CELLS = ("rustbgpd-sighup", "bird", "openbgpd")
 GROUPED_CELL = "rustbgpd-sighup-grouped-control"
 TRANSACTION_CELL = "rustbgpd-txn"
+PHASE_FIELDS = (
+    "preflight_us", "cohort_selection_us", "cohort_prestage_session_apply_us",
+    "cohort_rib_transition_us", "authoritative_remainder_apply_us",
+    "deferred_refresh_dispatch_us", "convergence_check_us", "total_us",
+    "unattributed_us",
+)
 CANONICAL_SHAPE = (320, 183040, 1000, 40000, 61)
 CANONICAL_FULL_INPUTS = {
     "smoke": "",
@@ -67,6 +73,91 @@ class InvalidReceipt(ValueError):
 
 def fail(message: str) -> None:
     raise InvalidReceipt(message)
+
+
+def validate_reload_phases(daemon_log: Path, reload_log: Path, output: Path) -> None:
+    triggers = [
+        (int(number), int(wall_us))
+        for number, wall_us in re.findall(
+            r"^reload (\d+) (?:SIGHUP|reload_cmd) wall_us=(\d+)",
+            reload_log.read_text(),
+            re.MULTILINE,
+        )
+    ]
+    if not triggers or [number for number, _ in triggers] != list(range(1, len(triggers) + 1)):
+        fail(f"{reload_log}: reload triggers are missing, duplicate, or reordered")
+
+    records = []
+    for raw in daemon_log.read_text(errors="replace").splitlines():
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            fail(f"{daemon_log}: JSON log event is not an object")
+        fields = event.get("fields", {})
+        if not isinstance(fields, dict):
+            fail(f"{daemon_log}: JSON log event has non-object fields")
+        if fields.get("message") != "reload generation phase timing":
+            continue
+        if fields.get("target") != "reload_generation_phase":
+            fail(f"{daemon_log}: phase record has the wrong structured target")
+        try:
+            parsed = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
+            if parsed.utcoffset() is None:
+                raise ValueError("timestamp has no UTC offset")
+            since_epoch = parsed - datetime(1970, 1, 1, tzinfo=timezone.utc)
+            epoch_us = (
+                (since_epoch.days * 86_400 + since_epoch.seconds) * 1_000_000
+                + since_epoch.microseconds
+            )
+        except (ValueError, KeyError, AttributeError, TypeError, OverflowError):
+            fail(f"{daemon_log}: phase record has no parseable timestamp")
+        required = set(PHASE_FIELDS) | {
+            "total_targets", "cohort_targets", "remainder_targets", "refresh_count",
+            "outcome", "authoritative_fallback",
+        }
+        if set(fields) & required != required:
+            fail(f"{daemon_log}: malformed phase record")
+        try:
+            numeric = {key: int(fields[key]) for key in PHASE_FIELDS}
+            counts = {key: int(fields[key]) for key in ("total_targets", "cohort_targets", "remainder_targets", "refresh_count")}
+        except (TypeError, ValueError, OverflowError):
+            fail(f"{daemon_log}: non-integer phase/count field")
+        if any(value < 0 for value in (*numeric.values(), *counts.values())):
+            fail(f"{daemon_log}: negative phase/count field")
+        if counts["cohort_targets"] + counts["remainder_targets"] != counts["total_targets"]:
+            fail(f"{daemon_log}: target counts do not close")
+        if (
+            not isinstance(fields["outcome"], str)
+            or fields["outcome"] not in {"committed", "failed"}
+            or not isinstance(fields["authoritative_fallback"], bool)
+        ):
+            fail(f"{daemon_log}: invalid outcome/fallback field")
+        phases = sum(numeric[key] for key in PHASE_FIELDS if key != "total_us")
+        if abs(phases - numeric["total_us"]) > max(2_000, numeric["total_us"] // 100):
+            fail(f"{daemon_log}: phase sum does not materially close")
+        records.append((epoch_us, fields, numeric, counts))
+    if any(left[0] >= right[0] for left, right in zip(records, records[1:])):
+        fail(f"{daemon_log}: phase records are reordered")
+
+    bound = []
+    for index, (reload_number, start) in enumerate(triggers):
+        end = triggers[index + 1][1] if index + 1 < len(triggers) else None
+        matches = [record for record in records if record[0] >= start and (end is None or record[0] < end)]
+        if len(matches) != 1:
+            fail(f"reload {reload_number}: expected exactly one phase record, found {len(matches)}")
+        bound.append((reload_number, matches[0]))
+
+    header = ("reload", "timestamp_epoch_us", "total_targets", "cohort_targets", "remainder_targets",
+              "refresh_count", "outcome", "authoritative_fallback", *PHASE_FIELDS)
+    with output.open("w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(header)
+        for reload_number, (epoch_us, fields, numeric, counts) in bound:
+            writer.writerow((reload_number, epoch_us, counts["total_targets"], counts["cohort_targets"],
+                             counts["remainder_targets"], counts["refresh_count"], fields["outcome"],
+                             str(fields["authoritative_fallback"]).lower(), *(numeric[key] for key in PHASE_FIELDS)))
 
 
 def quoted(text: str, position: int) -> tuple[str, int]:
@@ -1390,14 +1481,24 @@ def validate_root(root: Path, kind: str):
     if actual_shape != CANONICAL_SHAPE or int(inputs.get("reloads", -1)) != 4:
         fail(f"{root}: noncanonical full shape/seed/reload count")
     commit = git.get("commit")
+    origin_main = git.get("origin_main")
+    measurement_mode = git.get("measurement_mode")
+    source_relation_valid = (
+        measurement_mode == "main"
+        and origin_main == commit
+        and git.get("head_matches_origin_main") is True
+    ) or (
+        measurement_mode == "candidate"
+        and git.get("head_matches_origin_main") is (origin_main == commit)
+    )
     if (
         not isinstance(commit, str)
         or not re.fullmatch(r"[0-9a-f]{40}", commit)
-        or not isinstance(git.get("origin_main"), str)
-        or not re.fullmatch(r"[0-9a-f]{40}", git.get("origin_main"))
+        or not isinstance(origin_main, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", origin_main)
         or git.get("dirty") is not False
-        or git.get("origin_main") != commit
-        or git.get("head_matches_origin_main") is not True
+        or not source_relation_valid
+        or git.get("ancestry_verified") is not True
         or not re.fullmatch(r"[0-9a-f]{64}", git.get("dirty_state_sha256", ""))
         or set(git)
         != {
@@ -1406,6 +1507,8 @@ def validate_root(root: Path, kind: str):
             "dirty_state_sha256",
             "origin_main",
             "head_matches_origin_main",
+            "measurement_mode",
+            "ancestry_verified",
         }
     ):
         fail(f"{root}: full source/preflight contract not proven")
@@ -1765,7 +1868,7 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
     provenance = {
         "schema": 3,
         "started_at_epoch_ns": started,
-        "git": {"commit": "c" * 40, "dirty": False, "dirty_state_sha256": "d" * 64, "origin_main": "c" * 40, "head_matches_origin_main": True},
+        "git": {"commit": "c" * 40, "dirty": False, "dirty_state_sha256": "d" * 64, "origin_main": "c" * 40, "head_matches_origin_main": True, "measurement_mode": "main", "ancestry_verified": True},
         "scripts": {"runner": "1" * 64, "verifier": "2" * 64, "generator": "3" * 64, "rss_sampler": "4" * 64, "txn_apply": "5" * 64, "txn_lifecycle": "a" * 64},
         "binaries": {"reloadstall": "6" * 64, "rustbgpd": "7" * 64, "rbgp": "8" * 64, "rs_config_render": "9" * 64},
         "environment": {key: "fixture" for key in ("rustc", "cargo", "python", "jq", "docker", "kernel", "cpu_model")},
@@ -1954,6 +2057,54 @@ def rebind_provenance(root: Path) -> None:
 
 
 def self_test() -> None:
+    with tempfile.TemporaryDirectory() as phase_tmp:
+        root = Path(phase_tmp)
+        reload_log = root / "reload.log"
+        daemon_log = root / "daemon.log"
+        output = root / "phases.csv"
+        reload_log.write_text(
+            "reload 1 SIGHUP wall_us=8635464000000000 policy=b\n"
+            "reload 2 SIGHUP wall_us=8635464001000000 policy=a\n"
+        )
+        def phase_line(second: int, outcome: str, fallback: bool) -> str:
+            fields = {
+                "message": "reload generation phase timing", "target": "reload_generation_phase",
+                "total_targets": 320, "cohort_targets": 300, "remainder_targets": 20,
+                "refresh_count": 32, "outcome": outcome, "authoritative_fallback": fallback,
+                "preflight_us": 10, "cohort_selection_us": 20,
+                "cohort_prestage_session_apply_us": 30, "cohort_rib_transition_us": 40,
+                "authoritative_remainder_apply_us": 50, "deferred_refresh_dispatch_us": 60,
+                "convergence_check_us": 70, "total_us": 300, "unattributed_us": 20,
+            }
+            return json.dumps({"timestamp": f"2243-08-25T12:00:0{second}.000001Z", "level": "INFO",
+                               "fields": fields, "target": "rustbgpd::peer_manager::policy"}) + "\n"
+        daemon_log.write_text(phase_line(0, "committed", False) + phase_line(1, "failed", True))
+        validate_reload_phases(daemon_log, reload_log, output)
+        assert [
+            int(row["timestamp_epoch_us"])
+            for row in csv.DictReader(output.open())
+        ] == [8635464000000001, 8635464001000001]
+        original = daemon_log.read_text()
+        non_numeric = json.loads(phase_line(0, "committed", False))
+        non_numeric["fields"]["preflight_us"] = None
+        non_string_outcome = json.loads(phase_line(0, "committed", False))
+        non_string_outcome["fields"]["outcome"] = []
+        for broken in (
+            phase_line(0, "committed", False),
+            original + phase_line(1, "failed", True),
+            "null\n" + original,
+            json.dumps({"fields": []}) + "\n" + original,
+            json.dumps(non_numeric) + "\n" + phase_line(1, "failed", True),
+            json.dumps(non_string_outcome) + "\n" + phase_line(1, "failed", True),
+        ):
+            daemon_log.write_text(broken)
+            try:
+                validate_reload_phases(daemon_log, reload_log, output)
+            except InvalidReceipt:
+                pass
+            else:
+                fail("reload phase self-test accepted a missing/duplicate record")
+
     proofs = {}
     with tempfile.TemporaryDirectory() as directory:
         base = Path(directory)
@@ -2465,6 +2616,8 @@ def self_test() -> None:
         rejected("dirty-commit", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"dirty": True})))
         rejected("origin-only", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"origin_main": "e" * 40})))
         rejected("head-matches-false", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"head_matches_origin_main": False})))
+        rejected("ancestry-unverified", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"ancestry_verified": False})))
+        rejected("measurement-mode-invalid", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"measurement_mode": "branch"})))
         rejected("mismatched-commit", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"commit": "d" * 40, "origin_main": "d" * 40})))
         rejected("commit-malformed", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"commit": "C" * 40, "origin_main": "C" * 40})))
         rejected("scripts-null", lambda root: alter_json(root / "provenance.json", lambda data: data.update({"scripts": None})))
@@ -2674,7 +2827,7 @@ def self_test() -> None:
                 proofs[name] = True
         grouped_pair_drift("cross-role-environment", "environment", "cpu_model", "other-platform")
         grouped_pair_drift("cross-role-source-identity", "binaries", "rbgp", "a" * 64)
-        expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "origin-only", "head-matches-false", "mismatched-commit", "commit-malformed", "scripts-null", "scripts-empty-map", "binary-malformed", "fingerprint-recompute", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "cell-root-provenance", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "cell-provenance", "evidence-roster", "scenario-roster", "scenario-duplicate", "scenario-unsafe-path", "scenario-retained-config", "cell-root-rows", "reload-log-rows", "percentile-order", "percentile-positive", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "seal-checksum", "exact-root-roster", "symlink-anywhere", "writable-root", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-role-source-identity"}
+        expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "origin-only", "head-matches-false", "ancestry-unverified", "measurement-mode-invalid", "mismatched-commit", "commit-malformed", "scripts-null", "scripts-empty-map", "binary-malformed", "fingerprint-recompute", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "cell-root-provenance", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "cell-provenance", "evidence-roster", "scenario-roster", "scenario-duplicate", "scenario-unsafe-path", "scenario-retained-config", "cell-root-rows", "reload-log-rows", "percentile-order", "percentile-positive", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "seal-checksum", "exact-root-roster", "symlink-anywhere", "writable-root", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-role-source-identity"}
         expected |= {"current-down", "reestablished", "flapped", "counter-malformed", "establishment-roster", "flap-roster", "row-session-loss"}
         expected |= {"preflip-private", "lane-gauge"}
         expected |= set(
@@ -2729,6 +2882,10 @@ def main() -> int:
     inspect.add_argument("--confirm-id", required=True)
     marker = subparsers.add_parser("inspect-generation")
     marker.add_argument("config", type=Path)
+    phases = subparsers.add_parser("reload-phases")
+    phases.add_argument("--daemon-log", required=True, type=Path)
+    phases.add_argument("--reload-log", required=True, type=Path)
+    phases.add_argument("--output", required=True, type=Path)
     subparsers.add_parser("self-test")
     args = parser.parse_args()
     try:
@@ -2759,6 +2916,8 @@ def main() -> int:
             )
         elif args.command == "inspect-generation":
             print(generation_marker(args.config))
+        elif args.command == "reload-phases":
+            validate_reload_phases(args.daemon_log, args.reload_log, args.output)
         else:
             self_test()
     except (InvalidReceipt, OSError, KeyError, TypeError, ValueError) as error:

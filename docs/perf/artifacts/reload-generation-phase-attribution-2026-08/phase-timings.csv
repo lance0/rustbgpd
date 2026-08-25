@@ -1,0 +1,9 @@
+root,reload,total_targets,cohort_targets,remainder_targets,refresh_count,outcome,authoritative_fallback,preflight_us,cohort_selection_us,cohort_prestage_session_apply_us,cohort_rib_transition_us,authoritative_remainder_apply_us,deferred_refresh_dispatch_us,convergence_check_us,total_us,unattributed_us
+A,1,320,320,0,320,committed,true,35,5819,3200,422785,1,41315,56,478614,5403
+A,2,320,320,0,320,committed,true,33,5454,3127,1717319,1,56623,46,1787955,5352
+A,3,320,320,0,320,committed,true,44,5822,3156,1719895,0,53828,46,1788161,5370
+A,4,320,320,0,320,committed,true,33,5708,3131,1654389,1,48831,30,1717344,5221
+B,1,320,320,0,320,committed,true,34,5438,2646,393732,1,55268,38,462544,5387
+B,2,320,320,0,320,committed,true,36,5201,3584,1743026,0,62365,18,1819660,5430
+B,3,320,320,0,320,committed,true,35,5466,2793,1735606,1,58642,62,1807973,5368
+B,4,320,320,0,320,committed,true,32,5359,3245,1752889,1,51970,24,1820008,6488
