@@ -74,19 +74,22 @@
 //! `docs/perf/exact-export-fanout-2026-07.md`.
 
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 
+use bytes::Bytes;
 use rustbgpd_policy::{
     NeighborSetMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
 };
 use rustbgpd_rib::RibManager;
 use rustbgpd_rib::manager::{AdjRibOutFanoutBenchReceipt, PolicyTransitionBenchReceipt};
 use rustbgpd_rib::route::{Route, RouteOrigin};
-use rustbgpd_rib::update::{ExactExportEncoder, OutboundRouteUpdate, RibUpdate};
+use rustbgpd_rib::update::{
+    ExactExportCandidate, ExactExportEncoder, OutboundRouteUpdate, RibUpdate,
+};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{
     FanoutBenchExportSnapshotEvidence, fanout_bench_add_path_export_encoder,
@@ -94,7 +97,8 @@ use rustbgpd_transport::{
     fanout_bench_route_server_export_encoder,
 };
 use rustbgpd_wire::{
-    Afi, AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix, RpkiValidation, Safi,
+    Afi, AsPath, AsPathSegment, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity, Origin,
+    PathAttribute, Prefix, RawAttribute, RpkiValidation, Safi,
 };
 use tokio::sync::mpsc;
 
@@ -168,6 +172,50 @@ fn make_route_with_med(prefix: Prefix, med: u32) -> Route {
 
 fn make_route(prefix: Prefix) -> Route {
     make_route_with_med(prefix, 50)
+}
+
+fn mp_prefix(index: usize, prefix_len: u8) -> Prefix {
+    Prefix::V6(Ipv6Prefix::new(
+        Ipv6Addr::from(0x2001_0db8_1000_0000_0000_0000_0000_0000_u128 | ((index as u128) << 64)),
+        prefix_len,
+    ))
+}
+
+fn mp_route(index: usize, prefix_len: u8, attributes: Arc<Vec<PathAttribute>>) -> Route {
+    let mut route = make_route(mp_prefix(index, prefix_len));
+    route.prefix = mp_prefix(index, prefix_len);
+    route.next_hop = IpAddr::V6(Ipv6Addr::from(
+        0x2001_0db8_ffff_0000_0000_0000_0000_0001_u128,
+    ));
+    route.attributes = attributes;
+    route
+}
+
+fn rich_mp_attributes(index: usize) -> Arc<Vec<PathAttribute>> {
+    Arc::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![
+                AsPathSegment::AsSequence(vec![65_000, 65_001, 65_002, 65_003]),
+                AsPathSegment::AsSequence(vec![65_010, 65_011]),
+            ],
+        }),
+        PathAttribute::LocalPref(100),
+        PathAttribute::Med(u32::try_from(index).expect("benchmark index fits u32")),
+        PathAttribute::Communities((0..32).map(|value| 0xFDE8_0000 + value).collect()),
+        PathAttribute::ExtendedCommunities(vec![ExtendedCommunity::new(0x0002_FDE8_0000_0007)]),
+        PathAttribute::LargeCommunities(vec![LargeCommunity::new(65_000, 7, 9)]),
+        PathAttribute::OriginatorId(Ipv4Addr::new(192, 0, 2, 9)),
+        PathAttribute::ClusterList(vec![
+            Ipv4Addr::new(192, 0, 2, 10),
+            Ipv4Addr::new(192, 0, 2, 11),
+        ]),
+        PathAttribute::Unknown(RawAttribute {
+            flags: 0xE0,
+            type_code: 99,
+            data: Bytes::from(vec![0x5A; 96]),
+        }),
+    ])
 }
 
 fn changed_prefixes() -> Vec<Prefix> {
@@ -2192,6 +2240,103 @@ fn bench_policy_regroup_resync(c: &mut Criterion) {
     group.finish();
 }
 
+fn assert_exact_probe_results(
+    results: &[Result<rustbgpd_rib::ExactExportResult, rustbgpd_rib::ExactExportError>],
+    expected: usize,
+) {
+    assert_eq!(results.len(), expected, "probe cardinality must be exact");
+    for result in results {
+        let result = result.as_ref().expect("every MP export probe must succeed");
+        assert!(
+            result.encoded_len > 19,
+            "MP UPDATE must have a nonempty body"
+        );
+        assert!(result.encoded_len <= result.max_len);
+    }
+}
+
+fn bench_mp_exact_export_probe(c: &mut Criterion) {
+    let encoder = fanout_bench_export_encoder();
+    let snapshot = encoder.snapshot();
+    let shared_attributes = Arc::new(typical_attributes());
+    let same_shape_routes = (0..64)
+        .map(|index| mp_route(index, 64, Arc::clone(&shared_attributes)))
+        .collect::<Vec<_>>();
+    let distinct_shape_routes = (0..64)
+        .map(|index| mp_route(index, 64, Arc::new(typical_attributes())))
+        .collect::<Vec<_>>();
+    let rich_routes = (0..50)
+        .map(|index| mp_route(index, 64, rich_mp_attributes(index)))
+        .collect::<Vec<_>>();
+    let same_shape_one = [ExactExportCandidate::Unicast {
+        route: &same_shape_routes[0],
+        next_hop_override: None,
+    }];
+    let same_shape_many = same_shape_routes
+        .iter()
+        .map(|route| ExactExportCandidate::Unicast {
+            route,
+            next_hop_override: None,
+        })
+        .collect::<Vec<_>>();
+    let distinct_shape_many = distinct_shape_routes
+        .iter()
+        .map(|route| ExactExportCandidate::Unicast {
+            route,
+            next_hop_override: None,
+        })
+        .collect::<Vec<_>>();
+    let rich_candidates = rich_routes
+        .iter()
+        .map(|route| ExactExportCandidate::Unicast {
+            route,
+            next_hop_override: None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_exact_probe_results(&snapshot.probe_announcements(&same_shape_one), 1);
+    assert_exact_probe_results(&snapshot.probe_announcements(&same_shape_many), 64);
+    assert_exact_probe_results(&snapshot.probe_announcements(&distinct_shape_many), 64);
+    let rich_setup = rich_candidates
+        .iter()
+        .map(|candidate| snapshot.probe_announcement(*candidate))
+        .collect::<Vec<_>>();
+    assert_exact_probe_results(&rich_setup, 50);
+
+    let mut group = c.benchmark_group("mp_exact_export_probe");
+    group.bench_function("same_shape/1", |bench| {
+        bench.iter(|| {
+            std::hint::black_box(
+                snapshot.probe_announcements(std::hint::black_box(&same_shape_one)),
+            )
+        });
+    });
+    group.bench_function("same_shape/64", |bench| {
+        bench.iter(|| {
+            std::hint::black_box(
+                snapshot.probe_announcements(std::hint::black_box(&same_shape_many)),
+            )
+        });
+    });
+    group.bench_function("distinct_shape/64", |bench| {
+        bench.iter(|| {
+            std::hint::black_box(
+                snapshot.probe_announcements(std::hint::black_box(&distinct_shape_many)),
+            )
+        });
+    });
+    group.bench_function("rich_scalar/50", |bench| {
+        bench.iter(|| {
+            for candidate in &rich_candidates {
+                let _ = std::hint::black_box(
+                    snapshot.probe_announcement(std::hint::black_box(*candidate)),
+                );
+            }
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_fanout,
@@ -2204,6 +2349,7 @@ criterion_group!(
     bench_initial_table_peer_join,
     bench_add_path_export_staging,
     bench_policy_regroup_resync,
-    bench_ixp_policy_regroup_resync
+    bench_ixp_policy_regroup_resync,
+    bench_mp_exact_export_probe
 );
 criterion_main!(benches);
