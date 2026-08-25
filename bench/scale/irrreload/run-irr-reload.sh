@@ -44,6 +44,7 @@ SAMPLER="$REPO/bench/scale/matrix/rss-sampler.sh"
 TXN_APPLY="$REPO/bench/scale/irrreload/txn-apply.sh"
 TXN_LIFECYCLE="$REPO/bench/scale/irrreload/txn-lifecycle.sh"
 VERIFY="$REPO/bench/scale/irrreload/verify-receipt.py"
+STAGE_DATASETS="$REPO/bench/scale/irrreload/stage-rustbgpd-datasets.sh"
 RBGP="$REPO/target/release/rbgp"
 RENDER="$REPO/target/release/rs-config-render"
 DAEMON="$REPO/target/release/rustbgpd"
@@ -76,6 +77,11 @@ SIGHUP_ONLY=false
 if [ ${#CELLS[@]} -eq 1 ] && [ "${CELLS[0]}" = rustbgpd-sighup ]; then
     SIGHUP_ONLY=true
 fi
+LAN1233_DATASET_AB=${LAN1233_DATASET_AB:-}
+if [ -n "$LAN1233_DATASET_AB" ] && [ "$LAN1233_DATASET_AB" != 1 ]; then
+    echo "LAN1233_DATASET_AB must be 1 when set" >&2
+    exit 2
+fi
 if [ -z "$SMOKE" ] && [[ " ${CELLS[*]} " == *" rustbgpd-txn "* ]] &&
     [ "$TXN_ONLY" != true ]; then
     echo "rustbgpd-txn must use a separate measured campaign and ARTIFACTS_DIR" >&2
@@ -107,6 +113,11 @@ fi
 SEED="${SEED:-61}"
 CHANGED_FRACTION="${CHANGED_FRACTION:-0.1}"
 OVERLAP_FRACTION="${OVERLAP_FRACTION:-0}"
+if [ "$LAN1233_DATASET_AB" = 1 ] &&
+    { [ -n "$SMOKE" ] || [ "$SIGHUP_ONLY" != true ] || [ "$CHANGED_FRACTION" != 1.0 ]; }; then
+    echo "LAN1233_DATASET_AB=1 requires one full rustbgpd-sighup CHANGED_FRACTION=1.0 campaign" >&2
+    exit 2
+fi
 awk -v f="$OVERLAP_FRACTION" 'BEGIN { exit !(f ~ /^[0-9]+([.][0-9]+)?$/ && f + 0 >= 0 && f + 0 < 1) }' || {
     echo "OVERLAP_FRACTION must be a decimal in [0, 1)" >&2
     exit 2
@@ -243,8 +254,10 @@ if [ -z "$SMOKE" ]; then
         echo "full measurement source gate failed: require clean exact main or exact descendant candidate" >&2
         exit 2
     fi
-    if [ "$N_MEMBERS,$TOTAL_PREFIXES,$MIN_LIST,$MAX_LIST,$SEED,$RELOADS,$CHANGED_FRACTION,$PORT,$CONTROL_SECS,$TXN_MAX_CANDIDATE_BYTES,$CELL_TIMEOUT,$START_TIMEOUT,$BIRD_THREADS" != \
-        "320,183040,1000,40000,61,4,0.1,1790,30,402653184,7200,600,8" ]; then
+    canonical_knobs="$N_MEMBERS,$TOTAL_PREFIXES,$MIN_LIST,$MAX_LIST,$SEED,$RELOADS,$PORT,$CONTROL_SECS,$TXN_MAX_CANDIDATE_BYTES,$CELL_TIMEOUT,$START_TIMEOUT,$BIRD_THREADS"
+    if [ "$canonical_knobs" != "320,183040,1000,40000,61,4,1790,30,402653184,7200,600,8" ] ||
+        { [ "$CHANGED_FRACTION" != 0.1 ] &&
+            ! { [ "$LAN1233_DATASET_AB" = 1 ] && [ "$CHANGED_FRACTION" = 1.0 ]; }; }; then
         echo "full measured campaigns require canonical workload knobs" >&2
         exit 2
     fi
@@ -335,6 +348,7 @@ CAMPAIGN_PROVENANCE=$(jq -cn \
     --arg run_script_sha256 "$(hash_file "$REPO/bench/scale/irrreload/run-irr-reload.sh")" \
     --arg verifier_sha256 "$(hash_file "$VERIFY")" \
     --arg generator_sha256 "$(hash_file "$GEN")" \
+    --arg stage_datasets_sha256 "$(hash_file "$STAGE_DATASETS")" \
     --arg sampler_sha256 "$(hash_file "$SAMPLER")" \
     --arg txn_apply_sha256 "$(hash_file "$TXN_APPLY")" \
     --arg txn_lifecycle_sha256 "$(hash_file "$TXN_LIFECYCLE")" \
@@ -360,7 +374,7 @@ CAMPAIGN_PROVENANCE=$(jq -cn \
     --arg cpu_model "$(awk -F: '/^model name/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }' /proc/cpuinfo)" \
     --arg bird_image "$BIRD_IMAGE" --arg bird_image_id "$BIRD_IMAGE_ID" \
     --arg openbgpd_image "$OPENBGPD_IMAGE" --arg openbgpd_image_id "$OPENBGPD_IMAGE_ID" \
-    '{schema:4,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,tree:$tree,dirty:$dirty,dirty_state_sha256:$dirty_state_sha256,origin_main:$origin_main,head_matches_origin_main:$head_matches_origin_main,measurement_mode:$measurement_mode,ancestry_verified:$ancestry_verified},scripts:{runner:$run_script_sha256,verifier:$verifier_sha256,generator:$generator_sha256,rss_sampler:$sampler_sha256,txn_apply:$txn_apply_sha256,txn_lifecycle:$txn_lifecycle_sha256},binaries:{reloadstall:$harness_sha256,rustbgpd:$daemon_sha256,rbgp:$cli_sha256,rs_config_render:$renderer_sha256},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,overlap_fraction:$overlap_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
+    '{schema:4,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,tree:$tree,dirty:$dirty,dirty_state_sha256:$dirty_state_sha256,origin_main:$origin_main,head_matches_origin_main:$head_matches_origin_main,measurement_mode:$measurement_mode,ancestry_verified:$ancestry_verified},scripts:{runner:$run_script_sha256,verifier:$verifier_sha256,generator:$generator_sha256,stage_datasets:$stage_datasets_sha256,rss_sampler:$sampler_sha256,txn_apply:$txn_apply_sha256,txn_lifecycle:$txn_lifecycle_sha256},binaries:{reloadstall:$harness_sha256,rustbgpd:$daemon_sha256,rbgp:$cli_sha256,rs_config_render:$renderer_sha256},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,overlap_fraction:$overlap_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
 CAMPAIGN_FINGERPRINT=$(printf '%s' "$CAMPAIGN_PROVENANCE" | jq -cS . | sha256sum | cut -d' ' -f1) || exit 1
 SEALED_CAMPAIGN_PROVENANCE=$(printf '%s\n' "$CAMPAIGN_PROVENANCE" | jq -cS \
     --arg fingerprint "$CAMPAIGN_FINGERPRINT" '. + {fingerprint:$fingerprint}') || exit 1
@@ -475,6 +489,9 @@ seal_cell_evidence() {
         ;;
     rustbgpd-sighup | "$GROUPED_CELL")
         evidence_files+=(config.toml topology.json topology.tsv metrics-1.prom metrics-2.prom metrics-3.prom metrics-mid.prom phase-timings.csv pre-churn/ready pre-churn/ack received-view.tsv)
+        if jq -e '.rustbgpd_dataset_mode == true' "$cdir/manifest.json" >/dev/null 2>&1; then
+            evidence_files+=(dataset-refresh-summary.csv)
+        fi
         [ "$CAMPAIGN_KIND" != full-rustbgpd-sighup ] || evidence_files+=(authoritative-phase-timings.csv)
         ;;
     esac
@@ -493,7 +510,7 @@ seal_cell_evidence() {
 }
 
 seal_scenario() {
-    local run=$1 cdir=$2 path digest
+    local run=$1 cdir=$2 path digest generation
     local -a runtime_files=()
     mapfile -t runtime_files < <(
         jq -er '.runtime_files | select(type == "array" and length > 0)[]' \
@@ -501,9 +518,29 @@ seal_scenario() {
     ) || return 1
     [ ${#runtime_files[@]} -gt 0 ] || return 1
     : >"$cdir/scenario.sha256"
-    for path in "${runtime_files[@]}" manifest.json; do
+    local -a bound_files=("${runtime_files[@]}")
+    if jq -e '.rustbgpd_dataset_mode == true' "$run/manifest.json" >/dev/null 2>&1; then
+        path=$(jq -er '.static_policy_manifest' "$run/manifest.json") || return 1
+        digest=$(jq -er '.static_policy_manifest_sha256' "$run/manifest.json") || return 1
+        [ "$(hash_file "$run/$path")" = "$digest" ] || return 1
+        (cd "$run" && sha256sum --check --strict --status "$path") || return 1
+        bound_files+=("$path")
+        for generation in a b; do
+            path=$(jq -er --arg generation "$generation" \
+                '.dataset_generation_manifests[$generation]' "$run/manifest.json") || return 1
+            digest=$(jq -er --arg generation "$generation" \
+                '.dataset_generation_manifest_sha256[$generation]' "$run/manifest.json") || return 1
+            [ "$(hash_file "$run/$path")" = "$digest" ] || return 1
+            (cd "$run/render-$generation" && sha256sum --check --strict --status "$run/$path") || return 1
+            if [ "$generation" = a ]; then
+                (cd "$run" && sha256sum --check --strict --status "$path") || return 1
+            fi
+            bound_files+=("$path")
+        done
+    fi
+    for path in "${bound_files[@]}" manifest.json; do
         case $path in
-        '' | /* | */* | *..*)
+        '' | /* | *../* | */.. | *//*)
             echo "invalid runtime input path in manifest: $path" >&2
             return 1
             ;;
@@ -750,7 +787,7 @@ run_cell() {
     mkdir -p "$cdir" || return 1
     mkdir -m 0700 -- "$run" || return 1
     local daemon_pid="" daemon_start="" container="" reload_cmd="" pid_arg="" topology_mode="" barrier="" final_barrier="" final_acked=false
-    local live a b entries generator_cell=$cell
+    local live a b entries generator_cell=$cell dataset_stage_cmd=""
     CELL_SCENARIO_SHA256=""
     CELL_DATASET_SHA256=""
     CELL_EVIDENCE_SHA256=""
@@ -763,6 +800,10 @@ run_cell() {
         daemon_pid=$!
         ACTIVE_DAEMON_PID=$daemon_pid
         live="$run/member.rpol" a="$run/gen-a.rpol" b="$run/gen-b.rpol"
+        if jq -e '.rustbgpd_dataset_mode == true' "$run/manifest.json" >/dev/null; then
+            dataset_stage_cmd=$(python3 -c 'import shlex,sys; print(shlex.join(sys.argv[1:]))' \
+                "$STAGE_DATASETS" "$run") || return 1
+        fi
         pid_arg=$daemon_pid
         topology_mode=private
         ;;
@@ -775,6 +816,10 @@ run_cell() {
         daemon_pid=$!
         ACTIVE_DAEMON_PID=$daemon_pid
         live="$run/member.rpol" a="$run/gen-a.rpol" b="$run/gen-b.rpol"
+        if jq -e '.rustbgpd_dataset_mode == true' "$run/manifest.json" >/dev/null; then
+            dataset_stage_cmd=$(python3 -c 'import shlex,sys; print(shlex.join(sys.argv[1:]))' \
+                "$STAGE_DATASETS" "$run") || return 1
+        fi
         pid_arg=$daemon_pid
         topology_mode=grouped
         ;;
@@ -856,6 +901,7 @@ run_cell() {
     final_barrier="$run/final-evidence"
     [ ! -e "$final_barrier" ] || return 1
     local -a henv=(RELOADSTALL_EVIDENCE_DIR="$final_barrier")
+    [ -z "$dataset_stage_cmd" ] || henv+=(RELOADSTALL_STAGE_CMD="$dataset_stage_cmd")
     # The generator emits overlap.tsv only at OVERLAP_FRACTION > 0; every
     # cell's stubs must announce the same second-announcer allocation.
     [ ! -f "$run/overlap.tsv" ] || henv+=(RELOADSTALL_OVERLAP_FILE="$run/overlap.tsv")
@@ -968,6 +1014,13 @@ run_cell() {
             --reload-log "$cdir/reloadstall.log" --output "$cdir/phase-timings.csv"; then
         echo "cell $cell: reload phase attribution validation failed" >&2
         rc=90
+    fi
+    if [ -n "$dataset_stage_cmd" ] && [ "$rc" -eq 0 ] &&
+        ! python3 "$VERIFY" dataset-refresh --daemon-log "$cdir/daemon.log" \
+            --reload-log "$cdir/reloadstall.log" --manifest "$run/manifest.json" \
+            --output "$cdir/dataset-refresh-summary.csv"; then
+        echo "cell $cell: dataset refresh summary validation failed" >&2
+        rc=88
     fi
     if [ "$CAMPAIGN_KIND" = full-rustbgpd-sighup ] && [ "$rc" -eq 0 ] &&
         ! python3 "$VERIFY" authoritative-discriminator --daemon-log "$cdir/daemon.log" \

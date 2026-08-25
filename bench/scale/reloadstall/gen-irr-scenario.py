@@ -7,19 +7,19 @@ generators (stub `i` binds 127.1.(i//200).(i%200+1), ASN 64512+i, announces
 blocks), but the policy being reloaded is an IRR-scale member policy: every
 member carries an IRR-style filter list (its announced slice + its churn
 block + deterministic padding prefixes drawn from 30.0.0.0-99.255.255.0),
-sized log-uniformly between --min-list and --max-list entries. The whole
-generation-varying policy lives in ONE file per daemon, so the harness's
-frozen copy-then-reload contract drives every cell unchanged.
+sized log-uniformly between --min-list and --max-list entries. The harness's
+frozen marker copy remains the generation selector; dataset-aware rustbgpd
+renders additionally stage only changed external dataset files before SIGHUP.
 
 Cells:
   rustbgpd      SIGHUP parse-then-swap cell. The member policy is rendered by
                 `rs-config-render` (the production IRR pipeline renderer) from
                 a synthetic `arouteserver template-context` document built
                 from the dataset; the rendered rs-hygiene + per-client .rpol
-                files are concatenated (plus the generation marker export
-                policy) into gen-a.rpol/gen-b.rpol and the rendered
-                config.toml is patched for the loopback bench contract (see
-                patch_rendered_config for the exact, asserted edits).
+                files are preserved as independent units with per-client
+                external datasets. Generation manifests bind immutable A/B
+                dataset sources and a live datasets/ tree; old renderers with
+                no dataset bindings retain the concatenated gen-a/gen-b form.
   rustbgpd-txn  gRPC transactional cell. The config-transaction seam rejects
                 out-of-band .rpol content changes by design, so this cell
                 expresses the same dataset as inline [policy.definitions]
@@ -62,8 +62,10 @@ overlap_fraction/overlap_pairs. F=0 output is byte-identical to the
 pre-overlap generator (no new files or manifest keys).
 
 Emits into <out_dir> (per cell):
-  rustbgpd      config.toml, member.rpol (live, = gen-a), gen-a.rpol,
-                gen-b.rpol, render-{a,b}/ (rs-config-render output + receipt)
+  rustbgpd      config.toml, member.rpol (live marker, = gen-a), gen-a.rpol,
+                gen-b.rpol, render-{a,b}/ (rs-config-render output), plus
+                policy/, datasets/, and exact source manifests when the
+                renderer emits external datasets
   rustbgpd-txn  config.toml (boot, = gen-a), candidate.toml (live swap file),
                 gen-a.toml, gen-b.toml
   bird          bird.conf, gen.conf (live, = gen-a), gen-a.conf, gen-b.conf
@@ -79,8 +81,11 @@ import json
 import math
 import pathlib
 import random
+import re
+import shutil
 import subprocess
 import sys
+import tomllib
 
 CHURNERS = 8
 CHURN_BLOCK = 16
@@ -275,6 +280,8 @@ def write_manifest(
         # Keys are absent at F=0 so the default manifest stays byte-identical.
         manifest["overlap_fraction"] = args.overlap_fraction
         manifest["overlap_pairs"] = [list(pair) for pair in overlap]
+    if hasattr(args, "rustbgpd_dataset_metadata"):
+        manifest.update(args.rustbgpd_dataset_metadata)
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
 
 
@@ -453,6 +460,7 @@ def patch_rendered_config(
     port: int,
     rundir: pathlib.Path,
     bmp_collector: str | None = None,
+    dataset_mode: bool = False,
 ) -> str:
     """Adapt rs-config-render output to the loopback bench contract.
 
@@ -465,8 +473,10 @@ def patch_rendered_config(
         NEXT_HOP is not the peer address; BIRD/OpenBGPD cells get the
         equivalent accommodation: `next hop keep` glue / `nexthop qualify
         via default`) — replaced by the sibling generators' hold_time;
-      - rpol_files collapsed to the single swapped file; export chain
-        pointed at the generation marker policy.
+      - inline renderers collapse rpol_files to the single swapped file;
+        dataset renderers retain their independent hygiene/client units and
+        add the swapped generation marker unit;
+      - export chain pointed at the generation marker policy.
     """
 
     def replace_once(haystack: str, old: str, new: str) -> str:
@@ -489,7 +499,13 @@ def patch_rendered_config(
 
     files_start = text.index("rpol_files = [")
     files_end = text.index("]", files_start) + 1
-    text = text[:files_start] + 'rpol_files = ["member.rpol"' + text[files_end - 1 :]
+    if dataset_mode:
+        roster = text[files_start:files_end]
+        assert '"member.rpol"' not in roster
+        roster = roster[:-1].rstrip() + '\n    "member.rpol",\n]'
+        text = text[:files_start] + roster + text[files_end:]
+    else:
+        text = text[:files_start] + 'rpol_files = ["member.rpol"' + text[files_end - 1 :]
     text = replace_once(
         text,
         'export_chain = ["rs-transparent-export"]\n',
@@ -499,11 +515,97 @@ def patch_rendered_config(
     return text.rstrip() + "\n" + bench_bmp_block(bmp_collector)
 
 
+def rendered_rpol_roster(config: str) -> list[str]:
+    match = re.search(r"(?s)rpol_files\s*=\s*\[(.*?)\]", config)
+    assert match is not None, "rendered config has no rpol_files roster"
+    roster = re.findall(r'"([^"\n]+\.rpol)"', match.group(1))
+    assert roster and len(roster) == len(set(roster)), "invalid rendered rpol roster"
+    return roster
+
+
+def rendered_dataset_shape(render_dir: pathlib.Path, config: str) -> dict[str, tuple[str, str]]:
+    """Return dataset name -> (kind, relative path), or empty for old renderers."""
+    document = tomllib.loads(config)
+    bindings = document.get("policy", {}).get("datasets", {})
+    dataset_dir = render_dir / "datasets"
+    assert isinstance(bindings, dict), "rendered [policy.datasets] is not a table"
+    assert bool(bindings) == dataset_dir.is_dir(), (
+        "renderer must emit both [policy.datasets] bindings and datasets/"
+    )
+    if not bindings:
+        return {}
+
+    declarations: dict[str, str] = {}
+    for relative in rendered_rpol_roster(config):
+        path = pathlib.PurePosixPath(relative)
+        assert not path.is_absolute() and ".." not in path.parts
+        text = (render_dir / path).read_text()
+        for kind, name in re.findall(
+            r"(?m)^\s*dataset\s+(asn-set|prefix-set)\s+([A-Za-z_][A-Za-z0-9_-]*)\s*$",
+            text,
+        ):
+            assert name not in declarations, f"duplicate dataset declaration {name}"
+            declarations[name] = kind
+
+    shape: dict[str, tuple[str, str]] = {}
+    for name, binding in bindings.items():
+        assert name in declarations, f"binding without declaration: {name}"
+        assert isinstance(binding, dict) and set(binding) == {"path"}
+        relative = binding["path"]
+        assert isinstance(relative, str)
+        path = pathlib.PurePosixPath(relative)
+        assert (
+            not path.is_absolute()
+            and path.parts
+            and path.parts[0] == "datasets"
+            and ".." not in path.parts
+        ), f"unsafe dataset path {relative!r}"
+        assert (render_dir / path).is_file(), f"missing dataset file {relative}"
+        shape[name] = (declarations[name], path.as_posix())
+    assert set(declarations) == set(shape), "dataset declarations/bindings differ"
+    actual = {
+        path.relative_to(render_dir).as_posix()
+        for path in dataset_dir.rglob("*")
+        if path.is_file()
+    }
+    assert actual == {relative for _, relative in shape.values()}, (
+        "datasets/ contains unbound or missing files"
+    )
+    return shape
+
+
+def write_dataset_manifest(
+    out: pathlib.Path, render_dir: pathlib.Path, generation: str, paths: list[str]
+) -> tuple[str, str]:
+    name = f"gen-{generation}-datasets.sha256"
+    content = "".join(
+        f"{hashlib.sha256((render_dir / path).read_bytes()).hexdigest()}  {path}\n"
+        for path in sorted(paths)
+    )
+    manifest = out / name
+    manifest.write_text(content)
+    manifest.chmod(0o444)
+    return name, hashlib.sha256(content.encode()).hexdigest()
+
+
+def write_policy_manifest(out: pathlib.Path, paths: list[str]) -> tuple[str, str]:
+    name = "static-policy.sha256"
+    content = "".join(
+        f"{hashlib.sha256((out / path).read_bytes()).hexdigest()}  {path}\n"
+        for path in sorted(paths)
+    )
+    manifest = out / name
+    manifest.write_text(content)
+    manifest.chmod(0o444)
+    return name, hashlib.sha256(content.encode()).hexdigest()
+
+
 def emit_rustbgpd(args, members: list[Member], out: pathlib.Path) -> list[str]:
     if not args.render_bin:
         sys.exit("cell rustbgpd requires --render-bin (path to rs-config-render)")
     rundir = out.resolve()
     check_sun_len(rundir)
+    rendered: dict[str, tuple[pathlib.Path, str, list[str], dict[str, tuple[str, str]]]] = {}
     for gen in ("a", "b"):
         ctx = out / f"context-{gen}.json"
         ctx.write_text(
@@ -522,26 +624,93 @@ def emit_rustbgpd(args, members: list[Member], out: pathlib.Path) -> list[str]:
             stdout=subprocess.DEVNULL,
         )
         rendered_config = (render_dir / "config.toml").read_text()
-        # Concatenate the rendered policy files in the order config.toml
-        # references them, then append the generation marker policy.
-        parts = []
-        for line in rendered_config.splitlines():
-            line = line.strip()
-            if line.startswith('"policy/') and line.endswith('",'):
-                parts.append((render_dir / line.strip('",')).read_text())
-        assert len(parts) == len(members) + 1, "rendered rpol roster mismatch"
-        (out / f"gen-{gen}.rpol").write_text("".join(parts) + marker_policy_rpol(gen))
-        if gen == "a":
-            (out / "config.toml").write_text(
-                patch_rendered_config(
-                    rendered_config,
-                    len(members),
-                    args.port,
-                    rundir,
-                    args.bmp_collector,
-                )
+        roster = rendered_rpol_roster(rendered_config)
+        assert len(roster) == len(members) + 1, "rendered rpol roster mismatch"
+        rendered[gen] = (
+            render_dir,
+            rendered_config,
+            roster,
+            rendered_dataset_shape(render_dir, rendered_config),
+        )
+
+    dataset_mode = bool(rendered["a"][3])
+    assert dataset_mode == bool(rendered["b"][3]), "renderer capability changed by generation"
+    if not dataset_mode:
+        for gen in ("a", "b"):
+            render_dir, _, roster, _ = rendered[gen]
+            parts = [(render_dir / path).read_text() for path in roster]
+            (out / f"gen-{gen}.rpol").write_text(
+                "".join(parts) + marker_policy_rpol(gen)
             )
-    (out / "member.rpol").write_text((out / "gen-a.rpol").read_text())
+        (out / "member.rpol").write_text((out / "gen-a.rpol").read_text())
+        (out / "config.toml").write_text(
+            patch_rendered_config(
+                rendered["a"][1], len(members), args.port, rundir, args.bmp_collector
+            )
+        )
+    else:
+        a_dir, a_config, a_roster, a_shape = rendered["a"]
+        b_dir, _, b_roster, b_shape = rendered["b"]
+        assert a_roster == b_roster, "dataset renderer changed policy roster by generation"
+        assert a_shape == b_shape, "dataset renderer changed dataset roster by generation"
+        for relative in a_roster:
+            assert (a_dir / relative).read_bytes() == (b_dir / relative).read_bytes(), (
+                f"dataset renderer leaked generation content into {relative}"
+            )
+        shutil.copytree(a_dir / "policy", out / "policy")
+        shutil.copytree(a_dir / "datasets", out / "datasets")
+        for gen in ("a", "b"):
+            (out / f"gen-{gen}.rpol").write_text(marker_policy_rpol(gen))
+        (out / "member.rpol").write_text(marker_policy_rpol("a"))
+        (out / "config.toml").write_text(
+            patch_rendered_config(
+                a_config,
+                len(members),
+                args.port,
+                rundir,
+                args.bmp_collector,
+                dataset_mode=True,
+            )
+        )
+        dataset_paths = [relative for _, relative in a_shape.values()]
+        manifests, manifest_digests = {}, {}
+        for gen, render_dir in (("a", a_dir), ("b", b_dir)):
+            manifests[gen], manifest_digests[gen] = write_dataset_manifest(
+                out, render_dir, gen, dataset_paths
+            )
+        policy_manifest, policy_manifest_digest = write_policy_manifest(out, a_roster)
+        changed_by_kind = {"asn-set": 0, "prefix-set": 0}
+        for name, (kind, relative) in a_shape.items():
+            if (a_dir / relative).read_bytes() != (b_dir / relative).read_bytes():
+                changed_by_kind[kind] += 1
+        expected_changed = sum(member.changed for member in members)
+        assert changed_by_kind == {
+            "asn-set": 0,
+            "prefix-set": expected_changed,
+        }, "only changed member prefix datasets may differ"
+        if (
+            args.seed == 61
+            and args.n_members == 320
+            and args.total_prefixes == 183_040
+            and args.min_list == 1_000
+            and args.max_list == 40_000
+            and args.changed_fraction in (0.1, 1.0)
+        ):
+            expected = 36 if args.changed_fraction == 0.1 else 320
+            assert changed_by_kind["prefix-set"] == expected
+        args.rustbgpd_dataset_metadata = {
+            "rustbgpd_dataset_mode": True,
+            "policy_files": a_roster,
+            "static_policy_manifest": policy_manifest,
+            "static_policy_manifest_sha256": policy_manifest_digest,
+            "initial_dataset_generation": "a",
+            "dataset_generation_manifests": manifests,
+            "dataset_generation_manifest_sha256": manifest_digests,
+            "changed_dataset_files": {
+                "prefix": changed_by_kind["prefix-set"],
+                "asn": changed_by_kind["asn-set"],
+            },
+        }
     return ["config.toml", "member.rpol", "gen-a.rpol", "gen-b.rpol"]
 
 

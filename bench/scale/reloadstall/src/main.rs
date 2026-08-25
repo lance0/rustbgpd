@@ -34,6 +34,11 @@
 //!   each observer's final-generation received view (base prefixes seen
 //!   with the marker, BEFORE own-announcement exclusion) so the verifier
 //!   can compute the per-client-best vs grouped received-view delta.
+//! - `RELOADSTALL_STAGE_CMD` (env, SIGHUP reload mode only): after copying
+//!   the selected A/B marker file but before RSS sampling and the trigger
+//!   timestamp, run one `sh -c` staging command. The selected generation is
+//!   exported as `RELOADSTALL_STAGE_GENERATION=a|b`. A nonzero exit fails
+//!   before SIGHUP, so native trigger timing remains unchanged.
 //! - `--flapstorm K` (anywhere in argv): alternative mode replacing the
 //!   reload loop. After convergence + the control window, close the first
 //!   K stub sockets simultaneously, timestamp every survivor's receipt of
@@ -1831,6 +1836,7 @@ fn main() {
         std::env::var_os("RELOADSTALL_PRE_CHURN_EVIDENCE_DIR").map(PathBuf::from);
     let overlap_file = std::env::var_os("RELOADSTALL_OVERLAP_FILE").map(PathBuf::from);
     let received_view_file = std::env::var_os("RELOADSTALL_RECEIVED_VIEW_FILE").map(PathBuf::from);
+    let stage_cmd = std::env::var("RELOADSTALL_STAGE_CMD").ok();
     let notification_metrics_addr = std::env::var("RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR")
         .ok()
         .map(|value| value.parse::<SocketAddr>())
@@ -1884,6 +1890,11 @@ fn main() {
     assert!(
         evidence_dir.is_none() || final_evidence_allowed(reloads, flapstorm),
         "RELOADSTALL_EVIDENCE_DIR is not valid for flapstorm measurements"
+    );
+    assert!(
+        stage_cmd.is_none()
+            || (reloads > 0 && flapstorm.is_none() && !convergence_only && reload_cmd.is_none()),
+        "RELOADSTALL_STAGE_CMD requires the native SIGHUP reload mode"
     );
     if let Some(k) = flapstorm {
         assert!(
@@ -2312,6 +2323,18 @@ fn main() {
                 COMMUNITY_GEN_A
             };
             std::fs::copy(next, &policy_live).unwrap();
+            if let Some(cmd) = &stage_cmd {
+                let generation = if r % 2 == 1 { "b" } else { "a" };
+                let status = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .env("RELOADSTALL_STAGE_GENERATION", generation)
+                    .status();
+                if !matches!(&status, Ok(status) if status.success()) {
+                    eprintln!("reload {r} pre-trigger stage failed: {status:?}");
+                    std::process::exit(1);
+                }
+            }
             let rss_before = rss_mib(pid);
             for (i, observer) in ctx
                 .obs
@@ -2735,6 +2758,22 @@ mod tests {
         assert!(final_evidence_allowed(0, None));
         assert!(!final_evidence_allowed(0, Some(1)));
         assert!(!final_evidence_allowed(4, Some(1)));
+    }
+
+    #[test]
+    fn optional_stage_hook_precedes_sampling_and_trigger() {
+        let source = include_str!("main.rs");
+        let copy = source.find("std::fs::copy(next, &policy_live)").unwrap();
+        let stage = source
+            .find(".env(\"RELOADSTALL_STAGE_GENERATION\", generation)")
+            .unwrap();
+        let rss = source[stage..]
+            .find("let rss_before = rss_mib(pid)")
+            .unwrap()
+            + stage;
+        let trigger = source[rss..].find("let t_hup = now_us(&ctx)").unwrap() + rss;
+        assert!(copy < stage && stage < rss && rss < trigger);
+        assert_eq!(source.matches("RELOADSTALL_STAGE_CMD").count(), 4);
     }
 
     #[test]
