@@ -54,7 +54,7 @@ ASN datasets. A separate full-change control is admitted only as a standalone
 rustbgpd SIGHUP campaign:
 
 ```sh
-LAN1233_DATASET_AB=1 CHANGED_FRACTION=1.0 \
+DATASET_REFRESH_FULL_CHANGE=1 CHANGED_FRACTION=1.0 \
   ARTIFACTS_DIR=/tmp/irrreload-dataset-full \
   bench/scale/irrreload/run-irr-reload.sh rustbgpd-sighup
 ```

@@ -77,9 +77,9 @@ SIGHUP_ONLY=false
 if [ ${#CELLS[@]} -eq 1 ] && [ "${CELLS[0]}" = rustbgpd-sighup ]; then
     SIGHUP_ONLY=true
 fi
-LAN1233_DATASET_AB=${LAN1233_DATASET_AB:-}
-if [ -n "$LAN1233_DATASET_AB" ] && [ "$LAN1233_DATASET_AB" != 1 ]; then
-    echo "LAN1233_DATASET_AB must be 1 when set" >&2
+DATASET_REFRESH_FULL_CHANGE=${DATASET_REFRESH_FULL_CHANGE:-}
+if [ -n "$DATASET_REFRESH_FULL_CHANGE" ] && [ "$DATASET_REFRESH_FULL_CHANGE" != 1 ]; then
+    echo "DATASET_REFRESH_FULL_CHANGE must be 1 when set" >&2
     exit 2
 fi
 if [ -z "$SMOKE" ] && [[ " ${CELLS[*]} " == *" rustbgpd-txn "* ]] &&
@@ -113,9 +113,9 @@ fi
 SEED="${SEED:-61}"
 CHANGED_FRACTION="${CHANGED_FRACTION:-0.1}"
 OVERLAP_FRACTION="${OVERLAP_FRACTION:-0}"
-if [ "$LAN1233_DATASET_AB" = 1 ] &&
+if [ "$DATASET_REFRESH_FULL_CHANGE" = 1 ] &&
     { [ -n "$SMOKE" ] || [ "$SIGHUP_ONLY" != true ] || [ "$CHANGED_FRACTION" != 1.0 ]; }; then
-    echo "LAN1233_DATASET_AB=1 requires one full rustbgpd-sighup CHANGED_FRACTION=1.0 campaign" >&2
+    echo "DATASET_REFRESH_FULL_CHANGE=1 requires one full rustbgpd-sighup CHANGED_FRACTION=1.0 campaign" >&2
     exit 2
 fi
 awk -v f="$OVERLAP_FRACTION" 'BEGIN { exit !(f ~ /^[0-9]+([.][0-9]+)?$/ && f + 0 >= 0 && f + 0 < 1) }' || {
@@ -257,7 +257,7 @@ if [ -z "$SMOKE" ]; then
     canonical_knobs="$N_MEMBERS,$TOTAL_PREFIXES,$MIN_LIST,$MAX_LIST,$SEED,$RELOADS,$PORT,$CONTROL_SECS,$TXN_MAX_CANDIDATE_BYTES,$CELL_TIMEOUT,$START_TIMEOUT,$BIRD_THREADS"
     if [ "$canonical_knobs" != "320,183040,1000,40000,61,4,1790,30,402653184,7200,600,8" ] ||
         { [ "$CHANGED_FRACTION" != 0.1 ] &&
-            ! { [ "$LAN1233_DATASET_AB" = 1 ] && [ "$CHANGED_FRACTION" = 1.0 ]; }; }; then
+            ! { [ "$DATASET_REFRESH_FULL_CHANGE" = 1 ] && [ "$CHANGED_FRACTION" = 1.0 ]; }; }; then
         echo "full measured campaigns require canonical workload knobs" >&2
         exit 2
     fi
