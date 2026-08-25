@@ -86,6 +86,22 @@ fn emitted_1000_peer_scenario_is_all_ebgp_and_daemon_valid() {
 }
 
 #[test]
+fn irr_reload_phase_receipt_is_sealed_and_fail_closed() {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let runner = std::fs::read_to_string(format!("{root}/bench/scale/irrreload/run-irr-reload.sh"))
+        .expect("IRR reload runner");
+    let verifier =
+        std::fs::read_to_string(format!("{root}/bench/scale/irrreload/verify-receipt.py"))
+            .expect("IRR reload verifier");
+    assert!(runner.contains("reload-phases --daemon-log"));
+    assert!(runner.contains("phase-timings.csv"));
+    assert!(verifier.contains("expected exactly one phase record"));
+    assert!(verifier.contains("phase sum does not materially close"));
+    assert!(verifier.contains("phase records are reordered"));
+    assert!(verifier.contains("missing/duplicate record"));
+}
+
+#[test]
 /// Parse every shell script exercised by this integration target.
 fn irr_reload_shell_scripts_parse_as_bash() {
     let root = env!("CARGO_MANIFEST_DIR");

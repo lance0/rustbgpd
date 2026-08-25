@@ -407,7 +407,7 @@ seal_cell_evidence() {
         fi
         ;;
     rustbgpd-sighup | "$GROUPED_CELL")
-        evidence_files+=(config.toml topology.json topology.tsv metrics-1.prom metrics-2.prom metrics-3.prom metrics-mid.prom pre-churn/ready pre-churn/ack received-view.tsv)
+        evidence_files+=(config.toml topology.json topology.tsv metrics-1.prom metrics-2.prom metrics-3.prom metrics-mid.prom phase-timings.csv pre-churn/ready pre-churn/ack received-view.tsv)
         ;;
     esac
     : >"$cdir/evidence.sha256.tmp"
@@ -894,6 +894,12 @@ run_cell() {
     else
         terminate_process_group "$daemon_pid"
         ACTIVE_DAEMON_PID=""
+    fi
+    if [ -n "$topology_mode" ] && [ "$rc" -eq 0 ] &&
+        ! python3 "$VERIFY" reload-phases --daemon-log "$cdir/daemon.log" \
+            --reload-log "$cdir/reloadstall.log" --output "$cdir/phase-timings.csv"; then
+        echo "cell $cell: reload phase attribution validation failed" >&2
+        rc=90
     fi
     local sampler_rc=0
     wait "$sampler_pid" || sampler_rc=$?
