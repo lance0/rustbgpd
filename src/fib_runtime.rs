@@ -3040,6 +3040,23 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn setup_ipv6_unicast_netns(ns: &NetnsFixture) {
+        setup_unicast_netns(ns);
+        ns.exec(
+            "ip",
+            &[
+                "-6",
+                "addr",
+                "add",
+                "2001:db8::2/64",
+                "dev",
+                "fib0",
+                "nodad",
+            ],
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     fn setup_link_local_unicast_netns(ns: &NetnsFixture) {
         ns.exec(
             "ip",
@@ -3102,6 +3119,47 @@ mod tests {
             );
         }
         String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn route_show_v6(table_id: u32, prefix: &str) -> String {
+        let table = table_id.to_string();
+        let args = ["-6", "route", "show", "table", &table, "exact", prefix];
+        let out = Command::new("ip").args(args).output().expect("spawn");
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("FIB table does not exist") {
+                return String::new();
+            }
+            panic!(
+                "ip {args:?} failed: status={} stdout={} stderr={}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                stderr,
+            );
+        }
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn assert_raw_unresolved_errno(fib: &LinuxUnicastFib, route: FibRoute, expected: i32) {
+        let op = FibOp::Add(route);
+        let FibOp::Add(route) = &op else {
+            unreachable!()
+        };
+        let message = build_route_message(route, RouteMessageGateway::Include).unwrap();
+        let error = fib
+            .handle
+            .route()
+            .add(message)
+            .execute()
+            .await
+            .expect_err("unreachable gateway must fail");
+        let rtnetlink::Error::NetlinkError(message) = &error else {
+            panic!("expected structured netlink error, got {error:?}");
+        };
+        assert_eq!(message.raw_code(), expected);
+        assert!(is_next_hop_unresolved(&op, &error));
     }
 
     #[cfg(target_os = "linux")]
@@ -6331,6 +6389,13 @@ mod tests {
         let (status_tx, status_rx) = watch::channel(Vec::new());
         let (event_tx, mut event_rx) = broadcast::channel(16);
 
+        assert_raw_unresolved_errno(
+            &fib,
+            fib_route(prefix, ip("198.18.0.1")),
+            -libc::ENETUNREACH,
+        )
+        .await;
+
         reconcile_once_with_events(
             &config(),
             &rib_with_routes(vec![desired.clone()]),
@@ -6400,6 +6465,125 @@ mod tests {
         )
         .await;
         run("ip", &["route", "del", "198.18.0.0/24", "dev", "fib0"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the IPv6 netns scenario keeps errno proof, hold, event retry, and cleanup together"
+    )]
+    async fn netns_general_unicast_fib_ipv6_unresolved_retry_on_covering_route_event() {
+        if !netns_gate() {
+            eprintln!(
+                "skipping: set EVPN_LINUX_NETNS=1 to run privileged IPv6 unresolved FIB test"
+            );
+            return;
+        }
+        if !is_inner_netns() {
+            let ns = NetnsFixture::create("unresolved-v6");
+            setup_ipv6_unicast_netns(&ns);
+            run_inner_netns(
+                &ns,
+                "netns_general_unicast_fib_ipv6_unresolved_retry_on_covering_route_event",
+            );
+            return;
+        }
+
+        let prefix = Prefix::V6(Ipv6Prefix::new(
+            Ipv6Addr::new(0x2001, 0xdb8, 0xffff, 0, 0, 0, 0, 0),
+            64,
+        ));
+        let prefix_text = "2001:db8:ffff::/64";
+        let gateway = ip("2001:db8:1::1");
+        let desired = route(prefix, gateway);
+        let metrics = metrics();
+        let mut fib = LinuxUnicastFib::connect(metrics.clone()).expect("LinuxUnicastFib::connect");
+        let mut kernel_events = fib.take_kernel_route_events();
+        let mut owned = FibOwnedState::default();
+        let mut unresolved = UnresolvedHolds::default();
+        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (event_tx, mut event_rx) = broadcast::channel(16);
+
+        assert_raw_unresolved_errno(&fib, fib_route(prefix, gateway), -libc::EHOSTUNREACH).await;
+        reconcile_once_with_events(
+            &config(),
+            &rib_with_routes(vec![desired.clone()]),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &event_tx,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::None,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(route_show_v6(1000, prefix_text).trim().is_empty());
+        assert!(owned.routes.is_empty());
+        assert_eq!(unresolved.routes.len(), 1);
+        assert_eq!(status_rx.borrow()[0].state, FibRuntimeState::Unresolved);
+        assert_eq!(status_rx.borrow()[0].reason, "next_hop_unresolved");
+        assert!(event_rx.try_recv().is_err());
+
+        run(
+            "ip",
+            &["-6", "route", "add", "2001:db8:1::/64", "dev", "fib0"],
+        );
+        let coverage = Prefix::V6(Ipv6Prefix::new(
+            Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 0),
+            64,
+        ));
+        let event = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = recv_kernel_route_event(&mut kernel_events)
+                    .await
+                    .expect("route event stream closed");
+                if event.prefix == Some(coverage) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("IPv6 covering route notification");
+        let retry_keys = matching_unresolved_holds(&event, &unresolved);
+        assert_eq!(retry_keys, BTreeSet::from([key(prefix)]));
+
+        reconcile_once_with_events(
+            &config(),
+            &rib_with_routes(vec![desired]),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &event_tx,
+            &mut owned,
+            &mut unresolved,
+            HeldRetry::Keys(retry_keys),
+            &CancellationToken::new(),
+        )
+        .await;
+        let installed = route_show_v6(1000, prefix_text);
+        assert!(
+            installed.contains("via 2001:db8:1::1"),
+            "route missing: {installed}"
+        );
+        assert!(unresolved.routes.is_empty());
+        assert_eq!(status_rx.borrow()[0].state, FibRuntimeState::Installed);
+
+        reconcile_once(
+            &config(),
+            &rib_with_routes(Vec::new()),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+            &CancellationToken::new(),
+        )
+        .await;
+        run(
+            "ip",
+            &["-6", "route", "del", "2001:db8:1::/64", "dev", "fib0"],
+        );
     }
 
     #[cfg(target_os = "linux")]
