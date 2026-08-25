@@ -823,7 +823,7 @@ def check_evpn_dashboard(
         if variable.get("multi") is not True or variable.get("includeAll") is not True:
             raise ValueError(f"EVPN ${name} must support multi-select and All")
         if variable.get("allValue") != ".*":
-            raise ValueError(f"EVPN ${name} All value must be the simple regex .* ")
+            raise ValueError(f"EVPN ${name} All value must be the simple regex .*")
     forbidden_variables = {"peer", "mac", "esi", "name", "ip"} & set(variables)
     if forbidden_variables:
         raise ValueError(

@@ -16,13 +16,13 @@ SPEC.loader.exec_module(CHECK)
 
 class DashboardMetricLinkTests(unittest.TestCase):
     def evpn_dashboard(self):
-        return json.loads(CHECK.EVPN_DASHBOARD.read_text())
+        return json.loads(CHECK.EVPN_DASHBOARD.read_text(encoding="utf-8"))
 
     def check_evpn(self, dashboard):
-        source = CHECK.METRICS.read_text()
+        source = CHECK.METRICS.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "evpn.json"
-            path.write_text(json.dumps(dashboard))
+            path.write_text(json.dumps(dashboard), encoding="utf-8")
             CHECK.check_evpn_dashboard(
                 path, CHECK.rust_metric_inventory(source), source
             )
