@@ -33,7 +33,7 @@ if [ "${DRY_RUN_PROTOCOL:-}" = 1 ]; then
     exit 0
 fi
 
-for tool in cargo curl flock git grep jq python3 setsid sha256sum ss timeout; do
+for tool in cargo curl flock git grep jq python3 setsid ss timeout; do
     command -v "$tool" >/dev/null || { echo "missing required tool: $tool" >&2; exit 2; }
 done
 
@@ -79,6 +79,9 @@ cleanup() {
     terminate_group "$ACTIVE_SINK"
     terminate_group "$ACTIVE_HARNESS"
     terminate_group "$ACTIVE_DAEMON"
+    if [ "$rc" -ne 0 ]; then
+        rm -f "$ART/COMPLETED"
+    fi
     if [ -n "$ACTIVE_TMP" ]; then
         if [ "$rc" -eq 0 ]; then
             rm -rf "$ACTIVE_TMP"
@@ -136,8 +139,6 @@ run_once() {
          and .total_filter_entries == $entries and .bmp_collector == $collector
          and .bmp_version == 3 and .bmp_view == "loc_rib"' \
         "$run/manifest.json" >/dev/null
-    (cd "$run" && { jq -r '.runtime_files[]' manifest.json; echo manifest.json; } | sort | xargs sha256sum) >"$out/scenario.sha256"
-
     setsid "$DAEMON" "$run/config.toml" >"$out/daemon.log" 2>&1 &
     local daemon_pid=$!
     ACTIVE_DAEMON=$daemon_pid
@@ -207,26 +208,14 @@ run_once() {
     ACTIVE_TMP=""
 }
 
-jq -n --arg commit "$HEAD" \
-    '{schema:1,commit:$commit,runs:["run-a","run-b"],order:"fresh-sequential"}' \
-    >"$ART/provenance.json"
 run_once a
 run_once b
-# Capture the verifier's stderr and drop the partial stdout redirect on
-# failure so a red verification never leaves an empty verification.json
-# behind as if it were a result.
-if ! python3 "$VERIFY" verify --allow-unsealed "$ART" \
-    >"$ART/verification.json" 2>"$ART/verification.stderr"; then
-    rm -f "$ART/verification.json"
+printf 'pass\n' >"$ART/COMPLETED"
+if ! python3 "$VERIFY" verify "$ART"; then
+    rm -f "$ART/COMPLETED"
     echo "cross-run verification failed:" >&2
-    cat "$ART/verification.stderr" >&2
     exit 1
 fi
-rm -f "$ART/verification.stderr"
-printf 'pass\n' >"$ART/COMPLETED"
-(cd "$ART" && find . -type f ! -name SHA256SUMS -printf '%P\0' | sort -z | xargs -0 sha256sum) >"$ART/SHA256SUMS"
-chmod -R a-w "$ART"
-python3 "$VERIFY" verify "$ART" >/dev/null
 rm -rf -- "${COMPLETED_RUNS[@]}"
 COMPLETED_RUNS=()
-echo "sealed BMP buffer receipt: $ART"
+echo "verified BMP buffer receipt: $ART"

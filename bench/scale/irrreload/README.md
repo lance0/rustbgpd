@@ -205,6 +205,10 @@ CONFIRM_NO_MAIN_PUSHES=1 ARTIFACTS_DIR=/tmp/bmp-buffer-receipt \
   bench/scale/irrreload/run-bmp-buffer-receipt.sh
 ```
 
+Each successful root retains the exact per-run commit receipt, manifest, raw
+logs, metrics, and sink summary plus an exact `COMPLETED=pass` marker. The
+verifier recomputes the claim directly from those files.
+
 `tests/bmp_buffer_receipt_check.rs` runs corrupt-fixture parser, inventory/order, metrics, and repeat proofs; full fleet remains a quiet-host receipt.
 
 ## Cells and reload mechanisms
