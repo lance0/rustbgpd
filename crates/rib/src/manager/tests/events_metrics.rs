@@ -1099,10 +1099,8 @@ fn commit_family_gauge_fixture(
     assert!(manager.try_send_and_commit_outbound_update(
         peer,
         OutboundCommitBatch {
-            next_hop_override,
-            announce: announce.into(),
             vpn_announce,
-            ..OutboundCommitBatch::default()
+            ..OutboundCommitBatch::with_unicast(announce.into(), next_hop_override)
         },
     ));
     let gathered = metrics.registry().gather();

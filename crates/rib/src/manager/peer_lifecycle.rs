@@ -1760,8 +1760,6 @@ impl RibManager {
             || self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                 peer,
                 OutboundCommitBatch {
-                    next_hop_override: unicast.next_hop_override.into(),
-                    announce: unicast.announce.into(),
                     withdraw: unicast.withdraw,
                     flowspec_announce: fs_announce,
                     flowspec_withdraw: fs_withdraw,
@@ -1775,7 +1773,10 @@ impl RibManager {
                     labeled_withdraw,
                     rtc_announce,
                     rtc_withdraw,
-                    ..OutboundCommitBatch::default()
+                    ..OutboundCommitBatch::with_unicast(
+                        unicast.announce.into(),
+                        unicast.next_hop_override.into(),
+                    )
                 },
                 HashSet::new(),
                 None,

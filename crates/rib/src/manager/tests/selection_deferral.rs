@@ -727,11 +727,10 @@ fn deferred_selection_rejects_route_commit_until_release() {
     let commit = |manager: &mut RibManager| {
         manager.try_send_and_commit_outbound_update(
             target,
-            OutboundCommitBatch {
-                next_hop_override: vec![None].into(),
-                announce: vec![make_route_with_lp(prefix, Ipv4Addr::new(10, 0, 0, 2), 100)].into(),
-                ..OutboundCommitBatch::default()
-            },
+            OutboundCommitBatch::with_unicast(
+                vec![make_route_with_lp(prefix, Ipv4Addr::new(10, 0, 0, 2), 100)].into(),
+                vec![None].into(),
+            ),
         )
     };
     assert!(

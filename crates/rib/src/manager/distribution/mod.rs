@@ -127,16 +127,12 @@ pub(in crate::manager) struct SharedUnicastPrecommit<'a> {
 /// the send-ladder methods; this value only keeps the family inventories
 /// together as they move through that ladder.
 ///
-/// `announce` and `next_hop_override` are parallel slices: they must have the
-/// same length, and each override applies to the announcement at the same
-/// index. Callers using `..OutboundCommitBatch::default()` must populate both
-/// fields together when adding unicast announcements.
+/// Unicast announcements and next-hop overrides can only be populated through
+/// [`OutboundCommitBatch::with_unicast`], which enforces their parallel-slice
+/// invariant before a commit batch can be represented.
 #[derive(Default)]
 pub(in crate::manager) struct OutboundCommitBatch {
-    /// Next-hop actions indexed exactly like `announce`.
-    pub(in crate::manager) next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
-    /// Unicast announcements indexed exactly like `next_hop_override`.
-    pub(in crate::manager) announce: Arc<[crate::route::Route]>,
+    pub(in crate::manager) unicast: AlignedUnicastPayload,
     pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
     pub(in crate::manager) end_of_rib: Vec<(Afi, Safi)>,
     pub(in crate::manager) refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
@@ -152,6 +148,36 @@ pub(in crate::manager) struct OutboundCommitBatch {
     pub(in crate::manager) labeled_withdraw: Vec<crate::route::LabeledRibRouteKey>,
     pub(in crate::manager) rtc_announce: Vec<crate::route::RtcRibRoute>,
     pub(in crate::manager) rtc_withdraw: Vec<crate::route::RtcRibRouteKey>,
+}
+
+/// Structurally aligned unicast payload for one outbound commit.
+#[derive(Default)]
+pub(in crate::manager) struct AlignedUnicastPayload {
+    /// Unicast announcements indexed exactly like `next_hop_override`.
+    announce: Arc<[crate::route::Route]>,
+    /// Next-hop actions indexed exactly like `announce`.
+    next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+}
+
+impl OutboundCommitBatch {
+    #[track_caller]
+    pub(in crate::manager) fn with_unicast(
+        announce: Arc<[crate::route::Route]>,
+        next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+    ) -> Self {
+        assert_eq!(
+            announce.len(),
+            next_hop_override.len(),
+            "outbound unicast announcements and next-hop overrides must stay aligned"
+        );
+        Self {
+            unicast: AlignedUnicastPayload {
+                announce,
+                next_hop_override,
+            },
+            ..Self::default()
+        }
+    }
 }
 
 struct SharedUnicastProbeCacheEntry {
@@ -2081,8 +2107,11 @@ impl RibManager {
         otc_reconcile_prefixes: Option<&HashSet<Prefix>>,
     ) -> bool {
         let OutboundCommitBatch {
-            mut next_hop_override,
-            mut announce,
+            unicast:
+                AlignedUnicastPayload {
+                    mut announce,
+                    mut next_hop_override,
+                },
             mut withdraw,
             end_of_rib,
             refresh_markers,
@@ -2221,7 +2250,6 @@ impl RibManager {
                 "single-best group staging must reject OTC before its shared table commit; \
                  per-client-best groups defer to this backstop by design"
             );
-            debug_assert_eq!(announce.len(), next_hop_override.len());
             let mut permitted = Vec::with_capacity(announce.len());
             let mut permitted_next_hops = Vec::with_capacity(next_hop_override.len());
             // Preserve the caller's withdrawal order while making duplicate
@@ -2320,7 +2348,6 @@ impl RibManager {
 
             #[cfg(feature = "bench-internals")]
             let bench_exact_started = bench_per_client_best_resync.then(std::time::Instant::now);
-            debug_assert_eq!(announce.len(), next_hop_override.len());
             let family_lengths = [
                 announce.len(),
                 flowspec_announce.len(),
@@ -5638,8 +5665,6 @@ impl RibManager {
                 if self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                     peer,
                     OutboundCommitBatch {
-                        next_hop_override: nh_override_flags,
-                        announce,
                         withdraw: unicast.withdraw,
                         end_of_rib: pending_eor.clone(),
                         flowspec_announce: fs_announce,
@@ -5654,7 +5679,7 @@ impl RibManager {
                         labeled_withdraw,
                         rtc_announce,
                         rtc_withdraw,
-                        ..OutboundCommitBatch::default()
+                        ..OutboundCommitBatch::with_unicast(announce, nh_override_flags)
                     },
                     group_prior,
                     shared_unicast_cache_group.map(|group_id| SharedUnicastPrecommit {

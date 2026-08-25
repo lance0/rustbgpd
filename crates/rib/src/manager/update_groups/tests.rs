@@ -5364,11 +5364,7 @@ fn single_best_group_otc_at_backstop_trips_debug_assert() {
     let nh: Arc<[Option<NextHopAction>]> = vec![None].into();
     let _ = m.try_send_and_commit_outbound_update(
         MEMBER,
-        OutboundCommitBatch {
-            next_hop_override: nh,
-            announce,
-            ..OutboundCommitBatch::default()
-        },
+        OutboundCommitBatch::with_unicast(announce, nh),
     );
 }
 
@@ -5398,11 +5394,7 @@ fn per_client_best_group_otc_at_backstop_strips_with_pending_gated_withdraw() {
     let nh: Arc<[Option<NextHopAction>]> = vec![None].into();
     assert!(m.try_send_and_commit_outbound_update(
         MEMBER,
-        OutboundCommitBatch {
-            next_hop_override: nh,
-            announce,
-            ..OutboundCommitBatch::default()
-        },
+        OutboundCommitBatch::with_unicast(announce, nh),
     ));
     let update = outbound_rx.try_recv().unwrap();
     assert!(

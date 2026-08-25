@@ -722,7 +722,8 @@ changed.
    compared the crate against its latest crates.io release on the PR, so a
    bump it reported as required is not optional.
 3. Update `version` in `crates/wire/Cargo.toml`
-4. Add a `rustbgpd-wire` entry in `CHANGELOG.md`
+4. Roll `crates/wire/CHANGELOG.md` and add a `rustbgpd-wire` entry in the
+   repository-level `CHANGELOG.md`
 5. `cargo publish -p rustbgpd-wire --dry-run`
 6. `cargo publish -p rustbgpd-wire`
 7. Verify the version is visible in the registry, update the declared current
@@ -755,7 +756,8 @@ do not force an FSM release for every daemon tag.
    The `semver-checks` workflow applies the same crates.io comparison to this
    crate on the PR.
 3. Update `version` in `crates/fsm/Cargo.toml`
-4. Add a `rustbgpd-fsm` entry in `CHANGELOG.md`
+4. Roll `crates/fsm/CHANGELOG.md` and add a `rustbgpd-fsm` entry in the
+   repository-level `CHANGELOG.md`
 5. `cargo publish -p rustbgpd-fsm --dry-run`
 6. `cargo publish -p rustbgpd-fsm`
 7. Verify the version is visible in the registry, update the declared current

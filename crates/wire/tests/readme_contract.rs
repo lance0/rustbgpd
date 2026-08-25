@@ -1,3 +1,6 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+
 use syn::{
     Attribute, FnArg, GenericArgument, GenericParam, Item, Meta, PathArguments, ReturnType, Type,
     UseTree, Visibility,
@@ -23,12 +26,17 @@ fn expected_dependency_block(version: &str) -> String {
     format!("```toml\n[dependencies]\nrustbgpd-wire = \"{version}\"\nbytes = \"1\"\n```")
 }
 
-fn has_documented_error_roster(exhaustiveness: &str) -> bool {
-    compact_whitespace(exhaustiveness).contains(
-        "The five public error enums are also non-exhaustive: `DecodeError`, `EncodeError`, \
-         `RouteDistinguisherParseError`, `ShutdownCommunicationError`, and `BgpCodecError` \
-         (available with the `tokio-codec` feature).",
-    )
+fn documented_public_error_roster(exhaustiveness: &str) -> BTreeSet<String> {
+    exhaustiveness
+        .split("\n\n")
+        .find(|paragraph| paragraph.contains("public error enums"))
+        .expect("README must name its public error enum roster")
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|name| name.ends_with("Error"))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn is_public(visibility: &Visibility) -> bool {
@@ -281,17 +289,52 @@ fn lib_has_exact_codec_gate(source: &str) -> bool {
     bindings == 1 && canonical_binding
 }
 
-fn source_enum_is_public_and_non_exhaustive(source: &str, name: &str) -> bool {
+fn public_error_enums_in_source(source: &str) -> BTreeMap<String, bool> {
     syn::parse_file(source)
-        .expect("error source must remain valid Rust")
+        .expect("wire source must remain valid Rust")
         .items
         .iter()
-        .any(|item| {
-            matches!(item, Item::Enum(item)
-            if is_public(&item.vis)
-                && item.ident == name
-                && item.attrs.iter().any(|attribute| attribute.path().is_ident("non_exhaustive")))
+        .filter_map(|item| match item {
+            Item::Enum(item)
+                if is_public(&item.vis) && item.ident.to_string().ends_with("Error") =>
+            {
+                Some((
+                    item.ident.to_string(),
+                    item.attrs
+                        .iter()
+                        .any(|attribute| attribute.path().is_ident("non_exhaustive")),
+                ))
+            }
+            _ => None,
         })
+        .collect()
+}
+
+fn collect_public_error_enums(dir: &Path, roster: &mut BTreeMap<String, bool>) {
+    for entry in std::fs::read_dir(dir).expect("read wire source directory") {
+        let entry = entry.expect("read wire source entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_public_error_enums(&path, roster);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            let source = std::fs::read_to_string(&path).expect("read wire Rust source");
+            for (name, non_exhaustive) in public_error_enums_in_source(&source) {
+                assert!(
+                    roster.insert(name.clone(), non_exhaustive).is_none(),
+                    "duplicate public error enum name {name}"
+                );
+            }
+        }
+    }
+}
+
+fn source_public_error_roster() -> BTreeMap<String, bool> {
+    let mut roster = BTreeMap::new();
+    collect_public_error_enums(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src").as_path(),
+        &mut roster,
+    );
+    roster
 }
 
 #[test]
@@ -306,25 +349,20 @@ fn usage_matches_the_published_wire_contract() {
 }
 
 #[test]
-fn enum_guidance_matches_the_five_known_public_errors() {
+fn enum_guidance_matches_the_complete_public_error_roster() {
     let exhaustiveness = section(README, "## Enum exhaustiveness");
-    assert!(has_documented_error_roster(exhaustiveness));
     assert!(exhaustiveness.contains("must include\na wildcard arm"));
     assert!(exhaustiveness.contains("_ => {}"));
-    for (source, name) in [
-        (include_str!("../src/error.rs"), "DecodeError"),
-        (include_str!("../src/error.rs"), "EncodeError"),
-        (
-            include_str!("../src/evpn.rs"),
-            "RouteDistinguisherParseError",
-        ),
-        (
-            include_str!("../src/notification.rs"),
-            "ShutdownCommunicationError",
-        ),
-        (include_str!("../src/tokio_codec.rs"), "BgpCodecError"),
-    ] {
-        assert!(source_enum_is_public_and_non_exhaustive(source, name));
+    let source_roster = source_public_error_roster();
+    assert_eq!(
+        documented_public_error_roster(exhaustiveness),
+        source_roster.keys().cloned().collect()
+    );
+    for (name, non_exhaustive) in source_roster {
+        assert!(
+            non_exhaustive,
+            "public error enum {name} must remain non-exhaustive"
+        );
     }
     assert!(lib_has_exact_codec_gate(LIB_SOURCE));
 }
@@ -347,4 +385,11 @@ fn helpers_reject_contract_mutations() {
         pub use tokio_codec::BgpCodecError;
     "#;
     assert!(!lib_has_exact_codec_gate(extra_codec_cfg));
+    assert_eq!(
+        public_error_enums_in_source("pub enum SixthError { Broken }")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["SixthError".to_owned()])
+    );
 }

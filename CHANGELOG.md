@@ -11,6 +11,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Outbound route commits now make mismatched announcement and next-hop
+  override inventories unrepresentable, catching the internal invariant at
+  construction instead of silently truncating the longer inventory. (LAN-1280)
+
 - Assigned BGP attributes 36-42 now use their registered propagation classes;
   D-PATH, SFP, BFD Discriminator, NHC, Prefix-SID, and BIER receive bounded
   structural framing checks before opaque propagation, while Edge Metadata is
@@ -28,7 +32,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Use `Route.local_pref_attr` when attribute presence matters;
   `Route.local_pref` is the effective value and defaults to 100 when the
-  attribute is absent.
+  attribute is absent (previously it was 0).
 - Migrate removed `RibService.WatchRoutes` and `RibService.WatchRouteEvents`
   consumers to `EventService.WatchEvents` for live deltas or
   `EventService.SubscribeFromEvent` for durable replay. Update route-stream
