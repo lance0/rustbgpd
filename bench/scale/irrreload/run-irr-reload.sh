@@ -167,17 +167,71 @@ for tool in docker jq python3 cargo curl flock ss sha256sum git awk timeout find
     }
 done
 
+validate_full_measurement_source() {
+    local repo=$1 candidate=${2:-} head origin
+    git -C "$repo" fetch --quiet origin main || return 1
+    head=$(git -C "$repo" rev-parse HEAD) || return 1
+    origin=$(git -C "$repo" rev-parse origin/main) || return 1
+    MEASUREMENT_MODE=main
+    ANCESTRY_VERIFIED=true
+    if [ -n "$candidate" ]; then
+        MEASUREMENT_MODE=candidate
+        [[ $candidate =~ ^[0-9a-f]{40}$ ]] || return 1
+        [ "$(git -C "$repo" cat-file -t "$candidate" 2>/dev/null)" = commit ] || return 1
+        [ "$head" = "$candidate" ] || return 1
+        git -C "$repo" merge-base --is-ancestor "$origin" "$candidate" || return 1
+    else
+        [ "$head" = "$origin" ] || return 1
+    fi
+    [ -z "$(git -C "$repo" status --porcelain=v1)" ] || return 1
+    HEAD_COMMIT=$head
+    ORIGIN_MAIN=$origin
+}
+
+if [ "${1:-}" = --self-test-candidate-gate ]; then
+    root=$(mktemp -d /tmp/irrreload-candidate-gate.XXXXXX) || exit 1
+    trap 'rm -rf "$root"' EXIT
+    git init -q --bare "$root/origin.git" || exit 1
+    git clone -q "$root/origin.git" "$root/repo" || exit 1
+    git -C "$root/repo" config user.email test@example.invalid
+    git -C "$root/repo" config user.name test
+    printf 'base\n' >"$root/repo/file"
+    git -C "$root/repo" add file && git -C "$root/repo" commit -qm base || exit 1
+    git -C "$root/repo" branch -M main && git -C "$root/repo" push -q -u origin main || exit 1
+    base=$(git -C "$root/repo" rev-parse HEAD)
+    validate_full_measurement_source "$root/repo" "" || exit 1
+    printf 'candidate\n' >>"$root/repo/file"
+    git -C "$root/repo" commit -qam candidate || exit 1
+    candidate=$(git -C "$root/repo" rev-parse HEAD)
+    git -C "$root/repo" tag -am candidate-tag candidate-tag
+    tag_object=$(git -C "$root/repo" rev-parse candidate-tag)
+    validate_full_measurement_source "$root/repo" "$candidate" || exit 1
+    for invalid in bad "${candidate:0:12}" HEAD "${candidate^^}" "$tag_object" "$base"; do
+        ! validate_full_measurement_source "$root/repo" "$invalid" || exit 1
+    done
+    ! validate_full_measurement_source "$root/repo" "" || exit 1
+    printf 'dirty\n' >>"$root/repo/file"
+    ! validate_full_measurement_source "$root/repo" "$candidate" || exit 1
+    git -C "$root/repo" restore file
+    git -C "$root/repo" checkout -q --detach "$base"
+    ! validate_full_measurement_source "$root/repo" "$candidate" || exit 1
+    git -C "$root/repo" checkout -q --orphan unrelated
+    git -C "$root/repo" rm -q -f file
+    printf 'unrelated\n' >"$root/repo/other"
+    git -C "$root/repo" add other && git -C "$root/repo" commit -qm unrelated
+    unrelated=$(git -C "$root/repo" rev-parse HEAD)
+    ! validate_full_measurement_source "$root/repo" "$unrelated" || exit 1
+    echo "SELF_TEST_CANDIDATE_GATE pass"
+    exit 0
+fi
+
 if [ -z "$SMOKE" ]; then
     if [ -n "${SKIP_PREFLIGHT:-}" ]; then
         echo "full measured campaigns cannot set SKIP_PREFLIGHT" >&2
         exit 2
     fi
-    git -C "$REPO" fetch --quiet origin main || exit 1
-    HEAD_COMMIT=$(git -C "$REPO" rev-parse HEAD) || exit 1
-    ORIGIN_MAIN=$(git -C "$REPO" rev-parse origin/main) || exit 1
-    if [ "$HEAD_COMMIT" != "$ORIGIN_MAIN" ] ||
-        [ -n "$(git -C "$REPO" status --porcelain=v1)" ]; then
-        echo "full measured campaigns require a clean HEAD exactly at origin/main" >&2
+    if ! validate_full_measurement_source "$REPO" "${MEASUREMENT_CANDIDATE_SHA:-}"; then
+        echo "full measurement source gate failed: require clean exact main or exact descendant candidate" >&2
         exit 2
     fi
     if [ "$N_MEMBERS,$TOTAL_PREFIXES,$MIN_LIST,$MAX_LIST,$SEED,$RELOADS,$CHANGED_FRACTION,$PORT,$CONTROL_SECS,$TXN_MAX_CANDIDATE_BYTES,$CELL_TIMEOUT,$START_TIMEOUT,$BIRD_THREADS" != \
@@ -244,6 +298,8 @@ COMMIT=$(git -C "$REPO" rev-parse HEAD) || exit 1
 # Full provenance binds source, tools, binaries, images, and campaign inputs;
 # dirty smoke runs include tracked diffs and untracked content hashes.
 ORIGIN_MAIN=$(git -C "$REPO" rev-parse origin/main 2>/dev/null || printf unavailable)
+MEASUREMENT_MODE=${MEASUREMENT_MODE:-main}
+ANCESTRY_VERIFIED=${ANCESTRY_VERIFIED:-false}
 HEAD_MATCHES_ORIGIN_MAIN=false
 [ "$COMMIT" = "$ORIGIN_MAIN" ] && HEAD_MATCHES_ORIGIN_MAIN=true
 CAMPAIGN_STARTED_EPOCH_NS=$(date +%s%N)
@@ -264,6 +320,7 @@ CAMPAIGN_PROVENANCE=$(jq -cn \
     --arg commit "$COMMIT" --argjson dirty "$DIRTY" \
     --arg dirty_state_sha256 "$DIRTY_STATE_SHA256" \
     --arg origin_main "$ORIGIN_MAIN" --argjson head_matches_origin_main "$HEAD_MATCHES_ORIGIN_MAIN" \
+    --arg measurement_mode "$MEASUREMENT_MODE" --argjson ancestry_verified "$ANCESTRY_VERIFIED" \
     --argjson started_at_epoch_ns "$CAMPAIGN_STARTED_EPOCH_NS" \
     --arg run_script_sha256 "$(hash_file "$REPO/bench/scale/irrreload/run-irr-reload.sh")" \
     --arg verifier_sha256 "$(hash_file "$VERIFY")" \
@@ -293,7 +350,7 @@ CAMPAIGN_PROVENANCE=$(jq -cn \
     --arg cpu_model "$(awk -F: '/^model name/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }' /proc/cpuinfo)" \
     --arg bird_image "$BIRD_IMAGE" --arg bird_image_id "$BIRD_IMAGE_ID" \
     --arg openbgpd_image "$OPENBGPD_IMAGE" --arg openbgpd_image_id "$OPENBGPD_IMAGE_ID" \
-    '{schema:3,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,dirty:$dirty,dirty_state_sha256:$dirty_state_sha256,origin_main:$origin_main,head_matches_origin_main:$head_matches_origin_main},scripts:{runner:$run_script_sha256,verifier:$verifier_sha256,generator:$generator_sha256,rss_sampler:$sampler_sha256,txn_apply:$txn_apply_sha256,txn_lifecycle:$txn_lifecycle_sha256},binaries:{reloadstall:$harness_sha256,rustbgpd:$daemon_sha256,rbgp:$cli_sha256,rs_config_render:$renderer_sha256},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,overlap_fraction:$overlap_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
+    '{schema:3,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,dirty:$dirty,dirty_state_sha256:$dirty_state_sha256,origin_main:$origin_main,head_matches_origin_main:$head_matches_origin_main,measurement_mode:$measurement_mode,ancestry_verified:$ancestry_verified},scripts:{runner:$run_script_sha256,verifier:$verifier_sha256,generator:$generator_sha256,rss_sampler:$sampler_sha256,txn_apply:$txn_apply_sha256,txn_lifecycle:$txn_lifecycle_sha256},binaries:{reloadstall:$harness_sha256,rustbgpd:$daemon_sha256,rbgp:$cli_sha256,rs_config_render:$renderer_sha256},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,overlap_fraction:$overlap_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
 CAMPAIGN_FINGERPRINT=$(printf '%s' "$CAMPAIGN_PROVENANCE" | jq -cS . | sha256sum | cut -d' ' -f1) || exit 1
 SEALED_CAMPAIGN_PROVENANCE=$(printf '%s\n' "$CAMPAIGN_PROVENANCE" | jq -cS \
     --arg fingerprint "$CAMPAIGN_FINGERPRINT" '. + {fingerprint:$fingerprint}') || exit 1

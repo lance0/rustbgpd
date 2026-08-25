@@ -1466,14 +1466,24 @@ def validate_root(root: Path, kind: str):
     if actual_shape != CANONICAL_SHAPE or int(inputs.get("reloads", -1)) != 4:
         fail(f"{root}: noncanonical full shape/seed/reload count")
     commit = git.get("commit")
+    origin_main = git.get("origin_main")
+    measurement_mode = git.get("measurement_mode")
+    source_relation_valid = (
+        measurement_mode == "main"
+        and origin_main == commit
+        and git.get("head_matches_origin_main") is True
+    ) or (
+        measurement_mode == "candidate"
+        and git.get("head_matches_origin_main") is (origin_main == commit)
+    )
     if (
         not isinstance(commit, str)
         or not re.fullmatch(r"[0-9a-f]{40}", commit)
-        or not isinstance(git.get("origin_main"), str)
-        or not re.fullmatch(r"[0-9a-f]{40}", git.get("origin_main"))
+        or not isinstance(origin_main, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", origin_main)
         or git.get("dirty") is not False
-        or git.get("origin_main") != commit
-        or git.get("head_matches_origin_main") is not True
+        or not source_relation_valid
+        or git.get("ancestry_verified") is not True
         or not re.fullmatch(r"[0-9a-f]{64}", git.get("dirty_state_sha256", ""))
         or set(git)
         != {
@@ -1482,6 +1492,8 @@ def validate_root(root: Path, kind: str):
             "dirty_state_sha256",
             "origin_main",
             "head_matches_origin_main",
+            "measurement_mode",
+            "ancestry_verified",
         }
     ):
         fail(f"{root}: full source/preflight contract not proven")
@@ -1841,7 +1853,7 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
     provenance = {
         "schema": 3,
         "started_at_epoch_ns": started,
-        "git": {"commit": "c" * 40, "dirty": False, "dirty_state_sha256": "d" * 64, "origin_main": "c" * 40, "head_matches_origin_main": True},
+        "git": {"commit": "c" * 40, "dirty": False, "dirty_state_sha256": "d" * 64, "origin_main": "c" * 40, "head_matches_origin_main": True, "measurement_mode": "main", "ancestry_verified": True},
         "scripts": {"runner": "1" * 64, "verifier": "2" * 64, "generator": "3" * 64, "rss_sampler": "4" * 64, "txn_apply": "5" * 64, "txn_lifecycle": "a" * 64},
         "binaries": {"reloadstall": "6" * 64, "rustbgpd": "7" * 64, "rbgp": "8" * 64, "rs_config_render": "9" * 64},
         "environment": {key: "fixture" for key in ("rustc", "cargo", "python", "jq", "docker", "kernel", "cpu_model")},
@@ -2574,6 +2586,8 @@ def self_test() -> None:
         rejected("dirty-commit", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"dirty": True})))
         rejected("origin-only", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"origin_main": "e" * 40})))
         rejected("head-matches-false", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"head_matches_origin_main": False})))
+        rejected("ancestry-unverified", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"ancestry_verified": False})))
+        rejected("measurement-mode-invalid", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"measurement_mode": "branch"})))
         rejected("mismatched-commit", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"commit": "d" * 40, "origin_main": "d" * 40})))
         rejected("commit-malformed", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"commit": "C" * 40, "origin_main": "C" * 40})))
         rejected("scripts-null", lambda root: alter_json(root / "provenance.json", lambda data: data.update({"scripts": None})))
@@ -2783,7 +2797,7 @@ def self_test() -> None:
                 proofs[name] = True
         grouped_pair_drift("cross-role-environment", "environment", "cpu_model", "other-platform")
         grouped_pair_drift("cross-role-source-identity", "binaries", "rbgp", "a" * 64)
-        expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "origin-only", "head-matches-false", "mismatched-commit", "commit-malformed", "scripts-null", "scripts-empty-map", "binary-malformed", "fingerprint-recompute", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "cell-root-provenance", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "cell-provenance", "evidence-roster", "scenario-roster", "scenario-duplicate", "scenario-unsafe-path", "scenario-retained-config", "cell-root-rows", "reload-log-rows", "percentile-order", "percentile-positive", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "seal-checksum", "exact-root-roster", "symlink-anywhere", "writable-root", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-role-source-identity"}
+        expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "origin-only", "head-matches-false", "ancestry-unverified", "measurement-mode-invalid", "mismatched-commit", "commit-malformed", "scripts-null", "scripts-empty-map", "binary-malformed", "fingerprint-recompute", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "cell-root-provenance", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "cell-provenance", "evidence-roster", "scenario-roster", "scenario-duplicate", "scenario-unsafe-path", "scenario-retained-config", "cell-root-rows", "reload-log-rows", "percentile-order", "percentile-positive", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "seal-checksum", "exact-root-roster", "symlink-anywhere", "writable-root", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-role-source-identity"}
         expected |= {"current-down", "reestablished", "flapped", "counter-malformed", "establishment-roster", "flap-roster", "row-session-loss"}
         expected |= {"preflip-private", "lane-gauge"}
         expected |= set(
