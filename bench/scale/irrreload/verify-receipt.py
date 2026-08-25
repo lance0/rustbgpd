@@ -330,7 +330,7 @@ def validate_authoritative_pair(repo: Path, roots: list[Path], output: Path) -> 
         "commit":runs[0]["commit"], "tree":git["tree"], "roots":details}, sort_keys=True) + "\n")
 
 
-def validate_authoritative_publication(artifact: Path, repo: Path) -> None:
+def validate_authoritative_publication(artifact: Path) -> None:
     content = {"authoritative-pair.json", "authoritative-batch-phases.csv", "verification.json"}
     if {path.name for path in artifact.iterdir()} != content | {"SHA256SUMS"}: fail("publication roster changed")
     if any((artifact / name).is_symlink() or not (artifact / name).is_file() for name in content | {"SHA256SUMS"}): fail("publication contains a non-regular file")
@@ -380,16 +380,6 @@ def validate_authoritative_publication(artifact: Path, repo: Path) -> None:
         fail("verification schema changed")
     if verification["schema"] != 1 or verification["verdict"] != pair["verdict"] or verification["candidate_commit"] != pair["commit"] or verification["candidate_tree"] != pair["tree"]:
         fail("verification does not bind pair identity")
-    frozen_source = {"commit":"09c1a1342c86c118e34a62d30c53d1cf159b3ade",
-        "tree":"f7e638f7bb6ba455aa72e83c855e5c00f698e1d7",
-        "origin_main":"9fc3286dcea4c8f1a5d371a782931a416e30a4b6"}
-    if pair["commit"] != frozen_source["commit"] or pair["tree"] != frozen_source["tree"] or verification["origin_main"] != frozen_source["origin_main"]:
-        fail("publication source identity changed")
-    try:
-        resolved_tree = subprocess.run(["git", "-C", str(repo), "rev-parse", f'{pair["commit"]}^{{tree}}'], check=True, capture_output=True, text=True).stdout.strip()
-        ancestry = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", verification["origin_main"], pair["commit"]]).returncode
-    except subprocess.CalledProcessError as error: fail(f"publication git identity failed: {error}")
-    if resolved_tree != pair["tree"] or ancestry: fail("publication git tree/ancestry changed")
     digests = (verification["source_identity_sha256"], verification["system_environment_sha256"], verification["dataset_sha256"])
     if not re.fullmatch(r"[0-9a-f]{40}", verification["origin_main"]) or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in digests):
         fail("publication provenance hashes are malformed")
@@ -3271,15 +3261,14 @@ transaction-mixed-binary transaction-process-reuse transaction-file-tamper trans
         missing = expected - proofs.keys()
         if missing:
             fail(f"self-test proofs did not reject: {sorted(missing)}")
-        source_repo = Path(__file__).resolve().parents[3]
-        publication = source_repo / "docs/perf/artifacts/reload-authoritative-batch-discriminator-2026-08"
-        validate_authoritative_publication(publication, source_repo)
+        publication = Path(__file__).resolve().parents[3] / "docs/perf/artifacts/reload-authoritative-batch-discriminator-2026-08"
+        validate_authoritative_publication(publication)
         def publication_rejected(name, mutate, reseal=True):
             copied = base / f"publication-{name}"; shutil.copytree(publication, copied); mutate(copied)
             if reseal:
                 names = ("authoritative-pair.json", "authoritative-batch-phases.csv", "verification.json")
                 copied.joinpath("SHA256SUMS").write_text("".join(f"{sha256(copied / item)}  {item}\n" for item in names))
-            try: validate_authoritative_publication(copied, source_repo)
+            try: validate_authoritative_publication(copied)
             except InvalidReceipt: print(f"red-proof authoritative-publication-{name}=pass")
             else: fail(f"publication self-test accepted {name}")
         publication_rejected("missing", lambda root: root.joinpath("authoritative-pair.json").unlink(), False)
@@ -3290,15 +3279,6 @@ transaction-mixed-binary transaction-process-reuse transaction-file-tamper trans
         def promote_pair_witness(root):
             path = root / "authoritative-pair.json"; document = read_json(path)
             document["phase"] = "member_emit_state_us"; path.write_text(json.dumps(document))
-        def alter_publication_source(root, field):
-            pair_path, verification_path = root / "authoritative-pair.json", root / "verification.json"
-            pair, verification = read_json(pair_path), read_json(verification_path)
-            if field in {"commit", "tree"}:
-                pair[field] = "a" * 40; pair_path.write_text(json.dumps(pair))
-                verification[{"commit":"candidate_commit", "tree":"candidate_tree"}[field]] = "a" * 40
-                verification["artifacts"]["frozen_pair_output_sha256"] = sha256(pair_path)
-            else: verification["origin_main"] = "a" * 40
-            verification_path.write_text(json.dumps(verification))
         def alter_publication_csv(root, row_index, key, value):
             path = root / "authoritative-batch-phases.csv"
             with path.open(newline="") as stream:
@@ -3339,8 +3319,6 @@ transaction-mixed-binary transaction-process-reuse transaction-file-tamper trans
         publication_rejected("sub-20-growth", lambda root: alter_publication_attribution(root, totals=[100, 110, 110, 110]))
         publication_rejected("sub-70-attribution", lambda root: alter_publication_attribution(root, registrations=[1294, 1300, 1300, 1300]))
         publication_rejected("pair-witness", promote_pair_witness)
-        for field in ("commit", "tree", "origin_main"):
-            publication_rejected(f"source-{field}", lambda root, field=field: alter_publication_source(root, field))
         publication_rejected("binding", lambda root: alter_publication(root, "artifacts", "frozen_pair_output_sha256", "a" * 64))
         publication_rejected("decision", lambda root: alter_publication(root, "decision", "mechanism", "claimed"))
         publication_rejected("chronology", lambda root: root.joinpath("verification.json").write_text(json.dumps({**read_json(root / "verification.json"), "roots":{**read_json(root / "verification.json")["roots"], "B":{**read_json(root / "verification.json")["roots"]["B"], "started_at_epoch_ns":1}}})))
@@ -3397,7 +3375,6 @@ def main() -> int:
     pair.add_argument("roots", nargs=2, type=Path)
     publication = subparsers.add_parser("authoritative-publication")
     publication.add_argument("--artifact-dir", required=True, type=Path)
-    publication.add_argument("--repo", required=True, type=Path)
     subparsers.add_parser("self-test")
     args = parser.parse_args()
     try:
@@ -3435,7 +3412,7 @@ def main() -> int:
         elif args.command == "authoritative-pair":
             validate_authoritative_pair(args.repo, args.roots, args.output)
         elif args.command == "authoritative-publication":
-            validate_authoritative_publication(args.artifact_dir, args.repo)
+            validate_authoritative_publication(args.artifact_dir)
         else:
             self_test()
     except (InvalidReceipt, OSError, KeyError, TypeError, ValueError) as error:

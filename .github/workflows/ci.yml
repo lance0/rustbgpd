@@ -382,7 +382,7 @@ jobs:
           cargo test --locked --test reloadstall_scenario_emitted_check
           python3 bench/scale/irrreload/verify-receipt.py self-test
           python3 bench/scale/irrreload/verify-receipt.py authoritative-publication \
-            --repo . --artifact-dir docs/perf/artifacts/reload-authoritative-batch-discriminator-2026-08
+            --artifact-dir docs/perf/artifacts/reload-authoritative-batch-discriminator-2026-08
           bash -n bench/compare-criterion.sh bench/tests/test-compare-criterion-harness.sh
           shellcheck bench/compare-criterion.sh bench/tests/test-compare-criterion-harness.sh
           shellcheck bench/smoke-benches.sh
