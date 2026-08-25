@@ -1180,8 +1180,8 @@ pub fn decode_path_attributes_revised(
         // must fall through to decode_attribute_value, whose flags error is
         // classified treat-as-withdraw below (§3 (c) — the stronger action
         // wins per §3 (h)).
-        let flags_ok = expected_flags(type_code).is_none_or(|expected| {
-            (flags & (attr_flags::OPTIONAL | attr_flags::TRANSITIVE)) == expected
+        let flags_ok = registered_flags(type_code).is_none_or(|registered| {
+            (flags & (attr_flags::OPTIONAL | attr_flags::TRANSITIVE)) == registered.flags
         });
         let expected_aggregator_len = if four_octet_as { 8 } else { 6 };
         let bad_aggregate_len = flags_ok
@@ -1252,11 +1252,25 @@ pub fn decode_path_attributes_revised(
 /// RFC 4271 section 5 requires unrecognized optional non-transitive
 /// attributes to be quietly ignored rather than stored or propagated.
 fn is_unknown_optional_non_transitive(flags: u8, type_code: u8) -> bool {
-    expected_flags(type_code).is_none()
-        && assigned_unsupported_flags(type_code)
-            .is_none_or(|expected| expected == attr_flags::OPTIONAL)
-        && (flags & attr_flags::OPTIONAL) != 0
-        && (flags & attr_flags::TRANSITIVE) == 0
+    let class = flags & (attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL);
+    if is_assigned_unsupported_optional_non_transitive(type_code) {
+        return class == attr_flags::OPTIONAL;
+    }
+    match registered_flags(type_code) {
+        Some(_) => false,
+        None => (flags & attr_flags::OPTIONAL) != 0 && (flags & attr_flags::TRANSITIVE) == 0,
+    }
+}
+
+fn is_assigned_unsupported_optional_non_transitive(type_code: u8) -> bool {
+    matches!(
+        registered_flags(type_code),
+        Some(RegisteredFlags {
+            flags: attr_flags::OPTIONAL,
+            payload_unsupported: true,
+            ..
+        })
+    )
 }
 
 /// Registry-known class for assigned attributes whose payload semantics are
@@ -1264,13 +1278,43 @@ fn is_unknown_optional_non_transitive(flags: u8, type_code: u8) -> bool {
 /// prevents registry recognition from becoming a typed-codec support claim.
 fn assigned_unsupported_flags(type_code: u8) -> Option<u8> {
     match type_code {
-        attr_type::AIGP | attr_type::BGPSEC_PATH => Some(attr_flags::OPTIONAL),
+        attr_type::AIGP | attr_type::BGPSEC_PATH | attr_type::EDGE_METADATA => {
+            Some(attr_flags::OPTIONAL)
+        }
         attr_type::TUNNEL_ENCAPSULATION
         | attr_type::PE_DISTINGUISHER_LABELS
+        | attr_type::DOMAIN_PATH
+        | attr_type::SFP
+        | attr_type::BFD_DISCRIMINATOR
+        | attr_type::NHC
         | attr_type::PREFIX_SID
+        | attr_type::BIER
         | attr_type::ATTR_SET => Some(attr_flags::OPTIONAL | attr_flags::TRANSITIVE),
         _ => None,
     }
+}
+
+#[derive(Clone, Copy)]
+struct RegisteredFlags {
+    flags: u8,
+    payload_unsupported: bool,
+    partial_must_clear: bool,
+}
+
+fn registered_flags(type_code: u8) -> Option<RegisteredFlags> {
+    expected_flags(type_code)
+        .map(|flags| RegisteredFlags {
+            flags,
+            payload_unsupported: false,
+            partial_must_clear: false,
+        })
+        .or_else(|| {
+            assigned_unsupported_flags(type_code).map(|flags| RegisteredFlags {
+                flags,
+                payload_unsupported: true,
+                partial_must_clear: flags == attr_flags::OPTIONAL,
+            })
+        })
 }
 
 /// Consume RFC 6793 compatibility attributes and leave one canonical path and
@@ -1579,14 +1623,15 @@ fn decode_attribute_value(
         | if matches!(
             type_code,
             attr_type::MP_REACH_NLRI | attr_type::MP_UNREACH_NLRI | attr_type::BGP_LS
-        ) {
+        ) || registered_flags(type_code)
+            .is_some_and(|registered| registered.partial_must_clear)
+        {
             attr_flags::PARTIAL
         } else {
             0
         };
-    if let Some(expected) =
-        expected_flags(type_code).or_else(|| assigned_unsupported_flags(type_code))
-        && (flags & flags_mask) != expected
+    if let Some(registered) = registered_flags(type_code)
+        && (flags & flags_mask) != registered.flags
     {
         return Err(DecodeError::UpdateAttributeError {
             subcode: update_subcode::ATTRIBUTE_FLAGS_ERROR,
@@ -1595,9 +1640,26 @@ fn decode_attribute_value(
                 "type {} flags {:#04x} (expected {:#04x})",
                 type_code,
                 flags & flags_mask,
-                expected
+                registered.flags
             ),
         });
+    }
+    if matches!(
+        type_code,
+        attr_type::DOMAIN_PATH
+            | attr_type::SFP
+            | attr_type::BFD_DISCRIMINATOR
+            | attr_type::NHC
+            | attr_type::PREFIX_SID
+            | attr_type::BIER
+    ) {
+        crate::assigned_attributes::validate(type_code, value).map_err(|detail| {
+            DecodeError::UpdateAttributeError {
+                subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                data: attr_error_data(flags, type_code, value),
+                detail: format!("attribute type {type_code}: {detail}"),
+            }
+        })?;
     }
     match type_code {
         attr_type::ORIGIN => {
@@ -1892,9 +1954,15 @@ fn decode_attribute_value(
         }
         // Correctly-classed assigned optional non-transitive attributes whose
         // payload semantics are unsupported are ignored, never retained.
-        attr_type::AIGP | attr_type::BGPSEC_PATH => unreachable!(
-            "assigned unsupported optional non-transitive attributes are filtered before decode"
-        ),
+        attr_type::AIGP | attr_type::BGPSEC_PATH | attr_type::EDGE_METADATA => {
+            Err(DecodeError::UpdateAttributeError {
+                subcode: update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+                data: attr_error_data(flags, type_code, value),
+                detail: format!(
+                    "assigned optional non-transitive attribute type {type_code} reached value decoding"
+                ),
+            })
+        }
         // Any unknown type -> RawAttribute. AS4_PATH and AS4_AGGREGATOR are
         // kept raw only until the shared post-decode RFC 6793 normalizer
         // consumes them.
@@ -2796,6 +2864,7 @@ fn encode_path_attributes_with_scratch(
             attr,
             PathAttribute::Unknown(raw)
                 if matches!(raw.type_code, attr_type::AS4_PATH | attr_type::AS4_AGGREGATOR)
+                    || is_assigned_unsupported_optional_non_transitive(raw.type_code)
                     || is_unknown_optional_non_transitive(raw.flags, raw.type_code)
         ) {
             // Compatibility sidecars are derived from canonical attributes,
@@ -6371,7 +6440,7 @@ mod tests {
     #[test]
     fn only_to_customer_bad_flags_returns_attribute_flags_error() {
         // Correct length (4), wrong flags — must be subcode 4
-        // ATTRIBUTE_FLAGS_ERROR (handled by the shared expected_flags()
+        // ATTRIBUTE_FLAGS_ERROR (handled by the shared registered_flags()
         // check before type dispatch).
         for bad_flags in [
             0x00u8,                 // no flags

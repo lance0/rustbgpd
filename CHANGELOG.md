@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Assigned BGP attributes 36-42 now use their registered propagation classes;
+  D-PATH, SFP, BFD Discriminator, NHC, Prefix-SID, and BIER receive bounded
+  structural framing checks before opaque propagation, while Edge Metadata is
+  never retained or emitted. Strict decoding returns typed errors instead of
+  reaching an impossible branch, and revised decoding applies each row's
+  treat-as-withdraw or attribute-discard action. (LAN-1236, LAN-1286)
+
 - General unicast FIB Add/Replace operations whose unscoped, same-family,
   non-link-local next-hop target receives Linux's family-specific unreachable
   errno are now held as `unresolved` and retried on relevant route notifications

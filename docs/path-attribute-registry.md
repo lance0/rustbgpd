@@ -64,13 +64,13 @@ octet from 0 through 255 to appear exactly once with no blank cell.
 | 33 | BGPsec_Path | optional non-transitive; flags `0x80`; RFC 8205 | payload semantics unsupported; correct class ignored; wrong class is treat-as-withdraw | assigned-class matrix below |
 | 34 | BGP Community Container Attribute (TEMPORARY - registered 2017-07-28, extension registered 2024-08-22, expires 2025-07-28) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 35 | Only to Customer (OTC) | optional transitive; flags `0xc0`; exactly one four-octet ASN; RFC 9234 §5 | typed ASN + Partial round-trip; Extended Length and reserved low bits canonicalize; wrong class or length is treat-as-withdraw | OTC codec and transport matrices |
-| 36 | BGP Domain Path (D-PATH) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 37 | SFP attribute | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 38 | BFD Discriminator | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 39 | Next Hop Dependent Characteristic (NHC) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 40 | BGP Prefix-SID | optional transitive; flags `0xc0`; RFC 8669 §3 | payload semantics unsupported; correct class retained opaque and emitted with Partial; wrong class is treat-as-withdraw | assigned-class matrix below |
-| 41 | BIER | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 42 | Edge Metadata Path Attribute (TEMPORARY - registered 2025-04-23, extension registered 2026-04-03, expires 2027-04-23) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
+| 36 | BGP Domain Path (D-PATH) | optional transitive; flags `0xc0`; draft-ietf-bess-evpn-ipvpn-interworking-18 | opaque retention with bounded domain-segment framing; malformed is treat-as-withdraw | assigned framing matrix below |
+| 37 | SFP attribute | optional transitive; flags `0xc0`; RFC 9015 §3.2.1 | opaque retention with TLV, Hop, and Hop sub-TLV framing; malformed is treat-as-withdraw | assigned framing matrix below |
+| 38 | BFD Discriminator | optional transitive; flags `0xc0`; RFC 9026 §3.1.6 | opaque retention with base and Source-IP TLV framing; malformed is attribute-discard | assigned framing matrix below |
+| 39 | Next Hop Dependent Characteristic (NHC) | optional transitive; flags `0xc0`; draft-ietf-idr-nhc-07 | opaque retention with next-hop and characteristic-TLV framing; malformed or empty characteristics is attribute-discard | assigned framing matrix below |
+| 40 | BGP Prefix-SID | optional transitive; flags `0xc0`; RFC 8669 §§3, 6 | opaque retention with complete TLV framing and known-length checks; malformed is attribute-discard | assigned framing matrix below |
+| 41 | BIER | optional transitive; flags `0xc0`; RFC 9793 §§3-4 | opaque retention with exact TLV/sub-TLV length-boundary framing; boundary failure is attribute-discard | assigned framing matrix below |
+| 42 | Edge Metadata Path Attribute (TEMPORARY - registered 2025-04-23, extension registered 2026-04-03, expires 2027-04-23) | optional non-transitive; flags `0x80`; draft-ietf-idr-5g-edge-service-metadata-27 | payload unsupported; correct class ignored and never emitted; every class or Partial conflict is treat-as-withdraw | assigned framing matrix below |
 | 43-127 | Unassigned | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 128 | ATTR_SET | optional transitive; flags `0xc0`; RFC 6368 | payload semantics unsupported; correct class retained opaque and emitted with Partial; wrong class is treat-as-withdraw | assigned-class matrix below |
 | 129 | Deprecated | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
@@ -114,9 +114,27 @@ negotiation. "Wrong O" toggles Optional, "wrong T" toggles Transitive, and
 
 | Codes | Class | Correct-class retention and egress | Wrong O | Wrong T | Both wrong | Legacy decoder |
 |---|---|---|---|---|---|---|
-| 23, 27, 40, 128 | optional transitive (`0xc0`) | opaque retention; Partial set on egress; input Partial and Extended Length preserved | treat-as-withdraw | treat-as-withdraw | treat-as-withdraw | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
+| 23, 27, 36-41, 128 | optional transitive (`0xc0`) | opaque retention; Partial set on egress; input Partial and Extended Length preserved | treat-as-withdraw | treat-as-withdraw | treat-as-withdraw | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
 | 26 | optional non-transitive (`0x80`) | ignored; no retention or egress | treat-as-withdraw | attribute-discard | attribute-discard | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
 | 33 | optional non-transitive (`0x80`) | ignored; no retention or egress | treat-as-withdraw | treat-as-withdraw | treat-as-withdraw | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
+| 42 | optional non-transitive (`0x80`) | ignored; no retention or egress; Partial rejected | treat-as-withdraw | treat-as-withdraw | treat-as-withdraw | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
+
+## Assigned framing matrix (36-42)
+
+These checks are syntax-only. They do not implement route-family applicability,
+stateful lookup, policy, or attribute semantics. Unknown TLVs remain opaque.
+
+<!-- assigned-framing:start -->
+| Code | Registered class | Bounded structural fence | Revised malformed action |
+|---|---|---|---|
+| 36 | optional transitive; flags `0xc0` | non-empty sequence of nonzero-count domain segments, each exactly `1 + 7*n` octets | treat-as-withdraw |
+| 37 | optional transitive; flags `0xc0` | exact one-octet-type/two-octet-length TLVs, at least one Hop TLV, and at least one exactly framed sub-TLV after every Hop service index | treat-as-withdraw |
+| 38 | optional transitive; flags `0xc0` | five-octet base, exact one-octet-type/length optional TLVs, and a Source IP TLV of length 4 or 16 | attribute-discard |
+| 39 | optional transitive; flags `0xc0` | AFI/SAFI/next-hop-length boundary followed by one or more exact two-octet-type/two-octet-length characteristic TLVs | attribute-discard |
+| 40 | optional transitive; flags `0xc0` | exact one-octet-type/two-octet-length TLVs; Label-Index length 7; Originator SRGB length `2 + nonzero*6` | attribute-discard |
+| 41 | optional transitive; flags `0xc0` | zero or more exact two-octet-type/length TLVs; known containers consume nested length framing only when their four-octet fixed prefix is present; semantic field shapes remain opaque | attribute-discard |
+| 42 | optional non-transitive; flags `0x80` | no payload validation; exact registered class is dropped before value decoding | class conflict is treat-as-withdraw |
+<!-- assigned-framing:end -->
 
 ## PMSI tunnel-type matrix
 

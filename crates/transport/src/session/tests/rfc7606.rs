@@ -201,6 +201,150 @@ async fn unknown_optional_non_transitive_is_absent_from_delivered_route() {
     assert_eq!(session.fsm.state(), SessionState::Established);
 }
 
+#[tokio::test]
+async fn assigned_opaque_attributes_reach_rib_while_edge_metadata_is_absent() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    assert!(matches!(
+        read_single_bgp_message(&mut server).await,
+        Message::Open(_)
+    ));
+    assert!(matches!(
+        read_single_bgp_message(&mut server).await,
+        Message::Keepalive
+    ));
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 42), 32);
+    let values = [
+        (36_u8, vec![1, 0, 0, 0, 0, 0, 0, 0]),
+        (37, vec![2, 0, 4, 1, 99, 0, 0]),
+        (38, vec![1, 0, 0, 0, 1, 1, 4, 192, 0, 2, 1]),
+        (39, vec![0, 1, 1, 4, 192, 0, 2, 1, 0, 1, 0, 0]),
+        (41, vec![0, 1, 0, 12, 0, 0, 0, 0, 0, 4, 0, 4, 192, 0, 2, 1]),
+    ];
+    let mut extra = Vec::new();
+    for (code, value) in &values {
+        extra.extend([0xc0, *code, u8::try_from(value.len()).unwrap()]);
+        extra.extend(value);
+    }
+    extra.extend([0x80, 42, 1, 0xaa]);
+    session
+        .process_update(rfc7606_update(rfc7606_attr_bytes(&extra), &[prefix]))
+        .await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected assigned opaque announcement");
+    };
+    assert_eq!(announced.len(), 1);
+    for (code, _) in &values {
+        assert!(
+            announced[0]
+                .attributes
+                .iter()
+                .any(|attribute| attribute.type_code() == *code),
+            "assigned type {code} did not reach the RIB"
+        );
+    }
+    assert!(
+        announced[0]
+            .attributes
+            .iter()
+            .all(|attribute| attribute.type_code() != 42)
+    );
+    let delivered = announced[0].clone();
+    session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
+        announce: vec![delivered].into(),
+        next_hop_override: vec![None].into(),
+        ..empty_outbound_update()
+    });
+    let Message::Update(egress) = read_single_bgp_message(&mut server).await else {
+        panic!("expected outbound UPDATE");
+    };
+    let parsed = egress.parse(true, false, &[]).unwrap();
+    for (code, value) in &values {
+        let Some(PathAttribute::Unknown(raw)) = parsed
+            .attributes
+            .iter()
+            .find(|attribute| attribute.type_code() == *code)
+        else {
+            panic!("assigned type {code} missing from outbound UPDATE");
+        };
+        assert_eq!(raw.flags, 0xe0, "assigned type {code} missing Partial");
+        assert_eq!(raw.data.as_ref(), value);
+    }
+    assert!(
+        parsed
+            .attributes
+            .iter()
+            .all(|attribute| attribute.type_code() != 42)
+    );
+    assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
+#[tokio::test]
+async fn malformed_domain_path_withdraws_route_and_keeps_session() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 36), 32);
+    session
+        .process_update(rfc7606_update(rfc7606_attr_bytes(&[]), &[prefix]))
+        .await;
+    let _ = rib_rx.try_recv().expect("initial route");
+
+    session
+        .process_update(rfc7606_update(
+            rfc7606_attr_bytes(&[0xc0, 36, 8, 0, 0, 0, 0, 0, 0, 0, 0]),
+            &[prefix],
+        ))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx.try_recv().expect("treat-as-withdraw update")
+    else {
+        panic!("expected route withdrawal");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)]);
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+}
+
+#[tokio::test]
+async fn malformed_bfd_discriminator_discards_attribute_and_keeps_route() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 38), 32);
+    let malformed = [0xc0, 38, 11, 1, 0, 0, 0, 1, 2, 4, 0, 0, 0, 0];
+    session
+        .process_update(rfc7606_update(rfc7606_attr_bytes(&malformed), &[prefix]))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } =
+        rib_rx.try_recv().expect("attribute-discard announcement")
+    else {
+        panic!("expected retained route");
+    };
+    assert_eq!(announced.len(), 1);
+    assert!(
+        announced[0]
+            .attributes
+            .iter()
+            .all(|attribute| attribute.type_code() != 38)
+    );
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "attribute_discard");
+}
+
 /// RFC 6793 / RFC 7606: a malformed `AS4_PATH` is discarded without losing
 /// reachable NLRI or the valid ordinary path on a legacy session.
 ///

@@ -56,6 +56,7 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
+mod assigned_attributes;
 /// Path attribute types and codec (`ORIGIN`, `AS_PATH`, `NEXT_HOP`, etc.).
 pub mod attribute;
 /// BGP-LS NLRI codec substrate (RFC 9552).
