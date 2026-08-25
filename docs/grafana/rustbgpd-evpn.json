@@ -1,0 +1,426 @@
+{
+  "uid": "rustbgpd-evpn-alpha",
+  "title": "rustbgpd EVPN Operations (Alpha)",
+  "description": "Alpha EVPN/VTEP operations dashboard. It exposes only metrics registered by rustbgpd. Type 2 has local-origination and duplicate-MAC signals; Type 5 has per-IP-VRF state. Type 3 has no dedicated metric and is visible only inside the aggregate EVPN Loc-RIB count. There is no VTEP-reachability or generic installed-FDB/NHG-total series in this Alpha contract.",
+  "tags": ["rustbgpd", "evpn", "alpha"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {"from": "now-6h", "to": "now"},
+  "refresh": "30s",
+  "timezone": "",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      },
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": "label_values(bgp_rib_outbound_registered_peers, instance)",
+        "current": {},
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "vrf",
+        "label": "IP-VRF",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": "label_values(evpn_ip_vrf_observed_routes{instance=~\"$instance\"}, vrf)",
+        "current": {},
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "annotations": {"list": []},
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Type-2 / Type-3 / Type-5 and IP-VRF state",
+      "description": "Type 3 has no dedicated metric; the EVPN Loc-RIB panel is the only Prometheus view that includes it.",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "EVPN Loc-RIB (all route types)",
+      "description": "All selected EVPN Loc-RIB routes. This gauge combines route Types 1 through 5; it cannot isolate Type 3.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 6, "x": 0, "y": 1},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "decimals": 0}, "overrides": []},
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance) (bgp_rib_loc_prefixes{instance=~\"$instance\",afi_safi=\"evpn\"})",
+          "legendFormat": "{{instance}} all EVPN types",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Type-2 local origination actions, errors, and drops",
+      "description": "Rates of successful Type-2 inject/withdraw actions, failed actions, and kernel local-MAC observations dropped before the originator. Counters are rated before aggregation.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 9, "x": 6, "y": 1},
+      "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance, action) (rate(evpn_local_originations_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} success {{action}}/s",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance, action) (rate(evpn_local_origination_errors_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} error {{action}}/s",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance, reason) (rate(evpn_local_observations_dropped_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} observation drop {{reason}}/s",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Type-5 IP-VRF route state",
+      "description": "Current eligible observed kernel routes, locally originated Type-5 routes, and remotely installed Type-5 routes per configured IP-VRF.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 9, "x": 15, "y": 1},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "decimals": 0, "custom": {"lineInterpolation": "stepAfter"}}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance, vrf) (evpn_ip_vrf_observed_routes{instance=~\"$instance\",vrf=~\"$vrf\"})",
+          "legendFormat": "{{instance}} {{vrf}} observed",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance, vrf) (evpn_ip_vrf_originated_routes{instance=~\"$instance\",vrf=~\"$vrf\"})",
+          "legendFormat": "{{instance}} {{vrf}} originated",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance, vrf) (evpn_ip_vrf_installed_routes{instance=~\"$instance\",vrf=~\"$vrf\"})",
+          "legendFormat": "{{instance}} {{vrf}} installed",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Type-5 filtering, suppression, and projection drops",
+      "description": "Classifier and readiness suppressions are event rates. Remote projection drops are current gauges, including _unscoped rows that could not be tied to a configured IP-VRF.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance, vrf, reason) (rate(evpn_ip_vrf_observed_routes_filtered_total{instance=~\"$instance\",vrf=~\"$vrf\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} {{vrf}} filtered {{reason}}/s",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance, vrf, reason) (rate(evpn_ip_vrf_origination_suppressed_total{instance=~\"$instance\",vrf=~\"$vrf\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} {{vrf}} suppressed {{reason}}/s",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance, vrf, reason) (evpn_ip_vrf_remote_prefix_drops{instance=~\"$instance\",vrf=~\"$vrf\"})",
+          "legendFormat": "{{instance}} {{vrf}} current drop {{reason}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "row",
+      "title": "DF, attachment circuits, and drain",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 16},
+      "panels": []
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Active DF assignments",
+      "description": "Count of active local DF assignments by VNI. The one-hot role=df series is selected; ESI is aggregated away.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 6, "x": 0, "y": 17},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "decimals": 0, "custom": {"lineInterpolation": "stepAfter"}}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance, vni) (evpn_df_role{instance=~\"$instance\",role=\"df\"} == 1)",
+          "legendFormat": "{{instance}} VNI {{vni}} DF assignments",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Attachment-circuit gate state",
+      "description": "Single-active AC gate states, aggregated over ESI. blocked, forwarding, and mixed-roles are one-hot per bound segment.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 6, "x": 6, "y": 17},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "decimals": 0, "custom": {"lineInterpolation": "stepAfter"}}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance, state) (evpn_es_ac_gate{instance=~\"$instance\"} == 1)",
+          "legendFormat": "{{instance}} {{state}} segments",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Ethernet-segment drain reasons",
+      "description": "Active operator and link drain reasons, aggregated over ESI. A segment is drained while any reason is one.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 6, "x": 12, "y": 17},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "decimals": 0, "custom": {"lineInterpolation": "stepAfter"}}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance, reason) (evpn_es_drained{instance=~\"$instance\"} == 1)",
+          "legendFormat": "{{instance}} {{reason}} drains",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "DF role changes",
+      "description": "DF/NonDF transition rate by VNI, aggregated over ESI.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 6, "x": 18, "y": 17},
+      "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance, vni) (rate(evpn_df_role_changes_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} VNI {{vni}} changes/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "row",
+      "title": "Duplicate-MAC quarantine",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 24},
+      "panels": []
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Quarantined local Type-2 keys",
+      "description": "Current local Type-2 origination suppressions. The rendered result aggregates VNI and MAC away, but the daemon-lifetime per-MAC source series remain in Prometheus and the query scan can grow.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 25},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "decimals": 0, "custom": {"lineInterpolation": "stepAfter"}}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance) (evpn_duplicate_mac_quarantine_active{instance=~\"$instance\"} == 1)",
+          "legendFormat": "{{instance}} quarantined keys",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Duplicate-MAC contention activity",
+      "description": "MAC-mobility contention and configured threshold-crossing rates. VNI/MAC are intentionally aggregated away.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 25},
+      "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance) (rate(evpn_duplicate_mac_moves_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} moves/s",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance, action) (rate(evpn_duplicate_mac_threshold_exceeded_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} threshold {{action}}/s",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Time since first recorded move for active quarantines",
+      "description": "Time since the process-lifetime first recorded move among keys that are currently quarantined. Clearing and re-quarantining a key does not reset or reap its first-move timestamp. MAC and VNI are used for the exact active-state join and removed only from rendered output; the underlying per-MAC series and query scan can grow for the daemon lifetime.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 25},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []},
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "max by (instance) (clamp_min(time() - evpn_duplicate_mac_first_move_timestamp_seconds{instance=~\"$instance\"}, 0) and on (instance, vni, mac) (evpn_duplicate_mac_quarantine_active{instance=~\"$instance\"} == 1))",
+          "legendFormat": "{{instance}} since first recorded move",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "row",
+      "title": "Dataplane repair, adoption, and single-active state",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 32},
+      "panels": []
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Managed netdev state",
+      "description": "Current managed EVPN netdev state counts by class and state. Device name and desired tuple are aggregated away; detailed reasons remain in ListManagedNetdevs/rbgp.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 33},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "decimals": 0, "custom": {"lineInterpolation": "stepAfter"}}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance, class, state) (evpn_managed_netdev_state{instance=~\"$instance\"} == 1)",
+          "legendFormat": "{{instance}} {{class}} {{state}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "FDB-NHG repair and cleanup",
+      "description": "Rates of repaired members, replaced groups, cleaned orphan nexthops, and permanent dump failures that disabled drift recovery. No generic installed-NHG total is exported.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 33},
+      "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_fdb_nhg_drift_members_repaired_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} members repaired/s", "refId": "A"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_fdb_nhg_drift_groups_replaced_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} groups replaced/s", "refId": "B"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_fdb_nhg_orphans_cleaned_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} orphans cleaned/s", "refId": "C"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_fdb_nhg_drift_disabled_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} drift disabled/s", "refId": "D"}
+      ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Startup adoption and deferred reap",
+      "description": "Startup adoption and post-deferral reap rates for single-dst FDB rows, IP-VRF routes, L3 neighbors, and L3VXLAN FDB rows.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 7, "x": 12, "y": 33},
+      "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_fdb_single_dst_adopted_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} FDB adopted/s", "refId": "A"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_fdb_single_dst_reaped_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} FDB reaped/s", "refId": "B"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_l3_route_adopted_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} routes adopted/s", "refId": "C"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_l3_route_reaped_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} routes reaped/s", "refId": "D"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_l3_neighbor_adopted_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} neighbors adopted/s", "refId": "E"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_l3_neighbor_reaped_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} neighbors reaped/s", "refId": "F"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_l3vxlan_fdb_adopted_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} L3VXLAN FDB adopted/s", "refId": "G"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_l3vxlan_fdb_reaped_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} L3VXLAN FDB reaped/s", "refId": "H"}
+      ]
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Single-active failover state",
+      "description": "Current backup-retargeted groups plus backup-swap and ordered-teardown event rates.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 5, "x": 19, "y": 33},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (evpn_single_active_backup_active{instance=~\"$instance\"})", "legendFormat": "{{instance}} backup active", "refId": "A"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_single_active_backup_swaps_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} swaps/s", "refId": "B"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_single_active_teardowns_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} teardowns/s", "refId": "C"}
+      ]
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Ownership conflicts and fail-stops",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 41},
+      "panels": []
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Foreign ownership conflicts",
+      "description": "Rates of fail-closed replace blocks, spared deletes, relinquished keys, and foreign objects in the reserved NHID range.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 16, "x": 0, "y": 42},
+      "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_foreign_replaces_blocked_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} replace blocked/s", "refId": "A"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_foreign_deletes_skipped_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} delete skipped/s", "refId": "B"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_foreign_owned_relinquished_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} ownership relinquished/s", "refId": "C"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (instance) (rate(evpn_foreign_nhid_range_conflicts_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{instance}} NHID conflicts/s", "refId": "D"}
+      ]
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "Runtime decomposed fail-stops",
+      "description": "Mid-sequence decomposed runtime applies that pinned the coordinator in Failed during the last 15 minutes. This is the only source-backed EVPN fail-stop metric.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 42},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "decimals": 0}, "overrides": []},
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance) (increase(evpn_runtime_decomposed_fail_stops_total{instance=~\"$instance\"}[15m]))",
+          "legendFormat": "{{instance}} fail-stops/15m",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

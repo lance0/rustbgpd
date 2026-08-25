@@ -15,6 +15,25 @@ SPEC.loader.exec_module(CHECK)
 
 
 class DashboardMetricLinkTests(unittest.TestCase):
+    def evpn_dashboard(self):
+        return json.loads(CHECK.EVPN_DASHBOARD.read_text(encoding="utf-8"))
+
+    def check_evpn(self, dashboard):
+        source = CHECK.METRICS.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evpn.json"
+            path.write_text(json.dumps(dashboard), encoding="utf-8")
+            CHECK.check_evpn_dashboard(
+                path, CHECK.rust_metric_inventory(source), source
+            )
+
+    def evpn_panel(self, dashboard, title):
+        return next(
+            panel
+            for panel in CHECK.all_panels(dashboard["panels"])
+            if panel.get("title") == title
+        )
+
     def remove_panel(self, panels, panel_id):
         for index, panel in enumerate(panels):
             if panel.get("id") == panel_id:
@@ -134,8 +153,184 @@ let families = self.allocated.collect();'''
         with self.assertRaisesRegex(ValueError, "no registered Rust metrics"):
             CHECK.rust_metric_inventory(source)
 
+    def test_live_evpn_dashboard_and_frozen_source_inventory(self):
+        source = CHECK.METRICS.read_text(encoding="utf-8")
+        self.assertEqual(
+            {
+                name: definition
+                for name, definition in CHECK.registered_metric_definitions(source).items()
+                if name.startswith("evpn_")
+            },
+            CHECK.EVPN_METRICS,
+        )
+        self.check_evpn(self.evpn_dashboard())
+
+    def test_evpn_temp_json_parse_error_keeps_its_context(self):
+        source = CHECK.METRICS.read_text(encoding="utf-8")
+        inventory = CHECK.rust_metric_inventory(source)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evpn-invalid.json"
+            path.write_text("{", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "cannot parse .*evpn-invalid.json"):
+                CHECK.check_evpn_dashboard(path, inventory, source)
+
+    def test_evpn_metric_typo_and_invalid_label_fail_closed(self):
+        dashboard = self.evpn_dashboard()
+        panel = self.evpn_panel(dashboard, "Active DF assignments")
+        expression = panel["targets"][0]["expr"]
+        for replacement, error in (
+            (expression.replace("evpn_df_role", "evpn_df_roles"), "exact expression"),
+            (expression.replace('role="df"', 'role="df",mac="00:00:00:00:00:01"'),
+             "exact expression"),
+        ):
+            with self.subTest(replacement=replacement):
+                panel["targets"][0]["expr"] = replacement
+                with self.assertRaisesRegex(ValueError, error):
+                    self.check_evpn(dashboard)
+                panel["targets"][0]["expr"] = expression
+
+    def test_evpn_alpha_marker_and_required_row_fail_closed(self):
+        dashboard = self.evpn_dashboard()
+        dashboard["title"] = "rustbgpd EVPN Operations"
+        with self.assertRaisesRegex(ValueError, "title.*Alpha marker"):
+            self.check_evpn(dashboard)
+
+        dashboard = self.evpn_dashboard()
+        dashboard["panels"] = [
+            panel
+            for panel in dashboard["panels"]
+            if panel.get("title") != "Duplicate-MAC quarantine"
+        ]
+        with self.assertRaisesRegex(ValueError, "missing required operator rows.*Duplicate-MAC"):
+            self.check_evpn(dashboard)
+
+    def test_evpn_kind_and_cardinality_guards_fail_closed(self):
+        dashboard = self.evpn_dashboard()
+        panel = self.evpn_panel(dashboard, "DF role changes")
+        expression = panel["targets"][0]["expr"]
+        panel["targets"][0]["expr"] = expression.replace(
+            "sum by (instance, vni)", "sum by (instance, vni, esi)"
+        )
+        with self.assertRaisesRegex(ValueError, "unsafe aggregation.*esi"):
+            CHECK.check_evpn_promql_safety(
+                panel["targets"][0]["expr"],
+                panel["targets"][0]["legendFormat"],
+                CHECK.EVPN_METRICS,
+                "test",
+            )
+
+        dashboard = self.evpn_dashboard()
+        panel = self.evpn_panel(dashboard, "FDB-NHG repair and cleanup")
+        panel["targets"][0]["expr"] = panel["targets"][0]["expr"].replace(
+            "rate(", "("
+        )
+        with self.assertRaisesRegex(ValueError, "counter.*must use rate/increase"):
+            CHECK.check_evpn_promql_safety(
+                panel["targets"][0]["expr"],
+                panel["targets"][0]["legendFormat"],
+                CHECK.EVPN_METRICS,
+                "test",
+            )
+
+        dashboard = self.evpn_dashboard()
+        panel = self.evpn_panel(dashboard, "Type-5 IP-VRF route state")
+        panel["targets"][0]["expr"] = (
+            'rate(evpn_ip_vrf_observed_routes{instance=~"$instance",vrf=~"$vrf"}'
+            '[$__rate_interval])'
+        )
+        with self.assertRaisesRegex(ValueError, "gauge.*must not use rate/increase"):
+            CHECK.check_evpn_promql_safety(
+                panel["targets"][0]["expr"],
+                panel["targets"][0]["legendFormat"],
+                CHECK.EVPN_METRICS,
+                "test",
+            )
+
+    def test_evpn_multi_value_vrf_uses_regex_matching(self):
+        dashboard = self.evpn_dashboard()
+        panel = self.evpn_panel(dashboard, "Type-5 IP-VRF route state")
+        panel["targets"][0]["expr"] = panel["targets"][0]["expr"].replace(
+            'vrf=~"$vrf"', 'vrf="$vrf"'
+        )
+        with self.assertRaisesRegex(ValueError, "multi-value.*must use the =~"):
+            CHECK.check_evpn_promql_safety(
+                panel["targets"][0]["expr"],
+                panel["targets"][0]["legendFormat"],
+                CHECK.EVPN_METRICS,
+                "test",
+            )
+
+    def test_evpn_load_bearing_promql_mutations_fail_closed(self):
+        mutations = (
+            ("Active DF assignments", ' == 1)', ' >= 0)'),
+            ("Type-5 IP-VRF route state", "sum by", "avg by"),
+            (
+                "Time since first recorded move for active quarantines",
+                " and on (instance, vni, mac) ",
+                " + on (instance, vni, mac) ",
+            ),
+            ("Quarantined local Type-2 keys", " == 1)", " == 1) or vector(0)"),
+        )
+        for title, old, new in mutations:
+            with self.subTest(panel=title):
+                dashboard = self.evpn_dashboard()
+                target = self.evpn_panel(dashboard, title)["targets"][0]
+                self.assertIn(old, target["expr"])
+                target["expr"] = target["expr"].replace(old, new, 1)
+                with self.assertRaisesRegex(ValueError, "exact expression"):
+                    self.check_evpn(dashboard)
+
+    def test_evpn_target_legend_and_datasource_are_exact(self):
+        for field, replacement, error in (
+            ("legendFormat", "{{instance}} vague", "retain legend"),
+            (
+                "datasource",
+                {"type": "prometheus", "uid": "prometheus-fixed"},
+                "bind the Prometheus.*datasource",
+            ),
+        ):
+            with self.subTest(field=field):
+                dashboard = self.evpn_dashboard()
+                target = self.evpn_panel(dashboard, "Active DF assignments")["targets"][0]
+                target[field] = replacement
+                with self.assertRaisesRegex(ValueError, error):
+                    self.check_evpn(dashboard)
+
+    def test_evpn_extra_data_panel_fails_closed(self):
+        dashboard = self.evpn_dashboard()
+        dashboard["panels"].append(
+            {
+                "id": 999,
+                "type": "timeseries",
+                "title": "Unsafe per-MAC quarantine detail",
+                "targets": [
+                    {
+                        "refId": "A",
+                        "expr": (
+                            "evpn_duplicate_mac_quarantine_active"
+                            '{instance=~"$instance"}'
+                        ),
+                        "legendFormat": "{{mac}}",
+                        "datasource": CHECK.EVPN_TARGET_DATASOURCE,
+                    }
+                ],
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "unexpected data panels.*Unsafe per-MAC"):
+            self.check_evpn(dashboard)
+
+    def test_evpn_duplicate_required_panel_title_fails_closed(self):
+        dashboard = self.evpn_dashboard()
+        duplicate = json.loads(
+            json.dumps(self.evpn_panel(dashboard, "Active DF assignments"))
+        )
+        duplicate["id"] = 999
+        dashboard["panels"].append(duplicate)
+        with self.assertRaisesRegex(ValueError, "exactly one.*counts=.*Active DF"):
+            self.check_evpn(dashboard)
+
     def test_live_dashboard_presentation_mutations_pass_full_check(self):
-        dashboard = json.loads(CHECK.DASHBOARD.read_text())
+        dashboard = json.loads(CHECK.DASHBOARD.read_text(encoding="utf-8"))
         for index, panel in enumerate(CHECK.all_panels(dashboard["panels"])):
             changes = {"description": "changed",
                        "collapsed": not panel.get("collapsed", False),
@@ -159,7 +354,7 @@ let families = self.allocated.collect();'''
         blackhole_row["panels"].append(blackhole)
         with tempfile.TemporaryDirectory() as directory:
             copy = Path(directory) / "dashboard.json"
-            copy.write_text(json.dumps(dashboard))
+            copy.write_text(json.dumps(dashboard), encoding="utf-8")
             original, CHECK.DASHBOARD = CHECK.DASHBOARD, copy
             try:
                 with redirect_stdout(io.StringIO()):
@@ -169,7 +364,7 @@ let families = self.allocated.collect();'''
                 for field in ("expr", "legendFormat"):
                     saved = orr["targets"][0][field]
                     orr["targets"][0][field] = "broken"
-                    copy.write_text(json.dumps(dashboard))
+                    copy.write_text(json.dumps(dashboard), encoding="utf-8")
                     with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
                         CHECK.main()
                     orr["targets"][0][field] = saved
@@ -184,7 +379,7 @@ let families = self.allocated.collect();'''
                 for subject, field, replacement in mutations:
                     saved = subject[field]
                     subject[field] = replacement
-                    copy.write_text(json.dumps(dashboard))
+                    copy.write_text(json.dumps(dashboard), encoding="utf-8")
                     with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
                         CHECK.main()
                     subject[field] = saved
@@ -200,12 +395,12 @@ let families = self.allocated.collect();'''
                 ):
                     saved = subject[field]
                     subject[field] = replacement
-                    copy.write_text(json.dumps(dashboard))
+                    copy.write_text(json.dumps(dashboard), encoding="utf-8")
                     with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
                         CHECK.main()
                     subject[field] = saved
                 self.assertTrue(self.remove_panel(dashboard["panels"], blackhole["id"]))
-                copy.write_text(json.dumps(dashboard))
+                copy.write_text(json.dumps(dashboard), encoding="utf-8")
                 stderr = io.StringIO()
                 targets = CHECK.TARGETS
                 legends = CHECK.REQUIRED_LEGENDS
