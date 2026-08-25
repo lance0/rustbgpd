@@ -1463,6 +1463,8 @@ FIB runtime. The actor is still default-off; configure at least one
 | `bgp_kernel_route_notify_dropped_total{actor,reason="channel_full"}` | Kernel route-event wake feed dropped an event before the FIB or BLACKHOLE reconciler could consume it; periodic reconcile remains the repair backstop |
 | `bgp_kernel_route_notify_subscription_failures_total{actor,group}` | The FIB or BLACKHOLE reconciler failed to subscribe to an IPv4/IPv6 route multicast group and is running with periodic-only kernel-drift repair |
 | `bgp_netlink_subscription_overruns_total{actor}` | The kernel reported a receive-buffer overrun to the `link_carrier`, `general_fib`, or `blackhole_discard` NETLINK_ROUTE actor. Each increment is one overrun notification—not a count of lost events—and proves only that one or more multicast events may have been lost |
+| `bgp_session_notification_outstanding` | Current lossless session notifications from sender entry through successful PeerManager dequeue. This includes synchronous in-flight reservations plus queued notifications; handling occurs after the value is decremented. |
+| `bgp_session_notification_outstanding_high_watermark` | Monotonic daemon-lifetime high-water mark of that outstanding population. It resets only when the daemon restarts and is not an exact per-flap or per-round peak. |
 
 The three netlink-overrun series are materialized at zero. A non-zero value
 does not identify which multicast group lost events and does not prove that a

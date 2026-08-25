@@ -47,7 +47,8 @@ use crate::event_sink::{NoopTransportEventSink, TransportEventSink};
 use crate::framing::ReadBuffer;
 use crate::handle::{
     PeerCommand, PeerSessionState, SessionIdentity, SessionLifecycleNotification,
-    SessionNotification, SessionNotificationDirection, SessionNotificationEvent, SessionRole,
+    SessionNotification, SessionNotificationDirection, SessionNotificationEvent,
+    SessionNotificationSender, SessionRole,
 };
 use crate::timer::{Timers, poll_timer};
 
@@ -266,7 +267,7 @@ pub(crate) struct PeerSession {
     /// Channel to notify `PeerManager` of lossless collision-coordination events.
     /// Unbounded so notifications are never dropped and never block (avoids
     /// deadlock with `QueryState`).
-    session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+    session_notify_tx: Option<SessionNotificationSender>,
     /// Bounded operator-facing lifecycle event channel.
     ///
     /// This carries ordinary FSM `StateChanged` observations used by
@@ -971,7 +972,7 @@ impl PeerSession {
         rib_tx: mpsc::Sender<RibUpdate>,
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
-        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_notify_tx: Option<SessionNotificationSender>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         advertise_graceful_shutdown: bool,
@@ -1005,7 +1006,7 @@ impl PeerSession {
         rib_tx: mpsc::Sender<RibUpdate>,
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
-        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_notify_tx: Option<SessionNotificationSender>,
         session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
@@ -1043,7 +1044,7 @@ impl PeerSession {
         rib_tx: mpsc::Sender<RibUpdate>,
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
-        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_notify_tx: Option<SessionNotificationSender>,
         session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
@@ -1194,7 +1195,7 @@ impl PeerSession {
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
         stream: TcpStream,
-        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_notify_tx: Option<SessionNotificationSender>,
         session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,

@@ -755,7 +755,7 @@ fn max_prefix_on_command_peer_handle(
     session_id: u64,
     role: rustbgpd_transport::SessionRole,
     trigger: MaxPrefixTrigger,
-    notify_tx: mpsc::UnboundedSender<SessionNotification>,
+    notify_tx: rustbgpd_transport::SessionNotificationSender,
     counters: Arc<FakePeerCounters>,
 ) -> PeerHandle {
     use rustbgpd_transport::PeerCommand;

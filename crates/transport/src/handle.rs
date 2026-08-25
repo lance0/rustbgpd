@@ -291,6 +291,89 @@ pub enum SessionNotification {
     },
 }
 
+/// Lossless, nonblocking sender for peer-session coordination notifications.
+#[derive(Debug, Clone)]
+pub struct SessionNotificationSender {
+    inner: mpsc::UnboundedSender<SessionNotification>,
+    metrics: BgpMetrics,
+}
+
+impl SessionNotificationSender {
+    /// Send exactly one notification while accounting for its outstanding lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original notification when the receiver is closed.
+    pub fn send(
+        &self,
+        notification: SessionNotification,
+    ) -> Result<(), mpsc::error::SendError<SessionNotification>> {
+        self.metrics.reserve_session_notification();
+        match self.inner.send(notification) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.metrics.release_session_notification();
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Receiver half of the lossless session-notification channel.
+#[derive(Debug)]
+pub struct SessionNotificationReceiver {
+    inner: mpsc::UnboundedReceiver<SessionNotification>,
+    metrics: BgpMetrics,
+}
+
+impl SessionNotificationReceiver {
+    /// Receive one notification, releasing its reservation only after dequeue.
+    pub async fn recv(&mut self) -> Option<SessionNotification> {
+        let notification = self.inner.recv().await;
+        if notification.is_some() {
+            self.metrics.release_session_notification();
+        }
+        notification
+    }
+
+    /// Try to receive one notification without waiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Empty` when no notification is queued and `Disconnected` when
+    /// every sender has closed and the queue is drained.
+    pub fn try_recv(&mut self) -> Result<SessionNotification, mpsc::error::TryRecvError> {
+        let notification = self.inner.try_recv()?;
+        self.metrics.release_session_notification();
+        Ok(notification)
+    }
+}
+
+impl Drop for SessionNotificationReceiver {
+    fn drop(&mut self) {
+        self.inner.close();
+        while self.try_recv().is_ok() {}
+    }
+}
+
+/// Create the intentionally unbounded lossless session-notification lane.
+#[must_use]
+pub fn session_notification_channel(
+    metrics: BgpMetrics,
+) -> (SessionNotificationSender, SessionNotificationReceiver) {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    (
+        SessionNotificationSender {
+            inner: sender,
+            metrics: metrics.clone(),
+        },
+        SessionNotificationReceiver {
+            inner: receiver,
+            metrics,
+        },
+    )
+}
+
 /// Bounded lifecycle notification sent from a peer session to `PeerManager`.
 ///
 /// These events back operator-facing streams such as
@@ -850,7 +933,7 @@ impl PeerHandle {
         rib_tx: mpsc::Sender<RibUpdate>,
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
-        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_notify_tx: Option<SessionNotificationSender>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         advertise_graceful_shutdown: bool,
@@ -882,7 +965,7 @@ impl PeerHandle {
         rib_tx: mpsc::Sender<RibUpdate>,
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
-        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_notify_tx: Option<SessionNotificationSender>,
         session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
@@ -918,7 +1001,7 @@ impl PeerHandle {
         rib_tx: mpsc::Sender<RibUpdate>,
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
-        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_notify_tx: Option<SessionNotificationSender>,
         session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
@@ -960,7 +1043,7 @@ impl PeerHandle {
         rib_tx: mpsc::Sender<RibUpdate>,
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
-        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_notify_tx: Option<SessionNotificationSender>,
         session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
@@ -1001,7 +1084,7 @@ impl PeerHandle {
         rib_tx: mpsc::Sender<RibUpdate>,
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
-        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_notify_tx: Option<SessionNotificationSender>,
         session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
@@ -1060,7 +1143,7 @@ impl PeerHandle {
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
         stream: TcpStream,
-        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_notify_tx: Option<SessionNotificationSender>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         advertise_graceful_shutdown: bool,
@@ -1094,7 +1177,7 @@ impl PeerHandle {
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
         stream: TcpStream,
-        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_notify_tx: Option<SessionNotificationSender>,
         session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
@@ -1132,7 +1215,7 @@ impl PeerHandle {
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
         stream: TcpStream,
-        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_notify_tx: Option<SessionNotificationSender>,
         session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
@@ -1176,7 +1259,7 @@ impl PeerHandle {
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
         stream: TcpStream,
-        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_notify_tx: Option<SessionNotificationSender>,
         session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
@@ -1222,7 +1305,7 @@ impl PeerHandle {
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
         stream: TcpStream,
-        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_notify_tx: Option<SessionNotificationSender>,
         session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
@@ -2034,7 +2117,158 @@ impl PeerHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Barrier;
     use std::time::Instant;
+
+    fn gauge(metrics: &BgpMetrics, name: &str) -> f64 {
+        metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == name)
+            .and_then(|family| family.get_metric().first().cloned())
+            .map(|metric| metric.get_gauge().value())
+            .unwrap()
+    }
+
+    fn assert_gauge(metrics: &BgpMetrics, name: &str, expected: f64) {
+        let actual = gauge(metrics, name);
+        assert!((actual - expected).abs() < f64::EPSILON, "{name}: {actual}");
+    }
+
+    fn notification(producer: u64, ordinal: u8) -> SessionNotification {
+        let host = u8::try_from(producer % 250 + 1).unwrap();
+        let peer_addr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, host));
+        match ordinal {
+            0 => SessionNotification::OpenReceived {
+                session_id: producer,
+                role: SessionRole::Primary,
+                peer_addr,
+                remote_router_id: Ipv4Addr::new(198, 51, 100, 1),
+                peer_asn: 65_000,
+            },
+            1 => SessionNotification::BackToIdle {
+                session_id: producer,
+                role: SessionRole::Primary,
+                peer_addr,
+            },
+            2 => SessionNotification::MaxPrefixExceeded {
+                session_id: producer,
+                role: SessionRole::Primary,
+                peer_addr,
+                count: usize::try_from(producer).unwrap(),
+                bound: 1,
+                family: None,
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    fn identity(notification: &SessionNotification) -> (u64, u8) {
+        match notification {
+            SessionNotification::OpenReceived { session_id, .. } => (*session_id, 0),
+            SessionNotification::BackToIdle { session_id, .. } => (*session_id, 1),
+            SessionNotification::MaxPrefixExceeded { session_id, .. } => (*session_id, 2),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_notification_depth_tracks_700_by_3_exact_fifo_roster() {
+        let metrics = BgpMetrics::new();
+        let (sender, mut receiver) = session_notification_channel(metrics.clone());
+        let mut producers = Vec::new();
+        for producer in 0..700 {
+            let sender = sender.clone();
+            producers.push(tokio::spawn(async move {
+                for ordinal in 0..3 {
+                    sender.send(notification(producer, ordinal)).unwrap();
+                }
+            }));
+        }
+        for producer in producers {
+            producer.await.unwrap();
+        }
+        assert_gauge(&metrics, "bgp_session_notification_outstanding", 2_100.0);
+        assert_gauge(
+            &metrics,
+            "bgp_session_notification_outstanding_high_watermark",
+            2_100.0,
+        );
+
+        let mut roster = HashMap::<u64, Vec<u8>>::new();
+        while let Ok(notification) = receiver.try_recv() {
+            let (producer, ordinal) = identity(&notification);
+            roster.entry(producer).or_default().push(ordinal);
+        }
+        assert_eq!(roster.len(), 700);
+        assert!(roster.values().all(|ordinals| ordinals == &[0, 1, 2]));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_gauge(&metrics, "bgp_session_notification_outstanding", 0.0);
+        assert_gauge(
+            &metrics,
+            "bgp_session_notification_outstanding_high_watermark",
+            2_100.0,
+        );
+    }
+
+    #[tokio::test]
+    async fn session_notification_async_recv_releases_exactly_once() {
+        let metrics = BgpMetrics::new();
+        let (sender, mut receiver) = session_notification_channel(metrics.clone());
+        sender.send(notification(1, 0)).unwrap();
+        assert_gauge(&metrics, "bgp_session_notification_outstanding", 1.0);
+        assert_eq!(identity(&receiver.recv().await.unwrap()), (1, 0));
+        assert_gauge(&metrics, "bgp_session_notification_outstanding", 0.0);
+    }
+
+    #[test]
+    fn session_notification_receiver_drop_drains_and_closed_send_rolls_back() {
+        let metrics = BgpMetrics::new();
+        let (sender, receiver) = session_notification_channel(metrics.clone());
+        sender.send(notification(1, 0)).unwrap();
+        let remaining = sender.clone();
+        drop(receiver);
+        assert!(remaining.send(notification(2, 0)).is_err());
+        assert_gauge(&metrics, "bgp_session_notification_outstanding", 0.0);
+        assert_gauge(
+            &metrics,
+            "bgp_session_notification_outstanding_high_watermark",
+            1.0,
+        );
+
+        let (sender, receiver) = session_notification_channel(metrics.clone());
+        let barrier = Arc::new(Barrier::new(65));
+        let mut producers = Vec::new();
+        for producer in 0..64 {
+            let sender = sender.clone();
+            let barrier = Arc::clone(&barrier);
+            producers.push(std::thread::spawn(move || {
+                barrier.wait();
+                sender.send(notification(producer, 0)).is_ok()
+            }));
+        }
+        barrier.wait();
+        drop(receiver);
+        let outcomes = producers
+            .into_iter()
+            .map(|producer| producer.join().unwrap())
+            .collect::<Vec<_>>();
+        drop(sender);
+        let succeeded = outcomes.iter().filter(|outcome| **outcome).count();
+        let failed = outcomes.len() - succeeded;
+        assert_eq!(succeeded + failed, 64);
+        assert_gauge(&metrics, "bgp_session_notification_outstanding", 0.0);
+        assert!(
+            gauge(
+                &metrics,
+                "bgp_session_notification_outstanding_high_watermark"
+            ) >= 1.0
+        );
+    }
 
     #[test]
     fn peer_command_error_display_preserves_operator_text() {

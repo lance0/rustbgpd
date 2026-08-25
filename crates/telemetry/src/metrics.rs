@@ -2,13 +2,74 @@
 
 use std::cell::RefCell;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
+    core::{Collector, Desc},
+    proto::MetricFamily,
 };
+
+#[derive(Debug)]
+struct SessionNotificationDepthCollector {
+    current: Arc<AtomicI64>,
+    high_watermark: Arc<AtomicI64>,
+    descs: Vec<Desc>,
+}
+
+impl SessionNotificationDepthCollector {
+    fn new(current: Arc<AtomicI64>, high_watermark: Arc<AtomicI64>) -> Self {
+        let descs = vec![
+            Desc::new(
+                "bgp_session_notification_outstanding".to_string(),
+                "Current session notifications from sender entry through successful PeerManager dequeue, including synchronous in-flight reservations and queued notifications".to_string(),
+                Vec::new(),
+                std::collections::HashMap::new(),
+            )
+            .expect("valid metric descriptor"),
+            Desc::new(
+                "bgp_session_notification_outstanding_high_watermark".to_string(),
+                "Monotonic daemon-lifetime high-water mark of session notifications outstanding until process restart".to_string(),
+                Vec::new(),
+                std::collections::HashMap::new(),
+            )
+            .expect("valid metric descriptor"),
+        ];
+        Self {
+            current,
+            high_watermark,
+            descs,
+        }
+    }
+}
+
+impl Collector for SessionNotificationDepthCollector {
+    fn desc(&self) -> Vec<&Desc> {
+        self.descs.iter().collect()
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        let current = self.current.load(Ordering::Acquire);
+        let high_watermark = self.high_watermark.load(Ordering::Acquire).max(current);
+        let current_gauge = IntGauge::new(
+            "bgp_session_notification_outstanding",
+            "Current session notifications from sender entry through successful PeerManager dequeue, including synchronous in-flight reservations and queued notifications",
+        )
+        .expect("valid metric definition");
+        current_gauge.set(current);
+        let high_watermark_gauge = IntGauge::new(
+            "bgp_session_notification_outstanding_high_watermark",
+            "Monotonic daemon-lifetime high-water mark of session notifications outstanding until process restart",
+        )
+        .expect("valid metric definition");
+        high_watermark_gauge.set(high_watermark);
+        let mut families = current_gauge.collect();
+        families.extend(high_watermark_gauge.collect());
+        families
+    }
+}
 
 /// Canonical `peer` label value: the neighbor's bare IP address.
 ///
@@ -211,6 +272,8 @@ struct BgpMetricsInner {
     peer_admin_enabled: IntGaugeVec,
     peer_session_established: IntGaugeVec,
     stale_timer_events: IntCounterVec,
+    session_notification_outstanding_value: Arc<AtomicI64>,
+    session_notification_outstanding_high_watermark_value: Arc<AtomicI64>,
 
     // ── Dynamic-neighbor capacity ─────────────────────────────────
     dynamic_neighbor_slots_used: IntGauge,
@@ -509,6 +572,8 @@ impl BgpMetrics {
             &["peer", "from", "to"],
         )
         .expect("valid metric definition");
+        let session_notification_outstanding_value = Arc::new(AtomicI64::new(0));
+        let session_notification_outstanding_high_watermark_value = Arc::new(AtomicI64::new(0));
 
         let session_flaps = IntCounterVec::new(
             Opts::new(
@@ -2108,6 +2173,12 @@ impl BgpMetrics {
             .register(Box::new(state_transitions.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(SessionNotificationDepthCollector::new(
+                Arc::clone(&session_notification_outstanding_value),
+                Arc::clone(&session_notification_outstanding_high_watermark_value),
+            )))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(session_flaps.clone()))
             .expect("metric not already registered");
         registry
@@ -2656,6 +2727,8 @@ impl BgpMetrics {
             registry,
             instance_id: NEXT_METRICS_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             state_transitions,
+            session_notification_outstanding_value,
+            session_notification_outstanding_high_watermark_value,
             session_flaps,
             session_established,
             peer_admin_enabled,
@@ -2841,6 +2914,31 @@ impl BgpMetrics {
     #[must_use]
     pub fn registry(&self) -> &Registry {
         &self.0.registry
+    }
+
+    /// Reserve one session notification before its lossless channel send.
+    pub fn reserve_session_notification(&self) {
+        let outstanding = self
+            .0
+            .session_notification_outstanding_value
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
+        self.0
+            .session_notification_outstanding_high_watermark_value
+            .fetch_max(outstanding, Ordering::AcqRel);
+    }
+
+    /// Release one reservation after dequeue or a failed channel send.
+    pub fn release_session_notification(&self) {
+        let released = self.0.session_notification_outstanding_value.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| current.checked_sub(1).filter(|next| *next >= 0),
+        );
+        debug_assert!(
+            released.is_ok(),
+            "session notification accounting underflow"
+        );
     }
 
     /// Publish the authoritative process-global dynamic-neighbor slot state.
@@ -5205,6 +5303,71 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use prometheus::{Encoder, core::Collector};
+
+    fn unlabeled_gauge(metrics: &BgpMetrics, name: &str) -> f64 {
+        metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == name)
+            .and_then(|family| family.get_metric().first().cloned())
+            .map(|metric| metric.get_gauge().value())
+            .unwrap()
+    }
+
+    fn assert_unlabeled_gauge(metrics: &BgpMetrics, name: &str, expected: f64) {
+        let actual = unlabeled_gauge(metrics, name);
+        assert!((actual - expected).abs() < f64::EPSILON, "{name}: {actual}");
+    }
+
+    #[test]
+    fn session_notification_depth_metrics_register_unlabeled_at_zero() {
+        let metrics = BgpMetrics::new();
+        assert_unlabeled_gauge(&metrics, "bgp_session_notification_outstanding", 0.0);
+        assert_unlabeled_gauge(
+            &metrics,
+            "bgp_session_notification_outstanding_high_watermark",
+            0.0,
+        );
+        let mut encoded = Vec::new();
+        prometheus::TextEncoder::new()
+            .encode(&metrics.registry().gather(), &mut encoded)
+            .unwrap();
+        let encoded = String::from_utf8(encoded).unwrap();
+        assert!(encoded.contains("# HELP bgp_session_notification_outstanding Current session notifications from sender entry through successful PeerManager dequeue, including synchronous in-flight reservations and queued notifications"));
+        assert!(encoded.contains("# TYPE bgp_session_notification_outstanding gauge"));
+        assert!(encoded.contains("# HELP bgp_session_notification_outstanding_high_watermark Monotonic daemon-lifetime high-water mark of session notifications outstanding until process restart"));
+        assert!(
+            encoded.contains("# TYPE bgp_session_notification_outstanding_high_watermark gauge")
+        );
+    }
+
+    #[test]
+    fn session_notification_depth_atomic_lifecycle_is_monotonic() {
+        let metrics = BgpMetrics::new();
+        metrics.reserve_session_notification();
+        metrics.reserve_session_notification();
+        metrics.release_session_notification();
+        assert_unlabeled_gauge(&metrics, "bgp_session_notification_outstanding", 1.0);
+        assert_unlabeled_gauge(
+            &metrics,
+            "bgp_session_notification_outstanding_high_watermark",
+            2.0,
+        );
+        assert!(
+            unlabeled_gauge(
+                &metrics,
+                "bgp_session_notification_outstanding_high_watermark"
+            ) >= unlabeled_gauge(&metrics, "bgp_session_notification_outstanding")
+        );
+        metrics.release_session_notification();
+        assert_unlabeled_gauge(&metrics, "bgp_session_notification_outstanding", 0.0);
+        assert_unlabeled_gauge(
+            &metrics,
+            "bgp_session_notification_outstanding_high_watermark",
+            2.0,
+        );
+    }
 
     use super::*;
 

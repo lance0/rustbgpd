@@ -396,7 +396,7 @@ All inter-task communication uses bounded `tokio::mpsc` channels (capacity 4096 
 | PeerManager commands | API | PeerManager | `send().await` blocks. gRPC call waits. |
 | BMP events | Transport | BmpManager | `try_send()` — event dropped, warning logged. |
 
-The small set of intentional unbounded channels is enumerated in Design Invariant #3 above; the `session_notify` channel used for TCP collision detection remains intentionally unbounded because a bounded send would deadlock with synchronous `QueryState` peer-state queries during collision resolution.
+The small set of intentional unbounded channels is enumerated in Design Invariant #3 above; the `session_notify` channel used for TCP collision detection remains intentionally unbounded because a bounded send would deadlock with synchronous `QueryState` peer-state queries during collision resolution. Its domain wrapper accounts from sender entry through successful PeerManager dequeue, including synchronous in-flight reservations and queued notifications; the exported high-water mark is monotonic for the daemon lifetime and is not a per-flap or per-round peak.
 
 ### Dirty-peer resync
 

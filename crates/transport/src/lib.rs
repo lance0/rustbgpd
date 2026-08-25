@@ -47,8 +47,9 @@ pub use handle::{
     ImportPolicyTermHits, NegotiatedGracefulRestartState, NegotiatedSessionState, PeerCommand,
     PeerCommandError, PeerHandle, PeerSessionState, PeerShutdownError, SessionIdentity,
     SessionLifecycleNotification, SessionNotification, SessionNotificationDirection,
-    SessionNotificationEvent, SessionQueryOutcome, SessionRole, StateQueryOutcome,
-    WarmCheckpointSessionState,
+    SessionNotificationEvent, SessionNotificationReceiver, SessionNotificationSender,
+    SessionQueryOutcome, SessionRole, StateQueryOutcome, WarmCheckpointSessionState,
+    session_notification_channel,
 };
 pub use listener::{
     AcceptedConnection, BgpListener, ListenerSocketOptions, Md5ListenerKey,
