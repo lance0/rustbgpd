@@ -93,7 +93,11 @@ def validate_reload_phases(daemon_log: Path, reload_log: Path, output: Path) -> 
             event = json.loads(raw)
         except json.JSONDecodeError:
             continue
+        if not isinstance(event, dict):
+            fail(f"{daemon_log}: JSON log event is not an object")
         fields = event.get("fields", {})
+        if not isinstance(fields, dict):
+            fail(f"{daemon_log}: JSON log event has non-object fields")
         if fields.get("message") != "reload generation phase timing":
             continue
         if fields.get("target") != "reload_generation_phase":
@@ -118,7 +122,7 @@ def validate_reload_phases(daemon_log: Path, reload_log: Path, output: Path) -> 
         try:
             numeric = {key: int(fields[key]) for key in PHASE_FIELDS}
             counts = {key: int(fields[key]) for key in ("total_targets", "cohort_targets", "remainder_targets", "refresh_count")}
-        except ValueError:
+        except (TypeError, ValueError, OverflowError):
             fail(f"{daemon_log}: non-integer phase/count field")
         if any(value < 0 for value in (*numeric.values(), *counts.values())):
             fail(f"{daemon_log}: negative phase/count field")
@@ -2077,7 +2081,15 @@ def self_test() -> None:
             for row in csv.DictReader(output.open())
         ] == [8635464000000001, 8635464001000001]
         original = daemon_log.read_text()
-        for broken in (phase_line(0, "committed", False), original + phase_line(1, "failed", True)):
+        non_numeric = json.loads(phase_line(0, "committed", False))
+        non_numeric["fields"]["preflight_us"] = None
+        for broken in (
+            phase_line(0, "committed", False),
+            original + phase_line(1, "failed", True),
+            "null\n" + original,
+            json.dumps({"fields": []}) + "\n" + original,
+            json.dumps(non_numeric) + "\n" + phase_line(1, "failed", True),
+        ):
             daemon_log.write_text(broken)
             try:
                 validate_reload_phases(daemon_log, reload_log, output)
