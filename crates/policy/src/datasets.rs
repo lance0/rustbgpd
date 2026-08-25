@@ -189,13 +189,22 @@ impl DatasetHandle {
     #[must_use]
     pub fn new(name: &str, kind: DatasetKind, data: DatasetData) -> Self {
         assert_eq!(data.kind(), kind, "dataset data matches declared kind");
-        Self {
-            name: Arc::from(name),
+        Self::from_snapshot(
+            name,
             kind,
-            current: ArcSwap::from_pointee(DatasetSnapshot {
+            Arc::new(DatasetSnapshot {
                 generation: 1,
                 data,
             }),
+        )
+    }
+
+    fn from_snapshot(name: &str, kind: DatasetKind, snapshot: Arc<DatasetSnapshot>) -> Self {
+        assert_eq!(snapshot.data.kind(), kind, "dataset snapshot matches kind");
+        Self {
+            name: Arc::from(name),
+            kind,
+            current: ArcSwap::new(snapshot),
             last_error: Mutex::new(None),
         }
     }
@@ -334,17 +343,19 @@ impl DatasetBindings {
         self.handles.is_empty()
     }
 
-    /// Deep-copy current snapshots into independent handles. This is
-    /// for immutable config-source evidence, never config diffing.
+    /// Copy current snapshot references into independent handles. This is for
+    /// immutable config-source evidence, never config diffing. The immutable
+    /// snapshot is shared until either handle is refreshed; their `ArcSwap`
+    /// cells remain independent.
     #[doc(hidden)]
     #[must_use]
     pub fn detached_clone(&self) -> Self {
         let mut detached = Self::new();
         for handle in self.handles.values() {
-            detached.insert(Arc::new(DatasetHandle::new(
+            detached.insert(Arc::new(DatasetHandle::from_snapshot(
                 handle.name(),
                 handle.kind(),
-                handle.pin().data.clone(),
+                handle.pin(),
             )));
         }
         detached
@@ -549,5 +560,31 @@ mod tests {
             asn_data(&[64501]),
         )));
         assert_ne!(left, rebound);
+    }
+
+    #[test]
+    fn detached_bindings_share_one_snapshot_then_refresh_independently() {
+        let original = Arc::new(DatasetHandle::new(
+            "customers",
+            DatasetKind::Asn,
+            asn_data(&[64500]),
+        ));
+        original.refresh(asn_data(&[64501])).expect("generation 2");
+        let mut bindings = DatasetBindings::new();
+        bindings.insert(Arc::clone(&original));
+
+        let detached = bindings.detached_clone();
+        let copy = Arc::clone(detached.get("customers").unwrap());
+        assert!(!Arc::ptr_eq(&original, &copy));
+        assert_eq!(copy.pin().generation, 2);
+        assert!(Arc::ptr_eq(&original.pin(), &copy.pin()));
+
+        original
+            .refresh(asn_data(&[64502]))
+            .expect("original swaps");
+        assert_eq!(copy.pin().data, asn_data(&[64501]));
+        copy.refresh(asn_data(&[64503])).expect("copy swaps");
+        assert_eq!(original.pin().data, asn_data(&[64502]));
+        assert_eq!(copy.pin().data, asn_data(&[64503]));
     }
 }

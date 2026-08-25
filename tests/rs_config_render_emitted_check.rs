@@ -168,7 +168,7 @@ test bh-invalid-passes-hygiene { route { family ipv4-unicast; prefix 203.0.113.0
 "#);
         }
         if path == "policy/client-as4242-1.rpol" {
-            source.push_str(r#"
+            let cases = r#"
 test bh-v25-reject { route { family ipv4-unicast; prefix 203.0.113.0/25; communities [BLACKHOLE]; as-path "4242" } expect client-as4242-1 == reject }
 test bh-v26-accept { route { family ipv4-unicast; prefix 203.0.113.0/26; communities [BLACKHOLE]; as-path "4242" } expect client-as4242-1 == accept with community BLACKHOLE }
 test bh-v26-invalid-accept { route { family ipv4-unicast; prefix 203.0.113.0/26; communities [BLACKHOLE]; as-path "4242"; rpki invalid } expect client-as4242-1 == accept with community BLACKHOLE }
@@ -180,7 +180,9 @@ test bh-origin-reject { route { family ipv4-unicast; prefix 203.0.113.0/32; comm
 test bh-std { route { family ipv4-unicast; prefix 203.0.113.0/26; communities [65500:666]; as-path "4242" } expect client-as4242-1 == accept with community BLACKHOLE }
 test bh-large { route { family ipv4-unicast; prefix 203.0.113.0/26; large-communities [65500:666:1]; as-path "4242" } expect client-as4242-1 == accept with community BLACKHOLE }
 test bh-ext { route { family ipv4-unicast; prefix 203.0.113.0/26; ext-communities [RT:192.0.2.1:65535]; as-path "4242" } expect client-as4242-1 == accept with community BLACKHOLE }
-"#);
+"#;
+            let overrides = "dataset client-as4242-1-origins { 4242 } dataset client-as4242-1-prefixes { 198.51.100.0/24 } dataset client-as4242-1-blackhole-cover { 203.0.113.0/24 ge 26 le 32 }";
+            source.push_str(&cases.replace("{ route", &format!("{{ {overrides} route")));
         }
         let report = rustbgpd_policy::rpol::check_rpol(&source);
         assert!(

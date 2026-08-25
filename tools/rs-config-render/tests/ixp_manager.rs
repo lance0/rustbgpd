@@ -2,8 +2,9 @@ use std::fs;
 
 use rs_config_render::ixp_manager::{Error, SchemaVersion, render_document};
 use rs_config_render::ixp_manager_host::RenderBinding;
+use rustbgpd_policy::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
 use rustbgpd_policy::rpol::{RpolFile, run_rpol_tests};
-use rustbgpd_policy::sets::SetStore;
+use rustbgpd_policy::sets::{AsnSet, CommunitySet, PrefixSet, SetStore};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/ixp-manager-v1-supported.json");
 const V2_FILTERS: &[u8] = include_bytes!("fixtures/ixp-manager-v2-ui-filters.json");
@@ -92,10 +93,7 @@ fn with_receive_filters(filters: Vec<serde_json::Value>) -> serde_json::Value {
 }
 
 fn assert_terms(source: &str, policy: &str, expected: &[&str]) {
-    let file = RpolFile::parse(source).unwrap();
-    let compiled = file
-        .compile_policy(policy, &[], &mut SetStore::new())
-        .unwrap();
+    let compiled = compile_with_empty_datasets(source, policy);
     assert_eq!(
         compiled.policies[0]
             .terms
@@ -104,6 +102,22 @@ fn assert_terms(source: &str, policy: &str, expected: &[&str]) {
             .collect::<Vec<_>>(),
         expected
     );
+}
+
+fn compile_with_empty_datasets(source: &str, policy: &str) -> rustbgpd_policy::ir::CompiledChain {
+    let file = RpolFile::parse(source).unwrap();
+    let mut bindings = DatasetBindings::new();
+    for (name, kind) in file.dataset_decls() {
+        let data = match kind {
+            DatasetKind::Asn => DatasetData::Asn(AsnSet::new([])),
+            DatasetKind::Prefix => DatasetData::Prefix(PrefixSet::new([])),
+            DatasetKind::Community => DatasetData::Community(CommunitySet::new([])),
+        };
+        bindings.insert(std::sync::Arc::new(DatasetHandle::new(name, kind, data)));
+    }
+    file.compile_policy_bound(policy, &[], &mut SetStore::new(), &bindings)
+        .unwrap()
+        .unwrap()
 }
 
 fn assert_policy_tests(source: &str, tests: &str) {
@@ -120,7 +134,7 @@ fn supported_render_is_deterministic_and_explicit() {
             .unwrap()
             .files
     );
-    assert_eq!(first.files.len(), 4);
+    assert_eq!(first.files.len(), 6);
     let aliases = &first.files["birdwatcher-protocol-aliases.conf"];
     assert_eq!(aliases, "pb_0003_as42=10.1.0.36@master4\n");
     assert!(!aliases.contains("PCH DNS"));
@@ -137,17 +151,27 @@ fn supported_render_is_deterministic_and_explicit() {
         "max_prefix_restart_seconds = 300",
         "md5_password = \"mcWsqMdzGwTKt67g\"",
         "export_chain = [\"ixp-transparent-export\", \"ixp-manager-own-as-export-scrub\"]",
+        "[policy.datasets.client-3-origins]\npath = \"datasets/client-3-origins.list\"",
+        "[policy.datasets.client-3-prefixes]\npath = \"datasets/client-3-prefixes.list\"",
     ] {
         assert!(config.contains(expected), "missing {expected}");
     }
     let client = &first.files["policy/client-3.rpol"];
-    assert!(client.contains("asn-set client-3-origins { 42 }"));
-    assert!(client.contains("31.135.128.0/19"));
+    assert!(client.contains("dataset asn-set client-3-origins"));
+    assert!(client.contains("dataset prefix-set client-3-prefixes"));
+    assert!(!client.contains("31.135.128.0/19"));
+    assert_eq!(first.files["datasets/client-3-origins.list"], "42\n");
+    assert_eq!(
+        first.files["datasets/client-3-prefixes.list"],
+        "31.135.128.0/19\n"
+    );
     assert!(client.contains("term accept-authorized { accept }"));
+    assert!(run_rpol_tests(client).unwrap().all_passed());
     let mut loose = value();
     loose["clients"][0]["more_specifics"] = true.into();
     assert!(
-        rendered(&loose).unwrap().files["policy/client-3.rpol"].contains("31.135.128.0/19 le 24")
+        rendered(&loose).unwrap().files["datasets/client-3-prefixes.list"]
+            .contains("31.135.128.0/19 le 24")
     );
     let mut transit = value();
     transit["policy"]["no_transit"]["asns"] = serde_json::json!([42]);
@@ -169,6 +193,24 @@ fn supported_render_is_deterministic_and_explicit() {
     assert!(
         !rendered(&maximum).unwrap().files["policy/ixp-hygiene.rpol"]
             .contains("ixp-manager-too-specific")
+    );
+}
+
+#[test]
+fn one_ixp_client_change_only_changes_its_dataset_artifact() {
+    let baseline = rendered_v2(&v2_value(V2_SUPPORTED)).unwrap();
+    let mut input = v2_value(V2_SUPPORTED);
+    input["clients"][1]["prefixes"] = serde_json::json!(["192.175.48.0/24", "198.51.100.0/24"]);
+    let changed = rendered_v2(&input).unwrap();
+    let changed_paths = baseline
+        .files
+        .iter()
+        .filter_map(|(path, before)| (changed.files[path] != *before).then_some(path.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(changed_paths, ["datasets/client-4-prefixes.list"]);
+    assert_eq!(
+        changed.files["datasets/client-4-prefixes.list"],
+        "192.175.48.0/24\n198.51.100.0/24\n"
     );
 }
 
@@ -290,18 +332,26 @@ test as-path-65 {{
         client,
         r#"
 test nonempty-first-as-mismatch {
+    dataset client-3-origins { 42 }
+    dataset client-3-prefixes { 31.135.128.0/19 }
     route { prefix 31.135.128.0/19; as-path "43 42" }
     expect client-3 == reject
 }
 test bad-irrdb-origin {
+    dataset client-3-origins { 42 }
+    dataset client-3-prefixes { 31.135.128.0/19 }
     route { prefix 31.135.128.0/19; as-path "42 43" }
     expect client-3 == reject
 }
 test bad-irrdb-prefix {
+    dataset client-3-origins { 42 }
+    dataset client-3-prefixes { 31.135.128.0/19 }
     route { prefix 31.135.160.0/19; as-path "42" }
     expect client-3 == reject
 }
 test authorized-fallthrough {
+    dataset client-3-origins { 42 }
+    dataset client-3-prefixes { 31.135.128.0/19 }
     route { prefix 31.135.128.0/19; as-path "42" }
     expect client-3 == accept
 }
@@ -382,16 +432,16 @@ fn strict_schema_completion_and_refusal_matrix_fail_closed() {
 }
 
 #[test]
-fn v1_and_v2_dispatch_are_strict_and_v1_output_stays_legacy() {
+fn v1_and_v2_dispatch_are_strict_and_v1_output_stays_schema_specific() {
     let v1 = render_document(FIXTURE, 300, &binding(), SchemaVersion::V1).unwrap();
     for (name, expected) in [
         (
             "config.toml",
-            "7ed88dd78d15be8b4e0949afbcc9479afa13d852db472e1d2d7b37ff71f48685",
+            "f8f53e2f884f12e3feb91dda8c4aa5d6b29fdfa4a71144ee0890fce3e1c8c619",
         ),
         (
             "policy/client-3.rpol",
-            "1ac6975245e79cd317de99870071fcac768f616ae7e2cf7fef1680e35ce292f7",
+            "fe84eafd70808b5776f9db5cdeed8579ac944dd6f8816762d46a4cee56017a84",
         ),
         (
             "policy/ixp-hygiene.rpol",
@@ -473,7 +523,7 @@ fn v2_filter_policies_preserve_order_direction_and_reachability() {
     let full = rendered_v2(&v2_value(V2_FILTERS)).unwrap().files;
     assert_eq!(
         content_digest(&full.values().map(String::as_str).collect::<String>()),
-        "4b860dad0edf95be0af40c2e873338994aa464d3342187d72a74fae60049f391"
+        "6f5cc57dc100a74de4efea99cf6dda43cfa95cd5f3686b2b116d2cd375b7cb01"
     );
     let import = &full["policy/client-1.rpol"];
     assert_terms(
@@ -508,6 +558,8 @@ fn v2_filter_policies_preserve_order_direction_and_reachability() {
         &full["policy/client-4.rpol"],
         r#"
 test other-client-has-no-ui-filter-effects {
+    dataset client-4-origins { 112 }
+    dataset client-4-prefixes { 192.175.48.0/24 }
     route { prefix 192.175.48.0/24; as-path "112" }
     expect client-4 == accept
 }
@@ -517,6 +569,8 @@ test other-client-has-no-ui-filter-effects {
         import,
         r#"
 test advertise-rules-accumulate-after-irr {
+    dataset client-1-origins { 1213 }
+    dataset client-1-prefixes { 77.72.72.0/21 }
     route { prefix 77.72.72.0/21; as-path "1213" }
     expect client-1 == accept with large-community 65501:0:0, large-community 65501:102:112
 }
@@ -597,6 +651,8 @@ test unscoped-global-prepend {
         guarded,
         r#"
 test wrong-advertised-prefix-is-a-no-op {
+    dataset client-1-origins { 1213 }
+    dataset client-1-prefixes { 87.32.0.0/12 }
     route { prefix 87.32.0.0/12; as-path "1213" }
     expect client-1 == accept
 }
@@ -665,18 +721,26 @@ fn v2_all_action_variants_execute_with_exact_effects() {
         source,
         r#"
 test advertise-deny-control {
+    dataset client-1-origins { 1213 }
+    dataset client-1-prefixes { 77.72.72.0/21 }
     route { prefix 77.72.72.0/21; as-path "1213" }
     expect client-1 == accept with large-community 65501:0:112
 }
 test advertise-prepend-once-control {
+    dataset client-1-origins { 1213 }
+    dataset client-1-prefixes { 87.32.0.0/12 }
     route { prefix 87.32.0.0/12; as-path "1213" }
     expect client-1 == accept with large-community 65501:101:112
 }
 test advertise-prepend-twice-control {
+    dataset client-1-origins { 1213 }
+    dataset client-1-prefixes { 91.189.88.0/21 }
     route { prefix 91.189.88.0/21; as-path "1213" }
     expect client-1 == accept with large-community 65501:102:112
 }
 test advertise-prepend-thrice-control {
+    dataset client-1-origins { 1213 }
+    dataset client-1-prefixes { 185.1.0.0/24 }
     route { prefix 185.1.0.0/24; as-path "1213" }
     expect client-1 == accept with large-community 65501:103:112
 }
@@ -922,10 +986,7 @@ test accumulated-255-executes {
     let at_cap = rendered_v2(&cells(63)).unwrap();
     let source = &at_cap.files["policy/client-1.rpol"];
     assert_eq!(source.matches("term ui-receive-cell-").count(), 4096);
-    let compiled = RpolFile::parse(source)
-        .unwrap()
-        .compile_policy("client-1-receive", &[], &mut SetStore::new())
-        .unwrap();
+    let compiled = compile_with_empty_datasets(source, "client-1-receive");
     assert_eq!(compiled.policies[0].terms.len(), 4097);
     assert_eq!(
         rendered_v2(&cells(64)).unwrap_err(),

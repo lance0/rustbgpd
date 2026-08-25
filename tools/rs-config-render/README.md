@@ -72,6 +72,15 @@ same generated-file hashes and immutable activation generation as
 and send it `SIGHUP` after successful activation. The renderer and activation
 helper deliberately do not discover or signal adapter processes.
 
+Each client also has deterministic, sorted dataset artifacts for its enabled
+checks: `datasets/client-<id>-origins.list` for origin enforcement,
+`datasets/client-<id>-prefixes.list` for prefix enforcement, and an additional
+`datasets/client-<id>-blackhole-cover.list` when blackhole filtering is active.
+The generated policy declares only those external datasets and `config.toml`
+binds them with safe paths relative to the candidate root. IRR members
+therefore stay out of `.rpol` source while the receipt hashes the dataset files
+alongside every other candidate artifact.
+
 `ixp-manager-v2` preserves ordered UI-filter rows. Advertise AS_IS is a no-op;
 deny and prepend actions add the exact IXP Manager route-server control large
 community and matching rules accumulate after hygiene and IRR checks. Receive
@@ -98,11 +107,13 @@ and may be empty. Lists must be sorted, unique, and nonzero. The legacy empty
 `IXP_MANAGER_IMPLICIT_DEFAULT` token remains refused, and the new token is
 refused under v1, so old/new exporter-renderer version skew fails closed.
 
-After reviewing a complete candidate, install `config.toml` and its `policy/`
-directory together using the existing coordinated-file procedure, then SIGHUP
-rustbgpd. A failed export, refusal, render, or check leaves the running daemon
-untouched. This render mode does not fetch or call IXP Manager update/release
-callbacks.
+After reviewing a complete candidate, install `config.toml`, `policy/`, and
+`datasets/` together using the existing coordinated-file procedure, then
+SIGHUP rustbgpd. A failed export, refusal, render, or check leaves the running
+daemon untouched. This render mode does not fetch or call IXP Manager
+update/release callbacks. During migration, publish the complete candidate tree
+atomically; remove stale, unreferenced legacy files only after the new
+generation has activated successfully.
 
 ### Atomic local activation
 
@@ -291,15 +302,11 @@ suppress:
 ```
 
 Sizing: a generation is the rendered candidate copied verbatim — `config.toml`,
-the shared hygiene policy, one `.rpol` per member, the alias and reject maps,
-and the receipt. Measured on ext4 (4 KiB blocks) with synthetic IXP Manager v2
-members carrying 8 IRR prefixes each: 100 members → 104 files, 129 KiB apparent
-/ 484 KiB allocated; 250 members → 314 KiB / 1,188 KiB; 500 members →
-622 KiB / 2,348 KiB (32 prefixes per member: 851 KiB / 2,348 KiB). Allocation is
-block-dominated at roughly 4.8 KiB per member per generation, so a 500-member
-route server spends about 2.3 MiB per distinct generation; an hourly lifecycle
-whose render differs every run (the worst case) would retain about 20 GiB a
-year unpruned, and `--keep 48` bounds it to about 110 MiB.
+the shared hygiene policy, one `.rpol` plus the dataset files required by each
+member's enabled IRR and blackhole checks, the alias and reject maps, and the
+receipt. Dataset bytes scale with the actual IRR roster. Use `du` on
+representative retained generations when selecting `--keep`; pruning bounds
+generation count, not bytes.
 
 ### Inspecting activation and lifecycle state
 
@@ -405,11 +412,16 @@ and against a live run of the pinned arouteserver image by
 |---|---|
 | `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"`, strict next-hop ownership, per-family max-prefix ceilings and OpenBGPD-style timed restart, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it); plus `ebgp_requires_policy = true` and explicit transparent or blackhole-aware export chains |
 | `policy/rs-hygiene.rpol` | Shared import hygiene: reject AS_SET segments (always the first term), invalid/private/reserved ASNs in the path, transit-free and never-via-route-servers ASNs, AS_PATH length cap, bogon and black-list prefixes, prefix-length windows, RPKI origin validation with RFC 8097 tagging |
-| `policy/client-<id>.rpol` | The client's IRR-derived `prefix-set` and origin `asn-set`, one accept term (`route.origin-as in … && route.prefix in …`), and an unconditional reject tail |
+| `policy/client-<id>.rpol` | Dataset declarations for the client's IRR prefix/origin filters, one accept term (`route.origin-as in … && route.prefix in …`), and an unconditional reject tail |
+| `datasets/client-<id>-origins.list` | Sorted, deduplicated origin ASNs, one canonical entry per line |
+| `datasets/client-<id>-prefixes.list` | Sorted, deduplicated ordinary IRR prefix members, one canonical entry per line |
+| `datasets/client-<id>-blackhole-cover.list` | Present only for an active blackhole family; the same-family IRR cover with its effective lower bound and forced `le 32`/`le 128` |
 | `render-receipt.json` | Render timestamp, context fingerprint, per-client set cardinalities, max-prefix ceilings and restart seconds, warnings |
 
-Every generated `.rpol` file carries in-language `test` blocks derived
-from the site's own data; `rbgp policy check` runs them.
+Generated client `.rpol` files carry fixed synthetic, data-independent dataset
+overrides in their in-language tests. `rbgp policy check` therefore validates
+policy structure without reading operator files or copying live IRR members
+back into policy source.
 
 Term ordering is a contract: the hygiene policy leads every client's
 import chain and its first term rejects AS_SET segments, so per-client

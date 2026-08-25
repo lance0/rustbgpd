@@ -735,14 +735,22 @@ pub fn render_document(
     }
     files.insert("policy/ixp-hygiene.rpol".into(), render_hygiene(&document));
     for (client, prefixes) in document.clients.iter().zip(&effective) {
+        let slug = client.vlan_interface_id;
         files.insert(
-            format!("policy/client-{}.rpol", client.vlan_interface_id),
+            format!("policy/client-{slug}.rpol"),
             render_client(
                 client,
-                prefixes,
                 filters.get(&client.customer_id).map_or(&[], Vec::as_slice),
                 document.router.asn,
             )?,
+        );
+        files.insert(
+            format!("datasets/client-{slug}-origins.list"),
+            render_ixp_asn_dataset(&client.origins),
+        );
+        files.insert(
+            format!("datasets/client-{slug}-prefixes.list"),
+            render_ixp_prefix_dataset(prefixes),
         );
     }
     files.insert(
@@ -813,6 +821,14 @@ fn render_config(
     out.push_str(
         "]\nexport_chain = [\"ixp-transparent-export\", \"ixp-manager-own-as-export-scrub\"]\n",
     );
+    for client in &document.clients {
+        let slug = client.vlan_interface_id;
+        let _ = write!(
+            out,
+            "\n[policy.datasets.client-{slug}-origins]\npath = \"datasets/client-{slug}-origins.list\"\n\
+             \n[policy.datasets.client-{slug}-prefixes]\npath = \"datasets/client-{slug}-prefixes.list\"\n"
+        );
+    }
     for client in &document.clients {
         let family = if router.protocol == 4 {
             "ipv4_unicast"
@@ -923,30 +939,15 @@ fn write_filter_term(out: &mut String, name: &str, guards: &[String], action: &s
     }
 }
 
-fn render_client(
-    client: &Client,
-    prefixes: &[String],
-    filters: &[&UiFilter],
-    router_asn: u32,
-) -> Result<String, Error> {
+fn render_client(client: &Client, filters: &[&UiFilter], router_asn: u32) -> Result<String, Error> {
     let slug = client.vlan_interface_id;
     let reachable_receive = reachable_receive_filters(filters);
     let compiled_receive = reachable_receive_overlap(&reachable_receive)
         .then(|| compile_receive_cells(&reachable_receive))
         .transpose()?;
-    let origins = client
-        .origins
-        .iter()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
     let mut out = format!(
-        "# GENERATED IXP Manager IRR policy.\nasn-set client-{slug}-origins {{ {origins} }}\nprefix-set client-{slug}-prefixes {{\n"
+        "# GENERATED IXP Manager IRR policy.\ndataset asn-set client-{slug}-origins\ndataset prefix-set client-{slug}-prefixes\n"
     );
-    for prefix in prefixes {
-        let _ = writeln!(out, "    {prefix},");
-    }
-    out.push_str("}\n");
     if let Some(compiled) = &compiled_receive
         && !compiled.prefixes.is_empty()
     {
@@ -980,6 +981,7 @@ fn render_client(
     }
     out.push_str("    term accept-authorized { accept }\n}\n");
     if filters.is_empty() {
+        render_ixp_client_tests(&mut out, slug, client.asn);
         return Ok(out);
     }
     let _ = writeln!(out, "policy client-{slug}-receive {{");
@@ -1066,7 +1068,45 @@ fn render_client(
         }
     }
     out.push_str("    term accept-unmatched { accept }\n}\n");
+    render_ixp_client_tests(&mut out, slug, client.asn);
     Ok(out)
+}
+
+fn render_ixp_client_tests(out: &mut String, slug: u64, peer_asn: u32) {
+    let _ = write!(
+        out,
+        "\ntest client-{slug}-synthetic-authorized-route {{\n\
+         \x20   dataset client-{slug}-origins {{ 64496 }}\n\
+         \x20   dataset client-{slug}-prefixes {{ 192.0.2.0/24 }}\n\
+         \x20   route {{ prefix 192.0.2.0/24; as-path \"{peer_asn} 64496\" }}\n\
+         \x20   expect client-{slug} == accept\n\
+         }}\n\
+         \ntest client-{slug}-synthetic-unregistered-origin {{\n\
+         \x20   dataset client-{slug}-origins {{ 64498 }}\n\
+         \x20   dataset client-{slug}-prefixes {{ 192.0.2.0/24 }}\n\
+         \x20   route {{ prefix 192.0.2.0/24; as-path \"{peer_asn} 64497\" }}\n\
+         \x20   expect client-{slug} == reject\n\
+         }}\n"
+    );
+}
+
+fn render_ixp_asn_dataset(origins: &[u32]) -> String {
+    let mut values = origins.to_vec();
+    values.sort_unstable();
+    values.dedup();
+    values
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+fn render_ixp_prefix_dataset(prefixes: &[String]) -> String {
+    let mut values = prefixes.to_vec();
+    values.sort_unstable();
+    values.dedup();
+    values.join("\n") + "\n"
 }
 
 #[cfg(unix)]

@@ -168,6 +168,120 @@ def validate_reload_phases(daemon_log: Path, reload_log: Path, output: Path) -> 
                              str(fields["authoritative_fallback"]).lower(), *(numeric[key] for key in PHASE_FIELDS)))
 
 
+def event_epoch_us(event: dict, context: str) -> int:
+    try:
+        parsed = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
+        if parsed.utcoffset() is None:
+            raise ValueError("timestamp has no UTC offset")
+        since_epoch = parsed - datetime(1970, 1, 1, tzinfo=timezone.utc)
+        return (since_epoch.days * 86_400 + since_epoch.seconds) * 1_000_000 + since_epoch.microseconds
+    except (ValueError, KeyError, AttributeError, TypeError, OverflowError):
+        fail(f"{context}: event has no parseable timestamp")
+
+
+def validate_dataset_refresh(
+    daemon_log: Path, reload_log: Path, manifest_path: Path, output: Path
+) -> None:
+    triggers = [(int(number), int(wall)) for number, wall in re.findall(
+        r"^reload (\d+) SIGHUP wall_us=(\d+)", reload_log.read_text(), re.MULTILINE)]
+    if len(triggers) != 4 or [number for number, _ in triggers] != [1, 2, 3, 4]:
+        fail("dataset refresh summary requires four ordered SIGHUP triggers")
+    if any(left[1] >= right[1] for left, right in zip(triggers, triggers[1:])):
+        fail("dataset refresh triggers are not strictly ordered")
+
+    manifest = read_json(manifest_path)
+    changed = manifest.get("changed_dataset_files")
+    changed_fraction = manifest.get("changed_fraction")
+    expected_changed = {0.1: 36, 1.0: 320}.get(changed_fraction)
+    if (
+        manifest.get("rustbgpd_dataset_mode") is not True
+        or manifest.get("n_members") != 320
+        or manifest.get("seed") != 61
+        or type(changed_fraction) not in (int, float)
+        or expected_changed is None
+        or set(changed or {}) != {"prefix", "asn"}
+        or changed.get("asn") != 0
+        or changed.get("prefix") != expected_changed
+    ):
+        fail("dataset refresh manifest is not a canonical partial/full candidate")
+    expected = {
+        "dataset_hashed": 640,
+        "dataset_parsed": expected_changed,
+        "dataset_exact_content_reused": 640 - expected_changed,
+        "dataset_source_rebound": 0,
+        "dataset_changed": expected_changed,
+        "dataset_failed": 0,
+    }
+    loads, refreshes = [], []
+    for raw in daemon_log.read_text(errors="replace").splitlines():
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            fail("dataset refresh log event is not an object")
+        fields = event.get("fields", {})
+        if not isinstance(fields, dict):
+            fail("dataset refresh log fields are not an object")
+        message = fields.get("message")
+        if message == "config source loaded":
+            if not set(expected) <= set(fields) or any(type(fields[key]) is not int for key in expected):
+                fail("dataset config-load counters are malformed")
+            loads.append((event_epoch_us(event, "dataset config load"), fields))
+        elif message == "processed dataset-swap dependency-scoped refresh":
+            required = {"eligible", "refreshed", "skipped_not_established", "failures"}
+            if not required <= set(fields) or any(type(fields[key]) is not int for key in required):
+                fail("dataset dependency-refresh counters are malformed")
+            refreshes.append((event_epoch_us(event, "dataset dependency refresh"), fields))
+
+    rows = []
+    for index, (number, start) in enumerate(triggers):
+        end = triggers[index + 1][1] if index + 1 < len(triggers) else None
+        bound_loads = [record for record in loads if record[0] >= start and (end is None or record[0] < end)]
+        bound_refreshes = [record for record in refreshes if record[0] >= start and (end is None or record[0] < end)]
+        if len(bound_loads) != 1 or len(bound_refreshes) != 1:
+            fail(f"reload {number}: expected one dataset load and refresh record")
+        load_time, load = bound_loads[0]
+        refresh_time, refresh = bound_refreshes[0]
+        if any(load[key] != value for key, value in expected.items()):
+            fail(f"reload {number}: dataset load counters differ from candidate contract")
+        if (
+            refresh_time < load_time
+            or refresh["eligible"] != expected_changed
+            or refresh["refreshed"] != expected_changed
+            or refresh["skipped_not_established"] != 0
+            or refresh["failures"] != 0
+        ):
+            fail(f"reload {number}: dependency-scoped refresh counters are invalid")
+        rows.append((number, load_time, refresh_time, load, refresh))
+
+    measurement_rows = [
+        line.removeprefix("reloadstall_csv,").split(",")
+        for line in reload_log.read_text().splitlines()
+        if line.startswith("reloadstall_csv,")
+    ]
+    if len(measurement_rows) != 4:
+        fail("dataset refresh receipt requires four harness measurement rows")
+    for number, row in enumerate(measurement_rows, 1):
+        if len(row) != 22 or row[0] != str(number) or row[-2:] != ["320", "0"]:
+            fail(f"reload {number}: sessions or parse-error receipt is invalid")
+
+    header = (
+        "reload", "load_timestamp_epoch_us", "refresh_timestamp_epoch_us", "hashed",
+        "parsed", "exact_reused", "source_rebound", "changed", "failed", "eligible",
+        "refreshed", "skipped_not_established", "refresh_failures", "sessions_up", "parse_errors",
+    )
+    with output.open("w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(header)
+        for number, load_time, refresh_time, load, refresh in rows:
+            writer.writerow((number, load_time, refresh_time, load["dataset_hashed"],
+                load["dataset_parsed"], load["dataset_exact_content_reused"],
+                load["dataset_source_rebound"], load["dataset_changed"], load["dataset_failed"],
+                refresh["eligible"], refresh["refreshed"], refresh["skipped_not_established"],
+                refresh["failures"], 320, 0))
+
+
 def validate_authoritative_discriminator(daemon_log: Path, reload_log: Path, output: Path) -> None:
     triggers = [(int(number), int(wall)) for number, wall in re.findall(
         r"^reload (\d+) SIGHUP wall_us=(\d+)", reload_log.read_text(), re.MULTILINE)]
@@ -286,6 +400,7 @@ def validate_authoritative_pair(repo: Path, roots: list[Path], output: Path) -> 
         fail("candidate ancestry is not valid")
     paths = {"runner":"bench/scale/irrreload/run-irr-reload.sh",
         "verifier":"bench/scale/irrreload/verify-receipt.py", "generator":"bench/scale/reloadstall/gen-irr-scenario.py",
+        "stage_datasets":"bench/scale/irrreload/stage-rustbgpd-datasets.sh",
         "rss_sampler":"bench/scale/matrix/rss-sampler.sh", "txn_apply":"bench/scale/irrreload/txn-apply.sh",
         "txn_lifecycle":"bench/scale/irrreload/txn-lifecycle.sh"}
     if any(hashlib.sha256(git_bytes("show", f'{git["commit"]}:{path}')).hexdigest() != runs[0]["scripts"][name]
@@ -1133,6 +1248,37 @@ def validate_digest_roster(path: Path, base: Path, expected_paths: set[str]) -> 
     return sha256(path)
 
 
+def scenario_expected_paths(manifest: dict) -> set[str]:
+    expected = {*manifest["runtime_files"], "manifest.json"}
+    if manifest.get("rustbgpd_dataset_mode") is not True:
+        return expected
+    policy_files = manifest.get("policy_files")
+    generation_manifests = manifest.get("dataset_generation_manifests")
+    generation_digests = manifest.get("dataset_generation_manifest_sha256")
+    static_manifest = manifest.get("static_policy_manifest")
+    static_digest = manifest.get("static_policy_manifest_sha256")
+    if (
+        not isinstance(policy_files, list)
+        or not policy_files
+        or len(set(policy_files)) != len(policy_files)
+        or any(not isinstance(path, str) or not path.startswith("policy/")
+               or Path(path).is_absolute() or ".." in Path(path).parts for path in policy_files)
+        or not isinstance(generation_manifests, dict)
+        or set(generation_manifests) != {"a", "b"}
+        or not isinstance(generation_digests, dict)
+        or set(generation_digests) != {"a", "b"}
+        or any(not isinstance(value, str) or Path(value).name != value
+               for value in (static_manifest, *(generation_manifests or {}).values()))
+        or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+               for value in (static_digest, *(generation_digests or {}).values()))
+        or manifest.get("initial_dataset_generation") != "a"
+    ):
+        fail("dataset scenario source manifests are incomplete or unsafe")
+    expected.add(static_manifest)
+    expected.update(generation_manifests.values())
+    return expected
+
+
 def validate_scenario_roster(cdir: Path, manifest: dict) -> str:
     runtime_files = manifest.get("runtime_files")
     if not isinstance(runtime_files, list) or not runtime_files:
@@ -1146,8 +1292,15 @@ def validate_scenario_roster(cdir: Path, manifest: dict) -> str:
         for relative in runtime_files
     ) or len(set(runtime_files)) != len(runtime_files):
         fail(f"{cdir}: manifest runtime_files contains an unsafe or duplicate path")
-    expected = {*runtime_files, "manifest.json"}
+    expected = scenario_expected_paths(manifest)
     entries = parse_digest_roster(cdir / "scenario.sha256", expected)
+    if manifest.get("rustbgpd_dataset_mode") is True:
+        if entries[manifest["static_policy_manifest"]] != manifest["static_policy_manifest_sha256"]:
+            fail(f"{cdir}: static policy manifest digest is not bound")
+        for generation in ("a", "b"):
+            if entries[manifest["dataset_generation_manifests"][generation]] != \
+                    manifest["dataset_generation_manifest_sha256"][generation]:
+                fail(f"{cdir}: dataset generation {generation} manifest digest is not bound")
     for relative, digest in entries.items():
         retained = cdir / relative
         if retained.exists() and (not retained.is_file() or sha256(retained) != digest):
@@ -1684,7 +1837,7 @@ def validate_root(root: Path, kind: str):
         or not re.fullmatch(r"[0-9a-f]{64}", fingerprint)
         or provenance_fingerprint(provenance) != fingerprint
         or not isinstance(scripts, dict)
-        or set(scripts) != {"runner", "verifier", "generator", "rss_sampler", "txn_apply", "txn_lifecycle"}
+        or set(scripts) != {"runner", "verifier", "generator", "stage_datasets", "rss_sampler", "txn_apply", "txn_lifecycle"}
         or not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) for value in scripts.values())
         or not isinstance(binaries, dict)
         or set(binaries) != {"reloadstall", "rustbgpd", "rbgp", "rs_config_render"}
@@ -1703,8 +1856,11 @@ def validate_root(root: Path, kind: str):
         "openbgpd_image_id",
         "overlap_fraction",
     }
+    canonical_inputs = dict(CANONICAL_FULL_INPUTS)
+    if kind == "sighup" and inputs.get("changed_fraction") == "1.0":
+        canonical_inputs["changed_fraction"] = "1.0"
     if set(inputs) != expected_input_keys or any(
-        inputs.get(key) != value for key, value in CANONICAL_FULL_INPUTS.items()
+        inputs.get(key) != value for key, value in canonical_inputs.items()
     ):
         fail(f"{root}: full workload inputs are not exact and canonical")
     # The overlap fraction is a legitimate campaign dimension (LAN-892), not
@@ -1799,7 +1955,7 @@ def validate_root(root: Path, kind: str):
         manifest = read_json(cdir / "manifest.json")
         scenario_digest = validate_scenario_roster(cdir, manifest)
         scenario_entries = parse_digest_roster(
-            cdir / "scenario.sha256", {*manifest["runtime_files"], "manifest.json"}
+            cdir / "scenario.sha256", scenario_expected_paths(manifest)
         )
         validate_cell_chain(
             root,
@@ -1813,6 +1969,12 @@ def validate_root(root: Path, kind: str):
         )
         if manifest.get("dataset_sha256") != dataset or manifest.get("admit_churn") is not True:
             fail(f"{root}: {cell} manifest dataset/churn mismatch")
+        manifest_fraction = manifest.get("changed_fraction")
+        if (
+            type(manifest_fraction) not in (int, float)
+            or manifest_fraction != float(inputs["changed_fraction"])
+        ):
+            fail(f"{root}: {cell} manifest changed fraction does not match campaign inputs")
         if manifest.get("overlap_fraction", 0.0) != float(inputs_overlap):
             fail(f"{root}: {cell} manifest overlap does not match campaign inputs")
         load_overlap(cdir / "manifest.json", 320, 183040)
@@ -1841,6 +2003,17 @@ def validate_root(root: Path, kind: str):
         ):
             fail(f"{root}: competitor path-hiding applicability is misstated")
         if cell in ("rustbgpd-sighup", GROUPED_CELL):
+            if manifest.get("rustbgpd_dataset_mode") is True:
+                summary = cdir / "dataset-refresh-summary.csv"
+                with tempfile.NamedTemporaryFile() as rebuilt:
+                    validate_dataset_refresh(
+                        cdir / "daemon.log",
+                        cdir / "reloadstall.log",
+                        cdir / "manifest.json",
+                        Path(rebuilt.name),
+                    )
+                    if Path(rebuilt.name).read_bytes() != summary.read_bytes():
+                        fail(f"{root}: {cell} dataset refresh summary does not re-extract")
             for marker in ("ready", "ack"):
                 marker_path = cdir / "pre-churn" / marker
                 if marker_path.is_symlink() or not marker_path.is_file() or marker_path.read_text() != f"{marker}\n":
@@ -2131,7 +2304,7 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
         "schema": 4,
         "started_at_epoch_ns": started,
         "git": {"commit": "c" * 40, "tree": "b" * 40, "dirty": False, "dirty_state_sha256": "d" * 64, "origin_main": "c" * 40, "head_matches_origin_main": True, "measurement_mode": "main", "ancestry_verified": True},
-        "scripts": {"runner": "1" * 64, "verifier": "2" * 64, "generator": "3" * 64, "rss_sampler": "4" * 64, "txn_apply": "5" * 64, "txn_lifecycle": "a" * 64},
+        "scripts": {"runner": "1" * 64, "verifier": "2" * 64, "generator": "3" * 64, "stage_datasets": "b" * 64, "rss_sampler": "4" * 64, "txn_apply": "5" * 64, "txn_lifecycle": "a" * 64},
         "binaries": {"reloadstall": "6" * 64, "rustbgpd": "7" * 64, "rbgp": "8" * 64, "rs_config_render": "9" * 64},
         "environment": {key: "fixture" for key in ("rustc", "cargo", "python", "jq", "docker", "kernel", "cpu_model")},
         "inputs": {
@@ -2182,7 +2355,7 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
             "bird": ["bird.conf", "gen.conf", "gen-a.conf", "gen-b.conf"],
             "openbgpd": ["bgpd.conf", "gen.conf", "gen-a.conf", "gen-b.conf"],
         }[cell]
-        manifest = {"dataset_sha256": dataset, "admit_churn": True, "n_members": 320, "total_prefixes": 183040, "min_list": 1000, "max_list": 40000, "seed": 61, "runtime_files": runtime_files, **mode}
+        manifest = {"dataset_sha256": dataset, "admit_churn": True, "n_members": 320, "total_prefixes": 183040, "min_list": 1000, "max_list": 40000, "seed": 61, "changed_fraction": 0.1, "runtime_files": runtime_files, **mode}
         (cdir / "manifest.json").write_text(json.dumps(manifest))
         cell_rows = [row for row in root_rows if row[0] == cell]
         (cdir / "rows.csv").write_text("".join(",".join(row) + "\n" for row in cell_rows))
@@ -2367,6 +2540,56 @@ def self_test() -> None:
             else:
                 fail("reload phase self-test accepted a missing/duplicate record")
 
+        manifest_path = root / "manifest.json"
+        manifest_path.write_text(json.dumps({
+            "rustbgpd_dataset_mode": True, "n_members": 320, "seed": 61,
+            "changed_fraction": 0.1,
+            "changed_dataset_files": {"prefix": 36, "asn": 0},
+        }))
+        reload_log.write_text("".join(
+            f"reload {number} SIGHUP wall_us={8635464000000000 + number * 1000000} policy=x\n"
+            + ",".join(["reloadstall_csv", str(number), "320", "36", "284", "183040",
+                *(["1.0"] * 14), "320", "320", "0"]) + "\n"
+            for number in range(1, 5)
+        ))
+        def dataset_lines(number: int) -> str:
+            load = {"message":"config source loaded", "dataset_hashed":640,
+                "dataset_parsed":36, "dataset_exact_content_reused":604,
+                "dataset_source_rebound":0, "dataset_changed":36, "dataset_failed":0}
+            refresh = {"message":"processed dataset-swap dependency-scoped refresh",
+                "eligible":36, "refreshed":36, "skipped_not_established":0, "failures":0}
+            return "\n".join((
+                json.dumps({"timestamp":f"2243-08-25T12:00:0{number}.100001Z", "fields":load}),
+                json.dumps({"timestamp":f"2243-08-25T12:00:0{number}.200001Z", "fields":refresh}),
+            )) + "\n"
+        daemon_log.write_text("".join(dataset_lines(number) for number in range(1, 5)))
+        validate_dataset_refresh(daemon_log, reload_log, manifest_path, output)
+        dataset_original = daemon_log.read_text()
+        reload_original = reload_log.read_text()
+        mutations = {
+            "parsed": dataset_original.replace('"dataset_parsed": 36', '"dataset_parsed": 35', 1),
+            "missing-refresh": "\n".join(dataset_original.splitlines()[1:]) + "\n",
+            "source-rebound": dataset_original.replace('"dataset_source_rebound": 0', '"dataset_source_rebound": 1', 1),
+            "duplicate-load": dataset_original + dataset_original.splitlines()[0] + "\n",
+        }
+        for name, broken in mutations.items():
+            daemon_log.write_text(broken)
+            try: validate_dataset_refresh(daemon_log, reload_log, manifest_path, output)
+            except InvalidReceipt: print(f"red-proof dataset-refresh-{name}=pass")
+            else: fail(f"dataset refresh self-test accepted {name} mutation")
+        daemon_log.write_text(dataset_original)
+        reload_log.write_text(reload_original.replace(",320,0\n", ",319,0\n", 1))
+        try: validate_dataset_refresh(daemon_log, reload_log, manifest_path, output)
+        except InvalidReceipt: print("red-proof dataset-refresh-sessions=pass")
+        else: fail("dataset refresh self-test accepted missing session")
+        full_labeled = read_json(manifest_path)
+        full_labeled["changed_fraction"] = 1.0
+        manifest_path.write_text(json.dumps(full_labeled))
+        reload_log.write_text(reload_original)
+        try: validate_dataset_refresh(daemon_log, reload_log, manifest_path, output)
+        except InvalidReceipt: print("red-proof dataset-refresh-full-label-partial=pass")
+        else: fail("dataset refresh self-test accepted partial counters as full")
+
         reload_log.write_text("".join(
             f"reload {number} SIGHUP wall_us={8635464000000000 + number * 1000000} policy=x\n"
             for number in range(1, 5)))
@@ -2443,6 +2666,7 @@ def self_test() -> None:
         subprocess.run(["git", "-C", str(repo), "config", "user.name", "fixture"], check=True)
         script_paths = {"runner":"bench/scale/irrreload/run-irr-reload.sh",
             "verifier":"bench/scale/irrreload/verify-receipt.py", "generator":"bench/scale/reloadstall/gen-irr-scenario.py",
+            "stage_datasets":"bench/scale/irrreload/stage-rustbgpd-datasets.sh",
             "rss_sampler":"bench/scale/matrix/rss-sampler.sh", "txn_apply":"bench/scale/irrreload/txn-apply.sh",
             "txn_lifecycle":"bench/scale/irrreload/txn-lifecycle.sh"}
         for name, relative in script_paths.items():
@@ -3087,6 +3311,11 @@ def self_test() -> None:
             alter_json(manifest_path, lambda data: data["runtime_files"].append("extra.conf"))
             rebind_scenario_manifest(cdir)
         rejected("scenario-roster", break_scenario_roster)
+        def break_manifest_changed_fraction(root):
+            cdir = root / "bird"
+            alter_json(cdir / "manifest.json", lambda data: data.update({"changed_fraction": 1.0}))
+            rebind_scenario_manifest(cdir)
+        rejected("manifest-changed-fraction", break_manifest_changed_fraction)
         def break_overlap_input_binding(root):
             # Internally valid manifest overlap (1 pair at the canonical
             # total) while the campaign inputs still declare overlap 0.
@@ -3245,7 +3474,7 @@ def self_test() -> None:
                 proofs[name] = True
         grouped_pair_drift("cross-role-environment", "environment", "cpu_model", "other-platform")
         grouped_pair_drift("cross-role-source-identity", "binaries", "rbgp", "a" * 64)
-        expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "origin-only", "head-matches-false", "ancestry-unverified", "measurement-mode-invalid", "mismatched-commit", "commit-malformed", "scripts-null", "scripts-empty-map", "binary-malformed", "fingerprint-recompute", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "cell-root-provenance", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "cell-provenance", "evidence-roster", "scenario-roster", "scenario-duplicate", "scenario-unsafe-path", "scenario-retained-config", "cell-root-rows", "reload-log-rows", "percentile-order", "percentile-positive", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "seal-checksum", "exact-root-roster", "symlink-anywhere", "writable-root", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-role-source-identity"}
+        expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "origin-only", "head-matches-false", "ancestry-unverified", "measurement-mode-invalid", "mismatched-commit", "commit-malformed", "scripts-null", "scripts-empty-map", "binary-malformed", "fingerprint-recompute", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "cell-root-provenance", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "cell-provenance", "evidence-roster", "scenario-roster", "manifest-changed-fraction", "scenario-duplicate", "scenario-unsafe-path", "scenario-retained-config", "cell-root-rows", "reload-log-rows", "percentile-order", "percentile-positive", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "seal-checksum", "exact-root-roster", "symlink-anywhere", "writable-root", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-role-source-identity"}
         expected |= {"current-down", "reestablished", "flapped", "counter-malformed", "establishment-roster", "flap-roster", "row-session-loss"}
         expected |= {"preflip-private", "lane-gauge"}
         expected |= set(
@@ -3365,6 +3594,11 @@ def main() -> int:
     phases.add_argument("--daemon-log", required=True, type=Path)
     phases.add_argument("--reload-log", required=True, type=Path)
     phases.add_argument("--output", required=True, type=Path)
+    dataset_refresh = subparsers.add_parser("dataset-refresh")
+    dataset_refresh.add_argument("--daemon-log", required=True, type=Path)
+    dataset_refresh.add_argument("--reload-log", required=True, type=Path)
+    dataset_refresh.add_argument("--manifest", required=True, type=Path)
+    dataset_refresh.add_argument("--output", required=True, type=Path)
     discriminator = subparsers.add_parser("authoritative-discriminator")
     discriminator.add_argument("--daemon-log", required=True, type=Path)
     discriminator.add_argument("--reload-log", required=True, type=Path)
@@ -3407,6 +3641,8 @@ def main() -> int:
             print(generation_marker(args.config))
         elif args.command == "reload-phases":
             validate_reload_phases(args.daemon_log, args.reload_log, args.output)
+        elif args.command == "dataset-refresh":
+            validate_dataset_refresh(args.daemon_log, args.reload_log, args.manifest, args.output)
         elif args.command == "authoritative-discriminator":
             validate_authoritative_discriminator(args.daemon_log, args.reload_log, args.output)
         elif args.command == "authoritative-pair":

@@ -5,10 +5,14 @@
     reason = "accepted ownership is active while digest and v2 exposure remain private"
 )]
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rustbgpd_policy::datasets::{DatasetFileFingerprint, DatasetKind};
+use rustbgpd_policy::datasets::{
+    DatasetData, DatasetFileFingerprint, DatasetHandle, DatasetKind, DatasetSnapshot,
+    MAX_DATASET_BYTES,
+};
 use rustbgpd_policy::rpol::RpolFile;
 use sha2::{Digest, Sha256};
 
@@ -43,6 +47,26 @@ pub(crate) struct DatasetSource {
     pub(crate) path: PathBuf,
     pub(crate) length: u64,
     pub(crate) sha256: [u8; 32],
+}
+
+#[derive(Debug)]
+pub(super) enum CapturedDatasetLoad {
+    Parsed(DatasetData),
+    ExactContent(Arc<DatasetSnapshot>),
+}
+
+#[derive(Debug)]
+pub(super) struct CapturedDatasetRead {
+    pub(super) load: CapturedDatasetLoad,
+    pub(super) source: DatasetFileFingerprint,
+    pub(super) source_rebound: bool,
+}
+
+#[derive(Debug)]
+pub(super) struct CapturedDatasetError {
+    pub(super) reason: String,
+    pub(super) source: Option<DatasetFileFingerprint>,
+    pub(super) source_rebound: bool,
 }
 
 #[derive(Default)]
@@ -108,6 +132,12 @@ impl SourceCapture {
 }
 
 impl SourceManifest {
+    fn dataset(&self, name: &str, kind: DatasetKind) -> Option<&DatasetSource> {
+        self.datasets
+            .iter()
+            .find(|source| source.name == name && source.kind == kind)
+    }
+
     fn source_sha256(&self) -> [u8; 32] {
         let mut digest = Sha256::new();
         digest.update(SOURCE_DIGEST_DOMAIN);
@@ -135,6 +165,87 @@ impl SourceManifest {
         }
         digest.finalize().into()
     }
+}
+
+pub(super) fn load_dataset_captured(
+    path: &Path,
+    name: &str,
+    kind: DatasetKind,
+    existing: Option<&Arc<DatasetHandle>>,
+    accepted: Option<&Arc<DatasetHandle>>,
+    prior_manifest: Option<&SourceManifest>,
+) -> Result<CapturedDatasetRead, CapturedDatasetError> {
+    let failure = |reason| CapturedDatasetError {
+        reason,
+        source: None,
+        source_rebound: false,
+    };
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|error| failure(format!("cannot stat {}: {error}", path.display())))?;
+    let file = std::fs::File::open(&canonical_path)
+        .map_err(|error| failure(format!("cannot read {}: {error}", path.display())))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| failure(format!("cannot stat {}: {error}", path.display())))?;
+    if metadata.len() > MAX_DATASET_BYTES {
+        return Err(failure(format!(
+            "{} is {} bytes — larger than the {MAX_DATASET_BYTES}-byte dataset bound",
+            path.display(),
+            metadata.len()
+        )));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    file.take(MAX_DATASET_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| failure(format!("cannot read {}: {error}", path.display())))?;
+    if bytes.len() as u64 > MAX_DATASET_BYTES {
+        return Err(failure(format!(
+            "{} grew larger than the {MAX_DATASET_BYTES}-byte dataset bound while reading",
+            path.display()
+        )));
+    }
+    let source = DatasetFileFingerprint {
+        canonical_path,
+        raw_len: u64::try_from(bytes.len()).expect("bounded source length fits u64"),
+        raw_sha256: Sha256::digest(&bytes).into(),
+    };
+    let prior = prior_manifest.and_then(|manifest| manifest.dataset(name, kind));
+    let source_rebound = prior.is_some_and(|prior| prior.path != source.canonical_path);
+    if prior
+        .is_some_and(|prior| prior.length == source.raw_len && prior.sha256 == source.raw_sha256)
+        && let Some((live, accepted)) = existing
+            .filter(|handle| handle.kind() == kind)
+            .zip(accepted.filter(|handle| handle.kind() == kind))
+    {
+        let live = live.pin();
+        let accepted = accepted.pin();
+        if Arc::ptr_eq(&live, &accepted) || live.data == accepted.data {
+            return Ok(CapturedDatasetRead {
+                load: CapturedDatasetLoad::ExactContent(live),
+                source,
+                source_rebound,
+            });
+        }
+    }
+
+    let text = String::from_utf8(bytes).map_err(|error| CapturedDatasetError {
+        reason: format!("cannot read {}: {error}", path.display()),
+        source: Some(source.clone()),
+        source_rebound,
+    })?;
+    let data = rustbgpd_policy::rpol::parse_dataset_text(&text, kind).map_err(|reason| {
+        CapturedDatasetError {
+            reason,
+            source: Some(source.clone()),
+            source_rebound,
+        }
+    })?;
+    Ok(CapturedDatasetRead {
+        load: CapturedDatasetLoad::Parsed(data),
+        source,
+        source_rebound,
+    })
 }
 
 fn frame(digest: &mut Sha256, bytes: &[u8]) {
@@ -213,6 +324,7 @@ impl AcceptedConfigSnapshot {
             DatasetBindMode::Stage,
             Some(&mut capture),
             None,
+            None,
         )?;
         config.file_path = Some(config_path.to_path_buf());
         after_capture();
@@ -288,6 +400,7 @@ impl AcceptedConfigSnapshot {
             DatasetBindMode::Stage,
             Some(&mut capture),
             prior.map(|snapshot| &snapshot.manifest),
+            prior.map(|snapshot| &snapshot.config.policy.dataset_bindings),
         )?;
         config.file_path = Some(path.to_path_buf());
         after_capture();
@@ -579,11 +692,260 @@ import_policy_chain = ["inbound"]
         )
     }
 
+    fn reuse_ctx(origin_asn: u32) -> rustbgpd_policy::RouteContext<'static> {
+        static COMMUNITIES: [u32; 1] = [(65_000_u32 << 16) | 1];
+        rustbgpd_policy::RouteContext {
+            prefix: Some(rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                "10.1.0.0".parse().unwrap(),
+                24,
+            ))),
+            next_hop: None,
+            extended_communities: &[],
+            communities: &COMMUNITIES,
+            large_communities: &[],
+            as_path_str: "",
+            as_path: None,
+            as_path_len: 0,
+            origin_asn: Some(origin_asn),
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            peer_address: None,
+            peer_asn: None,
+            peer_group: None,
+            route_type: None,
+            family: None,
+            evpn_route_type: None,
+            local_pref: None,
+            med: None,
+        }
+    }
+
     fn module_names(unit: &RpolUnitSource) -> Vec<&str> {
         unit.modules
             .iter()
             .map(|module| module.path.file_name().unwrap().to_str().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn captured_dataset_identity_uses_name_kind_and_bytes_not_path() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first_path = first.path().join("customers.txt");
+        let second_path = second.path().join("customers.txt");
+        fs::write(&first_path, "64500\n").unwrap();
+        fs::write(&second_path, "64500\n").unwrap();
+        let handle = Arc::new(DatasetHandle::new(
+            "customers",
+            DatasetKind::Asn,
+            DatasetData::Asn(AsnSet::new([64500])),
+        ));
+        let prior = SourceManifest {
+            toml_sha256: [0; 32],
+            rpol_units: Vec::new(),
+            datasets: vec![DatasetSource {
+                name: "customers".to_string(),
+                kind: DatasetKind::Asn,
+                path: first_path.canonicalize().unwrap(),
+                length: 6,
+                sha256: Sha256::digest(b"64500\n").into(),
+            }],
+        };
+
+        let exact = load_dataset_captured(
+            &second_path,
+            "customers",
+            DatasetKind::Asn,
+            Some(&handle),
+            Some(&handle),
+            Some(&prior),
+        )
+        .unwrap();
+        assert!(exact.source_rebound);
+        assert_eq!(
+            exact.source.canonical_path,
+            second_path.canonicalize().unwrap()
+        );
+        let CapturedDatasetLoad::ExactContent(snapshot) = exact.load else {
+            panic!("identical bytes in a new generation directory must skip parsing")
+        };
+        assert!(Arc::ptr_eq(&snapshot, &handle.pin()));
+
+        fs::write(&first_path, "64501\n").unwrap();
+        assert!(matches!(
+            load_dataset_captured(
+                &first_path,
+                "customers",
+                DatasetKind::Asn,
+                Some(&handle),
+                Some(&handle),
+                Some(&prior)
+            )
+            .unwrap()
+            .load,
+            CapturedDatasetLoad::Parsed(_)
+        ));
+        fs::write(&second_path, "64502\n").unwrap();
+        let changed_path = load_dataset_captured(
+            &second_path,
+            "customers",
+            DatasetKind::Asn,
+            Some(&handle),
+            Some(&handle),
+            Some(&prior),
+        )
+        .unwrap();
+        assert!(changed_path.source_rebound);
+        assert!(matches!(changed_path.load, CapturedDatasetLoad::Parsed(_)));
+
+        fs::write(&second_path, "64500\n").unwrap();
+        assert!(matches!(
+            load_dataset_captured(
+                &second_path,
+                "vendors",
+                DatasetKind::Asn,
+                Some(&handle),
+                Some(&handle),
+                Some(&prior)
+            )
+            .unwrap()
+            .load,
+            CapturedDatasetLoad::Parsed(_)
+        ));
+        let kind_mismatch = load_dataset_captured(
+            &second_path,
+            "customers",
+            DatasetKind::Prefix,
+            Some(&handle),
+            Some(&handle),
+            Some(&prior),
+        )
+        .expect_err("kind mismatch must parse as the candidate kind");
+        assert!(kind_mismatch.source.is_some());
+    }
+
+    #[test]
+    fn identical_dataset_in_new_generation_reuses_isolated_candidate_snapshot() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first_path = reuse_fixture(first.path());
+        let second_path = reuse_fixture(second.path());
+        let prior = AcceptedConfigSnapshot::load(&first_path, None).unwrap();
+        let prior_handle = dataset(&prior);
+        let prior_snapshot = prior_handle.pin();
+
+        let candidate = AcceptedConfigSnapshot::load(&second_path, Some(&prior)).unwrap();
+        let candidate_handle = dataset(&candidate);
+        assert!(!Arc::ptr_eq(&prior_handle, &candidate_handle));
+        assert!(Arc::ptr_eq(&prior_snapshot, &candidate_handle.pin()));
+        assert!(candidate.policy.dataset_events.swapped.is_empty());
+        assert!(candidate.policy.dataset_events.failed.is_empty());
+        assert_eq!(
+            candidate.manifest.datasets[0].path,
+            second.path().join("customers.txt").canonicalize().unwrap()
+        );
+        assert_eq!(
+            candidate.manifest.datasets[0].sha256,
+            prior.manifest.datasets[0].sha256
+        );
+
+        let resolved = candidate.resolved_neighbors().unwrap();
+        let compiled = resolved[0].import_policy.as_ref().unwrap();
+        fs::write(second.path().join("customers.txt"), "64502\n").unwrap();
+        let changed_path = AcceptedConfigSnapshot::load(&second_path, Some(&prior)).unwrap();
+        assert_eq!(changed_path.policy.dataset_events.swapped, ["customers"]);
+        assert!(!Arc::ptr_eq(&dataset(&changed_path).pin(), &prior_snapshot));
+        assert_eq!(
+            changed_path.manifest.datasets[0].path,
+            second.path().join("customers.txt").canonicalize().unwrap()
+        );
+        assert_ne!(
+            changed_path.manifest.datasets[0].sha256,
+            prior.manifest.datasets[0].sha256
+        );
+
+        prior_handle.refresh(DatasetData::Asn(AsnSet::new([64501])));
+        assert_eq!(candidate_handle.pin().data, prior_snapshot.data);
+        assert_eq!(
+            compiled.evaluate(&reuse_ctx(64500)).action,
+            rustbgpd_policy::PolicyAction::Permit
+        );
+        assert_eq!(
+            compiled.evaluate(&reuse_ctx(64501)).action,
+            rustbgpd_policy::PolicyAction::Deny
+        );
+    }
+
+    #[test]
+    fn retry_after_accepted_effect_before_dataset_commit_reparses_live_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = reuse_fixture(dir.path());
+        let accepted_a = AcceptedConfigSnapshot::load(&path, None).unwrap();
+        let live_bindings = accepted_a.policy.dataset_bindings.detached_clone();
+        let live_config = accepted_a
+            .runtime_config_without_sources(
+                accepted_a.normalized_toml(),
+                &accepted_a.policy.rpol_files,
+                accepted_a.policy.rpol.clone(),
+                &live_bindings,
+            )
+            .unwrap();
+        let live_resolved = live_config.resolved_neighbors().unwrap();
+        let installed = live_resolved[0].import_policy.as_ref().unwrap();
+        assert_eq!(
+            installed.evaluate(&reuse_ctx(64500)).action,
+            rustbgpd_policy::PolicyAction::Permit
+        );
+
+        fs::write(dir.path().join("customers.txt"), "64502\n").unwrap();
+        let accepted_b =
+            AcceptedConfigSnapshot::load_for_reload(&path, &accepted_a, &live_bindings).unwrap();
+        assert_eq!(accepted_b.policy.dataset_events.swapped, ["customers"]);
+        // Model a later pre-commit failure: desired provenance advanced to B,
+        // but the running handle and every installed dependent still serve A.
+        assert_eq!(
+            installed.evaluate(&reuse_ctx(64500)).action,
+            rustbgpd_policy::PolicyAction::Permit
+        );
+
+        let retry =
+            AcceptedConfigSnapshot::load_for_reload(&path, &accepted_b, &live_bindings).unwrap();
+        let retry_handle = dataset(&retry);
+        assert_eq!(retry.policy.dataset_events.swapped, ["customers"]);
+        assert!(!Arc::ptr_eq(
+            &retry_handle.pin(),
+            &dataset(&accepted_b).pin()
+        ));
+        assert_eq!(
+            retry.manifest.datasets[0].sha256,
+            <[u8; 32]>::from(Sha256::digest(b"64502\n"))
+        );
+        assert_eq!(
+            retry.resolved_neighbors().unwrap()[0]
+                .import_policy
+                .as_ref()
+                .unwrap()
+                .evaluate(&reuse_ctx(64500))
+                .action,
+            rustbgpd_policy::PolicyAction::Deny
+        );
+
+        let mut retry_config = retry.config();
+        let commit = retry_config.prepare_staged_datasets(&live_bindings);
+        assert!(!commit.is_empty());
+        assert_eq!(
+            installed.evaluate(&reuse_ctx(64500)).action,
+            rustbgpd_policy::PolicyAction::Permit
+        );
+        commit.commit();
+        assert_eq!(
+            installed.evaluate(&reuse_ctx(64500)).action,
+            rustbgpd_policy::PolicyAction::Deny
+        );
+        assert_eq!(
+            live_bindings.get("customers").unwrap().pin().data,
+            retry_handle.pin().data
+        );
     }
 
     #[test]
@@ -614,6 +976,9 @@ import_policy_chain = ["inbound"]
         );
 
         let unchanged = AcceptedConfigSnapshot::load(&path, Some(&prior)).unwrap();
+        let unchanged_dataset = dataset(&unchanged);
+        assert!(!Arc::ptr_eq(&unchanged_dataset, &prior_dataset));
+        assert!(Arc::ptr_eq(&unchanged_dataset.pin(), &prior_dataset.pin()));
         assert!(Arc::ptr_eq(
             &unchanged.policy.rpol.policies["inbound"].file,
             &prior_file
@@ -641,6 +1006,8 @@ import_policy_chain = ["inbound"]
         ));
         let candidate_dataset = dataset(&changed_dataset);
         assert!(!Arc::ptr_eq(&candidate_dataset, &prior_dataset));
+        assert!(!Arc::ptr_eq(&candidate_dataset.pin(), &prior_dataset.pin()));
+        assert_eq!(changed_dataset.policy.dataset_events.swapped, ["customers"]);
         assert_ne!(
             changed_dataset.manifest.datasets[0].sha256,
             prior.manifest.datasets[0].sha256
@@ -654,37 +1021,12 @@ import_policy_chain = ["inbound"]
             &candidate_compiled.datasets[0].handle,
             &candidate_dataset
         ));
-        let communities = [(65_000_u32 << 16) | 1];
-        let ctx = |origin_asn| rustbgpd_policy::RouteContext {
-            prefix: Some(rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
-                "10.1.0.0".parse().unwrap(),
-                24,
-            ))),
-            next_hop: None,
-            extended_communities: &[],
-            communities: &communities,
-            large_communities: &[],
-            as_path_str: "",
-            as_path: None,
-            as_path_len: 0,
-            origin_asn: Some(origin_asn),
-            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-            peer_address: None,
-            peer_asn: None,
-            peer_group: None,
-            route_type: None,
-            family: None,
-            evpn_route_type: None,
-            local_pref: None,
-            med: None,
-        };
         assert_eq!(
             prior_resolved[0]
                 .import_policy
                 .as_ref()
                 .unwrap()
-                .evaluate(&ctx(64500))
+                .evaluate(&reuse_ctx(64500))
                 .action,
             rustbgpd_policy::PolicyAction::Permit
         );
@@ -693,7 +1035,7 @@ import_policy_chain = ["inbound"]
                 .import_policy
                 .as_ref()
                 .unwrap()
-                .evaluate(&ctx(64500))
+                .evaluate(&reuse_ctx(64500))
                 .action,
             rustbgpd_policy::PolicyAction::Deny
         );

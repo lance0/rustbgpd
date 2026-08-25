@@ -46,7 +46,10 @@ The driver renders both configs itself (nothing is bind-mounted into
 the route-server nodes): `arouteserver bird` in the pinned container
 for BIRD, `cargo run -p rs-config-render` for rustbgpd, followed by
 the pipeline's own gates (`rustbgpd --check --strict`, `rbgp policy
-check` on every generated `.rpol`).
+check` on every generated `.rpol`). The rustbgpd copy keeps the generated
+`datasets/` directory beside `policy/`; the relative
+`[policy.datasets.client-…]` bindings therefore resolve identically in the
+host-side context proof and in the container.
 
 **Image pin:** the driver runs
 `pierky/arouteserver@sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66`

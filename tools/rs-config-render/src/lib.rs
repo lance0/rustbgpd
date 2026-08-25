@@ -286,7 +286,7 @@ impl std::error::Error for RenderError {}
 #[derive(Debug)]
 pub struct Rendered {
     /// Deterministic output files, keyed by path relative to the output
-    /// directory (`config.toml`, `policy/*.rpol`).
+    /// directory (`config.toml`, `policy/*.rpol`, `datasets/*.list`).
     pub files: BTreeMap<String, String>,
     /// The refresh receipt (carries the render timestamp, so it is not
     /// part of the deterministic file set).
@@ -1066,6 +1066,24 @@ fn render_inner(
             format!("policy/client-{}.rpol", rc.slug),
             render_client_rpol(rc, &found_fingerprint),
         );
+        if rc.enforce_origin {
+            files.insert(
+                format!("datasets/client-{}-origins.list", rc.slug),
+                render_asn_dataset(&rc.origins),
+            );
+        }
+        if rc.enforce_prefix {
+            files.insert(
+                format!("datasets/client-{}-prefixes.list", rc.slug),
+                render_prefix_dataset(rc),
+            );
+        }
+        if let Some(blackhole) = &rc.blackhole {
+            files.insert(
+                format!("datasets/client-{}-blackhole-cover.list", rc.slug),
+                render_blackhole_cover_dataset(rc, blackhole.ipv6),
+            );
+        }
     }
     if let Some(artifact) = render_reject_communities(&ctx, &resolved)? {
         files.insert("birdwatcher-reject-communities.json".to_owned(), artifact);
@@ -1975,9 +1993,26 @@ fn resolve_clients<'a>(
 ) -> Result<Vec<ResolvedClient<'a>>, RenderError> {
     let mut resolved = Vec::new();
     let mut implausible = Vec::new();
+    let mut slugs = BTreeSet::new();
 
     for client in &ctx.clients {
         let slug = client.id.to_lowercase().replace('_', "-");
+        if slug.is_empty()
+            || !slug
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return Err(RenderError::Parse(format!(
+                "client id {:?} cannot form a safe policy/dataset artifact name",
+                client.id
+            )));
+        }
+        if !slugs.insert(slug.clone()) {
+            return Err(RenderError::Parse(format!(
+                "client id {:?} collides with another client after artifact-name normalization ({slug})",
+                client.id
+            )));
+        }
         let filtering = &client.cfg.filtering;
         let tag_and_reject = filtering
             .reject_policy
@@ -2273,6 +2308,28 @@ fn render_toml(
         }
     }
     out.push_str("]\nexport_chain = [\"rs-transparent-export\"]\n");
+
+    for rc in clients {
+        let slug = &rc.slug;
+        if rc.enforce_origin {
+            let _ = writeln!(
+                out,
+                "\n[policy.datasets.client-{slug}-origins]\npath = \"datasets/client-{slug}-origins.list\""
+            );
+        }
+        if rc.enforce_prefix {
+            let _ = writeln!(
+                out,
+                "\n[policy.datasets.client-{slug}-prefixes]\npath = \"datasets/client-{slug}-prefixes.list\""
+            );
+        }
+        if rc.blackhole.is_some() {
+            let _ = writeln!(
+                out,
+                "\n[policy.datasets.client-{slug}-blackhole-cover]\npath = \"datasets/client-{slug}-blackhole-cover.list\""
+            );
+        }
+    }
 
     for rc in clients {
         let family = if rc.client.ip.contains(':') {
@@ -2760,25 +2817,11 @@ fn render_client_rpol(rc: &ResolvedClient<'_>, fingerprint: &str) -> String {
 
     let mut conjuncts = Vec::new();
     if rc.enforce_origin {
-        let _ = writeln!(
-            out,
-            "asn-set client-{slug}-origins {{ {} }}",
-            rc.origins
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        let _ = writeln!(out, "dataset asn-set client-{slug}-origins");
         conjuncts.push(format!("route.origin-as in client-{slug}-origins"));
     }
     if rc.enforce_prefix {
-        render_prefix_set(
-            &mut out,
-            &format!("client-{slug}-prefixes"),
-            &rc.prefixes,
-            false,
-            rc.allow_longer_prefixes,
-        );
+        let _ = writeln!(out, "dataset prefix-set client-{slug}-prefixes");
         conjuncts.push(format!("route.prefix in client-{slug}-prefixes"));
     }
 
@@ -2793,12 +2836,7 @@ fn render_client_rpol(rc: &ResolvedClient<'_>, fingerprint: &str) -> String {
         for (kind, marker) in &blackhole.markers {
             marker_guards.push(format!("{} has {marker}", community_field(*kind)));
         }
-        render_covering_prefix_set(
-            &mut out,
-            &format!("client-{slug}-blackhole-cover"),
-            &rc.prefixes,
-            blackhole.ipv6,
-        );
+        let _ = writeln!(out, "dataset prefix-set client-{slug}-blackhole-cover");
         let origin = if rc.enforce_origin {
             format!(" && route.origin-as in client-{slug}-origins")
         } else {
@@ -2868,30 +2906,49 @@ fn render_client_rpol(rc: &ResolvedClient<'_>, fingerprint: &str) -> String {
         );
     }
 
-    // In-language tests derived from the client's own IRR data.
-    if let (true, Some(first_origin)) = (rc.enforce_origin, rc.origins.first()) {
-        let accept_prefix = if rc.enforce_prefix {
-            rc.prefixes.first().map(|p| representative_prefix(p))
+    // Data-independent in-language tests: dataset bytes are never copied into
+    // policy source, and offline checks never read the operator-bound files.
+    if rc.enforce_origin {
+        let overrides = render_test_dataset_overrides(rc, true);
+        let _ = write!(
+            out,
+            "\ntest client-{slug}-authorized-route-is-accepted {{\n{overrides}\
+             \x20   route {{ prefix 192.0.2.0/24; as-path \"64496\" }}\n\
+             \x20   expect client-{slug} == accept\n\
+             }}\n"
+        );
+        let overrides = render_test_dataset_overrides(rc, false);
+        let _ = write!(
+            out,
+            "\ntest client-{slug}-unregistered-origin-is-rejected {{\n{overrides}\
+             \x20   route {{ prefix 192.0.2.0/24; as-path \"64497\" }}\n\
+             \x20   expect client-{slug} == reject\n\
+             }}\n"
+        );
+    }
+    out
+}
+
+fn render_test_dataset_overrides(rc: &ResolvedClient<'_>, authorized_origin: bool) -> String {
+    let slug = &rc.slug;
+    let mut out = String::new();
+    let origin = if authorized_origin { 64496 } else { 64498 };
+    if rc.enforce_origin {
+        let _ = writeln!(out, "    dataset client-{slug}-origins {{ {origin} }}");
+    }
+    if rc.enforce_prefix {
+        let _ = writeln!(out, "    dataset client-{slug}-prefixes {{ 192.0.2.0/24 }}");
+    }
+    if let Some(blackhole) = &rc.blackhole {
+        let cover = if blackhole.ipv6 {
+            "2001:db8::/32 le 128"
         } else {
-            Some("203.0.113.0/24".to_owned())
+            "192.0.2.0/24 le 32"
         };
-        if let Some(prefix) = accept_prefix {
-            let _ = write!(
-                out,
-                "\ntest client-{slug}-authorized-route-is-accepted {{\n\
-                 \x20   route {{ prefix {prefix}; as-path \"{first_origin}\" }}\n\
-                 \x20   expect client-{slug} == accept\n\
-                 }}\n"
-            );
-            let unregistered = unregistered_origin(&rc.origins);
-            let _ = write!(
-                out,
-                "\ntest client-{slug}-unregistered-origin-is-rejected {{\n\
-                 \x20   route {{ prefix {prefix}; as-path \"{unregistered}\" }}\n\
-                 \x20   expect client-{slug} == reject\n\
-                 }}\n"
-            );
-        }
+        let _ = writeln!(
+            out,
+            "    dataset client-{slug}-blackhole-cover {{ {cover} }}"
+        );
     }
     out
 }
@@ -2904,34 +2961,51 @@ fn community_field(kind: CommunityKind) -> &'static str {
     }
 }
 
-fn render_covering_prefix_set(out: &mut String, name: &str, entries: &[&PrefixEntry], ipv6: bool) {
-    let _ = writeln!(out, "prefix-set {name} {{");
-    for entry in entries.iter().filter(|entry| entry.is_ipv6() == ipv6) {
+fn render_asn_dataset(origins: &[u32]) -> String {
+    let mut values = origins.to_vec();
+    values.sort_unstable();
+    values.dedup();
+    values
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+fn render_prefix_dataset(rc: &ResolvedClient<'_>) -> String {
+    let mut members = rc
+        .prefixes
+        .iter()
+        .map(|entry| entry.render_member(false, rc.allow_longer_prefixes))
+        .collect::<Vec<_>>();
+    members.sort_unstable();
+    members.dedup();
+    members.join("\n") + "\n"
+}
+
+fn render_blackhole_cover_dataset(rc: &ResolvedClient<'_>, ipv6: bool) -> String {
+    let mut members = Vec::new();
+    for entry in rc.prefixes.iter().filter(|entry| entry.is_ipv6() == ipv6) {
         let mut member = format!("{}/{}", entry.prefix, entry.length);
         if let Some(ge) = entry.ge.filter(|ge| *ge > entry.length) {
             let _ = write!(member, " ge {ge}");
         }
         let _ = write!(member, " le {}", entry.family_bits());
-        let _ = writeln!(out, "    {member},");
+        members.push(member);
     }
-    out.push_str("}\n");
+    members.sort_unstable();
+    members.dedup();
+    members.join("\n") + "\n"
 }
 
-/// A concrete prefix guaranteed to match the given set member: the
-/// member's own network, lengthened to `ge` when the member excludes
-/// its own length. Lengthening keeps the literal valid (network bits
-/// are unchanged, host bits stay zero).
+#[cfg(test)]
 fn representative_prefix(entry: &PrefixEntry) -> String {
     let length = entry
         .ge
         .filter(|ge| *ge > entry.length)
         .unwrap_or(entry.length);
     format!("{}/{}", entry.prefix, length)
-}
-
-fn unregistered_origin(origins: &[u32]) -> u32 {
-    let max = origins.iter().copied().max().unwrap_or(0);
-    if max == u32::MAX { max - 1 } else { max + 1 }
 }
 
 // ---------------------------------------------------------------------------

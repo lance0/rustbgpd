@@ -41,6 +41,32 @@ policy generations:
   the full re-advertisement the harness timestamps for completion — the same
   mechanics as `docs/perf/ixp-matrix-2026-07.md` S2.
 
+Current `rs-config-render` output keeps the hygiene and 320 client RPOL files
+as independent config units. Each client unit declares one ASN dataset and one
+prefix dataset. The policy units and ASN datasets are invariant; generation
+A/B changes only selected prefix dataset files plus the small marker unit.
+The harness stages content-different dataset files with temp-copy + atomic
+rename before the native SIGHUP timestamp. An older renderer with no dataset
+bindings retains the historical four-file inline/concatenated layout.
+
+At seed 61, the partial candidate changes exactly 36 prefix datasets and zero
+ASN datasets. A separate full-change control is admitted only as a standalone
+rustbgpd SIGHUP campaign:
+
+```sh
+DATASET_REFRESH_FULL_CHANGE=1 CHANGED_FRACTION=1.0 \
+  ARTIFACTS_DIR=/tmp/irrreload-dataset-full \
+  bench/scale/irrreload/run-irr-reload.sh rustbgpd-sighup
+```
+
+All other canonical full-shape and evidence gates remain in force. Every
+successful dataset-mode cell retains `dataset-refresh-summary.csv`, bound to
+the four reload triggers. Partial rows require `hashed=640`, `parsed=36`,
+`exact_reused=604`, `changed=36`, and `eligible=refreshed=36`; full rows require
+`hashed=640`, `parsed=320`, `exact_reused=320`, `changed=320`, and
+`eligible=refreshed=320`. Both require zero source rebinds, dataset/refresh
+failures, skipped sessions, and parse errors, with all 320 sessions up.
+
 ## Shape (a harness parameter, stated exactly)
 
 | Parameter | Smoke (`SMOKE=1`) | Full cross-daemon | Full transaction |
@@ -215,8 +241,8 @@ verifier recomputes the claim directly from those files.
 
 | Cell | Policy representation | Reload mechanism |
 |---|---|---|
-| `rustbgpd-sighup` | `.rpol` per-member IRR filters rendered by `tools/rs-config-render` (the production IRR pipeline renderer) from a synthetic `arouteserver template-context` document, concatenated into one swapped file | copy generation file over live, `SIGHUP` |
-| `rustbgpd-sighup-grouped-control` | the same `.rpol` policy and canonical dataset, with `per_client_best = false` (since the ADR-0126 classifier flip both rustbgpd cells form one 320-member update group; this control isolates the path-hiding/runner-up-lane term) | copy generation file over live, `SIGHUP`; standalone diagnostic control only |
+| `rustbgpd-sighup` | independent hygiene/client `.rpol` units plus per-client ASN/prefix datasets rendered by `tools/rs-config-render` from a synthetic `arouteserver template-context` document | copy marker, atomically stage changed datasets, `SIGHUP` |
+| `rustbgpd-sighup-grouped-control` | the same RPOL units, datasets, and canonical input, with `per_client_best = false` (since the ADR-0126 classifier flip both rustbgpd cells form one 320-member update group; this control isolates the path-hiding/runner-up-lane term) | copy marker, atomically stage changed datasets, `SIGHUP`; standalone diagnostic control only |
 | `rustbgpd-txn` | same dataset as inline `[policy.definitions]` chain-engine statements in a full candidate config TOML | copy candidate; streamed JSON Plan; explicit streamed Apply with the returned single-use plan token, snapshot token, and commit-confirm; assert pending v3 state, then confirm (`txn-apply.sh`) |
 | `bird` | per-member prefix-set `define`s + import filters in the swapped include file | copy include, `birdc configure` |
 | `openbgpd` | per-member `prefix-set`s + `source-as`/`prefix-set` allow rules in the swapped include file | copy include, `bgpctl reload` |

@@ -247,6 +247,7 @@ render_rustbgpd_config() {
 
     docker cp "$RENDER_DIR/config.toml" "$RUSTBGPD":/etc/rustbgpd/config.toml
     docker cp "$RENDER_DIR/policy" "$RUSTBGPD":/etc/rustbgpd/policy
+    docker cp "$RENDER_DIR/datasets" "$RUSTBGPD":/etc/rustbgpd/datasets
 
     # The pipeline's own gate (cookbook step 3): the rendered config
     # must pass full validation before it may serve members.

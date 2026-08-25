@@ -5,6 +5,7 @@
 //! targeted mutation of the same context.
 
 use rs_config_render::{Exit, Options, RenderError, render};
+use rustbgpd_policy::rpol::run_rpol_tests;
 
 const FIXTURE: &str = include_str!("fixtures/context-small.yml");
 
@@ -117,6 +118,22 @@ fn golden_files_match() {
             "policy/client-as197000-1.rpol",
             include_str!("golden/client-as197000-1.rpol"),
         ),
+        (
+            "datasets/client-as4242-1-origins.list",
+            include_str!("golden/client-as4242-1-origins.list"),
+        ),
+        (
+            "datasets/client-as4242-1-prefixes.list",
+            include_str!("golden/client-as4242-1-prefixes.list"),
+        ),
+        (
+            "datasets/client-as197000-1-origins.list",
+            include_str!("golden/client-as197000-1-origins.list"),
+        ),
+        (
+            "datasets/client-as197000-1-prefixes.list",
+            include_str!("golden/client-as197000-1-prefixes.list"),
+        ),
     ];
     assert_eq!(
         rendered.files.len(),
@@ -131,6 +148,13 @@ fn golden_files_match() {
             .unwrap_or_else(|| panic!("missing rendered file {path}"));
         assert_eq!(actual, expected, "golden mismatch for {path}");
     }
+    assert!(!rendered.files["config.toml"].contains("blackhole-cover"));
+    assert!(
+        rendered
+            .files
+            .keys()
+            .all(|path| !path.contains("blackhole-cover"))
+    );
     assert!(rendered.warnings.is_empty(), "{:?}", rendered.warnings);
 }
 
@@ -152,6 +176,64 @@ fn receipt_carries_cardinalities_and_fingerprint() {
     assert_eq!(clients[1]["prefix_set_size"], 1);
     assert_eq!(clients[1]["max_prefixes_ipv6"], 1000);
     assert!(receipt["rendered_at_utc"].as_str().unwrap().ends_with('Z'));
+}
+
+#[test]
+fn one_client_irr_change_only_changes_its_dataset_and_receipt_cardinality() {
+    let baseline = render(&to_yaml(&healthy_value()), &rtr_options()).unwrap();
+    let mut changed = healthy_value();
+    changed["irrdb_info"]["AS197000_bundle"]["prefixes"]
+        .as_sequence_mut()
+        .unwrap()
+        .push(
+            serde_yaml::from_str("{prefix: '2001:db8:ffff::', length: 48, exact: true}").unwrap(),
+        );
+    let changed = render(&to_yaml(&changed), &rtr_options()).unwrap();
+    let changed_paths = baseline
+        .files
+        .iter()
+        .filter_map(|(path, before)| (changed.files[path] != *before).then_some(path.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(changed_paths, ["datasets/client-as197000-1-prefixes.list"]);
+    assert_eq!(
+        changed.files["datasets/client-as197000-1-prefixes.list"],
+        "2001:db8:ffff::/48\n2a10:cc40::/29 le 48\n"
+    );
+    let mut before_receipt = baseline.receipt;
+    let mut after_receipt = changed.receipt;
+    for receipt in [&mut before_receipt, &mut after_receipt] {
+        receipt.as_object_mut().unwrap().remove("rendered_at_unix");
+        receipt.as_object_mut().unwrap().remove("rendered_at_utc");
+    }
+    assert_eq!(before_receipt["clients"][0], after_receipt["clients"][0]);
+    assert_eq!(before_receipt["clients"][1]["prefix_set_size"], 1);
+    assert_eq!(after_receipt["clients"][1]["prefix_set_size"], 2);
+    before_receipt["clients"][1]["prefix_set_size"] = 2.into();
+    assert_eq!(before_receipt, after_receipt);
+}
+
+#[test]
+fn client_dataset_names_are_safe_and_collision_free() {
+    let mut unsafe_id = healthy_value();
+    unsafe_id["clients"][0]["id"] = "../escape".into();
+    assert!(
+        render(&to_yaml(&unsafe_id), &rtr_options())
+            .unwrap_err()
+            .to_string()
+            .contains("safe policy/dataset artifact name")
+    );
+
+    let mut collision = healthy_value();
+    let mut twin = collision["clients"][0].clone();
+    twin["id"] = "AS4242-1".into();
+    twin["ip"] = "192.0.2.99".into();
+    collision["clients"].as_sequence_mut().unwrap().push(twin);
+    assert!(
+        render(&to_yaml(&collision), &rtr_options())
+            .unwrap_err()
+            .to_string()
+            .contains("collides with another client")
+    );
 }
 
 #[cfg(unix)]
@@ -178,6 +260,10 @@ fn cli_stdout_matrix_retains_files_and_receipt() {
             "policy/rs-hygiene.rpol",
             "policy/client-as4242-1.rpol",
             "policy/client-as197000-1.rpol",
+            "datasets/client-as4242-1-origins.list",
+            "datasets/client-as4242-1-prefixes.list",
+            "datasets/client-as197000-1-origins.list",
+            "datasets/client-as197000-1-prefixes.list",
             "render-receipt.json",
         ] {
             assert!(out.join(path).is_file(), "missing retained {path}");
@@ -199,7 +285,7 @@ fn cli_stdout_matrix_retains_files_and_receipt() {
     assert_eq!(
         healthy.stdout,
         format!(
-            "rendered 4 file(s) + receipt into {} — gate with `rustbgpd --check --strict {}` before swapping\n",
+            "rendered 8 file(s) + receipt into {} — gate with `rustbgpd --check --strict {}` before swapping\n",
             healthy_dir.display(),
             healthy_dir.join("config.toml").display()
         )
@@ -639,7 +725,55 @@ fn blackhole_import_covering_markers_and_export_matrix() {
     value["clients"].as_sequence_mut().unwrap().push(twin);
     let rendered = render(&to_yaml(&value), &rtr_options()).unwrap();
     let client = &rendered.files["policy/client-as4242-1.rpol"];
-    assert!(client.contains("203.0.113.0/24 ge 26 le 32"), "{client}");
+    assert!(client.contains("dataset prefix-set client-as4242-1-blackhole-cover"));
+    assert_eq!(
+        rendered.files["datasets/client-as4242-1-blackhole-cover.list"],
+        "198.51.100.0/24 le 32\n203.0.113.0/24 ge 26 le 32\n"
+    );
+    assert!(
+        rendered.files["config.toml"].contains(
+            "[policy.datasets.client-as4242-1-blackhole-cover]\npath = \"datasets/client-as4242-1-blackhole-cover.list\""
+        )
+    );
+    let cases = r#"
+test ordinary-exact-prefix-remains-authorized {
+    dataset client-as4242-1-origins { 4242 }
+    dataset client-as4242-1-prefixes { 203.0.113.0/24 }
+    dataset client-as4242-1-blackhole-cover { 203.0.113.0/24 ge 26 le 32 }
+    route { family ipv4-unicast; prefix 203.0.113.0/24; as-path "4242" }
+    expect client-as4242-1 == accept
+}
+test marked-covered-host-is-authorized {
+    dataset client-as4242-1-origins { 4242 }
+    dataset client-as4242-1-prefixes { 203.0.113.0/24 }
+    dataset client-as4242-1-blackhole-cover { 203.0.113.0/24 ge 26 le 32 }
+    route { family ipv4-unicast; prefix 203.0.113.1/32; as-path "4242"; communities [65535:666] }
+    expect client-as4242-1 == accept with community BLACKHOLE
+}
+test marked-prefix-below-cover-ge-is-rejected {
+    dataset client-as4242-1-origins { 4242 }
+    dataset client-as4242-1-prefixes { 203.0.113.0/24 }
+    dataset client-as4242-1-blackhole-cover { 203.0.113.0/24 ge 26 le 32 }
+    route { family ipv4-unicast; prefix 203.0.113.0/25; as-path "4242"; communities [65535:666] }
+    expect client-as4242-1 == reject
+}
+test marked-prefix-outside-cover-is-rejected {
+    dataset client-as4242-1-origins { 4242 }
+    dataset client-as4242-1-prefixes { 203.0.113.0/24 }
+    dataset client-as4242-1-blackhole-cover { 203.0.113.0/24 ge 26 le 32 }
+    route { family ipv4-unicast; prefix 198.51.100.1/32; as-path "4242"; communities [65535:666] }
+    expect client-as4242-1 == reject
+}
+test wrong-afi-never-uses-v4-cover {
+    dataset client-as4242-1-origins { 4242 }
+    dataset client-as4242-1-prefixes { 203.0.113.0/24 }
+    dataset client-as4242-1-blackhole-cover { 203.0.113.0/24 ge 26 le 32 }
+    route { family ipv6-unicast; prefix 2001:db8::1/128; as-path "4242"; communities [65535:666] }
+    expect client-as4242-1 == reject
+}
+"#;
+    let report = run_rpol_tests(&format!("{client}\n{cases}")).unwrap();
+    assert!(report.all_passed(), "{:?}", report.failures);
     for guard in [
         "route.communities has 65500:666",
         "route.large-communities has 65500:666:1",

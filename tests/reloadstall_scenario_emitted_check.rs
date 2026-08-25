@@ -99,6 +99,8 @@ fn irr_reload_phase_receipt_is_sealed_and_fail_closed() {
     assert!(verifier.contains("phase sum does not materially close"));
     assert!(verifier.contains("phase records are reordered"));
     assert!(verifier.contains("missing/duplicate record"));
+    assert!(verifier.contains("dataset refresh summary requires four ordered SIGHUP triggers"));
+    assert!(runner.contains("dataset-refresh-summary.csv"));
 }
 
 #[test]
@@ -151,6 +153,7 @@ fn irr_reload_shell_scripts_parse_as_bash() {
     let root = env!("CARGO_MANIFEST_DIR");
     for relative in [
         "bench/scale/irrreload/run-irr-reload.sh",
+        "bench/scale/irrreload/stage-rustbgpd-datasets.sh",
         "bench/scale/irrreload/txn-apply.sh",
         "bench/scale/irrreload/txn-lifecycle.sh",
         "bench/scale/matrix/rss-sampler.sh",
@@ -547,7 +550,7 @@ fn irr_reload_protocol_separates_full_transaction_from_smoke() {
         env!("CARGO_MANIFEST_DIR")
     );
     let mixed = std::process::Command::new("bash")
-        .arg(runner)
+        .arg(&runner)
         .args(["rustbgpd-sighup", "rustbgpd-txn"])
         .env("DRY_RUN_PROTOCOL", "1")
         .env_remove("SMOKE")
@@ -558,6 +561,29 @@ fn irr_reload_protocol_separates_full_transaction_from_smoke() {
         String::from_utf8_lossy(&mixed.stderr)
             .contains("rustbgpd-txn must use a separate measured campaign")
     );
+
+    let dataset_ab = std::process::Command::new("bash")
+        .arg(&runner)
+        .arg("rustbgpd-sighup")
+        .env("DRY_RUN_PROTOCOL", "1")
+        .env("DATASET_REFRESH_FULL_CHANGE", "1")
+        .env("CHANGED_FRACTION", "1.0")
+        .env_remove("SMOKE")
+        .output()
+        .expect("run full dataset A/B protocol");
+    assert!(dataset_ab.status.success());
+    for cells in [&[][..], &["bird"][..]] {
+        let rejected = std::process::Command::new("bash")
+            .arg(&runner)
+            .args(cells)
+            .env("DRY_RUN_PROTOCOL", "1")
+            .env("DATASET_REFRESH_FULL_CHANGE", "1")
+            .env("CHANGED_FRACTION", "1.0")
+            .env_remove("SMOKE")
+            .output()
+            .expect("run invalid dataset A/B protocol");
+        assert_eq!(rejected.status.code(), Some(2));
+    }
 }
 
 #[test]
@@ -769,6 +795,18 @@ fn irr_reload_manifest_seals_a_cell_independent_dataset_digest() {
             .map(|value| value.as_str().expect("runtime path"))
             .collect::<Vec<_>>();
         assert_eq!(roster, expected_roster, "{cell} runtime roster");
+        if cell == "rustbgpd" {
+            assert_eq!(manifest["rustbgpd_dataset_mode"], true);
+            assert_eq!(manifest["policy_files"].as_array().unwrap().len(), 11);
+            assert_eq!(manifest["changed_dataset_files"]["asn"], 0);
+            for name in [
+                "static-policy.sha256",
+                "gen-a-datasets.sha256",
+                "gen-b-datasets.sha256",
+            ] {
+                assert!(dir.path().join(name).is_file(), "missing {name}");
+            }
+        }
         let canonical_digest =
             Sha256::digest(std::fs::read(&canonical).expect("read canonical dataset"))
                 .iter()
@@ -1209,13 +1247,27 @@ fn irr_memory_path_hiding_is_explicit_but_not_dataset_identity() {
             if expected { 8 } else { 0 }
         );
         assert!(!config.contains("[neighbors.add_path]"));
-        let policy = std::fs::read_to_string(dir.path().join("member.rpol")).expect("policy");
+        let policy = if manifest["rustbgpd_dataset_mode"] == true {
+            std::fs::read_dir(dir.path().join("datasets"))
+                .expect("dataset directory")
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with("-prefixes.list")
+                })
+                .map(|entry| std::fs::read_to_string(entry.path()).expect("prefix dataset"))
+                .collect::<String>()
+        } else {
+            std::fs::read_to_string(dir.path().join("member.rpol")).expect("policy")
+        };
         assert!(
             policy.contains("20.0.0.0/24"),
             "base prefix must remain admitted"
         );
         if expected_churn {
-            assert!(policy.contains("\n    172.16.0.0/24"));
+            assert!(policy.lines().any(|line| line.trim() == "172.16.0.0/24"));
             assert_eq!(manifest["total_filter_entries"], 208);
             assert!(
                 manifest["list_sizes"]
@@ -1226,7 +1278,7 @@ fn irr_memory_path_hiding_is_explicit_but_not_dataset_identity() {
             );
         } else {
             assert!(
-                !policy.contains("\n    172."),
+                !policy.lines().any(|line| line.trim().starts_with("172.")),
                 "all churn blocks must be rejected"
             );
             assert_eq!(manifest["total_filter_entries"], 80);
