@@ -333,6 +333,7 @@ async fn run_loop<F>(
                     &mut owned,
                 )
                 .await;
+                metrics.set_fib_routes_unresolved(0);
                 return;
             }
             // Runtime [[fib_tables]] hot-swap, prioritized right after shutdown
@@ -4789,6 +4790,53 @@ mod tests {
         assert_eq!(statuses[0].state, FibRuntimeState::Installed);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, FibRuntimeEventKind::Installed);
+        assert_eq!(
+            metric_value_bits(&registry, "bgp_fib_routes_unresolved"),
+            0.0_f64.to_bits()
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_clears_unresolved_gauge() {
+        let registry = Registry::new();
+        let metrics = BgpMetrics::with_registry(registry.clone());
+        let desired = route(v4(24), ip("192.0.2.1"));
+        let (rib_tx, _count, _events) = rib_with_events(vec![desired]);
+        let (status_tx, mut status_rx) = watch::channel(Vec::new());
+        let (event_tx, _) = broadcast::channel(16);
+        let shutdown = CancellationToken::new();
+        let handle = spawn_with_fib(
+            config(),
+            rib_tx.clone(),
+            rib_tx,
+            FakeFib {
+                fail_apply: vec![FibApplyError::Unresolved],
+                ..FakeFib::default()
+            },
+            metrics,
+            status_tx,
+            event_tx,
+            shutdown,
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while status_rx
+                .borrow()
+                .iter()
+                .all(|status| status.state != FibRuntimeState::Unresolved)
+            {
+                status_rx.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            metric_value_bits(&registry, "bgp_fib_routes_unresolved"),
+            1.0_f64.to_bits()
+        );
+
+        handle.shutdown().await;
+
         assert_eq!(
             metric_value_bits(&registry, "bgp_fib_routes_unresolved"),
             0.0_f64.to_bits()
