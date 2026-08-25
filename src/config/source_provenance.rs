@@ -291,6 +291,12 @@ impl AcceptedConfigSnapshot {
         )?;
         config.file_path = Some(path.to_path_buf());
         after_capture();
+        if let Some(prior) = prior {
+            config
+                .policy
+                .rpol
+                .reuse_unchanged_files_from(&prior.config.policy.rpol);
+        }
         config.policy.dataset_bindings = config.policy.dataset_bindings.detached_clone();
 
         let normalized_toml = Arc::new(
@@ -500,6 +506,60 @@ path = "customers.txt"
         path
     }
 
+    fn reuse_fixture(dir: &Path) -> PathBuf {
+        fs::write(
+            dir.join("policy.rpol"),
+            "import \"lib.rpol\"\npolicy outbound { term rest { accept } }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("lib.rpol"),
+            "dataset asn-set customers\n\
+             prefix-set edge { 10.0.0.0/8 ge 8 le 32 }\n\
+             community-set marked { 65000:1 }\n\
+             asn-set origins { 64500 }\n\
+             policy inbound {\n\
+               term customer { if route.prefix in edge && route.communities in marked && route.origin-as in origins && route.origin-as in customers { accept } }\n\
+               term rest { reject }\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(dir.join("customers.txt"), "64500\n").unwrap();
+        let config = tier_authorized_uds_test_config(
+            r#"
+[global]
+asn = 65000
+router_id = "192.0.2.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[policy]
+rpol_files = ["policy.rpol"]
+[policy.datasets.customers]
+path = "customers.txt"
+[[neighbors]]
+address = "192.0.2.2"
+remote_asn = 65001
+import_policy_chain = ["inbound"]
+[[neighbors]]
+address = "192.0.2.3"
+remote_asn = 65002
+import_policy_chain = ["inbound"]
+[[neighbors]]
+address = "192.0.2.4"
+remote_asn = 65003
+import_policy_chain = ["inbound"]
+[[neighbors]]
+address = "192.0.2.5"
+remote_asn = 65004
+import_policy_chain = ["inbound"]
+"#,
+        );
+        let path = dir.join("config.toml");
+        fs::write(&path, config).unwrap();
+        path
+    }
+
     fn fingerprint(path: &Path, bytes: &[u8]) -> DatasetFileFingerprint {
         DatasetFileFingerprint {
             canonical_path: path.to_path_buf(),
@@ -524,6 +584,140 @@ path = "customers.txt"
             .iter()
             .map(|module| module.path.file_name().unwrap().to_str().unwrap())
             .collect()
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario proves reuse, candidate dataset ownership, evaluation, and rejection isolation"
+    )]
+    fn accepted_reload_reuses_rpol_storage_without_reusing_dataset_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = reuse_fixture(dir.path());
+        let prior = AcceptedConfigSnapshot::load(&path, None).unwrap();
+        let prior_file = Arc::clone(&prior.policy.rpol.policies["inbound"].file);
+        let prior_dataset = dataset(&prior);
+        let prior_resolved = prior.resolved_neighbors().unwrap();
+        let compiled = |neighbor: &crate::config::ResolvedNeighbor| {
+            Arc::clone(
+                neighbor.import_policy.as_ref().unwrap().policies[0]
+                    .rpol
+                    .as_ref()
+                    .unwrap(),
+            )
+        };
+        let prior_compiled: Vec<_> = prior_resolved.iter().map(compiled).collect();
+        assert!(
+            prior_compiled[1..]
+                .iter()
+                .all(|chain| Arc::ptr_eq(&chain.prefix_sets[0], &prior_compiled[0].prefix_sets[0]))
+        );
+
+        let unchanged = AcceptedConfigSnapshot::load(&path, Some(&prior)).unwrap();
+        assert!(Arc::ptr_eq(
+            &unchanged.policy.rpol.policies["inbound"].file,
+            &prior_file
+        ));
+        assert!(Arc::ptr_eq(
+            &unchanged.policy.rpol.policies["outbound"].file,
+            &prior_file
+        ));
+        let unchanged_resolved = unchanged.resolved_neighbors().unwrap();
+        for (old, new) in prior_compiled
+            .iter()
+            .zip(unchanged_resolved.iter().map(compiled))
+        {
+            assert!(!Arc::ptr_eq(old, &new));
+            assert!(Arc::ptr_eq(&old.prefix_sets[0], &new.prefix_sets[0]));
+            assert!(Arc::ptr_eq(&old.community_sets[0], &new.community_sets[0]));
+            assert!(Arc::ptr_eq(&old.asn_sets[0], &new.asn_sets[0]));
+        }
+
+        fs::write(dir.path().join("customers.txt"), "64501\n").unwrap();
+        let changed_dataset = AcceptedConfigSnapshot::load(&path, Some(&prior)).unwrap();
+        assert!(Arc::ptr_eq(
+            &changed_dataset.policy.rpol.policies["inbound"].file,
+            &prior_file
+        ));
+        let candidate_dataset = dataset(&changed_dataset);
+        assert!(!Arc::ptr_eq(&candidate_dataset, &prior_dataset));
+        assert_ne!(
+            changed_dataset.manifest.datasets[0].sha256,
+            prior.manifest.datasets[0].sha256
+        );
+        let candidate = changed_dataset.resolved_neighbors().unwrap();
+        let candidate_compiled = candidate[0].import_policy.as_ref().unwrap().policies[0]
+            .rpol
+            .as_ref()
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &candidate_compiled.datasets[0].handle,
+            &candidate_dataset
+        ));
+        let communities = [(65_000_u32 << 16) | 1];
+        let ctx = |origin_asn| rustbgpd_policy::RouteContext {
+            prefix: Some(rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                "10.1.0.0".parse().unwrap(),
+                24,
+            ))),
+            next_hop: None,
+            extended_communities: &[],
+            communities: &communities,
+            large_communities: &[],
+            as_path_str: "",
+            as_path: None,
+            as_path_len: 0,
+            origin_asn: Some(origin_asn),
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            peer_address: None,
+            peer_asn: None,
+            peer_group: None,
+            route_type: None,
+            family: None,
+            evpn_route_type: None,
+            local_pref: None,
+            med: None,
+        };
+        assert_eq!(
+            prior_resolved[0]
+                .import_policy
+                .as_ref()
+                .unwrap()
+                .evaluate(&ctx(64500))
+                .action,
+            rustbgpd_policy::PolicyAction::Permit
+        );
+        assert_eq!(
+            candidate[0]
+                .import_policy
+                .as_ref()
+                .unwrap()
+                .evaluate(&ctx(64500))
+                .action,
+            rustbgpd_policy::PolicyAction::Deny
+        );
+
+        let prior_config = fs::read_to_string(&path).unwrap();
+        fs::write(
+            &path,
+            prior_config.replace("remote_asn = 65001", "remote_asn = 0"),
+        )
+        .unwrap();
+        assert!(AcceptedConfigSnapshot::load(&path, Some(&prior)).is_err());
+        assert!(Arc::ptr_eq(
+            &prior.policy.rpol.policies["inbound"].file,
+            &prior_file
+        ));
+        assert_eq!(
+            prior_dataset.pin().data,
+            DatasetData::Asn(AsnSet::new([64500]))
+        );
+        let after_rejection = prior.resolved_neighbors().unwrap();
+        assert!(Arc::ptr_eq(
+            &prior_compiled[0].prefix_sets[0],
+            &compiled(&after_rejection[0]).prefix_sets[0]
+        ));
     }
 
     #[test]

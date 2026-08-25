@@ -371,6 +371,71 @@ pub struct RpolPolicySet {
     pub policies: HashMap<String, RpolPolicyEntry>,
 }
 
+impl RpolPolicySet {
+    /// Reuse parsed files from the immediately prior accepted registry when
+    /// their complete source identity is unchanged.
+    #[doc(hidden)]
+    pub fn reuse_unchanged_files_from(&mut self, prior: &Self) {
+        let mut seen_files = Vec::new();
+        let mut replacements = Vec::new();
+        for candidate in self.policies.values() {
+            let candidate_ptr = Arc::as_ptr(&candidate.file);
+            if seen_files.contains(&candidate_ptr) {
+                continue;
+            }
+            seen_files.push(candidate_ptr);
+
+            let members: Vec<_> = self
+                .policies
+                .iter()
+                .filter(|(_, entry)| Arc::as_ptr(&entry.file) == candidate_ptr)
+                .collect();
+            let Some((_, first)) = members.first() else {
+                continue;
+            };
+            let Some(accepted_file) = prior
+                .policies
+                .get(members[0].0)
+                .map(|entry| Arc::clone(&entry.file))
+            else {
+                continue;
+            };
+            let accepted_ptr = Arc::as_ptr(&accepted_file);
+            let all_members_match = members.iter().all(|(name, entry)| {
+                prior.policies.get(*name).is_some_and(|accepted| {
+                    accepted.params == entry.params
+                        && accepted.path == entry.path
+                        && Arc::as_ptr(&accepted.file) == accepted_ptr
+                })
+            });
+            let accepted_members = prior
+                .policies
+                .values()
+                .filter(|entry| Arc::as_ptr(&entry.file) == accepted_ptr)
+                .count();
+            if all_members_match
+                && accepted_members == members.len()
+                && first
+                    .file
+                    .source_fingerprints()
+                    .eq(accepted_file.source_fingerprints())
+                && first.file.content_eq(&accepted_file)
+            {
+                replacements.push((candidate_ptr, accepted_file));
+            }
+        }
+
+        for entry in self.policies.values_mut() {
+            if let Some((_, accepted)) = replacements
+                .iter()
+                .find(|(candidate, _)| *candidate == Arc::as_ptr(&entry.file))
+            {
+                entry.file = Arc::clone(accepted);
+            }
+        }
+    }
+}
+
 /// Split a policy chain reference into base name + `u32` arguments:
 /// `"bogon-filter"` → `("bogon-filter", [])`,
 /// `"customer-in(200)"` → `("customer-in", [200])`. Used by the daemon
