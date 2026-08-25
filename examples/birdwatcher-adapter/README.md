@@ -109,6 +109,13 @@ returns 403 before truncation and sanitized 502 on missing/changing versions,
 duplicates, conflicts, or any incomplete walk. Table names and IPv4/IPv6
 family are inferred from one live alias snapshot; this is not VRF discovery.
 
+Every received-route view that joins `ListReceivedRoutes` with
+`ListBestRoutes` requires one matching `RoutePageVersion` across every page of
+both captures. A generation change or upstream `ABORTED` response discards the
+entire partial capture and retries at most three times; missing versions and a
+third mismatch fail with sanitized HTTP 502. Advertised-route generations are
+independent and are not compared with the best-route generation.
+
 Protocol inventory never fans out rejected-route queries. It fails HTTP 502
 when a stale or older daemon omits the retained count instead of presenting a
 false zero. Each row carries `route_limit_at` from the same accepted-prefix
