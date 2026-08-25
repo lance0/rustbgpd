@@ -120,7 +120,10 @@ fn reload_generation_phase_attribution_receipt_is_sealed() {
     for (index, row) in rows.iter().enumerate() {
         let fields = row.split(',').collect::<Vec<_>>();
         assert_eq!(fields.len(), 17);
-        assert_eq!(fields[1], (index % 4 + 1).to_string());
+        assert_eq!(
+            fields[1].parse::<usize>().expect("reload number"),
+            index % 4 + 1
+        );
         assert_eq!(&fields[2..6], ["320", "320", "0", "320"]);
         assert_eq!(&fields[6..8], ["committed", "true"]);
         let phases = fields[8..15]

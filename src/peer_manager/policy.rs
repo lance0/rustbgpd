@@ -712,17 +712,16 @@ impl PeerManager {
             .filter_map(|(target, selected)| (!selected).then_some(target))
             .collect();
         let authoritative_remainder_started = Instant::now();
-        match self
+        let authoritative_remainder = self
             .apply_resolved_policy_snapshot_authoritatively(
                 remainder,
                 &mut rollback_rib_budget,
                 require_clean_convergence,
             )
-            .await
-        {
+            .await;
+        phases.authoritative_remainder_apply_us = elapsed_us(authoritative_remainder_started);
+        match authoritative_remainder {
             Ok(mut remainder_captured) => {
-                phases.authoritative_remainder_apply_us =
-                    elapsed_us(authoritative_remainder_started);
                 captured.append(&mut remainder_captured);
                 info!(
                     total_targets,
