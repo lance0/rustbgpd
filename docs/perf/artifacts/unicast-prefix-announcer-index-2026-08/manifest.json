@@ -1,0 +1,16 @@
+{
+  "schema": "rustbgpd.unicast-prefix-announcer-index.v1",
+  "base_commit": "812770e5297f6c455e457f158d057528f6bcf4fb",
+  "base_tree": "e8d586c1623d1f1cda0374117e7c9755321a04b7",
+  "head_commit": "5ed4d093d8985207108a463a6cc06e959a598457",
+  "head_tree": "9ccd399cf64bd97301d1609ffd881b4244eb3763",
+  "student_t_one_sided_95_df5": 2.0150483733,
+  "maximum_regression_ucl_percent": 5.0,
+  "rrharness_command": "bench/scale/compare-rrharness.sh --base 812770e5297f6c455e457f158d057528f6bcf4fb --head 5ed4d093d8985207108a463a6cc06e959a598457 --output-dir DIR",
+  "driver_sha256": "df34ae100cb0b9c1f7dbe09344c2b67d4b9ca7f59c9688deb2b1a1602c6c912c",
+  "parser_sha256": "a6933cd74fbd30e7d80424f71f02302798c88d3ce9c6807f30fa99d9ea93d2ba",
+  "campaign_manifest_sha256": {"3":"65e7d4dc7309b406e9b1b7fe765f0b68793858c53e822f5aef1954bd5e97b1e1","4":"e22154707c4828341589a8fc581961400eaba4ccffee79f69cc7f8c843e55761","5":"ef1ad965fcffb2c31cf1c4cbdcf3d4cea79c2a5a186007e90c9b369eeb043d4f"},
+  "campaign_results_sha256": {"3":"35281a16c94016ae38fbd3d406577cf12fb9bbf4bd3628b20698ab447e1558e4","4":"23110c21dd0ff007cf55811df09e9a7f9bf36ac9be8469e6360996d9e72abd4c","5":"9acd432be8b85f57a4b1665eeef5c6bc81d3bc71b68d855e917698dbe58ce94d"},
+  "campaign_preflight_sha256": {"3":"bb4e30cb2a4459d0b023966f4db2510a2674ab65172acfb4fdd39c1d7e3604b1","4":"d3e39d68aadeed5067223efc3f898eacf99d4330dff2ac4fd52dc406ce23ec50","5":"27622d3e6f6e02dfb547e62715c444153109c3bca7f816e82000a1681593a3f0"},
+  "limits": ["memory values are requested live allocator bytes, not daemon RSS", "throughput result is a bounded no-regression gate, not universal speedup"]
+}
