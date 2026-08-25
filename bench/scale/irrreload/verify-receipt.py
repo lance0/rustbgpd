@@ -191,14 +191,17 @@ def validate_dataset_refresh(
 
     manifest = read_json(manifest_path)
     changed = manifest.get("changed_dataset_files")
-    expected_changed = changed.get("prefix") if isinstance(changed, dict) else None
+    changed_fraction = manifest.get("changed_fraction")
+    expected_changed = {0.1: 36, 1.0: 320}.get(changed_fraction)
     if (
         manifest.get("rustbgpd_dataset_mode") is not True
         or manifest.get("n_members") != 320
         or manifest.get("seed") != 61
+        or type(changed_fraction) not in (int, float)
+        or expected_changed is None
         or set(changed or {}) != {"prefix", "asn"}
         or changed.get("asn") != 0
-        or expected_changed not in {36, 320}
+        or changed.get("prefix") != expected_changed
     ):
         fail("dataset refresh manifest is not a canonical partial/full candidate")
     expected = {
@@ -1966,6 +1969,12 @@ def validate_root(root: Path, kind: str):
         )
         if manifest.get("dataset_sha256") != dataset or manifest.get("admit_churn") is not True:
             fail(f"{root}: {cell} manifest dataset/churn mismatch")
+        manifest_fraction = manifest.get("changed_fraction")
+        if (
+            type(manifest_fraction) not in (int, float)
+            or manifest_fraction != float(inputs["changed_fraction"])
+        ):
+            fail(f"{root}: {cell} manifest changed fraction does not match campaign inputs")
         if manifest.get("overlap_fraction", 0.0) != float(inputs_overlap):
             fail(f"{root}: {cell} manifest overlap does not match campaign inputs")
         load_overlap(cdir / "manifest.json", 320, 183040)
@@ -2346,7 +2355,7 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
             "bird": ["bird.conf", "gen.conf", "gen-a.conf", "gen-b.conf"],
             "openbgpd": ["bgpd.conf", "gen.conf", "gen-a.conf", "gen-b.conf"],
         }[cell]
-        manifest = {"dataset_sha256": dataset, "admit_churn": True, "n_members": 320, "total_prefixes": 183040, "min_list": 1000, "max_list": 40000, "seed": 61, "runtime_files": runtime_files, **mode}
+        manifest = {"dataset_sha256": dataset, "admit_churn": True, "n_members": 320, "total_prefixes": 183040, "min_list": 1000, "max_list": 40000, "seed": 61, "changed_fraction": 0.1, "runtime_files": runtime_files, **mode}
         (cdir / "manifest.json").write_text(json.dumps(manifest))
         cell_rows = [row for row in root_rows if row[0] == cell]
         (cdir / "rows.csv").write_text("".join(",".join(row) + "\n" for row in cell_rows))
@@ -2534,6 +2543,7 @@ def self_test() -> None:
         manifest_path = root / "manifest.json"
         manifest_path.write_text(json.dumps({
             "rustbgpd_dataset_mode": True, "n_members": 320, "seed": 61,
+            "changed_fraction": 0.1,
             "changed_dataset_files": {"prefix": 36, "asn": 0},
         }))
         reload_log.write_text("".join(
@@ -2572,6 +2582,13 @@ def self_test() -> None:
         try: validate_dataset_refresh(daemon_log, reload_log, manifest_path, output)
         except InvalidReceipt: print("red-proof dataset-refresh-sessions=pass")
         else: fail("dataset refresh self-test accepted missing session")
+        full_labeled = read_json(manifest_path)
+        full_labeled["changed_fraction"] = 1.0
+        manifest_path.write_text(json.dumps(full_labeled))
+        reload_log.write_text(reload_original)
+        try: validate_dataset_refresh(daemon_log, reload_log, manifest_path, output)
+        except InvalidReceipt: print("red-proof dataset-refresh-full-label-partial=pass")
+        else: fail("dataset refresh self-test accepted partial counters as full")
 
         reload_log.write_text("".join(
             f"reload {number} SIGHUP wall_us={8635464000000000 + number * 1000000} policy=x\n"
@@ -3294,6 +3311,11 @@ def self_test() -> None:
             alter_json(manifest_path, lambda data: data["runtime_files"].append("extra.conf"))
             rebind_scenario_manifest(cdir)
         rejected("scenario-roster", break_scenario_roster)
+        def break_manifest_changed_fraction(root):
+            cdir = root / "bird"
+            alter_json(cdir / "manifest.json", lambda data: data.update({"changed_fraction": 1.0}))
+            rebind_scenario_manifest(cdir)
+        rejected("manifest-changed-fraction", break_manifest_changed_fraction)
         def break_overlap_input_binding(root):
             # Internally valid manifest overlap (1 pair at the canonical
             # total) while the campaign inputs still declare overlap 0.
@@ -3452,7 +3474,7 @@ def self_test() -> None:
                 proofs[name] = True
         grouped_pair_drift("cross-role-environment", "environment", "cpu_model", "other-platform")
         grouped_pair_drift("cross-role-source-identity", "binaries", "rbgp", "a" * 64)
-        expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "origin-only", "head-matches-false", "ancestry-unverified", "measurement-mode-invalid", "mismatched-commit", "commit-malformed", "scripts-null", "scripts-empty-map", "binary-malformed", "fingerprint-recompute", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "cell-root-provenance", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "cell-provenance", "evidence-roster", "scenario-roster", "scenario-duplicate", "scenario-unsafe-path", "scenario-retained-config", "cell-root-rows", "reload-log-rows", "percentile-order", "percentile-positive", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "seal-checksum", "exact-root-roster", "symlink-anywhere", "writable-root", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-role-source-identity"}
+        expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "origin-only", "head-matches-false", "ancestry-unverified", "measurement-mode-invalid", "mismatched-commit", "commit-malformed", "scripts-null", "scripts-empty-map", "binary-malformed", "fingerprint-recompute", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "cell-root-provenance", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "cell-provenance", "evidence-roster", "scenario-roster", "manifest-changed-fraction", "scenario-duplicate", "scenario-unsafe-path", "scenario-retained-config", "cell-root-rows", "reload-log-rows", "percentile-order", "percentile-positive", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "seal-checksum", "exact-root-roster", "symlink-anywhere", "writable-root", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-role-source-identity"}
         expected |= {"current-down", "reestablished", "flapped", "counter-malformed", "establishment-roster", "flap-roster", "row-session-loss"}
         expected |= {"preflip-private", "lane-gauge"}
         expected |= set(
