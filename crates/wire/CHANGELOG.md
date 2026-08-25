@@ -5,6 +5,10 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- **BIER minimum cardinality:** Zero-length BIER attributes are now rejected
+  and receive RFC 7606 attribute-discard handling. Non-empty unknown TLVs and
+  supported framing remain opaque and continue to propagate unchanged.
+
 - **Additive borrowed-attribute builder:** Added
   `UpdateMessage::try_build_from_attribute_iter`, which consumes one
   single-pass iterator of borrowed path attributes in yielded order and

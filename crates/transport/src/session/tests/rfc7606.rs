@@ -345,6 +345,38 @@ async fn malformed_bfd_discriminator_discards_attribute_and_keeps_route() {
     assert_single_malformed_disposition(&session, "attribute_discard");
 }
 
+#[tokio::test]
+async fn empty_bier_attribute_is_discarded_and_keeps_route_and_session() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 41), 32);
+    session
+        .process_update(rfc7606_update(
+            rfc7606_attr_bytes(&[0xc0, 41, 0]),
+            &[prefix],
+        ))
+        .await;
+
+    let RibUpdate::RoutesReceived { announced, .. } =
+        rib_rx.try_recv().expect("attribute-discard announcement")
+    else {
+        panic!("expected retained route");
+    };
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].prefix, Prefix::V4(prefix));
+    assert!(
+        announced[0]
+            .attributes
+            .iter()
+            .all(|attribute| attribute.type_code() != 41)
+    );
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "attribute_discard");
+}
+
 /// RFC 6793 / RFC 7606: a malformed `AS4_PATH` is discarded without losing
 /// reachable NLRI or the valid ordinary path on a legacy session.
 ///
