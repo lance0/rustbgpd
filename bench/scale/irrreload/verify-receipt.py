@@ -99,8 +99,15 @@ def validate_reload_phases(daemon_log: Path, reload_log: Path, output: Path) -> 
         if fields.get("target") != "reload_generation_phase":
             fail(f"{daemon_log}: phase record has the wrong structured target")
         try:
-            epoch_us = int(datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00")).timestamp() * 1_000_000)
-        except (ValueError, KeyError, AttributeError):
+            parsed = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
+            if parsed.utcoffset() is None:
+                raise ValueError("timestamp has no UTC offset")
+            since_epoch = parsed - datetime(1970, 1, 1, tzinfo=timezone.utc)
+            epoch_us = (
+                (since_epoch.days * 86_400 + since_epoch.seconds) * 1_000_000
+                + since_epoch.microseconds
+            )
+        except (ValueError, KeyError, AttributeError, TypeError, OverflowError):
             fail(f"{daemon_log}: phase record has no parseable timestamp")
         required = set(PHASE_FIELDS) | {
             "total_targets", "cohort_targets", "remainder_targets", "refresh_count",
@@ -2048,8 +2055,8 @@ def self_test() -> None:
         daemon_log = root / "daemon.log"
         output = root / "phases.csv"
         reload_log.write_text(
-            "reload 1 SIGHUP wall_us=1787659200000000 policy=b\n"
-            "reload 2 SIGHUP wall_us=1787659201000000 policy=a\n"
+            "reload 1 SIGHUP wall_us=8635464000000000 policy=b\n"
+            "reload 2 SIGHUP wall_us=8635464001000000 policy=a\n"
         )
         def phase_line(second: int, outcome: str, fallback: bool) -> str:
             fields = {
@@ -2061,10 +2068,14 @@ def self_test() -> None:
                 "authoritative_remainder_apply_us": 50, "deferred_refresh_dispatch_us": 60,
                 "convergence_check_us": 70, "total_us": 300, "unattributed_us": 20,
             }
-            return json.dumps({"timestamp": f"2026-08-25T12:00:0{second}.100000Z", "level": "INFO",
+            return json.dumps({"timestamp": f"2243-08-25T12:00:0{second}.000001Z", "level": "INFO",
                                "fields": fields, "target": "rustbgpd::peer_manager::policy"}) + "\n"
         daemon_log.write_text(phase_line(0, "committed", False) + phase_line(1, "failed", True))
         validate_reload_phases(daemon_log, reload_log, output)
+        assert [
+            int(row["timestamp_epoch_us"])
+            for row in csv.DictReader(output.open())
+        ] == [8635464000000001, 8635464001000001]
         original = daemon_log.read_text()
         for broken in (phase_line(0, "committed", False), original + phase_line(1, "failed", True)):
             daemon_log.write_text(broken)

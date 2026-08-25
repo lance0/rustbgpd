@@ -615,8 +615,9 @@ impl PeerManager {
                     &mut rollback_rib_budget,
                     require_clean_convergence,
                 )
-                .await?;
+                .await;
             phases.authoritative_remainder_apply_us = elapsed_us(authoritative_started);
+            let captured = captured?;
             let convergence_started = Instant::now();
             let outcome = self
                 .complete_policy_snapshot(
@@ -635,6 +636,10 @@ impl PeerManager {
         phases.cohort_targets = cohort_targets;
         phases.remainder_targets = total_targets - cohort_targets;
         if cohort_targets < 2 {
+            // The selected set is too small to execute as a cohort. Report
+            // the full authoritative path that actually runs.
+            phases.cohort_targets = 0;
+            phases.remainder_targets = total_targets;
             let authoritative_started = Instant::now();
             let captured = self
                 .apply_resolved_policy_snapshot_authoritatively(
@@ -642,8 +647,9 @@ impl PeerManager {
                     &mut rollback_rib_budget,
                     require_clean_convergence,
                 )
-                .await?;
+                .await;
             phases.authoritative_remainder_apply_us = elapsed_us(authoritative_started);
+            let captured = captured?;
             let convergence_started = Instant::now();
             let outcome = self
                 .complete_policy_snapshot(
