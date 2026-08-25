@@ -9,7 +9,7 @@ use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{
     PeerHandle, SessionIdentity, SessionLifecycleNotification, SessionNotification,
-    SessionNotificationDirection, TransportConfig,
+    SessionNotificationDirection, TransportConfig, session_notification_channel,
 };
 use rustbgpd_wire::{
     Afi, Capability, Message, NotificationMessage, OpenMessage, Safi, decode_message,
@@ -635,7 +635,7 @@ async fn state_changed_uses_bounded_lifecycle_channel() {
     let addr = listener.local_addr().unwrap();
     let metrics = BgpMetrics::new();
 
-    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<SessionNotification>();
+    let (notify_tx, mut notify_rx) = session_notification_channel(metrics.clone());
     let (lifecycle_tx, mut lifecycle_rx) = mpsc::channel::<SessionLifecycleNotification>(8);
 
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
@@ -687,7 +687,7 @@ async fn constructor_without_lifecycle_sender_keeps_state_changes_off_lossless_l
     let addr = listener.local_addr().unwrap();
     let metrics = BgpMetrics::new();
 
-    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<SessionNotification>();
+    let (notify_tx, mut notify_rx) = session_notification_channel(metrics.clone());
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
     let handle = PeerHandle::spawn_with_identity(
         transport_config(addr),
@@ -809,7 +809,7 @@ async fn open_confirm_sends_session_notification() {
     let addr = listener.local_addr().unwrap();
     let metrics = BgpMetrics::new();
 
-    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<SessionNotification>();
+    let (notify_tx, mut notify_rx) = session_notification_channel(metrics.clone());
 
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
     let mut config = transport_config(addr);
@@ -885,7 +885,7 @@ async fn query_state_returns_router_id_at_open_confirm() {
     let addr = listener.local_addr().unwrap();
     let metrics = BgpMetrics::new();
 
-    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<SessionNotification>();
+    let (notify_tx, mut notify_rx) = session_notification_channel(metrics.clone());
 
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
     let handle = PeerHandle::spawn(

@@ -543,10 +543,11 @@ async fn max_prefix_with_notification_gr_latches_and_sends_encapsulated_hard_res
     config.max_prefixes_ipv4 = Some(1);
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, mut rib_rx) = mpsc::channel(64);
-    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel();
+    let metrics = BgpMetrics::new();
+    let (notify_tx, mut notify_rx) = crate::session_notification_channel(metrics.clone());
     let mut session = PeerSession::new_with_identity_and_lifecycle(
         config,
-        BgpMetrics::new(),
+        metrics,
         cmd_rx,
         rib_tx,
         None,

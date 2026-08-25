@@ -46,17 +46,20 @@ EMITTER_FILES = frozenset({TELEMETRY, SETTLEMENT})
 CUSTOM_COLLECTORS = frozenset(
     {
         (TELEMETRY, "JemallocCollector"),
+        (TELEMETRY, "SessionNotificationDepthCollector"),
         (SETTLEMENT, "RuntimeConfigSettlementCollector"),
     }
 )
 CUSTOM_COLLECTOR_PREFIXES = {
     (TELEMETRY, "JemallocCollector"): "jemalloc_",
+    (TELEMETRY, "SessionNotificationDepthCollector"): "bgp_session_notification_",
     (SETTLEMENT, "RuntimeConfigSettlementCollector"): "bgp_runtime_config_settlement_",
 }
 SPECIAL_REGISTRATIONS = {
     TELEMETRY: (
         "prometheus::process_collector::ProcessCollector::for_self()",
         "jemalloc_stats::JemallocCollector::new()",
+        "SessionNotificationDepthCollector::new(Arc::clone(&session_notification_outstanding_value),Arc::clone(&session_notification_outstanding_high_watermark_value),)",
     ),
     SETTLEMENT: (
         "RuntimeConfigSettlementCollector::new(Arc::clone(&self.registry,))",
@@ -354,6 +357,55 @@ def registered_metric_variables(
     return set(variables)
 
 
+def session_notification_depth_inventory(source: str) -> tuple[dict[str, str], set[str]]:
+    """Validate the two fresh local gauges emitted by the atomic depth collector."""
+    source = production_source(source)
+    syntax, _ = DASHBOARD_CHECK.rust_lex(source)
+    collector_impl = braced_body(
+        syntax,
+        r"\bimpl\s+Collector\s+for\s+SessionNotificationDepthCollector\s*\{",
+        "Collector impl for SessionNotificationDepthCollector",
+    )
+    collect_body = braced_body(
+        collector_impl,
+        r"\bfn\s+collect\s*\(\s*&self\s*\)\s*->\s*Vec\s*<\s*MetricFamily\s*>\s*\{",
+        "collect method for SessionNotificationDepthCollector",
+    )
+    definitions = static_metric_definitions(source)
+    emitted = {
+        variable: definition
+        for variable, definition in definitions.items()
+        if definition[0].startswith("bgp_session_notification_")
+    }
+    expected = {
+        "current_gauge": ("bgp_session_notification_outstanding", "ordinary"),
+        "high_watermark_gauge": (
+            "bgp_session_notification_outstanding_high_watermark",
+            "ordinary",
+        ),
+    }
+    if emitted != expected:
+        raise ValueError(
+            "SessionNotificationDepthCollector must construct exactly two uniquely "
+            f"named local gauges: expected {expected}, got {emitted}"
+        )
+    if collect_body.count("IntGauge::new(") != 2:
+        raise ValueError(
+            "SessionNotificationDepthCollector must construct exactly two local IntGauge encoders"
+        )
+    initial = "let mut families = current_gauge.collect();"
+    extension = "families.extend(high_watermark_gauge.collect());"
+    if collect_body.count(initial) != 1 or collect_body.count(extension) != 1:
+        raise ValueError(
+            "SessionNotificationDepthCollector must assemble each local gauge exactly once"
+        )
+    if re.search(r"\bfamilies\s*$", collect_body.strip()) is None:
+        raise ValueError(
+            "SessionNotificationDepthCollector must return its assembled families"
+        )
+    return {name: kind for name, kind in emitted.values()}, set(emitted)
+
+
 def candidate_emitter_sources(root: Path = ROOT) -> dict[str, str]:
     """Discover tracked production Rust files that can define metric families."""
     result = subprocess.run(
@@ -467,7 +519,12 @@ def workspace_metric_inventory(
         "JemallocCollector",
         CUSTOM_COLLECTOR_PREFIXES[(TELEMETRY, "JemallocCollector")],
     )
-    expected_registered = set(telemetry_definitions) - jemalloc_variables
+    session_depth, session_depth_variables = session_notification_depth_inventory(
+        sources[TELEMETRY]
+    )
+    expected_registered = (
+        set(telemetry_definitions) - jemalloc_variables - session_depth_variables
+    )
     if registered != expected_registered:
         missing = sorted(
             telemetry_definitions[variable][0]
@@ -486,6 +543,7 @@ def workspace_metric_inventory(
         for variable in registered
     }
     telemetry.update(jemalloc)
+    telemetry.update(session_depth)
 
     settlement = settlement_metric_inventory(sources[SETTLEMENT])
     overlap = sorted(set(telemetry) & set(settlement))
@@ -499,8 +557,8 @@ def workspace_metric_inventory(
         if name in inventory:
             raise ValueError(f"process family duplicates workspace family {name}")
         inventory[name] = "ordinary"
-    if len(inventory) != 193:
-        raise ValueError(f"emitted metric roster changed: expected 193, got {len(inventory)}")
+    if len(inventory) != 195:
+        raise ValueError(f"emitted metric roster changed: expected 195, got {len(inventory)}")
     return dict(sorted(inventory.items()))
 
 

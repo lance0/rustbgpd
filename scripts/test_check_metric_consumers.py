@@ -47,7 +47,7 @@ class MetricConsumerContractTests(unittest.TestCase):
 
     def test_live_inventory_and_consumer_counts_are_exact(self):
         self.assertEqual(set(self.sources), set(CHECK.EMITTER_FILES))
-        self.assertEqual(len(self.inventory), 193)
+        self.assertEqual(len(self.inventory), 195)
         self.assertEqual(
             len(CHECK.DASHBOARD_CHECK.rust_metric_inventory(self.sources[CHECK.TELEMETRY])),
             182,
@@ -58,10 +58,10 @@ class MetricConsumerContractTests(unittest.TestCase):
         self.assertEqual(len(CHECK.PROCESS_FAMILIES), 7)
         self.assertEqual(len(self.dashboard_refs), 94)
         self.assertEqual(len(self.rule_refs), 40)
-        self.assertEqual(len(self.public_doc_refs), 182)
-        self.assertEqual(len(self.doc_refs), 182)
+        self.assertEqual(len(self.public_doc_refs), 184)
+        self.assertEqual(len(self.doc_refs), 184)
         consumers = self.dashboard_refs | self.rule_refs | self.doc_refs
-        self.assertEqual(len(consumers), 187)
+        self.assertEqual(len(consumers), 189)
         self.assertEqual(set(self.inventory) - consumers, set(CHECK.ALLOWLIST))
         self.assertEqual(
             set(CHECK.ALLOWLIST), CHECK.PROCESS_FAMILIES - {"process_start_time_seconds"}
@@ -72,9 +72,9 @@ class MetricConsumerContractTests(unittest.TestCase):
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             self.assertEqual(CHECK.main(), 0)
-        self.assertIn("193 emitted families", stdout.getvalue())
-        self.assertIn("182 normative-doc families", stdout.getvalue())
-        self.assertIn("187 consumed, 6 justified raw diagnostics", stdout.getvalue())
+        self.assertIn("195 emitted families", stdout.getvalue())
+        self.assertIn("184 normative-doc families", stdout.getvalue())
+        self.assertIn("189 consumed, 6 justified raw diagnostics", stdout.getvalue())
 
     def test_blackhole_metric_inventory_has_one_operations_row_per_family(self):
         prefix = "bgp_blackhole_discard_"
@@ -212,6 +212,63 @@ fn alias_metric(registry: &Registry) {
         )
         with self.assertRaisesRegex(ValueError, "constructs MetricFamily values directly"):
             CHECK.settlement_metric_inventory(direct_proto)
+
+    def test_session_notification_depth_collector_shape_is_fail_closed(self):
+        telemetry = self.sources[CHECK.TELEMETRY]
+        emitted, variables = CHECK.session_notification_depth_inventory(telemetry)
+        self.assertEqual(
+            emitted,
+            {
+                "bgp_session_notification_outstanding": "ordinary",
+                "bgp_session_notification_outstanding_high_watermark": "ordinary",
+            },
+        )
+        self.assertEqual(variables, {"current_gauge", "high_watermark_gauge"})
+
+        duplicate_collect = telemetry.replace(
+            "families.extend(high_watermark_gauge.collect());",
+            "families.extend(current_gauge.collect());",
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "assemble each local gauge exactly once"):
+            CHECK.session_notification_depth_inventory(duplicate_collect)
+
+        discarded = telemetry.replace(
+            "let mut families = current_gauge.collect();",
+            "let _ = current_gauge.collect();\n        let mut families = Vec::new();",
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "assemble each local gauge exactly once"):
+            CHECK.session_notification_depth_inventory(discarded)
+
+        renamed = telemetry.replace(
+            '"bgp_session_notification_outstanding_high_watermark",',
+            '"bgp_session_notification_outstanding_peak",',
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "exactly two uniquely named local gauges"):
+            CHECK.session_notification_depth_inventory(renamed)
+
+        third = telemetry.replace(
+            "let mut families = current_gauge.collect();",
+            '''let extra_gauge = IntGauge::new(
+            "bgp_session_notification_extra", "help"
+        ).expect("valid metric definition");
+        let mut families = current_gauge.collect();''',
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "exactly two uniquely named local gauges"):
+            CHECK.session_notification_depth_inventory(third)
+
+    def test_session_notification_depth_registration_is_pinned(self):
+        sources = dict(self.sources)
+        sources[CHECK.TELEMETRY] = sources[CHECK.TELEMETRY].replace(
+            "SessionNotificationDepthCollector::new(",
+            "RenamedSessionNotificationDepthCollector::new(",
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "special collector registrations changed"):
+            CHECK.workspace_metric_inventory(sources, self.lock_text)
 
     def test_process_dependency_drift_is_rejected(self):
         drifted = self.lock_text.replace(

@@ -2228,7 +2228,9 @@ branch is between features.
     justified `unsafe` outside any shipped path.
   - LAN-1162 tranche A bounds the peer-manager private command lane and the
     config-bridge replacement lane at capacity one with lossless FIFO sends.
-    LAN-1162 remains open for tranche B observability and sustained-flap proof;
+    LAN-1162 B1 adds daemon-lifetime current/high-water depth accounting around
+    `session_notify` without changing delivery semantics. LAN-1162 remains open
+    for B2's optional handshake and real 700/400400 three-round flap proof;
     `session_notify` remains intentionally unbounded for the `QueryState`
     collision-resolution deadlock constraint.
 

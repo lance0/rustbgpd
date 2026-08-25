@@ -16,9 +16,12 @@ use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
+#[cfg(test)]
+use rustbgpd_transport::SessionNotification;
 use rustbgpd_transport::{
-    PeerHandle, SessionLifecycleNotification, SessionNotification,
-    SessionNotificationEvent as TransportNotificationEvent, SessionQueryOutcome, TransportConfig,
+    PeerHandle, SessionLifecycleNotification,
+    SessionNotificationEvent as TransportNotificationEvent, SessionNotificationReceiver,
+    SessionNotificationSender, SessionQueryOutcome, TransportConfig, session_notification_channel,
 };
 use rustbgpd_wire::{Afi, Safi};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -362,8 +365,8 @@ pub struct PeerManager {
     bmp_tx: Option<mpsc::Sender<BmpEvent>>,
     /// RPKI/ASPA validation snapshot receiver, cloned to each peer session.
     validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
-    session_notify_tx: mpsc::UnboundedSender<SessionNotification>,
-    session_notify_rx: mpsc::UnboundedReceiver<SessionNotification>,
+    session_notify_tx: SessionNotificationSender,
+    session_notify_rx: SessionNotificationReceiver,
     session_lifecycle_tx: mpsc::Sender<SessionLifecycleNotification>,
     session_lifecycle_rx: mpsc::Receiver<SessionLifecycleNotification>,
     session_notification_event_tx: mpsc::Sender<TransportNotificationEvent>,
@@ -684,7 +687,7 @@ impl PeerManager {
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         current_config: Config,
     ) -> Self {
-        let (session_notify_tx, session_notify_rx) = mpsc::unbounded_channel();
+        let (session_notify_tx, session_notify_rx) = session_notification_channel(metrics.clone());
         let (session_lifecycle_tx, session_lifecycle_rx) = mpsc::channel(4096);
         let (session_notification_event_tx, session_notification_event_rx) = mpsc::channel(4096);
         let (session_events_tx, _) = broadcast::channel(4096);
