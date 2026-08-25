@@ -728,6 +728,13 @@ prefer `Valid`, leaving `NotFound` as a neutral fallback.
 CLI-network-vantage check and warns on failure; use the daemon-side
 `rpki.vrp_table` check to assess whether rustbgpd has synchronized VRPs.
 
+`bgp_rpki_cache_end_of_data_ready{cache}` is `0` at startup, becomes `1` only
+after an accepted, complete, validated End of Data (including an empty table),
+and remains `1` while that cache's retained contribution stays usable through
+disconnect or resynchronization. It returns to `0` after flush or expiry. This
+is cache readiness, not connectivity, merged-table availability, policy
+matchability, or a startup gate.
+
 ### BMP collector unreachable
 
 Each BMP client reconnects independently with backoff (default
@@ -1579,6 +1586,7 @@ details stay in the structured daemon log and RPC status.
 | `bgp_rpki_vrp_count{af="ipv4"}` | IPv4 VRP entries loaded |
 | `bgp_rpki_vrp_count{af="ipv6"}` | IPv6 VRP entries loaded |
 | `bgp_rpki_cache_effective_expire_seconds{cache}` | Effective RTR expire per cache (`IP:port`): the cache-advertised expire after the RFC 8210 two-day maximum and the configured `max_expire_interval` ceiling. Set at client start and after every End of Data |
+| `bgp_rpki_cache_end_of_data_ready{cache}` | Per-cache retained End-of-Data readiness: `0` at startup and after flush/expiry; `1` after validated End of Data, including an empty table, and through reconnect/resync |
 | `bgp_aspa_records` | ASPA customer records loaded in the merged table. Renamed from `bgp_aspa_records_total` (a gauge must not carry the counter `_total` suffix) |
 | `bgp_validation_import_refreshes_total{dependency, outcome}` | Inbound Route Refresh work triggered by VRP / ASPA cache updates for peers whose import policy matches validation state. `dependency` is `rpki` or `aspa`; `outcome` is `eligible`, `refreshed`, `skipped_not_established`, or `failed`. |
 
@@ -1587,6 +1595,9 @@ cache itself has stale data. A non-zero `failed` outcome on
 `bgp_validation_import_refreshes_total` means the cache update arrived, but one
 or more validation-dependent peers could not be refreshed immediately; check the
 daemon log for the peer-specific reason.
+`NotFound` includes startup/no validated data and after all applicable retained
+cache contributions flush or expire. The readiness gauge cannot be matched in
+policy.
 
 ### EVPN VTEP alpha
 

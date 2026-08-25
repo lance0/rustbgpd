@@ -413,6 +413,7 @@ struct BgpMetricsInner {
     // ── RPKI ───────────────────────────────────────────────────
     rpki_vrp_count: IntGaugeVec,
     rpki_cache_effective_expire_seconds: IntGaugeVec,
+    rpki_cache_end_of_data_ready: IntGaugeVec,
 
     // ── ASPA ───────────────────────────────────────────────────
     aspa_records: IntGauge,
@@ -1605,6 +1606,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let rpki_cache_end_of_data_ready = IntGaugeVec::new(
+            Opts::new(
+                "bgp_rpki_cache_end_of_data_ready",
+                "Whether this cache has a retained contribution from an accepted, complete, validated RTR End of Data transaction (1 ready, 0 not ready); not connectivity, merged-table availability, or policy readiness",
+            ),
+            &["cache"],
+        )
+        .expect("valid metric definition");
+
         let aspa_records = IntGauge::new(
             "bgp_aspa_records",
             "Number of ASPA customer records in the merged table",
@@ -2515,6 +2525,9 @@ impl BgpMetrics {
             .register(Box::new(rpki_cache_effective_expire_seconds.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rpki_cache_end_of_data_ready.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(aspa_records.clone()))
             .expect("metric not already registered");
         registry
@@ -2839,6 +2852,7 @@ impl BgpMetrics {
             selection_deferral_ledger_overflows,
             rpki_vrp_count,
             rpki_cache_effective_expire_seconds,
+            rpki_cache_end_of_data_ready,
             aspa_records,
             validation_import_refreshes,
             policy_dataset_refresh_errors,
@@ -4343,6 +4357,15 @@ impl BgpMetrics {
             .rpki_cache_effective_expire_seconds
             .with_label_values(&[cache])
             .set(i64::try_from(secs).unwrap_or(i64::MAX));
+    }
+
+    /// Set whether one RPKI cache has a retained, validated End-of-Data
+    /// contribution. This is cache readiness, not connectivity.
+    pub fn set_rpki_cache_end_of_data_ready(&self, cache: &str, ready: bool) {
+        self.0
+            .rpki_cache_end_of_data_ready
+            .with_label_values(&[cache])
+            .set(i64::from(ready));
     }
 
     /// Set ASPA record count.
@@ -5980,6 +6003,19 @@ mod tests {
                 .get(),
             0
         );
+    }
+
+    #[test]
+    fn rpki_cache_end_of_data_readiness_is_registered_and_label_scoped() {
+        let m = BgpMetrics::new();
+        m.set_rpki_cache_end_of_data_ready("192.0.2.10:3323", false);
+        m.set_rpki_cache_end_of_data_ready("192.0.2.11:3323", true);
+        let text = gather_text(&m);
+        assert!(text.contains(
+            "# HELP bgp_rpki_cache_end_of_data_ready Whether this cache has a retained contribution from an accepted, complete, validated RTR End of Data transaction (1 ready, 0 not ready); not connectivity, merged-table availability, or policy readiness"
+        ));
+        assert!(text.contains("bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.10:3323\"} 0"));
+        assert!(text.contains("bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.11:3323\"} 1"));
     }
 
     #[test]

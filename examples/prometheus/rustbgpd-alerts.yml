@@ -315,6 +315,19 @@ groups:
             expired, or delivering no data; prefix origin validation is
             not filtering anything.
 
+      - alert: RpkiCacheEndOfDataNotReady
+        expr: bgp_rpki_cache_end_of_data_ready == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RPKI cache {{ $labels.cache }} has no validated End of Data"
+          description: >-
+            RPKI cache {{ $labels.cache }} on {{ $labels.instance }} has had no
+            usable retained contribution for 15 minutes. Check this cache
+            independently; other configured caches may still be ready and
+            contributing to the merged validation table.
+
       - alert: BgpEventOutboxDegraded
         # Latches to 1 on any durability-impacting drop, decode/codec
         # failure, or DB-open failure; does not auto-clear (operator
