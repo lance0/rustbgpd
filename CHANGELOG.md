@@ -140,12 +140,52 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   event-drop alert, and a focused Grafana panel. The gauge clears after repair
   or genuine teardown and is reaped with the peer. (LAN-1241)
 
+- Per-cache RPKI readiness is now exported as
+  `bgp_rpki_cache_end_of_data_ready{cache}`, with a matching
+  `RpkiCacheEndOfDataNotReady` warning rule in the shipped alert bundle. The
+  gauge is `0` at startup, becomes `1` only after an accepted, complete,
+  validated End of Data — including an empty table — and stays `1` across
+  disconnect and resynchronization while that cache's retained contribution
+  remains usable, returning to `0` after flush or expiry. It reports cache
+  readiness only, not connectivity, merged-table availability, or policy
+  matchability.
+
+- Session notification depth is now visible through
+  `bgp_session_notification_outstanding` and
+  `bgp_session_notification_outstanding_high_watermark`. The gauges account
+  for the intentionally unbounded `session_notify` collision-detection channel
+  from sender entry through successful PeerManager dequeue, including
+  synchronous in-flight reservations and queued notifications. The high-water
+  mark is monotonic for the daemon lifetime and resets only when the daemon
+  restarts; it is not a per-flap or per-round peak.
+
+- `bgp_netlink_subscription_overruns_total{actor}` counts NETLINK_ROUTE
+  receive-buffer overrun notifications for the `link_carrier`, `general_fib`,
+  and `blackhole_discard` actors. All three series are materialized at zero and
+  are captured in `rbgp doctor`'s `system/metrics.prom`. Each increment is one
+  overrun notification, not a count of lost events: it proves only that one or
+  more multicast events may have been lost, does not identify which group lost
+  them, and does not prove that a later periodic reconcile repaired the
+  resulting drift.
+
 - `RibService` route detail now carries the RFC 4271 AGGREGATOR and
   ATOMIC_AGGREGATE path attributes (`Route.aggregator` with AS number and
   router ID, `Route.atomic_aggregate`), and the Bird's Eye adapter renders
   them as `bgp.aggregator` / `bgp.atomic_aggr` exactly as the pinned
   BIRD 2.0.12 + Bird's Eye oracle prints them, closing the two matching
   runtime-divergence allow-list entries. (LAN-1232)
+
+- `PolicyService.GetValidationPolicyPosture` conservatively reports whether the
+  live installed import policies and accepted dynamic ranges reject
+  RPKI-invalid and ASPA-invalid routes, per scope and in aggregate, as
+  `ENFORCED`, `UNENFORCED`, or `UNKNOWN`. The bounded response carries
+  `complete` and `omitted`, and an incomplete aggregate is never `ENFORCED`.
+  `rbgp doctor` consumes it as the advisory `rpki.invalid_route_policy` and
+  `aspa.invalid_route_policy` checks, which warn on missing or uncertain
+  evidence — including `UNIMPLEMENTED` from an older daemon — and retain exit
+  status 0. This is a policy-disposition proof only, not an assertion about
+  validator readiness, connectivity, configured intent, FIB state, or runtime
+  enforcement.
 
 ### Changed
 
