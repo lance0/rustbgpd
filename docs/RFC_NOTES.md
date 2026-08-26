@@ -28,7 +28,7 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 | Origin / path security | RFC 6811 + RFC 8210 (RPKI/RTR), ASPA, RFC 9234 (Roles + OTC, ADR-0071) | Origin validation, AS-path verification, leak prevention |
 | Transport security | RFC 5925 (TCP-AO), TCP MD5, RFC 5082 (GTSM) | TCP-AO: static-neighbor and direct dynamic-prefix keyrings on Linux; add-only successor installation, observation-gated successor selection/deprecation, then deprecated unselected-MKT deletion on separate SIGHUP generations |
 | FlowSpec / blackhole | RFC 8955/8956 (FlowSpec, SAFI 133), RFC 7999 (BLACKHOLE) | Receiver scoping + opt-in Linux FIB discard |
-| Liveness | RFC 5880/5881/5882 (BFD), RFC 9687 (Send Hold Timer) | Single-hop async BFD for static neighbors |
+| Liveness | RFC 5880/5881/5882 (BFD), RFC 9384 (BFD Down Cease subcode), RFC 9687 (Send Hold Timer) | Single-hop async BFD for static neighbors; typed Cease/10 teardown on a genuine BFD Down |
 | Maintenance | RFC 8326 (Graceful Shutdown), RFC 8203 (Admin Shutdown Communication) | Receiver gating + initiator toggle |
 | Monitoring | RFC 7854/8671/9069 (BMP trio), RFC 6396 (MRT TABLE_DUMP_V2), RFC 7951 (gNMI/OpenConfig JSON) | Pre-policy / post-policy / Loc-RIB BMP views |
 
@@ -404,14 +404,49 @@ multiple behaviors. Each is documented here for auditability.
 
 ### Partial Bit Policy
 
-When re-advertising an unrecognized optional transitive attribute,
-rustbgpd OR's the Partial bit (flag 0x20). All other flags and the
-attribute bytes are preserved unchanged. This is not configurable in v1.
+The Partial bit (flag 0x20) is meaningful only on an optional transitive
+attribute, and rustbgpd handles three cases distinctly. None is configurable
+in v1.
 
-**Rationale:** rustbgpd has not validated the semantics of the
-attribute. Marking it Partial is the correct conservative signal to
-downstream peers. Matches behavior of FRR, BIRD, and most production
-implementations.
+- **Attributes rustbgpd does not parse — Partial is OR'd on
+  re-advertisement.** This covers an unrecognized optional transitive
+  attribute and, since v0.67.0, an IANA-assigned optional transitive type
+  whose payload semantics are deliberately unsupported: Tunnel Encapsulation
+  (23), IPv6 Address Specific Extended Community (25), PE Distinguisher
+  Labels (27), Community Container (34), D-PATH (36), SFP (37), BFD
+  Discriminator (38), NHC (39), BGP Prefix-SID (40), BIER (41), and ATTR_SET
+  (128). Registry recognition fences those types' class and outer framing; it
+  is not a claim to understand the value, so the conservative signal still
+  applies. All other flags and the value bytes are preserved unchanged,
+  including an explicitly received Extended Length encoding — re-emitting a
+  one-octet length under a retained Extended Length flag would corrupt the
+  attribute boundary.
+- **Recognized optional transitive attributes — a received Partial is
+  preserved, never invented.** AGGREGATOR (7), Communities (8), Extended
+  Communities (16), PMSI Tunnel (22), Large Communities (32), and
+  Only-to-Customer (35) decode into typed values that carry the received
+  Partial bit as state (`PathAttribute::CommunitiesPartial` and its siblings,
+  `Aggregator::partial`), so it survives policy and the RIB and is re-emitted
+  on egress under both compact and Extended Length framing. rustbgpd
+  validated these values, so it never adds Partial to one that arrived
+  without it — including one that export policy modified, since the mutating
+  accessors keep the typed variant. Locally originated values are canonical
+  and carry Partial clear.
+- **Everything else — Partial is never set.** Well-known attributes
+  (Optional=0) are never marked Partial. Optional non-transitive attributes
+  MUST carry Partial clear (RFC 4271 §4.3); rustbgpd enforces that on receipt
+  for MP_REACH_NLRI, MP_UNREACH_NLRI, the BGP-LS Attribute, and the four
+  assigned optional non-transitive types (Traffic Engineering 24, AIGP 26,
+  BGPsec_PATH 33, Edge Metadata 42). Unrecognized optional non-transitive
+  attributes are ignored on receipt and omitted by the defensive encoder
+  (RFC 4271 §5), so they have no egress form to mark.
+
+**Rationale:** Partial states that a speaker on the path did not fully
+process the attribute. Setting it on anything rustbgpd only reflected
+byte-for-byte is the correct conservative signal to downstream peers, and
+matches FRR, BIRD, and most production implementations. Setting it on a value
+rustbgpd did parse and validate would be a false claim, which is why the
+recognized types carry the received bit through rather than OR one in.
 
 ### Cease Subcode Fallback
 
@@ -488,6 +523,60 @@ message (§3 (h)).
   (for example, an unspecified IPv6 address) is treat-as-withdraw with Invalid
   NEXT_HOP (3/8), not session-reset. Duplicate MP attributes remain 3/1 with
   empty data, and flag conflicts remain 3/4 with exact attribute data.
+
+Assigned attributes whose payload is not parsed (v0.67.0):
+
+Fifteen IANA-assigned path attribute types are recognized by registry entry
+only. The class fence and the framing walk below are the whole of that
+recognition — no typed model, no semantic, and no support claim for any of
+them. Before v0.67.0 an unparsed assigned type was either silently ignored or
+retained opaquely regardless of how its flags and framing were encoded.
+
+- **Class fencing.** Each of the fifteen carries its registered
+  Optional/Transitive class through decode. A class conflict is
+  treat-as-withdraw (§3 (c)) instead of being silently accepted, with one
+  exception: an AIGP attribute carrying Transitive is attribute-discard,
+  because RFC 7311 §3.2 is more specific than §3 (c). Correctly classed
+  values keep their ordinary treatment — the four optional non-transitive
+  types (Traffic Engineering 24, AIGP 26, BGPsec_PATH 33, Edge Metadata 42)
+  are ignored on receipt and never retained, stored, or emitted, including on
+  egress; the eleven optional transitive types (23, 25, 27, 34, 36-41, 128)
+  are retained opaquely and re-advertised with the Partial bit.
+- **Structural framing.** Eight of the transitive types additionally get a
+  bounded, syntax-only walk of their outer framing before opaque propagation:
+  IPv6 Address Specific Extended Community (25) must be a non-empty multiple
+  of 20 octets; Community Container (34) walks container headers, its Type 1
+  subtypes — which may not repeat — the atom TLV stream, and atom prefix
+  lengths; D-PATH (36) walks non-empty 7-octet domain segments; SFP (37)
+  requires a Hop TLV and walks its sub-TLVs; BFD Discriminator (38) requires
+  a Source IP TLV of length 4 or 16; NHC (39) walks the next hop and requires
+  at least one characteristic; BGP Prefix-SID (40) length-checks the
+  Label-Index and Originator SRGB TLVs; and BIER (41) must carry at least one
+  TLV and walks its sub-TLV nesting. Values that pass stay opaque bytes.
+- **Framing dispositions split by type.** A framing failure in BFD
+  Discriminator (38), NHC (39), BGP Prefix-SID (40), or BIER (41) is
+  attribute-discard: the malformed value cannot affect route selection, so
+  the UPDATE's routes survive without it. A framing failure in IPv6 Address
+  Specific Extended Community (25), Community Container (34), D-PATH (36), or
+  SFP (37) is treat-as-withdraw. A *class* conflict on any of the eight is
+  treat-as-withdraw regardless — §3 (h) takes the stronger of the two
+  actions. Zero-length BIER is the case that changed disposition in v0.67.0:
+  it was previously retained as though it held a valid TLV sequence, and is
+  now attribute-discard.
+- **Duplicate Community Container (34)** is treat-as-withdraw rather than the
+  §3 (g) keep-first discard, because the container model has no defined merge
+  for a second instance. Both the strict and the revised decoder enforce it.
+- **Unrecognized optional non-transitive attributes** (no registry entry) are
+  ignored on receipt by both decoders and omitted by the defensive encoder
+  per RFC 4271 §5, instead of being retained and re-advertised. Unknown
+  optional *transitive* attributes are still preserved and propagated with
+  Partial.
+- The strict (RFC 4271) decoder reports each of these as a typed UPDATE
+  attribute error — Attribute Flags Error for a class conflict, Attribute
+  Length Error for a framing failure — rather than reaching an unreachable
+  branch. Its residual arm for a correctly classed optional non-transitive
+  assigned type returns Optional Attribute Error; that arm is defensive,
+  since the decode loop drops those attributes before value decoding.
 
 Interpretation decisions:
 
@@ -616,7 +705,8 @@ Wire layout:
 AFI (2 bytes) | SAFI (1) | Withdrawn Routes (variable)
 ```
 
-- Flags: Optional + Non-Transitive (0x80).
+- Flags: Optional + Non-Transitive (`0x80`). As with MP_REACH_NLRI, the
+  Extended Length bit may be added for framing and Partial is invalid.
 - Withdrawn routes use the same prefix-length encoding as announced NLRI.
 - An empty NLRI field after AFI/SAFI is End-of-RIB only when that family
   was negotiated on the session and is not IPv4 unicast (RFC 4724 §2).
@@ -1109,6 +1199,40 @@ carries inactive (absent), unlimited (zero), or finite.
   UTF-8 reason string.
 - Reason threaded from gRPC `DisableNeighbor` through transport to the
   NOTIFICATION data field.
+
+---
+
+## RFC 9384 — BFD Down Cease subcode
+
+- A BFD-driven teardown sends NOTIFICATION Cease (6) with subcode 10 — BFD
+  Down — in place of the Administrative Shutdown (subcode 2) rustbgpd
+  previously reused for this cause. The data field is empty: RFC 9384
+  defines no reason string for the subcode, so the RFC 9003 shutdown
+  communication is neither attached on send nor extracted on receipt.
+- **Only a genuine transition triggers it.** BFD reporting Down or
+  AdminDown for a session that was already held down — a level re-report or
+  resync ack — is release-only and never tears BGP down. A freshly
+  (re)started BFD session legitimately starts Down, so treating a level
+  report as an event would flap every non-strict peer at startup. Only a
+  real Up→Down transition reaches the FSM as a BFD Down event.
+- **Handshake states, not just Established.** BFD Down in OpenSent or
+  OpenConfirm also sends the typed Cease, and uniquely among failed
+  handshakes it emits `SessionDown` so the shared transport teardown path
+  clears cached notification state (§8 above). In Connect and Active there
+  is no peer to notify, so the session goes silently to Idle. The
+  NOTIFICATION is cached before `SessionDown` is dispatched, so BMP Peer
+  Down and the operator event history both carry the BFD reason.
+- **RFC 8538 interaction.** When the peer negotiated the Notification GR
+  N-bit, transport rewrites the outgoing NOTIFICATION as Cease/9 (Hard
+  Reset, RFC 8538 §4) whose data field encapsulates the Cease code and the
+  BFD Down subcode. The reason survives the envelope, and the Hard Reset
+  correctly bypasses the receiver's Notification GR handling: a link BFD has
+  declared dead must not leave the peer holding our routes as stale. The
+  encapsulated tuple is not an administrative one, so no shutdown
+  communication is read out of it either.
+- **Operator impact:** automation that classified BFD-driven teardowns by
+  Cease subcode 2 must re-classify. From v0.67.0 the observed subcode is 10,
+  or 9 wrapping it when Notification GR was negotiated.
 
 ---
 
