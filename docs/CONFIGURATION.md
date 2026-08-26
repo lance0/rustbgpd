@@ -895,7 +895,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
 | `tcp_ao`               | table or array | no | -- | Ordered TCP-AO keyring for static neighbors (RFC 5925; Linux; append a non-preferred successor, then select it in a later observation-gated SIGHUP generation) |
 | `bfd`                  | table    | no       | --      | Single-hop BFD attachment referencing a `[[bfd_profiles]]` entry (RFC 5880/5881/5882; static neighbors only, restart-required edits) |
-| `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only). Strict: inbound packets must arrive with TTL/Hop-Limit exactly 255 (`IP_MINTTL` / `IPV6_MINHOPCOUNT`, RFC 5082 §3.2) and outbound packets are sent with 255. Earlier releases accepted 254; a peer that depended on that leniency will not establish |
+| `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only). Strict: inbound packets must arrive with TTL/Hop-Limit exactly 255 (`IP_MINTTL` / `IPV6_MINHOPCOUNT`, RFC 5082 §3.2) and outbound packets are sent with 255. Earlier releases accepted 254; a peer that depended on that leniency will not establish. Mutually exclusive with a multihop peer — see below |
 | `families`             | [string] | no       | (auto)  | Address families to negotiate (see below)        |
 | `required_families`    | [string] | no       | `[]`    | Families that must appear in the final negotiated intersection; must be a subset of effective `families` |
 | `graceful_restart`     | bool     | no       | true    | Enable Graceful Restart receiving speaker (RFC 4724) |
@@ -1150,6 +1150,37 @@ configuration change. Appending a non-preferred successor can be installed
 live on SIGHUP; a later SIGHUP can select that installed successor and
 observation-gate predecessor deprecation in the same immutable generation.
 Deleting an MKT remains restart-coordinated.
+
+### eBGP multihop and `ttl_security`
+
+There is no `ebgp_multihop` key, because there is nothing to enable. rustbgpd
+never lowers the outbound TTL / Hop Limit on a BGP socket, and it has no check
+that refuses an eBGP peer for not being directly connected. A neighbor several
+hops away is configured exactly like an adjacent one — an address, a
+`remote_asn`, and whatever policy the session needs — and the outgoing
+connection carries the kernel default TTL like any other TCP connection. The
+same is true in the inbound direction: nothing inspects the arriving TTL unless
+`ttl_security` is set.
+
+The corollary is that rustbgpd has no way to *bound* how far away a peer may
+be. Elsewhere a multihop peer needs an explicit statement, and where that
+statement carries a hop count the count doubles as a misconfiguration guard: a
+mistyped neighbor address that happens to be a reachable host far away fails to
+establish instead of quietly coming up. rustbgpd gives that up by default.
+Treat the neighbor address itself as the control, and keep `local_address`
+pinned on multihop sessions so the source address is stable. The
+per-implementation comparison and its sourcing live in
+[COMPARISON.md](COMPARISON.md).
+
+> **`ttl_security` makes a multihop session impossible.** GTSM (RFC 5082 §3.2)
+> is an exact-255 check in both directions: rustbgpd sends with TTL / Hop Limit
+> 255 and installs `IP_MINTTL` / `IPV6_MINHOPCOUNT` at 255, so any packet that
+> crossed a router — decremented to 254 or lower — is dropped by the kernel
+> before the handshake completes. A peer that is not directly connected cannot
+> satisfy that, so the session will never establish. The two features are
+> alternatives, not layers: use `ttl_security` on adjacent peers, and leave it
+> off (`false`, the default) on multihop ones. rustbgpd does not implement the
+> "255 minus hop count" variant that would let the two coexist.
 
 ### BFD (RFC 5880 / 5881 / 5882)
 
