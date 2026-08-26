@@ -1,4 +1,4 @@
-# rustbgpd-cli (rbgp)
+# rustbgpctl (rbgp)
 
 Installs as `rbgp` — a thin gRPC wrapper over the daemon's management
 surface with human-readable and JSON output modes.
