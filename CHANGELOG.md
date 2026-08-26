@@ -102,7 +102,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `bgp_fib_kernel_failures_total{action="install"}` and
   `bgp_fib_kernel_failures_total{action="replace"}` no longer count next-hop-
   unreachable outcomes that are retained as `unresolved` and retried. Alerting
-  for unresolved routes should use the current FIB state surfaces; the failure
+  for unresolved routes should use `bgp_fib_routes_unresolved`; the failure
   counter now represents terminal or unclassified kernel errors.
 
 ### Added
