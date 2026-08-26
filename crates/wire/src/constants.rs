@@ -173,6 +173,9 @@ pub mod attr_type {
     pub const BGP_LS: u8 = 29;
     /// RFC 8205: `BGPsec_PATH` attribute.
     pub const BGPSEC_PATH: u8 = 33;
+    /// Community Container attribute (temporary IANA assignment for a
+    /// work-in-progress specification).
+    pub const COMMUNITY_CONTAINER: u8 = 34;
     /// RFC 9234 §5: Only-to-Customer (OTC).
     pub const ONLY_TO_CUSTOMER: u8 = 35;
     /// D-PATH (draft-ietf-bess-evpn-ipvpn-interworking).

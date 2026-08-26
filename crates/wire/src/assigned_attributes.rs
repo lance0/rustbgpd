@@ -4,6 +4,7 @@ use crate::constants::attr_type;
 
 pub(crate) fn validate(type_code: u8, value: &[u8]) -> Result<(), &'static str> {
     match type_code {
+        attr_type::COMMUNITY_CONTAINER => community_container(value),
         attr_type::IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY => {
             ipv6_address_specific_extended_community(value)
         }
@@ -15,6 +16,81 @@ pub(crate) fn validate(type_code: u8, value: &[u8]) -> Result<(), &'static str> 
         attr_type::BIER => bier(value),
         _ => Ok(()),
     }
+}
+
+fn community_container(mut value: &[u8]) -> Result<(), &'static str> {
+    if value.is_empty() {
+        return Err("Community Container attribute contains no containers");
+    }
+    while !value.is_empty() {
+        if value.len() < 6 {
+            return Err("Community Container header is truncated");
+        }
+        let kind = u16::from_be_bytes([value[0], value[1]]);
+        let length = usize::from(u16::from_be_bytes([value[4], value[5]]));
+        if length < 6 {
+            return Err("Community Container total length is shorter than its header");
+        }
+        if value.len() < length {
+            return Err("Community Container overruns attribute");
+        }
+        if kind == 1 {
+            community_container_type_one(&value[6..length])?;
+        }
+        value = &value[length..];
+    }
+    Ok(())
+}
+
+fn community_container_type_one(body: &[u8]) -> Result<(), &'static str> {
+    if body.len() < 12 {
+        return Err("Community Container Type 1 fixed body is truncated");
+    }
+    let mut seen = [false; 256];
+    let mut subtypes = &body[12..];
+    while !subtypes.is_empty() {
+        let (kind, value, rest) = tlv_u8_u16(subtypes)?;
+        if std::mem::replace(&mut seen[usize::from(kind)], true) {
+            return Err("Community Container Type 1 repeats a subtype");
+        }
+        if matches!(kind, 1..=3) {
+            community_atom_stream(value)?;
+        }
+        subtypes = rest;
+    }
+    Ok(())
+}
+
+fn community_atom_stream(mut value: &[u8]) -> Result<(), &'static str> {
+    while !value.is_empty() {
+        let (kind, body, rest) = tlv_u8_u16(value)?;
+        match kind {
+            0 | 255 => return Err("Community atom type is reserved"),
+            1 | 4 | 5 | 6 | 7 if body.is_empty() || !body.len().is_multiple_of(4) => {
+                return Err("Community atom length is not a positive multiple of four");
+            }
+            2 => community_prefixes(body, 32)?,
+            3 => community_prefixes(body, 128)?,
+            _ => {}
+        }
+        value = rest;
+    }
+    Ok(())
+}
+
+fn community_prefixes(mut value: &[u8], maximum: u8) -> Result<(), &'static str> {
+    while !value.is_empty() {
+        let prefix_length = value[0];
+        if prefix_length > maximum {
+            return Err("Community atom prefix length exceeds its address family");
+        }
+        let octets = usize::from(prefix_length).div_ceil(8);
+        if value.len() < 1 + octets {
+            return Err("Community atom prefix is truncated");
+        }
+        value = &value[1 + octets..];
+    }
+    Ok(())
 }
 
 fn ipv6_address_specific_extended_community(value: &[u8]) -> Result<(), &'static str> {

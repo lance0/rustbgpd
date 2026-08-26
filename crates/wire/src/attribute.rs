@@ -924,8 +924,18 @@ pub fn decode_path_attributes_counted(
 ) -> Result<(Vec<PathAttribute>, u32), DecodeError> {
     let mut attrs = Vec::new();
     let mut bgpls_discarded = 0_u32;
+    let mut seen_community_container = false;
     while !buf.is_empty() {
         let (flags, type_code, value) = split_next_attribute_mp_aware(&mut buf)?;
+        if type_code == attr_type::COMMUNITY_CONTAINER
+            && std::mem::replace(&mut seen_community_container, true)
+        {
+            return Err(DecodeError::UpdateAttributeError {
+                subcode: update_subcode::MALFORMED_ATTRIBUTE_LIST,
+                data: vec![],
+                detail: "duplicate attribute type 34".to_string(),
+            });
+        }
         if is_unknown_optional_non_transitive(flags, type_code) {
             continue;
         }
@@ -1149,9 +1159,9 @@ pub fn decode_path_attributes_revised(
         }
         let duplicate = std::mem::replace(&mut seen[usize::from(type_code)], true);
         if duplicate {
-            // RFC 7606 §3 (g): duplicate MP_REACH/MP_UNREACH is fatal; any
-            // other duplicate keeps the first occurrence and discards the
-            // rest while the UPDATE continues to be processed.
+            // RFC 7606 §3 (g): duplicate MP_REACH/MP_UNREACH is fatal.
+            // A duplicate Community Container is treat-as-withdraw; other
+            // duplicates keep the first occurrence and discard the rest.
             let error = DecodeError::UpdateAttributeError {
                 subcode: update_subcode::MALFORMED_ATTRIBUTE_LIST,
                 data: vec![],
@@ -1165,7 +1175,11 @@ pub fn decode_path_attributes_revised(
             }
             malformed.push(MalformedAttribute {
                 type_code,
-                disposition: ErrorDisposition::AttributeDiscard,
+                disposition: if type_code == attr_type::COMMUNITY_CONTAINER {
+                    ErrorDisposition::TreatAsWithdraw
+                } else {
+                    ErrorDisposition::AttributeDiscard
+                },
                 error,
             });
             continue;
@@ -1285,6 +1299,7 @@ fn assigned_unsupported_flags(type_code: u8) -> Option<u8> {
         attr_type::TUNNEL_ENCAPSULATION
         | attr_type::IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY
         | attr_type::PE_DISTINGUISHER_LABELS
+        | attr_type::COMMUNITY_CONTAINER
         | attr_type::DOMAIN_PATH
         | attr_type::SFP
         | attr_type::BFD_DISCRIMINATOR
@@ -1649,6 +1664,7 @@ fn decode_attribute_value(
     if matches!(
         type_code,
         attr_type::IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY
+            | attr_type::COMMUNITY_CONTAINER
             | attr_type::DOMAIN_PATH
             | attr_type::SFP
             | attr_type::BFD_DISCRIMINATOR

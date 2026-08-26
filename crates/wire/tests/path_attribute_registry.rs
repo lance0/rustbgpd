@@ -61,9 +61,31 @@ fn extended_attribute(flags: u8, code: u8, value: &[u8]) -> Vec<u8> {
     bytes
 }
 
+fn community_tlv(kind: u8, value: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![kind];
+    bytes.extend_from_slice(&u16::try_from(value.len()).unwrap().to_be_bytes());
+    bytes.extend_from_slice(value);
+    bytes
+}
+
+fn community_container(kind: u16, body: &[u8]) -> Vec<u8> {
+    let mut bytes = kind.to_be_bytes().to_vec();
+    bytes.extend([0x5a, 0xa5]);
+    bytes.extend_from_slice(&u16::try_from(body.len() + 6).unwrap().to_be_bytes());
+    bytes.extend_from_slice(body);
+    bytes
+}
+
+fn community_type_one(subtypes: &[u8]) -> Vec<u8> {
+    let mut body = vec![0; 12];
+    body.extend_from_slice(subtypes);
+    community_container(1, &body)
+}
+
 fn assigned_value(code: u8) -> Vec<u8> {
     match code {
         25 => (0_u8..20).collect(),
+        34 => community_container(2, &[]),
         36 => vec![1, 0, 0, 0, 0, 0, 0, 0],
         37 => vec![2, 0, 4, 1, 99, 0, 0],
         38 => vec![1, 0, 0, 0, 1, 1, 4, 192, 0, 2, 1],
@@ -424,6 +446,11 @@ fn assigned_unsupported_class_matrix_is_fail_closed_without_semantic_support() {
             transitive_conflict: ErrorDisposition::TreatAsWithdraw,
         },
         Case {
+            code: 34,
+            canonical: 0xc0,
+            transitive_conflict: ErrorDisposition::TreatAsWithdraw,
+        },
+        Case {
             code: 40,
             canonical: 0xc0,
             transitive_conflict: ErrorDisposition::TreatAsWithdraw,
@@ -503,7 +530,7 @@ fn assigned_unsupported_class_matrix_is_fail_closed_without_semantic_support() {
 
 #[test]
 fn assigned_unsupported_opaque_flags_and_neighboring_fences_stay_orthogonal() {
-    for code in [23, 25, 27, 40, 128] {
+    for code in [23, 25, 27, 34, 40, 128] {
         let value = assigned_value(code);
         for flags in [0xe0, 0xf0] {
             let input = if flags == 0xf0 {
@@ -559,6 +586,137 @@ fn assigned_unsupported_opaque_flags_and_neighboring_fences_stay_orthogonal() {
         defensive.is_empty(),
         "assigned optional non-transitive type 24 must never egress"
     );
+}
+
+#[test]
+fn community_container_accepts_bounded_opaque_and_known_atom_streams() {
+    let mut atoms = Vec::new();
+    for kind in [1_u8, 4, 5, 6, 7] {
+        atoms.extend(community_tlv(kind, &[0, 0, 0, kind]));
+    }
+    atoms.extend(community_tlv(2, &[]));
+    atoms.extend(community_tlv(
+        2,
+        &[0, 17, 10, 0, 0, 24, 192, 0, 2, 32, 203, 0, 113, 9],
+    ));
+    let mut ipv6 = vec![0, 64];
+    ipv6.extend([0x20, 1, 0x0d, 0xb8, 0, 0, 0, 1]);
+    ipv6.push(65);
+    ipv6.extend([0x20, 1, 0x0d, 0xb8, 0, 1, 0, 2, 0]);
+    ipv6.push(128);
+    ipv6.extend([0x20, 1, 0x0d, 0xb8, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6]);
+    atoms.extend(community_tlv(3, &[]));
+    atoms.extend(community_tlv(3, &ipv6));
+    atoms.extend(community_tlv(8, &[0, 0xff, 0x80]));
+    atoms.extend(community_tlv(9, &[]));
+    atoms.extend(community_tlv(254, &[0xff]));
+
+    let mut empty_known = Vec::new();
+    for kind in 1_u8..=3 {
+        empty_known.extend(community_tlv(kind, &[]));
+    }
+    empty_known.extend(community_tlv(255, &[0, 1]));
+    let mut value = community_type_one(&empty_known);
+    value.extend(community_container(65000, &[0, 1, 2]));
+    value.extend(community_type_one(&community_tlv(1, &atoms)));
+
+    for flags in [0xc0, 0xe0] {
+        let input = attribute(flags, 34, &value);
+        let strict = decode_path_attributes(&input, true, &[]).unwrap();
+        let [PathAttribute::Unknown(raw)] = strict.as_slice() else {
+            panic!("type 34 must remain opaque");
+        };
+        assert_eq!((raw.flags, raw.data.as_ref()), (flags, &value[..]));
+        let mut emitted = Vec::new();
+        encode_path_attributes(&strict, &mut emitted, true, false).unwrap();
+        assert_eq!(emitted[0], flags | 0x20);
+        assert_eq!(&emitted[3..], value.as_slice());
+    }
+}
+
+#[test]
+fn community_container_rejects_every_framing_boundary_and_duplicate() {
+    let mut invalid = vec![Vec::new()];
+    invalid.extend((1_usize..6).map(|length| vec![0; length]));
+    invalid.extend([
+        vec![0, 2, 0, 0, 0, 0],
+        vec![0, 2, 0, 0, 0, 5],
+        vec![0, 2, 0, 0, 0, 7],
+        [community_container(2, &[]), vec![0]].concat(),
+        community_container(1, &[0; 11]),
+    ]);
+    for subtype in [vec![1], vec![1, 0], vec![1, 0, 1]] {
+        invalid.push(community_type_one(&subtype));
+    }
+    invalid.push(community_type_one(
+        &[community_tlv(1, &[]), community_tlv(1, &[])].concat(),
+    ));
+    for atom in [
+        vec![1],
+        vec![1, 0],
+        vec![1, 0, 1],
+        community_tlv(0, &[]),
+        community_tlv(255, &[]),
+    ] {
+        invalid.push(community_type_one(&community_tlv(1, &atom)));
+    }
+    for kind in [1_u8, 4, 5, 6, 7] {
+        for body in [&[][..], &[0; 5][..]] {
+            invalid.push(community_type_one(&community_tlv(
+                1,
+                &community_tlv(kind, body),
+            )));
+        }
+    }
+    for (kind, prefixes) in [
+        (2_u8, vec![33]),
+        (2, vec![32, 192, 0, 2]),
+        (2, vec![0, 24, 192, 0]),
+        (3, vec![129]),
+        (3, vec![128; 16]),
+    ] {
+        invalid.push(community_type_one(&community_tlv(
+            1,
+            &community_tlv(kind, &prefixes),
+        )));
+    }
+
+    for value in invalid {
+        let input = attribute(0xc0, 34, &value);
+        assert!(matches!(
+            decode_path_attributes(&input, true, &[]),
+            Err(DecodeError::UpdateAttributeError { subcode, data, .. })
+                if subcode == update_subcode::ATTRIBUTE_LENGTH_ERROR && data == input
+        ));
+        let revised = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
+        assert!(revised.attributes.is_empty());
+        assert_eq!(revised.malformed.len(), 1);
+        assert_eq!(
+            revised.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
+    }
+
+    let values = [community_container(2, &[]), community_container(3, &[1])];
+    for (first, second) in [(&values[0], &values[1]), (&values[1], &values[0])] {
+        let bytes = [attribute(0xc0, 34, first), attribute(0xc0, 34, second)].concat();
+        assert!(matches!(
+            decode_path_attributes(&bytes, true, &[]),
+            Err(DecodeError::UpdateAttributeError { subcode, .. })
+                if subcode == update_subcode::MALFORMED_ATTRIBUTE_LIST
+        ));
+        let revised = decode_path_attributes_revised(&bytes, true, false, &[]).unwrap();
+        assert_eq!(revised.attributes.len(), 1);
+        assert_eq!(revised.malformed.len(), 1);
+        assert_eq!(
+            revised.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
+        assert!(matches!(
+            &revised.attributes[0],
+            PathAttribute::Unknown(raw) if raw.data.as_ref() == first.as_slice()
+        ));
+    }
 }
 
 #[test]

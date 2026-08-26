@@ -62,7 +62,7 @@ octet from 0 through 255 to appear exactly once with no blank cell.
 | 31 | Deprecated | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 32 | LARGE_COMMUNITY | optional transitive; flags `0xc0`; values are twelve-octet communities; RFC 8092 §6 | typed canonical + Partial round-trip; duplicate values normalize first-seen; malformed length is treat-as-withdraw | typed-Partial matrix |
 | 33 | BGPsec_Path | optional non-transitive; flags `0x80`; RFC 8205 | payload semantics unsupported; correct class ignored; wrong class is treat-as-withdraw | assigned-class matrix below |
-| 34 | BGP Community Container Attribute (TEMPORARY - registered 2017-07-28, extension registered 2024-08-22, expires 2025-07-28) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
+| 34 | BGP Community Container Attribute (temporary assignment in the live IANA registry) | optional transitive; flags `0xc0`; draft-ietf-idr-wide-bgp-communities-11 (work in progress) | opaque retention with Partial on egress; bounded container, Type 1 subtype, atom, and prefix framing; wrong class, malformed framing, or a duplicate attribute is treat-as-withdraw | Community Container framing matrix below; this is not a stable standards-support claim |
 | 35 | Only to Customer (OTC) | optional transitive; flags `0xc0`; exactly one four-octet ASN; RFC 9234 §5 | typed ASN + Partial round-trip; Extended Length and reserved low bits canonicalize; wrong class or length is treat-as-withdraw | OTC codec and transport matrices |
 | 36 | BGP Domain Path (D-PATH) | optional transitive; flags `0xc0`; draft-ietf-bess-evpn-ipvpn-interworking-18 | opaque retention with bounded domain-segment framing; malformed is treat-as-withdraw | assigned framing matrix below |
 | 37 | SFP attribute | optional transitive; flags `0xc0`; RFC 9015 §3.2.1 | opaque retention with TLV, Hop, and Hop sub-TLV framing; malformed is treat-as-withdraw | assigned framing matrix below |
@@ -114,7 +114,7 @@ negotiation. "Wrong O" toggles Optional, "wrong T" toggles Transitive, and
 
 | Codes | Class | Correct-class retention and egress | Wrong O | Wrong T | Both wrong | Legacy decoder |
 |---|---|---|---|---|---|---|
-| 23, 25, 27, 36-41, 128 | optional transitive (`0xc0`) | opaque retention; Partial set on egress; input Partial and Extended Length preserved | treat-as-withdraw | treat-as-withdraw | treat-as-withdraw | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
+| 23, 25, 27, 34, 36-41, 128 | optional transitive (`0xc0`) | opaque retention; Partial set on egress; input Partial and Extended Length preserved | treat-as-withdraw | treat-as-withdraw | treat-as-withdraw | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
 | 26 | optional non-transitive (`0x80`) | ignored; no retention or egress | treat-as-withdraw | attribute-discard | attribute-discard | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
 | 24, 33, 42 | optional non-transitive (`0x80`) | ignored; no retention or egress; Partial rejected | treat-as-withdraw | treat-as-withdraw | treat-as-withdraw | `ATTRIBUTE_FLAGS_ERROR` for every conflict |
 
@@ -128,6 +128,19 @@ errors.
 |---|---|
 | 20, 40, ... | retained opaquely and propagated with Partial |
 | 0 or any non-multiple of 20 | Attribute Length Error; revised treat-as-withdraw |
+
+## Community Container framing matrix
+
+Type 34 remains an unsupported opaque attribute under a temporary live IANA
+assignment and a work-in-progress draft. The checks below validate only bounded
+framing; they do not expose a typed model or claim stable standards support.
+
+| Layer | Accepted boundary | Rejected boundary |
+|---|---|---|
+| Container stream | one or more exact six-octet-header containers; unknown types opaque | truncated header, total length below six, overrun, or trailing bytes |
+| Type 1 | twelve-octet fixed body followed by uniquely typed subtype TLVs; repeated Type 1 containers allowed | short fixed body, subtype framing error, or repeated subtype within one Type 1 |
+| Known subtypes 1-3 | empty or an exact atom stream; unknown subtypes opaque | atom framing error or reserved atom type 0/255 |
+| Atom values | types 1/4/5/6/7: positive multiples of four; types 2/3: complete IPv4/IPv6 prefix sequences; type 8 and types 9-254 opaque | fixed-width mismatch, prefix length above 32/128, or truncated prefix octets |
 
 ## Assigned framing matrix (36-42)
 
