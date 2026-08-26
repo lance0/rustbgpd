@@ -384,6 +384,22 @@ fn irr_reload_requires_a_fresh_artifact_root() {
             .contains("artifact root already exists; choose a fresh ARTIFACTS_DIR")
     );
 
+    let parent = tempfile::tempdir().expect("dangling artifact parent");
+    let dangling = parent.path().join("dangling");
+    std::os::unix::fs::symlink(parent.path().join("missing"), &dangling)
+        .expect("create dangling artifact symlink");
+    let output = std::process::Command::new("bash")
+        .arg(&runner)
+        .env("SMOKE", "1")
+        .env("ARTIFACTS_DIR", &dangling)
+        .output()
+        .expect("run dangling-symlink gate");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("artifact root already exists; choose a fresh ARTIFACTS_DIR")
+    );
+
     let script = std::fs::read_to_string(runner).expect("read runner");
     for removed in [
         "cell_receipt_matches",

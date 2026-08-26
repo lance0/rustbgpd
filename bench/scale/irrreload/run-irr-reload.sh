@@ -181,7 +181,7 @@ if [ -n "${DRY_RUN_PROTOCOL:-}" ]; then
     exit 0
 fi
 
-if [ -e "$ART" ]; then
+if [ -e "$ART" ] || [ -L "$ART" ]; then
     echo "artifact root already exists; choose a fresh ARTIFACTS_DIR" >&2
     exit 2
 fi

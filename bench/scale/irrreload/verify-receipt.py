@@ -1412,8 +1412,8 @@ def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict
         "transactions/cycles.jsonl", "transactions/lifecycle.json",
     }
     actual_files = {path.relative_to(cdir).as_posix() for path in cdir.rglob("*") if path.is_file()}
-    if not expected_files <= actual_files:
-        fail(f"{cdir}: transaction evidence is incomplete")
+    if expected_files != actual_files:
+        fail(f"{cdir}: transaction evidence file roster is not exact")
     try:
         cycles = [json.loads(line) for line in (cdir / "transactions/cycles.jsonl").read_text().splitlines()]
     except json.JSONDecodeError as error:
@@ -1715,7 +1715,7 @@ def validate_root(root: Path, kind: str):
         or git.get("dirty") is not False
         or set(git) != {"commit", "tree", "dirty"}
     ):
-        fail(f"{root}: exact clean commit/tree context is not proven")
+        fail(f"{root}: commit/tree context is malformed or incomplete")
     dataset = (root / "dataset.sha256").read_text().strip()
     if not re.fullmatch(r"[0-9a-f]{64}", dataset):
         fail(f"{root}: invalid canonical dataset digest")
@@ -2860,6 +2860,7 @@ def self_test() -> None:
                 path.write_text(path.read_text().replace(f'"pid": {old}', f'"pid": {new}').replace(f'"starttime": {old + 100}', f'"starttime": {new + 100}'))
         txn_rejected("transaction-process-reuse", reuse_transaction_process, root_index=1)
         txn_rejected("transaction-file-tamper", lambda root: (root / TRANSACTION_CELL / "transactions/cycles.jsonl").write_text("tampered\n"))
+        txn_rejected("transaction-file-roster", lambda root: (root / TRANSACTION_CELL / "unexpected").write_text("surplus\n"))
 
         def rejected(name, mutate):
             copied = base / f"bad-{name}"
@@ -3031,7 +3032,7 @@ def self_test() -> None:
         )
         expected |= set("""v3-inspector-linkage v3-inspector-mode v3-inspector-target v3-inspector-canonical v3-inspector-field-order v3-inspector-nested-order v3-inspector-raw-utf8 transaction-cycle-roster transaction-plan-token transaction-confirm transaction-v3-pending transaction-v3-linkage transaction-apply-deadline-missing transaction-apply-deadline-bool transaction-v3-deadline-missing transaction-v3-deadline-bool transaction-v3-deadline-stale transaction-v3-deadline-swapped transaction-v3-deadline-tamper transaction-schema-v1 transaction-lifecycle-schema-v1 transaction-v3-cleanup transaction-history transaction-abort transaction-timeout transaction-noop transaction-opposite
 transaction-token-leak transaction-warning-log transaction-warning-binding transaction-applied-generation transaction-cross-root-generation transaction-port-gate transaction-disk-gate transaction-swap-gate transaction-fallback-shape
-transaction-process-reuse transaction-file-tamper""".split())
+transaction-process-reuse transaction-file-tamper transaction-file-roster""".split())
         missing = expected - proofs.keys()
         if missing:
             fail(f"self-test proofs did not reject: {sorted(missing)}")
