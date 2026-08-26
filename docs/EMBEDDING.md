@@ -158,7 +158,7 @@ This is the "MRT reader / monitor / analyzer" consumer. Links only
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.17.2"
+rustbgpd-wire = "0.18.0"
 bytes = "1"
 ```
 
@@ -218,8 +218,8 @@ intentional split (ADR-0002: inherent methods, no I/O in the FSM).
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.17.2"
-rustbgpd-fsm = "0.4.1"
+rustbgpd-wire = "0.18.0"
+rustbgpd-fsm = "0.5.0"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```
@@ -317,7 +317,7 @@ once that crate is published.
 **Status: `wire` → `fsm` are published; `rpki` is next; `rib`, `bmp`, `mrt`,
 and `policy` are later.**
 
-1. **`rustbgpd-wire` (published as `0.17.2`).** This is the
+1. **`rustbgpd-wire` (published as `0.18.0`).** This is the
    foundation — dependent crate versions cannot publish before their wire
    dependency exists on crates.io. `0.15.0` brought `Capability::PathsLimit`
    with its `PathsLimitFamily` entry type (experimental capability code 76),
@@ -357,9 +357,39 @@ and `policy` are later.**
    against `0.17.1` build unchanged. The same release replaces the
    `unreachable!` arms on the attribute decode path with the typed
    `DecodeError` the surrounding validation already produces; acceptance is
-   unchanged for every input those guards already rejected.
+   unchanged for every input those guards already rejected. `0.18.0` removes
+   no public item but **takes the next 0.x compatibility line**, because
+   decode acceptance and RFC 7606 classification change in several places.
+   Assigned path attributes now decode under their registered
+   Optional/Transitive propagation classes, with bounded structural framing
+   checks and typed strict-mode flag errors: Traffic Engineering (24) stays
+   payload-opaque and is ignored as optional non-transitive; the IPv6 Address
+   Specific Extended Community (25) stays opaque and propagates with Partial,
+   but its payload must now be a nonempty multiple of 20 octets; a
+   zero-length BIER attribute is discarded per RFC 7606; and the temporary
+   Community Container (34) gains bounded container, Type 1 subtype, atom,
+   and prefix framing while valid values stay opaque and propagate with
+   Partial. Attributes 36-41 stay opaque under the same treatment, and class
+   conflicts on Tunnel Encapsulation, AIGP, PE Distinguisher Labels,
+   BGPsec_Path, Prefix-SID, and ATTR_SET now produce their registered RFC
+   7606 outcomes instead of being silently ignored. Truncated
+   `MP_REACH_NLRI` / `MP_UNREACH_NLRI` attributes return Optional Attribute
+   Error carrying the exact received bytes, Partial is rejected on both, and
+   complete undersized values return Attribute Length Error. Received
+   Partial-bearing Communities, Extended Communities, PMSI Tunnel, Large
+   Communities, and OTC values now stay typed through propagation via new
+   `PathAttribute` variants; locally built canonical variants are unchanged.
+   The additive API surface is
+   `UpdateMessage::try_build_from_attribute_iter` (a single-pass builder over
+   borrowed attributes that delegates to the same transactional encoder),
+   `cease_subcode::BFD_DOWN`, the assigned path-attribute registry constants,
+   and the default-off `tokio-codec` feature (`BgpCodec` / `BgpCodecError`,
+   with independent inbound and outbound RFC 8654 ceilings). A consumer that
+   asserts on accepted bytes or on exact `PathAttribute` variants must diff
+   the itemized list in `crates/wire/README.md` under "0.18.0 compatibility
+   note" before upgrading.
 
-2. **`rustbgpd-fsm` (published as `0.4.1`).** The `0.4.0` release makes no
+2. **`rustbgpd-fsm` (published as `0.5.0`).** The `0.4.0` release makes no
    FSM API changes of its own — it exists because the FSM's public surface
    re-exports `rustbgpd-wire` types (`Action` carries wire messages), so the
    wire `0.16.2 → 0.17.0` breaking transition changes the identity of those
@@ -372,9 +402,20 @@ and `policy` are later.**
    `Option<&NegotiatedSession>` signature, nothing was removed or changed,
    and `0.4.1` re-pins `rustbgpd-wire ^0.17.1` — a patch-level wire move with
    no API change, so there is nothing to migrate. That requirement admits wire
-   `0.17.2` without another FSM release. Main has since added
-   `Event::BfdDown`, so the next publish pairs FSM 0.5.0 with wire 0.18.0; the
-   current FSM source is no longer identical to published 0.4.1. (History:
+   `0.17.2` without another FSM release. `0.5.0` is the **paired breaking
+   bump** for wire `0.18.0`: the FSM's public surface re-exports wire types
+   (`Event` carries `OpenMessage` and `NotificationMessage`, `Action` carries
+   wire messages), so the wire `0.17.2 → 0.18.0` compatibility-line move
+   changes the identity of those types even though the FSM removed nothing.
+   Upgrade both crates together, or the re-exported types stop unifying
+   across the two wire versions in one dependency tree. The FSM's own change
+   is additive: `Event::BfdDown` joins the `#[non_exhaustive]` `Event` enum,
+   and a BFD-triggered teardown in `OpenSent`, `OpenConfirm`, or
+   `Established` emits the typed Cease notification and the authoritative
+   session-down cleanup, while earlier connection states return to `Idle`
+   without a notification. Because the FSM surfaces wire decode results to
+   its callers, diff the wire `0.18.0` acceptance changes above before
+   upgrading. (History:
    `0.3.1` added
    `min_hold_time` and `required_families` to the `#[non_exhaustive]`
    `PeerConfig`, made the last duplicate Graceful Restart capability win, and
@@ -467,9 +508,12 @@ To be the de facto Rust BGP codec, the concrete gaps:
 
 ## 7. Published-crate release boundary
 
-`rustbgpd-wire 0.17.2` and `rustbgpd-fsm 0.4.1` are published and are the
-versions the §3 dependency examples name. The ordering rules that govern every
-future publish are:
+`rustbgpd-wire 0.18.0` and `rustbgpd-fsm 0.5.0` are published and are the
+versions the §3 dependency examples name. Both crates moved in the same
+release: the codec took the next 0.x compatibility line for its changed
+decode acceptance, and the FSM's public API re-exports codec types, so it
+took the paired breaking bump. Upgrade the two together. The ordering rules
+that govern every future publish are:
 
 - Publish `rustbgpd-wire` first, then verify it is registry-visible. Only then
   run the fully verified package/dry-run gate for `rustbgpd-fsm`. Cargo
