@@ -96,12 +96,11 @@ input from the network. It runs under continuous fuzzing in CI.
     needs the received TTL delivered as ancillary data to enforce the RFC 5881
     exact-255 receive check.
 
-  The daemon binary's own crate-root deny is additionally `cfg_attr`-gated off
-  when the `jemalloc` (the default) or `dhat-heap` feature is on, because
-  registering a `#[global_allocator]` is itself an `unsafe` construct. Building
-  with `--no-default-features` re-arms that deny; the `bfd_runtime` block above
-  carries its own `#[allow]`, so it stays a visible, reviewed opt-out under
-  either configuration.
+  The daemon binary carries the same unconditional crate-root deny with its
+  default `jemalloc`, opt-in `dhat-heap`, and no-default-feature configurations.
+  Registering either dependency-provided allocator introduces no `unsafe` block
+  or `unsafe impl` in this crate. The three shipped boundaries above remain
+  visible, reviewed opt-outs with recorded reasons.
 
   Test and benchmark targets are separate compilation units and are not covered
   by a crate root's deny. Several carry justified `unsafe`: allocation-tracking
