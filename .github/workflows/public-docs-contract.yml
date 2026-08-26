@@ -41,6 +41,11 @@ jobs:
         run: |
           python3 -m unittest -v scripts/test_check_metric_consumers.py
           python3 scripts/check-metric-consumers.py
+      - name: Check metric changes have release notes
+        if: matrix.contract == 'public'
+        run: |
+          python3 -m unittest -v scripts/test_check_metric_release_notes.py
+          python3 scripts/check_metric_release_notes.py
       - name: Check public documentation cites no private tracker IDs
         if: matrix.contract == 'public'
         run: |

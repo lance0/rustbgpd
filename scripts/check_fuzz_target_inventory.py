@@ -277,7 +277,9 @@ def repository_inventory() -> dict[str, tuple[str, ...]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Verify the exact 19-target cargo-fuzz inventory."
+        description=(
+            f"Verify the exact {EXPECTED_COUNT}-target cargo-fuzz inventory."
+        )
     )
     parser.add_argument(
         "--print-targets",
