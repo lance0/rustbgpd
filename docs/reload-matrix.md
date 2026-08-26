@@ -252,6 +252,9 @@ that are stood up once at startup. Two flags are hot-pluggable.
 | `ebgp_requires_policy` | restart-required | ADR-0112/0119 RFC 8212 enforcement mode and raw-presence verdict. Pinned with `config_epoch` as one startup tuple: a SIGHUP reports value or representation drift in `--diff` and the v1 transaction rejection, logs an `ERROR`, and keeps the running import/export treatment and source verdict at startup. |
 | `install_blackhole_discard` | restart-required | The RFC 7999 kernel-discard reconciler spawns once at startup. |
 | `allow_blackhole_broad_prefixes` | restart-required | Same — feeds the discard-spawn gate. |
+| `blackhole_discard_max_active` | restart-required | The reconciler captures the active-discard cap at startup; SIGHUP pins the running value. |
+| `blackhole_discard_install_rate_per_minute` | restart-required | The reconciler captures the install-attempt rate at startup; SIGHUP pins the running value. |
+| `blackhole_discard_install_burst` | restart-required | The reconciler captures the install-attempt burst at startup; SIGHUP pins the running value. |
 | `multipath_relax` | restart-required | RIB best-path tie-break behavior; reconciling mid-flight would require an Adj-RIB-Out rebuild. |
 | `link_bandwidth_weighted` | restart-required | Weighted-multipath behavior (ADR-0068). |
 | `dynamic_neighbor_limit` | restart-required | Admission cap compared live against the dynamic-peer counter (inbound admission and LRU eviction bound); nothing is pre-allocated. SIGHUP pins the runtime snapshot to the startup value while retaining the edited desired value for restart. |

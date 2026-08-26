@@ -370,8 +370,9 @@ Microbenchmarks, memory scaling, and the bgperf2 cross-daemon comparison:
 ## gRPC API
 
 Eleven native `rustbgpd.v1` services cover the daemon's operational surface —
-Global, Config, Neighbor, Policy (22 RPCs including explain, dry-run, and
-per-term stats), PeerGroup, Rib, BFD, Event, Injection, Control, and Evpn —
+Global, Config, Neighbor, Policy (23 RPCs including explain, dry-run, per-term
+stats, and bounded validation-policy posture), PeerGroup, Rib, BFD, Event,
+Injection, Control, and Evpn —
 plus a separate `gnmi.gNMI` service for OpenConfig BGP telemetry and the first
 transaction-backed config subset.
 
