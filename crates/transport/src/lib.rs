@@ -16,7 +16,10 @@ pub mod framing;
 pub mod handle;
 pub mod listener;
 pub(crate) mod session;
-#[allow(unsafe_code)]
+#[allow(
+    unsafe_code,
+    reason = "Linux BGP socket options require raw libc ABI calls and records"
+)]
 mod socket_opts;
 pub mod timer;
 

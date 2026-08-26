@@ -1216,7 +1216,10 @@ mod linux {
 
     // Raw setsockopt: socket2 / the safe wrappers don't expose IP_RECVTTL /
     // IPV6_RECVHOPLIMIT. The call is a textbook c_int option set on an owned fd.
-    #[allow(unsafe_code)]
+    #[allow(
+        unsafe_code,
+        reason = "BFD receive TTL requires the raw Linux socket-option ABI"
+    )]
     fn enable_recv_ttl(fd: i32, v6: bool) -> std::io::Result<()> {
         let on: libc::c_int = 1;
         let (level, opt) = if v6 {

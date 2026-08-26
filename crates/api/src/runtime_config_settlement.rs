@@ -1754,7 +1754,10 @@ fn fatal_clock_loop(registry: &Arc<Registry>) {
 }
 
 #[cfg(not(test))]
-#[allow(unsafe_code)]
+#[allow(
+    unsafe_code,
+    reason = "the settlement fail-stop requires bare libc::_exit without unwinding"
+)]
 fn terminate_process() -> ! {
     unsafe { libc::_exit(AMBIGUOUS_CONFIG_EXIT_STATUS) }
 }
