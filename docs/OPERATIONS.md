@@ -471,7 +471,7 @@ effective-impact view:
   named policies, peer groups, global / per-neighbor policy chains, and
   the hot-applied `[global]` flags `honor_graceful_shutdown` and
   control-plane-only `honor_blackhole`. SIGHUP reconciles all of these.
-- **Restart-required changes** — `[global]` ASN/router-id/families,
+- **Restart-required changes** — `[global]` ASN/router-id/cluster-id,
   `[global.telemetry.grpc_*]` listener config (including TLS / mTLS),
   `[rpki]`, `[bmp]`, `[mrt]`, unsupported EVPN shapes, and
   `apply_bum_enforcement`. Supported EVPN edits are shape-aware and appear
@@ -535,7 +535,7 @@ It does not abort an already-owned reload: the daemon waits for its typed
 settlement before taking the warm checkpoint or tearing down required actors.
 
 **Restart-required surfaces** (logged at reload, surfaced under
-"Restart-required" in `--diff`): `[global]` ASN/router-id/families,
+"Restart-required" in `--diff`): `[global]` ASN/router-id/cluster-id,
 `[global.telemetry.grpc_tcp]` and `[global.telemetry.grpc_uds]`
 listener config (including any TLS / mTLS field), `[rpki]`, `[bmp]`,
 `[mrt]`, and `apply_bum_enforcement`. EVPN table edits are

@@ -13,7 +13,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 | **NeighborService** | Dynamic peer CRUD, enable/disable, inbound soft reset, single-peer outbound refresh, dynamic-neighbor range CRUD (`ListDynamicNeighbors` / `AddDynamicNeighbor` / `DeleteDynamicNeighbor`), and the RFC 8326 graceful-shutdown toggle (`SetGracefulShutdown`) |
 | **PolicyService** | Named policy CRUD, neighbor-set CRUD, global/per-neighbor chain assignment, import-policy explain (`ExplainImportPolicy`), rejected-route listing (`ListRejectedRoutes`), live-RIB dry-run (`TestPolicy`), per-term hit counters (`GetPolicyStats`), and bounded invalid-validation disposition posture (`GetValidationPolicyPosture`) |
 | **PeerGroupService** | Peer-group CRUD, neighbor-to-group assignment |
-| **RibService** | Received/best/advertised route queries (incl. EVPN), BLACKHOLE discard status, FIB route status, BGP-LS route queries (ListBgpLsRoutes, RFC 9552), and watch stream |
+| **RibService** | Received/best/advertised route queries (incl. EVPN), BLACKHOLE discard status, FIB route status, and BGP-LS route queries (ListBgpLsRoutes, RFC 9552); all unary — live route deltas stream through `EventService.WatchEvents` |
 | **BfdService** | BFD session queries (RFC 5880/5881/5882) |
 | **EventService** | Live event stream (`WatchEvents`), recent session/policy/EVPN history, and the durable `SubscribeFromEvent` cursor (ADR-0072) |
 | **InjectionService** | Inject/withdraw unicast, FlowSpec, and EVPN routes |

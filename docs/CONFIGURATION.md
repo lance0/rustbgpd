@@ -4212,13 +4212,20 @@ reload, applied in dependency order:
    re-evaluated. Operators do not need to follow up with a manual
    `softreset` after a chain swap.
 
-Reload halts at the first step failure and returns a partial-state
-snapshot, so the daemon's in-memory config tracks what the peer
-manager actually applied (operator fixes the failing TOML and
-reloads again to converge against the half-applied state). The
-neighbor-reconcile step returns `None` on partial failure because
-live state is genuinely ambiguous after a delete-then-readd partial;
-earlier reload steps still land at the manager and remain in effect.
+Reload halts at the first step failure. If no step had taken effect
+yet, the halt is a clean no-effect failure: the reload is reported
+and refused with nothing mutated. Once any step has landed at the
+peer manager, the halt instead returns an authoritative
+known-partial receipt — it records the failing bucket, target, and
+error, and carries the honest partial snapshot of what actually
+applied, so the daemon's in-memory config tracks the peer manager
+rather than the rejected candidate. Every reload step reports
+through that receipt, the neighbor reconcile included; earlier
+steps that landed at the manager remain in effect. The acknowledged
+partial authority settles before another reload may begin, and a
+lost acknowledgement fences the runtime config for recovery instead
+of leaving the authority ambiguous. Operators fix the failing TOML
+and reload again to converge against the half-applied state.
 
 `[global]` identity and daemon-wide flags (ASN, router-id, listen
 port, cluster-id, admission and multipath knobs),

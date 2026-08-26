@@ -63,7 +63,13 @@ not an observation of actor scheduling or end-to-end gRPC latency. Unlike
 Criterion, the harness does not multiply the 400k route/page-size 100
 repeated-scan baseline by a minimum sample count.
 
-Use the paired driver for retained comparisons:
+Use the paired driver for retained comparisons. The invocation below
+records how the retained route-paging receipt was produced; it is not a
+runnable recipe today. The `--base` pin is a reachable `main` ancestor, but
+the `--head` pin was that comparison's PR branch tip, which squash-merged
+under a different commit ID — no clone can resolve it, and the driver
+enforces both pins exactly, so it refuses to run. Reproducing the shape
+means re-pinning both commits to objects reachable in the checkout.
 
 ```bash
 bench/compare-route-paging.sh \

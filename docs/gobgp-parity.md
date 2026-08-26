@@ -108,7 +108,7 @@ releases rather than carried forward from older measurements.
 | Next-hop set/self | Yes | Yes | set_next_hop = "self" or IP |
 | Named policy definitions | Yes | Yes | TOML definitions with configurable default_action |
 | Policy chaining | Yes | Yes | GoBGP-style: permit=continue, deny=stop, implicit permit |
-| Default eBGP policy (RFC 8212) | No | Opt-in | GoBGP [v4.8.0 policy documentation](https://github.com/osrg/gobgp/blob/v4.8.0/docs/sources/policy.md#L886-L899) defaults unmatched import/export policy to `accept-route`; rustbgpd requires explicit `ebgp_requires_policy = true` |
+| Default eBGP policy (RFC 8212) | No | Opt-in | GoBGP [v4.8.0 policy documentation](https://github.com/osrg/gobgp/blob/v4.8.0/docs/sources/policy.md#L886-L899) defaults unmatched import/export policy to `accept-route`; rustbgpd enforces RFC 8212 when opted in, by either `[global] ebgp_requires_policy = true` or the ADR-0119 activated secure default — root `config_epoch = 2` with the boolean omitted resolves to effective `true`. Epoch-less and `config_epoch = 1` omission stay effective `false` |
 | Scriptable policy language | No | Yes | `.rpol` (ADR-0096): typed + compiled, named prefix/community sets as indexed matchers, parameterized policies, `apply()` composition, in-language unit tests via `rbgp policy check`; route-for-route parity vs FRR route-maps proven in M80 |
 | Policy dry-run against the live RIB | No | Yes | `rbgp policy test` / `TestPolicy` RPC — a candidate `.rpol` policy evaluated read-only over an Adj-RIB-In / Loc-RIB snapshot: counts, per-term hits, before/after diffs |
 | Live per-term policy hit counters | No | Yes | `rbgp policy stats --direction import\|export\|both` / `GetPolicyStats` — since-chain-install counters on installed import and export chains; import rows also carry the session-local policy generation |
@@ -281,8 +281,11 @@ target. Remaining gaps are narrower:
 2. **IPv6 link-local BFD for unnumbered peers** — follows naturally from the
    scoped peer identity in ADR-0069, but ADR-0067 intentionally shipped global
    IPv4 / IPv6 single-hop first.
-3. **Config transaction / diff UX** — required before any serious gNMI `Set`
-   or broader remote-mutation story.
+3. ~~**Config transaction / diff UX**~~ — *shipped in v0.35.0 (ADR-0076),
+   on the `DiffRuntimeConfig` baseline from v0.22.0.* `ConfigService` plans,
+   applies, confirms, and aborts runtime config transactions under the shared
+   runtime-config coordinator, and the gNMI `Set` subset commits through the
+   same executor.
 4. ~~**Durable event replay**~~ — *shipped in v0.30.0 (ADR-0072 + ADR-0072
    follow-up sprint).* `SubscribeFromEvent` with monotonic-`event_id` cursor
    carries the post-incident debugging story; gNMI `ON_CHANGE` v1 for
