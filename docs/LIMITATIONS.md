@@ -90,6 +90,16 @@ full gate ladder.
 - BGP unnumbered supports static IPv6 link-local neighbors for IPv4 unicast.
   Interface-neighbor autodiscovery and capability 77 remain follow-up work.
 
+## Configuration control
+
+- The peer-manager private command lane and config-bridge replacement lane are
+  lossless capacity-one FIFO channels. A planning, apply, rollback, or reload
+  operation already using one of these lanes serializes later control work;
+  callers wait instead of commands being dropped or an unbounded queue growing.
+  Under a slow configuration operation this can increase concurrent management
+  request latency even though routing-session work continues on its own actor
+  paths.
+
 ## Operational proof
 
 Published benchmarks and receipts cover the main protocol, interop, scale, and

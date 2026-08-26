@@ -1668,17 +1668,17 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 | Message | Level | Meaning |
 |---------|-------|---------|
 | `starting rustbgpd` | INFO | Daemon started successfully |
-| `peer session established` | INFO | BGP session reached Established |
-| `peer session down` | INFO | BGP session left Established |
-| `received shutdown signal` | INFO | SIGTERM/SIGINT received |
+| `session established` | INFO | BGP session reached Established |
+| `session down` | INFO | BGP session left Established |
+| `received SIGTERM` / `received SIGINT` | INFO | Process signal received |
 | `shutdown initiated via gRPC` | INFO | `Shutdown` RPC called |
 | `gRPC server exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `RIB manager exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `peer manager task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP listener task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP accept-forwarding task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
-| `config reloaded` | INFO | SIGHUP reload succeeded |
-| `config reload failed` | ERROR | SIGHUP reload failed — previous config kept |
+| `config reload complete` | INFO | SIGHUP reload completed |
+| `config reload stopped at this step; settling the acknowledged partial runtime authority before another reload may begin` | ERROR | A reload step failed after the coordinator established the resulting authority; inspect the structured `bucket`, `target`, and `error` fields |
 | `GR restart marker` | INFO | Restart marker written or read |
 | `published GR restart marker with wall-clock fallback because boottime protection was unavailable` | WARN | Clock-domain sampling or representation failed; a complete bounded v1/v2 marker was selected. Check `publication_durability` on the final publication log for directory-sync status. |
 | `max-prefix limit exceeded` | WARN | Peer exceeded prefix limit |

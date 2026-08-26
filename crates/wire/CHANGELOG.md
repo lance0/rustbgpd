@@ -5,6 +5,8 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+## 0.18.0 - 2026-08-26
+
 - **Community Container framing fence:** Registered temporary path attribute
   34 as optional transitive and retained valid values opaquely with Partial on
   egress. Bounded container, Type 1 subtype, atom, and prefix framing failures,

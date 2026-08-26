@@ -28,6 +28,7 @@ reproducible receipt:
   live churn, same harness / same host — the policy-file reload, not the IRR
   filter refresh below): new policy fully delivered to every member in
   **1.28–1.57 s p50** vs BIRD 3.3.1's 64–85 s and OpenBGPD 9.1's 244–251 s —
+  measured 2026-07-17,
   [IXP receipt matrix](docs/perf/ixp-matrix-2026-07.md)
 - **IRR-scale filter reload** (320 route-server members × 183,040 prefixes ×
   3,218,965 IRR filter entries, same harness / same host): steady-state reload
@@ -42,9 +43,11 @@ reproducible receipt:
   [grouped per-client-best receipt](docs/perf/irr-reload-grouped-per-client-best-2026-08.md)
 - **Member-flap propagation** (50 members flap, 650 observers): re-announce
   p50 **0.49–0.55 s** vs BIRD's 2.9–3.7 s and OpenBGPD's 21.1–21.6 s;
-  withdraw p50 0.31–0.47 s, also fastest — [same matrix](docs/perf/ixp-matrix-2026-07.md#s3--flapstorm-member-down--member-up-propagation)
+  withdraw p50 0.31–0.47 s, also fastest — measured 2026-07-17,
+  [same matrix](docs/perf/ixp-matrix-2026-07.md#s3--flapstorm-member-down--member-up-propagation)
 - **Cold start**: full 400,400-route table delivered to all 700 members in
   **4.8–5.0 s** vs 60.9–63.3 s (BIRD) and 338.0–352.1 s (OpenBGPD) —
+  measured 2026-07-17,
   [same matrix](docs/perf/ixp-matrix-2026-07.md#s1--cold-convergence)
 - **Route-reflector scale**: 1,000 RR clients × 100k routes converge on the
   wire in **1.82 s** at **419 MiB** whole-process RSS — measured 2026-07-03
@@ -282,7 +285,7 @@ cargo build --release -p rustbgpd -p rustbgpctl -p rs-config-render -p birdwatch
 ### Docker
 
 Release images are published to GHCR (versioned tags, e.g.
-`ghcr.io/lance0/rustbgpd:0.66.0`), or build locally:
+`ghcr.io/lance0/rustbgpd:0.67.0`), or build locally:
 
 ```bash
 docker build -t rustbgpd .                    # daemon + rbgp + birdwatcher-adapter, nonroot
@@ -474,7 +477,7 @@ evolving API.**
 | Dimension | Current state |
 |-----------|---------------|
 | **Target use case** | Data-center fabric pilots, IXP route servers, programmable BGP control planes, lab/test environments |
-| **Maturity** | Public alpha (v0.66.0) |
+| **Maturity** | Public alpha (v0.67.0) |
 | **Adopter support** | Reporting channels, compatibility boundaries, and proof limits are documented in [SUPPORT.md](SUPPORT.md). |
 | **Narrow stable contract** | The machine-pinned [route-server / route-reflector v1 contract](docs/v1-stable-contract.md) covers only its inventoried control-plane roles and surfaces; the project and all unlisted features remain alpha. |
 | **Implemented** | Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR, ASPA path verification, FlowSpec, BMP, MRT, BFD, EVPN/VXLAN (alpha), and full gRPC/CLI management. Linux FIB integration is default-off and scoped to RFC 7999 discard routes and configured unicast tables (including ECMP and weighted multipath); broader routing-suite features remain future work. |

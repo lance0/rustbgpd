@@ -371,9 +371,11 @@ and `policy` are later.**
    boundary while the session is live. `Session::negotiated()` keeps its
    `Option<&NegotiatedSession>` signature, nothing was removed or changed,
    and `0.4.1` re-pins `rustbgpd-wire ^0.17.1` — a patch-level wire move with
-   no API change, so there is nothing to migrate. The FSM does not move for
-   wire `0.17.2`: its `^0.17.1` requirement already resolves to the new patch
-   and the FSM's own source is unchanged since `0.4.1`. (History: `0.3.1` added
+   no API change, so there is nothing to migrate. That requirement admits wire
+   `0.17.2` without another FSM release. Main has since added
+   `Event::BfdDown`, so the next publish pairs FSM 0.5.0 with wire 0.18.0; the
+   current FSM source is no longer identical to published 0.4.1. (History:
+   `0.3.1` added
    `min_hold_time` and `required_families` to the `#[non_exhaustive]`
    `PeerConfig`, made the last duplicate Graceful Restart capability win, and
    rejected invalid OPEN identities.) Why the FSM was the second published crate:

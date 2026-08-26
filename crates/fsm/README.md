@@ -77,6 +77,14 @@ length type 6 is an attribute-length error in the current decoder. See the
 "0.17.2 compatibility note" in the `rustbgpd-wire` README, since the FSM
 surfaces wire decode results to its callers.
 
+`rustbgpd-fsm 0.5.0` moves the exposed wire-type boundary to
+`rustbgpd-wire 0.18.0`, so consumers must upgrade the two crates together for
+their shared types to unify. The direct FSM API addition is `Event::BfdDown`;
+the public event enum is `#[non_exhaustive]`, and no existing variant or method
+is removed. The paired wire release is API-additive but changes decode
+acceptance and RFC 7606 classification across assigned attributes; review the
+itemized "0.18.0 compatibility note" in the wire README.
+
 ## Key types
 
 - **`Session`** — the state machine: `handle_event(&mut self, Event) -> Vec<Action>` (state is mutated in place on `&mut self`)
