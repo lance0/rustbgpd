@@ -242,7 +242,7 @@ fn build_transport_config_reflects_every_transport_field() {
             }
             .into(),
         ),
-        ttl_security: true,
+        ttl_security_hops: std::num::NonZeroU8::new(9),
         families: vec![(Afi::Ipv6, Safi::Unicast)],
         required_families: vec![(Afi::Ipv6, Safi::Unicast)],
         graceful_restart: true,
@@ -288,7 +288,7 @@ fn build_transport_config_reflects_every_transport_field() {
         max_prefix_restart_seconds: _max_prefix_restart_seconds,
         md5_password,
         tcp_ao,
-        ttl_security,
+        ttl_security_hops,
         families,
         required_families,
         graceful_restart,
@@ -345,7 +345,7 @@ fn build_transport_config_reflects_every_transport_field() {
         "md5_password"
     );
     assert_eq!(t.tcp_ao, *tcp_ao, "tcp_ao");
-    assert_eq!(t.ttl_security, *ttl_security, "ttl_security");
+    assert_eq!(t.ttl_security_hops, *ttl_security_hops, "ttl_security_hops");
     assert_eq!(t.peer.families, *families, "families");
     assert_eq!(
         t.peer.required_families, *required_families,

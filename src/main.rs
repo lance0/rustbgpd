@@ -1865,7 +1865,7 @@ fn md5_listener_key_for_dynamic_range(
 }
 
 /// GTSM selector for a static neighbor. Entries are emitted for every
-/// neighbor — including `enforce: false` — so a non-GTSM static neighbor
+/// neighbor — including `hops: None` — so a non-GTSM static neighbor
 /// inside an enforcing dynamic range keeps its own policy at accept time.
 fn ttl_security_listener_policy_for_neighbor(
     neighbor: &config::ResolvedNeighbor,
@@ -1875,7 +1875,7 @@ fn ttl_security_listener_policy_for_neighbor(
         owner: TcpAoListenerOwnerKind::Static,
         peer,
         prefix_len: if peer.is_ipv4() { 32 } else { 128 },
-        enforce: neighbor.transport_config.ttl_security,
+        hops: neighbor.transport_config.ttl_security_hops,
     }
 }
 
@@ -1890,7 +1890,10 @@ fn ttl_security_listener_policy_for_dynamic_range(
         owner: TcpAoListenerOwnerKind::Dynamic,
         peer,
         prefix_len,
-        enforce: group.ttl_security.unwrap_or(false),
+        hops: group
+            .ttl_security
+            .unwrap_or(false)
+            .then(|| group.ttl_security_hops.unwrap_or(std::num::NonZeroU8::MIN)),
     })
 }
 
@@ -4992,7 +4995,7 @@ async fn run<T>(
             max_prefix_restart_seconds: neighbor.max_prefix_restart_seconds,
             md5_password: transport_config.md5_password.clone(),
             tcp_ao: transport_config.tcp_ao.clone(),
-            ttl_security: transport_config.ttl_security,
+            ttl_security_hops: transport_config.ttl_security_hops,
             families: transport_config.peer.families.clone(),
             required_families: transport_config.peer.required_families.clone(),
             graceful_restart: transport_config.peer.graceful_restart,
@@ -7565,7 +7568,9 @@ ttl_security = true
             "an IPv6 neighbor's md5_password must reach the listener inventory"
         );
         assert!(
-            ttl_security_listener_policy_for_neighbor(&neighbor).enforce,
+            ttl_security_listener_policy_for_neighbor(&neighbor)
+                .hops
+                .is_some(),
             "an IPv6 neighbor's ttl_security must reach the listener inventory"
         );
     }
@@ -7649,7 +7654,7 @@ peer_group = "members"
         // GTSM selectors resolve from the same sources.
         let static_ttl = ttl_security_listener_policy_for_neighbor(&neighbor);
         assert_eq!(static_ttl.owner, TcpAoListenerOwnerKind::Static);
-        assert!(static_ttl.enforce);
+        assert_eq!(static_ttl.hops, std::num::NonZeroU8::new(1));
         let dynamic_ttl = ttl_security_listener_policy_for_dynamic_range(
             &config.dynamic_neighbors[0],
             &config.peer_groups,
@@ -7657,7 +7662,7 @@ peer_group = "members"
         .unwrap();
         assert_eq!(dynamic_ttl.owner, TcpAoListenerOwnerKind::Dynamic);
         assert_eq!(dynamic_ttl.prefix_len, 24);
-        assert!(dynamic_ttl.enforce);
+        assert_eq!(dynamic_ttl.hops, std::num::NonZeroU8::new(1));
     }
 
     #[test]
@@ -7698,7 +7703,7 @@ peer_group = "plain"
         // Unprotected entries still emit non-enforcing GTSM selectors so a
         // static exception inside an enforcing range resolves correctly.
         let static_ttl = ttl_security_listener_policy_for_neighbor(&neighbor);
-        assert!(!static_ttl.enforce);
+        assert!(static_ttl.hops.is_none());
     }
 
     #[test]
@@ -7760,6 +7765,7 @@ peer_group = "plain"
                     tcp_ao: None,
                     bfd: None,
                     ttl_security: Some(false),
+                    ttl_security_hops: None,
                     families: Vec::new(),
                     required_families: Vec::new(),
                     graceful_restart: Some(true),
@@ -7809,6 +7815,7 @@ peer_group = "plain"
                     tcp_ao: None,
                     bfd: None,
                     ttl_security: Some(false),
+                    ttl_security_hops: None,
                     families: Vec::new(),
                     required_families: Vec::new(),
                     graceful_restart: Some(true),
@@ -7858,6 +7865,7 @@ peer_group = "plain"
                     tcp_ao: None,
                     bfd: None,
                     ttl_security: Some(false),
+                    ttl_security_hops: None,
                     families: Vec::new(),
                     required_families: Vec::new(),
                     graceful_restart: Some(false),

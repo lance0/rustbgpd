@@ -9,6 +9,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- GTSM / TTL security now accepts an optional `ttl_security_hops` distance
+  (1--255) on neighbors and peer groups. Existing `ttl_security = true`
+  configurations retain their exact-255 one-hop behavior; setting a distance
+  lowers the inbound TTL / Hop-Limit floor to `256 - ttl_security_hops` while
+  outbound packets continue to use 255. (LAN-1301)
+
 ## [0.67.0] — 2026-08-26
 
 > **Release framing — strict wire input, explicit migrations.** The wire crate

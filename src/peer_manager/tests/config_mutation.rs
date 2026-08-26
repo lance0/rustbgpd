@@ -1357,6 +1357,7 @@ peer_group = "edge"
                 max_prefix_restart_seconds: None,
                 md5_password: None,
                 ttl_security: None,
+                ttl_security_hops: None,
                 families: Vec::new(),
                 required_families: Vec::new(),
                 graceful_restart: None,

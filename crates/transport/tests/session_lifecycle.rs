@@ -88,7 +88,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         max_prefixes_ipv6: None,
         md5_password: None,
         tcp_ao: None,
-        ttl_security: false,
+        ttl_security_hops: None,
         local_ipv6_nexthop: None,
         peer_group: None,
         gr_stale_routes_time: 360,

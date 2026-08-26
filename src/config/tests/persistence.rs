@@ -1069,7 +1069,11 @@ peer_group = "rr-clients"
         );
         assert_eq!(
             materialized.ttl_security,
-            Some(resolved.transport_config.ttl_security)
+            Some(resolved.transport_config.ttl_security_hops.is_some())
+        );
+        assert_eq!(
+            materialized.ttl_security_hops,
+            resolved.transport_config.ttl_security_hops
         );
     }
     // Group inheritance visible on the second neighbor.

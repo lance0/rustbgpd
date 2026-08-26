@@ -409,6 +409,7 @@ log_format = "json"
             tcp_ao: None,
             bfd: None,
             ttl_security: Some(false),
+            ttl_security_hops: None,
             families: Vec::new(),
             required_families: Vec::new(),
             graceful_restart: None,

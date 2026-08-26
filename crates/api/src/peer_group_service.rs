@@ -147,6 +147,17 @@ fn proto_definition_to_input(
                 .map_err(|_| Status::invalid_argument("paths_limit_receive_max must be <= 65535"))
         })
         .transpose()?;
+    let ttl_security_hops = definition
+        .ttl_security_hops
+        .map(|value| {
+            u8::try_from(value)
+                .ok()
+                .and_then(std::num::NonZeroU8::new)
+                .ok_or_else(|| {
+                    Status::invalid_argument("ttl_security_hops must be between 1 and 255")
+                })
+        })
+        .transpose()?;
 
     Ok(PeerGroupDefinition {
         hold_time,
@@ -156,6 +167,7 @@ fn proto_definition_to_input(
         max_prefix_restart_seconds: definition.max_prefix_restart_seconds,
         md5_password: definition.md5_password.map(Into::into),
         ttl_security: definition.ttl_security,
+        ttl_security_hops,
         families,
         required_families,
         graceful_restart: definition.graceful_restart,
@@ -215,6 +227,10 @@ fn input_definition_to_proto(definition: &PeerGroupDefinition) -> proto::PeerGro
         md5_password: None,
         has_md5_password: Some(definition.md5_password.is_some()),
         ttl_security: definition.ttl_security,
+        ttl_security_hops: definition
+            .ttl_security_hops
+            .map(std::num::NonZeroU8::get)
+            .map(u32::from),
         families: definition.families.clone(),
         required_families: definition.required_families.clone(),
         graceful_restart: definition.graceful_restart,
@@ -866,6 +882,28 @@ mod tests {
             input_definition_to_proto(&input).required_families,
             vec!["ipv4_unicast"]
         );
+    }
+
+    #[test]
+    fn ttl_security_hops_round_trip_and_reject_invalid_proto_values() {
+        let input = proto_definition_to_input(proto::PeerGroupDefinition {
+            ttl_security: Some(true),
+            ttl_security_hops: Some(9),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(input.ttl_security_hops, std::num::NonZeroU8::new(9));
+        assert_eq!(input_definition_to_proto(&input).ttl_security_hops, Some(9));
+
+        for invalid in [0, 256] {
+            let error = proto_definition_to_input(proto::PeerGroupDefinition {
+                ttl_security_hops: Some(invalid),
+                ..Default::default()
+            })
+            .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(error.message().contains("between 1 and 255"));
+        }
     }
 
     /// `orr_vantage` round-trips proto string → definition → proto string

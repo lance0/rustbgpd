@@ -3136,6 +3136,7 @@ impl PeerManager {
                 tcp_ao: None,
                 bfd: None,
                 ttl_security: None,
+                ttl_security_hops: None,
                 families: Vec::new(),
                 required_families: Vec::new(),
                 graceful_restart: None,
@@ -3377,7 +3378,7 @@ impl PeerManager {
             max_prefix_restart_seconds: resolved.max_prefix_restart_seconds,
             md5_password: tc.md5_password.clone(),
             tcp_ao: tc.tcp_ao.clone(),
-            ttl_security: tc.ttl_security,
+            ttl_security_hops: tc.ttl_security_hops,
             families: tc.peer.families.clone(),
             required_families: tc.peer.required_families.clone(),
             graceful_restart: tc.peer.graceful_restart,
@@ -3443,7 +3444,8 @@ impl PeerManager {
             && let Some(old_group) = self.current_config.peer_groups.get(name)
             && let Some(new_group) = next_config.peer_groups.get(name)
             && (old_group.md5_password != new_group.md5_password
-                || old_group.ttl_security != new_group.ttl_security)
+                || old_group.ttl_security != new_group.ttl_security
+                || old_group.ttl_security_hops != new_group.ttl_security_hops)
         {
             return Err(CatalogMutationError::RestartRequired(format!(
                 "peer group {name:?} changes md5_password or ttl_security; inbound listener \
@@ -3570,7 +3572,8 @@ impl PeerManager {
             && let Some(old_group) = self.current_config.peer_groups.get(name)
             && let Some(new_group) = next_config.peer_groups.get(name)
             && (old_group.md5_password != new_group.md5_password
-                || old_group.ttl_security != new_group.ttl_security)
+                || old_group.ttl_security != new_group.ttl_security
+                || old_group.ttl_security_hops != new_group.ttl_security_hops)
         {
             return OwnedCatalogMutationOutcome::RejectedNoEffect(
                 CatalogMutationError::RestartRequired(format!(

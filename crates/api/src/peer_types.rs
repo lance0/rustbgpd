@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv6Addr};
+use std::num::NonZeroU8;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -1734,6 +1735,8 @@ pub struct PeerGroupDefinition {
     pub md5_password: Option<TransportAuthSecret>,
     /// Optional TTL-security override.
     pub ttl_security: Option<bool>,
+    /// Optional maximum GTSM peer distance in IP hops.
+    pub ttl_security_hops: Option<NonZeroU8>,
     /// Address families override.
     pub families: Vec<String>,
     /// Families every inheriting session must negotiate.
@@ -1887,8 +1890,8 @@ pub struct PeerManagerNeighborConfig {
     pub md5_password: Option<TransportAuthSecret>,
     /// Optional ordered TCP-AO keyring for static-neighbor runtime sockets.
     pub tcp_ao: Option<TcpAoKeyring>,
-    /// Whether GTSM / TTL security is enabled.
-    pub ttl_security: bool,
+    /// Maximum GTSM peer distance in IP hops. `None` disables GTSM.
+    pub ttl_security_hops: Option<NonZeroU8>,
     /// Negotiated address families for this peer.
     pub families: Vec<(Afi, Safi)>,
     /// Families that must be present in the final negotiated intersection.

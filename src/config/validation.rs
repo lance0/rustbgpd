@@ -716,6 +716,18 @@ impl Config {
 
             let group = self.peer_group_for_neighbor(neighbor)?;
 
+            let effective_ttl_security = neighbor
+                .ttl_security
+                .or_else(|| group.and_then(|group| group.ttl_security))
+                .unwrap_or(false);
+            if neighbor.ttl_security_hops.is_some() && !effective_ttl_security {
+                return Err(ConfigError::InvalidNeighborConfig {
+                    address: neighbor.address.clone(),
+                    field: "ttl_security_hops".to_string(),
+                    reason: "requires effective ttl_security = true".to_string(),
+                });
+            }
+
             if let Some(tcp_ao) = &neighbor.tcp_ao {
                 if neighbor.md5_password.is_some() {
                     return Err(ConfigError::InvalidNeighborConfig {
@@ -2636,6 +2648,14 @@ fn validate_peer_group(
     local_asn: u32,
 ) -> Result<(), ConfigError> {
     EffectiveHoldTimers::for_peer_group(group).validate()?;
+
+    if group.ttl_security_hops.is_some() && group.ttl_security != Some(true) {
+        return Err(ConfigError::InvalidNeighborConfig {
+            address: format!("peer_group.{name}"),
+            field: "ttl_security_hops".to_string(),
+            reason: "requires ttl_security = true on the same peer group".to_string(),
+        });
+    }
 
     let configured_families = (!group.families.is_empty())
         .then(|| parse_families(&group.families))

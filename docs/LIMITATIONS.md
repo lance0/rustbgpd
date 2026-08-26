@@ -88,21 +88,8 @@ full gate ladder.
   static neighbors. Multihop BFD (RFC 5883), echo, demand mode,
   authentication, dynamic-neighbor BFD, and IPv6 link-local BFD remain
   follow-up work. This deferral is scoped to BFD sessions only. It says
-  nothing about BGP sessions to non-adjacent peers, which are a separate
-  mechanism with a different answer — see the next entry.
-- Multihop eBGP sessions require no configuration, and there is no knob to
-  bound them. rustbgpd never lowers the outbound TTL / Hop Limit on a BGP
-  socket and has no check that refuses an eBGP peer for not being directly
-  connected, so a session to a non-adjacent peer is attempted with the kernel
-  default TTL like any other outgoing TCP connection. The limitation is the
-  second half: other implementations require an explicit multihop statement,
-  and where that statement carries a hop count the count doubles as a
-  misconfiguration guard — a mistyped neighbor address fails loudly instead of
-  quietly establishing to a distant speaker. rustbgpd does not currently offer
-  that guard, and `ttl_security` is not a substitute for it: GTSM and multihop
-  are mutually exclusive. See [`CONFIGURATION.md`](CONFIGURATION.md) for the
-  configuration consequence and [`COMPARISON.md`](COMPARISON.md) for the
-  per-implementation sourcing.
+  nothing about BGP sessions to non-adjacent peers: those require no separate
+  enablement and can be distance-bounded with `ttl_security_hops`.
 - BGP unnumbered supports static IPv6 link-local neighbors for IPv4 unicast.
   Interface-neighbor autodiscovery and capability 77 remain follow-up work.
 

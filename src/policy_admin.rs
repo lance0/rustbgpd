@@ -202,6 +202,7 @@ pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerG
             .as_ref()
             .map(|secret| secret.as_ref().to_owned()),
         ttl_security: definition.ttl_security,
+        ttl_security_hops: definition.ttl_security_hops,
         bfd: None,
         families: definition.families,
         required_families: definition.required_families,
@@ -255,6 +256,7 @@ pub(crate) fn config_peer_group_to_api(definition: &PeerGroupConfig) -> PeerGrou
             .map(std::num::NonZeroU32::get),
         md5_password: definition.md5_password.as_deref().map(Into::into),
         ttl_security: definition.ttl_security,
+        ttl_security_hops: definition.ttl_security_hops,
         families: definition.families.clone(),
         required_families: definition.required_families.clone(),
         graceful_restart: definition.graceful_restart,
@@ -473,6 +475,7 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Neighbor {
         tcp_ao: None,
         bfd: None,
         ttl_security: None,
+        ttl_security_hops: None,
         families: raw
             .families
             .as_ref()
@@ -558,7 +561,8 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                         .map(|secret| secret.as_ref().to_owned()),
                     tcp_ao: cfg.tcp_ao.as_ref().map(transport_tcp_ao_to_config),
                     bfd: None,
-                    ttl_security: Some(cfg.ttl_security),
+                    ttl_security: Some(cfg.ttl_security_hops.is_some()),
+                    ttl_security_hops: cfg.ttl_security_hops,
                     families: cfg
                         .families
                         .iter()
@@ -1108,7 +1112,7 @@ peer_group = "fabric"
                         }
                         .into(),
                     ),
-                    ttl_security: false,
+                    ttl_security_hops: None,
                     families: vec![(rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast)],
                     required_families: Vec::new(),
                     graceful_restart: true,

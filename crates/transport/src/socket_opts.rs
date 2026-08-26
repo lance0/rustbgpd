@@ -12,6 +12,7 @@ use std::io;
 #[cfg(target_os = "linux")]
 use std::net::IpAddr;
 use std::net::SocketAddr;
+use std::num::NonZeroU8;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 
@@ -3192,8 +3193,8 @@ fn read_sockaddr(storage: &libc::sockaddr_storage) -> io::Result<IpAddr> {
 
 /// Enable GTSM (Generalized TTL Security Mechanism, RFC 5082) on a socket.
 ///
-/// Sets GTSM for the remote address family: accept only directly connected
-/// packets and send with TTL/Hop-Limit 255.
+/// Sends with TTL/Hop-Limit 255 and accepts packets that arrived within the
+/// configured maximum IP-hop distance.
 ///
 /// # Errors
 ///
@@ -3205,11 +3206,18 @@ fn read_sockaddr(storage: &libc::sockaddr_storage) -> io::Result<IpAddr> {
     clippy::cast_possible_truncation,
     reason = "GTSM requires raw Linux socket options and socklen_t casts"
 )]
-pub fn set_gtsm(socket: &Socket, remote: SocketAddr) -> io::Result<()> {
+pub fn set_gtsm(socket: &Socket, remote: SocketAddr, hops: NonZeroU8) -> io::Result<()> {
     if remote.is_ipv6() {
-        return set_gtsm_v6(socket);
+        return set_gtsm_v6(socket, hops);
     }
-    set_gtsm_v4(socket)
+    set_gtsm_v4(socket, hops)
+}
+
+/// Lowest acceptable inbound TTL/Hop Limit for a maximum peer distance.
+/// A directly connected peer is one IP hop away and therefore resolves to
+/// 255; a peer up to nine hops away resolves to 247.
+const fn gtsm_min_ttl(hops: NonZeroU8) -> u8 {
+    u8::MAX - (hops.get() - 1)
 }
 
 #[cfg(target_os = "linux")]
@@ -3218,14 +3226,9 @@ pub fn set_gtsm(socket: &Socket, remote: SocketAddr) -> io::Result<()> {
     clippy::cast_possible_truncation,
     reason = "IPv4 GTSM requires raw Linux socket options and socklen_t casts"
 )]
-fn set_gtsm_v4(socket: &Socket) -> io::Result<()> {
+fn set_gtsm_v4(socket: &Socket, hops: NonZeroU8) -> io::Result<()> {
     const IP_MINTTL: libc::c_int = 21;
-    // RFC 5082 §3.2: a directly connected peer's packets arrive with
-    // TTL 255 (the sender's stack cannot emit more, and any forwarding
-    // hop would decrement below it). Strict 255 matches FRR/BIRD and
-    // the BFD receive path's exact-255 check; 254 would accept packets
-    // that crossed one router.
-    let min_ttl: libc::c_int = 255;
+    let min_ttl = libc::c_int::from(gtsm_min_ttl(hops));
 
     let fd = {
         use std::os::unix::io::AsRawFd;
@@ -3258,9 +3261,8 @@ fn set_gtsm_v4(socket: &Socket) -> io::Result<()> {
     clippy::cast_possible_truncation,
     reason = "IPv6 GTSM requires raw Linux socket options and socklen_t casts"
 )]
-fn set_gtsm_v6(socket: &Socket) -> io::Result<()> {
-    // Strict RFC 5082 §3.2 Hop Limit — see the IPv4 twin above.
-    let min_hops: libc::c_int = 255;
+fn set_gtsm_v6(socket: &Socket, hops: NonZeroU8) -> io::Result<()> {
+    let min_hops = libc::c_int::from(gtsm_min_ttl(hops));
     let fd = socket.as_raw_fd();
 
     let ret = unsafe {
@@ -3299,7 +3301,7 @@ pub(crate) fn set_gtsm_outbound(socket: &Socket, is_v4: bool) -> io::Result<()> 
 ///
 /// Always returns [`io::ErrorKind::Unsupported`].
 #[cfg(not(target_os = "linux"))]
-pub fn set_gtsm(_socket: &Socket, _remote: SocketAddr) -> io::Result<()> {
+pub fn set_gtsm(_socket: &Socket, _remote: SocketAddr, _hops: NonZeroU8) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "ttl_security (GTSM / TTL security, RFC 5082) requires Linux: this platform has no \
@@ -3340,6 +3342,14 @@ mod tests {
     assert_not_impl!(TcpAoMktCore: Clone);
     assert_not_impl!(TcpAoDeletePreflight: std::fmt::Debug);
     assert_not_impl!(TcpAoDeletePreflight: Clone);
+
+    #[test]
+    fn gtsm_hop_distance_maps_to_inbound_minimum() {
+        assert_eq!(gtsm_min_ttl(NonZeroU8::new(1).unwrap()), 255);
+        assert_eq!(gtsm_min_ttl(NonZeroU8::new(2).unwrap()), 254);
+        assert_eq!(gtsm_min_ttl(NonZeroU8::new(9).unwrap()), 247);
+        assert_eq!(gtsm_min_ttl(NonZeroU8::new(255).unwrap()), 1);
+    }
 
     fn base_key() -> TcpAoKey<'static> {
         TcpAoKey {

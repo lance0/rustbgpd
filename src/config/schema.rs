@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::net::IpAddr;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU8, NonZeroU32};
 use std::path::PathBuf;
 
 use schemars::{JsonSchema, Schema, SchemaGenerator};
@@ -1338,6 +1338,17 @@ define_neighbor_and_peer_group_configs! {
         }
     }
     after_security {
+        ttl_security_hops: Option<NonZeroU8> {
+            neighbor {
+                /// Maximum GTSM peer distance in IP hops. Requires effective
+                /// `ttl_security = true`; omitted preserves one-hop/exact-255
+                /// enforcement.
+            }
+            peer_group {
+                /// Maximum GTSM peer distance inherited by group members.
+                /// Requires `ttl_security = true` on this peer group.
+            }
+        }
         families: Vec<String> {
             neighbor {
                 /// Address families to negotiate (e.g., `["ipv4_unicast", "ipv6_unicast"]`).
@@ -1676,6 +1687,7 @@ impl fmt::Debug for Neighbor {
             .field("tcp_ao", &self.tcp_ao)
             .field("bfd", &self.bfd)
             .field("ttl_security", &self.ttl_security)
+            .field("ttl_security_hops", &self.ttl_security_hops)
             .field("families", &self.families)
             .field("required_families", &self.required_families)
             .field("graceful_restart", &self.graceful_restart)
@@ -1851,6 +1863,7 @@ impl fmt::Debug for PeerGroupConfig {
                 &self.md5_password.as_ref().map(|_| "<redacted>"),
             )
             .field("ttl_security", &self.ttl_security)
+            .field("ttl_security_hops", &self.ttl_security_hops)
             .field("bfd", &self.bfd)
             .field("families", &self.families)
             .field("required_families", &self.required_families)

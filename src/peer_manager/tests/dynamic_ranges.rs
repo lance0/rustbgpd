@@ -241,7 +241,7 @@ async fn delete_peer_rejects_listener_enforced_auth() {
     let mut md5_config = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
     md5_config.md5_password = Some("secret".to_string().into());
     let mut gtsm_config = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), 65003);
-    gtsm_config.ttl_security = true;
+    gtsm_config.ttl_security_hops = Some(std::num::NonZeroU8::MIN);
 
     for config in [md5_config, gtsm_config] {
         let addr = config.address;
