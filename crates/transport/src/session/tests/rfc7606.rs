@@ -219,6 +219,7 @@ async fn assigned_opaque_attributes_reach_rib_while_edge_metadata_is_absent() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 42), 32);
     let values = [
         (25_u8, (0_u8..20).collect::<Vec<_>>()),
+        (34_u8, vec![0, 2, 0x5a, 0xa5, 0, 6]),
         (36_u8, vec![1, 0, 0, 0, 0, 0, 0, 0]),
         (37, vec![2, 0, 4, 1, 99, 0, 0]),
         (38, vec![1, 0, 0, 0, 1, 1, 4, 192, 0, 2, 1]),
@@ -290,6 +291,62 @@ async fn assigned_opaque_attributes_reach_rib_while_edge_metadata_is_absent() {
             .all(|attribute| attribute.type_code() != 42)
     );
     assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
+#[tokio::test]
+async fn malformed_community_container_withdraws_dual_stack_replacements() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    install_dual_stack_session(&mut session, false);
+    rfc7606_drain(&mut rib_rx);
+    let ipv4 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let ipv6 = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
+    let ipv6_nlri = [32, 0x20, 0x01, 0x0d, 0xb8];
+
+    session
+        .process_update(rfc7606_update(rfc7606_attr_bytes(&[]), &[ipv4]))
+        .await;
+    session
+        .process_update(rfc7606_update(
+            rfc7606_attr_bytes(&rfc7606_mp_reach(&ipv6_nlri)),
+            &[],
+        ))
+        .await;
+    for expected in [Prefix::V4(ipv4), Prefix::V6(ipv6)] {
+        let RibUpdate::RoutesReceived { announced, .. } =
+            rib_rx.try_recv().expect("initial route must reach RIB")
+        else {
+            panic!("expected initial route");
+        };
+        assert_eq!(announced.len(), 1);
+        assert_eq!(announced[0].prefix, expected);
+    }
+
+    let mut replacement = vec![0xc0, 34, 5, 0, 1, 0, 0, 0];
+    replacement.extend(rfc7606_mp_reach(&ipv6_nlri));
+    session
+        .process_update(rfc7606_update(rfc7606_attr_bytes(&replacement), &[ipv4]))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("replacement withdrawals must reach RIB")
+    else {
+        panic!("expected replacement withdrawals");
+    };
+    assert!(announced.is_empty(), "malformed attribute must stay absent");
+    assert_eq!(withdrawn.len(), 2);
+    assert!(withdrawn.contains(&(Prefix::V4(ipv4), 0)));
+    assert!(withdrawn.contains(&(Prefix::V6(ipv6), 0)));
+    assert!(rib_rx.try_recv().is_err());
+    assert_eq!(session.known_prefix_count(), 0);
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
 }
 
 #[tokio::test]

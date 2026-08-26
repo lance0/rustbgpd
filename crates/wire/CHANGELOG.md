@@ -5,6 +5,13 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- **Community Container framing fence:** Registered temporary path attribute
+  34 as optional transitive and retained valid values opaquely with Partial on
+  egress. Bounded container, Type 1 subtype, atom, and prefix framing failures,
+  class conflicts, and duplicate attributes now receive treat-as-withdraw.
+  This syntax-only handling follows a work-in-progress draft and does not claim
+  stable standards support or expose a typed model.
+
 - **Traffic Engineering and IPv6-specific community fences:** Registered path
   attributes 24 and 25 now enforce their Optional/Transitive classes. Traffic
   Engineering remains payload-opaque and is ignored as optional
