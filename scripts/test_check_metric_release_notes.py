@@ -76,6 +76,18 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
         self.assertEqual(added, {"bgp_consumed_new_total"})
         self.assertEqual(removed, set())
 
+    def test_metric_name_substrings_do_not_count_as_release_notes(self):
+        for documented in ("bgp_new_total_suffix", "prefix_bgp_new_total"):
+            with self.subTest(documented=documented), self.assertRaisesRegex(
+                ValueError, "added=bgp_new_total"
+            ):
+                check.validate_release_notes(
+                    set(),
+                    {"bgp_new_total"},
+                    f"\n- Export `{documented}`.\n",
+                    {},
+                )
+
     def test_removal_and_rename_require_old_and_new_names(self):
         baseline = {"bgp_stable", "bgp_removed", "bgp_old_name"}
         current = {"bgp_stable", "bgp_new_name"}
