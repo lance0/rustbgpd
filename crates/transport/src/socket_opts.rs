@@ -4,9 +4,9 @@
 //! require raw socket options that are only available on Linux. TCP-AO
 //! (RFC 5925) uses the same boundary for `setsockopt` and `getsockopt`.
 //!
-//! These are the only `unsafe` blocks in any library crate — they exist
-//! because there is no safe Rust API for `TCP_MD5SIG`, `IP_MINTTL`, or
-//! TCP-AO. See SECURITY.md for the full unsafe-code posture.
+//! This crate's `unsafe` blocks are isolated here because there is no safe Rust
+//! API for `TCP_MD5SIG`, `IP_MINTTL`, or TCP-AO. See SECURITY.md for the full
+//! project-wide unsafe-code posture.
 
 use std::io;
 #[cfg(target_os = "linux")]
@@ -3136,7 +3136,10 @@ fn write_alg_name(dst: &mut [u8; 64], name: &str) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
+#[allow(
+    unsafe_code,
+    reason = "encode an IP address in the Linux sockaddr_storage ABI"
+)]
 fn write_sockaddr(storage: &mut libc::sockaddr_storage, peer: IpAddr, scope_id: u32) {
     match peer {
         IpAddr::V4(addr) => {
