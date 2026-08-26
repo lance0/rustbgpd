@@ -73,25 +73,42 @@ input from the network. It runs under continuous fuzzing in CI.
   Locator absence carries no v3 authority. A retired v2 locator or locator-free
   v1/v2 journal makes v0.65.0 and every later release refuse boot before
   candidate mutation, and remains untouched for recovery with rustbgpd v0.64.0.
-- **No `unsafe` code in shipped paths, with two scoped exceptions.** Every
+- **No `unsafe` code in shipped paths outside three scoped modules.** Every
   workspace crate root carries `#![deny(unsafe_code)]`, so `unsafe` cannot enter
-  a crate without a visible, reviewed opt-out. There are two:
-  - `crates/transport`'s `socket_opts` module carries a documented
-    `#[allow(unsafe_code)]` for socket-option FFI (`TCP_MD5SIG`, `IP_MINTTL`,
-    TCP-AO) that has no safe Rust API. This is the only `unsafe` in any library
-    crate.
-  - The daemon binary's deny is `cfg_attr`-gated off when the `jemalloc` (the
-    default) or `dhat-heap` feature is on, because registering a
-    `#[global_allocator]` is itself an `unsafe` construct. Building with
-    `--no-default-features` re-arms the deny; the daemon writes no `unsafe`
-    blocks of its own under either configuration.
+  a crate without a visible, reviewed opt-out. Three modules hold one:
+  - `crates/transport`'s `socket_opts` module, opted out by a module-level
+    `#[allow(unsafe_code)]` in the crate root and a per-function
+    `#[allow(unsafe_code, reason = ...)]` on each site inside it. Every site is
+    Linux socket-option ABI with no safe Rust wrapper: `TCP_MD5SIG` /
+    `TCP_MD5SIG_EXT`, TCP-AO key installation, deletion, inspection and RNext
+    selection, GTSM (`IP_MINTTL` / `IPV6_MINHOPCOUNT`), and the `sockaddr_in` /
+    `sockaddr_in6` encoding those options take.
+  - `crates/api`'s `runtime_config_settlement` module: the
+    ambiguous-configuration watchdog's terminal boundary is
+    `#[cfg(not(test))] fn terminate_process()`, whose entire body is
+    `unsafe { libc::_exit(70) }`. It is exit-only by construction, and that is
+    enforced rather than asserted — a unit test parses the production source and
+    requires the body to be exactly that call and to contain no allocation,
+    lock, drop, panic, logging, or metric term, so nothing runs between the
+    fence decision and process exit.
+  - The daemon binary's `bfd_runtime` module: one raw `setsockopt` enabling
+    `IP_RECVTTL` / `IPV6_RECVHOPLIMIT`, which `socket2` does not expose. BFD
+    needs the received TTL delivered as ancillary data to enforce the RFC 5881
+    exact-255 receive check.
+
+  The daemon binary's own crate-root deny is additionally `cfg_attr`-gated off
+  when the `jemalloc` (the default) or `dhat-heap` feature is on, because
+  registering a `#[global_allocator]` is itself an `unsafe` construct. Building
+  with `--no-default-features` re-arms that deny; the `bfd_runtime` block above
+  carries its own `#[allow]`, so it stays a visible, reviewed opt-out under
+  either configuration.
 
   Test and benchmark targets are separate compilation units and are not covered
   by a crate root's deny. Several carry justified `unsafe`: allocation-tracking
-  `GlobalAlloc` wrappers used by the memory-profile receipts (`crates/mrt`
-  benches, `crates/rib` tests, the standalone `bench/scale` harnesses) and
-  `libc` socket/netns helpers in the privileged `crates/evpn-linux` tests. None
-  of that code ships in the daemon or in any published library crate.
+  `GlobalAlloc` wrappers used by the memory-profile receipts (crate benches and
+  tests, plus the standalone `bench/scale` harnesses) and `libc` socket/netns
+  helpers in the privileged `crates/evpn-linux` tests. None of that code ships
+  in the daemon or in any published library crate.
 - **Structured errors, not strings.** Every failure produces a
   machine-parseable event for forensic analysis.
 
@@ -102,7 +119,7 @@ published by CISA and partner agencies recommending memory-safe languages
 for software that processes untrusted network input. The enforcement
 mechanism is the crate-root `#![deny(unsafe_code)]` invariant described
 under Design Principles above: no `unsafe` in shipped paths beyond the
-two documented, scoped exceptions.
+three documented, scoped modules.
 
 One concrete bound this pins: `AS_PATH` matching is length-bounded under
 RFC 8654 Extended Messages. The policy engine matches the rendered path
@@ -114,12 +131,13 @@ see the full ~16,000-ASN path.
 ### Fuzzing
 
 Six fuzz crates (`crates/wire`, `crates/policy`, `crates/mrt`,
-`crates/evpn`, `crates/bfd`, `crates/rpki`) carry 19 fuzz targets covering
-the message decoders, the policy frontend, MRT snapshot and warm-bundle
+`crates/evpn`, `crates/bfd`, `crates/rpki`) carry 21 fuzz targets covering
+the message decoders, the policy frontend, structure-aware policy-chain
+compilation and explain-walk agreement, MRT snapshot and warm-bundle
 readers, EVPN parsing, the BFD control-packet decoder, and the RTR PDU
-decoder. A nightly CI campaign (`.github/workflows/fuzz.yml`) runs every target
-in each crate against tracked seed corpora and fails loudly if target
-enumeration returns nothing. A ClusterFuzzLite workflow builds all
+decoder. A nightly CI campaign (`.github/workflows/fuzz.yml`) runs every
+target in each crate against tracked seed corpora and fails loudly if
+target enumeration returns nothing. A ClusterFuzzLite workflow builds all
 targets with AddressSanitizer for on-demand campaigns. The target
 inventory is fail-closed: `scripts/check_fuzz_target_inventory.py` runs
 in CI and fails when the inventory drifts from the reviewed list.

@@ -15,7 +15,7 @@ A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "driv
 
 **Observable by default.** Prometheus metrics, structured logs, and machine-parseable errors everywhere. Operators should never have to guess what the daemon is doing or why a session flapped.
 
-**Safe, boring, maintainable.** Minimal `unsafe` (one module for TCP MD5/GTSM socket options). Fuzzed wire decoder. Explicit resource limits. No clever tricks — just correct, auditable Rust.
+**Safe, boring, maintainable.** Minimal `unsafe` — every crate root denies it, and exactly three modules take a reviewed opt-out (transport socket options, the settlement watchdog's terminal `_exit`, the BFD receive-TTL socket option). Fuzzed wire decoder. Explicit resource limits. No clever tricks — just correct, auditable Rust.
 
 ## Non-Goals (v1)
 
@@ -87,7 +87,7 @@ and mirrors internal architecture.
 
 ```protobuf
 // Abridged — proto/rustbgpd.proto is authoritative; NeighborService has
-// 12 RPCs and RibService 23, only representative subsets are shown here.
+// 12 RPCs and RibService 21, only representative subsets are shown here.
 
 // Global daemon configuration and identity
 service GlobalService {
@@ -454,7 +454,7 @@ Inject and withdraw routes via gRPC (`AddPath` / `DeletePath`). Build Adj-RIB-Ou
 - `UpdateMessage::build()` high-level constructor for outbound UPDATEs.
 - eBGP outbound: prepend local ASN to AS_PATH, set NEXT_HOP to session's local IPv4 socket address (reachable, not router-id), strip LOCAL_PREF.
 - iBGP outbound: ensure LOCAL_PREF present (default 100), pass NEXT_HOP through.
-- TCP MD5 and GTSM require `socket2::Socket` for pre-connect `setsockopt` calls (ADR-0016). Only `unsafe` code in the project, isolated to `socket_opts` module.
+- TCP MD5 and GTSM require `socket2::Socket` for pre-connect `setsockopt` calls (ADR-0016). The `unsafe` this needs is isolated to the `socket_opts` module — one of the project's three scoped `unsafe` modules, and the only one in the transport path. `SECURITY.md` carries the full inventory.
 - Policy engine: first-match-wins evaluation with match conditions (prefix, community, AS_PATH regex) and route modifications (LOCAL_PREF, MED, communities, AS_PATH prepend, next-hop). Separate import/export policies.
 
 **Exit criteria:**
