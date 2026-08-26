@@ -522,6 +522,17 @@ fn base_prefix_index(prefix: Ipv4Prefix, total_prefixes: u32) -> Option<usize> {
     (index < total_prefixes).then(|| usize::try_from(index).unwrap())
 }
 
+/// COMMUNITIES values as received, whichever Partial flavour the sender used.
+/// Peers that set the RFC 4271 Partial bit on transitive attributes decode to
+/// `CommunitiesPartial`; matching the bare variant alone read an empty slice
+/// and stalled generation tracking against them.
+fn observed_communities(attributes: &[PathAttribute]) -> &[u32] {
+    attributes
+        .iter()
+        .find_map(PathAttribute::communities)
+        .unwrap_or(&[])
+}
+
 fn observe_generation(
     progress: &mut GenerationProgress,
     expected_community: u32,
@@ -924,14 +935,7 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
                         if !parsed.announced.is_empty() {
                             // Borrow the communities out of the single parse;
                             // clone once only to store the last-seen sample.
-                            let communities: &[u32] = parsed
-                                .attributes
-                                .iter()
-                                .find_map(|attribute| match attribute {
-                                    PathAttribute::Communities(c) => Some(c.as_slice()),
-                                    _ => None,
-                                })
-                                .unwrap_or(&[]);
+                            let communities = observed_communities(&parsed.attributes);
                             *ob.last_comms.lock().unwrap() = communities.to_vec();
                             if communities.contains(&COMMUNITY_STABLE) {
                                 ob.stable_marker_seen_at_us.store(t_us, Ordering::Release);
@@ -2938,6 +2942,47 @@ mod tests {
         assert_eq!(
             progress.first_marker_base_at_us, None,
             "a new generation must not inherit first-output evidence"
+        );
+    }
+
+    #[test]
+    fn generation_progress_reads_partial_flagged_communities() {
+        // BIRD sets the RFC 4271 Partial bit on transit routes (flags 0xe0),
+        // so COMMUNITIES decodes to `CommunitiesPartial`. Both flavours must
+        // drive generation progress identically or the harness reports a
+        // false reload stall against a daemon that re-advertised correctly.
+        let announced = [base_prefix(7)];
+        let mut observed = Vec::new();
+
+        for attribute in [
+            PathAttribute::Communities(vec![COMMUNITY_GEN_B]),
+            PathAttribute::CommunitiesPartial(vec![COMMUNITY_GEN_B]),
+        ] {
+            let attributes = vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath { segments: vec![] }),
+                attribute,
+            ];
+            let communities = observed_communities(&attributes);
+            assert_eq!(communities, [COMMUNITY_GEN_B]);
+
+            let mut progress = GenerationProgress::default();
+            progress.reset(128, 1, 100, 27);
+            observe_generation(
+                &mut progress,
+                COMMUNITY_GEN_B,
+                communities,
+                announced.iter().copied(),
+                128,
+                20,
+            );
+            observed.push((progress.unique, progress.first_marker_base_at_us));
+        }
+
+        assert_eq!(observed[0], (1, Some(20)));
+        assert_eq!(
+            observed[0], observed[1],
+            "Partial-flagged COMMUNITIES must be observed like the bare variant"
         );
     }
 
