@@ -1735,6 +1735,12 @@ does not expose the status, because "no evidence" is not "no problem". A red
 verdict here never affects `/readyz`: missing operator policy is a
 configuration state to repair, not a daemon that cannot serve traffic.
 
+`rpki.invalid_route_policy` and `aspa.invalid_route_policy` are advisory compiled-policy
+disposition proofs. Green requires a complete, nonempty response whose aggregate and every
+scope are enforced; it does not claim readiness/currentness, traffic, intent, FIB state, or
+runtime enforcement. Missing or uncertain evidence is yellow, including `UNIMPLEMENTED`
+from an older daemon, and these warnings retain exit status 0.
+
 Doctor treats a present max-prefix restart countdown, including `0ms`, as an
 intentional yellow hold-down rather than a stuck-session failure; stale
 session evidence still takes precedence. An active outbound prefix-limit
