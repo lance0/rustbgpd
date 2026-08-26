@@ -7,11 +7,11 @@ gRPC transactional path runs the same canonical shape as a separate two-root
 receipt; its rows never enter the cross-daemon comparison. That transaction
 campaign is complete: the published receipt is
 [`docs/perf/irr-transactional-apply-2026-08.md`](../../../docs/perf/irr-transactional-apply-2026-08.md).
-The full cross-daemon comparison campaign (four sealed roots, A/B/B/A,
+The full cross-daemon comparison campaign (four fresh roots, A/B/B/A,
 plus the standalone grouped control) is also complete: the published
 receipt is
 [`docs/perf/irr-reload-comparison-2026-08.md`](../../../docs/perf/irr-reload-comparison-2026-08.md).
-The announcement-overlap sensitivity campaign (eight sealed roots, four
+The announcement-overlap sensitivity campaign (eight fresh roots, four
 per overlap point at `OVERLAP_FRACTION` 0.1 and 0.5) is complete as
 well: the published receipt is
 [`docs/perf/irr-reload-realistic-mix-2026-08.md`](../../../docs/perf/irr-reload-realistic-mix-2026-08.md).
@@ -160,9 +160,9 @@ after the final measured reload, with stub sessions still live, the harness
 dumps each observer's final-generation received view (base prefixes seen
 with the generation marker, BEFORE own-announcement exclusion) to
 `received-view.tsv` (`RELOADSTALL_RECEIVED_VIEW_FILE`), retained in each
-rustbgpd cell's sealed evidence. `verify-receipt.py received-view-delta`
+rustbgpd cell's retained evidence. `verify-receipt.py received-view-delta`
 (and the four-root `campaigns` verifier, per A/B repeat) compares the
-private and grouped cells' views over the same sealed scenario: grouped
+private and grouped cells' views over the same scenario: grouped
 deliveries must be a pointwise subset of per-client-best deliveries, every
 delta pair must be an overlapped prefix observed at one of its announcers,
 and the total must equal the manifest allocation exactly (one suppressed
@@ -201,7 +201,7 @@ python3 bench/scale/irrreload/verify-receipt.py campaigns \
   --output-dir /tmp/irrreload-ov50-verified \
   /tmp/irrreload-ov50-comparison-A /tmp/irrreload-ov50-grouped-A \
   /tmp/irrreload-ov50-grouped-B /tmp/irrreload-ov50-comparison-B
-# verification.json carries received_view_delta; standalone form:
+# The generated summary carries received_view_delta; standalone form:
 python3 bench/scale/irrreload/verify-receipt.py received-view-delta \
   --private-cell /tmp/irrreload-ov50-comparison-A/rustbgpd-sighup \
   --grouped-cell /tmp/irrreload-ov50-grouped-A/rustbgpd-sighup-grouped-control
@@ -322,29 +322,15 @@ only bound how long the harness waits before declaring a cell broken):
 any stub session down at reload validation, missing generation-marker
 evidence, any daemon UPDATE that fails to decode, a nonzero reload-command
 exit, daemon process-tree RSS > 100 GiB (cell aborted), or cell timeout
-(`CELL_TIMEOUT`). Artifact roots are immutable: a failed/interrupted cell,
-an inconsistent row set, or a different campaign fingerprint is never
-overwritten. Preserve it and choose a fresh `ARTIFACTS_DIR`; matching passed
-cells alone are resumable/skippable. Each passed cell seals its exact rows,
-RSS samples, daemon and harness logs, manifest, provenance, and scenario roster;
-resume revalidates that evidence and the root-row copy before skipping. A
-missing or malformed root seal aborts the whole invocation before another cell
-can append evidence.
+(`CELL_TIMEOUT`). `ARTIFACTS_DIR` must not exist when the runner starts. A
+failed or interrupted root is preserved for inspection; reruns always choose a
+fresh directory and never resume, repair, or overwrite prior evidence.
 
-Resume status is fingerprint-qualified. The fingerprint covers the exact Git
-commit and dirty-state content, runner/generator/sampler/transaction scripts,
-built daemon/CLI/renderer/harness binaries, Rust/Python/jq/Docker environment,
-selected cells, shape and timing inputs, and the local content IDs behind
-selected container image references. Each cell also retains `scenario.sha256`,
-a relative-path/content-hash roster of the manifest and exact daemon runtime
-inputs (not timestamped renderer receipts); its digest and the common dataset
-digest are bound into that cell's provenance and pass status. A pass from any
-other fingerprint or input digest cannot satisfy the new campaign. Root and
-per-cell `provenance.json` retain the
-fingerprint without hostnames, usernames, absolute paths, or other host-unique
-identifiers.
-Successful cells may delete their generated scenario only after retaining its
-generator `manifest.json` alongside that provenance.
+The root `provenance.json` is a compact context record: exact commit and tree,
+the clean-worktree result, selected workload knobs, container image IDs, and
+plain tool/platform versions. Every cell retains its generator `manifest.json`,
+raw rows, RSS samples, daemon and harness logs, process identity, and semantic
+summaries. The common canonical dataset digest remains explicit at the root.
 
 The full transaction cell retains only compact lifecycle evidence, never plan
 or runtime token contents and never the multi-MiB candidate or v3 raw snapshot.
@@ -372,10 +358,9 @@ proof binds the public empty history entries and on-disk history roster before
 and after every persist to the daemon's exact oversize warning (including a
 byte count above 10 MiB). The verifier requires nine such warnings: boot, four
 measured applies, abort apply/restore, and timeout apply/restore.
-Offline verification recomputes the canonical provenance fingerprint, requires
-the exact full-workload knobs and repeat tool/image identities, and re-parses
-`scenario.sha256` against the manifest's safe `runtime_files` roster. Any
-symlink in a retained receipt is invalid.
+Offline verification requires the exact clean commit/tree record, canonical
+full-workload knobs, matching repeat environments, and the semantic evidence
+for each reported claim. It does not claim artifact authenticity.
 
 The RSS sampler is a required instrument: early/nonzero sampler exit or an
 empty/malformed `rss.csv` fails the cell. The runner reaps the sampler after
@@ -409,23 +394,23 @@ manifest's overlapped-pair count (ADR-0126 Decision 3); the grouped control
 requires no `per_client_best` peers and an empty lane. The last accepted scrape
 must precede the harness's first wire-measurement trigger. The retained
 `ready`, `ack`, timestamps, config, and raw scrapes are all in the cell's
-checksum chain and are independently re-parsed by the four-root verifier.
+retained raw evidence and are independently re-parsed by the four-root verifier.
 
 **Cross-daemon run count and order**: four fresh artifact roots in fixed A/B/B/A order:
 comparison A, grouped-control A, grouped-control B, comparison B. Each cell
 gets a fresh daemon PID/start identity. This counterbalances host drift around
 the diagnostic control without putting the control in the competitor table.
 `verify-receipt.py campaigns` rejects reordered roots, reused process
-identities, source/dataset/shape mismatches, non-quiet cells, broken seals, or
+identities, source/dataset/shape mismatches, non-quiet cells, invalid semantic evidence, or
 grouped rows in `comparison.csv`; it writes grouped rows only to
 `grouped-control.csv`. The repeats are not statistically independent trials.
 
 **Transaction run count and order**: two fresh full-shape roots in strict A/B
 order. `verify-receipt.py transactions` requires the same clean commit,
-dataset, shape, scripts, binaries, and platform, non-overlapping roots, and
+dataset, shape, workload context, and platform, non-overlapping roots, and
 distinct daemon PID/start identities. It independently checks all four cycles,
 abort/timeout restoration, history-warning sequence, exact file roster,
-quiet-host evidence, seals, and the absence of retained token contents.
+quiet-host evidence and the absence of retained token contents.
 
 **Host-quiet preconditions** (every full measured mode enforces): clean `HEAD`
 exactly at `origin/main`, the canonical shape/seed, no `SKIP_PREFLIGHT`, a
@@ -434,8 +419,8 @@ lock. Before every cell, two retained 1-minute-load samples at least 30 seconds
 apart must both be below 2.0, ports 1790 and 9179 must be free, the artifact
 filesystem must have at least 40 GiB available, and `pswpin`/`pswpout` must not
 move between samples; cells retain their daemon PID/start identity.
-Successful roots carry `COMPLETED` plus an exact `SHA256SUMS` roster and become
-read-only. `SMOKE=1` skips the quiet gates because it is not a measurement.
+Successful roots receive `COMPLETED` only after every requested cell passes its
+semantic gates. `SMOKE=1` skips the quiet gates because it is not a measurement.
 
 ## Comparability protocol
 
