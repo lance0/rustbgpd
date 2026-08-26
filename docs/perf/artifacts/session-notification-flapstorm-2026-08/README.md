@@ -1,4 +1,4 @@
-# LAN-1162 session-notification flapstorm receipt
+# Session-notification flapstorm receipt
 
 This one-host, one-run receipt exercised 700 sessions and 400,400 prefixes
 across three rounds, closing and reconnecting 50 sessions per round. Initial
@@ -17,21 +17,28 @@ resolution performs synchronous `QueryState` work. The high-water value is a
 daemon-lifetime cumulative observation, not a per-round peak, queue capacity,
 latency or memory measurement, performance bound, or optimization claim.
 
-`receipt.json` pins source, binary, environment, workload, host, and raw-root
-provenance. `SHA256SUMS` seals the seven compact artifacts. The independent
-verifier derives the compact CSV files from the retained raw harness log and
-scans the raw daemon and harness logs before accepting the receipt.
+The campaign ran at the pre-merge measurement commit
+`cdc9966ffbca9a3f4902484e75c9bd703bdb1322` (tree
+`51e56d5b1b19ee52fe6312cd89d4bef336f64ca8`). That branch commit is not an
+ancestor of `main`; the reachable squash is
+`9fc3286dcea4c8f1a5d371a782931a416e30a4b6`. The measured harness, scenario
+generator, matrix runner, and lockfiles are byte-identical between those two
+commits.
 
-The retained raw root is `/tmp/lan1162-b2-20260825T1305Z`: 10 files totaling
-57,264,495 bytes, sealed by directory digest
-`fdf81db0f657838a83df899a85f4ff94c9689b09f9135a6781ffe5fb946d0885`.
-The exact campaign and verification commands are:
+The run was captured at `2026-08-25T13:10:21Z` on an AMD Ryzen Threadripper
+7970X 32-Core host running Linux 6.17.0-35-generic, rustc 1.98.0, and Cargo
+1.98.0. This equivalent reproduction command normalizes `ARTIFACTS_DIR` to a
+fresh generic path; the output-directory name is not measurement-relevant:
 
 ```sh
 N_PEERS=700 TOTAL_PREFIXES=400400 RELOADS=0 CONTROL_SECS=30 FLAPSTORM=50 \
-  ARTIFACTS_DIR=/tmp/lan1162-b2-20260825T1305Z \
+  ARTIFACTS_DIR=/tmp/session-notification-flapstorm-run \
   RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR=127.0.0.1:9179 \
   bash bench/scale/matrix/run-matrix.sh rustbgpd
-python3 bench/scale/reloadstall/verify_session_notification_receipt.py \
-  docs/perf/artifacts/lan-1162-session-notification-flapstorm
 ```
+
+`initial.csv` records exact initial convergence, `checkpoints.csv` records the
+ten drained notification-accounting boundaries, and `flapstorm.csv` records
+the three withdraw/reannounce rounds. `summary.json` preserves the
+publication-time scan of the raw daemon and harness logs; those raw logs are
+not retained. It also records campaign status, revision, and capture time.
