@@ -159,7 +159,8 @@ IPv4/IPv6 `Prefix` routes.
 |---|:---:|:---:|:---:|:---:|:---:|
 | TCP MD5 (RFC 2385) | Yes | Yes | Yes | Yes | Yes |
 | TCP-AO (RFC 5925) | Static + dynamic-prefix keyrings; observation-gated live rotation; deprecated/unselected-key deletion on SIGHUP | No | Yes | No | No |
-| GTSM / TTL Security | Yes | Yes | Yes | Yes | Yes |
+| GTSM / TTL Security | Strict 255 only[^gtsm-strict] | Yes | Yes | Yes | Yes |
+| eBGP multihop enablement | None needed[^multihop-rustbgpd] | Required[^multihop-frr] | Required[^multihop-bird] | Configurable[^multihop-gobgp] | Required[^multihop-openbgpd] |
 | RPKI origin validation | Yes | Yes | Yes | Yes | Yes |
 | ASPA path verification | Yes[^aspa] | No | Yes | No | Yes |
 | Private AS removal | Yes | Yes | Yes | Yes | Yes |
@@ -170,6 +171,59 @@ CVE-2026-49943, a stack-based buffer overflow in BIRD's AS-path filter
 matching reachable when RFC 8654 extended messages are enabled (affected
 through 2.19.0), is a recent example of the vulnerability class the
 memory-safe-language row refers to.
+
+[^gtsm-strict]: rustbgpd implements GTSM as strict RFC 5082 §3.2 — TTL /
+    Hop Limit exactly 255 in both directions, with no hop-count form — so it
+    cannot be combined with a multihop peer. The others document a
+    distance-aware variant: FRR
+    [`neighbor PEER ttl-security hops NUMBER`](https://docs.frrouting.org/en/latest/bgp.html#clicmd-neighbor-PEER-ttl-security-hops-NUMBER)
+    (documented as mutually exclusive with `ebgp-multihop`), BIRD
+    [3.3.1](https://bird.nic.cz/doc/bird-3.3.1.html) `ttl security`, where "if
+    both ttl security and multihop options are enabled, multihop option should
+    specify proper hop value to compute expected TTL", and the
+    [OpenBSD-current `bgpd.conf(5)` ttl-security documentation](https://man.openbsd.org/bgpd.conf#ttl-security),
+    where "for multihop peers, incoming packets are required to have a TTL of
+    256 minus multihop distance". GoBGP
+    [v4.8.0](https://github.com/osrg/gobgp/blob/v4.8.0/docs/sources/configuration.md#L166-L171)
+    exposes a configurable `ttl-min` but documents TTL security as mutually
+    exclusive with `neighbors.ebgp-multihop.config`.
+
+[^multihop-rustbgpd]: rustbgpd has no multihop knob because there is nothing
+    to enable: it never lowers the outbound TTL / Hop Limit on a BGP socket and
+    has no check refusing an eBGP peer for not being directly connected, so a
+    non-adjacent peer is dialed with the kernel default TTL. The same property
+    means it has no way to *bound* how far away a peer may be, so it does not
+    get the misconfiguration guard the other implementations' hop count
+    provides. This describes the mechanism, not an interoperability receipt.
+    See [CONFIGURATION.md](CONFIGURATION.md) and
+    [LIMITATIONS.md](LIMITATIONS.md).
+
+[^multihop-frr]: [FRR latest](https://docs.frrouting.org/en/latest/bgp.html#clicmd-neighbor-PEER-ebgp-multihop)
+    documents `neighbor PEER ebgp-multihop` and states that "when the neighbor
+    is not directly connected and this knob is not enabled, the session will
+    not establish".
+
+[^multihop-bird]: BIRD [3.3.1](https://bird.nic.cz/doc/bird-3.3.1.html)
+    documents `direct` — the neighbor address "must be from a directly
+    reachable IP range ... otherwise the BGP session wouldn't start" — as
+    "Default: enabled for eBGP", and `multihop [number]` as its alternative
+    for "a neighbor that isn't directly connected", where the "optional number
+    argument can be used to specify the number of hops (used for TTL)". This
+    claim is limited to that release line.
+
+[^multihop-gobgp]: GoBGP
+    [v4.8.0 configuration documentation](https://github.com/osrg/gobgp/blob/v4.8.0/docs/sources/configuration.md#L83-L85)
+    documents `[neighbors.ebgp-multihop.config]` with `enabled` and
+    `multihop-ttl`. The pinned document does not state what happens to a
+    non-adjacent peer when the section is omitted, so this cell records the
+    knob's existence rather than a requirement.
+
+[^multihop-openbgpd]: The
+    [OpenBSD-current `bgpd.conf(5)` multihop documentation](https://man.openbsd.org/bgpd.conf#multihop)
+    says neighbors not in the same AS as the local `bgpd(8)` "normally have to
+    be directly connected to the local machine", and that when this is not the
+    case the `multihop` statement "defines the maximum hops the neighbor may be
+    away".
 
 [^aspa]: rustbgpd ships RTR v2 ASPA input, role-aware upstream/downstream path
     verification selected by BGP Roles, best-path preference, policy matching
