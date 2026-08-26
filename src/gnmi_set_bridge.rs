@@ -461,6 +461,7 @@ fn empty_neighbor(address: IpAddr) -> Neighbor {
         tcp_ao: None,
         bfd: None,
         ttl_security: None,
+        ttl_security_hops: None,
         families: Vec::new(),
         required_families: Vec::new(),
         graceful_restart: None,

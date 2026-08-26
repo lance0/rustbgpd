@@ -895,7 +895,8 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
 | `tcp_ao`               | table or array | no | -- | Ordered TCP-AO keyring for static neighbors (RFC 5925; Linux; append a non-preferred successor, then select it in a later observation-gated SIGHUP generation) |
 | `bfd`                  | table    | no       | --      | Single-hop BFD attachment referencing a `[[bfd_profiles]]` entry (RFC 5880/5881/5882; static neighbors only, restart-required edits) |
-| `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only). Strict: inbound packets must arrive with TTL/Hop-Limit exactly 255 (`IP_MINTTL` / `IPV6_MINHOPCOUNT`, RFC 5082 §3.2) and outbound packets are sent with 255. Earlier releases accepted 254; a peer that depended on that leniency will not establish. Mutually exclusive with a multihop peer — see below |
+| `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only). Outbound packets use TTL/Hop-Limit 255. Without `ttl_security_hops`, inbound packets must arrive with exactly 255, preserving the historical one-hop policy |
+| `ttl_security_hops`    | non-zero u8 | no    | 1 when GTSM is enabled | Maximum expected peer distance for GTSM (1--255). Requires effective `ttl_security = true`; inbound packets below `256 - ttl_security_hops` are dropped by `IP_MINTTL` / `IPV6_MINHOPCOUNT`. Inherits from peer groups and may be overridden per neighbor |
 | `families`             | [string] | no       | (auto)  | Address families to negotiate (see below)        |
 | `required_families`    | [string] | no       | `[]`    | Families that must appear in the final negotiated intersection; must be a subset of effective `families` |
 | `graceful_restart`     | bool     | no       | true    | Enable Graceful Restart receiving speaker (RFC 4724) |
@@ -1151,7 +1152,7 @@ live on SIGHUP; a later SIGHUP can select that installed successor and
 observation-gate predecessor deprecation in the same immutable generation.
 Deleting an MKT remains restart-coordinated.
 
-### eBGP multihop and `ttl_security`
+### eBGP multihop and distance-aware `ttl_security`
 
 There is no `ebgp_multihop` key, because there is nothing to enable. rustbgpd
 never lowers the outbound TTL / Hop Limit on a BGP socket, and it has no check
@@ -1162,25 +1163,25 @@ connection carries the kernel default TTL like any other TCP connection. The
 same is true in the inbound direction: nothing inspects the arriving TTL unless
 `ttl_security` is set.
 
-The corollary is that rustbgpd has no way to *bound* how far away a peer may
-be. Elsewhere a multihop peer needs an explicit statement, and where that
-statement carries a hop count the count doubles as a misconfiguration guard: a
-mistyped neighbor address that happens to be a reachable host far away fails to
-establish instead of quietly coming up. rustbgpd gives that up by default.
-Treat the neighbor address itself as the control, and keep `local_address`
-pinned on multihop sessions so the source address is stable. The
-per-implementation comparison and its sourcing live in
-[COMPARISON.md](COMPARISON.md).
+Use GTSM when the distance should also be bounded. `ttl_security = true` alone
+preserves the strict adjacent-peer behavior: outbound TTL / Hop Limit is 255
+and inbound packets must arrive with 255. Add `ttl_security_hops = N` for a
+peer up to N hops away. The kernel then rejects inbound packets below `256 - N`
+while rustbgpd continues to send with 255:
 
-> **`ttl_security` makes a multihop session impossible.** GTSM (RFC 5082 §3.2)
-> is an exact-255 check in both directions: rustbgpd sends with TTL / Hop Limit
-> 255 and installs `IP_MINTTL` / `IPV6_MINHOPCOUNT` at 255, so any packet that
-> crossed a router — decremented to 254 or lower — is dropped by the kernel
-> before the handshake completes. A peer that is not directly connected cannot
-> satisfy that, so the session will never establish. The two features are
-> alternatives, not layers: use `ttl_security` on adjacent peers, and leave it
-> off (`false`, the default) on multihop ones. rustbgpd does not implement the
-> "255 minus hop count" variant that would let the two coexist.
+```toml
+[[neighbors]]
+address = "192.0.2.9"
+remote_asn = 64496
+ttl_security = true
+ttl_security_hops = 9
+```
+
+The hop value does not enable GTSM by itself; an explicit value with effective
+`ttl_security = false` is a configuration error. Pin the family's active-open
+source with `[global].listen_addresses` when a multihop session needs a stable
+local address. The per-implementation comparison and its sourcing live in
+[COMPARISON.md](COMPARISON.md).
 
 ### BFD (RFC 5880 / 5881 / 5882)
 
@@ -1414,6 +1415,8 @@ max_prefixes = 10000
 max_prefix_restart_seconds = 300
 md5_password = "s3cret"
 ttl_security = true
+# Optional for a non-adjacent peer; omission means one hop / exact 255.
+# ttl_security_hops = 9
 families = ["ipv4_unicast", "ipv6_unicast"]
 
 # IPv6 peer (defaults to dual-stack)
@@ -4357,6 +4360,7 @@ starting:
 | `llgr_stale_time` must be <= 16777215 (24-bit) | `llgr_stale_time exceeds maximum` |
 | `route_reflector_client` requires iBGP (local ASN == remote ASN) | `route_reflector_client requires iBGP` |
 | `local_ipv6_nexthop` must be a valid non-link-local, non-loopback, non-multicast IPv6 address | `invalid local_ipv6_nexthop` |
+| `ttl_security_hops` must be 1--255 and requires effective `ttl_security = true`; a peer-group value requires `ttl_security = true` on that same group | `ttl_security_hops` / `requires ... ttl_security = true` |
 | `ge` must be >= prefix length and <= AFI max (32 for IPv4, 128 for IPv6) | `invalid ge` |
 | `le` must be <= AFI max | `invalid le` |
 | `ge` must be <= `le` when both are set | `ge must be <= le` |
@@ -4372,6 +4376,7 @@ starting:
 | `connect_retry_secs` | 5 seconds (not configurable) |
 | gRPC listener | UDS at `<runtime_state_dir>/grpc.sock` with mode `0o600` |
 | `ttl_security` | `false` |
+| `ttl_security_hops` | `1` when `ttl_security = true`; otherwise unset |
 | `families` | `["ipv4_unicast"]` for IPv4 peers; `["ipv4_unicast", "ipv6_unicast"]` for IPv6 peers |
 | `graceful_restart` | `true` |
 | `gr_peer_restart_time_max` | 4095 seconds (full peer-advertised RFC 4724 range) |

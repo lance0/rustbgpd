@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::num::NonZeroU8;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -423,8 +424,9 @@ pub struct TransportConfig {
     pub md5_password: Option<TransportAuthSecret>,
     /// TCP-AO authentication key (RFC 5925).
     pub tcp_ao: Option<TcpAoKeyring>,
-    /// Enable GTSM / TTL security (RFC 5082).
-    pub ttl_security: bool,
+    /// Maximum GTSM peer distance in IP hops. `None` disables GTSM;
+    /// `Some(1)` requires an inbound TTL/Hop Limit of exactly 255.
+    pub ttl_security_hops: Option<NonZeroU8>,
     /// Explicit IPv6 next-hop for eBGP advertisements. Used when the TCP
     /// session is IPv4 but IPv6 routes need a valid next-hop in
     /// `MP_REACH_NLRI`. If `None`, the local IPv6 socket address is used
@@ -557,7 +559,7 @@ impl TransportConfig {
             peer_group: None,
             md5_password: None,
             tcp_ao: None,
-            ttl_security: false,
+            ttl_security_hops: None,
             local_ipv6_nexthop: None,
             gr_stale_routes_time: 360,
             gr_peer_restart_time_max: 4095,

@@ -221,7 +221,7 @@ pub(crate) fn build_peer_mgr_config(
         max_prefix_restart_seconds,
         md5_password: tc.md5_password.clone(),
         tcp_ao: tc.tcp_ao.clone(),
-        ttl_security: tc.ttl_security,
+        ttl_security_hops: tc.ttl_security_hops,
         families: tc.peer.families.clone(),
         required_families: tc.peer.required_families.clone(),
         graceful_restart: tc.peer.graceful_restart,
@@ -7943,7 +7943,7 @@ ttl_security = true
         assert!(
             ttl_security
                 .iter()
-                .any(|policy| policy.peer.to_string() == "2001:db8::2" && policy.enforce),
+                .any(|policy| policy.peer.to_string() == "2001:db8::2" && policy.hops.is_some()),
             "IPv6 ttl_security must appear in the reload listener inventory"
         );
     }
@@ -7998,7 +7998,7 @@ peer_group = "members"
         assert!(
             ttl_security
                 .iter()
-                .any(|policy| policy.enforce && policy.prefix_len == 24)
+                .any(|policy| policy.hops.is_some() && policy.prefix_len == 24)
         );
     }
 
@@ -9390,7 +9390,7 @@ remote_asn = 65002
                     max_prefix_restart_seconds: None,
                     md5_password: None,
                     tcp_ao: None,
-                    ttl_security: false,
+                    ttl_security_hops: None,
                     families: vec![(Afi::Ipv4, Safi::Unicast)],
                     required_families: Vec::new(),
                     graceful_restart: true,
@@ -9502,7 +9502,7 @@ remote_asn = 65002
                     max_prefix_restart_seconds: None,
                     md5_password: None,
                     tcp_ao: None,
-                    ttl_security: false,
+                    ttl_security_hops: None,
                     families: vec![(Afi::Ipv4, Safi::Unicast)],
                     required_families: Vec::new(),
                     graceful_restart: true,

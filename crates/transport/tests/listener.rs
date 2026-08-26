@@ -175,7 +175,7 @@ mod inbound_auth {
             };
             let socket =
                 socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
-            set_gtsm(&socket, server)?;
+            set_gtsm(&socket, server, std::num::NonZeroU8::MIN)?;
             if let Some(source) = source {
                 socket.bind(&SocketAddr::new(source, 0).into())?;
             }
@@ -322,7 +322,7 @@ mod inbound_auth {
                 owner: TcpAoListenerOwnerKind::Static,
                 peer: "127.0.0.1".parse().unwrap(),
                 prefix_len: 32,
-                enforce: true,
+                hops: Some(std::num::NonZeroU8::MIN),
             }],
             ..ListenerSocketOptions::default()
         };
@@ -342,6 +342,35 @@ mod inbound_auth {
         expect_data_flows(compliant, accepted).await;
     }
 
+    /// A nine-hop policy accepts TTL 247 (= 256 - 9) and rejects 246. This
+    /// exercises the kernel option on the accepted socket rather than only
+    /// the pure threshold calculation.
+    #[tokio::test]
+    async fn ttl_security_hop_distance_enforces_boundary() {
+        let options = ListenerSocketOptions {
+            ttl_security: vec![TtlSecurityListenerPolicy {
+                owner: TcpAoListenerOwnerKind::Static,
+                peer: "127.0.0.1".parse().unwrap(),
+                prefix_len: 32,
+                hops: std::num::NonZeroU8::new(9),
+            }],
+            ..ListenerSocketOptions::default()
+        };
+        let (addr, mut accept_rx) = bind_listener(options).await;
+
+        let below = spawn_connect(addr, None, None, Some(246))
+            .await
+            .expect("TCP handshake below the configured GTSM boundary");
+        let accepted = expect_accept(&mut accept_rx).await;
+        expect_data_blocked(below, accepted).await;
+
+        let boundary = spawn_connect(addr, None, None, Some(247))
+            .await
+            .expect("TCP handshake at the configured GTSM boundary");
+        let accepted = expect_accept(&mut accept_rx).await;
+        expect_data_flows(boundary, accepted).await;
+    }
+
     /// GTSM for a dynamic range, with a static exception inside it: the
     /// range member is enforced, the static neighbor resolves to its own
     /// non-enforcing policy.
@@ -353,13 +382,13 @@ mod inbound_auth {
                     owner: TcpAoListenerOwnerKind::Dynamic,
                     peer: "127.0.0.0".parse().unwrap(),
                     prefix_len: 8,
-                    enforce: true,
+                    hops: Some(std::num::NonZeroU8::MIN),
                 },
                 TtlSecurityListenerPolicy {
                     owner: TcpAoListenerOwnerKind::Static,
                     peer: "127.0.0.1".parse().unwrap(),
                     prefix_len: 32,
-                    enforce: false,
+                    hops: None,
                 },
             ],
             ..ListenerSocketOptions::default()
@@ -468,7 +497,7 @@ mod inbound_auth {
                     owner: TcpAoListenerOwnerKind::Static,
                     peer: "127.0.0.1".parse().unwrap(),
                     prefix_len: 32,
-                    enforce: true,
+                    hops: Some(std::num::NonZeroU8::MIN),
                 }],
                 || {},
             )
@@ -539,7 +568,7 @@ mod inbound_auth {
                 owner: TcpAoListenerOwnerKind::Static,
                 peer: "::1".parse().unwrap(),
                 prefix_len: 128,
-                enforce: true,
+                hops: Some(std::num::NonZeroU8::MIN),
             }],
             ..ListenerSocketOptions::default()
         };

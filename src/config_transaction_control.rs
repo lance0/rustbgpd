@@ -3477,17 +3477,25 @@ async fn rollback_peer_reshape_and_snapshot(
 /// config: effective prefix → (MD5 password, GTSM) for every range whose
 /// peer group carries either. The listener installs these at startup/SIGHUP
 /// only, so runtime commits must leave this set unchanged.
+type DynamicRangeListenerAuth = (
+    (std::net::IpAddr, u8),
+    Option<String>,
+    Option<std::num::NonZeroU8>,
+);
+
 fn dynamic_range_listener_auth_inventory(
     config: &Config,
-) -> std::collections::BTreeSet<((std::net::IpAddr, u8), Option<String>, bool)> {
+) -> std::collections::BTreeSet<DynamicRangeListenerAuth> {
     config
         .dynamic_neighbors
         .iter()
         .filter_map(|range| {
             let key = crate::config::effective_prefix_str(&range.prefix)?;
             let group = config.peer_groups.get(&range.peer_group)?;
-            let gtsm = group.ttl_security == Some(true);
-            (group.md5_password.is_some() || gtsm).then(|| (key, group.md5_password.clone(), gtsm))
+            let gtsm_hops = (group.ttl_security == Some(true))
+                .then(|| group.ttl_security_hops.unwrap_or(std::num::NonZeroU8::MIN));
+            (group.md5_password.is_some() || gtsm_hops.is_some())
+                .then(|| (key, group.md5_password.clone(), gtsm_hops))
         })
         .collect()
 }
@@ -3534,7 +3542,7 @@ fn dynamic_bounce_listener_auth_error(
 fn runtime_added_neighbor_inbound_auth_error(
     config: &PeerManagerNeighborConfig,
 ) -> Option<ConfigTransactionApplyError> {
-    (config.md5_password.is_some() || config.ttl_security).then(|| {
+    (config.md5_password.is_some() || config.ttl_security_hops.is_some()).then(|| {
         peer_lifecycle_error_to_apply_error(PeerLifecycleError::RestartRequired(format!(
             "added neighbor {} resolves md5_password or ttl_security; inbound listener \
              enforcement is updated only by startup or SIGHUP reload — add this \

@@ -236,7 +236,8 @@ Mitigations, in preference order:
 ## TCP MD5 and GTSM
 
 Per-neighbor TCP MD5 authentication (RFC 2385) and GTSM / TTL security
-(RFC 5082) are supported on Linux via `md5_password` and `ttl_security`.
+(RFC 5082) are supported on Linux via `md5_password`, `ttl_security`, and the
+optional distance bound `ttl_security_hops`.
 These protect BGP transport sessions, not the gRPC management surface.
 After MD5 material crosses the protobuf or parsed-configuration boundary,
 internal API, peer-manager, and transport owners use a redacting wrapper whose

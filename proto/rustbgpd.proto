@@ -1133,6 +1133,10 @@ message PeerGroupDefinition {
   // set has_md5_password instead so clients can preserve or display presence.
   optional string md5_password = 3;
   optional bool ttl_security = 4;
+  // Maximum expected distance in hops for RFC 5082 GTSM. Valid range
+  // 1..255. Requires ttl_security = true; omission preserves the historical
+  // one-hop policy (inbound TTL/Hop-Limit exactly 255).
+  optional uint32 ttl_security_hops = 30;
   repeated string families = 5;
   optional bool graceful_restart = 6;
   optional uint32 gr_restart_time = 7;

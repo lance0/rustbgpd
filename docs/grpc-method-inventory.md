@@ -110,7 +110,7 @@ shape itself does not raise the tier.
 | RPC | Tier | Notes |
 |-----|------|-------|
 | `AddNeighbor` | `mutating` | Reversible per-peer. Runtime neighbor creation does not currently accept TCP MD5 or TCP-AO key material over gRPC. |
-| `DeleteNeighbor` | `mutating` | Single-peer scope. Deleting a neighbor that resolves `md5_password` or `ttl_security` is rejected `FAILED_PRECONDITION`, matching TCP-AO: the inbound listener key/TTL inventory is updated only by startup or SIGHUP reload. |
+| `DeleteNeighbor` | `mutating` | Single-peer scope. Deleting a neighbor that resolves `md5_password` or a `ttl_security` policy (including `ttl_security_hops`) is rejected `FAILED_PRECONDITION`, matching TCP-AO: the inbound listener key/TTL inventory is updated only by startup or SIGHUP reload. |
 | `ListNeighbors` | `sensitive_read` | Returns full topology: addresses, ASNs, families, peer-group memberships, route-server flags, counters. No credentials in response. |
 | `GetNeighborState` | `sensitive_read` | Single-peer detail; same shape as `ListNeighbors` element. |
 | `EnableNeighbor` | `mutating` | Single-peer. |
@@ -119,7 +119,7 @@ shape itself does not raise the tier.
 | `RefreshOutbound` | `mutating` | Re-emits one peer's current exportable outbound inventory across its negotiated families. The reply confirms scheduling, not writer drain or remote receipt; full-table use is an O(table) burst and should be serialized. |
 | `ListDynamicNeighbors` | `sensitive_read` | Topology disclosure for the dynamic-prefix accepted peers. |
 | `AddDynamicNeighbor` | `mutating` | Adds an accept-prefix range. Wider than `AddNeighbor` (multi-peer effective), but still per-prefix scope. |
-| `DeleteDynamicNeighbor` | `mutating` | Removes a prefix range; stops future accepts only — established dynamic peers keep running and drain when they next return to Idle. Deleting a range whose peer group carries `md5_password` or `ttl_security` is rejected `FAILED_PRECONDITION`, matching TCP-AO: the inbound listener key/TTL inventory is updated only by startup or SIGHUP reload. |
+| `DeleteDynamicNeighbor` | `mutating` | Removes a prefix range; stops future accepts only — established dynamic peers keep running and drain when they next return to Idle. Deleting a range whose peer group carries `md5_password` or a `ttl_security` policy (including `ttl_security_hops`) is rejected `FAILED_PRECONDITION`, matching TCP-AO: the inbound listener key/TTL inventory is updated only by startup or SIGHUP reload. |
 | `SetGracefulShutdown` | `operator_only` | Network-wide when `address` is empty; listed here because the proto puts it in `NeighborService`. |
 
 ### PolicyService (23 RPCs)
@@ -156,7 +156,7 @@ shape itself does not raise the tier.
 |-----|------|-------|
 | `ListPeerGroups` | `sensitive_read` | Exposes group templates including inherited policy chain names; `md5_password` is redacted from read responses and represented by `has_md5_password`. |
 | `GetPeerGroup` | `sensitive_read` | Single-group; `md5_password` is redacted from read responses and represented by `has_md5_password`. |
-| `SetPeerGroup` | `operator_only` | Edits propagate to every neighbor inheriting the group — blast radius is N peers, not one. `md5_password` may be set when creating a group, but changing `md5_password` or `ttl_security` on an existing group is rejected `FAILED_PRECONDITION`: the inbound listener key/TTL inventory is updated only by startup or SIGHUP reload. |
+| `SetPeerGroup` | `operator_only` | Edits propagate to every neighbor inheriting the group — blast radius is N peers, not one. `md5_password` may be set when creating a group, but changing `md5_password`, `ttl_security`, or `ttl_security_hops` on an existing group is rejected `FAILED_PRECONDITION`: the inbound listener key/TTL inventory is updated only by startup or SIGHUP reload. |
 | `DeletePeerGroup` | `operator_only` | Same propagation; will fail if any neighbor still references the group. |
 | `SetNeighborPeerGroup` | `mutating` | Single-neighbor reassignment. |
 | `ClearNeighborPeerGroup` | `mutating` | Single-neighbor. |

@@ -457,7 +457,7 @@ impl PeerManager {
             max_prefix_restart_seconds: managed.max_prefix_restart_seconds,
             md5_password: tc.md5_password.clone(),
             tcp_ao: tc.tcp_ao.clone(),
-            ttl_security: tc.ttl_security,
+            ttl_security_hops: tc.ttl_security_hops,
             families: tc.peer.families.clone(),
             required_families: tc.peer.required_families.clone(),
             graceful_restart: tc.peer.graceful_restart,
@@ -544,7 +544,7 @@ impl PeerManager {
         // Inbound MD5/GTSM enforcement lives on the BGP listener, which only
         // startup and SIGHUP reload can update — a runtime-created neighbor
         // resolving to either would have an unprotected inbound half.
-        if config.md5_password.is_some() || config.ttl_security {
+        if config.md5_password.is_some() || config.ttl_security_hops.is_some() {
             return Err(PeerLifecycleError::RestartRequired(format!(
                 "peer {peer} resolves md5_password or ttl_security; inbound listener \
                  enforcement is updated only by startup or SIGHUP reload — add this neighbor \
@@ -804,7 +804,8 @@ impl PeerManager {
         sync_config_snapshot: bool,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         if self.peers.get(&peer).is_some_and(|managed| {
-            managed.transport_config.md5_password.is_some() || managed.transport_config.ttl_security
+            managed.transport_config.md5_password.is_some()
+                || managed.transport_config.ttl_security_hops.is_some()
         }) {
             return Err(PeerLifecycleError::RestartRequired(format!(
                 "peer {peer} resolves md5_password or ttl_security; inbound listener \
@@ -849,7 +850,7 @@ impl PeerManager {
         let peer = PeerKey::new(config.address, config.interface.clone());
         if let Some(managed) = self.peers.get(&peer)
             && (managed.transport_config.md5_password != config.md5_password
-                || managed.transport_config.ttl_security != config.ttl_security)
+                || managed.transport_config.ttl_security_hops != config.ttl_security_hops)
         {
             return Err(PeerLifecycleError::RestartRequired(format!(
                 "peer {peer} changes md5_password or ttl_security; inbound listener \
@@ -1224,7 +1225,7 @@ impl PeerManager {
             // listener enforcing the old inventory (stale password accepted
             // inbound, new password rejected).
             if managed.transport_config.md5_password != target.md5_password
-                || managed.transport_config.ttl_security != target.ttl_security
+                || managed.transport_config.ttl_security_hops != target.ttl_security_hops
             {
                 return PeerReshapeSnapshotOutcome::RejectedNoEffect(
                     PeerLifecycleError::RestartRequired(format!(

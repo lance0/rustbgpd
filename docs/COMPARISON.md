@@ -159,7 +159,7 @@ IPv4/IPv6 `Prefix` routes.
 |---|:---:|:---:|:---:|:---:|:---:|
 | TCP MD5 (RFC 2385) | Yes | Yes | Yes | Yes | Yes |
 | TCP-AO (RFC 5925) | Static + dynamic-prefix keyrings; observation-gated live rotation; deprecated/unselected-key deletion on SIGHUP | No | Yes | No | No |
-| GTSM / TTL Security | Strict 255 only[^gtsm-strict] | Yes | Yes | Yes | Yes |
+| GTSM / TTL Security | Configurable hops[^gtsm-distance] | Yes | Yes | Yes | Yes |
 | eBGP multihop enablement | None needed[^multihop-rustbgpd] | Required[^multihop-frr] | Required[^multihop-bird] | Configurable[^multihop-gobgp] | Required[^multihop-openbgpd] |
 | RPKI origin validation | Yes | Yes | Yes | Yes | Yes |
 | ASPA path verification | Yes[^aspa] | No | Yes | No | Yes |
@@ -172,10 +172,10 @@ matching reachable when RFC 8654 extended messages are enabled (affected
 through 2.19.0), is a recent example of the vulnerability class the
 memory-safe-language row refers to.
 
-[^gtsm-strict]: rustbgpd implements GTSM as strict RFC 5082 §3.2 — TTL /
-    Hop Limit exactly 255 in both directions, with no hop-count form — so it
-    cannot be combined with a multihop peer. The others document a
-    distance-aware variant: FRR
+[^gtsm-distance]: rustbgpd sends with TTL / Hop Limit 255 and accepts an
+    optional `ttl_security_hops` value whose inbound floor is `256 - hops`;
+    omission preserves the exact-255 one-hop policy. The other implementations
+    document equivalent distance-aware forms: FRR
     [`neighbor PEER ttl-security hops NUMBER`](https://docs.frrouting.org/en/latest/bgp.html#clicmd-neighbor-PEER-ttl-security-hops-NUMBER)
     (documented as mutually exclusive with `ebgp-multihop`), BIRD
     [3.3.1](https://bird.nic.cz/doc/bird-3.3.1.html) `ttl security`, where "if
@@ -191,10 +191,10 @@ memory-safe-language row refers to.
 [^multihop-rustbgpd]: rustbgpd has no multihop knob because there is nothing
     to enable: it never lowers the outbound TTL / Hop Limit on a BGP socket and
     has no check refusing an eBGP peer for not being directly connected, so a
-    non-adjacent peer is dialed with the kernel default TTL. The same property
-    means it has no way to *bound* how far away a peer may be, so it does not
-    get the misconfiguration guard the other implementations' hop count
-    provides. This describes the mechanism, not an interoperability receipt.
+    non-adjacent peer is dialed with the kernel default TTL. That default path
+    has no distance guard; enable `ttl_security` with `ttl_security_hops` when
+    the peer's maximum distance should be bounded. This describes the
+    mechanism, not an interoperability receipt.
     See [CONFIGURATION.md](CONFIGURATION.md) and
     [LIMITATIONS.md](LIMITATIONS.md).
 

@@ -992,9 +992,9 @@ where
     // and cannot reach the connect operation or fall back to plaintext.
     let tcp_ao_receipt = install_active_tcp_ao_with(&socket, config, peer_label, install_key)?;
 
-    if config.ttl_security {
-        crate::socket_opts::set_gtsm(&socket, config.remote_addr)?;
-        debug!(peer = %peer_label, "GTSM / TTL security configured");
+    if let Some(hops) = config.ttl_security_hops {
+        crate::socket_opts::set_gtsm(&socket, config.remote_addr, hops)?;
+        debug!(peer = %peer_label, hops = hops.get(), "GTSM / TTL security configured");
     }
 
     socket.set_nonblocking(true)?;

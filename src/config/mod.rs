@@ -1566,7 +1566,7 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
             ConfigFieldImpact::SessionReset,
             "session reset: OPEN renegotiation",
         ),
-        "md5_password" | "ttl_security" | "send_hold_time" => (
+        "md5_password" | "ttl_security" | "ttl_security_hops" | "send_hold_time" => (
             ConfigFieldImpact::SessionReset,
             "session reset: TCP re-establish",
         ),
@@ -1715,6 +1715,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(max_prefixes_out_ipv6);
     cmp_field!(max_prefix_restart_seconds);
     cmp_field!(ttl_security);
+    cmp_field!(ttl_security_hops);
     cmp_field!(families);
     cmp_field!(required_families);
     cmp_field!(graceful_restart);
@@ -1845,6 +1846,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.max_prefix_restart_seconds == new.max_prefix_restart_seconds
         && old.md5_password == new.md5_password
         && old.ttl_security == new.ttl_security
+        && old.ttl_security_hops == new.ttl_security_hops
         && old.families == new.families
         && old.required_families == new.required_families
         && old.graceful_restart == new.graceful_restart
@@ -2677,12 +2679,17 @@ impl Config {
                     .or_else(|| group.and_then(|g| g.llgr_stale_time))
                     .unwrap_or(0),
             );
-            neighbor.ttl_security = Some(
+            let ttl_security = neighbor
+                .ttl_security
+                .or_else(|| group.and_then(|g| g.ttl_security))
+                .unwrap_or(false);
+            neighbor.ttl_security = Some(ttl_security);
+            neighbor.ttl_security_hops = ttl_security.then(|| {
                 neighbor
-                    .ttl_security
-                    .or_else(|| group.and_then(|g| g.ttl_security))
-                    .unwrap_or(false),
-            );
+                    .ttl_security_hops
+                    .or_else(|| group.and_then(|g| g.ttl_security_hops))
+                    .unwrap_or(std::num::NonZeroU8::MIN)
+            });
             neighbor.max_prefixes = neighbor
                 .max_prefixes
                 .or_else(|| group.and_then(|g| g.max_prefixes));
@@ -4864,6 +4871,7 @@ pub fn describe_peer_group_changes(
     cmp_field!(max_prefixes_out_ipv6);
     cmp_field!(max_prefix_restart_seconds);
     cmp_field!(ttl_security);
+    cmp_field!(ttl_security_hops);
     cmp_field!(families);
     cmp_field!(required_families);
     cmp_field!(graceful_restart);

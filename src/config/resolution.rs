@@ -780,10 +780,16 @@ impl Config {
                     .collect(),
             )
         });
-        transport.ttl_security = neighbor
+        let ttl_security = neighbor
             .ttl_security
             .or_else(|| group.and_then(|g| g.ttl_security))
             .unwrap_or(false);
+        transport.ttl_security_hops = ttl_security.then(|| {
+            neighbor
+                .ttl_security_hops
+                .or_else(|| group.and_then(|g| g.ttl_security_hops))
+                .unwrap_or(std::num::NonZeroU8::MIN)
+        });
         transport.local_ipv6_nexthop = neighbor
             .local_ipv6_nexthop
             .as_ref()
@@ -954,6 +960,7 @@ impl Config {
             tcp_ao: None,
             bfd: None,
             ttl_security: None,
+            ttl_security_hops: None,
             families: Vec::new(),
             required_families: Vec::new(),
             graceful_restart: None,

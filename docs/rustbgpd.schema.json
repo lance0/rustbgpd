@@ -2189,6 +2189,16 @@
             "boolean",
             "null"
           ]
+        },
+        "ttl_security_hops": {
+          "description": "Maximum GTSM peer distance in IP hops. Requires effective\n`ttl_security = true`; omitted preserves one-hop/exact-255\nenforcement.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 1
         }
       },
       "additionalProperties": false,
@@ -2606,6 +2616,16 @@
             "boolean",
             "null"
           ]
+        },
+        "ttl_security_hops": {
+          "description": "Maximum GTSM peer distance inherited by group members.\nRequires `ttl_security = true` on this peer group.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 1
         }
       },
       "additionalProperties": false

@@ -45,6 +45,8 @@ struct JsonPeerGroupDetail {
     has_md5_password: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     ttl_security: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl_security_hops: Option<u32>,
     families: Vec<String>,
     required_families: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,6 +96,7 @@ fn json_peer_group_detail(
         max_prefix_restart_seconds: def.max_prefix_restart_seconds,
         has_md5_password: def.has_md5_password.unwrap_or(false),
         ttl_security: def.ttl_security,
+        ttl_security_hops: def.ttl_security_hops,
         families: def.families.clone(),
         required_families: def.required_families.clone(),
         graceful_restart: def.graceful_restart,
@@ -197,6 +200,9 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
         }
         if let Some(t) = def.ttl_security {
             println!("TTL Security:          {t}");
+        }
+        if let Some(hops) = def.ttl_security_hops {
+            println!("TTL Security Hops:     {hops}");
         }
         if !def.families.is_empty() {
             println!("Families:              {}", def.families.join(", "));
@@ -393,6 +399,19 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(value["gr_peer_restart_time_max"], 300);
+    }
+
+    #[test]
+    fn detail_json_preserves_ttl_security_hops() {
+        let definition = crate::proto::PeerGroupDefinition {
+            ttl_security: Some(true),
+            ttl_security_hops: Some(9),
+            ..Default::default()
+        };
+        let value =
+            serde_json::to_value(json_peer_group_detail("multihop".to_string(), &definition))
+                .unwrap();
+        assert_eq!(value["ttl_security_hops"], 9);
     }
 
     #[test]

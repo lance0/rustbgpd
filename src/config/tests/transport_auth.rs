@@ -171,7 +171,76 @@ ttl_security = true
             .map(std::convert::AsRef::as_ref),
         Some("secret")
     );
-    assert!(peers[0].0.ttl_security);
+    assert_eq!(
+        peers[0].0.ttl_security_hops,
+        std::num::NonZeroU8::new(1),
+        "the legacy boolean remains an exact-255 one-hop policy"
+    );
+}
+
+#[test]
+fn ttl_security_hops_inherit_override_and_require_enablement() {
+    let inherited = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.multihop]
+ttl_security = true
+ttl_security_hops = 9
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "multihop"
+"#;
+    let config = parse(inherited).unwrap();
+    assert_eq!(
+        config.to_peer_configs().unwrap()[0].0.ttl_security_hops,
+        std::num::NonZeroU8::new(9)
+    );
+
+    let overridden = inherited.replace(
+        "peer_group = \"multihop\"",
+        "peer_group = \"multihop\"\nttl_security_hops = 3",
+    );
+    assert_eq!(
+        parse(&overridden).unwrap().to_peer_configs().unwrap()[0]
+            .0
+            .ttl_security_hops,
+        std::num::NonZeroU8::new(3)
+    );
+
+    let disabled_neighbor = overridden.replace(
+        "ttl_security_hops = 3",
+        "ttl_security = false\nttl_security_hops = 3",
+    );
+    assert!(parse(&disabled_neighbor).is_err());
+
+    let inherited_disabled = inherited.replace(
+        "peer_group = \"multihop\"",
+        "peer_group = \"multihop\"\nttl_security = false",
+    );
+    let config = parse(&inherited_disabled).unwrap();
+    assert_eq!(
+        config.to_peer_configs().unwrap()[0].0.ttl_security_hops,
+        None
+    );
+    assert_eq!(
+        config.effective_redacted().neighbors[0].ttl_security_hops,
+        None
+    );
+
+    let disabled_group = inherited.replace("ttl_security = true", "ttl_security = false");
+    assert!(parse(&disabled_group).is_err());
+
+    let zero = inherited.replace("ttl_security_hops = 9", "ttl_security_hops = 0");
+    assert!(parse(&zero).is_err());
 }
 
 #[test]

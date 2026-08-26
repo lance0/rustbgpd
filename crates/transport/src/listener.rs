@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroU8;
 use std::sync::Arc;
 
 use crate::config::{
@@ -142,7 +143,7 @@ impl std::fmt::Debug for Md5ListenerKey {
 /// GTSM (RFC 5082) enforcement selector for inbound accepts.
 ///
 /// The listener carries one entry per configured static neighbor and dynamic
-/// range — including `enforce: false` entries — so a static neighbor without
+/// range — including `hops: None` entries — so a static neighbor without
 /// `ttl_security` inside an enforcing dynamic range resolves to its own
 /// policy: exact static match wins, then longest dynamic prefix match.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,8 +154,8 @@ pub struct TtlSecurityListenerPolicy {
     pub peer: IpAddr,
     /// Prefix length for the remote network.
     pub prefix_len: u8,
-    /// Whether matched inbound connections require TTL/Hop-Limit 255.
-    pub enforce: bool,
+    /// Maximum peer distance in IP hops. `None` disables GTSM for this match.
+    pub hops: Option<NonZeroU8>,
 }
 
 /// Socket options installed before the BGP listener enters `listen(2)`.
@@ -750,7 +751,7 @@ impl TcpAoListenerKeyIndex {
 /// Resolve whether GTSM is enforced for one inbound peer address, matching
 /// accept-time neighbor resolution: an exact static selector wins, otherwise
 /// the longest covering dynamic selector, otherwise no enforcement.
-fn resolve_ttl_security(policies: &[TtlSecurityListenerPolicy], addr: IpAddr) -> bool {
+fn resolve_ttl_security(policies: &[TtlSecurityListenerPolicy], addr: IpAddr) -> Option<NonZeroU8> {
     let covers = |policy: &TtlSecurityListenerPolicy| match (policy.peer, addr) {
         (IpAddr::V4(network), IpAddr::V4(addr)) if policy.prefix_len <= 32 => {
             mask_v4(network.into(), policy.prefix_len) == mask_v4(addr.into(), policy.prefix_len)
@@ -772,7 +773,7 @@ fn resolve_ttl_security(policies: &[TtlSecurityListenerPolicy], addr: IpAddr) ->
         .max_by_key(|policy| policy.prefix_len);
     static_exact
         .or(dynamic_longest)
-        .is_some_and(|policy| policy.enforce)
+        .and_then(|policy| policy.hops)
 }
 
 fn mask_v4(addr: u32, prefix_len: u8) -> u32 {
@@ -1030,10 +1031,11 @@ impl BgpListener {
                         // between the handshake and this setsockopt are not
                         // re-filtered, but every later segment (including any
                         // KEEPALIVE required to reach Established) is.
-                        if resolve_ttl_security(&self.ttl_security, peer_ip)
+                        if let Some(hops) = resolve_ttl_security(&self.ttl_security, peer_ip)
                             && let Err(err) = crate::socket_opts::set_gtsm(
                                 &socket2::SockRef::from(&stream),
                                 peer_addr,
+                                hops,
                             )
                         {
                             warn!(peer = %peer_ip, error = %err, "rejecting inbound connection: GTSM TTL policy could not be installed");
@@ -2540,7 +2542,7 @@ fn log_bound_family(
         ttl_security_selectors = options
             .ttl_security
             .iter()
-            .filter(|policy| policy.enforce && policy.peer.is_ipv4() == is_v4)
+            .filter(|policy| policy.hops.is_some() && policy.peer.is_ipv4() == is_v4)
             .count(),
         "BGP listener bound"
     );
@@ -2713,7 +2715,7 @@ fn enable_listener_gtsm_outbound(
 fn listener_gtsm_outbound_required(is_v4: bool, policies: &[TtlSecurityListenerPolicy]) -> bool {
     policies
         .iter()
-        .any(|policy| policy.enforce && policy.peer.is_ipv4() == is_v4)
+        .any(|policy| policy.hops.is_some() && policy.peer.is_ipv4() == is_v4)
 }
 
 fn validate_listener_tcp_ao_capacity(options: &ListenerSocketOptions) -> std::io::Result<()> {
@@ -2904,13 +2906,13 @@ mod tests {
                 owner: TcpAoListenerOwnerKind::Static,
                 peer: "192.0.2.1".parse().unwrap(),
                 prefix_len: 32,
-                enforce: false,
+                hops: None,
             },
             TtlSecurityListenerPolicy {
                 owner: TcpAoListenerOwnerKind::Dynamic,
                 peer: "2001:db8::".parse().unwrap(),
                 prefix_len: 32,
-                enforce: true,
+                hops: Some(std::num::NonZeroU8::MIN),
             },
         ];
 
@@ -2953,7 +2955,7 @@ mod tests {
                     owner: TcpAoListenerOwnerKind::Static,
                     peer: "::1".parse().unwrap(),
                     prefix_len: 128,
-                    enforce: true,
+                    hops: Some(std::num::NonZeroU8::MIN),
                 }],
             )
             .expect_err("IPv6 hop-limit option on an IPv4 test socket must fail");
