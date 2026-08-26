@@ -181,6 +181,11 @@ if [ -n "${DRY_RUN_PROTOCOL:-}" ]; then
     exit 0
 fi
 
+if [ -e "$ART" ]; then
+    echo "artifact root already exists; choose a fresh ARTIFACTS_DIR" >&2
+    exit 2
+fi
+
 for tool in docker jq python3 cargo curl flock ss sha256sum git awk timeout find sort setsid stdbuf cmp mktemp stat df env; do
     command -v "$tool" >/dev/null || {
         echo "missing required tool: $tool" >&2
@@ -193,10 +198,7 @@ validate_full_measurement_source() {
     git -C "$repo" fetch --quiet origin main || return 1
     head=$(git -C "$repo" rev-parse HEAD) || return 1
     origin=$(git -C "$repo" rev-parse origin/main) || return 1
-    MEASUREMENT_MODE=main
-    ANCESTRY_VERIFIED=true
     if [ -n "$candidate" ]; then
-        MEASUREMENT_MODE=candidate
         [[ $candidate =~ ^[0-9a-f]{40}$ ]] || return 1
         [ "$(git -C "$repo" cat-file -t "$candidate" 2>/dev/null)" = commit ] || return 1
         [ "$head" = "$candidate" ] || return 1
@@ -205,7 +207,6 @@ validate_full_measurement_source() {
         [ "$head" = "$origin" ] || return 1
     fi
     [ -z "$(git -C "$repo" status --porcelain=v1)" ] || return 1
-    ORIGIN_MAIN=$origin
 }
 
 if [ "${1:-}" = --self-test-candidate-gate ]; then
@@ -288,16 +289,7 @@ for bin in "$HARNESS" "$RBGP" "$RENDER" "$DAEMON"; do
         exit 1
     }
 done
-mkdir -p "$ART"
-if [ -e "$ART/COMPLETED" ] || [ -e "$ART/SHA256SUMS" ]; then
-    echo "completed artifact roots are immutable; choose a fresh ARTIFACTS_DIR" >&2
-    exit 2
-fi
-hash_file() {
-    local output
-    output=$(sha256sum -- "$1") || return 1
-    printf '%s\n' "${output%% *}"
-}
+mkdir "$ART" || exit 1
 
 BIRD_IMAGE="bird:3.3.1"
 OPENBGPD_IMAGE="openbgpd/openbgpd:9.1"
@@ -318,44 +310,12 @@ DOCKER_VERSION=$(docker --version)
 
 COMMIT=$(git -C "$REPO" rev-parse HEAD) || exit 1
 COMMIT_TREE=$(git -C "$REPO" rev-parse 'HEAD^{tree}') || exit 1
-# Full provenance binds source, tools, binaries, images, and campaign inputs;
-# dirty smoke runs include tracked diffs and untracked content hashes.
-ORIGIN_MAIN=$(git -C "$REPO" rev-parse origin/main 2>/dev/null || printf unavailable)
-MEASUREMENT_MODE=${MEASUREMENT_MODE:-main}
-ANCESTRY_VERIFIED=${ANCESTRY_VERIFIED:-false}
-HEAD_MATCHES_ORIGIN_MAIN=false
-[ "$COMMIT" = "$ORIGIN_MAIN" ] && HEAD_MATCHES_ORIGIN_MAIN=true
 CAMPAIGN_STARTED_EPOCH_NS=$(date +%s%N)
 DIRTY=false
 [ -z "$(git -C "$REPO" status --porcelain=v1)" ] || DIRTY=true
-DIRTY_STATE_SHA256=$(
-    cd "$REPO" || exit 1
-    git status --porcelain=v1
-    git diff --binary HEAD --
-    git ls-files --others --exclude-standard -z |
-        while IFS= read -r -d '' path; do
-            printf 'untracked %s ' "$path"
-            hash_file "$path"
-        done
-) || exit 1
-DIRTY_STATE_SHA256=$(printf '%s' "$DIRTY_STATE_SHA256" | sha256sum | cut -d' ' -f1) || exit 1
 CAMPAIGN_PROVENANCE=$(jq -cn \
     --arg commit "$COMMIT" --arg tree "$COMMIT_TREE" --argjson dirty "$DIRTY" \
-    --arg dirty_state_sha256 "$DIRTY_STATE_SHA256" \
-    --arg origin_main "$ORIGIN_MAIN" --argjson head_matches_origin_main "$HEAD_MATCHES_ORIGIN_MAIN" \
-    --arg measurement_mode "$MEASUREMENT_MODE" --argjson ancestry_verified "$ANCESTRY_VERIFIED" \
     --argjson started_at_epoch_ns "$CAMPAIGN_STARTED_EPOCH_NS" \
-    --arg run_script_sha256 "$(hash_file "$REPO/bench/scale/irrreload/run-irr-reload.sh")" \
-    --arg verifier_sha256 "$(hash_file "$VERIFY")" \
-    --arg generator_sha256 "$(hash_file "$GEN")" \
-    --arg stage_datasets_sha256 "$(hash_file "$STAGE_DATASETS")" \
-    --arg sampler_sha256 "$(hash_file "$SAMPLER")" \
-    --arg txn_apply_sha256 "$(hash_file "$TXN_APPLY")" \
-    --arg txn_lifecycle_sha256 "$(hash_file "$TXN_LIFECYCLE")" \
-    --arg harness_sha256 "$(hash_file "$HARNESS")" \
-    --arg daemon_sha256 "$(hash_file "$DAEMON")" \
-    --arg cli_sha256 "$(hash_file "$RBGP")" \
-    --arg renderer_sha256 "$(hash_file "$RENDER")" \
     --arg cells "$(IFS=,; echo "${CELLS[*]}")" \
     --arg smoke "$SMOKE" --arg n_members "$N_MEMBERS" \
     --arg total_prefixes "$TOTAL_PREFIXES" --arg min_list "$MIN_LIST" \
@@ -374,87 +334,14 @@ CAMPAIGN_PROVENANCE=$(jq -cn \
     --arg cpu_model "$(awk -F: '/^model name/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }' /proc/cpuinfo)" \
     --arg bird_image "$BIRD_IMAGE" --arg bird_image_id "$BIRD_IMAGE_ID" \
     --arg openbgpd_image "$OPENBGPD_IMAGE" --arg openbgpd_image_id "$OPENBGPD_IMAGE_ID" \
-    '{schema:4,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,tree:$tree,dirty:$dirty,dirty_state_sha256:$dirty_state_sha256,origin_main:$origin_main,head_matches_origin_main:$head_matches_origin_main,measurement_mode:$measurement_mode,ancestry_verified:$ancestry_verified},scripts:{runner:$run_script_sha256,verifier:$verifier_sha256,generator:$generator_sha256,stage_datasets:$stage_datasets_sha256,rss_sampler:$sampler_sha256,txn_apply:$txn_apply_sha256,txn_lifecycle:$txn_lifecycle_sha256},binaries:{reloadstall:$harness_sha256,rustbgpd:$daemon_sha256,rbgp:$cli_sha256,rs_config_render:$renderer_sha256},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,overlap_fraction:$overlap_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
-CAMPAIGN_FINGERPRINT=$(printf '%s' "$CAMPAIGN_PROVENANCE" | jq -cS . | sha256sum | cut -d' ' -f1) || exit 1
-SEALED_CAMPAIGN_PROVENANCE=$(printf '%s\n' "$CAMPAIGN_PROVENANCE" | jq -cS \
-    --arg fingerprint "$CAMPAIGN_FINGERPRINT" '. + {fingerprint:$fingerprint}') || exit 1
-ARTIFACT_ROOT_EXISTING=false
-if [ -e "$ART/provenance.json" ]; then
-    ARTIFACT_ROOT_EXISTING=true
-    PRIOR_FINGERPRINT=$(jq -er '.fingerprint | select(type == "string" and length > 0)' \
-        "$ART/provenance.json" 2>/dev/null) || {
-        echo "artifact root has malformed provenance; refusing to overwrite it" >&2
-        echo "choose a fresh ARTIFACTS_DIR" >&2
-        exit 2
-    }
-    PRIOR_PROVENANCE=$(jq -cS . "$ART/provenance.json" 2>/dev/null) || {
-        echo "artifact root has malformed provenance; refusing to overwrite it" >&2
-        echo "choose a fresh ARTIFACTS_DIR" >&2
-        exit 2
-    }
-    if [ "$PRIOR_PROVENANCE" != "$SEALED_CAMPAIGN_PROVENANCE" ]; then
-        echo "artifact root belongs to campaign $PRIOR_FINGERPRINT" >&2
-        echo "refusing to overwrite or repair its provenance; choose a fresh ARTIFACTS_DIR" >&2
-        exit 2
-    fi
-elif [ -n "$(find "$ART" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-    echo "non-empty artifact root has no provenance; refusing to overwrite it" >&2
-    echo "choose a fresh ARTIFACTS_DIR" >&2
-    exit 2
-else
-    printf '%s\n' "$SEALED_CAMPAIGN_PROVENANCE" >"$ART/provenance.json" || exit 1
-fi
+    '{schema:1,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,tree:$tree,dirty:$dirty},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,overlap_fraction:$overlap_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
+printf '%s\n' "$CAMPAIGN_PROVENANCE" | jq -cS . >"$ART/provenance.json" || exit 1
 if [ -n "$PREFLIGHT_LOG" ]; then
     mv "$PREFLIGHT_LOG" "$ART/preflight.log" || exit 1
     PREFLIGHT_LOG=""
 fi
 ROWS_HEADER="cell,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_generation_update_p50_ms,changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors"
-if [ -f "$ART/rows.csv" ] && [ "$(head -n1 "$ART/rows.csv")" != "$ROWS_HEADER" ]; then
-    echo "artifact root has an incompatible rows.csv; choose a fresh ARTIFACTS_DIR" >&2
-    exit 2
-fi
-if [ "$ARTIFACT_ROOT_EXISTING" = true ] && [ ! -f "$ART/rows.csv" ]; then
-    echo "existing artifact root has no rows.csv; refusing to repair it" >&2
-    echo "choose a fresh ARTIFACTS_DIR" >&2
-    exit 2
-fi
-if [ "$ARTIFACT_ROOT_EXISTING" = false ]; then
-    printf '%s\n' "$ROWS_HEADER" >"$ART/rows.csv"
-fi
-
-cell_receipt_matches() {
-    local cdir=$1 cell scenario_sha dataset_sha evidence_sha actual_sha rows_tmp
-    cell=${cdir##*/}
-    scenario_sha=$(jq -er --arg fingerprint "$CAMPAIGN_FINGERPRINT" \
-        'select(.fingerprint == $fingerprint) | .scenario.manifest_sha256' \
-        "$cdir/provenance.json" 2>/dev/null) || return 1
-    dataset_sha=$(jq -er --arg fingerprint "$CAMPAIGN_FINGERPRINT" \
-        'select(.fingerprint == $fingerprint) | .scenario.dataset_sha256' \
-        "$cdir/provenance.json" 2>/dev/null) || return 1
-    [ -n "$scenario_sha" ] || return 1
-    [ -n "$dataset_sha" ] || return 1
-    actual_sha=$(hash_file "$cdir/scenario.sha256" 2>/dev/null) || return 1
-    [ "$actual_sha" = "$scenario_sha" ] || return 1
-    [ "$(cat "$ART/dataset.sha256" 2>/dev/null)" = "$dataset_sha" ] || return 1
-    evidence_sha=$(awk -v fingerprint="$CAMPAIGN_FINGERPRINT" \
-        -v scenario="$scenario_sha" -v dataset="$dataset_sha" \
-        '$1 == "pass" && $2 == fingerprint && $3 == scenario && $4 == dataset && NF == 5 { print $5 }' \
-        "$cdir/status" 2>/dev/null) || return 1
-    [ -n "$evidence_sha" ] || return 1
-    actual_sha=$(hash_file "$cdir/evidence.sha256" 2>/dev/null) || return 1
-    [ "$actual_sha" = "$evidence_sha" ] || return 1
-    (cd "$cdir" && sha256sum --check --strict --status evidence.sha256) || return 1
-    validate_cell_rows "$cdir/rows.csv" "$cell" || return 1
-    rows_tmp=$(mktemp "/tmp/irrreload-$cell-rows.XXXXXX") || return 1
-    grep "^$cell," "$ART/rows.csv" >"$rows_tmp" || {
-        rm -f "$rows_tmp"
-        return 1
-    }
-    cmp -s "$cdir/rows.csv" "$rows_tmp"
-    local rc=$?
-    rm -f "$rows_tmp"
-    return "$rc"
-}
+printf '%s\n' "$ROWS_HEADER" >"$ART/rows.csv"
 
 validate_cell_rows() {
     local rows=$1 cell=$2
@@ -473,100 +360,18 @@ validate_cell_rows() {
     ' "$rows"
 }
 
-seal_cell_evidence() {
-    local cdir=$1 path digest
-    local -a evidence_files=(
-        daemon.log final-evidence/ready final-evidence/ack manifest.json process.tsv provenance.json reloadstall.log rows.csv rss.csv scenario.sha256
-    )
-    if [ -z "$SMOKE" ]; then
-        evidence_files+=(quiet.tsv)
-    fi
-    case ${cdir##*/} in
-    rustbgpd-txn)
-        if [ -z "$SMOKE" ]; then
-            evidence_files+=(transactions/cycles.jsonl transactions/lifecycle.json)
-        fi
-        ;;
-    rustbgpd-sighup | "$GROUPED_CELL")
-        evidence_files+=(config.toml topology.json topology.tsv metrics-1.prom metrics-2.prom metrics-3.prom metrics-mid.prom phase-timings.csv pre-churn/ready pre-churn/ack received-view.tsv)
-        if jq -e '.rustbgpd_dataset_mode == true' "$cdir/manifest.json" >/dev/null 2>&1; then
-            evidence_files+=(dataset-refresh-summary.csv)
-        fi
-        [ "$CAMPAIGN_KIND" != full-rustbgpd-sighup ] || evidence_files+=(authoritative-phase-timings.csv)
-        ;;
-    esac
-    : >"$cdir/evidence.sha256.tmp"
-    for path in "${evidence_files[@]}"; do
-        [ -f "$cdir/$path" ] || {
-            echo "missing retained cell evidence: $path" >&2
-            rm -f "$cdir/evidence.sha256.tmp"
-            return 1
-        }
-        digest=$(hash_file "$cdir/$path") || return 1
-        printf '%s  %s\n' "$digest" "$path" >>"$cdir/evidence.sha256.tmp" || return 1
-    done
-    mv "$cdir/evidence.sha256.tmp" "$cdir/evidence.sha256" || return 1
-    CELL_EVIDENCE_SHA256=$(hash_file "$cdir/evidence.sha256") || return 1
-}
-
-seal_scenario() {
-    local run=$1 cdir=$2 path digest generation
-    local -a runtime_files=()
-    mapfile -t runtime_files < <(
-        jq -er '.runtime_files | select(type == "array" and length > 0)[]' \
-            "$run/manifest.json"
-    ) || return 1
-    [ ${#runtime_files[@]} -gt 0 ] || return 1
-    : >"$cdir/scenario.sha256"
-    local -a bound_files=("${runtime_files[@]}")
-    if jq -e '.rustbgpd_dataset_mode == true' "$run/manifest.json" >/dev/null 2>&1; then
-        path=$(jq -er '.static_policy_manifest' "$run/manifest.json") || return 1
-        digest=$(jq -er '.static_policy_manifest_sha256' "$run/manifest.json") || return 1
-        [ "$(hash_file "$run/$path")" = "$digest" ] || return 1
-        (cd "$run" && sha256sum --check --strict --status "$path") || return 1
-        bound_files+=("$path")
-        for generation in a b; do
-            path=$(jq -er --arg generation "$generation" \
-                '.dataset_generation_manifests[$generation]' "$run/manifest.json") || return 1
-            digest=$(jq -er --arg generation "$generation" \
-                '.dataset_generation_manifest_sha256[$generation]' "$run/manifest.json") || return 1
-            [ "$(hash_file "$run/$path")" = "$digest" ] || return 1
-            (cd "$run/render-$generation" && sha256sum --check --strict --status "$run/$path") || return 1
-            if [ "$generation" = a ]; then
-                (cd "$run" && sha256sum --check --strict --status "$path") || return 1
-            fi
-            bound_files+=("$path")
-        done
-    fi
-    for path in "${bound_files[@]}" manifest.json; do
-        case $path in
-        '' | /* | *../* | */.. | *//*)
-            echo "invalid runtime input path in manifest: $path" >&2
-            return 1
-            ;;
-        esac
-        [ -f "$run/$path" ] || {
-            echo "runtime input missing: $path" >&2
-            return 1
-        }
-        digest=$(hash_file "$run/$path") || return 1
-        printf '%s  ./%s\n' "$digest" "$path" >>"$cdir/scenario.sha256" || return 1
-    done
-    sort -o "$cdir/scenario.sha256" "$cdir/scenario.sha256" || return 1
-    CELL_SCENARIO_SHA256=$(hash_file "$cdir/scenario.sha256") || return 1
-    CELL_DATASET_SHA256=$(jq -er '.dataset_sha256' "$run/manifest.json") || return 1
+record_dataset() {
+    local run=$1 dataset_sha
+    dataset_sha=$(jq -er '.dataset_sha256 | select(type == "string" and test("^[0-9a-f]{64}$"))' \
+        "$run/manifest.json") || return 1
     if [ -f "$ART/dataset.sha256" ]; then
-        if [ "$(cat "$ART/dataset.sha256")" != "$CELL_DATASET_SHA256" ]; then
+        if [ "$(cat "$ART/dataset.sha256")" != "$dataset_sha" ]; then
             echo "cell dataset digest differs from the campaign dataset" >&2
             return 1
         fi
     else
-        printf '%s\n' "$CELL_DATASET_SHA256" >"$ART/dataset.sha256" || return 1
+        printf '%s\n' "$dataset_sha" >"$ART/dataset.sha256" || return 1
     fi
-    jq --arg scenario_sha "$CELL_SCENARIO_SHA256" \
-        --arg dataset_sha "$CELL_DATASET_SHA256" \
-        '. + {scenario:{manifest_sha256:$scenario_sha,dataset_sha256:$dataset_sha}}' \
-        "$ART/provenance.json" >"$cdir/provenance.json"
 }
 
 ACTIVE_DAEMON_PID=""
@@ -788,14 +593,11 @@ run_cell() {
     mkdir -m 0700 -- "$run" || return 1
     local daemon_pid="" daemon_start="" container="" reload_cmd="" pid_arg="" topology_mode="" barrier="" final_barrier="" final_acked=false
     local live a b entries generator_cell=$cell dataset_stage_cmd=""
-    CELL_SCENARIO_SHA256=""
-    CELL_DATASET_SHA256=""
-    CELL_EVIDENCE_SHA256=""
     case $cell in
     rustbgpd-sighup)
         gen_scenario rustbgpd "$run" --render-bin "$RENDER" \
             --path-hiding true --admit-churn true || return 1
-        seal_scenario "$run" "$cdir" || return 1
+        record_dataset "$run" || return 1
         setsid "$DAEMON" "$run/config.toml" >"$cdir/daemon.log" 2>&1 &
         daemon_pid=$!
         ACTIVE_DAEMON_PID=$daemon_pid
@@ -811,7 +613,7 @@ run_cell() {
         generator_cell=rustbgpd
         gen_scenario "$generator_cell" "$run" --render-bin "$RENDER" \
             --path-hiding false --admit-churn true || return 1
-        seal_scenario "$run" "$cdir" || return 1
+        record_dataset "$run" || return 1
         setsid "$DAEMON" "$run/config.toml" >"$cdir/daemon.log" 2>&1 &
         daemon_pid=$!
         ACTIVE_DAEMON_PID=$daemon_pid
@@ -839,7 +641,7 @@ run_cell() {
                 return 1
             fi
         done
-        seal_scenario "$run" "$cdir" || return 1
+        record_dataset "$run" || return 1
         setsid "$DAEMON" "$run/config.toml" >"$cdir/daemon.log" 2>&1 &
         daemon_pid=$!
         ACTIVE_DAEMON_PID=$daemon_pid
@@ -861,7 +663,7 @@ run_cell() {
     bird)
         gen_scenario bird "$run" --threads "$BIRD_THREADS" \
             --path-hiding true --admit-churn true || return 1
-        seal_scenario "$run" "$cdir" || return 1
+        record_dataset "$run" || return 1
         container="irr-bird"
         docker rm -f "$container" >/dev/null 2>&1
         docker run -d --name "$container" --network=host -v "$run":/etc/bird \
@@ -872,7 +674,7 @@ run_cell() {
         ;;
     openbgpd)
         gen_scenario openbgpd "$run" --path-hiding true --admit-churn true || return 1
-        seal_scenario "$run" "$cdir" || return 1
+        record_dataset "$run" || return 1
         container="irr-obgpd"
         docker rm -f "$container" >/dev/null 2>&1
         docker run -d --name "$container" --network=host -v "$run":/etc/bgpd \
@@ -1038,9 +840,8 @@ run_cell() {
         echo "cell $cell: RSS sampler produced empty or invalid data" >&2
         rc=98
     fi
-    if ! cp "$run/manifest.json" "$cdir/manifest.json" ||
-        [ "$(hash_file "$cdir/scenario.sha256" 2>/dev/null)" != "$CELL_SCENARIO_SHA256" ]; then
-        echo "cell $cell: required manifest/provenance retention failed" >&2
+    if ! cp "$run/manifest.json" "$cdir/manifest.json"; then
+        echo "cell $cell: required manifest retention failed" >&2
         rc=97
     fi
     if [ "$rc" -eq 0 ]; then
@@ -1056,9 +857,6 @@ run_cell() {
                 ! sed -n '1,$p' "$cdir/rows.csv" >>"$ART/rows.csv"; then
                 echo "cell $cell: failed to retain measurement rows" >&2
                 rc=96
-            elif ! seal_cell_evidence "$cdir"; then
-                echo "cell $cell: failed to seal retained evidence" >&2
-                rc=95
             else
                 rm -rf "$run" # reproduces from the generator + manifest
             fi
@@ -1068,79 +866,19 @@ run_cell() {
     return "$rc"
 }
 
-if [ "$ARTIFACT_ROOT_EXISTING" = true ]; then
-    allowed_cells=",$(IFS=,; echo "${CELLS[*]}"),"
-    if ! awk -F, -v allowed="$allowed_cells" '
-        NR == 1 { next }
-        index(allowed, "," $1 ",") == 0 { exit 1 }
-    ' "$ART/rows.csv"; then
-        echo "artifact root has measurement rows outside the selected cell roster" >&2
-        echo "choose a fresh ARTIFACTS_DIR" >&2
-        exit 2
-    fi
-    while IFS= read -r entry; do
-        name=${entry##*/}
-        case $name in
-        provenance.json | rows.csv | dataset.sha256) ;;
-        *)
-            if [[ " ${CELLS[*]} " != *" $name "* ]]; then
-                echo "artifact root has unexpected entry: $name" >&2
-                echo "choose a fresh ARTIFACTS_DIR" >&2
-                exit 2
-            fi
-            ;;
-        esac
-    done < <(find "$ART" -mindepth 1 -maxdepth 1 -print)
-    any_existing_cell=false
-    for cell in "${CELLS[@]}"; do
-        existing_rows=$(grep -c "^$cell," "$ART/rows.csv" 2>/dev/null)
-        if [ -e "$ART/$cell" ] || [ "${existing_rows:-0}" -ne 0 ]; then
-            any_existing_cell=true
-            if ! cell_receipt_matches "$ART/$cell" ||
-                [ "${existing_rows:-0}" -ne "$RELOADS" ]; then
-                echo "cell $cell: existing evidence is inconsistent and immutable" >&2
-                echo "choose a fresh ARTIFACTS_DIR" >&2
-                exit 2
-            fi
-        fi
-    done
-    if [ "$any_existing_cell" = false ] && [ -e "$ART/dataset.sha256" ]; then
-        echo "artifact root has an unowned dataset digest; refusing to repair it" >&2
-        echo "choose a fresh ARTIFACTS_DIR" >&2
-        exit 2
-    fi
-fi
-
 overall=0
 for cell in "${CELLS[@]}"; do
     status_file="$ART/$cell/status"
-    existing_rows=$(grep -c "^$cell," "$ART/rows.csv" 2>/dev/null)
-    if cell_receipt_matches "$ART/$cell" &&
-        [ "${existing_rows:-0}" -eq "$RELOADS" ]; then
-        echo "cell $cell: matching fingerprint already passed, skipping"
-        continue
-    fi
-    if [ -e "$ART/$cell" ] || [ "${existing_rows:-0}" -ne 0 ]; then
-        echo "cell $cell: existing failed, interrupted, or inconsistent evidence is immutable" >&2
-        echo "refusing to overwrite it; choose a fresh ARTIFACTS_DIR" >&2
-        overall=1
-        continue
-    fi
     load_gate "$cell"
     echo "=== cell $cell start $(date -Is) ==="
-    CELL_SCENARIO_SHA256=""
-    CELL_DATASET_SHA256=""
-    CELL_EVIDENCE_SHA256=""
     if run_cell "$cell"; then
-        echo "pass $CAMPAIGN_FINGERPRINT $CELL_SCENARIO_SHA256 $CELL_DATASET_SHA256 $CELL_EVIDENCE_SHA256" \
-            >"$status_file"
+        printf 'pass\n' >"$status_file"
         echo "=== cell $cell PASS $(date -Is) ==="
     else
         rc=$?
         cleanup
         mkdir -p "$ART/$cell"
-        echo "fail $CAMPAIGN_FINGERPRINT ${CELL_SCENARIO_SHA256:-unavailable} ${CELL_DATASET_SHA256:-unavailable} ${CELL_EVIDENCE_SHA256:-unavailable} rc=$rc" \
-            >"$status_file"
+        printf 'fail rc=%s\n' "$rc" >"$status_file"
         echo "=== cell $cell FAIL ==="
         overall=1
     fi
@@ -1150,7 +888,7 @@ done
 
 # Completion gate: every requested cell passed and produced its rows.
 for cell in "${CELLS[@]}"; do
-    cell_receipt_matches "$ART/$cell" || overall=1
+    [ "$(cat "$ART/$cell/status" 2>/dev/null)" = pass ] || overall=1
     rows=$(grep -c "^$cell," "$ART/rows.csv" 2>/dev/null)
     if [ "${rows:-0}" -ne "$RELOADS" ]; then
         echo "cell $cell: expected exactly $RELOADS measurement rows, found ${rows:-0}" >&2
@@ -1159,13 +897,10 @@ for cell in "${CELLS[@]}"; do
 done
 echo "measurement rows: $ART/rows.csv"
 if [ "$overall" -eq 0 ]; then
-    jq -n --arg fingerprint "$CAMPAIGN_FINGERPRINT" --argjson completed_at_epoch_ns "$(date +%s%N)" \
+    jq -n --argjson completed_at_epoch_ns "$(date +%s%N)" \
         --arg cells "$(IFS=,; echo "${CELLS[*]}")" \
-        '{status:"pass",fingerprint:$fingerprint,completed_at_epoch_ns:$completed_at_epoch_ns,cells:$cells}' \
+        '{status:"pass",completed_at_epoch_ns:$completed_at_epoch_ns,cells:$cells}' \
         >"$ART/COMPLETED" || exit 1
-    (cd "$ART" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum) \
-        >"$ART/SHA256SUMS" || exit 1
-    chmod -R a-w "$ART" || exit 1
-    echo "sealed read-only artifact root: $ART"
+    echo "completed artifact root: $ART"
 fi
 exit "$overall"

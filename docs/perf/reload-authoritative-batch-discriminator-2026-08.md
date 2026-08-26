@@ -19,8 +19,9 @@ Both roots used exact candidate `09c1a1342c86c118e34a62d30c53d1cf159b3ade` (tree
 
 Every reload retained 320/320 sessions, a committed shared outcome, 320 shared members,
 zero fallback members, one destination cohort, zero dirty or pending residue, and zero parse errors.
-Both 30-entry root checksum rosters passed; raw daemon logs re-extracted both phase CSVs byte-for-byte;
-candidate, tree, tracked scripts, binaries, workload, environment, and dataset identities match; daemon identities are distinct and sequential.
+The raw roots re-extracted both phase CSVs byte-for-byte; candidate, tree,
+workload, environment, and dataset context match; daemon identities are
+distinct and sequential.
 
 ## Boundary
 
@@ -34,9 +35,11 @@ authorization to optimize. Any next tranche must add deterministic work counts
 inside registration/membership and pass the same two-root gate; this receipt
 does not license a speculative correction or an opportunistic rerun.
 
-The exact rows, retained full-root adjudicator output, and sanitized verification record are
+The exact rows and retained full-root adjudicator output are
 [`authoritative-batch-phases.csv`](artifacts/reload-authoritative-batch-discriminator-2026-08/authoritative-batch-phases.csv),
-[`authoritative-pair.json`](artifacts/reload-authoritative-batch-discriminator-2026-08/authoritative-pair.json),
-and [`verification.json`](artifacts/reload-authoritative-batch-discriminator-2026-08/verification.json).
+and [`authoritative-pair.json`](artifacts/reload-authoritative-batch-discriminator-2026-08/authoritative-pair.json).
 Validate the checked publication without the raw roots with
 `python3 bench/scale/irrreload/verify-receipt.py authoritative-publication --artifact-dir docs/perf/artifacts/reload-authoritative-batch-discriminator-2026-08`.
+The checker accepts exactly those two inputs and recomputes row order, phase
+closure, work counts, chronology, growth and attribution thresholds, and the
+negative-result boundary. It makes no artifact-authenticity claim.

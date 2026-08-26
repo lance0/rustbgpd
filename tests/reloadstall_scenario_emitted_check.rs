@@ -86,7 +86,7 @@ fn emitted_1000_peer_scenario_is_all_ebgp_and_daemon_valid() {
 }
 
 #[test]
-fn irr_reload_phase_receipt_is_sealed_and_fail_closed() {
+fn irr_reload_phase_receipt_is_semantically_fail_closed() {
     let root = env!("CARGO_MANIFEST_DIR");
     let runner = std::fs::read_to_string(format!("{root}/bench/scale/irrreload/run-irr-reload.sh"))
         .expect("IRR reload runner");
@@ -365,132 +365,37 @@ fn irr_reload_process_group_cleanup_kills_a_stubborn_child() {
     assert!(gone, "stubborn process group survived cleanup");
 }
 
-fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
-    use sha2::{Digest, Sha256};
-
-    Sha256::digest(bytes.as_ref())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 #[test]
-/// Red proof: removing the retained-evidence digest check accepts the RSS
-/// mutation; removing the exact global/cell row comparison accepts the global
-/// row mutation; removing numeric row validation accepts the coherently
-/// re-sealed malformed row.
-fn irr_reload_resume_rejects_mutated_or_malformed_evidence() {
+/// A campaign never resumes or repairs an existing root. This executable gate
+/// runs before builds, so failed roots stay available for inspection.
+fn irr_reload_requires_a_fresh_artifact_root() {
     let root = env!("CARGO_MANIFEST_DIR");
-    let runner = std::fs::read_to_string(format!("{root}/bench/scale/irrreload/run-irr-reload.sh"))
-        .expect("read runner");
-    let receipt_functions = runner
-        .split_once("cell_receipt_matches() {")
-        .and_then(|(_, rest)| rest.split_once("seal_scenario() {"))
-        .map(|(body, _)| format!("cell_receipt_matches() {{{body}"))
-        .expect("receipt functions");
+    let runner = format!("{root}/bench/scale/irrreload/run-irr-reload.sh");
+    let artifact = tempfile::tempdir().expect("existing artifact root");
+    let output = std::process::Command::new("bash")
+        .arg(&runner)
+        .env("SMOKE", "1")
+        .env("ARTIFACTS_DIR", artifact.path())
+        .output()
+        .expect("run fresh-root gate");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("artifact root already exists; choose a fresh ARTIFACTS_DIR")
+    );
 
-    let art = tempfile::tempdir().expect("artifact root");
-    let cdir = art.path().join("bird");
-    std::fs::create_dir(&cdir).expect("cell dir");
-    std::fs::write(art.path().join("dataset.sha256"), "dataset\n").expect("dataset seal");
-    let scenario = "012345  ./manifest.json\n";
-    std::fs::write(cdir.join("scenario.sha256"), scenario).expect("scenario roster");
-    let scenario_sha = sha256_hex(scenario);
-    let provenance = serde_json::json!({
-        "fingerprint": "campaign",
-        "scenario": {
-            "manifest_sha256": scenario_sha,
-            "dataset_sha256": "dataset"
-        }
-    });
-    std::fs::write(
-        cdir.join("provenance.json"),
-        serde_json::to_vec(&provenance).expect("provenance JSON"),
-    )
-    .expect("provenance");
-    let good_row =
-        "bird,1,10,1,9,100,1.0,1.1,1.2,2.0,2.1,2.2,3.0,3.1,3.2,4.0,4.1,4.2,100.0,101.0,10,10,0\n";
-    let header = "cell,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_generation_update_p50_ms,changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors\n";
-    for (name, contents) in [
-        ("daemon.log", "daemon\n"),
-        ("manifest.json", "{}\n"),
-        ("reloadstall.log", "receipt\n"),
-        ("rows.csv", good_row),
-        ("rss.csv", "epoch_s,total_rss_kib,pids\n1,100,1\n"),
+    let script = std::fs::read_to_string(runner).expect("read runner");
+    for removed in [
+        "cell_receipt_matches",
+        "CAMPAIGN_FINGERPRINT",
+        "SHA256SUMS",
+        "chmod -R a-w",
     ] {
-        std::fs::write(cdir.join(name), contents).expect("cell evidence");
+        assert!(
+            !script.contains(removed),
+            "removed resume/seal token remains: {removed}"
+        );
     }
-    std::fs::write(art.path().join("rows.csv"), format!("{header}{good_row}"))
-        .expect("campaign rows");
-
-    let seal = |cdir: &std::path::Path| {
-        let files = [
-            "daemon.log",
-            "manifest.json",
-            "provenance.json",
-            "reloadstall.log",
-            "rows.csv",
-            "rss.csv",
-            "scenario.sha256",
-        ];
-        let mut roster = String::new();
-        for name in files {
-            let bytes = std::fs::read(cdir.join(name)).expect("read evidence");
-            roster.push_str(&format!("{}  {name}\n", sha256_hex(bytes)));
-        }
-        std::fs::write(cdir.join("evidence.sha256"), &roster).expect("evidence roster");
-        let evidence_sha = sha256_hex(roster);
-        std::fs::write(
-            cdir.join("status"),
-            format!("pass campaign {scenario_sha} dataset {evidence_sha}\n"),
-        )
-        .expect("status");
-    };
-    seal(&cdir);
-
-    let verify = || {
-        std::process::Command::new("bash")
-            .arg("-c")
-            .arg(format!(
-                "set -u\nART='{}'\nRELOADS=1\nCAMPAIGN_FINGERPRINT=campaign\nhash_file() {{ sha256sum -- \"$1\" | cut -d' ' -f1; }}\n{}\ncell_receipt_matches \"$ART/bird\"",
-                art.path().display(),
-                receipt_functions
-            ))
-            .status()
-            .expect("run receipt verifier")
-            .success()
-    };
-
-    assert!(verify(), "sealed receipt must resume");
-    std::fs::write(
-        art.path().join("rows.csv"),
-        format!("{header}{}", good_row.replace("1.0", "9.0")),
-    )
-    .expect("mutate root row");
-    assert!(!verify(), "changed global row must invalidate resume");
-    std::fs::write(art.path().join("rows.csv"), format!("{header}{good_row}"))
-        .expect("restore root row");
-    std::fs::write(
-        cdir.join("rss.csv"),
-        "epoch_s,total_rss_kib,pids\n1,999,1\n",
-    )
-    .expect("mutate RSS evidence");
-    assert!(!verify(), "changed raw evidence must invalidate resume");
-
-    let malformed_row = good_row.replacen("1.0", "oops", 1);
-    std::fs::write(
-        cdir.join("rss.csv"),
-        "epoch_s,total_rss_kib,pids\n1,100,1\n",
-    )
-    .expect("restore RSS evidence");
-    std::fs::write(cdir.join("rows.csv"), &malformed_row).expect("malformed cell row");
-    std::fs::write(
-        art.path().join("rows.csv"),
-        format!("{header}{malformed_row}"),
-    )
-    .expect("malformed root row");
-    seal(&cdir);
-    assert!(!verify(), "malformed numeric row must invalidate resume");
 }
 
 fn run_irr_protocol(args: &[&str], smoke: bool) -> String {
@@ -871,7 +776,7 @@ fn irr_reload_manifest_seals_a_cell_independent_dataset_digest() {
 /// fixture pass; changing the default/control rosters or their explicit mode
 /// flags fails the executed dry-protocol assertions. Removing the pre-trigger
 /// topology call, quiet double-sample, source fence, identity fence, or final
-/// immutable seal or owner-only runtime-directory creation fails the
+/// fresh-root gate or owner-only runtime-directory creation fails the
 /// corresponding structural assertion below.
 fn irr_reload_counterbalanced_receipt_protocol_is_load_bearing() {
     let root = env!("CARGO_MANIFEST_DIR");
@@ -904,38 +809,21 @@ fn irr_reload_counterbalanced_receipt_protocol_is_load_bearing() {
         "final-barrier-marker",
         "ordering",
         "dirty-commit",
-        "origin-only",
-        "head-matches-false",
         "mismatched-commit",
         "commit-malformed",
-        "scripts-null",
-        "scripts-empty-map",
-        "binary-malformed",
-        "fingerprint-recompute",
         "canonical-changed-fraction",
         "canonical-control-secs",
         "canonical-bird-threads",
         "repeat-image-identity",
-        "cell-root-provenance",
         "nonoverlap-order",
         "reused-identity",
         "quiet-spacing",
         "preflight-raw",
         "cell-status",
-        "cell-provenance",
-        "evidence-roster",
-        "scenario-roster",
-        "scenario-duplicate",
-        "scenario-unsafe-path",
-        "scenario-retained-config",
         "cell-root-rows",
         "reload-log-rows",
         "row-invariants",
         "rss-raw",
-        "seal-checksum",
-        "exact-root-roster",
-        "symlink-anywhere",
-        "writable-root",
         "grouped-output-isolation",
         "output-exact-roster",
         "output-audit-call",

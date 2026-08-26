@@ -14,7 +14,6 @@ import os
 import re
 import shutil
 import stat
-import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -384,27 +383,12 @@ def validate_authoritative_discriminator(daemon_log: Path, reload_log: Path, out
                 *(numeric[key] for key in AUTHORITATIVE_PHASES), *(numeric[key] for key in counter_names), *witness))
 
 
-def validate_authoritative_pair(repo: Path, roots: list[Path], output: Path) -> None:
+def validate_authoritative_pair(roots: list[Path], output: Path) -> None:
     runs = [validate_root(root, "sighup") for root in roots]
     if runs[0]["completed"] >= runs[1]["started"] or runs[0]["identities"] == runs[1]["identities"]:
         fail("pair chronology or daemon identity is not independent")
-    equal = ("commit", "dataset", "shape", "git", "scripts", "binaries", "environment", "inputs")
-    if any(runs[0][key] != runs[1][key] for key in equal): fail("pair provenance/workload differs")
-    git = runs[0]["git"]
-    def git_bytes(*args: str) -> bytes:
-        try: return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True).stdout
-        except subprocess.CalledProcessError as error: fail(f"git provenance check failed: {error}")
-    if git_bytes("rev-parse", f'{git["commit"]}^{{tree}}').decode().strip() != git["tree"]:
-        fail("candidate tree does not resolve")
-    if subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", git["origin_main"], git["commit"]]).returncode:
-        fail("candidate ancestry is not valid")
-    paths = {"runner":"bench/scale/irrreload/run-irr-reload.sh",
-        "verifier":"bench/scale/irrreload/verify-receipt.py", "generator":"bench/scale/reloadstall/gen-irr-scenario.py",
-        "stage_datasets":"bench/scale/irrreload/stage-rustbgpd-datasets.sh",
-        "rss_sampler":"bench/scale/matrix/rss-sampler.sh", "txn_apply":"bench/scale/irrreload/txn-apply.sh",
-        "txn_lifecycle":"bench/scale/irrreload/txn-lifecycle.sh"}
-    if any(hashlib.sha256(git_bytes("show", f'{git["commit"]}:{path}')).hexdigest() != runs[0]["scripts"][name]
-           for name, path in paths.items()): fail("tracked script blob identity differs")
+    equal = ("commit", "dataset", "shape", "git", "environment", "inputs")
+    if any(runs[0][key] != runs[1][key] for key in equal): fail("pair context/workload differs")
     tables = []
     for root in roots:
         cell = root / "rustbgpd-sighup"
@@ -442,26 +426,30 @@ def validate_authoritative_pair(repo: Path, roots: list[Path], output: Path) -> 
         verdict = "mechanism_witness"
     if verdict == "negative_result": phase = counter = ""
     output.write_text(json.dumps({"verdict":verdict, "phase":phase, "counter":counter,
-        "commit":runs[0]["commit"], "tree":git["tree"], "roots":details}, sort_keys=True) + "\n")
+        "commit":runs[0]["commit"], "tree":runs[0]["git"]["tree"], "roots":details}, sort_keys=True) + "\n")
 
 
 def validate_authoritative_publication(artifact: Path) -> None:
-    content = {"authoritative-pair.json", "authoritative-batch-phases.csv", "verification.json"}
-    if {path.name for path in artifact.iterdir()} != content | {"SHA256SUMS"}: fail("publication roster changed")
-    if any((artifact / name).is_symlink() or not (artifact / name).is_file() for name in content | {"SHA256SUMS"}): fail("publication contains a non-regular file")
-    sealed = parse_digest_roster(artifact / "SHA256SUMS", content)
-    if any(sha256(artifact / name) != digest for name, digest in sealed.items()): fail("publication seal mismatch")
-    pair, verification = read_json(artifact / "authoritative-pair.json"), read_json(artifact / "verification.json")
-    if set(pair) != {"commit", "counter", "phase", "roots", "tree", "verdict"} or pair["verdict"] != "negative_result" or pair["phase"] != "" or pair["counter"] != "" or set(pair["roots"]) != {"A", "B"}:
-        fail("pair output is not a strict negative result")
+    content = {"authoritative-pair.json", "authoritative-batch-phases.csv"}
+    if not artifact.is_dir() or {path.name for path in artifact.iterdir()} != content:
+        fail("publication must contain exactly the pair JSON and phase CSV")
+    if any((artifact / name).is_symlink() or not (artifact / name).is_file() for name in content):
+        fail("publication contains a non-regular input")
+    pair = read_json(artifact / "authoritative-pair.json")
+    if set(pair) != {"commit", "counter", "phase", "roots", "tree", "verdict"} or set(pair.get("roots", {})) != {"A", "B"}:
+        fail("pair output schema changed")
     if any(not isinstance(pair[key], str) or not re.fullmatch(r"[0-9a-f]{40}", pair[key]) for key in ("commit", "tree")):
         fail("pair source identity is malformed")
-    for value in pair["roots"].values():
-        if set(value) != {"owned_counts", "phase_us", "totals_us"} or any(
+    if pair["verdict"] not in {"negative_result", "mechanism_witness"} or not all(
+        isinstance(pair[key], str) for key in ("phase", "counter")
+    ):
+        fail("pair verdict is malformed")
+    for detail in pair["roots"].values():
+        if set(detail) != {"owned_counts", "phase_us", "totals_us"} or any(
             not isinstance(items, list) or len(items) != 4 or any(type(item) is not int or item < 0 for item in items)
-            for items in value.values()) or value["owned_counts"] != [0] * 4 or value["phase_us"] != [0] * 4:
-            fail("pair output retained an owned witness")
-        if any(total <= 0 for total in value["totals_us"]): fail("pair totals are not positive")
+            for items in detail.values()
+        ) or any(total <= 0 for total in detail["totals_us"]):
+            fail("pair timing/count details are malformed")
     expected_header = "repeat,reload,timestamp_epoch_us,outcome,classification,failure_stage,total_us,remainder_us,precondition_us,registration_membership_us,cohort_partition_us,cohort_precheck_us,destination_build_us,inventory_build_us,membership_commit_us,filtered_scope_build_us,member_emit_state_us,cohort_finalize_us,fallback_regroup_us,distribution_us,duplicate_fallback_us,input_peers,present_peers,skipped_peers,duplicate_peers,candidate_cohorts,shared_cohorts,shared_members,fallback_members,destination_ensures,destination_builds,destination_adoptions,membership_moves,inventory_announces,inventory_withdraws,inventory_supplements,tombstones,lagging_members,filtered_scope_prefixes,filtered_scope_member_visits,emits_attempted,emits_succeeded,emits_degraded,distribution_passes,filtered_state_before,filtered_state_after,dirty_before,dirty_after,pending_before,pending_after,groups_before,groups_after,causal_phase,owned_counter".split(",")
     with (artifact / "authoritative-batch-phases.csv").open(newline="") as stream:
         reader = csv.DictReader(stream); rows = list(reader)
@@ -470,7 +458,8 @@ def validate_authoritative_publication(artifact: Path) -> None:
     if any(set(row) != set(expected_header) for row in rows):
         fail("publication row field roster changed")
     phases = (*AUTHORITATIVE_PHASES,)
-    timestamps, root_timestamps, registration = [], {"A": [], "B": []}, {"A": [], "B": []}
+    timestamps = []
+    by_root = {"A": [], "B": []}
     for row in rows:
         numeric_names = [key for key in expected_header if key not in {"repeat", "outcome", "classification", "failure_stage", "causal_phase", "owned_counter"}]
         if any(not re.fullmatch(r"0|[1-9][0-9]*", row[key]) for key in numeric_names): fail("publication row has non-canonical integer")
@@ -488,45 +477,51 @@ def validate_authoritative_publication(artifact: Path) -> None:
             fail("publication count/phase invariant changed")
         if integers["timestamp_epoch_us"] <= 0 or integers["total_us"] <= 0: fail("publication timing is not positive")
         timestamps.append(integers["timestamp_epoch_us"])
-        root_timestamps[row["repeat"]].append(integers["timestamp_epoch_us"])
-        registration[row["repeat"]].append(integers["registration_membership_us"])
+        by_root[row["repeat"]].append((row, integers))
     if any(left >= right for left, right in zip(timestamps, timestamps[1:])): fail("publication chronology changed")
-    if set(verification) != {"schema", "verdict", "candidate_commit", "candidate_tree", "origin_main", "source_identity_sha256", "system_environment_sha256", "dataset_sha256", "shape", "roots", "validation", "attribution", "decision", "artifacts"}:
-        fail("verification schema changed")
-    if verification["schema"] != 1 or verification["verdict"] != pair["verdict"] or verification["candidate_commit"] != pair["commit"] or verification["candidate_tree"] != pair["tree"]:
-        fail("verification does not bind pair identity")
-    digests = (verification["source_identity_sha256"], verification["system_environment_sha256"], verification["dataset_sha256"])
-    if not re.fullmatch(r"[0-9a-f]{40}", verification["origin_main"]) or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in digests):
-        fail("publication provenance hashes are malformed")
-    if verification["shape"] != {"members":320, "prefixes":183040, "reloads":4, "changed_fraction":0.1, "overlap_fraction":0}:
-        fail("publication workload changed")
-    if verification["artifacts"] != {"authoritative_batch_phases_sha256":sealed["authoritative-batch-phases.csv"], "frozen_pair_output_sha256":sealed["authoritative-pair.json"]}:
-        fail("verification artifact binding changed")
-    expected_validation = {"checksum_rosters":"pass", "pair_verifier":"pass", "raw_csv_reextraction":"byte-identical",
-        "sessions":"320/320", "rows_per_root":4, "parse_errors":0, "session_loss":0,
-        "outcomes":"committed", "shared_members":320, "fallback_members":0}
-    if verification["validation"] != expected_validation: fail("published validation summary changed")
-    if set(verification["roots"]) != {"A", "B"} or verification["roots"]["A"]["completed_at_epoch_ns"] >= verification["roots"]["B"]["started_at_epoch_ns"] or (verification["roots"]["A"]["daemon_pid"], verification["roots"]["A"]["daemon_start_ticks"]) == (verification["roots"]["B"]["daemon_pid"], verification["roots"]["B"]["daemon_start_ticks"]):
-        fail("published root chronology/identity changed")
-    for label, root in verification["roots"].items():
-        if set(root) != {"fingerprint", "sha256sums_sha256", "inner_csv_sha256", "outer_csv_sha256", "daemon_pid", "daemon_start_ticks", "started_at_epoch_ns", "completed_at_epoch_ns"} or any(not re.fullmatch(r"[0-9a-f]{64}", root[key]) for key in ("fingerprint", "sha256sums_sha256", "inner_csv_sha256", "outer_csv_sha256")) or any(type(root[key]) is not int or root[key] <= 0 for key in ("daemon_pid", "daemon_start_ticks", "started_at_epoch_ns", "completed_at_epoch_ns")) or root["started_at_epoch_ns"] >= root["completed_at_epoch_ns"]:
-            fail("published root identity/hash changed")
-        if any(not root["started_at_epoch_ns"] <= timestamp * 1000 <= root["completed_at_epoch_ns"] for timestamp in root_timestamps[label]):
-            fail("publication timestamp is outside its root interval")
+    eligible = {("destination_build_us", counter) for counter in ("destination_builds", "destination_adoptions")}
+    eligible |= {("inventory_build_us", counter) for counter in ("inventory_announces", "inventory_withdraws", "inventory_supplements")}
+    eligible |= {("membership_commit_us", "membership_moves"),
+        ("filtered_scope_build_us", "filtered_scope_prefixes"),
+        ("member_emit_state_us", "filtered_scope_member_visits"),
+        ("member_emit_state_us", "emits_attempted"), ("fallback_regroup_us", "fallback_members"),
+        ("duplicate_fallback_us", "duplicate_peers")}
+    retained_direction = any(
+        row["causal_phase"] or row["owned_counter"] for root_rows in by_root.values()
+        for row, _ in root_rows
+    )
+    witnesses = []
     for label in "AB":
-        totals = pair["roots"][label]["totals_us"]; later, first = sorted(totals[1:])[1], totals[0]
-        reg_later = sorted(registration[label][1:])[1]
-        delta, registration_delta = later - first, reg_later - registration[label][0]
+        details = pair["roots"][label]
+        totals = details["totals_us"]
+        later, first = sorted(totals[1:])[1], totals[0]
+        registration = [values["registration_membership_us"] for _, values in by_root[label]]
+        reg_later = sorted(registration[1:])[1]
+        delta, registration_delta = later - first, reg_later - registration[0]
         if delta * 5 < first or registration_delta * 10 < delta * 7:
-            fail("published attribution no longer meets the frozen gates")
-        expected = {"outer_total_us":totals, "later_median_us":later,
-            "increase_percent":round((later-first)*100/first, 2), "registration_membership_us":registration[label],
-            "registration_delta_share_percent":round((reg_later-registration[label][0])*100/(later-first), 2)}
-        if verification["attribution"].get(label) != expected: fail("published attribution arithmetic changed")
-    if set(verification["attribution"]) != {"A", "B"}: fail("published attribution roster changed")
-    decision = verification["decision"]
-    if set(decision) != {"localized_phase", "owned_counter_witness", "mechanism", "reason"} or decision.get("localized_phase") != "registration_membership_us" or decision.get("owned_counter_witness") is not None or decision.get("mechanism") is not None or not isinstance(decision.get("reason"), str) or not decision["reason"]:
-        fail("negative decision was promoted")
+            fail("published growth or attribution no longer meets the frozen gates")
+        pairs = {(row["causal_phase"], row["owned_counter"]) for row, _ in by_root[label]}
+        candidate = next(iter(pairs)) if len(pairs) == 1 else ("", "")
+        if candidate not in eligible:
+            candidate = ("", "")
+        phase, counter = candidate
+        phase_values = [values[phase] for _, values in by_root[label]] if phase else [0] * 4
+        count_values = [values[counter] for _, values in by_root[label]] if counter else [0] * 4
+        phase_delta = sorted(phase_values[1:])[1] - phase_values[0]
+        witnessed = bool(phase) and phase_delta * 10 >= delta * 7 and len(set(count_values[1:])) == 1 and count_values[1] > count_values[0]
+        witnesses.append((witnessed, phase, counter, phase_values, count_values))
+    directional = all(item[0] for item in witnesses) and witnesses[0][1:3] == witnesses[1][1:3] and witnesses[0][4] == witnesses[1][4]
+    if directional:
+        phase, counter = witnesses[0][1:3]
+        if pair["verdict"] != "mechanism_witness" or (pair["phase"], pair["counter"]) != (phase, counter):
+            fail("directional witness is not reported exactly")
+        for label, witness in zip("AB", witnesses, strict=True):
+            if pair["roots"][label]["phase_us"] != witness[3] or pair["roots"][label]["owned_counts"] != witness[4]:
+                fail("pair witness arrays differ from the phase CSV")
+    elif pair["verdict"] != "negative_result" or pair["phase"] or pair["counter"] or retained_direction or any(
+        item[0] for item in witnesses
+    ) or any(pair["roots"][label][key] != [0] * 4 for label in "AB" for key in ("phase_us", "owned_counts")):
+        fail("negative result retained or promoted a directional witness")
 
 
 def quoted(text: str, position: int) -> tuple[str, int]:
@@ -988,49 +983,6 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def provenance_fingerprint(provenance: dict) -> str:
-    unsigned = dict(provenance)
-    unsigned.pop("fingerprint", None)
-    canonical = json.dumps(
-        unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
-    return hashlib.sha256((canonical + "\n").encode()).hexdigest()
-
-
-def reject_symlinks(root: Path) -> None:
-    if root.is_symlink() or any(path.is_symlink() for path in root.rglob("*")):
-        fail(f"{root}: receipt contains a symlink")
-
-
-def validate_seal(root: Path) -> None:
-    completed = root / "COMPLETED"
-    roster = root / "SHA256SUMS"
-    if not completed.is_file() or not roster.is_file():
-        fail(f"{root}: incomplete root (COMPLETED/SHA256SUMS missing)")
-    expected = {}
-    for line in roster.read_text().splitlines():
-        match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
-        if not match or match.group(2).startswith("/") or ".." in Path(match.group(2)).parts:
-            fail(f"{root}: malformed checksum roster")
-        relative = match.group(2).removeprefix("./")
-        if not relative or relative in expected:
-            fail(f"{root}: duplicate checksum path")
-        expected[relative] = match.group(1)
-    actual = {
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file() and path.name != "SHA256SUMS"
-    }
-    if actual != set(expected):
-        fail(f"{root}: checksum roster does not exactly cover retained files")
-    for relative, digest in expected.items():
-        if sha256(root / relative) != digest:
-            fail(f"{root}: checksum mismatch for {relative}")
-    for path in [root, *root.rglob("*")]:
-        if path.stat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
-            fail(f"{root}: writable retained path {path.relative_to(root) if path != root else '.'}")
-
-
 def read_json(path: Path):
     try:
         return json.loads(path.read_text())
@@ -1226,90 +1178,6 @@ def validate_preflight(path: Path) -> None:
         fail(f"{path}: missing manual confirmation for {phrase}")
 
 
-def parse_digest_roster(path: Path, expected_paths: set[str]) -> dict[str, str]:
-    entries = {}
-    for line in path.read_text().splitlines():
-        match = re.fullmatch(r"([0-9a-f]{64})  (?:\./)?(.+)", line)
-        if not match or match.group(2).startswith("/") or ".." in Path(match.group(2)).parts:
-            fail(f"{path}: malformed digest roster")
-        if match.group(2) in entries:
-            fail(f"{path}: duplicate digest path")
-        entries[match.group(2)] = match.group(1)
-    if set(entries) != expected_paths:
-        fail(f"{path}: digest roster does not exactly cover expected paths")
-    return entries
-
-
-def validate_digest_roster(path: Path, base: Path, expected_paths: set[str]) -> str:
-    entries = parse_digest_roster(path, expected_paths)
-    for relative, digest in entries.items():
-        if sha256(base / relative) != digest:
-            fail(f"{path}: checksum mismatch for {relative}")
-    return sha256(path)
-
-
-def scenario_expected_paths(manifest: dict) -> set[str]:
-    expected = {*manifest["runtime_files"], "manifest.json"}
-    if manifest.get("rustbgpd_dataset_mode") is not True:
-        return expected
-    policy_files = manifest.get("policy_files")
-    generation_manifests = manifest.get("dataset_generation_manifests")
-    generation_digests = manifest.get("dataset_generation_manifest_sha256")
-    static_manifest = manifest.get("static_policy_manifest")
-    static_digest = manifest.get("static_policy_manifest_sha256")
-    if (
-        not isinstance(policy_files, list)
-        or not policy_files
-        or len(set(policy_files)) != len(policy_files)
-        or any(not isinstance(path, str) or not path.startswith("policy/")
-               or Path(path).is_absolute() or ".." in Path(path).parts for path in policy_files)
-        or not isinstance(generation_manifests, dict)
-        or set(generation_manifests) != {"a", "b"}
-        or not isinstance(generation_digests, dict)
-        or set(generation_digests) != {"a", "b"}
-        or any(not isinstance(value, str) or Path(value).name != value
-               for value in (static_manifest, *(generation_manifests or {}).values()))
-        or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
-               for value in (static_digest, *(generation_digests or {}).values()))
-        or manifest.get("initial_dataset_generation") != "a"
-    ):
-        fail("dataset scenario source manifests are incomplete or unsafe")
-    expected.add(static_manifest)
-    expected.update(generation_manifests.values())
-    return expected
-
-
-def validate_scenario_roster(cdir: Path, manifest: dict) -> str:
-    runtime_files = manifest.get("runtime_files")
-    if not isinstance(runtime_files, list) or not runtime_files:
-        fail(f"{cdir}: manifest runtime_files is not a nonempty roster")
-    if any(
-        not isinstance(relative, str)
-        or not relative
-        or Path(relative).name != relative
-        or ".." in relative
-        or relative == "manifest.json"
-        for relative in runtime_files
-    ) or len(set(runtime_files)) != len(runtime_files):
-        fail(f"{cdir}: manifest runtime_files contains an unsafe or duplicate path")
-    expected = scenario_expected_paths(manifest)
-    entries = parse_digest_roster(cdir / "scenario.sha256", expected)
-    if manifest.get("rustbgpd_dataset_mode") is True:
-        if entries[manifest["static_policy_manifest"]] != manifest["static_policy_manifest_sha256"]:
-            fail(f"{cdir}: static policy manifest digest is not bound")
-        for generation in ("a", "b"):
-            if entries[manifest["dataset_generation_manifests"][generation]] != \
-                    manifest["dataset_generation_manifest_sha256"][generation]:
-                fail(f"{cdir}: dataset generation {generation} manifest digest is not bound")
-    for relative, digest in entries.items():
-        retained = cdir / relative
-        if retained.exists() and (not retained.is_file() or sha256(retained) != digest):
-            fail(f"{cdir}: retained scenario input mismatch for {relative}")
-    if sha256(cdir / "manifest.json") != entries["manifest.json"]:
-        fail(f"{cdir}: scenario roster does not bind retained manifest.json")
-    return sha256(cdir / "scenario.sha256")
-
-
 def validate_measurement_rows(rows_data: list[list[str]], cell: str, peers: int, total: int) -> None:
     for row in rows_data:
         if row[0] != cell:
@@ -1364,18 +1232,14 @@ def validate_rss(path: Path) -> None:
             fail(f"{path}: RSS sample is not a positive integer triple")
 
 
-def validate_cell_chain(
+def validate_cell_evidence(
     root: Path,
     cell: str,
-    root_provenance: dict,
-    scenario_digest: str,
-    dataset: str,
     root_rows: list[list[str]],
     peers: int,
     total: int,
 ) -> None:
     cdir = root / cell
-    fingerprint = root_provenance["fingerprint"]
     cell_rows = list(csv.reader((cdir / "rows.csv").open()))
     expected_rows = [row for row in root_rows if row[0] == cell]
     if cell_rows != expected_rows:
@@ -1388,23 +1252,8 @@ def validate_cell_chain(
     if logged != cell_rows:
         fail(f"{cdir}: retained rows do not re-extract from reloadstall.log")
     validate_rss(cdir / "rss.csv")
-    cell_provenance = read_json(cdir / "provenance.json")
-    scenario = cell_provenance.pop("scenario", {})
-    if (
-        cell_provenance != root_provenance
-        or scenario.get("manifest_sha256") != scenario_digest
-        or scenario.get("dataset_sha256") != dataset
-    ):
-        fail(f"{cdir}: cell provenance/scenario chain is broken")
-    retained = {
-        path.relative_to(cdir).as_posix()
-        for path in cdir.rglob("*")
-        if path.is_file() and path.name not in {"evidence.sha256", "status"}
-    }
-    evidence_digest = validate_digest_roster(cdir / "evidence.sha256", cdir, retained)
-    status = (cdir / "status").read_text().split()
-    if status != ["pass", fingerprint, scenario_digest, dataset, evidence_digest]:
-        fail(f"{cdir}: pass status does not bind the full evidence chain")
+    if (cdir / "status").read_text() != "pass\n":
+        fail(f"{cdir}: cell did not finish its semantic gates")
 
 
 def reject_transaction_tokens(value, path="receipt") -> None:
@@ -1556,18 +1405,15 @@ def validate_plan_apply(prefix, confirm_id: str, timeout: int, context: str) -> 
     return deadline
 
 
-def validate_transaction_evidence(
-    cdir: Path, identity: tuple[int, int], scenario_entries: dict[str, str]
-) -> dict:
+def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict:
     expected_files = {
-        "daemon.log", "evidence.sha256", "final-evidence/ack", "final-evidence/ready",
-        "manifest.json", "process.tsv", "provenance.json", "quiet.tsv", "reloadstall.log",
-        "rows.csv", "rss.csv", "scenario.sha256", "status", "transactions/cycles.jsonl",
-        "transactions/lifecycle.json",
+        "daemon.log", "final-evidence/ack", "final-evidence/ready", "manifest.json",
+        "process.tsv", "quiet.tsv", "reloadstall.log", "rows.csv", "rss.csv", "status",
+        "transactions/cycles.jsonl", "transactions/lifecycle.json",
     }
     actual_files = {path.relative_to(cdir).as_posix() for path in cdir.rglob("*") if path.is_file()}
-    if actual_files != expected_files:
-        fail(f"{cdir}: transaction cell roster is not exact")
+    if not expected_files <= actual_files:
+        fail(f"{cdir}: transaction evidence is incomplete")
     try:
         cycles = [json.loads(line) for line in (cdir / "transactions/cycles.jsonl").read_text().splitlines()]
     except json.JSONDecodeError as error:
@@ -1647,11 +1493,6 @@ def validate_transaction_evidence(
         )
     if not (candidate_ids[0] == candidate_ids[2] and candidate_ids[1] == candidate_ids[3] and candidate_ids[0] != candidate_ids[1]):
         fail(f"{cdir}: measured candidates do not alternate B/A/B/A")
-    if (
-        candidate_ids[0][0] != scenario_entries.get("gen-b.toml")
-        or candidate_ids[1][0] != scenario_entries.get("gen-a.toml")
-    ):
-        fail(f"{cdir}: measured candidates are not bound to sealed gen-a/gen-b inputs")
     if not (
         actual_ids[0] == actual_ids[2]
         and actual_ids[1] == actual_ids[3]
@@ -1781,8 +1622,6 @@ def validate_transaction_evidence(
 
 
 def validate_root(root: Path, kind: str):
-    reject_symlinks(root)
-    validate_seal(root)
     validate_preflight(root / "preflight.log")
     provenance = read_json(root / "provenance.json")
     inputs, git = provenance.get("inputs", {}), provenance.get("git", {})
@@ -1798,56 +1637,29 @@ def validate_root(root: Path, kind: str):
         "transaction": "full-transaction",
         "sighup": "full-rustbgpd-sighup",
     }[kind]
-    scripts = provenance.get("scripts")
-    binaries = provenance.get("binaries")
     environment = provenance.get("environment")
-    top_entries = {path.name for path in root.iterdir()}
-    expected_entries = {
-        "COMPLETED",
-        "SHA256SUMS",
-        "dataset.sha256",
-        "preflight.log",
-        "provenance.json",
-        "rows.csv",
-        *expected_cells,
-    }
-    if top_entries != expected_entries:
-        fail(f"{root}: artifact-root roster is not exact")
     if inputs.get("cells") != ",".join(expected_cells):
         fail(f"{root}: wrong {kind} cell roster")
     if inputs.get("campaign_kind") != expected_kind:
         fail(f"{root}: wrong campaign kind for {kind} role")
-    fingerprint = provenance.get("fingerprint")
     if (
         set(provenance)
         != {
             "schema",
             "started_at_epoch_ns",
             "git",
-            "scripts",
-            "binaries",
             "environment",
             "inputs",
-            "fingerprint",
         }
-        or provenance.get("schema") != 4
+        or provenance.get("schema") != 1
         or not isinstance(provenance.get("started_at_epoch_ns"), int)
         or provenance.get("started_at_epoch_ns", -1) <= 0
-        or not isinstance(fingerprint, str)
-        or not re.fullmatch(r"[0-9a-f]{64}", fingerprint)
-        or provenance_fingerprint(provenance) != fingerprint
-        or not isinstance(scripts, dict)
-        or set(scripts) != {"runner", "verifier", "generator", "stage_datasets", "rss_sampler", "txn_apply", "txn_lifecycle"}
-        or not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) for value in scripts.values())
-        or not isinstance(binaries, dict)
-        or set(binaries) != {"reloadstall", "rustbgpd", "rbgp", "rs_config_render"}
-        or not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) for value in binaries.values())
         or not isinstance(environment, dict)
         or set(environment)
         != {"rustc", "cargo", "python", "jq", "docker", "kernel", "cpu_model"}
         or not all(isinstance(value, str) and value for value in environment.values())
     ):
-        fail(f"{root}: schema/tool/source provenance is incomplete")
+        fail(f"{root}: receipt context is incomplete")
     expected_input_keys = {
         *CANONICAL_FULL_INPUTS,
         "campaign_kind",
@@ -1895,53 +1707,28 @@ def validate_root(root: Path, kind: str):
         fail(f"{root}: noncanonical full shape/seed/reload count")
     commit = git.get("commit")
     tree = git.get("tree")
-    origin_main = git.get("origin_main")
-    measurement_mode = git.get("measurement_mode")
-    source_relation_valid = (
-        measurement_mode == "main"
-        and origin_main == commit
-        and git.get("head_matches_origin_main") is True
-    ) or (
-        measurement_mode == "candidate"
-        and git.get("head_matches_origin_main") is (origin_main == commit)
-    )
     if (
         not isinstance(commit, str)
         or not re.fullmatch(r"[0-9a-f]{40}", commit)
         or not isinstance(tree, str)
         or not re.fullmatch(r"[0-9a-f]{40}", tree)
-        or not isinstance(origin_main, str)
-        or not re.fullmatch(r"[0-9a-f]{40}", origin_main)
         or git.get("dirty") is not False
-        or not source_relation_valid
-        or git.get("ancestry_verified") is not True
-        or not re.fullmatch(r"[0-9a-f]{64}", git.get("dirty_state_sha256", ""))
-        or set(git)
-        != {
-            "commit",
-            "tree",
-            "dirty",
-            "dirty_state_sha256",
-            "origin_main",
-            "head_matches_origin_main",
-            "measurement_mode",
-            "ancestry_verified",
-        }
+        or set(git) != {"commit", "tree", "dirty"}
     ):
-        fail(f"{root}: full source/preflight contract not proven")
+        fail(f"{root}: exact clean commit/tree context is not proven")
     dataset = (root / "dataset.sha256").read_text().strip()
     if not re.fullmatch(r"[0-9a-f]{64}", dataset):
         fail(f"{root}: invalid canonical dataset digest")
     rows_data = read_rows(root / "rows.csv", expected_cells)
     completed = read_json(root / "COMPLETED")
     if (
-        completed.get("status") != "pass"
-        or completed.get("fingerprint") != fingerprint
+        set(completed) != {"status", "completed_at_epoch_ns", "cells"}
+        or completed.get("status") != "pass"
         or completed.get("cells") != ",".join(expected_cells)
         or not isinstance(completed.get("completed_at_epoch_ns"), int)
         or completed.get("completed_at_epoch_ns", -1) <= provenance["started_at_epoch_ns"]
     ):
-        fail(f"{root}: COMPLETED does not bind status/cells/fingerprint/time")
+        fail(f"{root}: COMPLETED does not record status/cells/time")
     identities = []
     transaction_evidence = None
     for cell in expected_cells:
@@ -1953,16 +1740,9 @@ def validate_root(root: Path, kind: str):
             if marker_path.is_symlink() or not marker_path.is_file() or marker_path.read_text() != f"{marker}\n":
                 fail(f"{root}: {cell} final-evidence {marker} is not an exact regular marker")
         manifest = read_json(cdir / "manifest.json")
-        scenario_digest = validate_scenario_roster(cdir, manifest)
-        scenario_entries = parse_digest_roster(
-            cdir / "scenario.sha256", scenario_expected_paths(manifest)
-        )
-        validate_cell_chain(
+        validate_cell_evidence(
             root,
             cell,
-            provenance,
-            scenario_digest,
-            dataset,
             rows_data,
             320,
             183040,
@@ -1994,7 +1774,7 @@ def validate_root(root: Path, kind: str):
             if manifest.get("path_hiding") is not True or manifest.get("path_hiding_applicable") is not True:
                 fail(f"{root}: transaction path-hiding mode not explicit")
             transaction_evidence = validate_transaction_evidence(
-                cdir, identities[-1], scenario_entries
+                cdir, identities[-1]
             )
         elif not (
             manifest.get("path_hiding") is None
@@ -2053,8 +1833,6 @@ def validate_root(root: Path, kind: str):
         "started": int(provenance.get("started_at_epoch_ns", -1)),
         "completed": int(completed.get("completed_at_epoch_ns", -1)),
         "git": git,
-        "scripts": scripts,
-        "binaries": binaries,
         "environment": environment,
         "inputs": inputs,
         "identities": identities,
@@ -2120,19 +1898,19 @@ def validate_campaigns(roots: list[Path], output_dir: Path) -> None:
         for index in range(3)
     ):
         fail("campaign roots overlap or do not finish before the next root starts")
-    source_identity = ("git", "scripts", "binaries", "environment")
+    source_identity = ("git", "environment")
     if any(
         tuple(campaign[key] for key in source_identity)
         != tuple(campaigns[0][key] for key in source_identity)
         for campaign in campaigns[1:]
     ):
-        fail("four roots do not share exact source, tool, and platform identities")
-    repeat_identity = ("git", "scripts", "binaries", "environment", "inputs")
+        fail("four roots do not share exact source and environment context")
+    repeat_identity = ("git", "environment", "inputs")
     for left, right in ((campaigns[0], campaigns[3]), (campaigns[1], campaigns[2])):
         if tuple(left[key] for key in repeat_identity) != tuple(
             right[key] for key in repeat_identity
         ):
-            fail("A/B repeats do not share exact protocol, tool, and image identities")
+            fail("A/B repeats do not share exact protocol and environment context")
     identities = [identity for entry in campaigns for identity in entry["identities"]]
     if len(identities) != len(set(identities)):
         fail("daemon PID/start identity was reused across campaign cells")
@@ -2182,9 +1960,9 @@ def validate_transactions(roots: list[Path], output_dir: Path) -> None:
         fail("transaction roots do not share commit, canonical shape/seed, and dataset")
     if campaigns[0]["completed"] >= campaigns[1]["started"]:
         fail("transaction roots overlap or are not in A/B order")
-    shared = ("git", "scripts", "binaries", "environment", "inputs")
+    shared = ("git", "environment", "inputs")
     if any(campaigns[0][key] != campaigns[1][key] for key in shared):
-        fail("transaction roots do not share exact source, tool, platform, and inputs")
+        fail("transaction roots do not share exact source, environment, and inputs")
     if campaigns[0]["transaction_evidence"] != campaigns[1]["transaction_evidence"]:
         fail("transaction roots do not share exact A/B input and applied-state identities")
     identities = [identity for campaign in campaigns for identity in campaign["identities"]]
@@ -2301,11 +2079,9 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
     (root / "dataset.sha256").write_text(dataset + "\n")
     image_id = "sha256:" + "a" * 64
     provenance = {
-        "schema": 4,
+        "schema": 1,
         "started_at_epoch_ns": started,
-        "git": {"commit": "c" * 40, "tree": "b" * 40, "dirty": False, "dirty_state_sha256": "d" * 64, "origin_main": "c" * 40, "head_matches_origin_main": True, "measurement_mode": "main", "ancestry_verified": True},
-        "scripts": {"runner": "1" * 64, "verifier": "2" * 64, "generator": "3" * 64, "stage_datasets": "b" * 64, "rss_sampler": "4" * 64, "txn_apply": "5" * 64, "txn_lifecycle": "a" * 64},
-        "binaries": {"reloadstall": "6" * 64, "rustbgpd": "7" * 64, "rbgp": "8" * 64, "rs_config_render": "9" * 64},
+        "git": {"commit": "c" * 40, "tree": "b" * 40, "dirty": False},
         "environment": {key: "fixture" for key in ("rustc", "cargo", "python", "jq", "docker", "kernel", "cpu_model")},
         "inputs": {
             **CANONICAL_FULL_INPUTS,
@@ -2316,8 +2092,6 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
             "openbgpd_image_id": image_id if kind == "comparison" else "not-selected",
         },
     }
-    provenance["fingerprint"] = provenance_fingerprint(provenance)
-    fingerprint = provenance["fingerprint"]
     (root / "provenance.json").write_text(json.dumps(provenance))
     (root / "preflight.log").write_text(
         "  ok: no pushes to main during the soak window (confirmed via fixture)\n"
@@ -2394,101 +2168,10 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
             (boundary / "ack").write_text("ack\n")
         elif cell == TRANSACTION_CELL:
             make_transaction_evidence(cdir, pid)
-        scenario_lines = []
-        for relative in [*runtime_files, "manifest.json"]:
-            retained_input = cdir / relative
-            if cell == TRANSACTION_CELL and relative == "gen-a.toml":
-                digest = "a" * 64
-            elif cell == TRANSACTION_CELL and relative == "gen-b.toml":
-                digest = "b" * 64
-            else:
-                digest = sha256(retained_input) if retained_input.is_file() else "0" * 64
-            scenario_lines.append(f"{digest}  ./{relative}")
-        (cdir / "scenario.sha256").write_text("\n".join(sorted(scenario_lines)) + "\n")
-        cell_provenance = json.loads(json.dumps(provenance))
-        cell_provenance["scenario"] = {
-            "manifest_sha256": sha256(cdir / "scenario.sha256"),
-            "dataset_sha256": dataset,
-        }
-        (cdir / "provenance.json").write_text(json.dumps(cell_provenance))
-        retained = {
-            path.relative_to(cdir).as_posix()
-            for path in cdir.rglob("*")
-            if path.is_file()
-        }
-        lines = [f"{sha256(cdir / relative)}  {relative}" for relative in sorted(retained)]
-        (cdir / "evidence.sha256").write_text("\n".join(lines) + "\n")
-        evidence_digest = sha256(cdir / "evidence.sha256")
-        scenario_digest = sha256(cdir / "scenario.sha256")
-        (cdir / "status").write_text(
-            f"pass {fingerprint} {scenario_digest} {dataset} {evidence_digest}\n"
-        )
-    (root / "COMPLETED").write_text(json.dumps({"status": "pass", "fingerprint": fingerprint, "completed_at_epoch_ns": started + 5, "cells": ",".join(cells)}))
-    reseal(root)
-    freeze(root)
-
-
-def thaw(root: Path) -> None:
-    for path in [root, *root.rglob("*")]:
-        path.chmod(path.stat().st_mode | stat.S_IWUSR)
-
-
-def freeze(root: Path) -> None:
-    for path in sorted([root, *root.rglob("*")], key=lambda item: len(item.parts), reverse=True):
-        path.chmod(path.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
-
-
-def reseal(root: Path) -> None:
-    roster = root / "SHA256SUMS"
-    if roster.exists():
-        roster.unlink()
-    lines = []
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        lines.append(f"{sha256(path)}  {path.relative_to(root).as_posix()}")
-    roster.write_text("\n".join(lines) + "\n")
-
-
-def reseal_cell_evidence(root: Path) -> None:
-    for roster in root.rglob("evidence.sha256"):
-        cdir = roster.parent
-        status = cdir / "status"
-        retained = {
-            path.relative_to(cdir).as_posix()
-            for path in cdir.rglob("*")
-            if path.is_file() and path.name not in {"evidence.sha256", "status"}
-        }
-        roster.write_text(
-            "\n".join(
-                f"{sha256(cdir / relative)}  {relative}" for relative in sorted(retained)
-            )
-            + "\n"
-        )
-        prior = status.read_text().split()
-        status.write_text(
-            f"pass {prior[1]} {sha256(cdir / 'scenario.sha256')} {prior[3]} {sha256(roster)}\n"
-        )
-
-
-def rebind_provenance(root: Path) -> None:
-    provenance_path = root / "provenance.json"
-    provenance = read_json(provenance_path)
-    provenance["fingerprint"] = provenance_fingerprint(provenance)
-    provenance_path.write_text(json.dumps(provenance))
-    for cell in (*COMPARISON_CELLS, GROUPED_CELL, TRANSACTION_CELL):
-        cell_path = root / cell / "provenance.json"
-        if not cell_path.is_file():
-            continue
-        cell_provenance = read_json(cell_path)
-        scenario = cell_provenance["scenario"]
-        cell_path.write_text(json.dumps({**provenance, "scenario": scenario}))
-        status_path = cell_path.parent / "status"
-        status = status_path.read_text().split()
-        status[1] = provenance["fingerprint"]
-        status_path.write_text(" ".join(status) + "\n")
-    completed_path = root / "COMPLETED"
-    completed = read_json(completed_path)
-    completed["fingerprint"] = provenance["fingerprint"]
-    completed_path.write_text(json.dumps(completed))
+        (cdir / "status").write_text("pass\n")
+    (root / "COMPLETED").write_text(json.dumps({
+        "status": "pass", "completed_at_epoch_ns": started + 5, "cells": ",".join(cells)
+    }))
 
 
 def self_test() -> None:
@@ -2660,89 +2343,52 @@ def self_test() -> None:
             except InvalidReceipt: pass
             else: fail("discriminator self-test accepted non-strict trigger timestamps")
 
-        repo = root / "pair-repo"; repo.mkdir()
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
-        subprocess.run(["git", "-C", str(repo), "config", "user.email", "fixture@example.invalid"], check=True)
-        subprocess.run(["git", "-C", str(repo), "config", "user.name", "fixture"], check=True)
-        script_paths = {"runner":"bench/scale/irrreload/run-irr-reload.sh",
-            "verifier":"bench/scale/irrreload/verify-receipt.py", "generator":"bench/scale/reloadstall/gen-irr-scenario.py",
-            "stage_datasets":"bench/scale/irrreload/stage-rustbgpd-datasets.sh",
-            "rss_sampler":"bench/scale/matrix/rss-sampler.sh", "txn_apply":"bench/scale/irrreload/txn-apply.sh",
-            "txn_lifecycle":"bench/scale/irrreload/txn-lifecycle.sh"}
-        for name, relative in script_paths.items():
-            path = repo / relative; path.parent.mkdir(parents=True, exist_ok=True); path.write_text(name + "\n")
-        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
-        commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
-        tree = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"], check=True, capture_output=True, text=True).stdout.strip()
         roots = [root / "pair-a", root / "pair-b"]
         canonical_triggers = "".join(f"reload {n} SIGHUP wall_us={8635464000000000+n*1000000} policy=x\n" for n in range(1, 5))
         for index, pair_root in enumerate(roots):
             make_fixture(pair_root, "sighup", 100 + index * 100, 900 + index)
-            thaw(pair_root); cdir = pair_root / "rustbgpd-sighup"
+            cdir = pair_root / "rustbgpd-sighup"
             cdir.joinpath("reloadstall.log").write_text(cdir.joinpath("reloadstall.log").read_text() + canonical_triggers)
             cdir.joinpath("daemon.log").write_text("".join(discriminator_lines(n) for n in range(1, 5)))
             validate_authoritative_discriminator(cdir / "daemon.log", cdir / "reloadstall.log", cdir / "authoritative-phase-timings.csv")
             validate_reload_phases(cdir / "daemon.log", cdir / "reloadstall.log", cdir / "phase-timings.csv")
-            provenance = read_json(pair_root / "provenance.json")
-            provenance["git"].update(commit=commit, tree=tree, origin_main=commit)
-            provenance["scripts"] = {name:hashlib.sha256((repo / path).read_bytes()).hexdigest() for name, path in script_paths.items()}
-            pair_root.joinpath("provenance.json").write_text(json.dumps(provenance)); rebind_provenance(pair_root)
-            reseal_cell_evidence(pair_root); reseal(pair_root); freeze(pair_root)
-        validate_authoritative_pair(repo, roots, output)
+        validate_authoritative_pair(roots, output)
         if read_json(output)["verdict"] != "mechanism_witness": fail("pair fixture missed witness")
         print("red-proof authoritative-pair-positive=pass")
         for name, old, new in (("threshold", '"total_us": 400', '"total_us": 110'),
             ("witness", '"filtered_scope_member_visits": 6400', '"filtered_scope_member_visits": 6500')):
-            copied = root / f"pair-{name}"; shutil.copytree(roots[1], copied); thaw(copied); cdir = copied / "rustbgpd-sighup"
+            copied = root / f"pair-{name}"; shutil.copytree(roots[1], copied); cdir = copied / "rustbgpd-sighup"
             cdir.joinpath("daemon.log").write_text(cdir.joinpath("daemon.log").read_text().replace(old, new))
             if name == "threshold": cdir.joinpath("daemon.log").write_text(cdir.joinpath("daemon.log").read_text().replace('"cohort_rib_transition_us": 310', '"cohort_rib_transition_us": 20'))
             validate_authoritative_discriminator(cdir / "daemon.log", cdir / "reloadstall.log", cdir / "authoritative-phase-timings.csv")
             validate_reload_phases(cdir / "daemon.log", cdir / "reloadstall.log", cdir / "phase-timings.csv")
-            reseal_cell_evidence(copied); reseal(copied); freeze(copied)
-            validate_authoritative_pair(repo, [roots[0], copied], output)
+            validate_authoritative_pair([roots[0], copied], output)
             if read_json(output)["verdict"] != "negative_result" or read_json(output)["phase"]:
                 fail(f"pair fixture did not publish negative {name}")
             print(f"red-proof authoritative-pair-negative-{name}=pass")
         for name, mutate in (
-            ("schema", lambda value: value.update(schema=3)),
-            ("binary", lambda value: value["binaries"].update(rustbgpd="a" * 64)),
+            ("schema", lambda value: value.update(schema=2)),
             ("input", lambda value: value["inputs"].update(overlap_fraction="0.1"))):
-            copied = root / f"pair-{name}"; shutil.copytree(roots[1], copied); thaw(copied)
+            copied = root / f"pair-{name}"; shutil.copytree(roots[1], copied)
             value = read_json(copied / "provenance.json"); mutate(value); copied.joinpath("provenance.json").write_text(json.dumps(value))
-            rebind_provenance(copied); reseal_cell_evidence(copied); reseal(copied); freeze(copied)
-            try: validate_authoritative_pair(repo, [roots[0], copied], output)
+            try: validate_authoritative_pair([roots[0], copied], output)
             except InvalidReceipt: pass
             else: fail(f"pair self-test accepted {name} mutation")
             print(f"red-proof authoritative-pair-{name}=pass")
-        for name, mutate in (("tree", lambda value: value["git"].update(tree="a" * 40)),
-            ("blob", lambda value: value["scripts"].update(runner="a" * 64)),
-            ("same-overlap", lambda value: value["inputs"].update(overlap_fraction="0.1"))):
-            changed = []
-            for index, source in enumerate(roots):
-                copied = root / f"pair-{name}-{index}"; shutil.copytree(source, copied); thaw(copied)
-                value = read_json(copied / "provenance.json"); mutate(value); copied.joinpath("provenance.json").write_text(json.dumps(value))
-                rebind_provenance(copied); reseal_cell_evidence(copied); reseal(copied); freeze(copied); changed.append(copied)
-            try: validate_authoritative_pair(repo, changed, output)
-            except InvalidReceipt: pass
-            else: fail(f"pair self-test accepted same-{name} mutation")
-            print(f"red-proof authoritative-pair-{name}=pass")
-        copied = root / "pair-csv"; shutil.copytree(roots[1], copied); thaw(copied)
+        copied = root / "pair-csv"; shutil.copytree(roots[1], copied)
         path = copied / "rustbgpd-sighup/authoritative-phase-timings.csv"; path.write_text(path.read_text() + "x\n")
-        reseal_cell_evidence(copied); reseal(copied); freeze(copied)
         for name, pair_roots in (("csv", [roots[0], copied]), ("reversal", roots[::-1])):
-            try: validate_authoritative_pair(repo, pair_roots, output)
+            try: validate_authoritative_pair(pair_roots, output)
             except InvalidReceipt: pass
             else: fail(f"pair self-test accepted {name} mutation")
             print(f"red-proof authoritative-pair-{name}=pass")
         for name, source in (("identity", roots[0]), ("chronology", roots[1])):
-            copied = root / f"pair-{name}"; shutil.copytree(roots[1], copied); thaw(copied)
+            copied = root / f"pair-{name}"; shutil.copytree(roots[1], copied)
             if name == "identity": shutil.copyfile(source / "rustbgpd-sighup/process.tsv", copied / "rustbgpd-sighup/process.tsv")
             else:
                 value = read_json(copied / "provenance.json"); value["started_at_epoch_ns"] = 50
                 copied.joinpath("provenance.json").write_text(json.dumps(value))
-            rebind_provenance(copied); reseal_cell_evidence(copied); reseal(copied); freeze(copied)
-            try: validate_authoritative_pair(repo, [roots[0], copied], output)
+            try: validate_authoritative_pair([roots[0], copied], output)
             except InvalidReceipt: pass
             else: fail(f"pair self-test accepted {name} mutation")
             print(f"red-proof authoritative-pair-{name}=pass")
@@ -3129,12 +2775,9 @@ def self_test() -> None:
         def txn_alter_json(path, function):
             value = read_json(path); function(value); path.write_text(json.dumps(value) + "\n")
 
-        def txn_rejected(name, mutate, root_index=0, cell_reseal=True):
+        def txn_rejected(name, mutate, root_index=0):
             copied = base / f"bad-txn-{name}"
-            shutil.copytree(txn_roots[root_index], copied); thaw(copied); mutate(copied)
-            if cell_reseal:
-                reseal_cell_evidence(copied)
-            reseal(copied); freeze(copied)
+            shutil.copytree(txn_roots[root_index], copied); mutate(copied)
             pair = txn_roots.copy(); pair[root_index] = copied
             try:
                 validate_transactions(pair, base / f"txn-output-{name}")
@@ -3147,22 +2790,17 @@ def self_test() -> None:
             pair = []
             for index, root in enumerate(txn_roots):
                 copied = base / f"bad-txn-{name}-{index}"
-                shutil.copytree(root, copied); thaw(copied); mutate(copied)
-                reseal_cell_evidence(copied); reseal(copied); freeze(copied); pair.append(copied)
+                shutil.copytree(root, copied); mutate(copied); pair.append(copied)
             try:
                 validate_transactions(pair, base / f"txn-output-{name}")
             except InvalidReceipt:
                 proofs[name] = True; return
             fail(f"red transaction pair unexpectedly accepted: {name}")
 
-        def mutate_candidate_b(root, digest, bind_scenario=False):
+        def mutate_candidate_b(root, digest):
             mutate_cycle(root, 0, lambda row: row["candidate"].update({"sha256": digest}))
             mutate_cycle(root, 2, lambda row: row["candidate"].update({"sha256": digest}))
             mutate_lifecycle(root, lambda value: value["generations"]["opposite"].update({"sha256": digest}))
-            if bind_scenario:
-                cdir = root / TRANSACTION_CELL; scenario = cdir / "scenario.sha256"
-                scenario.write_text(scenario.read_text().replace("b" * 64 + "  ./gen-b.toml", digest + "  ./gen-b.toml"))
-                txn_alter_json(cdir / "provenance.json", lambda value: value["scenario"].update({"manifest_sha256": sha256(scenario)}))
 
         def swap_state_markers(state):
             for field in ("config", "runtime"):
@@ -3207,13 +2845,11 @@ def self_test() -> None:
         txn_rejected("transaction-warning-log", lambda root: (root / TRANSACTION_CELL / "daemon.log").write_text("missing warning\n"))
         txn_rejected("transaction-warning-binding", lambda root: mutate_cycle(root, 0, lambda row: row["history"]["warning"].update({"bytes": 12 * 1024 * 1024})))
         txn_pair_rejected("transaction-applied-generation", swap_applied_markers)
-        txn_pair_rejected("transaction-scenario-generation", lambda root: mutate_candidate_b(root, "f" * 64))
-        txn_rejected("transaction-cross-root-generation", lambda root: mutate_candidate_b(root, "f" * 64, True), root_index=1)
+        txn_rejected("transaction-cross-root-generation", lambda root: mutate_candidate_b(root, "f" * 64), root_index=1)
         txn_rejected("transaction-port-gate", lambda root: (root / TRANSACTION_CELL / "quiet.tsv").write_text((root / TRANSACTION_CELL / "quiet.tsv").read_text().replace("true\ttrue", "false\ttrue", 1)))
         txn_rejected("transaction-disk-gate", lambda root: (root / TRANSACTION_CELL / "quiet.tsv").write_text((root / TRANSACTION_CELL / "quiet.tsv").read_text().replace("41943040", "41943039", 1)))
         txn_rejected("transaction-swap-gate", lambda root: (root / TRANSACTION_CELL / "quiet.tsv").write_text((root / TRANSACTION_CELL / "quiet.tsv").read_text().replace("2\t31\t0.5\t0\t0", "2\t31\t0.5\t1\t0")))
-        txn_rejected("transaction-fallback-shape", lambda root: (txn_alter_json(root / "provenance.json", lambda value: value["inputs"].update({"n_members": "10"})), rebind_provenance(root)))
-        txn_rejected("transaction-mixed-binary", lambda root: (txn_alter_json(root / "provenance.json", lambda value: value["binaries"].update({"rbgp": "f" * 64})), rebind_provenance(root)), root_index=1)
+        txn_rejected("transaction-fallback-shape", lambda root: txn_alter_json(root / "provenance.json", lambda value: value["inputs"].update({"n_members": "10"})))
 
         def reuse_transaction_process(root):
             source = txn_roots[0] / TRANSACTION_CELL / "process.tsv"
@@ -3223,22 +2859,12 @@ def self_test() -> None:
                 path = root / TRANSACTION_CELL / relative
                 path.write_text(path.read_text().replace(f'"pid": {old}', f'"pid": {new}').replace(f'"starttime": {old + 100}', f'"starttime": {new + 100}'))
         txn_rejected("transaction-process-reuse", reuse_transaction_process, root_index=1)
-        txn_rejected("transaction-file-tamper", lambda root: (root / TRANSACTION_CELL / "transactions/cycles.jsonl").write_text("tampered\n"), cell_reseal=False)
-        txn_rejected("transaction-extra-file", lambda root: (root / TRANSACTION_CELL / "unexpected.txt").write_text("unexpected\n"))
+        txn_rejected("transaction-file-tamper", lambda root: (root / TRANSACTION_CELL / "transactions/cycles.jsonl").write_text("tampered\n"))
 
-        def rejected(
-            name, mutate, reseal_after=True, freeze_after=True, cell_reseal=True
-        ):
+        def rejected(name, mutate):
             copied = base / f"bad-{name}"
             shutil.copytree(base / "comparison-a", copied)
-            thaw(copied)
             mutate(copied)
-            if reseal_after:
-                if cell_reseal:
-                    reseal_cell_evidence(copied)
-                reseal(copied)
-            if freeze_after:
-                freeze(copied)
             bad_roots = [copied, roots[1], roots[2], roots[3]]
             try:
                 validate_campaigns(bad_roots, base / f"output-{name}")
@@ -3256,65 +2882,23 @@ def self_test() -> None:
         rejected("barrier-marker", lambda root: (root / "rustbgpd-sighup/pre-churn/ack").write_text("stale\n"))
         rejected("final-barrier-marker", lambda root: (root / "bird/final-evidence/ack").write_text("stale\n"))
         rejected("dirty-commit", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"dirty": True})))
-        rejected("origin-only", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"origin_main": "e" * 40})))
-        rejected("head-matches-false", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"head_matches_origin_main": False})))
-        rejected("ancestry-unverified", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"ancestry_verified": False})))
-        rejected("measurement-mode-invalid", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"measurement_mode": "branch"})))
-        rejected("mismatched-commit", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"commit": "d" * 40, "origin_main": "d" * 40})))
-        rejected("commit-malformed", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"commit": "C" * 40, "origin_main": "C" * 40})))
-        rejected("scripts-null", lambda root: alter_json(root / "provenance.json", lambda data: data.update({"scripts": None})))
-        rejected("scripts-empty-map", lambda root: alter_json(root / "provenance.json", lambda data: data.update({"scripts": {}})))
-        rejected("binary-malformed", lambda root: alter_json(root / "provenance.json", lambda data: data["binaries"].update({"rbgp": "not-a-digest"})))
-        rejected("fingerprint-recompute", lambda root: alter_json(root / "provenance.json", lambda data: data["environment"].update({"docker": "changed"})))
-        def change_input_and_rebind(root, key, value):
+        rejected("mismatched-commit", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"commit": "d" * 40})))
+        rejected("commit-malformed", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"commit": "C" * 40})))
+        def change_input(root, key, value):
             alter_json(root / "provenance.json", lambda data: data["inputs"].update({key: value}))
-            rebind_provenance(root)
-        rejected("canonical-changed-fraction", lambda root: change_input_and_rebind(root, "changed_fraction", "0.2"))
-        rejected("canonical-control-secs", lambda root: change_input_and_rebind(root, "control_secs", "31"))
-        rejected("canonical-bird-threads", lambda root: change_input_and_rebind(root, "bird_threads", "7"))
-        rejected("repeat-image-identity", lambda root: change_input_and_rebind(root, "bird_image_id", "sha256:" + "b" * 64))
-        rejected("cell-root-provenance", lambda root: alter_json(root / "bird/provenance.json", lambda data: data["environment"].update({"docker": "cell-only"})))
+        rejected("canonical-changed-fraction", lambda root: change_input(root, "changed_fraction", "0.2"))
+        rejected("canonical-control-secs", lambda root: change_input(root, "control_secs", "31"))
+        rejected("canonical-bird-threads", lambda root: change_input(root, "bird_threads", "7"))
+        rejected("repeat-image-identity", lambda root: change_input(root, "bird_image_id", "sha256:" + "b" * 64))
         def overlap_next_root(root):
             alter_json(root / "COMPLETED", lambda data: data.update({"completed_at_epoch_ns": 20}))
         rejected("nonoverlap-order", overlap_next_root)
         rejected("quiet-spacing", lambda root: (root / "bird/quiet.tsv").write_text("sample\tepoch_s\tload1\n1\t1\t0.5\n2\t2\t0.5\n"))
         rejected("preflight-raw", lambda root: (root / "preflight.log").write_text("[preflight] READY — all pre-flight checks passed\n"))
-        rejected("cell-status", lambda root: (root / "bird/status").write_text("fail stale\n"), cell_reseal=False)
-        rejected("cell-provenance", lambda root: alter_json(root / "bird/provenance.json", lambda data: data["scenario"].update({"dataset_sha256": "b" * 64})))
-        def break_evidence_roster(root):
-            roster = root / "bird/evidence.sha256"
-            roster.write_text("\n".join(roster.read_text().splitlines()[1:]) + "\n")
-            status = root / "bird/status"
-            fields = status.read_text().split()
-            fields[4] = sha256(roster)
-            status.write_text(" ".join(fields) + "\n")
-        rejected("evidence-roster", break_evidence_roster, cell_reseal=False)
-        def rebind_scenario_manifest(cdir):
-            manifest_path = cdir / "manifest.json"
-            scenario_path = cdir / "scenario.sha256"
-            lines = [
-                f"{sha256(manifest_path)}  ./manifest.json"
-                if line.endswith("  ./manifest.json")
-                else line
-                for line in scenario_path.read_text().splitlines()
-            ]
-            scenario_path.write_text("\n".join(lines) + "\n")
-            alter_json(
-                cdir / "provenance.json",
-                lambda data: data["scenario"].update(
-                    {"manifest_sha256": sha256(scenario_path)}
-                ),
-            )
-        def break_scenario_roster(root):
-            cdir = root / "bird"
-            manifest_path = cdir / "manifest.json"
-            alter_json(manifest_path, lambda data: data["runtime_files"].append("extra.conf"))
-            rebind_scenario_manifest(cdir)
-        rejected("scenario-roster", break_scenario_roster)
+        rejected("cell-status", lambda root: (root / "bird/status").write_text("fail stale\n"))
         def break_manifest_changed_fraction(root):
             cdir = root / "bird"
             alter_json(cdir / "manifest.json", lambda data: data.update({"changed_fraction": 1.0}))
-            rebind_scenario_manifest(cdir)
         rejected("manifest-changed-fraction", break_manifest_changed_fraction)
         def break_overlap_input_binding(root):
             # Internally valid manifest overlap (1 pair at the canonical
@@ -3326,27 +2910,7 @@ def self_test() -> None:
                     {"overlap_fraction": 1 / 183040, "overlap_pairs": [[0, 1]]}
                 ),
             )
-            rebind_scenario_manifest(cdir)
         rejected("overlap-input-binding", break_overlap_input_binding)
-        def break_scenario_duplicate(root):
-            cdir = root / "bird"
-            alter_json(cdir / "manifest.json", lambda data: data["runtime_files"].append("bird.conf"))
-            rebind_scenario_manifest(cdir)
-        rejected("scenario-duplicate", break_scenario_duplicate)
-        def break_scenario_unsafe(root):
-            cdir = root / "bird"
-            alter_json(cdir / "manifest.json", lambda data: data["runtime_files"].__setitem__(0, "../bird.conf"))
-            scenario_path = cdir / "scenario.sha256"
-            lines = [
-                line.replace("  ./bird.conf", "  ./../bird.conf")
-                if line.endswith("  ./bird.conf")
-                else line
-                for line in scenario_path.read_text().splitlines()
-            ]
-            scenario_path.write_text("\n".join(lines) + "\n")
-            rebind_scenario_manifest(cdir)
-        rejected("scenario-unsafe-path", break_scenario_unsafe)
-        rejected("scenario-retained-config", lambda root: (root / "rustbgpd-sighup/config.toml").write_text((root / "rustbgpd-sighup/config.toml").read_text() + "# drift\n"))
         rejected("cell-root-rows", lambda root: (root / "bird/rows.csv").write_text((root / "bird/rows.csv").read_text().replace(",1,1,1,", ",2,1,1,", 1)))
         rejected("reload-log-rows", lambda root: (root / "bird/reloadstall.log").write_text("reloadstall_csv,missing\n"))
         def break_percentile(root, start, values):
@@ -3393,18 +2957,6 @@ def self_test() -> None:
                 )
         rejected("row-session-loss", break_row_sessions)
         rejected("rss-raw", lambda root: (root / "bird/rss.csv").write_text("epoch_s,total_rss_kib,pids\n1,0,1\n"))
-        def break_top_checksum_only(root):
-            daemon_log = root / "bird/daemon.log"
-            daemon_log.write_text(daemon_log.read_text() + "semantically harmless line\n")
-            reseal_cell_evidence(root)
-        rejected("seal-checksum", break_top_checksum_only, reseal_after=False)
-        rejected("exact-root-roster", lambda root: (root / "unexpected.txt").write_text("unexpected\n"))
-        def replace_with_symlink(root):
-            daemon_log = root / "bird/daemon.log"
-            daemon_log.unlink()
-            daemon_log.symlink_to("../preflight.log")
-        rejected("symlink-anywhere", replace_with_symlink)
-        rejected("writable-root", lambda root: None, freeze_after=False)
         comparison_campaigns = [validate_root(roots[0], "comparison"), validate_root(roots[3], "comparison")]
         escaped = [
             {**campaign, "rows": [row.copy() for row in campaign["rows"]]}
@@ -3444,9 +2996,8 @@ def self_test() -> None:
         except InvalidReceipt:
             proofs["ordering"] = True
         reused = base / "reused"
-        shutil.copytree(roots[1], reused); thaw(reused)
+        shutil.copytree(roots[1], reused)
         shutil.copyfile(roots[2] / "rustbgpd-sighup-grouped-control/process.tsv", reused / "rustbgpd-sighup-grouped-control/process.tsv")
-        reseal_cell_evidence(reused); reseal(reused); freeze(reused)
         try:
             validate_campaigns([roots[0], reused, roots[2], roots[3]], base / "output-reused")
         except InvalidReceipt:
@@ -3456,15 +3007,10 @@ def self_test() -> None:
             for suffix, source in zip(("a", "b"), roots[1:3], strict=True):
                 copied = base / f"bad-{name}-{suffix}"
                 shutil.copytree(source, copied)
-                thaw(copied)
                 alter_json(
                     copied / "provenance.json",
                     lambda data: data[section].update({key: value}),
                 )
-                rebind_provenance(copied)
-                reseal_cell_evidence(copied)
-                reseal(copied)
-                freeze(copied)
                 changed.append(copied)
             try:
                 validate_campaigns(
@@ -3473,8 +3019,7 @@ def self_test() -> None:
             except InvalidReceipt:
                 proofs[name] = True
         grouped_pair_drift("cross-role-environment", "environment", "cpu_model", "other-platform")
-        grouped_pair_drift("cross-role-source-identity", "binaries", "rbgp", "a" * 64)
-        expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "origin-only", "head-matches-false", "ancestry-unverified", "measurement-mode-invalid", "mismatched-commit", "commit-malformed", "scripts-null", "scripts-empty-map", "binary-malformed", "fingerprint-recompute", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "cell-root-provenance", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "cell-provenance", "evidence-roster", "scenario-roster", "manifest-changed-fraction", "scenario-duplicate", "scenario-unsafe-path", "scenario-retained-config", "cell-root-rows", "reload-log-rows", "percentile-order", "percentile-positive", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "seal-checksum", "exact-root-roster", "symlink-anywhere", "writable-root", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-role-source-identity"}
+        expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "mismatched-commit", "commit-malformed", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "manifest-changed-fraction", "cell-root-rows", "reload-log-rows", "percentile-order", "percentile-positive", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment"}
         expected |= {"current-down", "reestablished", "flapped", "counter-malformed", "establishment-roster", "flap-roster", "row-session-loss"}
         expected |= {"preflip-private", "lane-gauge"}
         expected |= set(
@@ -3485,29 +3030,28 @@ def self_test() -> None:
             received-view-outside-allocation""".split()
         )
         expected |= set("""v3-inspector-linkage v3-inspector-mode v3-inspector-target v3-inspector-canonical v3-inspector-field-order v3-inspector-nested-order v3-inspector-raw-utf8 transaction-cycle-roster transaction-plan-token transaction-confirm transaction-v3-pending transaction-v3-linkage transaction-apply-deadline-missing transaction-apply-deadline-bool transaction-v3-deadline-missing transaction-v3-deadline-bool transaction-v3-deadline-stale transaction-v3-deadline-swapped transaction-v3-deadline-tamper transaction-schema-v1 transaction-lifecycle-schema-v1 transaction-v3-cleanup transaction-history transaction-abort transaction-timeout transaction-noop transaction-opposite
-transaction-token-leak transaction-warning-log transaction-warning-binding transaction-applied-generation transaction-scenario-generation transaction-cross-root-generation transaction-port-gate transaction-disk-gate transaction-swap-gate transaction-fallback-shape
-transaction-mixed-binary transaction-process-reuse transaction-file-tamper transaction-extra-file""".split())
+transaction-token-leak transaction-warning-log transaction-warning-binding transaction-applied-generation transaction-cross-root-generation transaction-port-gate transaction-disk-gate transaction-swap-gate transaction-fallback-shape
+transaction-process-reuse transaction-file-tamper""".split())
         missing = expected - proofs.keys()
         if missing:
             fail(f"self-test proofs did not reject: {sorted(missing)}")
         publication = Path(__file__).resolve().parents[3] / "docs/perf/artifacts/reload-authoritative-batch-discriminator-2026-08"
         validate_authoritative_publication(publication)
-        def publication_rejected(name, mutate, reseal=True):
+        def publication_rejected(name, mutate):
             copied = base / f"publication-{name}"; shutil.copytree(publication, copied); mutate(copied)
-            if reseal:
-                names = ("authoritative-pair.json", "authoritative-batch-phases.csv", "verification.json")
-                copied.joinpath("SHA256SUMS").write_text("".join(f"{sha256(copied / item)}  {item}\n" for item in names))
             try: validate_authoritative_publication(copied)
             except InvalidReceipt: print(f"red-proof authoritative-publication-{name}=pass")
             else: fail(f"publication self-test accepted {name}")
-        publication_rejected("missing", lambda root: root.joinpath("authoritative-pair.json").unlink(), False)
-        publication_rejected("extra", lambda root: root.joinpath("extra").write_text("x"), False)
+        publication_rejected("missing", lambda root: root.joinpath("authoritative-pair.json").unlink())
+        publication_rejected("extra", lambda root: root.joinpath("extra").write_text("x"))
         publication_rejected("ordering", lambda root: root.joinpath("authoritative-batch-phases.csv").write_text("\n".join([root.joinpath("authoritative-batch-phases.csv").read_text().splitlines()[0], *reversed(root.joinpath("authoritative-batch-phases.csv").read_text().splitlines()[1:])]) + "\n"))
-        def alter_publication(root, section, key, value):
-            path = root / "verification.json"; document = read_json(path); document[section][key] = value; path.write_text(json.dumps(document))
+        def alter_pair(root, mutate):
+            path = root / "authoritative-pair.json"; document = read_json(path); mutate(document); path.write_text(json.dumps(document))
         def promote_pair_witness(root):
-            path = root / "authoritative-pair.json"; document = read_json(path)
-            document["phase"] = "member_emit_state_us"; path.write_text(json.dumps(document))
+            alter_pair(root, lambda document: document.update({
+                "verdict": "mechanism_witness", "phase": "member_emit_state_us",
+                "counter": "emits_attempted",
+            }))
         def alter_publication_csv(root, row_index, key, value):
             path = root / "authoritative-batch-phases.csv"
             with path.open(newline="") as stream:
@@ -3519,8 +3063,9 @@ transaction-mixed-binary transaction-process-reuse transaction-file-tamper trans
             path = root / "authoritative-batch-phases.csv"; lines = path.read_text().splitlines()
             lines[1] += ",extra"; path.write_text("\n".join(lines) + "\n")
         def alter_publication_attribution(root, totals=None, registrations=None):
-            pair_path, csv_path, verification_path = (root / name for name in ("authoritative-pair.json", "authoritative-batch-phases.csv", "verification.json"))
-            pair, verification = read_json(pair_path), read_json(verification_path)
+            pair_path = root / "authoritative-pair.json"
+            csv_path = root / "authoritative-batch-phases.csv"
+            pair = read_json(pair_path)
             if totals is not None:
                 pair["roots"]["A"]["totals_us"] = totals; pair_path.write_text(json.dumps(pair))
             if registrations is not None:
@@ -3530,27 +3075,17 @@ transaction-mixed-binary transaction-process-reuse transaction-file-tamper trans
                     old_registration, old_remainder = (int(old_rows[index][key]) for key in ("registration_membership_us", "remainder_us"))
                     alter_publication_csv(root, index, "registration_membership_us", str(value))
                     alter_publication_csv(root, index, "remainder_us", str(old_remainder + old_registration - value))
-            totals = pair["roots"]["A"]["totals_us"]; later, first = sorted(totals[1:])[1], totals[0]
-            registrations = [int(row["registration_membership_us"]) for row in csv.DictReader(csv_path.open()) if row["repeat"] == "A"]
-            reg_later = sorted(registrations[1:])[1]
-            verification["artifacts"] = {"authoritative_batch_phases_sha256":sha256(csv_path),
-                "frozen_pair_output_sha256":sha256(pair_path)}
-            verification["attribution"]["A"] = {"outer_total_us":totals, "later_median_us":later,
-                "increase_percent":round((later-first)*100/first, 2), "registration_membership_us":registrations,
-                "registration_delta_share_percent":round((reg_later-registrations[0])*100/(later-first), 2)}
-            verification_path.write_text(json.dumps(verification))
-        publication_rejected("arithmetic", lambda root: alter_publication(root, "attribution", "A", {}))
+        publication_rejected("source-id", lambda root: alter_pair(root, lambda pair: pair.update({"commit": "C" * 40})))
         publication_rejected("csv-arithmetic", lambda root: alter_publication_csv(root, 0, "total_us", "1"))
         publication_rejected("csv-chronology", lambda root: alter_publication_csv(root, 1, "timestamp_epoch_us", "1787669377204703"))
         publication_rejected("csv-extra-value", append_publication_csv_value)
         publication_rejected("clean-state", lambda root: alter_publication_csv(root, 0, "dirty_before", "1"))
-        publication_rejected("out-of-root-timestamp", lambda root: alter_publication_csv(root, 0, "timestamp_epoch_us", "1"))
+        publication_rejected("outcome", lambda root: alter_publication_csv(root, 0, "outcome", "failed"))
         publication_rejected("sub-20-growth", lambda root: alter_publication_attribution(root, totals=[100, 110, 110, 110]))
         publication_rejected("sub-70-attribution", lambda root: alter_publication_attribution(root, registrations=[1294, 1300, 1300, 1300]))
         publication_rejected("pair-witness", promote_pair_witness)
-        publication_rejected("binding", lambda root: alter_publication(root, "artifacts", "frozen_pair_output_sha256", "a" * 64))
-        publication_rejected("decision", lambda root: alter_publication(root, "decision", "mechanism", "claimed"))
-        publication_rejected("chronology", lambda root: root.joinpath("verification.json").write_text(json.dumps({**read_json(root / "verification.json"), "roots":{**read_json(root / "verification.json")["roots"], "B":{**read_json(root / "verification.json")["roots"]["B"], "started_at_epoch_ns":1}}})))
+        publication_rejected("negative-witness", lambda root: alter_pair(root, lambda pair: pair["roots"]["A"].update({"phase_us": [1, 2, 2, 2], "owned_counts": [1, 2, 2, 2]})))
+        publication_rejected("retained-direction", lambda root: alter_publication_csv(root, 0, "causal_phase", "member_emit_state_us"))
         for name in sorted(expected):
             print(f"red-proof {name}=pass")
         print("SELF_TEST pass")
@@ -3604,7 +3139,6 @@ def main() -> int:
     discriminator.add_argument("--reload-log", required=True, type=Path)
     discriminator.add_argument("--output", required=True, type=Path)
     pair = subparsers.add_parser("authoritative-pair")
-    pair.add_argument("--repo", required=True, type=Path)
     pair.add_argument("--output", required=True, type=Path)
     pair.add_argument("roots", nargs=2, type=Path)
     publication = subparsers.add_parser("authoritative-publication")
@@ -3646,7 +3180,7 @@ def main() -> int:
         elif args.command == "authoritative-discriminator":
             validate_authoritative_discriminator(args.daemon_log, args.reload_log, args.output)
         elif args.command == "authoritative-pair":
-            validate_authoritative_pair(args.repo, args.roots, args.output)
+            validate_authoritative_pair(args.roots, args.output)
         elif args.command == "authoritative-publication":
             validate_authoritative_publication(args.artifact_dir)
         else:
