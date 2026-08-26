@@ -1085,6 +1085,12 @@ service PolicyService {
   // and TestPolicy dry runs never move these counters either — only
   // live route evaluation counts.
   rpc GetPolicyStats(GetPolicyStatsRequest) returns (GetPolicyStatsResponse);
+
+  // Conservatively report whether the live installed import policies and
+  // accepted dynamic ranges reject RPKI-invalid and ASPA-invalid routes.
+  // This is a bounded disposition proof, not a readiness or forwarding-state
+  // assertion.
+  rpc GetValidationPolicyPosture(GetValidationPolicyPostureRequest) returns (GetValidationPolicyPostureResponse);
 }
 
 service PeerGroupService {
@@ -1223,6 +1229,35 @@ message GetPolicyRequest {
 message GetPolicyResponse {
   string name = 1;
   PolicyDefinition definition = 2;
+}
+
+enum ValidationPolicyDisposition {
+  VALIDATION_POLICY_DISPOSITION_UNSPECIFIED = 0;
+  VALIDATION_POLICY_DISPOSITION_ENFORCED = 1;
+  VALIDATION_POLICY_DISPOSITION_UNENFORCED = 2;
+  VALIDATION_POLICY_DISPOSITION_UNKNOWN = 3;
+}
+
+message ValidationPolicyDimensionPosture {
+  ValidationPolicyDisposition disposition = 1;
+  string reason = 2;
+}
+
+message ValidationPolicyScopePosture {
+  string scope = 1;
+  string kind = 2;
+  ValidationPolicyDimensionPosture rpki_invalid = 3;
+  ValidationPolicyDimensionPosture aspa_invalid = 4;
+}
+
+message GetValidationPolicyPostureRequest {}
+
+message GetValidationPolicyPostureResponse {
+  repeated ValidationPolicyScopePosture scopes = 1;
+  ValidationPolicyDimensionPosture rpki_invalid = 2;
+  ValidationPolicyDimensionPosture aspa_invalid = 3;
+  bool complete = 4;
+  uint32 omitted = 5;
 }
 
 message SetPolicyRequest {

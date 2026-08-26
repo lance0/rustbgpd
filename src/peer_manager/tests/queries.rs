@@ -560,3 +560,109 @@ log_format = "json"
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     actor.await.unwrap();
 }
+
+#[tokio::test]
+async fn validation_policy_posture_uses_installed_static_and_dynamic_truth() {
+    use rustbgpd_api::peer_types::ValidationPolicyDisposition;
+
+    let mut manager = test_peer_manager();
+    let static_peer: IpAddr = "192.0.2.10".parse().unwrap();
+    insert_test_managed_peer(
+        &mut manager,
+        static_peer,
+        stalled_policy_query_handle(),
+        false,
+    );
+    manager
+        .peers
+        .get_mut(&key(static_peer))
+        .unwrap()
+        .import_policy = Some(validation_policy_chain(ImportValidationDependency::Rpki));
+    let enforced = manager.validation_policy_posture();
+    assert_eq!(
+        enforced.rpki_invalid.disposition,
+        ValidationPolicyDisposition::Enforced
+    );
+
+    let dynamic_peer: IpAddr = "192.0.2.20".parse().unwrap();
+    insert_test_managed_peer(
+        &mut manager,
+        dynamic_peer,
+        stalled_policy_query_handle(),
+        false,
+    );
+    let dynamic = manager.peers.get_mut(&key(dynamic_peer)).unwrap();
+    dynamic.is_dynamic = true;
+    dynamic.import_policy = None;
+
+    // The empty config catalog deliberately disagrees with the installed
+    // static chain: the query must read manager-owned installed state.
+    let snapshot = manager.validation_policy_posture();
+    assert_eq!(snapshot.scopes.len(), 2);
+    assert_eq!(snapshot.scopes[0].scope, static_peer.to_string());
+    assert_eq!(snapshot.scopes[0].kind, "static_peer");
+    assert_eq!(
+        snapshot.scopes[0].rpki_invalid.disposition,
+        ValidationPolicyDisposition::Enforced
+    );
+    assert_eq!(snapshot.scopes[1].kind, "dynamic_peer");
+    assert_eq!(
+        snapshot.scopes[1].rpki_invalid.disposition,
+        ValidationPolicyDisposition::Unenforced
+    );
+    assert_eq!(
+        snapshot.rpki_invalid.disposition,
+        ValidationPolicyDisposition::Unenforced
+    );
+    assert!(snapshot.complete);
+    assert_eq!(snapshot.omitted, 0);
+}
+
+#[test]
+fn validation_policy_posture_resolves_prospective_ranges_and_caps_before_resolution() {
+    use rustbgpd_api::peer_types::ValidationPolicyDisposition;
+
+    let range = |prefix: &str, peer_group: &str, remote_asn| crate::config::DynamicNeighborConfig {
+        prefix: prefix.to_string(),
+        peer_group: peer_group.to_string(),
+        remote_asn,
+        description: None,
+        tcp_ao: None,
+    };
+    let mut manager = dynamic_test_manager();
+    manager.current_config.global.ebgp_requires_policy = Some(true);
+    manager.current_config.dynamic_neighbors = vec![
+        range("198.51.100.17/24", "ix-members", 0),
+        range("198.51.100.129/25", "ix-members", 65002),
+    ];
+    manager.dynamic_ranges.clear();
+    let snapshot = manager.validation_policy_posture();
+    assert_eq!(snapshot.scopes.len(), 2);
+    assert_eq!(snapshot.scopes[0].scope, "198.51.100.0/24");
+    assert_eq!(snapshot.scopes[1].scope, "198.51.100.128/25");
+    assert!(snapshot.scopes.iter().all(|scope| {
+        scope.kind == "dynamic_range"
+            && scope.rpki_invalid.disposition == ValidationPolicyDisposition::Enforced
+            && scope.rpki_invalid.reason == "invalid_route_denied"
+    }));
+
+    manager.current_config.dynamic_neighbors = vec![range("203.0.113.0/24", "missing", 65002)];
+    let unresolved = manager.validation_policy_posture();
+    assert_eq!(
+        unresolved.scopes[0].rpki_invalid.reason,
+        "resolution_failed"
+    );
+
+    manager.current_config.dynamic_neighbors = (0_u32..=4096)
+        .map(|index| range(&format!("2001:db8::{index:x}/128"), "missing", 65002))
+        .collect();
+    let capped = manager.validation_policy_posture();
+    assert_eq!(capped.scopes.len(), 4096);
+    assert!(!capped.complete);
+    assert_eq!(capped.omitted, 1);
+    assert_eq!(
+        capped.rpki_invalid.disposition,
+        ValidationPolicyDisposition::Unknown
+    );
+    assert_eq!(capped.rpki_invalid.reason, "incomplete");
+}

@@ -15,7 +15,8 @@ use crate::actor_read::{peer_manager_read, rib_manager_read};
 use crate::health_probe::DaemonGate;
 use crate::peer_types::{
     ConfigEvent, NamedPolicyDefinition, OwnedCatalogMutation, OwnedCatalogMutationOutcome,
-    PeerManagerCommand, PolicyStatementDefinition,
+    PeerManagerCommand, PolicyStatementDefinition, ValidationPolicyDimensionSnapshot,
+    ValidationPolicyDisposition, ValidationPolicyScopeSnapshot,
 };
 use crate::policy_helpers::{proto_statement_to_input, validate_policy_action};
 use crate::proto;
@@ -539,6 +540,27 @@ async fn require_managed_peer_address(
 
 #[tonic::async_trait]
 impl proto::policy_service_server::PolicyService for PolicyService {
+    async fn get_validation_policy_posture(
+        &self,
+        _request: Request<proto::GetValidationPolicyPostureRequest>,
+    ) -> Result<Response<proto::GetValidationPolicyPostureResponse>, Status> {
+        let snapshot = peer_manager_read(&self.peer_mgr_tx, |reply| {
+            PeerManagerCommand::GetValidationPolicyPosture { reply }
+        })
+        .await?;
+        Ok(Response::new(proto::GetValidationPolicyPostureResponse {
+            scopes: snapshot
+                .scopes
+                .into_iter()
+                .map(posture_scope_to_proto)
+                .collect(),
+            rpki_invalid: Some(posture_dimension_to_proto(&snapshot.rpki_invalid)),
+            aspa_invalid: Some(posture_dimension_to_proto(&snapshot.aspa_invalid)),
+            complete: snapshot.complete,
+            omitted: snapshot.omitted,
+        }))
+    }
+
     async fn list_policies(
         &self,
         _request: Request<proto::ListPoliciesRequest>,
@@ -1470,6 +1492,31 @@ impl proto::policy_service_server::PolicyService for PolicyService {
     }
 }
 
+fn posture_dimension_to_proto(
+    snapshot: &ValidationPolicyDimensionSnapshot,
+) -> proto::ValidationPolicyDimensionPosture {
+    let disposition = match snapshot.disposition {
+        ValidationPolicyDisposition::Enforced => proto::ValidationPolicyDisposition::Enforced,
+        ValidationPolicyDisposition::Unenforced => proto::ValidationPolicyDisposition::Unenforced,
+        ValidationPolicyDisposition::Unknown => proto::ValidationPolicyDisposition::Unknown,
+    };
+    proto::ValidationPolicyDimensionPosture {
+        disposition: disposition.into(),
+        reason: snapshot.reason.to_string(),
+    }
+}
+
+fn posture_scope_to_proto(
+    snapshot: ValidationPolicyScopeSnapshot,
+) -> proto::ValidationPolicyScopePosture {
+    proto::ValidationPolicyScopePosture {
+        scope: snapshot.scope,
+        kind: snapshot.kind.to_string(),
+        rpki_invalid: Some(posture_dimension_to_proto(&snapshot.rpki_invalid)),
+        aspa_invalid: Some(posture_dimension_to_proto(&snapshot.aspa_invalid)),
+    }
+}
+
 const TEST_POLICY_PAGE_SIZE: usize = 1000;
 
 async fn query_test_policy_page(
@@ -1719,9 +1766,10 @@ mod tests {
         ListRejectedRoutes,
         TestPolicy,
         GetPolicyStats,
+        GetValidationPolicyPosture,
     }
 
-    const POLICY_READS: [PolicyRead; 10] = [
+    const POLICY_READS: [PolicyRead; 11] = [
         PolicyRead::ListPolicies,
         PolicyRead::GetPolicy,
         PolicyRead::ListNeighborSets,
@@ -1732,6 +1780,7 @@ mod tests {
         PolicyRead::ListRejectedRoutes,
         PolicyRead::TestPolicy,
         PolicyRead::GetPolicyStats,
+        PolicyRead::GetValidationPolicyPosture,
     ];
 
     impl PolicyRead {
@@ -1826,6 +1875,33 @@ mod tests {
             )
             .await
             .map(|_| ()),
+            PolicyRead::GetValidationPolicyPosture => {
+                PolicyServiceRpc::get_validation_policy_posture(
+                    service,
+                    Request::new(proto::GetValidationPolicyPostureRequest {}),
+                )
+                .await
+                .map(|_| ())
+            }
+        }
+    }
+
+    #[test]
+    fn validation_posture_mapping_never_emits_unspecified() {
+        for disposition in [
+            ValidationPolicyDisposition::Enforced,
+            ValidationPolicyDisposition::Unenforced,
+            ValidationPolicyDisposition::Unknown,
+        ] {
+            let proto = posture_dimension_to_proto(&ValidationPolicyDimensionSnapshot {
+                disposition,
+                reason: "stable_reason",
+            });
+            assert_ne!(
+                proto.disposition,
+                proto::ValidationPolicyDisposition::Unspecified as i32
+            );
+            assert_eq!(proto.reason, "stable_reason");
         }
     }
 
