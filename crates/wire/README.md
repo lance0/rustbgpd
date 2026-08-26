@@ -16,15 +16,43 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
-### Unreleased compatibility note
+### 0.18.0 compatibility note
 
-The unreleased API addition is non-breaking:
-`UpdateMessage::try_build_from_attribute_iter` accepts an `IntoIterator` that
-yields borrowed `PathAttribute` values. The iterator is consumed once, in
-yielded order, without requiring `Clone`, `ExactSizeIterator`, or a rewind.
-Encoding retains the existing attribute filtering, compatibility sidecars,
-wire order, and `EncodeError` behavior. `UpdateMessage::try_build` remains the
-slice-oriented entry point and delegates to the same encoder.
+`rustbgpd-wire` 0.18.0 is API-additive but deliberately uses the next 0.x
+compatibility line because decode acceptance and RFC 7606 classification change
+in several places. No public item is removed, and the enums receiving variants
+are `#[non_exhaustive]`; consumers that assert on accepted bytes or exact
+`PathAttribute` variants should diff this complete list before upgrading:
+
+- `UpdateMessage::try_build_from_attribute_iter` accepts one single-pass
+  iterator of borrowed attributes. The existing slice builder remains and
+  delegates to the same transactional encoder.
+- Received Partial-bearing Communities, Extended Communities, PMSI Tunnel,
+  Large Communities, and OTC values remain typed through propagation via new
+  `PathAttribute` variants; locally built canonical variants are unchanged.
+- The default-off `tokio-codec` feature adds `BgpCodec` / `BgpCodecError` with
+  independent inbound and outbound Extended Message ceilings. The default
+  dependency surface is unchanged.
+- `cease_subcode::BFD_DOWN` and assigned path-attribute registry constants are
+  added.
+- Traffic Engineering (24), IPv6 Address Specific Extended Community (25),
+  temporary Community Container (34), and assigned attributes 36-42 now enforce
+  their registered Optional/Transitive class and bounded syntax. Type 25 must
+  contain a nonempty multiple of 20 octets; type 34 validates its container,
+  subtype, atom, and prefix framing; empty BIER is attribute-discard.
+- MP_REACH_NLRI / MP_UNREACH_NLRI framing overruns carry exact Optional
+  Attribute Error data. Partial is rejected on both optional non-transitive MP
+  attributes, complete undersized values are Attribute Length Error, and empty
+  MP_UNREACH is End-of-RIB only for a negotiated non-IPv4-unicast family.
+- PMSI decoding enforces assigned, experimental, composite, and identifier
+  boundaries. Malformed OTC is classified before role processing; valid
+  Partial-bearing OTC remains typed.
+- Unknown optional non-transitive attributes are ignored by strict/revised
+  decode and defensive encode. Unknown optional transitive attributes remain
+  preserved with Partial.
+- Tunnel Encapsulation, AIGP, PE Distinguisher Labels, BGPsec_Path, Prefix-SID,
+  and ATTR_SET class conflicts now produce their registered RFC 7606 outcomes
+  instead of being silently ignored or retained opaquely.
 
 ## Supported RFCs
 
@@ -200,7 +228,7 @@ Add the codec and its buffer type as direct dependencies:
 
 ```toml
 [dependencies]
-rustbgpd-wire = "0.17.2"
+rustbgpd-wire = "0.18.0"
 bytes = "1"
 ```
 

@@ -5,6 +5,8 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+## 0.5.0 - 2026-08-26
+
 - **Additive FSM API:** Added `Event::BfdDown`. A BFD-triggered teardown in
   `OpenSent`, `OpenConfirm`, or `Established` emits the typed Cease notification
   and authoritative session-down cleanup; earlier connection states return to

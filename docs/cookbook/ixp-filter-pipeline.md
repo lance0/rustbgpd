@@ -25,7 +25,7 @@ general.yml + clients.yml
 context.yml
         │  rs-config-render                  (fail-stale rendering)
         ▼
-config.toml + policy/*.rpol + render-receipt.json
+config.toml + policy/*.rpol + datasets/*.list + render-receipt.json
         │  rustbgpd --check --strict         (full config validation)
         ▼
 swap + SIGHUP                                (parse-then-swap reload)
@@ -98,7 +98,10 @@ per-family max-prefix ceilings and a per-client import chain),
 `policy/rs-hygiene.rpol` (the shared hygiene chain: AS_SET reject,
 bogons, transit-free, path-length cap, RPKI origin validation),
 `policy/client-<id>.rpol` (the client's IRR-derived prefix/origin
-sets), and `render-receipt.json` (fingerprint, cardinalities,
+tests and dataset bindings), `datasets/client-<id>-origins.list` and
+`datasets/client-<id>-prefixes.list` (the generated IRR membership, plus a
+blackhole-cover dataset when configured), and `render-receipt.json`
+(fingerprint, cardinalities,
 warnings). `--rtr-cache` is required whenever the context enables
 RPKI origin validation — the context carries no cache address. The
 renderer ships in the release tarball alongside `rustbgpd` and `rbgp`
@@ -129,7 +132,9 @@ no output written; the last good configuration stays live (fail-stale)
 What a *successful* render of the same context (minus the broken
 client) emits is checked in verbatim as the golden outputs —
 [`tools/rs-config-render/tests/golden/`](../../tools/rs-config-render/tests/golden/):
-`config.toml`, `rs-hygiene.rpol`, and two `client-*.rpol` files. The
+`config.toml`, `rs-hygiene.rpol`, two `client-*.rpol` files, and each
+client's origin and prefix dataset files. The test maps the flat checked-in
+fixture names to their rendered `policy/` and `datasets/` paths. The
 generated policies carry in-language `test` blocks derived from the
 site's own data, runnable offline:
 
@@ -153,6 +158,8 @@ rs-config-render --context "$STATE/context.yml" \
 # --strict: warnings fail the gate, so a refresh never swaps in a config
 # the daemon had something to say about. Rendered output is clean.
 rustbgpd --check --strict "$STATE/candidate/config.toml"
+# The generated rpol resolves dataset paths relative to this tree. Install the
+# config, policy, and datasets together; never update only one directory.
 rsync -a --delete "$STATE/candidate/" /etc/rustbgpd/
 systemctl reload rustbgpd        # SIGHUP: parse-then-swap
 ```

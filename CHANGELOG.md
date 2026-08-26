@@ -9,6 +9,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.67.0] — 2026-08-26
+
+> **Release framing — strict wire input, explicit migrations.** The wire crate
+> moves to 0.18.0 and the FSM to 0.5.0 so downstream consumers opt into the
+> assigned-attribute correctness wave instead of receiving changed decode
+> acceptance through a compatible patch update. Operators should review the
+> stable route-stream RPC migration, generated-dataset activation boundary,
+> startup-only BLACKHOLE controls, and BFD Down teardown behavior below.
+
 ### Fixed
 
 - Outbound route commits now make mismatched announcement and next-hop
@@ -22,6 +31,34 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reaching an impossible branch, and revised decoding applies each row's
   treat-as-withdraw or attribute-discard action. (LAN-1236, LAN-1286)
 
+- Traffic Engineering (type 24) and IPv6 Address Specific Extended Community
+  (type 25) now enforce their registered propagation classes. Type 25 also
+  requires a nonempty payload in 20-octet units; malformed or mis-classed
+  values receive RFC 7606 treat-as-withdraw handling. Community Container
+  (temporary type 34) likewise receives bounded container, subtype, atom, and
+  prefix framing checks while valid values remain opaque and propagate with
+  Partial.
+
+- Zero-length BIER attributes are now discarded under RFC 7606 instead of
+  being retained as if they contained a valid TLV sequence.
+
+- MP_REACH_NLRI / MP_UNREACH_NLRI framing overruns now reset the session with
+  exact Optional Attribute Error data, illegal Partial flags reset with an
+  Attribute Flags Error, and empty MP_UNREACH marks End-of-RIB only for a
+  negotiated non-IPv4-unicast family; IPv4 keeps its empty UPDATE marker.
+  (LAN-1236)
+
+- Recognized optional-transitive Communities, Extended Communities, PMSI
+  Tunnel, and Large Communities attributes now preserve a received Partial
+  bit as typed state through policy and the RIB to egress. PMSI tunnel type,
+  composite, and identifier validation now follows the assigned and
+  experimental registry boundaries. (LAN-1285)
+
+- Malformed Only-to-Customer framing is handled before BGP Role logic:
+  revised decoding omits it and treats reachable NLRI as withdrawn, or resets
+  the session when none is reachable. Valid Partial-bearing OTC remains typed
+  and propagates normally. (LAN-1284)
+
 - General unicast FIB Add/Replace operations whose unscoped, same-family,
   non-link-local next-hop target receives Linux's family-specific unreachable
   errno are now held as `unresolved` and retried on relevant route notifications
@@ -30,6 +67,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Upgrade notes
 
+- **Wire strictness:** peers sending malformed or mis-classed assigned path
+  attributes — including the newly fenced types 24, 25, 34, and 36-42 plus
+  corrected class handling for Tunnel Encapsulation, AIGP, PE Distinguisher
+  Labels, BGPsec_Path, Prefix-SID, and ATTR_SET — can now have affected routes
+  withdrawn, attributes discarded, or sessions reset according to the
+  applicable RFC 7606 outcome. MP_REACH / MP_UNREACH Partial and framing errors
+  are also rejected. Review captured traffic before upgrading parsers that
+  depended on the former permissive acceptance.
 - Use `Route.local_pref_attr` when attribute presence matters;
   `Route.local_pref` is the effective value and defaults to 100 when the
   attribute is absent (previously it was 0).
@@ -43,6 +88,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Revalidate custom Bird's Eye consumers against the verified IXP Manager 7.4
   compatibility contract: route shapes and longest-match lookup behavior now
   converge on the pinned oracle.
+- Install an `rs-config-render` generation as one atomic tree containing
+  `config.toml`, `policy/`, and `datasets/`. Generated rpol files now bind IRR
+  origins and prefixes through relative dataset files; copying only the old
+  config-and-policy inventory leaves the candidate incomplete.
+- Restart rustbgpd after changing `blackhole_discard_max_active`,
+  `blackhole_discard_install_rate_per_minute`, or
+  `blackhole_discard_install_burst`. These controls are startup-only; SIGHUP
+  retains the live values and logs the restart requirement.
+- BFD-triggered teardown now sends Cease/BFD Down (or an RFC 8538 Hard Reset
+  carrying that reason) instead of Administrative Shutdown. Update automation
+  that classifies the prior notification subcode.
+- `bgp_fib_kernel_failures_total{action="install"}` and
+  `bgp_fib_kernel_failures_total{action="replace"}` no longer count next-hop-
+  unreachable outcomes that are retained as `unresolved` and retried. Alerting
+  for unresolved routes should use the current FIB state surfaces; the failure
+  counter now represents terminal or unclassified kernel errors.
 
 ### Added
 
@@ -87,6 +148,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runtime-divergence allow-list entries. (LAN-1232)
 
 ### Changed
+
+- Accepted reloads reuse the immediately prior parsed rpol file and its
+  immutable compiled set tables when every source path, imported file,
+  parameter, and byte fingerprint is unchanged. Dataset bindings remain owned
+  by the new candidate, and any identity mismatch takes the full fresh path.
+
+- `rs-config-render` emits generated IRR origin and prefix membership under
+  `datasets/` and binds those files from the generated rpol. A one-member IRR
+  change now replaces only that member's dataset artifact plus the receipt;
+  `config.toml` and unchanged policy source remain byte-identical.
+
+- The peer-manager private command lane and config-bridge replacement lane are
+  lossless capacity-one FIFO channels. Concurrent configuration work waits for
+  the current control operation instead of accumulating an unbounded private
+  queue; command ordering and transactional authority are unchanged.
 
 - On Linux kernels that accept strict netlink dump checking, general-unicast
   FIB reconciliation now requests each unique managed table from the kernel
@@ -503,22 +579,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- MP_REACH_NLRI / MP_UNREACH_NLRI framing overruns now reset the session with
-  exact Optional Attribute Error data, illegal Partial flags reset with an
-  Attribute Flags Error, and empty MP_UNREACH marks End-of-RIB only for a
-  negotiated non-IPv4-unicast family; IPv4 keeps its empty UPDATE marker.
-  (LAN-1236)
-- Recognized optional-transitive Communities, Extended Communities, PMSI
-  Tunnel, and Large Communities attributes now preserve a received Partial
-  bit as typed state through policy and the RIB to egress; existing read
-  projections continue to expose recognized community values. Local synthesis
-  remains canonical, malformed recognized values retain their RFC 7606
-  dispositions, and PMSI tunnel-type/identifier validation now follows the
-  assigned, experimental, and composite registry boundaries. (LAN-1285)
-- Malformed Only-to-Customer (OTC) framing is now handled before BGP Role
-  logic: revised decoding omits it and treats reachable NLRI as withdrawn, or
-  resets the session per RFC 7606 section 5.2 when none is reachable. Valid
-  Partial-bearing OTC remains typed and propagates normally. (LAN-1284)
 - `MrtDumpStale` in the shipped alert pack no longer fires on instances
   without `[mrt]` configured: the `mrt_*` gauges are exported as 0 on every
   instance, so the unguarded rule anchored dump age on process start with a
