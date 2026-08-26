@@ -129,6 +129,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The shipped Grafana overview now pairs the RFC 9107 ORR SPF computation
   rate with current topology node and usable-link counts. (LAN-1205)
 
+- Release archives and native packages now include the Alpha EVPN operations
+  dashboard alongside the Grafana overview, with both dashboards covered by
+  directory-wide validation and release-contract triggers.
+
 - gNMI dial-out now exposes `gnmi_dialout_resync_total{target}`,
   `gnmi_dialout_queue_depth{target}`, and
   `gnmi_dialout_last_publish_timestamp_seconds{target}` so repeated

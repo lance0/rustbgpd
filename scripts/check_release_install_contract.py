@@ -22,6 +22,11 @@ MONITORING = (
         "/usr/share/doc/rustbgpd/monitoring/rustbgpd-overview.json",
     ),
     (
+        "docs/grafana/rustbgpd-evpn.json",
+        "share/monitoring/rustbgpd-evpn.json",
+        "/usr/share/doc/rustbgpd/monitoring/rustbgpd-evpn.json",
+    ),
+    (
         "examples/prometheus/rustbgpd-alerts.yml",
         "share/monitoring/rustbgpd-alerts.yml",
         "/usr/share/doc/rustbgpd/monitoring/rustbgpd-alerts.yml",
@@ -295,7 +300,7 @@ def check(root: Path) -> list[str]:
         ) + (
             r"^cp LICENSE-MIT LICENSE-APACHE LICENSES\.md staging/$",
             r"^cp examples/systemd/rustbgpd\.service examples/systemd/rustbgpd@\.service examples/systemd/rustbgpd-dataplane\.conf staging/share/systemd/$",
-            r"^cp docs/grafana/rustbgpd-overview\.json staging/share/monitoring/$",
+            r"^cp docs/grafana/rustbgpd-overview\.json docs/grafana/rustbgpd-evpn\.json staging/share/monitoring/$",
             r"^cp examples/prometheus/rustbgpd-alerts\.yml examples/prometheus/rustbgpd-alerts_test\.yml staging/share/monitoring/$",
             exact(package_tar),
         )
@@ -371,7 +376,7 @@ def check(root: Path) -> list[str]:
                 r"^for tree in extracted/deb extracted/rpm; do$",
                 r"^for exe in rustbgpd rbgp rs-config-render birdwatcher-adapter; do$",
                 r'^test -x "\$tree/usr/bin/\$exe" ',
-                r"^for file in lib/systemd/system/rustbgpd\.service lib/systemd/system/rustbgpd@\.service usr/share/man/man1/rbgp\.1\.gz usr/share/man/man8/rustbgpd\.8\.gz usr/share/doc/rustbgpd/LICENSES\.md; do$",
+                r"^for file in lib/systemd/system/rustbgpd\.service lib/systemd/system/rustbgpd@\.service usr/share/man/man1/rbgp\.1\.gz usr/share/man/man8/rustbgpd\.8\.gz usr/share/doc/rustbgpd/LICENSES\.md usr/share/doc/rustbgpd/monitoring/rustbgpd-overview\.json usr/share/doc/rustbgpd/monitoring/rustbgpd-evpn\.json usr/share/doc/rustbgpd/monitoring/rustbgpd-alerts\.yml usr/share/doc/rustbgpd/monitoring/rustbgpd-alerts_test\.yml; do$",
                 r'^test -s "\$tree/\$file" ',
                 r'^"\$tree/usr/bin/rustbgpd" --check "\$tree/etc/rustbgpd/config\.toml"$',
                 r'^unit="\$tree/lib/systemd/system/rustbgpd\.service"$',

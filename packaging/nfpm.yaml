@@ -112,6 +112,10 @@ contents:
     dst: /usr/share/doc/rustbgpd/monitoring/rustbgpd-overview.json
     file_info:
       mode: 0644
+  - src: docs/grafana/rustbgpd-evpn.json
+    dst: /usr/share/doc/rustbgpd/monitoring/rustbgpd-evpn.json
+    file_info:
+      mode: 0644
   - src: examples/prometheus/rustbgpd-alerts.yml
     dst: /usr/share/doc/rustbgpd/monitoring/rustbgpd-alerts.yml
     file_info:

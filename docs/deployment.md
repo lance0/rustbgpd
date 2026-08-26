@@ -59,7 +59,8 @@ share/completions/rbgp.{bash,zsh,fish}  shell completions
 share/systemd/rustbgpd.service          hardened systemd unit
 share/systemd/rustbgpd@.service         opt-in per-handle systemd unit
 share/systemd/rustbgpd-dataplane.conf   opt-in CAP_NET_ADMIN drop-in
-share/monitoring/rustbgpd-overview.json Grafana dashboard
+share/monitoring/rustbgpd-overview.json Grafana overview dashboard
+share/monitoring/rustbgpd-evpn.json     Alpha EVPN Grafana dashboard
 share/monitoring/rustbgpd-alerts.yml    Prometheus alert rules
 share/monitoring/rustbgpd-alerts_test.yml promtool rule tests
 ```
@@ -316,11 +317,12 @@ terms and warranty disclaimers.
 
 ### Monitoring payloads
 
-Every release archive carries its matching Grafana dashboard, Prometheus alert
-rules, and promtool test suite under `share/monitoring/`. Native packages put
-the same files under `/usr/share/doc/rustbgpd/monitoring/`. Keep
-`rustbgpd-alerts.yml` beside `rustbgpd-alerts_test.yml`: the suite deliberately
-uses the relative `rule_files` entry `rustbgpd-alerts.yml`.
+Every release archive carries its version-matched Grafana dashboards,
+Prometheus alert rules, and promtool test suite under `share/monitoring/`.
+Native packages put the same files under
+`/usr/share/doc/rustbgpd/monitoring/`. Keep `rustbgpd-alerts.yml` beside
+`rustbgpd-alerts_test.yml`: the suite deliberately uses the relative
+`rule_files` entry `rustbgpd-alerts.yml`.
 
 Validate the shipped rules before loading them:
 
@@ -334,10 +336,11 @@ Validate the shipped rules before loading them:
 ```
 
 Copy or reference `rustbgpd-alerts.yml` from Prometheus's `rule_files`
-configuration, then import `rustbgpd-overview.json` in Grafana. The
-[Grafana guide](GRAFANA.md) supplies the matching scrape job and dashboard
-setup; keep the payloads from one rustbgpd release together so rules and
-metrics do not drift across versions.
+configuration, then import `rustbgpd-overview.json` and, when operating EVPN,
+the Alpha `rustbgpd-evpn.json` dashboard in Grafana. The [Grafana
+guide](GRAFANA.md) supplies the matching scrape job and dashboard setup; keep
+the payloads from one rustbgpd release together so rules and metrics do not
+drift across versions.
 
 ### From source
 
