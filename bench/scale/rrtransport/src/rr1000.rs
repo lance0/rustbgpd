@@ -534,14 +534,11 @@ mod tests {
 
     fn assert_exact_communities(routes: &[Route], expected: u32) {
         for route in routes {
-            let mut communities = route.attributes.iter().filter_map(|attribute| {
-                if let PathAttribute::Communities(values) = attribute {
-                    Some(values)
-                } else {
-                    None
-                }
-            });
-            assert_eq!(communities.next().unwrap().as_slice(), [expected]);
+            let mut communities = route
+                .attributes
+                .iter()
+                .filter_map(PathAttribute::communities);
+            assert_eq!(communities.next().unwrap(), [expected]);
             assert!(communities.next().is_none());
         }
     }
