@@ -19,6 +19,20 @@ def exact_inventory() -> dict[str, tuple[str, ...]]:
 
 
 class FuzzTargetInventoryTests(unittest.TestCase):
+    def test_cli_help_uses_enforced_target_count(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(Path(inventory.__file__)), "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            f"{inventory.EXPECTED_COUNT}-target cargo-fuzz inventory",
+            result.stdout,
+        )
+
     def test_repository_inventory_is_exact(self) -> None:
         actual = inventory.repository_inventory()
         self.assertEqual(actual, inventory.EXPECTED_TARGETS)
