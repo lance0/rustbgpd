@@ -151,7 +151,7 @@ fn transport_config(remote: SocketAddr) -> TransportConfig {
         peer_group: None,
         md5_password: None,
         tcp_ao: None,
-        ttl_security: false,
+        ttl_security_hops: None,
         local_ipv6_nexthop: None,
         gr_stale_routes_time: 360,
         gr_peer_restart_time_max: 4095,
