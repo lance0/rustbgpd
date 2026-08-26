@@ -993,6 +993,32 @@ impl CompiledChain {
         }
     }
 
+    /// Conservatively classify the disposition of a route whose selected
+    /// validation dimension is exactly invalid. The walk follows policy and
+    /// short-circuit order, but treats every unrelated predicate as unknown.
+    /// `visits` is shared by callers that analyze a fleet snapshot.
+    #[must_use]
+    pub fn invalid_validation_disposition(
+        &self,
+        dimension: ValidationDimension,
+        visits: &mut usize,
+        visit_limit: usize,
+    ) -> ValidationDisposition {
+        let mut outcomes = OUTCOME_PERMIT;
+        for policy in &self.policies {
+            if outcomes & OUTCOME_PERMIT == 0 {
+                break;
+            }
+            outcomes &= !OUTCOME_PERMIT;
+            outcomes |= policy_outcomes(policy, dimension, visits, visit_limit);
+        }
+        match outcomes {
+            OUTCOME_DENY => ValidationDisposition::Enforced,
+            OUTCOME_PERMIT => ValidationDisposition::Unenforced,
+            _ => ValidationDisposition::Unknown,
+        }
+    }
+
     /// Whether some guard probes the named external dataset (LAN-305)
     /// — the scoping predicate for swap-time refresh: a dataset
     /// content swap refreshes exactly the peers whose chains satisfy
@@ -1164,6 +1190,169 @@ impl CompiledChain {
     }
 }
 
+/// Validation axis selected by the posture analyzer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationDimension {
+    /// RPKI origin validation.
+    Rpki,
+    /// ASPA path validation.
+    Aspa,
+}
+
+/// Proven disposition of an invalid route under a compiled import chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationDisposition {
+    /// Every reachable evaluation rejects the route cleanly.
+    Enforced,
+    /// Every reachable evaluation permits the route cleanly.
+    Unenforced,
+    /// The disposition depends on unrelated input or a reachable error path.
+    Unknown,
+}
+
+const TRUTH_FALSE: u8 = 1;
+const TRUTH_TRUE: u8 = 2;
+const TRUTH_FAULT: u8 = 4;
+const OUTCOME_PERMIT: u8 = 1;
+const OUTCOME_DENY: u8 = 2;
+const OUTCOME_FAULT: u8 = 4;
+
+fn consume_visit(visits: &mut usize, limit: usize) -> bool {
+    if *visits >= limit {
+        false
+    } else {
+        *visits += 1;
+        true
+    }
+}
+
+fn guard_truth(
+    guard: &MatchExpr,
+    dimension: ValidationDimension,
+    visits: &mut usize,
+    limit: usize,
+) -> u8 {
+    if !consume_visit(visits, limit) {
+        return TRUTH_FAULT;
+    }
+    match guard {
+        MatchExpr::True => TRUTH_TRUE,
+        MatchExpr::RpkiIs(value) if dimension == ValidationDimension::Rpki => {
+            if *value == RpkiValidation::Invalid {
+                TRUTH_TRUE
+            } else {
+                TRUTH_FALSE
+            }
+        }
+        MatchExpr::AspaIs(value) if dimension == ValidationDimension::Aspa => {
+            if *value == AspaValidation::Invalid {
+                TRUTH_TRUE
+            } else {
+                TRUTH_FALSE
+            }
+        }
+        MatchExpr::And(children) => {
+            let mut states = TRUTH_TRUE;
+            for child in children {
+                if states & TRUTH_TRUE == 0 {
+                    break;
+                }
+                let child_truth = guard_truth(child, dimension, visits, limit);
+                let mut next = states & (TRUTH_FALSE | TRUTH_FAULT);
+                if states & TRUTH_TRUE != 0 {
+                    next |= child_truth;
+                }
+                states = next;
+            }
+            states
+        }
+        MatchExpr::Or(children) => {
+            let mut states = TRUTH_FALSE;
+            for child in children {
+                if states & TRUTH_FALSE == 0 {
+                    break;
+                }
+                let child_truth = guard_truth(child, dimension, visits, limit);
+                let mut next = states & (TRUTH_TRUE | TRUTH_FAULT);
+                if states & TRUTH_FALSE != 0 {
+                    next |= child_truth;
+                }
+                states = next;
+            }
+            states
+        }
+        MatchExpr::Not(inner) => {
+            let states = guard_truth(inner, dimension, visits, limit);
+            (if states & TRUTH_FALSE != 0 {
+                TRUTH_TRUE
+            } else {
+                0
+            }) | (if states & TRUTH_TRUE != 0 {
+                TRUTH_FALSE
+            } else {
+                0
+            }) | (states & TRUTH_FAULT)
+        }
+        MatchExpr::ValueCmp(_) => TRUTH_FALSE | TRUTH_TRUE | TRUTH_FAULT,
+        _ => TRUTH_FALSE | TRUTH_TRUE,
+    }
+}
+
+fn clean_modifications(modifications: &RouteModifications) -> bool {
+    modifications.as_path_prepend_computed.is_none()
+        && modifications.set_local_pref_computed.is_none()
+        && modifications.set_med_computed.is_none()
+}
+
+fn policy_outcomes(
+    policy: &CompiledPolicy,
+    dimension: ValidationDimension,
+    visits: &mut usize,
+    limit: usize,
+) -> u8 {
+    if !consume_visit(visits, limit) {
+        return OUTCOME_FAULT;
+    }
+    let mut pending = true;
+    let mut outcomes = 0;
+    for term in &policy.terms {
+        if !pending {
+            break;
+        }
+        let truth = guard_truth(&term.guard, dimension, visits, limit);
+        outcomes |= if truth & TRUTH_FAULT != 0 {
+            OUTCOME_FAULT
+        } else {
+            0
+        };
+        let false_reachable = truth & TRUTH_FALSE != 0;
+        if truth & TRUTH_TRUE != 0 {
+            if consume_visit(visits, limit) {
+                match &term.action {
+                    TermAction::Deny => outcomes |= OUTCOME_DENY,
+                    TermAction::Permit(mods) if clean_modifications(mods) => {
+                        outcomes |= OUTCOME_PERMIT;
+                    }
+                    TermAction::Continue(mods) if clean_modifications(mods) => {}
+                    _ => outcomes |= OUTCOME_FAULT,
+                }
+            } else {
+                outcomes |= OUTCOME_FAULT;
+            }
+        }
+        pending = false_reachable
+            || (truth & TRUTH_TRUE != 0
+                && matches!(&term.action, TermAction::Continue(mods) if clean_modifications(mods)));
+    }
+    if pending {
+        outcomes |= match policy.default_action {
+            PolicyAction::Permit => OUTCOME_PERMIT,
+            PolicyAction::Deny => OUTCOME_DENY,
+        };
+    }
+    outcomes
+}
+
 #[cfg(test)]
 mod action_view_tests {
     use super::*;
@@ -1249,5 +1438,216 @@ mod action_view_tests {
             panic!("large-community removal view changed variant");
         };
         assert_eq!(global_admin, 4_200_000_001);
+    }
+}
+
+#[cfg(test)]
+mod validation_posture_tests {
+    use super::*;
+
+    fn policy(terms: Vec<(MatchExpr, TermAction)>, default_action: PolicyAction) -> CompiledPolicy {
+        CompiledPolicy {
+            name: None,
+            terms: terms
+                .into_iter()
+                .map(|(guard, action)| Term {
+                    name: None,
+                    guard,
+                    action,
+                })
+                .collect(),
+            default_action,
+            source: PolicySource::Toml,
+        }
+    }
+
+    fn disposition(
+        policies: Vec<CompiledPolicy>,
+        dimension: ValidationDimension,
+    ) -> ValidationDisposition {
+        let mut chain = CompiledChain::empty();
+        chain.policies = policies;
+        chain.invalid_validation_disposition(dimension, &mut 0, 100_000)
+    }
+
+    #[test]
+    fn validation_posture_handles_decisions_defaults_and_continuation() {
+        let deny = policy(
+            vec![(MatchExpr::True, TermAction::Deny)],
+            PolicyAction::Permit,
+        );
+        let permit = policy(
+            vec![(
+                MatchExpr::True,
+                TermAction::Permit(RouteModifications::default()),
+            )],
+            PolicyAction::Deny,
+        );
+        assert_eq!(
+            disposition(vec![deny.clone()], ValidationDimension::Rpki),
+            ValidationDisposition::Enforced
+        );
+        assert_eq!(
+            disposition(vec![permit.clone()], ValidationDimension::Rpki),
+            ValidationDisposition::Unenforced
+        );
+        assert_eq!(
+            disposition(vec![permit, deny], ValidationDimension::Rpki),
+            ValidationDisposition::Enforced
+        );
+        assert_eq!(
+            disposition(
+                vec![policy(Vec::new(), PolicyAction::Deny)],
+                ValidationDimension::Rpki
+            ),
+            ValidationDisposition::Enforced
+        );
+        assert_eq!(
+            disposition(
+                vec![policy(
+                    vec![
+                        (
+                            MatchExpr::RpkiIs(RpkiValidation::Invalid),
+                            TermAction::Continue(RouteModifications::default()),
+                        ),
+                        (MatchExpr::True, TermAction::Deny),
+                    ],
+                    PolicyAction::Permit,
+                )],
+                ValidationDimension::Rpki,
+            ),
+            ValidationDisposition::Enforced
+        );
+    }
+
+    #[test]
+    fn validation_posture_keeps_axes_independent_and_short_circuits() {
+        let exact = policy(
+            vec![(MatchExpr::RpkiIs(RpkiValidation::Invalid), TermAction::Deny)],
+            PolicyAction::Permit,
+        );
+        assert_eq!(
+            disposition(vec![exact.clone()], ValidationDimension::Rpki),
+            ValidationDisposition::Enforced
+        );
+        assert_eq!(
+            disposition(vec![exact], ValidationDimension::Aspa),
+            ValidationDisposition::Unknown
+        );
+        let wrong = policy(
+            vec![(MatchExpr::RpkiIs(RpkiValidation::Valid), TermAction::Deny)],
+            PolicyAction::Permit,
+        );
+        assert_eq!(
+            disposition(vec![wrong], ValidationDimension::Rpki),
+            ValidationDisposition::Unenforced
+        );
+        let fault = MatchExpr::ValueCmp(Box::new(ValueCmpNode {
+            op: ValueCmpOp::Eq,
+            lhs: ValueExpr::Field(ValueField::OriginAs),
+            rhs: ValueExpr::Const(1),
+        }));
+        let lazy_or = policy(
+            vec![(
+                MatchExpr::Or(vec![
+                    MatchExpr::RpkiIs(RpkiValidation::Invalid),
+                    fault.clone(),
+                ]),
+                TermAction::Deny,
+            )],
+            PolicyAction::Permit,
+        );
+        assert_eq!(
+            disposition(vec![lazy_or], ValidationDimension::Rpki),
+            ValidationDisposition::Enforced
+        );
+        let lazy_not_and = policy(
+            vec![(
+                MatchExpr::Not(Box::new(MatchExpr::And(vec![
+                    MatchExpr::RpkiIs(RpkiValidation::Valid),
+                    fault,
+                ]))),
+                TermAction::Deny,
+            )],
+            PolicyAction::Permit,
+        );
+        assert_eq!(
+            disposition(vec![lazy_not_and], ValidationDimension::Rpki),
+            ValidationDisposition::Enforced
+        );
+    }
+
+    #[test]
+    fn validation_posture_is_unknown_for_reachable_data_errors_and_loops() {
+        let dataset = policy(
+            vec![(
+                MatchExpr::InDataset {
+                    probe: DatasetProbe::Prefix,
+                    id: DatasetId(0),
+                },
+                TermAction::Deny,
+            )],
+            PolicyAction::Permit,
+        );
+        assert_eq!(
+            disposition(vec![dataset], ValidationDimension::Rpki),
+            ValidationDisposition::Unknown
+        );
+
+        let reachable_error = policy(
+            vec![(
+                MatchExpr::True,
+                TermAction::Bind {
+                    slot: 0,
+                    name: "value".into(),
+                    expr: ValueExpr::Const(1),
+                },
+            )],
+            PolicyAction::Deny,
+        );
+        let reachable_loop = policy(
+            vec![(
+                MatchExpr::True,
+                TermAction::ForEach(Box::new(ForEachNode {
+                    source: LoopSource::Communities,
+                    slot: 0,
+                    var: "community".into(),
+                    body: Vec::new(),
+                })),
+            )],
+            PolicyAction::Deny,
+        );
+        for candidate in [reachable_error, reachable_loop] {
+            assert_eq!(
+                disposition(vec![candidate], ValidationDimension::Rpki),
+                ValidationDisposition::Unknown
+            );
+        }
+
+        let unreachable_error = policy(
+            vec![
+                (MatchExpr::True, TermAction::Deny),
+                (
+                    MatchExpr::True,
+                    TermAction::Bind {
+                        slot: 0,
+                        name: "unreachable".into(),
+                        expr: ValueExpr::Const(1),
+                    },
+                ),
+            ],
+            PolicyAction::Permit,
+        );
+        assert_eq!(
+            disposition(vec![unreachable_error], ValidationDimension::Rpki),
+            ValidationDisposition::Enforced
+        );
+
+        let mut chain = CompiledChain::empty();
+        chain.policies.push(policy(Vec::new(), PolicyAction::Deny));
+        assert_eq!(
+            chain.invalid_validation_disposition(ValidationDimension::Rpki, &mut 0, 0),
+            ValidationDisposition::Unknown
+        );
     }
 }

@@ -127,7 +127,7 @@ service InjectionService {
 }
 
 // Policy CRUD, chain assignment, and import-policy explain
-service PolicyService { /* 22 RPCs: policies, neighbor sets, chains, ExplainImportPolicy, ListRejectedRoutes, TestPolicy (dry-run), GetPolicyStats */ }
+service PolicyService { /* 23 RPCs: policies, neighbor sets, chains, explain/rejected views, dry-run/stats, validation posture */ }
 
 // Peer group CRUD
 service PeerGroupService { /* 6 RPCs: List/Get/Set/Delete groups, Set/Clear neighbor membership */ }

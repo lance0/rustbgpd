@@ -1123,6 +1123,11 @@ pub enum PeerManagerCommand {
         /// Reply channel returning all named policies.
         reply: oneshot::Sender<Vec<NamedPolicySnapshot>>,
     },
+    /// Snapshot the installed and prospective import-policy disposition for
+    /// invalid RPKI and ASPA validation results.
+    GetValidationPolicyPosture {
+        reply: oneshot::Sender<ValidationPolicyPostureSnapshot>,
+    },
     /// ADR-0073: query a peer's per-session import-decision cache.
     /// Side-effect-free. The typed reply keeps a stalled live session
     /// distinct from an exited session task (LAN-661).
@@ -1527,6 +1532,40 @@ pub struct DynamicNeighborInfo {
     pub peer_group: String,
     pub remote_asn: u32,
     pub description: String,
+}
+
+/// Internal tri-state used by the validation-policy posture RPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationPolicyDisposition {
+    Enforced,
+    Unenforced,
+    Unknown,
+}
+
+/// One dimension's result and stable explanatory token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationPolicyDimensionSnapshot {
+    pub disposition: ValidationPolicyDisposition,
+    pub reason: &'static str,
+}
+
+/// One installed peer or prospective dynamic-range policy scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationPolicyScopeSnapshot {
+    pub scope: String,
+    pub kind: &'static str,
+    pub rpki_invalid: ValidationPolicyDimensionSnapshot,
+    pub aspa_invalid: ValidationPolicyDimensionSnapshot,
+}
+
+/// Actor-consistent fleet posture snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationPolicyPostureSnapshot {
+    pub scopes: Vec<ValidationPolicyScopeSnapshot>,
+    pub rpki_invalid: ValidationPolicyDimensionSnapshot,
+    pub aspa_invalid: ValidationPolicyDimensionSnapshot,
+    pub complete: bool,
+    pub omitted: u32,
 }
 
 /// A dynamic neighbor range removed by `DeleteDynamicRange`, returned so the

@@ -122,7 +122,7 @@ shape itself does not raise the tier.
 | `DeleteDynamicNeighbor` | `mutating` | Removes a prefix range; stops future accepts only — established dynamic peers keep running and drain when they next return to Idle. Deleting a range whose peer group carries `md5_password` or `ttl_security` is rejected `FAILED_PRECONDITION`, matching TCP-AO: the inbound listener key/TTL inventory is updated only by startup or SIGHUP reload. |
 | `SetGracefulShutdown` | `operator_only` | Network-wide when `address` is empty; listed here because the proto puts it in `NeighborService`. |
 
-### PolicyService (22 RPCs)
+### PolicyService (23 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -147,6 +147,7 @@ shape itself does not raise the tier.
 | `ListRejectedRoutes` | `sensitive_read` | Enumerates a peer's retained rejected inbound routes with their reject-reason tokens and a compact attribute summary (`[policy.reject_retention]`, bounded per-peer LRU). Discloses policy structure and what a member announced. Side-effect-free; no RIB or counter mutation. |
 | `TestPolicy` | `sensitive_read` | ADR-0096. Compiles a submitted .rpol policy before RIB access, then dry-runs it read-only over version-fenced pages capped at 1,000 in canonical `(prefix, peer, path_id)` order; family/limit/diffs/counts/hits are global. A conservative Received/Best mutation returns `ABORTED` with no partial response (retry the whole RPC); generation exhaustion or an unavailable RIB backend returns `UNAVAILABLE`. Side-effect-free; no RIB, session, or counter mutation. |
 | `GetPolicyStats` | `sensitive_read` | ADR-0096 Decision 3.3. Snapshots the live per-term guard-hit counters of installed import/export chains (since chain install; reset on chain replace — import chains also report their install generation). Explicit-peer validation, export/import collection, and dataset reads share one absolute 500 ms deadline; fleet import reads use bounded concurrency, cancel outstanding session queries with the caller, and never return partial rows. Discloses policy structure and traffic shape. Side-effect-free; does not reset counters. |
+| `GetValidationPolicyPosture` | `sensitive_read` | Bounded conservative proof of RPKI-invalid and ASPA-invalid import disposition for installed peers and prospective dynamic ranges. It does not assert validation readiness, connectivity, intent, FIB state, or runtime enforcement. |
 | `ClearNeighborExportChain` | `mutating` | Per-neighbor. |
 
 ### PeerGroupService (6 RPCs)
@@ -251,13 +252,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 59 | 57.3% |
-| `mutating` | 20 | 19.4% |
-| `operator_only` | 24 | 23.3% |
-| **Total** | **103** | **100%** |
+| `sensitive_read` | 60 | 57.7% |
+| `mutating` | 20 | 19.2% |
+| `operator_only` | 24 | 23.1% |
+| **Total** | **104** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 103
-total is 99 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 104
+total is 100 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 
@@ -336,7 +337,7 @@ specific method if the model warrants it.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 103-method classification
+`crates/api/src/authz.rs` contains the same 104-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added

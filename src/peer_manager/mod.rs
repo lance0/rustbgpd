@@ -44,6 +44,7 @@ mod inbound;
 mod lifecycle;
 mod notifications;
 mod policy;
+mod queries;
 mod reconcile;
 mod rotation;
 pub(crate) use rotation::TCP_AO_AWAITING_PEER_PREFIX;
@@ -1394,6 +1395,9 @@ impl PeerManager {
                         }
                         PeerManagerCommand::ListPolicies { reply } => {
                             let _ = reply.send(named_policies_from_config(&self.current_config));
+                        }
+                        PeerManagerCommand::GetValidationPolicyPosture { reply } => {
+                            let _ = reply.send(self.validation_policy_posture());
                         }
                         PeerManagerCommand::ExplainImportPolicy {
                             address, afi, safi, prefix, path_id, reply,

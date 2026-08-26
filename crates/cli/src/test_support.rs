@@ -2159,6 +2159,27 @@ struct MockPolicyService {
 
 #[tonic::async_trait]
 impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicyService {
+    async fn get_validation_policy_posture(
+        &self,
+        _request: Request<server_proto::GetValidationPolicyPostureRequest>,
+    ) -> Result<Response<server_proto::GetValidationPolicyPostureResponse>, Status> {
+        Ok(Response::new(
+            server_proto::GetValidationPolicyPostureResponse {
+                scopes: vec![],
+                rpki_invalid: Some(server_proto::ValidationPolicyDimensionPosture {
+                    disposition: server_proto::ValidationPolicyDisposition::Unknown.into(),
+                    reason: "mock".to_string(),
+                }),
+                aspa_invalid: Some(server_proto::ValidationPolicyDimensionPosture {
+                    disposition: server_proto::ValidationPolicyDisposition::Unknown.into(),
+                    reason: "mock".to_string(),
+                }),
+                complete: true,
+                omitted: 0,
+            },
+        ))
+    }
+
     async fn list_policies(
         &self,
         _request: Request<server_proto::ListPoliciesRequest>,
