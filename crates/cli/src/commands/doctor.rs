@@ -24,10 +24,13 @@ use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::event_service_client::EventServiceClient;
 use crate::proto::global_service_client::GlobalServiceClient;
 use crate::proto::neighbor_service_client::NeighborServiceClient;
+use crate::proto::policy_service_client::PolicyServiceClient;
 use crate::proto::{
     BfdSession, BfdSessionState, GetBfdSessionsRequest, GetEffectiveConfigRequest,
-    GetGlobalRequest, HealthRequest, ListDynamicNeighborsRequest, ListNeighborsRequest,
-    ListPolicyEventsRequest, ListSessionEventsRequest, MetricsRequest,
+    GetGlobalRequest, GetValidationPolicyPostureRequest, GetValidationPolicyPostureResponse,
+    HealthRequest, ListDynamicNeighborsRequest, ListNeighborsRequest, ListPolicyEventsRequest,
+    ListSessionEventsRequest, MetricsRequest, ValidationPolicyDimensionPosture,
+    ValidationPolicyDisposition,
 };
 
 /// Bounded recent slice pulled from each event history for triage. The
@@ -335,6 +338,99 @@ fn bfd_state_label(value: i32) -> &'static str {
         Ok(BfdSessionState::Init) => "init",
         Ok(BfdSessionState::Up) => "up",
         Ok(BfdSessionState::Unspecified) | Err(_) => "unspecified",
+    }
+}
+
+fn validation_axis_check(response: &GetValidationPolicyPostureResponse, rpki: bool) -> Check {
+    let (name, label, advice, aggregate) = if rpki {
+        (
+            "rpki.invalid_route_policy",
+            "RPKI-invalid",
+            "review `reject-rpki-invalid` in examples/route-server/config.toml",
+            response.rpki_invalid.as_ref(),
+        )
+    } else {
+        (
+            "aspa.invalid_route_policy",
+            "ASPA-invalid",
+            "review `reject-aspa-invalid` in examples/route-server/hygiene.rpol",
+            response.aspa_invalid.as_ref(),
+        )
+    };
+    let enforced = response.complete
+        && response.omitted == 0
+        && !response.scopes.is_empty()
+        && dimension_is_enforced(aggregate)
+        && response.scopes.iter().all(|scope| {
+            dimension_is_enforced(if rpki {
+                scope.rpki_invalid.as_ref()
+            } else {
+                scope.aspa_invalid.as_ref()
+            })
+        });
+    Check {
+        name: name.to_string(),
+        status: if enforced {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Warn
+        },
+        detail: if enforced {
+            format!(
+                "compiled import-policy disposition proves every reported scope denies {label} \
+                 routes; this does not prove validation readiness/currentness, traffic, intent, \
+                 FIB state, or runtime enforcement"
+            )
+        } else {
+            format!(
+                "compiled import-policy disposition does not prove every reported scope denies \
+                 {label} routes; {advice}. This advisory does not report validation \
+                 readiness/currentness, traffic, intent, FIB state, or runtime enforcement"
+            )
+        },
+    }
+}
+
+fn dimension_is_enforced(dimension: Option<&ValidationPolicyDimensionPosture>) -> bool {
+    dimension.is_some_and(|dimension| {
+        ValidationPolicyDisposition::try_from(dimension.disposition)
+            == Ok(ValidationPolicyDisposition::Enforced)
+    })
+}
+
+fn validation_policy_posture_checks(
+    result: Result<GetValidationPolicyPostureResponse, tonic::Status>,
+) -> [Check; 2] {
+    match result {
+        Ok(response) => [
+            validation_axis_check(&response, true),
+            validation_axis_check(&response, false),
+        ],
+        Err(status) => {
+            let detail = if status.code() == tonic::Code::Unimplemented {
+                "serving daemon predates GetValidationPolicyPosture; upgrade it to evaluate the \
+                 compiled-policy disposition"
+                    .to_string()
+            } else {
+                format!(
+                    "GetValidationPolicyPosture RPC unavailable ({}); compiled-policy \
+                     disposition was not evaluated",
+                    status.code()
+                )
+            };
+            [true, false].map(|rpki| {
+                let name = if rpki {
+                    "rpki.invalid_route_policy"
+                } else {
+                    "aspa.invalid_route_policy"
+                };
+                Check {
+                    name: name.to_string(),
+                    status: CheckStatus::Warn,
+                    detail: detail.clone(),
+                }
+            })
+        }
     }
 }
 
@@ -1619,6 +1715,18 @@ pub(crate) async fn run(
                 connection.channel(),
                 connection.interceptor(),
             );
+            let mut policy = PolicyServiceClient::with_interceptor(
+                connection.channel(),
+                connection.interceptor(),
+            );
+
+            let posture = policy
+                .get_validation_policy_posture(GetValidationPolicyPostureRequest {})
+                .await
+                .map(|response| response.into_inner());
+            for check in validation_policy_posture_checks(posture) {
+                reporter.record(check.name, check.status, check.detail);
+            }
 
             // system/health.json + the healthy check. The same probe outcome
             // feeds the daemon.authz.* triage: a PERMISSION_DENIED here is an
@@ -2277,6 +2385,7 @@ pub(crate) async fn run(
 #[cfg(test)]
 mod tests {
     use std::io::Read;
+    use std::sync::atomic::Ordering;
 
     use super::*;
     use crate::connection::connect;
@@ -3488,6 +3597,142 @@ paths = ["x"]
         );
     }
 
+    fn posture_dimension(disposition: i32) -> ValidationPolicyDimensionPosture {
+        ValidationPolicyDimensionPosture {
+            disposition,
+            reason: "ignored".to_string(),
+        }
+    }
+
+    fn posture_response(rpki: i32, aspa: i32) -> GetValidationPolicyPostureResponse {
+        GetValidationPolicyPostureResponse {
+            scopes: vec![crate::proto::ValidationPolicyScopePosture {
+                scope: "192.0.2.1".to_string(),
+                kind: "static_peer".to_string(),
+                rpki_invalid: Some(posture_dimension(rpki)),
+                aspa_invalid: Some(posture_dimension(aspa)),
+            }],
+            rpki_invalid: Some(posture_dimension(rpki)),
+            aspa_invalid: Some(posture_dimension(aspa)),
+            complete: true,
+            omitted: 0,
+        }
+    }
+
+    #[test]
+    fn validation_posture_doctor_requires_axis_complete_enforced_proof() {
+        let enforced = ValidationPolicyDisposition::Enforced as i32;
+        let unknown = ValidationPolicyDisposition::Unknown as i32;
+        let checks = validation_policy_posture_checks(Ok(posture_response(enforced, enforced)));
+        assert!(checks.iter().all(|check| check.status == CheckStatus::Ok));
+        assert_eq!(checks[0].name, "rpki.invalid_route_policy");
+        assert_eq!(checks[1].name, "aspa.invalid_route_policy");
+
+        for (rpki, aspa, expected) in [
+            (enforced, unknown, [CheckStatus::Ok, CheckStatus::Warn]),
+            (unknown, enforced, [CheckStatus::Warn, CheckStatus::Ok]),
+        ] {
+            let checks = validation_policy_posture_checks(Ok(posture_response(rpki, aspa)));
+            assert_eq!(checks.map(|check| check.status), expected);
+        }
+        let warnings = validation_policy_posture_checks(Ok(posture_response(unknown, unknown)));
+        assert!(
+            warnings[0]
+                .detail
+                .contains("`reject-rpki-invalid` in examples/route-server/config.toml")
+        );
+        assert!(
+            warnings[1]
+                .detail
+                .contains("`reject-aspa-invalid` in examples/route-server/hygiene.rpol")
+        );
+    }
+
+    #[test]
+    fn validation_posture_doctor_warns_on_unknown_missing_or_inconsistent_axis() {
+        let enforced = ValidationPolicyDisposition::Enforced as i32;
+        let mut candidates = vec![
+            posture_response(ValidationPolicyDisposition::Unknown as i32, enforced),
+            posture_response(ValidationPolicyDisposition::Unenforced as i32, enforced),
+            posture_response(ValidationPolicyDisposition::Unspecified as i32, enforced),
+            posture_response(99, enforced),
+        ];
+        let mut missing_aggregate = posture_response(enforced, enforced);
+        missing_aggregate.rpki_invalid = None;
+        candidates.push(missing_aggregate);
+        let mut missing_scope = posture_response(enforced, enforced);
+        missing_scope.scopes[0].rpki_invalid = None;
+        candidates.push(missing_scope);
+        let mut inconsistent = posture_response(enforced, enforced);
+        inconsistent.scopes[0].rpki_invalid = Some(posture_dimension(
+            ValidationPolicyDisposition::Unenforced as i32,
+        ));
+        candidates.push(inconsistent);
+
+        for response in candidates {
+            assert_eq!(
+                validation_policy_posture_checks(Ok(response))[0].status,
+                CheckStatus::Warn
+            );
+        }
+    }
+
+    #[test]
+    fn validation_posture_doctor_warns_on_fleet_boundaries_and_rpc_errors() {
+        let enforced = ValidationPolicyDisposition::Enforced as i32;
+        let mut empty = posture_response(enforced, enforced);
+        empty.scopes.clear();
+        let mut incomplete = posture_response(enforced, enforced);
+        incomplete.complete = false;
+        let mut omitted = posture_response(enforced, enforced);
+        omitted.omitted = 1;
+        for response in [empty, incomplete, omitted] {
+            assert!(
+                validation_policy_posture_checks(Ok(response))
+                    .iter()
+                    .all(|check| check.status == CheckStatus::Warn)
+            );
+        }
+        for error in [
+            tonic::Status::unimplemented("old daemon"),
+            tonic::Status::internal("bearer secret must not escape"),
+        ] {
+            let checks = validation_policy_posture_checks(Err(error));
+            assert!(checks.iter().all(|check| check.status == CheckStatus::Warn));
+            assert!(checks.iter().all(|check| !check.detail.contains("secret")));
+        }
+    }
+
+    #[test]
+    fn validation_posture_doctor_has_one_dedicated_rpc_evidence_source() {
+        let source = include_str!("doctor.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        assert_eq!(
+            production
+                .matches(".get_validation_policy_posture(")
+                .count(),
+            1
+        );
+        let helper = production
+            .split("fn validation_axis_check")
+            .nth(1)
+            .unwrap()
+            .split("/// ADR-0112")
+            .next()
+            .unwrap();
+        assert!(!helper.contains("effective_toml"));
+        assert!(!helper.contains("metrics_text"));
+        let fixture = include_str!("../test_support.rs")
+            .split("async fn get_validation_policy_posture")
+            .nth(1)
+            .unwrap()
+            .split("async fn list_policies")
+            .next()
+            .unwrap();
+        assert!(!fixture.contains("config_effective"));
+        assert!(!fixture.contains("metrics"));
+    }
+
     // ---- bundle integration ------------------------------------------
 
     /// Extract a produced tar.gz into (root-relative path -> contents).
@@ -3544,6 +3789,45 @@ paths = ["x"]
             uptime_seconds: 3600,
             flap_count: flaps,
             ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn doctor_validation_posture_warnings_are_advisory_and_use_one_rpc() {
+        let server = spawn_mock_server(None).await;
+        let state_dir = tempfile::tempdir().unwrap();
+        *server.state.config_effective_toml.lock().await = Some(format!(
+            "[global]\nasn = 65000\nruntime_state_dir = \"{}\"\n",
+            state_dir.path().display()
+        ));
+        let output_dir = tempfile::tempdir().unwrap();
+        let bundle_path = output_dir.path().join("bundle.tar.gz");
+        let code = run(
+            connect(&server.addr, None).await,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(code, 0, "policy posture warnings are advisory");
+        assert_eq!(
+            server
+                .state
+                .validation_policy_posture_calls
+                .load(Ordering::SeqCst),
+            1
+        );
+        let files = extract_bundle(&bundle_path);
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        for name in ["rpki.invalid_route_policy", "aspa.invalid_route_policy"] {
+            assert_eq!(manifest_check(&manifest, name)["status"], "warn");
         }
     }
 

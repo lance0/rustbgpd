@@ -33,6 +33,7 @@ pub(crate) struct MockState {
     pub(crate) health_failures_remaining: AtomicUsize,
     pub(crate) metrics_calls: AtomicUsize,
     pub(crate) global_calls: AtomicUsize,
+    pub(crate) validation_policy_posture_calls: AtomicUsize,
     pub(crate) metrics_failures_remaining: AtomicUsize,
     pub(crate) global_failures_remaining: AtomicUsize,
     pub(crate) list_neighbors_calls: AtomicUsize,
@@ -2163,6 +2164,9 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
         &self,
         _request: Request<server_proto::GetValidationPolicyPostureRequest>,
     ) -> Result<Response<server_proto::GetValidationPolicyPostureResponse>, Status> {
+        self.state
+            .validation_policy_posture_calls
+            .fetch_add(1, Ordering::SeqCst);
         Ok(Response::new(
             server_proto::GetValidationPolicyPostureResponse {
                 scopes: vec![],
