@@ -29,6 +29,7 @@ INPUTS = (
     "packaging/nfpm.yaml",
     "scripts/build-packages.sh",
     "docs/grafana/rustbgpd-overview.json",
+    "docs/grafana/rustbgpd-evpn.json",
     "examples/prometheus/rustbgpd-alerts.yml",
     "examples/prometheus/rustbgpd-alerts_test.yml",
     contract.SYSTEMD_UNIT,
@@ -392,11 +393,13 @@ class ReleaseInstallContractTest(unittest.TestCase):
         )
 
     def test_empty_monitoring_source_fails(self) -> None:
-        root = self.fixture()
-        (root / "docs/grafana/rustbgpd-overview.json").write_text("")
-        self.assertTrue(
-            any("missing or empty" in error for error in contract.check(root))
-        )
+        for source, _, _ in contract.MONITORING:
+            with self.subTest(source=source):
+                root = self.fixture()
+                (root / source).write_text("")
+                self.assertTrue(
+                    any("missing or empty" in error for error in contract.check(root))
+                )
 
     def test_presentation_edits_do_not_gate_artifacts(self) -> None:
         root = self.fixture()

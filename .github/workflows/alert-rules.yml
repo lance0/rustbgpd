@@ -1,6 +1,6 @@
 name: Observability assets
 
-# Validates the shipped Grafana dashboard structurally, then checks the
+# Validates the shipped Grafana dashboards structurally, then checks the
 # Prometheus alert-rule pack with promtool (`check rules` for syntax/shape,
 # `test rules` for per-rule behavior). Path-scoped to those assets so it
 # costs nothing on unrelated changes.
@@ -9,7 +9,7 @@ on:
   push:
     paths:
       - "examples/prometheus/**"
-      - "docs/grafana/rustbgpd-overview.json"
+      - "docs/grafana/**"
       - "crates/telemetry/src/metrics.rs"
       - "scripts/check-grafana-dashboard.py"
       - "scripts/test_check_grafana_dashboard.py"
@@ -17,7 +17,7 @@ on:
   pull_request:
     paths:
       - "examples/prometheus/**"
-      - "docs/grafana/rustbgpd-overview.json"
+      - "docs/grafana/**"
       - "crates/telemetry/src/metrics.rs"
       - "scripts/check-grafana-dashboard.py"
       - "scripts/test_check_grafana_dashboard.py"

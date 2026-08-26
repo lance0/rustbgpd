@@ -11,7 +11,7 @@ on:
       - docs/QUICKSTART.md
       - docs/OPERATIONS.md
       - docs/adr/0127-config-transaction-settlement-watchdog.md
-      - docs/grafana/rustbgpd-overview.json
+      - docs/grafana/**
       - docs/cookbook/ixp-filter-pipeline.md
       - docs/cookbook/monitoring-feed.md
       - examples/birdwatcher-adapter/Cargo.toml
@@ -42,7 +42,7 @@ on:
       - docs/QUICKSTART.md
       - docs/OPERATIONS.md
       - docs/adr/0127-config-transaction-settlement-watchdog.md
-      - docs/grafana/rustbgpd-overview.json
+      - docs/grafana/**
       - docs/cookbook/ixp-filter-pipeline.md
       - docs/cookbook/monitoring-feed.md
       - examples/birdwatcher-adapter/Cargo.toml
@@ -128,7 +128,11 @@ jobs:
                         lib/systemd/system/rustbgpd@.service \
                         usr/share/man/man1/rbgp.1.gz \
                         usr/share/man/man8/rustbgpd.8.gz \
-                        usr/share/doc/rustbgpd/LICENSES.md; do
+                        usr/share/doc/rustbgpd/LICENSES.md \
+                        usr/share/doc/rustbgpd/monitoring/rustbgpd-overview.json \
+                        usr/share/doc/rustbgpd/monitoring/rustbgpd-evpn.json \
+                        usr/share/doc/rustbgpd/monitoring/rustbgpd-alerts.yml \
+                        usr/share/doc/rustbgpd/monitoring/rustbgpd-alerts_test.yml; do
               test -s "$tree/$file" || { echo "missing or empty: $tree/$file" >&2; exit 1; }
             done
             # The packaged daemon must accept the config its own package

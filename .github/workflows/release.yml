@@ -148,7 +148,7 @@ jobs:
           #   share/completions/rbgp.{bash,zsh,fish}  shell completions
           #   share/systemd/rustbgpd{,@}.service      hardened systemd units
           #   share/systemd/rustbgpd-dataplane.conf   opt-in CAP_NET_ADMIN drop-in
-          #   share/monitoring/rustbgpd-overview.json Grafana dashboard
+          #   share/monitoring/rustbgpd-{overview,evpn}.json Grafana dashboards
           #   share/monitoring/rustbgpd-alerts.yml    Prometheus alert rules
           #   share/monitoring/rustbgpd-alerts_test.yml promtool rule tests
           #
@@ -171,7 +171,8 @@ jobs:
           cp docs/rustbgpd.schema.json staging/
           cp examples/systemd/rustbgpd.service examples/systemd/rustbgpd@.service \
             examples/systemd/rustbgpd-dataplane.conf staging/share/systemd/
-          cp docs/grafana/rustbgpd-overview.json staging/share/monitoring/
+          cp docs/grafana/rustbgpd-overview.json \
+            docs/grafana/rustbgpd-evpn.json staging/share/monitoring/
           cp examples/prometheus/rustbgpd-alerts.yml \
             examples/prometheus/rustbgpd-alerts_test.yml \
             staging/share/monitoring/
@@ -217,6 +218,7 @@ jobs:
                    share/systemd/rustbgpd@.service \
                    share/systemd/rustbgpd-dataplane.conf \
                    share/monitoring/rustbgpd-overview.json \
+                   share/monitoring/rustbgpd-evpn.json \
                    share/monitoring/rustbgpd-alerts.yml \
                    share/monitoring/rustbgpd-alerts_test.yml; do
             if ! grep -qxF "$f" <<<"$entries"; then

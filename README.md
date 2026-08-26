@@ -266,7 +266,8 @@ Four binaries: the daemon, the `rbgp` CLI, `rs-config-render` (the
 harmless if you don't run one), and the optional Alice-LG
 `birdwatcher-adapter`. The tarball also carries man pages and
 bash/zsh/fish completions under `share/`, plus the version-matched Grafana
-dashboard, Prometheus alert rules, and promtool test suite under
+overview and Alpha EVPN dashboards, Prometheus alert rules, and promtool test
+suite under
 `share/monitoring/` (`/usr/share/doc/rustbgpd/monitoring/` after a
 `.deb`/`.rpm` install) — the
 [install walkthrough](docs/deployment.md#install) covers installing those
