@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutation proofs for the release-checklist path-existence gate."""
+"""Mutation proofs for release-checklist path and proof-mapping gates."""
 
 import subprocess
 import sys
@@ -12,6 +12,18 @@ CHECKER = ROOT / "scripts" / "check_release_checklist_paths.py"
 
 CHECKLIST = """\
 # Release checklist
+
+| Source owner | Required release proofs |
+| --- | --- |
+| `src/evpn_es_drain.rs` | M66, M67 |
+| `src/evpn_es_link_drain.rs` | M67 |
+| `src/evpn_segment.rs` | M38, M66, M67 |
+
+| Release proof | Topology | Assertion script |
+| --- | --- | --- |
+| `M38` | `tests/interop/m38-evpn-df-election.clab.yml` | `tests/interop/scripts/test-m38-evpn-df-election.sh` |
+| `M66` | `tests/interop/m66-evpn-es-drain-handover.clab.yml` | `tests/interop/scripts/test-m66-evpn-es-drain-handover.sh` |
+| `M67` | `tests/interop/m67-evpn-link-drain-failover.clab.yml` | `tests/interop/scripts/test-m67-evpn-link-drain-failover.sh` |
 
 If the release touches the parser (`src/parser.rs`) or the
 originator (`src/evpn_originator/`), run M-01:
@@ -34,10 +46,19 @@ These path-shaped tokens are not repository paths: `RibService/SetFibTable`,
 """
 
 FIXTURE_PATHS = (
+    "src/evpn_es_drain.rs",
+    "src/evpn_es_link_drain.rs",
+    "src/evpn_segment.rs",
     "src/parser.rs",
     "src/evpn_originator/",
     "tests/interop/m01.clab.yml",
+    "tests/interop/m38-evpn-df-election.clab.yml",
+    "tests/interop/m66-evpn-es-drain-handover.clab.yml",
+    "tests/interop/m67-evpn-link-drain-failover.clab.yml",
     "tests/interop/scripts/test-m01.sh",
+    "tests/interop/scripts/test-m38-evpn-df-election.sh",
+    "tests/interop/scripts/test-m66-evpn-es-drain-handover.sh",
+    "tests/interop/scripts/test-m67-evpn-link-drain-failover.sh",
     "proto/rustbgpd.proto",
     "tools/rs-config-render/",
     ".cargo/config.toml",
@@ -78,6 +99,43 @@ class ReleaseChecklistPathTests(unittest.TestCase):
         """Passes with recognized paths present; prose tokens are not extracted."""
         result = self.run_checker(CHECKLIST, FIXTURE_PATHS)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_fails_when_required_owner_mapping_is_removed(self) -> None:
+        """Fails when a source owner disappears while its proof paths remain."""
+        checklist = CHECKLIST.replace(
+            "| `src/evpn_es_link_drain.rs` | M67 |\n", ""
+        )
+        result = self.run_checker(checklist, FIXTURE_PATHS)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "missing required release-proof owner mapping for "
+            "`src/evpn_es_link_drain.rs`",
+            result.stderr,
+        )
+
+    def test_fails_when_required_owner_proof_is_removed(self) -> None:
+        """Fails when an owner silently drops one of its required proofs."""
+        checklist = CHECKLIST.replace(
+            "| `src/evpn_segment.rs` | M38, M66, M67 |",
+            "| `src/evpn_segment.rs` | M38, M66 |",
+        )
+        result = self.run_checker(checklist, FIXTURE_PATHS)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "release-proof owner `src/evpn_segment.rs` is missing required "
+            "proofs: M67",
+            result.stderr,
+        )
+
+    def test_fails_when_proof_source_mapping_is_changed(self) -> None:
+        """Fails when an M-number is repointed at a different existing proof."""
+        checklist = CHECKLIST.replace(
+            "`tests/interop/m67-evpn-link-drain-failover.clab.yml`",
+            "`tests/interop/m66-evpn-es-drain-handover.clab.yml`",
+        )
+        result = self.run_checker(checklist, FIXTURE_PATHS)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("proof-source mapping for `M67` must be", result.stderr)
 
     def test_non_repository_path_tokens_stay_excluded(self) -> None:
         """Path-shaped API, image, action, and download tokens stay out."""
