@@ -290,11 +290,12 @@ pub fn validate_config_transaction_apply_metadata(
 pub(crate) fn catalog_mutation_error_to_status(error: &CatalogMutationError) -> Status {
     match error {
         CatalogMutationError::NotFound(_) => Status::not_found(error.to_string()),
-        CatalogMutationError::StillReferenced { .. } => {
+        CatalogMutationError::StillReferenced { .. }
+        | CatalogMutationError::FailedPrecondition(_)
+        | CatalogMutationError::RestartRequired(_) => {
             Status::failed_precondition(error.to_string())
         }
         CatalogMutationError::Invalid(_) => Status::invalid_argument(error.to_string()),
-        CatalogMutationError::RestartRequired(_) => Status::failed_precondition(error.to_string()),
         CatalogMutationError::Internal(_) => Status::internal(error.to_string()),
     }
 }
@@ -2396,6 +2397,10 @@ mod tests {
             (
                 CatalogMutationError::invalid("bad policy"),
                 tonic::Code::InvalidArgument,
+            ),
+            (
+                CatalogMutationError::failed_precondition("session cannot converge"),
+                tonic::Code::FailedPrecondition,
             ),
             (
                 CatalogMutationError::RestartRequired("tcp_ao delta".into()),

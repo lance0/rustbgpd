@@ -150,25 +150,58 @@ enum PolicySnapshotFailureKind {
     CompensationAmbiguous,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PolicySnapshotRejectionClass {
+    NotFound,
+    InvalidArgument,
+    FailedPrecondition,
+    Internal,
+}
+
+impl PolicySnapshotRejectionClass {
+    fn from_error(error: &CatalogMutationError) -> Self {
+        match error {
+            CatalogMutationError::NotFound(_) => Self::NotFound,
+            CatalogMutationError::Invalid(_) => Self::InvalidArgument,
+            CatalogMutationError::StillReferenced { .. }
+            | CatalogMutationError::FailedPrecondition(_)
+            | CatalogMutationError::RestartRequired(_) => Self::FailedPrecondition,
+            CatalogMutationError::Internal(_) => Self::Internal,
+        }
+    }
+
+    fn closed_error(self, code: RuntimeConfigPolicyFailureCode) -> CatalogMutationError {
+        match self {
+            Self::NotFound => CatalogMutationError::not_found(code.as_str()),
+            Self::InvalidArgument => CatalogMutationError::invalid(code.as_str()),
+            Self::FailedPrecondition => CatalogMutationError::failed_precondition(code.as_str()),
+            Self::Internal => CatalogMutationError::internal(code.as_str()),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct PolicySnapshotFailure {
     kind: PolicySnapshotFailureKind,
+    rejection_class: PolicySnapshotRejectionClass,
     pub(super) code: RuntimeConfigPolicyFailureCode,
     message: String,
 }
 
 impl PolicySnapshotFailure {
-    fn rejected(message: impl Into<String>) -> Self {
+    fn rejected(error: &CatalogMutationError) -> Self {
         Self {
             kind: PolicySnapshotFailureKind::RejectedNoEffect,
+            rejection_class: PolicySnapshotRejectionClass::from_error(error),
             code: RuntimeConfigPolicyFailureCode::PreflightRejected,
-            message: message.into(),
+            message: error.to_string(),
         }
     }
 
     fn compensated(message: impl Into<String>) -> Self {
         Self {
             kind: PolicySnapshotFailureKind::FullyCompensated,
+            rejection_class: PolicySnapshotRejectionClass::Internal,
             code: RuntimeConfigPolicyFailureCode::SessionApplyRejected,
             message: message.into(),
         }
@@ -177,6 +210,7 @@ impl PolicySnapshotFailure {
     fn compensated_code(code: RuntimeConfigPolicyFailureCode, message: impl Into<String>) -> Self {
         Self {
             kind: PolicySnapshotFailureKind::FullyCompensated,
+            rejection_class: PolicySnapshotRejectionClass::Internal,
             code,
             message: message.into(),
         }
@@ -185,8 +219,21 @@ impl PolicySnapshotFailure {
     fn ambiguous_code(code: RuntimeConfigPolicyFailureCode, message: impl Into<String>) -> Self {
         Self {
             kind: PolicySnapshotFailureKind::CompensationAmbiguous,
+            rejection_class: PolicySnapshotRejectionClass::Internal,
             code,
             message: message.into(),
+        }
+    }
+
+    fn closed_catalog_error(&self) -> CatalogMutationError {
+        match self.kind {
+            PolicySnapshotFailureKind::RejectedNoEffect => {
+                self.rejection_class.closed_error(self.code)
+            }
+            PolicySnapshotFailureKind::FullyCompensated
+            | PolicySnapshotFailureKind::CompensationAmbiguous => {
+                CatalogMutationError::internal(self.code.as_str())
+            }
         }
     }
 }
@@ -625,7 +672,9 @@ impl PeerManager {
         let preflight_started = Instant::now();
         let preflight = self.preflight_rfc8212_import_transitions(&targets).await;
         phases.preflight_us = elapsed_us(preflight_started);
-        preflight.map_err(PolicySnapshotFailure::rejected)?;
+        preflight.map_err(|error| {
+            PolicySnapshotFailure::rejected(&CatalogMutationError::failed_precondition(error))
+        })?;
         let mut rollback_rib_budget = PolicyRollbackRibBudget::default();
         let total_targets = targets.len();
         let cohort_selection_started = Instant::now();
@@ -3076,27 +3125,19 @@ impl PeerManager {
                 self.publish_policy_config_event(&event, applied);
                 OwnedCatalogMutationOutcome::Success
             }
-            Err(PolicySnapshotFailure {
-                kind: PolicySnapshotFailureKind::RejectedNoEffect,
-                code,
-                ..
-            }) => OwnedCatalogMutationOutcome::RejectedNoEffect(CatalogMutationError::internal(
-                code.as_str(),
-            )),
-            Err(PolicySnapshotFailure {
-                kind: PolicySnapshotFailureKind::FullyCompensated,
-                code,
-                ..
-            }) => OwnedCatalogMutationOutcome::FullyCompensated(CatalogMutationError::internal(
-                code.as_str(),
-            )),
-            Err(PolicySnapshotFailure {
-                kind: PolicySnapshotFailureKind::CompensationAmbiguous,
-                code,
-                ..
-            }) => OwnedCatalogMutationOutcome::CompensationAmbiguous(
-                CatalogMutationError::internal(code.as_str()),
-            ),
+            Err(failure) => match failure.kind {
+                PolicySnapshotFailureKind::RejectedNoEffect => {
+                    OwnedCatalogMutationOutcome::RejectedNoEffect(failure.closed_catalog_error())
+                }
+                PolicySnapshotFailureKind::FullyCompensated => {
+                    OwnedCatalogMutationOutcome::FullyCompensated(failure.closed_catalog_error())
+                }
+                PolicySnapshotFailureKind::CompensationAmbiguous => {
+                    OwnedCatalogMutationOutcome::CompensationAmbiguous(
+                        failure.closed_catalog_error(),
+                    )
+                }
+            },
         }
     }
 
@@ -3150,27 +3191,19 @@ impl PeerManager {
             .await
         {
             Ok(_) => OwnedCatalogMutationOutcome::Success,
-            Err(PolicySnapshotFailure {
-                kind: PolicySnapshotFailureKind::RejectedNoEffect,
-                code,
-                ..
-            }) => OwnedCatalogMutationOutcome::RejectedNoEffect(CatalogMutationError::internal(
-                code.as_str(),
-            )),
-            Err(PolicySnapshotFailure {
-                kind: PolicySnapshotFailureKind::FullyCompensated,
-                code,
-                ..
-            }) => OwnedCatalogMutationOutcome::FullyCompensated(CatalogMutationError::internal(
-                code.as_str(),
-            )),
-            Err(PolicySnapshotFailure {
-                kind: PolicySnapshotFailureKind::CompensationAmbiguous,
-                code,
-                ..
-            }) => OwnedCatalogMutationOutcome::CompensationAmbiguous(
-                CatalogMutationError::internal(code.as_str()),
-            ),
+            Err(failure) => match failure.kind {
+                PolicySnapshotFailureKind::RejectedNoEffect => {
+                    OwnedCatalogMutationOutcome::RejectedNoEffect(failure.closed_catalog_error())
+                }
+                PolicySnapshotFailureKind::FullyCompensated => {
+                    OwnedCatalogMutationOutcome::FullyCompensated(failure.closed_catalog_error())
+                }
+                PolicySnapshotFailureKind::CompensationAmbiguous => {
+                    OwnedCatalogMutationOutcome::CompensationAmbiguous(
+                        failure.closed_catalog_error(),
+                    )
+                }
+            },
         }
     }
 
@@ -3259,9 +3292,9 @@ impl PeerManager {
                     continue;
                 }
                 Err(error) => {
-                    return Err(PolicySnapshotFailure::rejected(
-                        catalog_config_error(error).to_string(),
-                    ));
+                    return Err(PolicySnapshotFailure::rejected(&catalog_config_error(
+                        error,
+                    )));
                 }
             };
             targets.push(ResolvedPeerPolicy {

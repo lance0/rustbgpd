@@ -24,6 +24,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Policy mutation preflight failures now preserve `NOT_FOUND`, `INVALID_ARGUMENT`, and
+  `FAILED_PRECONDITION` while retaining the closed `policy_preflight_rejected` diagnostic.
+
 - Canonical and Partial community and Only-to-Customer attributes now receive
   the same value-based treatment in consumers and interoperability fixtures.
 
