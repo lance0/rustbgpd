@@ -417,6 +417,14 @@ detached), with a few semantics of its own:
   authoritative partial runtime receipt`. Fix the failing TOML and
   reload again. Partial is a clean outcome — only an *unprovable*
   outcome fences.
+- **Policy state proof gets one bounded retry.** At a settlement-owned policy
+  clean-state fence, one missed 100 ms session-state reply is retried at most
+  once inside a two-second window shared by the operation. Confirmed
+  non-Established state, session-task loss, or exhaustion compensates. The RIB
+  side registers one reverse-order exact rollback batch before Route Refresh;
+  only validated ordered receipts clear pending debt. A late batch stays
+  daemon-owned after the local two-minute wait, but an unproved repair remains
+  `known_divergence` and takes the normal recovery-fence path.
 - **What changed versus the pre-watchdog daemon:** a reload whose
   acknowledgements are lost, or whose reconcile result is not
   authoritative, now fences and exits 70 instead of logging an error

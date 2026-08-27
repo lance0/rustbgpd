@@ -68,6 +68,11 @@ const BMP_STATS_INTERVAL_SECS: u64 = 60;
 /// stalled peer surfaces as `stale = true` instead of as a wedged RPC.
 const PEER_QUERY_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// One absolute retry window shared by every clean-convergence state check in
+/// a settlement-owned policy cohort. A first 100 ms miss may be load rather
+/// than session loss; it is retried at most once inside this fixed window.
+const CLEAN_STATE_QUERY_WINDOW: Duration = Duration::from_secs(2);
+
 /// Hard deadline for any single peer-session policy hot-apply (import or
 /// export). Larger than [`PEER_QUERY_TIMEOUT`] because applying a policy
 /// chain involves more session-side work than a state read, but still

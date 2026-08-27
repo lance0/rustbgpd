@@ -9,6 +9,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Settlement-owned live policy changes no longer treat one missed 100 ms
+  session-state reply as session loss. A timed-out query retries at most once
+  inside one shared two-second clean-state window; a confirmed non-Established
+  state, a departed session task, or retry exhaustion compensates the change
+  instead of committing uncertain state.
+
+- Policy compensation now registers one exact rollback-only RIB batch before
+  issuing Route Refresh. The batch rejects duplicate peers before mutation,
+  restores in reverse application order, retains its late reply owner after a
+  local timeout or caller cancellation, and clears retry debt only from ordered
+  positive receipts. Settlement surfaces expose closed, secret-free policy
+  failure codes while unprovable repair remains `KnownDivergence`.
+
 ## [0.67.0] — 2026-08-26
 
 > **Release framing — strict wire input, explicit migrations.** The wire crate

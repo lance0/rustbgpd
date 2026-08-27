@@ -15,6 +15,14 @@ interned chain content, and the rendering — O(chain size) per member, tens
 of megabytes at IRR scale — was consumed only by the observational
 snapshot/planning surfaces, which now use a cached streaming digest.
 
+**Amended:** 2026-08-26 — settlement-owned policy applies preserve typed
+session-state outcomes at their clean-state fences. A first 100 ms timeout may
+retry once under one shared absolute two-second window; a positive
+non-Established reply, session-task loss, or retry exhaustion compensates
+rather than committing.
+RIB compensation is one rollback-only exact batch with ordered receipts and
+the normal two-minute batch-reply bound.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server
@@ -170,21 +178,24 @@ persistence failure replays the successful transaction's returned prior token
 through the same transaction owner.
 
 Rollback session and bookkeeping restoration remains newest first and may do
-O(peers) bounded session work. RIB compensation has one lazy absolute
-five-second deadline per top-level policy transaction, shared by authoritative
-self-heal and any later cohort unwind. Each partition first-polls every pinned
-RIB restore future newest first, without Tokio's cooperative budget, before it
-issues any rollback Route Refresh. This registers every bounded-channel waiter
-in FIFO order; refresh-generated route work and later peer lifecycle mutations
-cannot overtake a restore merely because the channel is full.
+O(peers) bounded session work. PeerManager supplies the captured RIB priors in
+original forward order as one rollback-only exact batch. The RIB rejects
+duplicate peer identities before mutation, reverses the batch, and returns one
+ordered `Restored` or `NotFound` receipt for every member. A `NotFound` receipt
+closes retry debt only when the session state was positively known to be
+non-Established; every ambiguous absence remains convergence debt.
 
-PeerManager then awaits the registered aggregate while continuing to service
-readiness. Deadline expiry or caller cancellation detaches that same aggregate
-rather than reconstructing commands: already-registered repairs may finish in
-order after the caller returns, while conservative per-peer pending flags keep
-explicit retry intent. The five-second claim bounds cumulative rollback RIB
-send/reply waiting across all partitions. It does not bound sequential session
-commands, Route Refresh acknowledgements, or the RIB actor's late repair work.
+The batch send and reply share one lazy absolute `RIB_BATCH_REPLY_TIMEOUT`
+(two minutes) across the top-level policy transaction. A detached task owns the
+send and receiver, so deadline expiry or caller cancellation cannot cancel a
+queued repair. PeerManager waits for the batch to be enqueued before issuing
+any rollback Route Refresh; FIFO therefore keeps refresh-generated route work
+and later peer lifecycle mutations behind the exact restore. It clears pending
+flags only after validating the receipt count, identity order, and positive
+outcome. A timeout, lost reply, mismatch, or rejected batch retains conservative
+pending flags and makes exact compensation unprovable. The bound does not cover
+sequential session commands, Route Refresh acknowledgements, or the RIB actor's
+detached late repair work.
 
 ### 5. Readiness and observability
 
@@ -277,8 +288,9 @@ wall-clock guarantee. See the
 - **Authoritative remainder and compensating rollback:** keep as the complete
   fallback and mixed-fleet correctness path. It handles every shape the fast
   path rejects. Its session work remains sequential, but cumulative rollback
-  RIB send/reply waiting is bounded by one transaction-wide deadline; retaining
-  pinned late repairs and conservative retry flags is the cancellation cost.
+  RIB send/reply waiting is bounded by one transaction-wide batch deadline;
+  retaining the detached late repair and conservative retry flags is the
+  cancellation cost.
 - **Final global retry opportunity:** keep until production poll data says
   otherwise. It promptly drains unrelated dirty/forced residue before the
   successful transaction reply, matching the authoritative replacement seam.

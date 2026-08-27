@@ -1634,10 +1634,21 @@ impl PeerHandle {
     ///   (command channel closed, or the reply was dropped during task
     ///   teardown). There is no live session behind this handle.
     pub async fn query_state_outcome(&self, deadline: Duration) -> StateQueryOutcome {
-        let queried = tokio::time::timeout(deadline, async {
+        Self::query_state_outcome_with(self.commands.clone(), deadline).await
+    }
+
+    /// Driver-side variant of [`Self::query_state_outcome`] that takes an
+    /// owned command sender. Unlike [`Self::query_state_with`], this preserves
+    /// the distinction between a live session that missed its deadline and a
+    /// session task that has exited, so transaction owners can retry only the
+    /// former without extending the caller's absolute settlement window.
+    pub async fn query_state_outcome_with(
+        commands: mpsc::Sender<PeerCommand>,
+        deadline: Duration,
+    ) -> StateQueryOutcome {
+        let queried = tokio::time::timeout(deadline, async move {
             let (reply_tx, reply_rx) = oneshot::channel();
-            if self
-                .commands
+            if commands
                 .send(PeerCommand::QueryState { reply: reply_tx })
                 .await
                 .is_err()
@@ -2365,6 +2376,29 @@ mod tests {
             elapsed < Duration::from_millis(250),
             "query_state_with should bound at ~50ms, took {elapsed:?}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owned_state_query_keeps_timeout_and_session_exit_distinct() {
+        let (stalled_tx, _stalled_rx) = mpsc::channel::<PeerCommand>(1);
+        stalled_tx.send(PeerCommand::Start).await.unwrap();
+        let timed_out = tokio::spawn(PeerHandle::query_state_outcome_with(
+            stalled_tx,
+            Duration::from_millis(50),
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(51)).await;
+        assert!(matches!(
+            timed_out.await.unwrap(),
+            StateQueryOutcome::TimedOut
+        ));
+
+        let (gone_tx, gone_rx) = mpsc::channel::<PeerCommand>(1);
+        drop(gone_rx);
+        assert!(matches!(
+            PeerHandle::query_state_outcome_with(gone_tx, Duration::from_millis(50)).await,
+            StateQueryOutcome::SessionGone
+        ));
     }
 
     fn handle_with_full_command_channel() -> (PeerHandle, mpsc::Receiver<PeerCommand>) {

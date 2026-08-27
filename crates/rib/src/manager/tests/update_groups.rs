@@ -6762,6 +6762,70 @@ fn authoritative_rejected_and_duplicate_paths_emit_one_terminal_each() {
     assert!(receipts.iter().all(authoritative_receipt_closes));
 }
 
+#[test]
+fn rollback_batch_reverses_order_reports_missing_and_rejects_duplicates() {
+    use crate::update::{PeerExportPolicyReplacement, PeerExportPolicyRestoreReceipt};
+
+    let prior = community_chain(0xFDE8_0001);
+    let candidate = community_chain(0xFDE8_0002);
+    let mut fleet = batched_pcb_fleet(Some(&candidate));
+    let missing = IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1));
+    let supplied = vec![
+        PeerExportPolicyReplacement {
+            peer: fleet.members[0],
+            export_policy: Some(prior.clone()),
+        },
+        PeerExportPolicyReplacement {
+            peer: fleet.members[1],
+            export_policy: Some(prior.clone()),
+        },
+        PeerExportPolicyReplacement {
+            peer: missing,
+            export_policy: Some(prior.clone()),
+        },
+    ];
+    let receipts = fleet
+        .manager
+        .restore_export_policy_replacements_synchronously(supplied)
+        .unwrap();
+    assert_eq!(
+        receipts,
+        vec![
+            PeerExportPolicyRestoreReceipt::NotFound { peer: missing },
+            PeerExportPolicyRestoreReceipt::Restored {
+                peer: fleet.members[1]
+            },
+            PeerExportPolicyRestoreReceipt::Restored {
+                peer: fleet.members[0]
+            },
+        ]
+    );
+    for peer in &fleet.members[..2] {
+        assert_eq!(
+            fleet.manager.peer_export_policies.get(peer),
+            Some(&Some(prior.clone()))
+        );
+    }
+
+    let duplicate = fleet.members[0];
+    let before = fleet.manager.peer_export_policies[&duplicate].clone();
+    let error = fleet
+        .manager
+        .restore_export_policy_replacements_synchronously(vec![
+            PeerExportPolicyReplacement {
+                peer: duplicate,
+                export_policy: Some(candidate.clone()),
+            },
+            PeerExportPolicyReplacement {
+                peer: duplicate,
+                export_policy: None,
+            },
+        ])
+        .expect_err("duplicates must reject before the first mutation");
+    assert!(error.to_string().contains("duplicate peer"));
+    assert_eq!(fleet.manager.peer_export_policies[&duplicate], before);
+}
+
 /// The canonical batched cohort: every member of one per-client-best
 /// group moves to a fresh chain in ONE command with ZERO per-member
 /// resync passes — the shared payload is one `Arc` and one encode cell

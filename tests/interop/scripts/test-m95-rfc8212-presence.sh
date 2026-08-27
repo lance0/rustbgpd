@@ -295,20 +295,10 @@ mark_log
 sighup_with "no-global-import"
 
 phase1_log=$(log_since_mark)
-if grep -q "did not negotiate Route Refresh" <<<"$phase1_log"; then
-    ok "the reload named the missing Route Refresh capability"
+if grep -q '"error":"policy_preflight_rejected"' <<<"$phase1_log"; then
+    ok "the reload reported a structured policy preflight rejection"
 else
-    fail "the reload did not report the missing capability; log tail: $(tail -5 <<<"$phase1_log")"
-fi
-if grep -q "no peer was modified" <<<"$phase1_log"; then
-    ok "the rejection stated that no peer was modified"
-else
-    fail "the rejection did not state that no peer was modified"
-fi
-if grep -qi "clear the session" <<<"$phase1_log"; then
-    ok "the rejection carried operator remediation (clear/reconnect)"
-else
-    fail "the rejection carried no remediation guidance"
+    fail "the reload did not report the structured preflight rejection; log tail: $(tail -5 <<<"$phase1_log")"
 fi
 
 # The headline no-partial-state assertion: the CAPABLE peer, which would have
@@ -422,10 +412,10 @@ else
     mark_log
     sighup_with "frr-missing"
     phase4_log=$(log_since_mark)
-    if grep -qi "stale route" <<<"$phase4_log"; then
-        ok "the reload deferred the transition while stale routes are retained"
+    if grep -q '"error":"policy_preflight_rejected"' <<<"$phase4_log"; then
+        ok "the reload reported a structured preflight rejection while stale routes were retained"
     else
-        fail "the reload did not defer on retained stale state; tail: $(tail -5 <<<"$phase4_log")"
+        fail "the reload did not report the structured preflight rejection while stale routes were retained; tail: $(tail -5 <<<"$phase4_log")"
     fi
     status=$(rfc8212_import_status "$FRR_PEER")
     if [ "$status" = "RFC8212_POLICY_STATUS_PRESENT" ]; then

@@ -1,5 +1,7 @@
 use super::*;
 
+use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
+
 async fn subscribe_policy_events(
     tx: &mpsc::Sender<PeerManagerCommand>,
 ) -> broadcast::Receiver<Arc<PolicyEvent>> {
@@ -1120,6 +1122,15 @@ async fn owned_policy_change_fences_when_failing_peer_cannot_restore() {
         ),
         "unexpected outcome: {outcome:?}"
     );
+    let rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::CompensationAmbiguous(error) =
+        &outcome
+    else {
+        unreachable!();
+    };
+    assert_eq!(
+        error.to_string(),
+        RuntimeConfigPolicyFailureCode::RollbackSessionRejected.as_str()
+    );
 
     let expect_prior = format!("{:?}", Some(prior));
     assert_eq!(
@@ -1170,10 +1181,156 @@ async fn owned_rpol_sync_reports_ambiguous_failed_session() {
             rustbgpd_policy::datasets::DatasetBindings::default(),
         )
         .await;
-    assert!(matches!(
-        outcome,
-        rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::CompensationAmbiguous(_)
-    ));
+    let rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::CompensationAmbiguous(error) =
+        outcome
+    else {
+        panic!("owned rpol sync must report ambiguous compensation");
+    };
+    assert_eq!(
+        error.to_string(),
+        RuntimeConfigPolicyFailureCode::RollbackSessionRejected.as_str(),
+        "SIGHUP rpol sync and catalog edits share one closed settlement classification"
+    );
+}
+
+#[tokio::test]
+async fn owned_policy_failure_diagnostic_never_carries_session_secret_text() {
+    use rustbgpd_api::peer_types::{NamedPolicyDefinition, PolicyStatementDefinition};
+
+    const SECRET: &str = "super-secret-policy-token";
+    let mut mgr = live_policy_test_manager();
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10));
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
+    let task = tokio::spawn(async move {
+        let mut import_attempts = 0;
+        while let Some(command) = session_rx.recv().await {
+            match command {
+                PeerCommand::UpdateImportPolicy { reply, .. } => {
+                    import_attempts += 1;
+                    let result = if import_attempts == 1 {
+                        Err(rustbgpd_transport::PeerCommandError::CommandFailed(
+                            SECRET.to_string(),
+                        ))
+                    } else {
+                        Ok(())
+                    };
+                    let _ = reply.send(result);
+                }
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(peer, SessionState::Established));
+                }
+                PeerCommand::SendRouteRefresh { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    insert_test_managed_peer(
+        &mut mgr,
+        peer,
+        PeerHandle::from_parts(session_tx, task),
+        false,
+    );
+    let mut neighbor = config_neighbor(peer, 65002);
+    neighbor.import_policy_chain = vec!["edge-import".to_string()];
+    mgr.current_config.neighbors = vec![neighbor];
+
+    let outcome = mgr
+        .apply_policy_change_owned(
+            ConfigEvent::SetPolicy {
+                name: "edge-import".to_string(),
+                definition: NamedPolicyDefinition {
+                    default_action: "deny".to_string(),
+                    statements: Vec::<PolicyStatementDefinition>::new(),
+                },
+                ack: None,
+            },
+            Some(vec![peer]),
+        )
+        .await;
+    let rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::FullyCompensated(error) = outcome
+    else {
+        panic!("failed session apply with exact repair must be fully compensated");
+    };
+    let diagnostic = error.to_string();
+    assert_eq!(
+        diagnostic,
+        RuntimeConfigPolicyFailureCode::SessionApplyRejected.as_str()
+    );
+    assert!(!diagnostic.contains(SECRET));
+}
+
+#[tokio::test]
+async fn owned_policy_failure_diagnostic_never_carries_rib_secret_text() {
+    use rustbgpd_api::peer_types::{NamedPolicyDefinition, PolicyStatementDefinition};
+
+    const SECRET: &str = "super-secret-rib-token";
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 11));
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut mgr = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    insert_test_managed_peer(
+        &mut mgr,
+        peer,
+        acking_policy_handle(peer, SessionState::Established),
+        false,
+    );
+    let mut neighbor = config_neighbor(peer, 65002);
+    neighbor.export_policy_chain = vec!["edge-export".to_string()];
+    mgr.current_config.neighbors = vec![neighbor];
+
+    let apply = mgr.apply_policy_change_owned(
+        ConfigEvent::SetPolicy {
+            name: "edge-export".to_string(),
+            definition: NamedPolicyDefinition {
+                default_action: "deny".to_string(),
+                statements: Vec::<PolicyStatementDefinition>::new(),
+            },
+            ack: None,
+        },
+        Some(vec![peer]),
+    );
+    let rib = async {
+        let RibUpdate::ReplacePeerExportPolicy { reply, .. } = rib_rx.recv().await.unwrap() else {
+            panic!("expected forward authoritative RIB apply");
+        };
+        reply
+            .send(Err(rustbgpd_rib::RibCommandError::internal(SECRET)))
+            .unwrap();
+        let RibUpdate::RestorePeerExportPoliciesAuthoritatively { reply, .. } =
+            rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected exact rollback RIB batch");
+        };
+        reply
+            .send(Ok(vec![
+                rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer },
+            ]))
+            .unwrap();
+    };
+    let (outcome, ()) = tokio::join!(apply, rib);
+    let rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::FullyCompensated(error) = outcome
+    else {
+        panic!("failed RIB apply with exact repair must be fully compensated");
+    };
+    let diagnostic = error.to_string();
+    assert_eq!(
+        diagnostic,
+        RuntimeConfigPolicyFailureCode::RibApplyRejected.as_str()
+    );
+    assert!(!diagnostic.contains(SECRET));
 }
 
 #[tokio::test]

@@ -32,7 +32,7 @@ use crate::loc_rib::LocRib;
 use crate::update::{
     ExactExportKey, ExplainAdvertisedRoute, ExplainDecision, ExplainReason, ExportGateStep,
     ExportGateVerdict, NeighborPolicyStats, OutboundRouteUpdate, PeerExportPolicyReplacement,
-    RibCommandError,
+    PeerExportPolicyRestoreReceipt, RibCommandError,
 };
 
 mod bgpls;
@@ -2991,6 +2991,66 @@ impl RibManager {
             return;
         }
         let _ = reply.send(self.apply_export_policy_replacements_synchronously(replacements));
+    }
+
+    pub(super) fn handle_restore_peer_export_policies_authoritatively(
+        &mut self,
+        replacements: Vec<PeerExportPolicyReplacement>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<Vec<PeerExportPolicyRestoreReceipt>, RibCommandError>,
+        >,
+    ) {
+        // Rollback remains authoritative after its caller's local wait expires:
+        // the detached receiver owns the late acknowledgement, while this actor
+        // must still repair the RIB. Never use `reply.is_closed()` as a reason to
+        // skip compensation.
+        let result = self.restore_export_policy_replacements_synchronously(replacements);
+        let _ = reply.send(result);
+    }
+
+    /// Execute one exact rollback-only batch.
+    ///
+    /// Validation is complete before the shared authoritative mutation kernel
+    /// runs. Duplicate identities reject wholesale instead of inheriting the
+    /// forward batch's last-writer-wins fallback. Receipts preserve the actual
+    /// newest-first execution order and make every departed peer explicit.
+    pub(in crate::manager) fn restore_export_policy_replacements_synchronously(
+        &mut self,
+        replacements: Vec<PeerExportPolicyReplacement>,
+    ) -> Result<Vec<PeerExportPolicyRestoreReceipt>, RibCommandError> {
+        let mut seen = HashSet::new();
+        if let Some(duplicate) = replacements
+            .iter()
+            .find(|replacement| !seen.insert(replacement.peer))
+        {
+            return Err(RibCommandError::internal(format!(
+                "duplicate peer {} in rollback export-policy batch",
+                duplicate.peer
+            )));
+        }
+        if self.pending_clean_policy_transition.is_some() {
+            return Err(RibCommandError::internal(
+                "internal RIB sequencing error: policy transition already in progress",
+            ));
+        }
+
+        let execution = replacements.into_iter().rev().collect::<Vec<_>>();
+        let receipts = execution
+            .iter()
+            .map(|replacement| {
+                if self.outbound_peers.contains_key(&replacement.peer) {
+                    PeerExportPolicyRestoreReceipt::Restored {
+                        peer: replacement.peer,
+                    }
+                } else {
+                    PeerExportPolicyRestoreReceipt::NotFound {
+                        peer: replacement.peer,
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        self.apply_export_policy_replacements_synchronously(execution)?;
+        Ok(receipts)
     }
 
     /// Apply a batch of authoritative export-policy replacements in one

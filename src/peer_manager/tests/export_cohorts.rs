@@ -894,6 +894,10 @@ async fn export_only_snapshot_duplicate_key_disables_partitioning_wholesale() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the partition regression keeps the failed cohort batch, exact rollback receipt, and untouched remainder assertions together"
+)]
 async fn export_only_snapshot_cohort_failure_leaves_remainder_untouched() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
 
@@ -913,6 +917,24 @@ async fn export_only_snapshot_cohort_failure_leaves_remainder_untouched() {
                 RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
                     singles.push(peer);
                     let _ = reply.send(Ok(()));
+                }
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    // A failed cohort is compensated by one exact batch. Append
+                    // its actual reverse execution order for the existing proof.
+                    let receipts = replacements
+                        .iter()
+                        .rev()
+                        .map(|replacement| {
+                            singles.push(replacement.peer);
+                            rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                                peer: replacement.peer,
+                            }
+                        })
+                        .collect();
+                    let _ = reply.send(Ok(receipts));
                 }
                 _ => {}
             }
@@ -1021,6 +1043,25 @@ async fn export_only_snapshot_remainder_failure_restores_remainder_then_cohort()
                 RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
                     singles.push(peer);
                     let _ = reply.send(Ok(()));
+                }
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    // Preserve the old cross-partition execution-order proof:
+                    // each partition is now one aggregate whose RIB execution
+                    // and receipt order are reverse supplied order.
+                    let receipts = replacements
+                        .iter()
+                        .rev()
+                        .map(|replacement| {
+                            singles.push(replacement.peer);
+                            rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                                peer: replacement.peer,
+                            }
+                        })
+                        .collect();
+                    let _ = reply.send(Ok(receipts));
                 }
                 _ => {}
             }
@@ -1211,16 +1252,35 @@ async fn policy_rollback_rib_wait_has_one_cross_partition_deadline() {
             }
         }
 
+        // Each rollback partition now registers one exact aggregate. The RIB
+        // reverses supplied forward order and receipts that execution order.
         let mut late_replies = Vec::new();
-        for expected_peer in peers[2..].iter().rev() {
-            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
-                rib_rx.recv().await.unwrap()
-            else {
-                panic!("expected remainder rollback command");
-            };
-            assert_eq!(peer, *expected_peer);
-            late_replies.push(reply);
-        }
+        let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected remainder rollback batch");
+        };
+        assert_eq!(
+            replacements
+                .iter()
+                .map(|replacement| replacement.peer)
+                .collect::<Vec<_>>(),
+            peers[2..]
+        );
+        late_replies.push((
+            reply,
+            replacements
+                .iter()
+                .rev()
+                .map(
+                    |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                        peer: replacement.peer,
+                    },
+                )
+                .collect::<Vec<_>>(),
+        ));
 
         let (readiness_reply, readiness_response) = oneshot::channel();
         readiness_tx
@@ -1243,38 +1303,55 @@ async fn policy_rollback_rib_wait_has_one_cross_partition_deadline() {
             peers.len()
         );
 
-        tokio::time::advance(RIB_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+        tokio::time::advance(RIB_BATCH_REPLY_TIMEOUT + Duration::from_millis(1)).await;
         tokio::task::yield_now().await;
-        for expected_peer in peers[..2].iter().rev() {
-            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
-                rib_rx.recv().await.unwrap()
-            else {
-                panic!("expected cohort rollback command");
-            };
-            assert_eq!(peer, *expected_peer);
-            late_replies.push(reply);
-        }
+        let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected cohort rollback batch");
+        };
+        assert_eq!(
+            replacements
+                .iter()
+                .map(|replacement| replacement.peer)
+                .collect::<Vec<_>>(),
+            peers[..2]
+        );
+        late_replies.push((
+            reply,
+            replacements
+                .iter()
+                .rev()
+                .map(
+                    |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                        peer: replacement.peer,
+                    },
+                )
+                .collect::<Vec<_>>(),
+        ));
         late_replies
     };
     let (result, late_replies) = tokio::join!(apply, drive_rib);
 
-    // LOAD-BEARING: constructing a fresh five-second timeout for the cohort
-    // unwind makes elapsed time ten seconds and this assertion goes red.
+    // LOAD-BEARING: constructing a fresh two-minute timeout for the cohort
+    // unwind makes elapsed time four minutes and this assertion goes red.
     assert!(
         tokio::time::Instant::now().duration_since(started)
-            < RIB_REPLY_TIMEOUT + Duration::from_secs(1),
+            < RIB_BATCH_REPLY_TIMEOUT + Duration::from_secs(1),
         "all rollback partitions must share the first rollback RIB deadline"
     );
     assert!(
         result.as_ref().is_err_and(|error| {
             error.contains("force cross-partition rollback")
-                && error.matches("shared 5s deadline").count() == 2
+                && error.matches("policy_rollback_batch_timeout").count() == 2
         }),
         "both timed-out partitions must report the shared deadline: {result:?}"
     );
-    for reply in late_replies {
+    for (reply, receipts) in late_replies {
         assert!(
-            reply.send(Ok(())).is_ok(),
+            reply.send(Ok(receipts)).is_ok(),
             "the exact timed-out RIB future must remain detached for late repair"
         );
     }
@@ -1335,31 +1412,45 @@ async fn policy_rollback_rib_deadline_starts_after_session_restores() {
     );
     let drive_rib = async {
         skip_destination_prestage(&mut rib_rx).await;
-        let mut replies = Vec::new();
-        for expected_peer in peers[..peers.len() - 1].iter().rev() {
-            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
-                rib_rx.recv().await.unwrap()
-            else {
-                panic!("expected rollback RIB restore");
-            };
-            assert_eq!(peer, *expected_peer);
-            replies.push(reply);
-        }
+        // Session compensation may be slow, but the RIB-only deadline is
+        // anchored lazily when this aggregate is registered afterwards.
+        let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected exact rollback RIB batch");
+        };
+        assert_eq!(
+            replacements
+                .iter()
+                .map(|replacement| replacement.peer)
+                .collect::<Vec<_>>(),
+            peers[..peers.len() - 1]
+        );
         assert!(
             tokio::time::Instant::now().duration_since(started) > RIB_REPLY_TIMEOUT,
             "successful session restores must consume more than the RIB-only deadline"
         );
 
         tokio::time::advance(
-            RIB_REPLY_TIMEOUT
+            RIB_BATCH_REPLY_TIMEOUT
                 .checked_sub(Duration::from_millis(1))
-                .expect("RIB reply timeout exceeds one millisecond"),
+                .expect("RIB batch reply timeout exceeds one millisecond"),
         )
         .await;
         tokio::task::yield_now().await;
-        for reply in replies {
-            reply.send(Ok(())).unwrap();
-        }
+        reply
+            .send(Ok(replacements
+                .iter()
+                .rev()
+                .map(
+                    |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                        peer: replacement.peer,
+                    },
+                )
+                .collect()))
+            .unwrap();
     };
     let (result, ()) = tokio::join!(apply, drive_rib);
 
@@ -1438,20 +1529,33 @@ async fn timed_out_policy_rollback_rearms_import_and_export_retry_intent() {
                     .unwrap();
             }
         }
-        let mut held = Vec::new();
-        for expected_peer in peers.iter().rev() {
-            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
-                rib_rx.recv().await.unwrap()
-            else {
-                panic!("expected rollback RIB command");
-            };
-            assert_eq!(peer, *expected_peer);
-            held.push(reply);
-        }
-        tokio::time::advance(RIB_REPLY_TIMEOUT + Duration::from_millis(1)).await;
-        held
+        let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected exact rollback RIB batch");
+        };
+        assert_eq!(
+            replacements
+                .iter()
+                .map(|replacement| replacement.peer)
+                .collect::<Vec<_>>(),
+            peers
+        );
+        let receipts = replacements
+            .iter()
+            .rev()
+            .map(
+                |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                    peer: replacement.peer,
+                },
+            )
+            .collect::<Vec<_>>();
+        tokio::time::advance(RIB_BATCH_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+        (reply, receipts)
     };
-    let (result, held) = tokio::join!(apply, drive_rib);
+    let (result, (held_reply, receipts)) = tokio::join!(apply, drive_rib);
     assert!(result.is_err());
 
     for peer in peers {
@@ -1461,9 +1565,7 @@ async fn timed_out_policy_rollback_rearms_import_and_export_retry_intent() {
         assert!(peer_state.pending_refresh);
         assert!(peer_state.pending_export_apply);
     }
-    for reply in held {
-        assert!(reply.send(Ok(())).is_ok());
-    }
+    assert!(held_reply.send(Ok(receipts)).is_ok());
 }
 
 #[tokio::test]
@@ -1593,6 +1695,24 @@ async fn export_only_snapshot_reasserts_prior_import_after_remainder_ack_loss() 
                 RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
                     singles.push(peer);
                     let _ = reply.send(Ok(()));
+                }
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    // The remainder has no export delta; the committed cohort
+                    // unwind is the single exact rollback batch recorded here.
+                    let receipts = replacements
+                        .iter()
+                        .rev()
+                        .map(|replacement| {
+                            singles.push(replacement.peer);
+                            rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                                peer: replacement.peer,
+                            }
+                        })
+                        .collect();
+                    let _ = reply.send(Ok(receipts));
                 }
                 _ => {}
             }
