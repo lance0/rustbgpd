@@ -797,6 +797,25 @@ pub struct PeerExportPolicyReplacement {
     pub export_policy: Option<PolicyChain>,
 }
 
+/// Ordered acknowledgement for one member of an exact rollback-only export
+/// policy batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PeerExportPolicyRestoreReceipt {
+    /// The peer was registered and its prior export policy was restored.
+    Restored { peer: IpAddr },
+    /// The peer was no longer registered when the rollback batch executed.
+    NotFound { peer: IpAddr },
+}
+
+impl PeerExportPolicyRestoreReceipt {
+    #[must_use]
+    pub const fn peer(self) -> IpAddr {
+        match self {
+            Self::Restored { peer } | Self::NotFound { peer } => peer,
+        }
+    }
+}
+
 /// Result of attempting an optimized export-policy cohort transition.
 ///
 /// A handoff is fail-closed: the RIB has removed every uncommitted destination
@@ -2219,6 +2238,19 @@ pub enum RibUpdate {
         replacements: Vec<PeerExportPolicyReplacement>,
         /// Response channel for success/failure.
         reply: oneshot::Sender<Result<(), RibCommandError>>,
+    },
+    /// Restore prior export policies as one exact rollback-only actor call.
+    ///
+    /// Duplicate peer identities reject the complete batch before mutation.
+    /// Otherwise replacements execute in reverse supplied order and return one
+    /// ordered [`PeerExportPolicyRestoreReceipt`] per input member. A missing
+    /// outbound registration is acknowledged as `NotFound`, never silently
+    /// collapsed into success.
+    RestorePeerExportPoliciesAuthoritatively {
+        /// Prior policies in original forward-application order.
+        replacements: Vec<PeerExportPolicyReplacement>,
+        /// Ordered receipts in rollback execution order.
+        reply: oneshot::Sender<Result<Vec<PeerExportPolicyRestoreReceipt>, RibCommandError>>,
     },
     /// Create and stage the prospective destination update-group of an
     /// upcoming [`RibUpdate::ReplacePeerExportPolicies`] cohort — without

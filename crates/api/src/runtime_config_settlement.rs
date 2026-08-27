@@ -714,6 +714,55 @@ pub enum RuntimeConfigFenceReason {
     AcknowledgementLost,
 }
 
+/// Closed, secret-free failure classification for settlement-owned policy
+/// mutations. These codes may cross the SIGHUP/catalog actor boundary; raw
+/// session, RIB, policy, path, or configuration error text must not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeConfigPolicyFailureCode {
+    PreflightRejected,
+    SessionApplyRejected,
+    RibApplyRejected,
+    RouteRefreshRejected,
+    StateNonEstablished,
+    StateSessionGone,
+    StateRetryExhausted,
+    ConvergenceDebt,
+    RollbackPeerGone,
+    RollbackSessionRejected,
+    RollbackBatchDuplicate,
+    RollbackBatchUnavailable,
+    RollbackBatchTimeout,
+    RollbackBatchReplyLost,
+    RollbackBatchRejected,
+    RollbackReceiptNotFound,
+    RollbackPendingDebt,
+}
+
+impl RuntimeConfigPolicyFailureCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PreflightRejected => "policy_preflight_rejected",
+            Self::SessionApplyRejected => "policy_session_apply_rejected",
+            Self::RibApplyRejected => "policy_rib_apply_rejected",
+            Self::RouteRefreshRejected => "policy_route_refresh_rejected",
+            Self::StateNonEstablished => "policy_state_non_established",
+            Self::StateSessionGone => "policy_state_session_gone",
+            Self::StateRetryExhausted => "policy_state_retry_exhausted",
+            Self::ConvergenceDebt => "policy_convergence_debt",
+            Self::RollbackPeerGone => "policy_rollback_peer_gone",
+            Self::RollbackSessionRejected => "policy_rollback_session_rejected",
+            Self::RollbackBatchDuplicate => "policy_rollback_batch_duplicate",
+            Self::RollbackBatchUnavailable => "policy_rollback_batch_unavailable",
+            Self::RollbackBatchTimeout => "policy_rollback_batch_timeout",
+            Self::RollbackBatchReplyLost => "policy_rollback_batch_reply_lost",
+            Self::RollbackBatchRejected => "policy_rollback_batch_rejected",
+            Self::RollbackReceiptNotFound => "policy_rollback_receipt_not_found",
+            Self::RollbackPendingDebt => "policy_rollback_pending_debt",
+        }
+    }
+}
+
 impl RuntimeConfigFenceReason {
     const fn as_str(self) -> &'static str {
         match self {
@@ -1779,6 +1828,39 @@ fn run_terminal_action(registry: &Registry) {
 mod tests {
     use super::*;
     use prometheus::Encoder as _;
+
+    #[test]
+    fn policy_failure_codes_are_closed_and_secret_free() {
+        let codes = [
+            RuntimeConfigPolicyFailureCode::PreflightRejected,
+            RuntimeConfigPolicyFailureCode::SessionApplyRejected,
+            RuntimeConfigPolicyFailureCode::RibApplyRejected,
+            RuntimeConfigPolicyFailureCode::RouteRefreshRejected,
+            RuntimeConfigPolicyFailureCode::StateNonEstablished,
+            RuntimeConfigPolicyFailureCode::StateSessionGone,
+            RuntimeConfigPolicyFailureCode::StateRetryExhausted,
+            RuntimeConfigPolicyFailureCode::ConvergenceDebt,
+            RuntimeConfigPolicyFailureCode::RollbackPeerGone,
+            RuntimeConfigPolicyFailureCode::RollbackSessionRejected,
+            RuntimeConfigPolicyFailureCode::RollbackBatchDuplicate,
+            RuntimeConfigPolicyFailureCode::RollbackBatchUnavailable,
+            RuntimeConfigPolicyFailureCode::RollbackBatchTimeout,
+            RuntimeConfigPolicyFailureCode::RollbackBatchReplyLost,
+            RuntimeConfigPolicyFailureCode::RollbackBatchRejected,
+            RuntimeConfigPolicyFailureCode::RollbackReceiptNotFound,
+            RuntimeConfigPolicyFailureCode::RollbackPendingDebt,
+        ];
+        let rendered = codes.map(RuntimeConfigPolicyFailureCode::as_str);
+        assert_eq!(
+            rendered
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            codes.len()
+        );
+        assert!(rendered.iter().all(|code| code.starts_with("policy_")));
+    }
 
     struct TestWatchdog(RuntimeConfigSettlementWatchdog);
 
