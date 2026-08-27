@@ -2148,7 +2148,9 @@ The output names each side's ID-free membership as `grouped`, `unknown`, or one
 of the fallback reasons in the table above. For `separate`, `differences` uses
 stable semantic categories rather than internal IDs: `export_policy`,
 `session_kind`, `route_reflector_client`, `local_role`, `rfc1997_mode`,
-`negotiated_families`, and `llgr_families`. `shared`, `private`, and `unknown`
+`negotiated_families`, `llgr_families`, and `per_client_best`. The last
+category means the peers differ on the RFC 7947 per-client-best group-key
+axis. `shared`, `private`, and `unknown`
 carry no difference list; for private peers, the side-specific membership
 reasons explain why shared staging is unavailable.
 

@@ -18,6 +18,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   registry-aware CI bootstrap that begins semver checking automatically once
   the first normal crates.io release is visible.
 
+- `NeighborService.GetNeighborState` update-group comparisons now report
+  `per_client_best` when two shared-staging group keys differ on the RFC 7947
+  per-client-best axis; CLI human and JSON output use the same stable label.
+
 ### Fixed
 
 - Settlement-owned live policy changes no longer treat one missed 100 ms
