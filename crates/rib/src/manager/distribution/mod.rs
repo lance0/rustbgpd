@@ -826,13 +826,10 @@ pub(in crate::manager) fn otc_egress_blocked(
     matches!(
         local_role,
         Some(BgpRole::Customer | BgpRole::Peer | BgpRole::RouteServerClient)
-    ) && route.attributes.iter().any(|attribute| {
-        matches!(
-            attribute,
-            rustbgpd_wire::PathAttribute::OnlyToCustomer(_)
-                | rustbgpd_wire::PathAttribute::OnlyToCustomerPartial(_)
-        )
-    })
+    ) && route
+        .attributes
+        .iter()
+        .any(|attribute| attribute.only_to_customer().is_some())
 }
 
 fn route_type(origin: crate::route::RouteOrigin) -> RouteType {

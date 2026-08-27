@@ -24,6 +24,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Canonical and Partial community and Only-to-Customer attributes now receive
+  the same value-based treatment in consumers and interoperability fixtures.
+
 - Settlement-owned live policy changes no longer treat one missed 100 ms
   session-state reply as session loss. A timed-out query retries at most once
   inside one shared two-second clean-state window; a confirmed non-Established

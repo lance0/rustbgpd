@@ -50,8 +50,8 @@ fn attributes() -> Vec<PathAttribute> {
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath { segments }),
         PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 1)),
-        PathAttribute::Communities(STANDARD.to_vec()),
-        PathAttribute::LargeCommunities(large_communities()),
+        PathAttribute::CommunitiesPartial(STANDARD.to_vec()),
+        PathAttribute::LargeCommunitiesPartial(large_communities()),
     ]
 }
 
@@ -210,14 +210,16 @@ fn canonical_from_rust(prefix: String, attributes: &[PathAttribute]) -> Canonica
                     })
                     .collect();
             }
-            PathAttribute::Communities(values) => {
+            attribute if attribute.communities().is_some() => {
+                let values = attribute.communities().unwrap();
                 standard.extend(
                     values
                         .iter()
                         .map(|value| format!("{}:{}", value >> 16, value & 0xffff)),
                 );
             }
-            PathAttribute::LargeCommunities(values) => {
+            attribute if attribute.large_communities().is_some() => {
+                let values = attribute.large_communities().unwrap();
                 large.extend(values.iter().map(ToString::to_string));
             }
             _ => {}

@@ -74,9 +74,8 @@ fn should_warn_rejected_route_eviction(count: u64) -> bool {
 fn otc_state(attrs: &[PathAttribute]) -> OtcState {
     let mut found = OtcState::Absent;
     for attr in attrs {
-        if let PathAttribute::OnlyToCustomer(asn) | PathAttribute::OnlyToCustomerPartial(asn) = attr
-        {
-            found = OtcState::Present(*asn);
+        if let Some(asn) = attr.only_to_customer() {
+            found = OtcState::Present(asn);
         }
     }
     found

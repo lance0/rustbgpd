@@ -5,6 +5,9 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- Added `PathAttribute::only_to_customer()` for reading either typed OTC
+  representation without discarding the Partial flag.
+
 ## 0.18.0 - 2026-08-26
 
 - **Community Container framing fence:** Registered temporary path attribute
