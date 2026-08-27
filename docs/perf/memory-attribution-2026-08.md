@@ -6,6 +6,16 @@ bought which. Seven sealed A/B campaigns, 25 measured arms, 134 runs at
 100 peers × 1,000 routes, each one preregistered before its first build,
 narrowed a 509-commit window to a single merge.
 
+> **Allocator-attribution erratum (2026-08-27).** Every measured phase
+> image used jemalloc. The exact arm revisions enabled jemalloc by
+> default, the campaign Dockerfile explicitly built
+> `rustbgpd/jemalloc`, and the retained `build_A.log` records compilation
+> of the `tikv-jemalloc-*` crates. Earlier wording incorrectly labeled
+> the observed anonymous-residency distribution as glibc
+> allocator-internal behavior. That causal label is retracted. The
+> measured ±30–50 MiB distribution, low-mode observations, thresholds,
+> and commit-ownership findings are unchanged.
+
 The answer is one commit — a deliberate coalescing change that replaced
 fragmented per-neighbor RIB actor queries with one ordered aggregate
 snapshot per API call. Holding more state per call in order to do less
@@ -270,12 +280,12 @@ in-campaign: its internal sum check is exact to the digit
 
 ## Noise floor, and how the bands account for it
 
-Settled memory at this shape carries a **±30–50 MiB glibc allocator-arena
-residency noise floor** — the same figure the soak gates are calibrated
+Settled memory at this shape carries a **±30–50 MiB anonymous-residency
+variance band** — the same figure the soak gates are calibrated
 against, see
 [`../soaks/soak-acceptance-gates.md`](../soaks/soak-acceptance-gates.md).
-It is not measurement error; it is how many pages the allocator's arenas
-happen to have dirtied on a given run.
+The measurements establish where the residency differs, but do not
+identify an allocator-internal cause for the distribution.
 
 The distribution is not merely noisy, it is **bimodal**. A minority of
 runs land 50–120 MiB below their own arm's median with normal
@@ -289,10 +299,11 @@ deciding phase 6**. The rollup signature is consistent every time: the
 entire delta is Anonymous/`Private_Dirty`, file-backed residency is
 identical to within ~0.1 MB (~1.5–1.6 MB `Shared_Clean`), the
 anonymous-VMA count is essentially unchanged (84 vs 85 in the run
-examined in most detail), and every large arena is uniformly less
-resident. Same allocation profile, fewer dirty pages — not a different
-code path, and it appears on both arms of an A/B, so it is a property of
-the daemon at this shape rather than of any commit under test.
+examined in most detail), and the large anonymous mappings are uniformly
+less resident. Same measured workload, fewer dirty pages — not a
+different code path, and it appears on both arms of an A/B, so it is a
+property of the daemon at this shape rather than of any commit under
+test.
 
 Three design choices follow from that, all preregistered:
 
@@ -300,9 +311,9 @@ Three design choices follow from that, all preregistered:
    verdict by at most one rank.
 2. **A +25 MiB ownership threshold with a ±15 MiB flat band and an
    explicit no-claim strip between them**, so a step has to clear the
-   arena's median-level influence before anyone calls it an owner. The
-   winning step is +106.6 MiB — more than 4× the threshold and more than
-   twice the top of the noise floor.
+   variance band's median-level influence before anyone calls it an
+   owner. The winning step is +106.6 MiB — more than 4× the threshold
+   and more than twice the top of the noise floor.
 3. **Every figure at this shape is a band, never a point.** The medians
    in this receipt are the statistic the rule was written against; the
    per-arm min/max spreads (5%–48%) are published in full in each
@@ -349,7 +360,7 @@ the interval is variance-driven", not "no movement".
 a *byte-identical binary* in a later campaign produced level offsets of
 +16.3, +9.2 and +18.9 MiB on cg peak in phases 3, 4 and 5 — each against
 a rebuild verified byte-identical to the prior phase's build, so those
-offsets are pure run-to-run and arena variance rather than build
+offsets are pure run-to-run anonymous-residency variance rather than build
 differences. (Phase 2's own +8.4 MiB offset is against phase 0, whose
 binary hash was never recorded because its image was deleted at campaign
 end.) Those offsets are the same order as the effects a late-stage
