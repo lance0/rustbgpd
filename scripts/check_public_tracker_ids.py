@@ -35,10 +35,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 # Anything under `docs/`, plus the top-level files a first-time reader lands
-# on. CHANGELOG.md and ROADMAP.md are deliberately out of scope: the
-# changelog's released sections are historical records that must not be
-# rewritten, and the roadmap tracks unshipped work whose only public name is
-# often the tracker item itself.
+# on. CHANGELOG.md, ROADMAP.md, and ROADMAP_HISTORY.md are deliberately out of
+# scope: released and completed sections are historical records that must not
+# be rewritten, while current roadmap work may have only a tracker item as its
+# public name.
 #
 # The rest of the tree — `bench/`, `examples/`, `scripts/`, crate sources —
 # is deliberately out of scope too (settled with LAN-957, the same
