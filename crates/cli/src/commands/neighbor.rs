@@ -906,6 +906,7 @@ fn comparison_difference_label(value: i32) -> &'static str {
         Ok(D::Rfc1997Mode) => "rfc1997_mode",
         Ok(D::NegotiatedFamilies) => "negotiated_families",
         Ok(D::LlgrFamilies) => "llgr_families",
+        Ok(D::PerClientBest) => "per_client_best",
         Ok(D::Unspecified) | Err(_) => "unknown",
     }
 }
@@ -1869,7 +1870,7 @@ mod tests {
         }
         labels!(comparison_verdict_label; V::Unknown => "unknown", V::Private => "private", V::Shared => "shared", V::Separate => "separate", V::Unspecified => "unknown", i32::MAX => "unknown");
         labels!(comparison_membership_label; M::Unknown => "unknown", M::Grouped => "grouped", M::PolicyPeerContext => "policy_peer_context", M::AddPathSend => "add_path_send", M::PerClientBest => "per_client_best", M::OrrVantage => "orr_vantage", M::OrfInstalled => "orf_installed", M::SlowPeer => "slow_peer", M::Unspecified => "unknown", i32::MAX => "unknown");
-        labels!(comparison_difference_label; D::ExportPolicy => "export_policy", D::SessionKind => "session_kind", D::RouteReflectorClient => "route_reflector_client", D::LocalRole => "local_role", D::Rfc1997Mode => "rfc1997_mode", D::NegotiatedFamilies => "negotiated_families", D::LlgrFamilies => "llgr_families", D::Unspecified => "unknown", i32::MAX => "unknown");
+        labels!(comparison_difference_label; D::ExportPolicy => "export_policy", D::SessionKind => "session_kind", D::RouteReflectorClient => "route_reflector_client", D::LocalRole => "local_role", D::Rfc1997Mode => "rfc1997_mode", D::NegotiatedFamilies => "negotiated_families", D::LlgrFamilies => "llgr_families", D::PerClientBest => "per_client_best", D::Unspecified => "unknown", i32::MAX => "unknown");
     }
 
     fn base_add_opts() -> AddNeighborOpts {

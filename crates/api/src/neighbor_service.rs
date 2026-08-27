@@ -468,13 +468,8 @@ fn update_group_comparison_to_proto(
             UpdateGroupComparisonDifference::NegotiatedFamilies => {
                 proto::UpdateGroupComparisonDifference::NegotiatedFamilies
             }
-            // ADR-0126: the `per_client_best` key axis has no proto
-            // value yet — the stable v1 message graph is frozen, and
-            // UNSPECIFIED is proto3's forward-compatible reading for a
-            // difference this schema revision cannot name. Give it a
-            // dedicated value at the next stable-surface revision.
             UpdateGroupComparisonDifference::PerClientBest => {
-                proto::UpdateGroupComparisonDifference::Unspecified
+                proto::UpdateGroupComparisonDifference::PerClientBest
             }
             UpdateGroupComparisonDifference::LlgrFamilies => {
                 proto::UpdateGroupComparisonDifference::LlgrFamilies
@@ -3355,7 +3350,10 @@ mod tests {
                     primary_update_group: "group:7".into(), verdict: UpdateGroupComparisonVerdict::Separate,
                     primary_membership: UpdateGroupComparisonMembership::Grouped,
                     comparison_membership: UpdateGroupComparisonMembership::SlowPeer,
-                    differences: vec![UpdateGroupComparisonDifference::SessionKind],
+                    differences: vec![
+                        UpdateGroupComparisonDifference::SessionKind,
+                        UpdateGroupComparisonDifference::PerClientBest,
+                    ],
                 }),
             }).unwrap();
         });
@@ -3375,7 +3373,13 @@ mod tests {
         assert_eq!(result.verdict, proto::UpdateGroupComparisonVerdict::Separate as i32);
         assert_eq!(result.primary_membership, proto::UpdateGroupComparisonMembership::Grouped as i32);
         assert_eq!(result.comparison_membership, proto::UpdateGroupComparisonMembership::SlowPeer as i32);
-        assert_eq!(result.differences, vec![proto::UpdateGroupComparisonDifference::SessionKind as i32]);
+        assert_eq!(
+            result.differences,
+            vec![
+                proto::UpdateGroupComparisonDifference::SessionKind as i32,
+                proto::UpdateGroupComparisonDifference::PerClientBest as i32,
+            ]
+        );
     }
 
     /// Load-bearing: the comparison is optional response detail, not a
