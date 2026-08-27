@@ -1,5 +1,7 @@
 use super::*;
 
+use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
+
 async fn assert_session_state_query_count(counter: &AtomicUsize, expected: usize) {
     for _ in 0..3 {
         tokio::task::yield_now().await;
@@ -83,6 +85,207 @@ fn import_tolerant_cohort_test_session_with_states(
         Ok(())
     });
     PeerHandle::from_parts(session_tx, task)
+}
+
+#[derive(Clone, Copy)]
+enum CleanStateReplyMode {
+    FirstTimeoutThenEstablished,
+    FirstReplyDropped,
+    NonEstablished,
+    RetryExhausted,
+}
+
+fn clean_state_test_session(
+    addr: IpAddr,
+    mode: CleanStateReplyMode,
+    queries: Arc<AtomicUsize>,
+) -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
+    let task = tokio::spawn(async move {
+        while let Some(command) = session_rx.recv().await {
+            match command {
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. }
+                | PeerCommand::SendRouteRefresh { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::QueryState { reply } => {
+                    let query = queries.fetch_add(1, Ordering::SeqCst) + 1;
+                    let withhold = match mode {
+                        CleanStateReplyMode::FirstTimeoutThenEstablished
+                        | CleanStateReplyMode::FirstReplyDropped => query == 1,
+                        CleanStateReplyMode::NonEstablished => false,
+                        CleanStateReplyMode::RetryExhausted => query <= 2,
+                    };
+                    if matches!(mode, CleanStateReplyMode::FirstReplyDropped) && withhold {
+                        drop(reply);
+                    } else if withhold {
+                        tokio::spawn(async move {
+                            tokio::time::sleep(CLEAN_STATE_QUERY_WINDOW * 2).await;
+                            let _ =
+                                reply.send(policy_test_peer_state(addr, SessionState::Established));
+                        });
+                    } else {
+                        let state = if matches!(mode, CleanStateReplyMode::NonEstablished) {
+                            SessionState::Connect
+                        } else {
+                            SessionState::Established
+                        };
+                        let _ = reply.send(policy_test_peer_state(addr, state));
+                    }
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
+fn clean_state_test_manager(
+    mode: CleanStateReplyMode,
+) -> (
+    PeerManager,
+    mpsc::Receiver<RibUpdate>,
+    IpAddr,
+    Arc<AtomicUsize>,
+) {
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 43, 0, 1));
+    let queries = Arc::new(AtomicUsize::new(0));
+    let (rib_tx, rib_rx) = mpsc::channel(16);
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    insert_test_managed_peer(
+        &mut manager,
+        peer,
+        clean_state_test_session(peer, mode, Arc::clone(&queries)),
+        false,
+    );
+    (manager, rib_rx, peer, queries)
+}
+
+fn one_export_target(peer: IpAddr) -> Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy> {
+    vec![rustbgpd_api::peer_types::ResolvedPeerPolicy {
+        address: peer,
+        interface: None,
+        import_policy: None,
+        export_policy: Some(deny_policy_chain()),
+    }]
+}
+
+#[tokio::test(start_paused = true)]
+async fn clean_state_first_timeout_then_established_commits() {
+    let (mut manager, mut rib_rx, peer, queries) =
+        clean_state_test_manager(CleanStateReplyMode::FirstTimeoutThenEstablished);
+    let apply = manager.apply_resolved_policy_snapshot_classified(one_export_target(peer), true);
+    let rib = async {
+        tokio::time::advance(PEER_QUERY_TIMEOUT + Duration::from_millis(1)).await;
+        let RibUpdate::ReplacePeerExportPolicy { reply, .. } = rib_rx.recv().await.unwrap() else {
+            panic!("expected forward authoritative RIB apply");
+        };
+        reply.send(Ok(())).unwrap();
+    };
+    let (result, ()) = tokio::join!(apply, rib);
+    assert!(
+        result.is_ok(),
+        "delayed Established reply must commit: {result:?}"
+    );
+    assert_eq!(queries.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn clean_state_session_gone_compensates_with_closed_code() {
+    let (mut manager, mut rib_rx, peer, queries) =
+        clean_state_test_manager(CleanStateReplyMode::FirstReplyDropped);
+    let apply = manager.apply_resolved_policy_snapshot_classified(one_export_target(peer), true);
+    let rib = async {
+        let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected exact rollback RIB batch");
+        };
+        assert_eq!(replacements.len(), 1);
+        reply
+            .send(Ok(vec![
+                rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer },
+            ]))
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(apply, rib);
+    let failure = result.expect_err("SessionGone must compensate rather than commit");
+    assert_eq!(
+        failure.code,
+        RuntimeConfigPolicyFailureCode::StateSessionGone
+    );
+    assert_eq!(queries.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn clean_state_non_established_compensates_with_closed_code() {
+    let (mut manager, mut rib_rx, peer, queries) =
+        clean_state_test_manager(CleanStateReplyMode::NonEstablished);
+    let apply = manager.apply_resolved_policy_snapshot_classified(one_export_target(peer), true);
+    let rib = async {
+        let RibUpdate::RestorePeerExportPoliciesAuthoritatively { reply, .. } =
+            rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected exact rollback RIB batch");
+        };
+        reply
+            .send(Ok(vec![
+                rustbgpd_rib::PeerExportPolicyRestoreReceipt::NotFound { peer },
+            ]))
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(apply, rib);
+    let failure = result.expect_err("non-Established state must compensate rather than commit");
+    assert_eq!(
+        failure.code,
+        RuntimeConfigPolicyFailureCode::StateNonEstablished
+    );
+    assert_eq!(queries.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn clean_state_retry_exhaustion_compensates_with_closed_code() {
+    let (mut manager, mut rib_rx, peer, queries) =
+        clean_state_test_manager(CleanStateReplyMode::RetryExhausted);
+    let apply = manager.apply_resolved_policy_snapshot_classified(one_export_target(peer), true);
+    let rib = async {
+        tokio::time::advance(PEER_QUERY_TIMEOUT + Duration::from_millis(1)).await;
+        tokio::time::advance(CLEAN_STATE_QUERY_WINDOW + Duration::from_millis(1)).await;
+        let RibUpdate::RestorePeerExportPoliciesAuthoritatively { reply, .. } =
+            rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected exact rollback RIB batch");
+        };
+        reply
+            .send(Ok(vec![
+                rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer },
+            ]))
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(apply, rib);
+    let failure = result.expect_err("retry exhaustion must compensate rather than commit");
+    assert_eq!(
+        failure.code,
+        RuntimeConfigPolicyFailureCode::StateRetryExhausted
+    );
+    assert_eq!(queries.load(Ordering::SeqCst), 3);
 }
 
 /// LAN-462: a reload that moves import AND export chains must still engage the
@@ -319,6 +522,10 @@ async fn import_tolerant_cohort_handoff_fires_deferred_refresh_once() {
 /// refresh (only the rollback's post-reassert refresh), leaving no pending
 /// retry intent behind after a clean restore.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the rollback regression keeps both peers' session, RIB, refresh, and final policy assertions together"
+)]
 async fn import_tolerant_cohort_rib_failure_restores_both_chains() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
 
@@ -338,9 +545,25 @@ async fn import_tolerant_cohort_rib_failure_restores_both_chains() {
                 RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
                     let _ = reply.send(Err("injected cohort failure".to_string()));
                 }
-                RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
-                    singles.push(peer);
-                    let _ = reply.send(Ok(()));
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    singles.extend(
+                        replacements
+                            .iter()
+                            .rev()
+                            .map(|replacement| replacement.peer),
+                    );
+                    let _ = reply.send(Ok(replacements
+                        .into_iter()
+                        .rev()
+                        .map(
+                            |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                                peer: replacement.peer,
+                            },
+                        )
+                        .collect()));
                 }
                 _ => {}
             }
@@ -434,6 +657,10 @@ async fn import_tolerant_cohort_rib_failure_restores_both_chains() {
 /// ordinary rollback — and the failing member still gets no RIB
 /// compensation, matching the export-only discipline.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the cross-side regression keeps the failing member's reassertion and the captured cohort rollback in one scenario"
+)]
 async fn import_tolerant_cohort_export_failure_reasserts_failing_member_import() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
 
@@ -447,9 +674,20 @@ async fn import_tolerant_cohort_export_failure_reasserts_failing_member_import()
     let _rib_task = tokio::spawn(async move {
         while let Some(update) = rib_rx.recv().await {
             match update {
-                RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
-                    restores.fetch_add(1, Ordering::SeqCst);
-                    let _ = reply.send(Ok(()));
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    restores.fetch_add(replacements.len(), Ordering::SeqCst);
+                    let _ = reply.send(Ok(replacements
+                        .into_iter()
+                        .rev()
+                        .map(
+                            |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                                peer: replacement.peer,
+                            },
+                        )
+                        .collect()));
                 }
                 RibUpdate::ReplacePeerExportPolicies { .. } => {
                     panic!("the RIB batch must not run after a session-side cohort failure");
@@ -559,8 +797,20 @@ async fn cohort_export_failure_repair_arms_pending_refresh_when_not_established(
     let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
     let _rib_task = tokio::spawn(async move {
         while let Some(update) = rib_rx.recv().await {
-            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
-                let _ = reply.send(Ok(()));
+            if let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            } = update
+            {
+                let _ = reply.send(Ok(replacements
+                    .into_iter()
+                    .rev()
+                    .map(
+                        |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                            peer: replacement.peer,
+                        },
+                    )
+                    .collect()));
             }
         }
     });
@@ -914,18 +1164,28 @@ async fn export_only_snapshot_handoff_failure_restores_every_peer_newest_first()
             )))
             .unwrap();
 
-        // Rollback stays on the per-peer restore seam, newest first.
-        let mut order = Vec::new();
-        for expected_peer in peers.into_iter().rev() {
-            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
-                rib_rx.recv().await.unwrap()
-            else {
-                panic!("expected rollback ordinary RIB command");
-            };
-            assert_eq!(peer, expected_peer);
-            order.push(peer);
-            reply.send(Ok(())).unwrap();
-        }
+        let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected exact rollback RIB batch");
+        };
+        assert_eq!(
+            replacements
+                .iter()
+                .map(|replacement| replacement.peer)
+                .collect::<Vec<_>>(),
+            peers
+        );
+        let order = peers.into_iter().rev().collect::<Vec<_>>();
+        reply
+            .send(Ok(order
+                .iter()
+                .copied()
+                .map(|peer| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer })
+                .collect()))
+            .unwrap();
         order
     });
 
@@ -1073,21 +1333,33 @@ async fn export_only_snapshot_handoff_timeout_restores_after_the_owned_forward_c
             late_forward_reply.send(Ok(())).is_err(),
             "the timed-out forward receiver must be gone before the RIB actor advances to rollback"
         );
-        let mut rollback_order = Vec::new();
-        for expected_peer in peers.into_iter().rev() {
-            let RibUpdate::ReplacePeerExportPolicy {
-                peer,
-                export_policy,
-                reply,
-            } = rib_rx.recv().await.unwrap()
-            else {
-                panic!("expected ordinary rollback command");
-            };
-            assert_eq!(peer, expected_peer);
-            assert!(export_policy.is_none());
-            rollback_order.push(peer);
-            reply.send(Ok(())).unwrap();
-        }
+        let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected exact rollback RIB batch");
+        };
+        assert_eq!(
+            replacements
+                .iter()
+                .map(|replacement| replacement.peer)
+                .collect::<Vec<_>>(),
+            peers
+        );
+        assert!(
+            replacements
+                .iter()
+                .all(|replacement| replacement.export_policy.is_none())
+        );
+        let rollback_order = peers.into_iter().rev().collect::<Vec<_>>();
+        reply
+            .send(Ok(rollback_order
+                .iter()
+                .copied()
+                .map(|peer| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer })
+                .collect()))
+            .unwrap();
         rollback_order
     };
     let (result, rollback_order) = tokio::join!(apply, drive_rib);
@@ -1172,65 +1444,73 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
             reply.send(Ok(())).unwrap();
         }
 
-        let mut lifecycle_task = None;
-        let mut restores = Vec::new();
+        let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected exact rollback RIB batch");
+        };
+        assert_eq!(
+            replacements
+                .iter()
+                .map(|replacement| replacement.peer)
+                .collect::<Vec<_>>(),
+            peers
+        );
+        let restores = peers.iter().rev().copied().collect::<Vec<_>>();
+        let later_tx = lifecycle_tx.clone();
+        let recreated = peers[0];
+        let lifecycle_task = tokio::spawn(async move {
+            later_tx
+                .send(RibUpdate::PeerDeleted { peer: recreated })
+                .await
+                .unwrap();
+            let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+            later_tx
+                .send(RibUpdate::PeerUp {
+                    peer: recreated,
+                    session_id: 99,
+                    peer_asn: 65002,
+                    peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
+                    outbound_tx,
+                    export_policy: None,
+                    sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+                    is_ebgp: true,
+                    route_reflector_client: false,
+                    orr_vantage: None,
+                    per_client_best: false,
+                    interpret_rfc1997: true,
+                    add_path_send_families: Vec::new(),
+                    add_path_send_max: 0,
+                    negotiated_orf_recv: Vec::new(),
+                    negotiated_llgr_families: Vec::new(),
+                })
+                .await
+                .unwrap();
+        });
+        reply
+            .send(Ok(restores
+                .iter()
+                .copied()
+                .map(|peer| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer })
+                .collect()))
+            .unwrap();
+
         let mut refresh_markers = 0;
         let mut saw_delete = false;
         let mut saw_recreate = false;
-        while restores.len() < peers.len()
-            || refresh_markers < peers.len() - 1
-            || !saw_delete
-            || !saw_recreate
-        {
+        while refresh_markers < peers.len() - 1 || !saw_delete || !saw_recreate {
             match rib_rx.recv().await.unwrap() {
-                RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
-                    if restores.is_empty() {
-                        let later_tx = lifecycle_tx.clone();
-                        let recreated = peers[0];
-                        lifecycle_task = Some(tokio::spawn(async move {
-                            later_tx
-                                .send(RibUpdate::PeerDeleted { peer: recreated })
-                                .await
-                                .unwrap();
-                            let (outbound_tx, _outbound_rx) = mpsc::channel(1);
-                            later_tx
-                                .send(RibUpdate::PeerUp {
-                                    peer: recreated,
-                                    session_id: 99,
-                                    peer_asn: 65002,
-                                    peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
-                                    outbound_tx,
-                                    export_policy: None,
-                                    sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
-                                    is_ebgp: true,
-                                    route_reflector_client: false,
-                                    orr_vantage: None,
-                                    per_client_best: false,
-                                    interpret_rfc1997: true,
-                                    add_path_send_families: Vec::new(),
-                                    add_path_send_max: 0,
-                                    negotiated_orf_recv: Vec::new(),
-                                    negotiated_llgr_families: Vec::new(),
-                                })
-                                .await
-                                .unwrap();
-                        }));
-                    }
-                    assert_eq!(peer, peers[peers.len() - 1 - restores.len()]);
-                    restores.push(peer);
-                    reply.send(Ok(())).unwrap();
-                }
                 RibUpdate::QueryLocRibCount { reply } => {
                     // LOAD-BEARING: moving Route Refresh ahead of aggregate
                     // registration lets this marker overtake a restore.
-                    assert_eq!(restores.len(), peers.len());
                     refresh_markers += 1;
                     reply.send(0).unwrap();
                 }
                 RibUpdate::PeerDeleted { peer } => {
                     // LOAD-BEARING: removing reverse-order pre-registration
                     // lets this later delete overtake an unregistered restore.
-                    assert_eq!(restores.len(), peers.len());
                     assert_eq!(peer, peers[0]);
                     saw_delete = true;
                 }
@@ -1238,7 +1518,6 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
                     peer, session_id, ..
                 } => {
                     assert!(saw_delete);
-                    assert_eq!(restores.len(), peers.len());
                     assert_eq!(peer, peers[0]);
                     assert_eq!(session_id, 99);
                     saw_recreate = true;
@@ -1246,7 +1525,7 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
                 _ => panic!("unexpected RIB command in rollback ordering proof"),
             }
         }
-        lifecycle_task.unwrap().await.unwrap();
+        lifecycle_task.await.unwrap();
     };
     let (result, ()) = tokio::join!(apply, drive_rib);
 
@@ -1309,30 +1588,39 @@ async fn policy_rollback_registered_rib_futures_survive_caller_cancellation() {
     });
 
     skip_destination_prestage(&mut rib_rx).await;
-    let RibUpdate::ReplacePeerExportPolicy {
-        peer: first_restore,
+    let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+        replacements,
         reply,
-        ..
     } = rib_rx.recv().await.unwrap()
     else {
-        panic!("expected the first registered rollback restore");
+        panic!("expected detached exact rollback batch");
     };
-    assert_eq!(first_restore, peers[peers.len() - 2]);
+    assert_eq!(
+        replacements
+            .iter()
+            .map(|replacement| replacement.peer)
+            .collect::<Vec<_>>(),
+        peers[..peers.len() - 1]
+    );
     apply_task.abort();
     assert!(apply_task.await.unwrap_err().is_cancelled());
-    reply.send(Ok(())).unwrap();
-
-    let mut restored = vec![first_restore];
-    while restored.len() < peers.len() - 1 {
-        let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = rib_rx.recv().await.unwrap()
-        else {
-            panic!("expected detached rollback restore");
-        };
-        restored.push(peer);
-        reply.send(Ok(())).unwrap();
-    }
-    // LOAD-BEARING: awaiting rollback futures directly in the caller drops
-    // this suffix on cancellation, closing the channel before all peers arrive.
+    let restored = peers[..peers.len() - 1]
+        .iter()
+        .rev()
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(
+        reply
+            .send(Ok(restored
+                .iter()
+                .copied()
+                .map(|peer| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer })
+                .collect()))
+            .is_ok(),
+        "detached rollback task must retain the late receiver"
+    );
+    // LOAD-BEARING: awaiting the rollback receiver directly in the caller
+    // closes this aggregate on cancellation instead of preserving late repair.
     assert_eq!(
         restored,
         peers[..peers.len() - 1]
@@ -1340,6 +1628,122 @@ async fn policy_rollback_registered_rib_futures_survive_caller_cancellation() {
             .rev()
             .copied()
             .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn rollback_batch_can_complete_after_the_old_five_second_window() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 47, 0, 1));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let (rib_tx, mut rib_rx) = mpsc::channel(16);
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    insert_test_managed_peer(
+        &mut manager,
+        peer,
+        established_export_policy_test_session(peer, attempts, Some(1)),
+        false,
+    );
+    let apply = manager.apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
+        address: peer,
+        interface: None,
+        import_policy: None,
+        export_policy: Some(deny_policy_chain()),
+    }]);
+    let rib = async {
+        let RibUpdate::RestorePeerExportPoliciesAuthoritatively { reply, .. } =
+            rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected exact rollback RIB batch");
+        };
+        tokio::time::advance(RIB_REPLY_TIMEOUT + Duration::from_secs(1)).await;
+        reply
+            .send(Ok(vec![
+                rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer },
+            ]))
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(apply, rib);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.contains("already-applied peers restored")),
+        "a six-second exact rollback remains fully compensated: {result:?}"
+    );
+    let peer_state = manager.peers.get(&key(peer)).unwrap();
+    assert!(!peer_state.pending_export_apply);
+    assert!(!peer_state.pending_refresh);
+}
+
+#[tokio::test(start_paused = true)]
+async fn rollback_batch_timeout_keeps_late_repair_owned_and_pending_armed() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 48, 0, 1));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let (rib_tx, mut rib_rx) = mpsc::channel(16);
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    insert_test_managed_peer(
+        &mut manager,
+        peer,
+        established_export_policy_test_session(peer, attempts, Some(1)),
+        false,
+    );
+    let apply_task = tokio::spawn(async move {
+        let result = manager
+            .apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
+                address: peer,
+                interface: None,
+                import_policy: None,
+                export_policy: Some(deny_policy_chain()),
+            }])
+            .await;
+        (manager, result)
+    });
+    let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+        reply: late_reply, ..
+    } = rib_rx.recv().await.unwrap()
+    else {
+        panic!("expected exact rollback RIB batch");
+    };
+    tokio::time::advance(RIB_BATCH_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+    let (manager, result) = apply_task.await.unwrap();
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.contains("policy_rollback_batch_timeout")),
+        "timeout must remain an explicit ambiguous repair: {result:?}"
+    );
+    let peer_state = manager.peers.get(&key(peer)).unwrap();
+    assert!(peer_state.pending_export_apply);
+    assert!(
+        late_reply
+            .send(Ok(vec![
+                rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer },
+            ]))
+            .is_ok(),
+        "detached late receiver must remain owned after local timeout"
     );
 }
 
@@ -1650,9 +2054,20 @@ async fn export_only_snapshot_restores_newest_first_after_session_failure() {
     let rib_task = tokio::spawn(async move {
         while let Some(update) = rib_rx.recv().await {
             match update {
-                RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
-                    restores.fetch_add(1, Ordering::SeqCst);
-                    let _ = reply.send(Ok(()));
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    restores.fetch_add(replacements.len(), Ordering::SeqCst);
+                    let _ = reply.send(Ok(replacements
+                        .into_iter()
+                        .rev()
+                        .map(
+                            |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                                peer: replacement.peer,
+                            },
+                        )
+                        .collect()));
                 }
                 RibUpdate::ReplacePeerExportPolicies { .. } => {
                     panic!("the RIB batch must not run after a session-side cohort failure");
@@ -1729,6 +2144,10 @@ async fn export_only_snapshot_restores_newest_first_after_session_failure() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the ordering regression keeps the blocked batch, readiness lane, rollback receipts, and final peer state together"
+)]
 async fn export_only_snapshot_restores_newest_first_after_rib_batch_failure() {
     use rustbgpd_api::peer_types::{PeerManagerReadinessQuery, ResolvedPeerPolicy};
 
@@ -1751,9 +2170,21 @@ async fn export_only_snapshot_restores_newest_first_after_rib_batch_failure() {
                     task_release.notified().await;
                     drop(reply);
                 }
-                RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
-                    restore_order.push(peer);
-                    let _ = reply.send(Ok(()));
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    restore_order.extend(
+                        replacements
+                            .iter()
+                            .rev()
+                            .map(|replacement| replacement.peer),
+                    );
+                    let _ = reply.send(Ok(restore_order
+                        .iter()
+                        .copied()
+                        .map(|peer| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer })
+                        .collect()));
                 }
                 _ => {}
             }

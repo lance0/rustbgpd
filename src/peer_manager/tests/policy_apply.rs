@@ -1,7 +1,7 @@
 use super::*;
 
 /// A policy-acking peer with a controllable first and subsequent state-query
-/// result. `None` drops the reply and keeps the observation explicitly unknown.
+/// result. `None` drops the reply and produces a typed session-gone outcome.
 fn sequenced_policy_state_handle(
     peer_addr: IpAddr,
     first_state: Option<SessionState>,
@@ -155,13 +155,23 @@ async fn owned_policy_cohort_failure_reports_fully_compensated() {
             panic!("expected destination preflight");
         };
         reply.send(Err("test: prestage skipped".into())).unwrap();
-        let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
-            rib_rx.recv().await.expect("cohort rollback RIB restore")
+        // Exact compensation is now one rollback-only batch. Keeping this
+        // expectation aggregate proves the cohort failure cannot regress to
+        // independently cancellable per-peer restore futures.
+        let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.expect("cohort rollback RIB restore")
         else {
-            panic!("expected rollback RIB restore");
+            panic!("expected exact rollback RIB batch");
         };
-        assert_eq!(peer, first);
-        reply.send(Ok(())).unwrap();
+        assert_eq!(replacements.len(), 1);
+        assert_eq!(replacements[0].peer, first);
+        reply
+            .send(Ok(vec![
+                rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer: first },
+            ]))
+            .unwrap();
     });
     let mut mgr = PeerManager::new(
         cmd_rx,
@@ -360,7 +370,7 @@ fn route_refresh_failing_after_first_handle(peer_addr: IpAddr, state: SessionSta
 enum NonEstablishedRollbackRibOutcome {
     Registered,
     NotFound,
-    UnknownStateNotFound,
+    SessionGoneNotFound,
     Internal,
 }
 
@@ -395,7 +405,7 @@ async fn assert_non_established_rollback_rib_outcome(
             Some(SessionState::Established),
             (!matches!(
                 rollback_outcome,
-                NonEstablishedRollbackRibOutcome::UnknownStateNotFound
+                NonEstablishedRollbackRibOutcome::SessionGoneNotFound
             ))
             .then_some(SessionState::Idle),
         ),
@@ -442,36 +452,38 @@ async fn assert_non_established_rollback_rib_outcome(
             )))
             .unwrap();
 
-        let RibUpdate::ReplacePeerExportPolicy {
-            peer,
-            export_policy,
+        // Rollback now crosses the actor boundary exactly once. The supplied
+        // input is original forward order; receipts below are reverse execution
+        // order, so this keeps the known-down NotFound proof explicit.
+        let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements,
             reply,
         } = rib_rx.recv().await.unwrap()
         else {
-            panic!("expected failing peer rollback RIB replacement");
+            panic!("expected exact rollback RIB batch");
         };
-        assert_eq!(peer, failing);
-        assert_eq!(format!("{export_policy:?}"), expected_prior);
-        reply.send(Ok(())).unwrap();
-
-        let RibUpdate::ReplacePeerExportPolicy {
-            peer,
-            export_policy,
-            reply,
-        } = rib_rx.recv().await.unwrap()
-        else {
-            panic!("non-Established rollback must still attempt the RIB replacement");
-        };
-        assert_eq!(peer, flapping);
-        assert_eq!(format!("{export_policy:?}"), expected_prior);
+        assert_eq!(
+            replacements
+                .iter()
+                .map(|replacement| replacement.peer)
+                .collect::<Vec<_>>(),
+            vec![flapping, failing]
+        );
+        assert!(
+            replacements
+                .iter()
+                .all(|replacement| format!("{:?}", replacement.export_policy) == expected_prior)
+        );
         let reply_result = match rollback_outcome {
-            NonEstablishedRollbackRibOutcome::Registered => Ok(()),
-            NonEstablishedRollbackRibOutcome::NotFound => Err(
-                rustbgpd_rib::RibCommandError::not_found("peer already absent during rollback"),
-            ),
-            NonEstablishedRollbackRibOutcome::UnknownStateNotFound => Err(
-                rustbgpd_rib::RibCommandError::not_found("peer absent after unknown state query"),
-            ),
+            NonEstablishedRollbackRibOutcome::Registered => Ok(vec![
+                rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer: failing },
+                rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer: flapping },
+            ]),
+            NonEstablishedRollbackRibOutcome::NotFound
+            | NonEstablishedRollbackRibOutcome::SessionGoneNotFound => Ok(vec![
+                rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer: failing },
+                rustbgpd_rib::PeerExportPolicyRestoreReceipt::NotFound { peer: flapping },
+            ]),
             NonEstablishedRollbackRibOutcome::Internal => Err(
                 rustbgpd_rib::RibCommandError::internal("rollback RIB transport failed"),
             ),
@@ -531,13 +543,13 @@ async fn assert_non_established_rollback_rib_outcome(
                 "a restored registered object or typed absence leaves no stale RIB export work"
             );
         }
-        NonEstablishedRollbackRibOutcome::UnknownStateNotFound
+        NonEstablishedRollbackRibOutcome::SessionGoneNotFound
         | NonEstablishedRollbackRibOutcome::Internal => {
             assert!(
                 error.contains("restoring already-applied peers also failed")
-                    && (error.contains("rollback RIB transport failed")
-                        || error.contains("peer absent after unknown state query")),
-                "an ambiguous rollback RIB failure must compose into the transaction error: {error}"
+                    && (error.contains("policy_rollback_batch_rejected")
+                        || error.contains("policy_rollback_receipt_not_found")),
+                "an ambiguous rollback receipt must compose a closed code into the transaction error: {error}"
             );
             assert!(
                 managed.pending_export_apply,
@@ -561,9 +573,9 @@ async fn non_established_rollback_accepts_typed_rib_absence() {
 }
 
 #[tokio::test]
-async fn unknown_state_rollback_treats_typed_rib_absence_as_fatal() {
+async fn session_gone_rollback_treats_typed_rib_absence_as_fatal() {
     assert_non_established_rollback_rib_outcome(
-        NonEstablishedRollbackRibOutcome::UnknownStateNotFound,
+        NonEstablishedRollbackRibOutcome::SessionGoneNotFound,
     )
     .await;
 }
@@ -758,7 +770,18 @@ async fn apply_resolved_policy_snapshot_mid_fanout_failure_self_heals() {
 async fn apply_resolved_policy_snapshot_restores_partially_mutated_failing_peer() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
 
-    let mut mgr = live_policy_test_manager();
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let mut mgr = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
     let address = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     insert_test_managed_peer(
         &mut mgr,
@@ -775,14 +798,29 @@ async fn apply_resolved_policy_snapshot_restores_partially_mutated_failing_peer(
     }
 
     let new_chain = deny_policy_chain();
-    let result = mgr
-        .apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
-            address,
-            interface: None,
-            import_policy: Some(new_chain.clone()),
-            export_policy: Some(new_chain),
-        }])
-        .await;
+    let apply = mgr.apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
+        address,
+        interface: None,
+        import_policy: Some(new_chain.clone()),
+        export_policy: Some(new_chain),
+    }]);
+    let rollback_rib = async {
+        let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("partial session mutation must restore through the exact rollback batch");
+        };
+        assert_eq!(replacements.len(), 1);
+        assert_eq!(replacements[0].peer, address);
+        reply
+            .send(Ok(vec![
+                rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer: address },
+            ]))
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(apply, rollback_rib);
     assert!(
         result.is_err(),
         "the one-shot export failure must surface as Err: {result:?}"
@@ -1021,8 +1059,28 @@ async fn apply_resolved_policy_snapshot_rearms_refresh_on_compound_rollback_fail
     let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
     let rib_drainer = tokio::spawn(async move {
         while let Some(update) = rib_rx.recv().await {
-            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
-                let _ = reply.send(Ok(()));
+            match update {
+                RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    // The compound-refresh assertions are session-side; keep
+                    // RIB compensation exact and positively receipted.
+                    let receipts = replacements
+                        .iter()
+                        .rev()
+                        .map(
+                            |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                                peer: replacement.peer,
+                            },
+                        )
+                        .collect();
+                    let _ = reply.send(Ok(receipts));
+                }
+                _ => {}
             }
         }
     });
