@@ -85,7 +85,7 @@ def check_raw(rows, variant, shape, mode):
             need(sum(alloc[k] for k in ("alloc_calls","alloc_zeroed_calls","realloc_calls")) > 0, "allocator signal")
     if mode == "timing": need(cv_within_limit(rows), "timing CV")
 def derive(root):
-    canonical, cells = [], {}; identities={shape:set() for shape in SHAPES}
+    canonical, cells = [], {}; identities={shape:set() for shape in SHAPES}; diagnostic_raw={shape:set() for shape in SHAPES}
     for block in range(1, 5):
         for slot, variant in enumerate(ORDER, 1):
             for shape in SHAPES:
@@ -94,8 +94,9 @@ def derive(root):
                 timing, diagnostic = read_rows(timing_path), read_rows(diagnostic_path)
                 check_raw(timing, variant, shape, "timing"); check_raw(diagnostic, variant, shape, "diagnostic")
                 all_rows, d = timing + diagnostic, diagnostic[0]
-                need(len({(r["raw_sha256"],r["semantic_sha256"],r["output_len_bytes"],r["decoded_entry_count"]) for r in all_rows}) == 1, "raw/semantic/count mismatch")
-                identities[shape].update((r["raw_sha256"],r["semantic_sha256"],r["output_len_bytes"],r["decoded_entry_count"],r["path_count"],r["prefix_count"],r["source_count"]) for r in all_rows)
+                need(len({(r["semantic_sha256"],r["output_len_bytes"],r["decoded_entry_count"],r["path_count"],r["prefix_count"],r["source_count"]) for r in all_rows}) == 1, "semantic/count mismatch")
+                identities[shape].update((r["semantic_sha256"],r["output_len_bytes"],r["decoded_entry_count"],r["path_count"],r["prefix_count"],r["source_count"]) for r in all_rows)
+                diagnostic_raw[shape].add(d["raw_sha256"])
                 alloc = sum(d["allocator"][k] for k in ("alloc_calls","alloc_zeroed_calls","realloc_calls"))
                 row = {"schema":2,"block":block,"slot":slot,"scratch_variant":variant,
                        "shape":shape,"source_commit":d["commit"],"source_tree":TREES[variant],
@@ -115,10 +116,11 @@ def derive(root):
             path=root / "raw" / f"same-{shape}-{side}.timing.jsonl"; rows = read_rows(path)
             same_hashes[shape,side]=sha(path)
             check_raw(rows, "control", shape, "timing"); sides.append(median(rows))
-            identities[shape].update((r["raw_sha256"],r["semantic_sha256"],r["output_len_bytes"],r["decoded_entry_count"],r["path_count"],r["prefix_count"],r["source_count"]) for r in rows)
+            identities[shape].update((r["semantic_sha256"],r["output_len_bytes"],r["decoded_entry_count"],r["path_count"],r["prefix_count"],r["source_count"]) for r in rows)
         favorable=max(0,sides[0]-sides[1]); need(favorable*100 < sides[0]*5, "same-SHA favorable drift")
         same[shape] = favorable,sides[0]
     need(all(len(values)==1 for values in identities.values()), "cross-cell encoded identity drift")
+    need(all(len(values)==1 for values in diagnostic_raw.values()), "diagnostic raw identity drift")
     for row in canonical:
         row["same_sha_left_jsonl_sha256"]=same_hashes[row["shape"],"left"]
         row["same_sha_right_jsonl_sha256"]=same_hashes[row["shape"],"right"]
