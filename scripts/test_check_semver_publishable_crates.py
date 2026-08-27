@@ -139,6 +139,15 @@ class PublishableCrateContractTests(unittest.TestCase):
                 else RegistryState.NORMAL_RELEASE,
             )
 
+    def test_manifest_outside_workspace_root_fails_with_contract_error(self) -> None:
+        changed = metadata()
+        changed["packages"][2]["manifest_path"] = "/outside/crates/rpki/Cargo.toml"
+        with self.assertRaisesRegex(
+            ContractError,
+            "publishable package manifest is outside workspace root: rustbgpd-rpki",
+        ):
+            derive(changed, WORKFLOW, lambda _name: RegistryState.NORMAL_RELEASE)
+
     def test_each_publishable_directory_is_required_in_trigger(self) -> None:
         with self.assertRaisesRegex(ContractError, "crates/rpki"):
             derive(

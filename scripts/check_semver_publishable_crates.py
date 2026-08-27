@@ -102,11 +102,17 @@ def _publishable(metadata: dict[str, object]) -> list[Package]:
         manifest = package.get("manifest_path")
         if not all(isinstance(value, str) for value in (name, version, manifest)):
             raise ContractError("publishable package metadata is incomplete")
+        try:
+            directory = Path(manifest).parent.relative_to(root_path)
+        except ValueError as error:
+            raise ContractError(
+                f"publishable package manifest is outside workspace root: {name}"
+            ) from error
         result.append(
             Package(
                 name=name,
                 version=version,
-                directory=str(Path(manifest).parent.relative_to(root_path)),
+                directory=str(directory),
             )
         )
     if not result:
