@@ -9,6 +9,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Prepare `rustbgpd-rpki 0.1.0` as the third independently published library
+  crate, with its current root and module API documented as the complete
+  `0.1.x` compatibility boundary. The package includes a compiled origin
+  validation example, an explicit Tokio/plain-TCP RTR boundary, and a
+  registry-aware CI bootstrap that begins semver checking automatically once
+  the first normal crates.io release is visible.
+
 ### Fixed
 
 - Settlement-owned live policy changes no longer treat one missed 100 ms

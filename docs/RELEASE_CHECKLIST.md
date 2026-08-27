@@ -29,9 +29,9 @@ diff actually ran before tagging.
 - [ ] **MSRV gate** — `cargo check --workspace --all-targets` at the
       declared `rust-version` (kept in lockstep with the Dockerfile
       builder version)
-- [ ] **Wire crate README freshness gate** — if
-      `crates/wire/Cargo.toml` version changed in the diff,
-      `crates/wire/README.md` must also be touched
+- [ ] **Published-crate README freshness gate** — if the independently
+      versioned manifest for `wire`, `fsm`, or `rpki` changed in the diff, the
+      matching crate README must also be touched
 - [ ] **Gate 8b BUM-filter kernel primitive**
       (`evpn_bum_filter_kernel` job) — runs the netns harness under
       `--cap-add=NET_ADMIN --cap-add=SYS_ADMIN
@@ -49,11 +49,14 @@ diff actually ran before tagging.
       `.github/workflows/public-docs-contract.yml` is green. Its two
       seconds-cheap Python checks now run unfiltered beside the public-docs
       contract on every pull request and main-branch push.
-- [ ] **Published-crate semver contract** — when `crates/wire/` or
-      `crates/fsm/` changed, `.github/workflows/semver-checks.yml` is green for
-      the pull request or a manual dispatch at the release commit. It is
-      path-scoped on pull requests to those crate trees and its own workflow;
-      it has no push trigger.
+- [ ] **Published-crate semver contract** — when `crates/wire/`, `crates/fsm/`,
+      or `crates/rpki/` changed, `.github/workflows/semver-checks.yml` is green
+      for the pull request or a manual dispatch at the release commit. It is
+      path-scoped on pull requests to those crate trees, its tested derivation
+      helper, and its own workflow; it has no push trigger. The exact RPKI
+      `0.1.0` first-publish exception applies only while crates.io returns 404
+      for the name and becomes an ordinary registry baseline automatically
+      once that normal release is visible.
 - [ ] **IXP Manager / Bird's Eye contract** — when the IXP Manager,
       Bird's Eye, renderer, adapter, or interop-doc surface changed,
       `.github/workflows/ixp-compat.yml` ran and is green. It is path-scoped on
@@ -795,3 +798,42 @@ do not force an FSM release for every daemon tag.
 7. Verify the version is visible in the registry, update the declared current
    boundary and dependency snippets in `docs/EMBEDDING.md`, then run
    `python3 scripts/check_embedding_versions.py`.
+
+### rustbgpd-rpki crate release
+
+The RPKI crate has its own version in `crates/rpki/Cargo.toml`, decoupled from
+the daemon workspace version. Its synchronous table API and asynchronous RTR
+client share one published compatibility boundary.
+
+1. **Did `crates/rpki/` or its public examples/docs change since the last
+   `rustbgpd-rpki` publish?**
+   - If no: skip. Do not publish a no-op release.
+   - If yes: continue.
+2. Decide semver bump:
+   - **Patch**: backward-compatible fixes, docs/test improvements, or additive
+     public API within the current `0.x` compatibility line.
+   - **Minor**: removed/changed public items, incompatible enum or struct shape
+     changes, or an incompatible `rustbgpd-wire` dependency move because wire
+     types appear in public RPKI method signatures.
+   The `semver-checks` workflow compares every registry-visible release with
+   its latest normal crates.io baseline.
+3. Update `version` in `crates/rpki/Cargo.toml` and the root workspace
+   dependency pin. Refresh every lockfile that resolves the path crate.
+4. Roll `crates/rpki/CHANGELOG.md`, update the crate README, and add a
+   `rustbgpd-rpki` entry in the repository-level `CHANGELOG.md`.
+5. Run `cargo package --locked -p rustbgpd-rpki --list`; inspect the exact
+   package inventory and normalized manifest. Normal dependencies must resolve
+   from crates.io with no path-only edge.
+6. Run `cargo publish --locked -p rustbgpd-rpki --dry-run`.
+7. Publish `rustbgpd-rpki`, verify the version and ownership are visible in the
+   registry, then manually dispatch `semver-checks.yml` at the publish commit.
+   The checked package set must now include RPKI.
+8. Update the declared current boundary and dependency snippets in
+   `docs/EMBEDDING.md`, then run `python3 scripts/check_embedding_versions.py`.
+
+For the initial `0.1.0` publish only, the semver workflow permits the exact
+`rustbgpd-rpki 0.1.0` package to have no baseline while crates.io returns 404
+for its name. Any other missing package/version, a claimed name without a
+normal release, or an ambiguous registry response fails closed. Recheck the
+name immediately before removing `publish = false` and immediately before the
+real publish.

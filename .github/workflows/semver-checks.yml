@@ -2,9 +2,11 @@ name: semver-checks
 
 # Guards the crates.io-published library crates against an accidental API
 # break. The crate set is re-derived on every run from the workspace: every
-# member whose manifest does NOT carry `publish = false` (today
-# `rustbgpd-wire` and `rustbgpd-fsm`) is checked with cargo-semver-checks
-# against its latest published version.
+# member whose manifest does NOT carry `publish = false` is checked with
+# cargo-semver-checks against its latest published version. The one exact
+# first-publish boundary (`rustbgpd-rpki 0.1.0`) is omitted only while crates.io
+# returns 404 for that name; the checked set picks it up automatically as soon
+# as the normal release is registry-visible.
 #
 # Baseline: no `baseline-version` / `baseline-rev` / `baseline-root` input is
 # passed on purpose. cargo-semver-checks then uses its default baseline — the
@@ -31,7 +33,10 @@ on:
     paths:
       - "crates/wire/**"
       - "crates/fsm/**"
+      - "crates/rpki/**"
       - ".github/workflows/semver-checks.yml"
+      - "scripts/check_semver_publishable_crates.py"
+      - "scripts/test_check_semver_publishable_crates.py"
   workflow_dispatch:
 
 jobs:
@@ -40,31 +45,17 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - name: Test publishable-crate derivation
+        run: python3 -m unittest -v scripts/test_check_semver_publishable_crates.py
       - name: Derive the publishable crate set
         id: publishable
         shell: bash
         run: |
           set -euo pipefail
           cargo metadata --locked --no-deps --format-version 1 > "$RUNNER_TEMP/metadata.json"
-          python3 - "$RUNNER_TEMP/metadata.json" .github/workflows/semver-checks.yml <<'PY' \
+          python3 scripts/check_semver_publishable_crates.py \
+            "$RUNNER_TEMP/metadata.json" .github/workflows/semver-checks.yml \
             | tee -a "$GITHUB_OUTPUT"
-          import json, os, sys
-          meta = json.load(open(sys.argv[1]))
-          root = meta["workspace_root"]
-          publishable = sorted(
-              (p["name"], os.path.relpath(os.path.dirname(p["manifest_path"]), root))
-              for p in meta["packages"]
-              if p["publish"] is None
-          )
-          if not publishable:
-              sys.exit("no publishable crate found; did every manifest gain publish = false?")
-          filter_text = open(sys.argv[2]).read()
-          missing = [d for _, d in publishable if f'- "{d}/**"' not in filter_text]
-          if missing:
-              sys.exit(f"publishable crate dirs missing from the pull_request paths filter: {missing}")
-          print("publishable:", ", ".join(f"{n} ({d})" for n, d in publishable), file=sys.stderr)
-          print("packages=" + ",".join(n for n, _ in publishable))
-          PY
       - uses: obi1kenobi/cargo-semver-checks-action@v2.9
         with:
           package: ${{ steps.publishable.outputs.packages }}
