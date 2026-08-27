@@ -2132,12 +2132,7 @@ impl PeerSession {
 pub(super) fn has_otc(attrs: &[PathAttribute]) -> bool {
     // Network ingress types every valid type-35 attribute and omits malformed
     // ones under revised handling. Synthetic Unknown(type 35) is not OTC.
-    attrs.iter().any(|attr| {
-        matches!(
-            attr,
-            PathAttribute::OnlyToCustomer(_) | PathAttribute::OnlyToCustomerPartial(_)
-        )
-    })
+    attrs.iter().any(|attr| attr.only_to_customer().is_some())
 }
 
 /// Remove private ASNs from an `AS_PATH` according to the configured mode.

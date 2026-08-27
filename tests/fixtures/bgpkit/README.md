@@ -16,7 +16,7 @@ The regeneration path writes only these three files:
   `UpdateMessage::encode`. Its fixed IPv4 NLRI is `203.0.113.0/24`, next hop
   is `192.0.2.1`, AS_SEQUENCE is `[64512, 64513]`, standard communities are
   `[64512:10, 64512:20, 64512:10]`, and large communities are
-  `[64512:100:1, 64512:200:2]`.
+  `[64512:100:1, 64512:200:2]`. Both community attributes carry Partial.
 - `table_dump_v2.bin` uses
   `rustbgpd_mrt::codec::{encode_peer_index_table, encode_rib_entries}`. It
   contains one AS4 IPv4 peer and one legacy `RIB_IPV4_UNICAST` row carrying
@@ -42,9 +42,9 @@ SHA-256:
 
 ```text
 0f6c88c61dfb3bf02fea98f0a7cc8782821511dfe27ed842b930f8ed9463b7a9  as_set_ipv4_update.bin
-7a97d1aa779e3f098f0954ca894a28c73e64ad57c33883de0316917b4851087f  bmp_v3_route_monitoring.bin
-02bc175c612a25b7b8736fa5faa0ce5f6db763b77f5b1b8051a270ddd6f278d2  clean_ipv4_update.bin
-0b4aed4363a79f20e94a80e0ec5b7035fd6120ccb78cfe9f0f501f642260eaa5  table_dump_v2.bin
+e0851fd8b25a299c6285ed8f0a2e296bd1128e3f227e9d689ee6e5c61dbb216b  bmp_v3_route_monitoring.bin
+596fa835bb771d8f627b6cd1567a1eece4cd229f7db82fda086255eedd379896  clean_ipv4_update.bin
+de3975665cf6ac981ede3b81724f8486b33bee36c816f9ef73b1f638cc4e4ae1  table_dump_v2.bin
 ```
 
 Scope is limited to IPv4 unicast without Add-Path, MP families,

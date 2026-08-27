@@ -471,11 +471,12 @@ fn establish_bgp_and_announce(bgp_port: u16) -> TcpStream {
                 PathAttribute::Med(med),
             ];
             if forge_reason {
-                attributes.push(PathAttribute::Communities(vec![
+                // Exercise equivalent values carried with the Partial bit.
+                attributes.push(PathAttribute::CommunitiesPartial(vec![
                     (65520 << 16) | 99,
                     (64512 << 16) | 3,
                 ]));
-                attributes.push(PathAttribute::LargeCommunities(vec![
+                attributes.push(PathAttribute::LargeCommunitiesPartial(vec![
                     LargeCommunity::new(65001, 1101, 99),
                     LargeCommunity::new(65001, 999, 7),
                     LargeCommunity::new(64496, 65520, 99),
@@ -525,7 +526,7 @@ fn announce_additional_route(stream: &mut TcpStream) {
             PathAttribute::Med(31),
             // An ordinary (non-reserved) large community, so the accepted
             // route is visible to the lc-zwild wildcard scan.
-            PathAttribute::LargeCommunities(vec![LargeCommunity::new(65020, 100, 1)]),
+            PathAttribute::LargeCommunitiesPartial(vec![LargeCommunity::new(65020, 100, 1)]),
         ],
         &mut attrs,
         true,

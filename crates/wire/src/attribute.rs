@@ -866,6 +866,16 @@ impl PathAttribute {
         }
     }
 
+    /// RFC 9234 Only-to-Customer ASN, independent of Partial.
+    #[inline]
+    #[must_use]
+    pub fn only_to_customer(&self) -> Option<u32> {
+        match self {
+            Self::OnlyToCustomer(asn) | Self::OnlyToCustomerPartial(asn) => Some(*asn),
+            _ => None,
+        }
+    }
+
     /// RFC 6514 PMSI Tunnel value, independent of Partial.
     #[inline]
     #[must_use]
@@ -6437,6 +6447,18 @@ mod tests {
         let partial = PathAttribute::OnlyToCustomerPartial(65001);
         assert_eq!(partial.type_code(), 35);
         assert_eq!(partial.flags(), 0xe0);
+    }
+    #[test]
+    fn only_to_customer_accessor_handles_partial() {
+        assert_eq!(
+            PathAttribute::OnlyToCustomer(65_001).only_to_customer(),
+            Some(65_001)
+        );
+        assert_eq!(
+            PathAttribute::OnlyToCustomerPartial(65_002).only_to_customer(),
+            Some(65_002)
+        );
+        assert_eq!(PathAttribute::LocalPref(100).only_to_customer(), None);
     }
     #[test]
     fn only_to_customer_malformed_length_is_attribute_length_error() {
