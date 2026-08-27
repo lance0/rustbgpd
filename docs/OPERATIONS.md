@@ -519,6 +519,17 @@ What happens (in dependency order):
    `AdjRibIn` get re-evaluated against the new policy. Operators no
    longer need to run `softreset` manually after a chain swap.
 
+Where settlement-owned policy work reaches a clean-session-state fence, the
+state is a fail-closed proof rather than a best-effort hint. The ordinary query
+is 100 ms. Only a typed timeout is retried, at most once, and all such retries
+share one absolute two-second window for the operation. A positive
+non-Established reply, a departed session task, or retry exhaustion rolls the
+policy change back. RIB compensation is registered as one reverse-order exact
+batch before rollback Route Refresh work is issued and may use the normal
+two-minute batch-reply bound. A local timeout does not cancel the queued repair:
+the late receiver remains daemon-owned and retry flags stay armed until a later
+operation proves convergence.
+
 Reload halts at the first step failure. A typed authoritative receipt records
 the exact successful peer effects, and the peer-manager snapshot, config
 bridge/persister, tracing projection, and gNMI dial-out targets all adopt that
@@ -527,8 +538,10 @@ operator can then fix the failing TOML and reload again to converge. A command
 that was definitely not accepted before any prior effect is a clean rejection;
 an accepted reply loss or non-authoritative reconcile instead recovery-fences
 the daemon, makes `/readyz` fail, rejects another persisted mutation, and exits
-70 after the five-second grace. Per-step errors are logged with structured
-`bucket` / `target` / `error` fields.
+70 after the five-second grace. Settlement-facing policy failures use closed
+`policy_*` codes, never raw session, RIB, config, path, or credential-bearing
+error text. Per-step operational detail remains in structured
+`bucket` / `target` / `error` logs.
 
 Coordinated shutdown closes new SIGHUP and runtime-mutation admission first.
 It does not abort an already-owned reload: the daemon waits for its typed

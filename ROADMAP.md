@@ -157,6 +157,11 @@ the data-driven filtering/tooling wrapper, not the daemon.
   `bgp_update_malformed_total{peer,disposition}` records
   `attribute_discard`, `treat_as_withdraw`, and `session_reset`, and M91 drives
   all three through a raw-speaker lab.
+- **Shipped:** settlement-owned policy reloads distinguish session timeout from
+  task loss, retry the first timeout once inside a shared two-second window,
+  and compensate explicit non-Established or unprovable state. Exact RIB
+  rollback is one reverse-order, receipt-bearing batch whose late repair stays
+  owned and whose pending debt clears only from validated acknowledgements.
 - Fanout-observability trio: ~~per-update-group / queue-depth metrics~~
   **Shipped (#962)** (`bgp_peer_outbound_queue_depth`, `bgp_peer_update_group`)
   → ~~slow-peer detection~~ **Shipped (#967)** (threshold+duration detector,
