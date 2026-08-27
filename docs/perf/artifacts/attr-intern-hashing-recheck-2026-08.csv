@@ -1,0 +1,181 @@
+record_type,attempt,order,group,case,count,median_ns,criterion_stddev_ns,attempt_mean_ns,between_attempt_stddev_ns,range_pct,cv_pct,limit_pct,retained,hash_scale,diagnostic_pct,required_pct,two_x_noise_pct,decision,note
+attempt,A1,1,attr_hash_only,many_unique,10000,176540.806,444.598,,,,,,,,,,,,
+attempt,B1,2,attr_hash_only,many_unique,10000,215035.831,1792.466,,,,,,,,,,,,
+attempt,B2,3,attr_hash_only,many_unique,10000,176192.157,1624.900,,,,,,,,,,,,
+attempt,A2,4,attr_hash_only,many_unique,10000,175760.842,988.563,,,,,,,,,,,,
+summary,,,attr_hash_only,many_unique,10000,,,185882.409,19438.233,21.129,10.457,3,false,,,,,,discarded from interpretation: same-SHA noise bound exceeded
+attempt,A1,1,attr_hash_only,rich_independent_equal,10000,1460971.358,18004.636,,,,,,,,,,,,
+attempt,B1,2,attr_hash_only,rich_independent_equal,10000,1452061.000,20402.748,,,,,,,,,,,,
+attempt,B2,3,attr_hash_only,rich_independent_equal,10000,1459185.215,14194.854,,,,,,,,,,,,
+attempt,A2,4,attr_hash_only,rich_independent_equal,10000,1437199.743,13571.378,,,,,,,,,,,,
+summary,,,attr_hash_only,rich_independent_equal,10000,,,1452354.329,10811.440,1.637,0.744,3,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hash_only,rich_shared_arc,10000,954358.078,2424.927,,,,,,,,,,,,
+attempt,B1,2,attr_hash_only,rich_shared_arc,10000,954336.623,2997.186,,,,,,,,,,,,
+attempt,B2,3,attr_hash_only,rich_shared_arc,10000,945944.190,6291.654,,,,,,,,,,,,
+attempt,A2,4,attr_hash_only,rich_shared_arc,10000,952863.616,1508.944,,,,,,,,,,,,
+summary,,,attr_hash_only,rich_shared_arc,10000,,,951875.627,4015.683,0.884,0.422,3,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hash_only,typical_independent_equal,10000,176412.890,1359.120,,,,,,,,,,,,
+attempt,B1,2,attr_hash_only,typical_independent_equal,10000,214857.625,479.343,,,,,,,,,,,,
+attempt,B2,3,attr_hash_only,typical_independent_equal,10000,175983.753,273.574,,,,,,,,,,,,
+attempt,A2,4,attr_hash_only,typical_independent_equal,10000,176072.067,634.759,,,,,,,,,,,,
+summary,,,attr_hash_only,typical_independent_equal,10000,,,185831.583,19351.579,20.919,10.414,3,false,,,,,,discarded from interpretation: same-SHA noise bound exceeded
+attempt,A1,1,attr_hash_only,typical_independent_equal,100000,9737178.241,32571.058,,,,,,,,,,,,
+attempt,B1,2,attr_hash_only,typical_independent_equal,100000,10162381.022,16226.967,,,,,,,,,,,,
+attempt,B2,3,attr_hash_only,typical_independent_equal,100000,9883189.479,38830.693,,,,,,,,,,,,
+attempt,A2,4,attr_hash_only,typical_independent_equal,100000,9691941.738,22182.377,,,,,,,,,,,,
+summary,,,attr_hash_only,typical_independent_equal,100000,,,9868672.620,212131.988,4.767,2.150,3,false,,,,,,discarded from interpretation: same-SHA noise bound exceeded
+attempt,A1,1,attr_hash_only,typical_shared_arc,10000,121996.326,573.845,,,,,,,,,,,,
+attempt,B1,2,attr_hash_only,typical_shared_arc,10000,122167.700,324.402,,,,,,,,,,,,
+attempt,B2,3,attr_hash_only,typical_shared_arc,10000,164577.136,2516.884,,,,,,,,,,,,
+attempt,A2,4,attr_hash_only,typical_shared_arc,10000,121225.823,579.489,,,,,,,,,,,,
+summary,,,attr_hash_only,typical_shared_arc,10000,,,132491.746,21394.182,32.720,16.148,3,false,,,,,,discarded from interpretation: same-SHA noise bound exceeded
+attempt,A1,1,attr_hash_only,typical_shared_arc,100000,1214039.070,2563.494,,,,,,,,,,,,
+attempt,B1,2,attr_hash_only,typical_shared_arc,100000,1213092.340,3132.216,,,,,,,,,,,,
+attempt,B2,3,attr_hash_only,typical_shared_arc,100000,1212515.488,5100.671,,,,,,,,,,,,
+attempt,A2,4,attr_hash_only,typical_shared_arc,100000,1243258.493,9020.979,,,,,,,,,,,,
+summary,,,attr_hash_only,typical_shared_arc,100000,,,1220726.348,15034.555,2.518,1.232,3,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_adj_rib_in_insert,many_unique,10000,1070446.139,1184.104,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_adj_rib_in_insert,many_unique,10000,1070213.526,2797.464,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_adj_rib_in_insert,many_unique,10000,1071236.283,3960.364,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_adj_rib_in_insert,many_unique,10000,1084136.033,2098.879,,,,,,,,,,,,
+summary,,,attr_hashing_adj_rib_in_insert,many_unique,10000,,,1074007.995,6766.199,1.296,0.630,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_adj_rib_in_insert,rich_independent_equal,10000,2115464.264,5767.445,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_adj_rib_in_insert,rich_independent_equal,10000,2058673.743,7865.100,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_adj_rib_in_insert,rich_independent_equal,10000,2049099.801,8712.900,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_adj_rib_in_insert,rich_independent_equal,10000,2090540.990,12858.625,,,,,,,,,,,,
+summary,,,attr_hashing_adj_rib_in_insert,rich_independent_equal,10000,,,2078444.700,30379.720,3.193,1.462,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_adj_rib_in_insert,rich_shared_arc,10000,1352626.571,4775.576,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_adj_rib_in_insert,rich_shared_arc,10000,1350066.224,4949.030,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_adj_rib_in_insert,rich_shared_arc,10000,1351314.709,2058.619,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_adj_rib_in_insert,rich_shared_arc,10000,1362134.911,3518.157,,,,,,,,,,,,
+summary,,,attr_hashing_adj_rib_in_insert,rich_shared_arc,10000,,,1354035.604,5499.800,0.891,0.406,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_adj_rib_in_insert,typical_independent_equal,10000,654933.872,1319.159,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_adj_rib_in_insert,typical_independent_equal,10000,654735.742,3713.140,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_adj_rib_in_insert,typical_independent_equal,10000,655960.016,1959.236,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_adj_rib_in_insert,typical_independent_equal,10000,656041.656,1652.041,,,,,,,,,,,,
+summary,,,attr_hashing_adj_rib_in_insert,typical_independent_equal,10000,,,655417.822,678.868,0.199,0.104,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_adj_rib_in_insert,typical_independent_equal,100000,13603420.015,161042.313,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_adj_rib_in_insert,typical_independent_equal,100000,14469455.944,168887.312,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_adj_rib_in_insert,typical_independent_equal,100000,13539825.944,186943.802,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_adj_rib_in_insert,typical_independent_equal,100000,14429218.458,93241.360,,,,,,,,,,,,
+summary,,,attr_hashing_adj_rib_in_insert,typical_independent_equal,100000,,,14010480.091,507678.995,6.635,3.624,5,false,,,,,,discarded from interpretation: same-SHA noise bound exceeded
+attempt,A1,1,attr_hashing_adj_rib_in_insert,typical_shared_arc,10000,475227.452,822.860,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_adj_rib_in_insert,typical_shared_arc,10000,475611.030,872.881,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_adj_rib_in_insert,typical_shared_arc,10000,475670.646,1069.975,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_adj_rib_in_insert,typical_shared_arc,10000,489306.751,1804.576,,,,,,,,,,,,
+summary,,,attr_hashing_adj_rib_in_insert,typical_shared_arc,10000,,,478953.970,6904.647,2.940,1.442,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_adj_rib_in_insert,typical_shared_arc,100000,4723069.582,7259.706,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_adj_rib_in_insert,typical_shared_arc,100000,4789125.371,22330.430,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_adj_rib_in_insert,typical_shared_arc,100000,4760942.589,8997.916,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_adj_rib_in_insert,typical_shared_arc,100000,4769452.042,8654.573,,,,,,,,,,,,
+summary,,,attr_hashing_adj_rib_in_insert,typical_shared_arc,100000,,,4760647.396,27692.936,1.388,0.582,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_bulk_initial_load,many_unique,10000,2136692.969,10762.699,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_bulk_initial_load,many_unique,10000,2122105.937,5004.038,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_bulk_initial_load,many_unique,10000,2129422.996,5983.308,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_bulk_initial_load,many_unique,10000,2130226.270,6499.211,,,,,,,,,,,,
+summary,,,attr_hashing_bulk_initial_load,many_unique,10000,,,2129612.043,5969.203,0.685,0.280,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_bulk_initial_load,rich_independent_equal,10000,3395700.093,10790.037,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_bulk_initial_load,rich_independent_equal,10000,3395341.537,13101.096,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_bulk_initial_load,rich_independent_equal,10000,3334371.981,20088.936,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_bulk_initial_load,rich_independent_equal,10000,3397902.170,11954.656,,,,,,,,,,,,
+summary,,,attr_hashing_bulk_initial_load,rich_independent_equal,10000,,,3380828.945,30991.993,1.879,0.917,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_bulk_initial_load,rich_shared_arc,10000,2397083.278,12118.599,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_bulk_initial_load,rich_shared_arc,10000,2386344.180,4769.692,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_bulk_initial_load,rich_shared_arc,10000,2400469.089,8252.189,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_bulk_initial_load,rich_shared_arc,10000,2382250.119,4432.612,,,,,,,,,,,,
+summary,,,attr_hashing_bulk_initial_load,rich_shared_arc,10000,,,2391536.666,8636.260,0.762,0.361,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_bulk_initial_load,typical_independent_equal,10000,1691964.498,6809.079,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_bulk_initial_load,typical_independent_equal,10000,1691332.856,5889.928,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_bulk_initial_load,typical_independent_equal,10000,1693722.818,4040.730,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_bulk_initial_load,typical_independent_equal,10000,1694081.193,4302.074,,,,,,,,,,,,
+summary,,,attr_hashing_bulk_initial_load,typical_independent_equal,10000,,,1692775.341,1334.315,0.162,0.079,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_bulk_initial_load,typical_independent_equal,100000,53971777.357,468346.332,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_bulk_initial_load,typical_independent_equal,100000,52125496.625,203048.481,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_bulk_initial_load,typical_independent_equal,100000,53852860.595,121206.146,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_bulk_initial_load,typical_independent_equal,100000,54461381.250,1269300.481,,,,,,,,,,,,
+summary,,,attr_hashing_bulk_initial_load,typical_independent_equal,100000,,,53602878.957,1019519.755,4.358,1.902,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_bulk_initial_load,typical_shared_arc,10000,1538056.866,4605.657,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_bulk_initial_load,typical_shared_arc,10000,1515196.486,3243.941,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_bulk_initial_load,typical_shared_arc,10000,1507533.948,4203.513,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_bulk_initial_load,typical_shared_arc,10000,1510537.714,6014.797,,,,,,,,,,,,
+summary,,,attr_hashing_bulk_initial_load,typical_shared_arc,10000,,,1517831.253,13847.354,2.011,0.912,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_bulk_initial_load,typical_shared_arc,100000,23525495.000,146057.582,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_bulk_initial_load,typical_shared_arc,100000,23873891.732,111407.426,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_bulk_initial_load,typical_shared_arc,100000,23764275.413,106838.184,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_bulk_initial_load,typical_shared_arc,100000,22920678.262,56346.264,,,,,,,,,,,,
+summary,,,attr_hashing_bulk_initial_load,typical_shared_arc,100000,,,23521085.102,425880.212,4.053,1.811,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_route_churn,many_unique,10000,319013.188,835.718,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_route_churn,many_unique,10000,316653.405,1452.978,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_route_churn,many_unique,10000,320302.105,1899.833,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_route_churn,many_unique,10000,321441.404,1940.652,,,,,,,,,,,,
+summary,,,attr_hashing_route_churn,many_unique,10000,,,319352.525,2054.711,1.499,0.643,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_route_churn,rich_independent_equal,10000,483788.296,3030.733,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_route_churn,rich_independent_equal,10000,464154.598,1964.577,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_route_churn,rich_independent_equal,10000,478289.116,3430.956,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_route_churn,rich_independent_equal,10000,469368.177,4584.884,,,,,,,,,,,,
+summary,,,attr_hashing_route_churn,rich_independent_equal,10000,,,473900.047,8804.412,4.143,1.858,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_route_churn,rich_shared_arc,10000,371386.784,1427.933,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_route_churn,rich_shared_arc,10000,370177.867,552.423,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_route_churn,rich_shared_arc,10000,373134.439,1898.531,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_route_churn,rich_shared_arc,10000,372271.557,630.795,,,,,,,,,,,,
+summary,,,attr_hashing_route_churn,rich_shared_arc,10000,,,371742.662,1263.857,0.795,0.340,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_route_churn,typical_independent_equal,10000,291768.287,1126.570,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_route_churn,typical_independent_equal,10000,292628.522,1437.251,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_route_churn,typical_independent_equal,10000,292176.019,2772.820,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_route_churn,typical_independent_equal,10000,293484.152,2616.544,,,,,,,,,,,,
+summary,,,attr_hashing_route_churn,typical_independent_equal,10000,,,292514.245,735.896,0.587,0.252,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_route_churn,typical_independent_equal,100000,4630984.625,107791.732,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_route_churn,typical_independent_equal,100000,4006799.736,41244.562,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_route_churn,typical_independent_equal,100000,4256973.883,32230.683,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_route_churn,typical_independent_equal,100000,3962182.089,22045.284,,,,,,,,,,,,
+summary,,,attr_hashing_route_churn,typical_independent_equal,100000,,,4214235.083,306630.571,15.870,7.276,5,false,,,,,,discarded from interpretation: same-SHA noise bound exceeded
+attempt,A1,1,attr_hashing_route_churn,typical_shared_arc,10000,271587.245,999.230,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_route_churn,typical_shared_arc,10000,270944.694,814.544,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_route_churn,typical_shared_arc,10000,271917.837,1097.147,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_route_churn,typical_shared_arc,10000,270787.885,635.564,,,,,,,,,,,,
+summary,,,attr_hashing_route_churn,typical_shared_arc,10000,,,271309.415,533.036,0.416,0.196,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_hashing_route_churn,typical_shared_arc,100000,3247397.726,12459.057,,,,,,,,,,,,
+attempt,B1,2,attr_hashing_route_churn,typical_shared_arc,100000,3210412.433,26794.477,,,,,,,,,,,,
+attempt,B2,3,attr_hashing_route_churn,typical_shared_arc,100000,3270907.606,15865.106,,,,,,,,,,,,
+attempt,A2,4,attr_hashing_route_churn,typical_shared_arc,100000,3257526.275,17764.583,,,,,,,,,,,,
+summary,,,attr_hashing_route_churn,typical_shared_arc,100000,,,3246561.010,25951.323,1.863,0.799,5,true,,,,,,retained for interpretation
+attempt,A1,1,attr_intern,many_unique,10000,707371.350,1403.065,,,,,,,,,,,,
+attempt,B1,2,attr_intern,many_unique,10000,705855.044,2098.218,,,,,,,,,,,,
+attempt,B2,3,attr_intern,many_unique,10000,700879.460,3653.289,,,,,,,,,,,,
+attempt,A2,4,attr_intern,many_unique,10000,707414.628,2465.282,,,,,,,,,,,,
+summary,,,attr_intern,many_unique,10000,,,705380.120,3086.838,0.926,0.438,3,true,,,,,,retained for interpretation
+attempt,A1,1,attr_intern,rich_independent_equal,10000,1512095.274,11149.504,,,,,,,,,,,,
+attempt,B1,2,attr_intern,rich_independent_equal,10000,1529330.099,5373.394,,,,,,,,,,,,
+attempt,B2,3,attr_intern,rich_independent_equal,10000,1515624.339,5433.384,,,,,,,,,,,,
+attempt,A2,4,attr_intern,rich_independent_equal,10000,1509053.927,5532.475,,,,,,,,,,,,
+summary,,,attr_intern,rich_independent_equal,10000,,,1516525.910,8948.392,1.337,0.590,3,true,,,,,,retained for interpretation
+attempt,A1,1,attr_intern,rich_shared_arc,10000,985798.643,8135.442,,,,,,,,,,,,
+attempt,B1,2,attr_intern,rich_shared_arc,10000,973423.685,2995.209,,,,,,,,,,,,
+attempt,B2,3,attr_intern,rich_shared_arc,10000,973555.080,2183.641,,,,,,,,,,,,
+attempt,A2,4,attr_intern,rich_shared_arc,10000,973109.945,2164.281,,,,,,,,,,,,
+summary,,,attr_intern,rich_shared_arc,10000,,,976471.838,6220.674,1.299,0.637,3,true,,,,,,retained for interpretation
+attempt,A1,1,attr_intern,typical_independent_equal,10000,301647.349,600.835,,,,,,,,,,,,
+attempt,B1,2,attr_intern,typical_independent_equal,10000,302736.940,1408.481,,,,,,,,,,,,
+attempt,B2,3,attr_intern,typical_independent_equal,10000,301015.416,701.559,,,,,,,,,,,,
+attempt,A2,4,attr_intern,typical_independent_equal,10000,302155.593,2119.115,,,,,,,,,,,,
+summary,,,attr_intern,typical_independent_equal,10000,,,301888.825,732.943,0.570,0.243,3,true,,,,,,retained for interpretation
+attempt,A1,1,attr_intern,typical_independent_equal,100000,4864443.349,92041.680,,,,,,,,,,,,
+attempt,B1,2,attr_intern,typical_independent_equal,100000,4728103.907,46543.516,,,,,,,,,,,,
+attempt,B2,3,attr_intern,typical_independent_equal,100000,4789475.636,96866.606,,,,,,,,,,,,
+attempt,A2,4,attr_intern,typical_independent_equal,100000,4816713.190,105623.085,,,,,,,,,,,,
+summary,,,attr_intern,typical_independent_equal,100000,,,4799684.021,56896.652,2.841,1.185,3,true,,,,,,retained for interpretation
+attempt,A1,1,attr_intern,typical_shared_arc,10000,146734.482,1727.007,,,,,,,,,,,,
+attempt,B1,2,attr_intern,typical_shared_arc,10000,148022.834,457.739,,,,,,,,,,,,
+attempt,B2,3,attr_intern,typical_shared_arc,10000,147973.137,674.338,,,,,,,,,,,,
+attempt,A2,4,attr_intern,typical_shared_arc,10000,147786.978,352.826,,,,,,,,,,,,
+summary,,,attr_intern,typical_shared_arc,10000,,,147629.358,605.160,0.873,0.410,3,true,,,,,,retained for interpretation
+attempt,A1,1,attr_intern,typical_shared_arc,100000,1486437.956,2084.333,,,,,,,,,,,,
+attempt,B1,2,attr_intern,typical_shared_arc,100000,1490284.354,4264.970,,,,,,,,,,,,
+attempt,B2,3,attr_intern,typical_shared_arc,100000,1486649.480,6399.741,,,,,,,,,,,,
+attempt,A2,4,attr_intern,typical_shared_arc,100000,1490351.756,6798.766,,,,,,,,,,,,
+summary,,,attr_intern,typical_shared_arc,100000,,,1488430.886,2180.999,0.263,0.147,3,true,,,,,,retained for interpretation
+derived,,,attr_intern,rich_shared_arc,10000,,,,,,,,false,1.0,97.481,20,,NOT_EVALUATED,attribution withheld because at least one same-SHA control failed
+derived,,,attr_hashing_adj_rib_in_insert,rich_shared_arc,10000,,,,,,,,false,1.0,70.299,5,,NOT_EVALUATED,attribution withheld because at least one same-SHA control failed
+derived,,,attr_hashing_bulk_initial_load,rich_shared_arc,10000,,,,,,,,false,1.0,39.802,5,,NOT_EVALUATED,attribution withheld because at least one same-SHA control failed
+derived,,,attr_hashing_route_churn,rich_shared_arc,10000,,,,,,,,false,0.1,25.606,5,,NOT_EVALUATED,attribution withheld because at least one same-SHA control failed
+decision,,,all,rich_shared_arc,10000,,,,,,,,false,,,,,NOT_EVALUATED,one or more unchanged stability gates failed; no attribution verdict or prototype authorization
