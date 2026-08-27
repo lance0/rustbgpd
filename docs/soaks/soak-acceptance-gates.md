@@ -231,8 +231,8 @@ pattern: jemalloc erases it, it is not an
 intern/RIB leak), so the soak ceiling adds 1 GiB of reload-cycle
 headroom (3 GiB). Because that retention front-loads, the slope gate
 bounds only the LATE window (final 25 % of the run), not the early
-settle; 10 MB/h is well above the ±30–50 MiB allocator-arena noise
-floor averaged over ≥ 6 h of 30 s samples, while still catching a
+settle; 10 MB/h is well above the ±30–50 MiB anonymous-residency variance
+band averaged over ≥ 6 h of 30 s samples, while still catching a
 ~240 MB/day leak. The late-window slope gates are evaluated only when
 the late window spans ≥ 1 h (`--min-slope-seconds`); on shorter smokes
 the analyzer records the values and annotates them as not evaluated —
@@ -277,12 +277,12 @@ historical real-transport measurement at this shape is the DATED
 419 MiB scratch-harness figure (quoted as calibration input only, not
 as a refreshed number; refreshing it is a separate decision). The
 1024 MB ceiling is ~2.4× that
-dated transport figure: wide enough that allocator-arena noise
+dated transport figure: wide enough that anonymous-residency variance
 (±30–50 MiB at 100p×1k) and measurement drift cannot trip it, tight
 enough to catch a leak of a few hundred MB. There are no reload cycles
 here, so no glibc reload-retention headroom is added (contrast
 scenario 10's 3 GiB). The late-window slope bounds match scenario 10:
-10 MB/h is above the arena noise floor averaged over a ≥ 6 h late
+10 MB/h is above the anonymous-residency variance band averaged over a ≥ 6 h late
 window while catching a ~240 MB/day leak; slope gates are evaluated
 only when the late window spans ≥ 1 h (`--min-slope-seconds`), else
 recorded and annotated as not evaluated — never silent green.

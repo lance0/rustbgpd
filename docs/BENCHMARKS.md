@@ -1330,11 +1330,14 @@ byte-identical across campaigns, cgroup `memory.peak` as the primary surface
 (not process-tree RSS, and not the raw container `memory_stats.usage` counter
 the bgperf2 rows above report), and bands preregistered before the runs.
 Settled memory at 100 peers × 1,000 routes carries a **±30–50 MiB
-allocator-arena residency noise floor** — the same figure the soak gates are
+anonymous-residency variance band** — the same figure the soak gates are
 calibrated against, see
 [`soaks/soak-acceptance-gates.md`](soaks/soak-acceptance-gates.md) — so every
 figure above is a band, never a point, and the ownership threshold was set at
 +25 MiB on a five-run median precisely so a verdict has to clear that floor.
+All measured phase images used jemalloc; the earlier glibc
+allocator-internal attribution was incorrect and is retracted in the
+[campaign erratum](perf/memory-attribution-2026-08.md).
 Absolute levels do not travel between campaigns: re-running byte-identical
 binaries produced level offsets of +8 to +27 MiB, so only within-campaign
 steps are comparable. The convergence figures are same-shape observations at

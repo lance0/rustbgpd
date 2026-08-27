@@ -11,6 +11,31 @@ preflight boot transcripts, lane telemetry, rendered runtime manifests)
 are retained read-only off-repo in the campaign artifact archive — tens
 of MB of raw capture with no reviewable prose.
 
+## Allocator-attribution erratum
+
+Every measured phase image used jemalloc. The exact arm revisions
+enabled jemalloc by default, the campaign Dockerfile explicitly built
+`rustbgpd/jemalloc`, and the retained `build_A.log` records compilation
+of the `tikv-jemalloc-*` crates. References in the frozen captures to a
+"glibc allocator-arena" cause are therefore incorrect. The corrected
+reading is a measured ±30–50 MiB anonymous/`Private_Dirty` residency
+distribution whose allocator-internal cause was not established. The
+low-mode observations, preregistered thresholds, and ownership findings
+remain valid.
+
+The affected frozen files are:
+
+- `phase1-tip-tranche/results.txt`
+- `phase2-coarse-bisect/MANIFEST.txt` and `results.txt`
+- `phase3-refinement-bisect/MANIFEST.txt` and `results.txt`
+- `phase4-quartile-split/MANIFEST.txt` and `results.txt`
+- `phase5-micro-bisect/MANIFEST.txt` and `results.txt`
+- `phase6-single-commit-split/MANIFEST.txt`
+
+Those captures retain their original wording because their checksums
+are evidence. This README and the live campaign receipt provide the
+corrected interpretation without rewriting the sealed record.
+
 The manifests are the load-bearing evidence: each was written **before
 any build or measurement**, and each states its outcome bands, its
 ownership thresholds, its anomaly tripwire, and its sum check up front.
