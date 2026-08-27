@@ -199,30 +199,25 @@ fn canonical_from_rust(prefix: String, attributes: &[PathAttribute]) -> Canonica
     let mut standard = Vec::new();
     let mut large = Vec::new();
     for attribute in attributes {
-        match attribute {
-            PathAttribute::AsPath(path) => {
-                segments = path
-                    .segments
+        if let PathAttribute::AsPath(path) = attribute {
+            segments = path
+                .segments
+                .iter()
+                .map(|segment| match segment {
+                    AsPathSegment::AsSequence(asns) => ("sequence".into(), asns.clone()),
+                    AsPathSegment::AsSet(asns) => ("set".into(), asns.clone()),
+                })
+                .collect();
+        }
+        if let Some(values) = attribute.communities() {
+            standard.extend(
+                values
                     .iter()
-                    .map(|segment| match segment {
-                        AsPathSegment::AsSequence(asns) => ("sequence".into(), asns.clone()),
-                        AsPathSegment::AsSet(asns) => ("set".into(), asns.clone()),
-                    })
-                    .collect();
-            }
-            attribute if attribute.communities().is_some() => {
-                let values = attribute.communities().unwrap();
-                standard.extend(
-                    values
-                        .iter()
-                        .map(|value| format!("{}:{}", value >> 16, value & 0xffff)),
-                );
-            }
-            attribute if attribute.large_communities().is_some() => {
-                let values = attribute.large_communities().unwrap();
-                large.extend(values.iter().map(ToString::to_string));
-            }
-            _ => {}
+                    .map(|value| format!("{}:{}", value >> 16, value & 0xffff)),
+            );
+        }
+        if let Some(values) = attribute.large_communities() {
+            large.extend(values.iter().map(ToString::to_string));
         }
     }
     standard.sort();
