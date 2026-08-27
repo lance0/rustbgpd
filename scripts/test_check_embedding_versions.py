@@ -37,7 +37,7 @@ class EmbeddingVersionContractTests(unittest.TestCase):
         return DOCUMENT[:start] + new + DOCUMENT[start + len(old) :]
 
     def test_each_wire_snippet_is_guarded(self) -> None:
-        """Red if either wire dependency example drifts to 0.15.0."""
+        """Fails if any wire dependency example drifts to 0.15.0."""
         old = 'rustbgpd-wire = "0.18.0"'
         for occurrence in (0, 1, 2):
             with self.subTest(occurrence=occurrence):
@@ -47,21 +47,21 @@ class EmbeddingVersionContractTests(unittest.TestCase):
                 )
 
     def test_fsm_snippet_is_guarded(self) -> None:
-        """Red if the FSM dependency example drifts to 0.3.1."""
+        """Fails if the FSM dependency example drifts to 0.3.1."""
         self.assert_fails(
             self.replace_nth('rustbgpd-fsm = "0.5.0"', 'rustbgpd-fsm = "0.3.1"'),
             "fsm-snippet-version",
         )
 
     def test_rpki_snippet_is_guarded(self) -> None:
-        """Red if the RPKI dependency example drifts from its published line."""
+        """Fails if the RPKI dependency example drifts from its published line."""
         self.assert_fails(
             self.replace_nth('rustbgpd-rpki = "0.1.0"', 'rustbgpd-rpki = "0.2.0"'),
             "rpki-snippet-version",
         )
 
     def test_publish_statuses_are_guarded(self) -> None:
-        """Red if either numbered publish heading names an old version."""
+        """Fails if any numbered publish heading names an old version."""
         mutations = (
             ("wire", "0.18.0", "0.17.2"),
             ("fsm", "0.5.0", "0.4.1"),
@@ -77,7 +77,7 @@ class EmbeddingVersionContractTests(unittest.TestCase):
                 )
 
     def test_current_boundary_is_guarded(self) -> None:
-        """Red if §7 loses either authoritative current-version slot."""
+        """Fails if §7 loses any authoritative current-version slot."""
         for package, version in (("wire", "0.18.0"), ("fsm", "0.5.0"), ("rpki", "0.1.0")):
             with self.subTest(package=package):
                 self.assert_fails(
@@ -89,7 +89,7 @@ class EmbeddingVersionContractTests(unittest.TestCase):
                 )
 
     def test_status_parser_rejects_prepared_as(self) -> None:
-        """Red if an actual publish status changes from published to prepared."""
+        """Fails if an actual publish status changes from published to prepared."""
         self.assert_fails(
             self.replace_nth(
                 "(published as `0.18.0`)", "(prepared as `0.18.0`)"
