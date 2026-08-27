@@ -391,6 +391,26 @@ for that review.
 
 ### Interop smoke (requires Docker + containerlab)
 
+The following source-to-proof map is a release contract, not a summary of the
+hosted workflow. `scripts/check_release_checklist_paths.py` validates both the
+owner-to-proof assignments and the proof source paths. These owners cross
+module boundaries: changing the shared drain primitive requires both drain
+proofs, while changing the segment actor requires the DF-election proof and
+both drain proofs. The hosted `Kernel Dataplane` workflow's unfiltered manual
+dispatch remains the defense-in-depth full sweep.
+
+| Source owner | Required release proofs |
+| --- | --- |
+| `src/evpn_es_drain.rs` | M66, M67 |
+| `src/evpn_es_link_drain.rs` | M67 |
+| `src/evpn_segment.rs` | M38, M66, M67 |
+
+| Release proof | Topology | Assertion script |
+| --- | --- | --- |
+| `M38` | `tests/interop/m38-evpn-df-election.clab.yml` | `tests/interop/scripts/test-m38-evpn-df-election.sh` |
+| `M66` | `tests/interop/m66-evpn-es-drain-handover.clab.yml` | `tests/interop/scripts/test-m66-evpn-es-drain-handover.sh` |
+| `M67` | `tests/interop/m67-evpn-link-drain-failover.clab.yml` | `tests/interop/scripts/test-m67-evpn-link-drain-failover.sh` |
+
 Run at least one from each category:
 
 ```bash
@@ -417,7 +437,12 @@ bash tests/interop/scripts/test-m18-extnexthop-frr.sh
 containerlab destroy -t tests/interop/m18-extnexthop-frr.clab.yml
 ```
 
-If the release includes recent LLGR changes, also run:
+If the release touches LLGR capability, negotiation, retained-route lifecycle,
+or outbound rewriting (`crates/wire/src/capability.rs`,
+`crates/fsm/src/config.rs`, `crates/fsm/src/negotiation.rs`,
+`crates/rib/src/manager/graceful_restart.rs`,
+`crates/rib/src/manager/peer_lifecycle.rs`, or
+`crates/transport/src/session/export.rs`), also run:
 
 ```bash
 containerlab deploy -t tests/interop/m16-llgr-frr.clab.yml
@@ -486,11 +511,18 @@ M37+IP. If the release touches **Gate 8 / 8b** (Type 1/4 origination
 in `crates/evpn/src/origination_es.rs`, DF election in
 `crates/evpn/src/df_election.rs`, ESI Label / ES-Import RT extcomms,
 aliasing in `crates/evpn/src/aliasing.rs`, mass-withdraw in
-`crates/evpn/src/mass_withdraw.rs`, or BUM-port enforcement), run M38
+`crates/evpn/src/mass_withdraw.rs`, or BUM-port intent/enforcement in
+`crates/evpn/src/dataplane.rs`, `src/evpn_dataplane.rs`,
+`src/evpn_segment.rs`,
+`crates/evpn-linux/src/bum_filter.rs`,
+`crates/evpn-linux/src/enforcement.rs`, or
+`crates/evpn-linux/src/reconcile.rs`), run M38
 to validate DF election + Type 1/4 origination against a peer running
-the same code. If the release touches **Gate 9 / ADR-0059 / ADR-0087 /
-ADR-0090** (IP-VRF, Type 5, L3 FIB programming, overlay-index
-recursion/origination, aliasing ECMP, or FDB nexthop groups), run the hosted
+the same code; the source-to-proof map above adds M66/M67 where the daemon
+owner also crosses a drain boundary. If the release touches **Gate 9 /
+ADR-0059 / ADR-0087 / ADR-0090** (IP-VRF, Type 5, L3 FIB programming,
+overlay-index recursion/origination, aliasing ECMP, or FDB nexthop groups),
+run the hosted
 `Kernel Dataplane` workflow for M39, M40, M68, M71, and future M72 as
 appropriate. If it touches
 **ADR-0089 VLAN-aware bridge or SVD programming**, also require M70 plus
