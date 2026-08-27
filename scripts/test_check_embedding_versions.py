@@ -39,7 +39,7 @@ class EmbeddingVersionContractTests(unittest.TestCase):
     def test_each_wire_snippet_is_guarded(self) -> None:
         """Red if either wire dependency example drifts to 0.15.0."""
         old = 'rustbgpd-wire = "0.18.0"'
-        for occurrence in (0, 1):
+        for occurrence in (0, 1, 2):
             with self.subTest(occurrence=occurrence):
                 self.assert_fails(
                     self.replace_nth(old, 'rustbgpd-wire = "0.15.0"', occurrence),
@@ -53,9 +53,20 @@ class EmbeddingVersionContractTests(unittest.TestCase):
             "fsm-snippet-version",
         )
 
+    def test_rpki_snippet_is_guarded(self) -> None:
+        """Red if the RPKI dependency example drifts from its published line."""
+        self.assert_fails(
+            self.replace_nth('rustbgpd-rpki = "0.1.0"', 'rustbgpd-rpki = "0.2.0"'),
+            "rpki-snippet-version",
+        )
+
     def test_publish_statuses_are_guarded(self) -> None:
         """Red if either numbered publish heading names an old version."""
-        mutations = (("wire", "0.18.0", "0.17.2"), ("fsm", "0.5.0", "0.4.1"))
+        mutations = (
+            ("wire", "0.18.0", "0.17.2"),
+            ("fsm", "0.5.0", "0.4.1"),
+            ("rpki", "0.1.0", "0.0.1"),
+        )
         for package, current, old in mutations:
             with self.subTest(package=package):
                 self.assert_fails(
@@ -67,10 +78,15 @@ class EmbeddingVersionContractTests(unittest.TestCase):
 
     def test_current_boundary_is_guarded(self) -> None:
         """Red if §7 loses either authoritative current-version slot."""
-        self.assert_fails(
-            self.replace_nth("`rustbgpd-fsm 0.5.0`", "rustbgpd-fsm 0.5.0"),
-            "current-boundary-version",
-        )
+        for package, version in (("wire", "0.18.0"), ("fsm", "0.5.0"), ("rpki", "0.1.0")):
+            with self.subTest(package=package):
+                self.assert_fails(
+                    self.replace_nth(
+                        f"`rustbgpd-{package} {version}`",
+                        f"rustbgpd-{package} {version}",
+                    ),
+                    "current-boundary-version",
+                )
 
     def test_status_parser_rejects_prepared_as(self) -> None:
         """Red if an actual publish status changes from published to prepared."""
@@ -84,7 +100,8 @@ class EmbeddingVersionContractTests(unittest.TestCase):
     def test_heading_renumbering_and_unrelated_prepared_prose_are_allowed(self) -> None:
         changed = DOCUMENT
         for old, new in (("## 7. ", "## 70. "), ("### 3.1 ", "### 30.1 "),
-                         ("### 3.3 ", "### 30.3 "), ("## 4. ", "## 40. ")):
+                         ("### 3.3 ", "### 30.3 "), ("### 3.4 ", "### 30.4 "),
+                         ("## 4. ", "## 40. ")):
             changed = changed.replace(old, new, 1)
         changed += "\nAn unrelated consumer prepared its own deployment.\n"
         self.assertEqual(self.run_checker(changed).returncode, 0)
@@ -94,6 +111,7 @@ class EmbeddingVersionContractTests(unittest.TestCase):
             "Published-crate release boundary",
             "Decode an UPDATE (codec-only — the canonical embedder)",
             'Build a session (codec + FSM — the "minimal speaker" consumer)',
+            "Validate an origin (RPKI table — the synchronous consumer)",
             "Which crate to publish next, and why",
         )
         for title in titles:

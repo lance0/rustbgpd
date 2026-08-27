@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 
-PACKAGES = ("wire", "fsm")
+PACKAGES = ("wire", "fsm", "rpki")
 HEADING = re.compile(r"^(#{1,6})\s+(?:\d+(?:\.\d+)*\.?\s+)?(.+?)\s*$", re.MULTILINE)
 SECTION_HEADING = re.compile(r"^(#{2,3})\s+", re.MULTILINE)
 
@@ -29,6 +29,7 @@ def check(document: str) -> list[str]:
         "boundary": (2, "Published-crate release boundary"),
         "decode": (3, "Decode an UPDATE (codec-only — the canonical embedder)"),
         "session": (3, 'Build a session (codec + FSM — the "minimal speaker" consumer)'),
+        "rpki": (3, "Validate an origin (RPKI table — the synchronous consumer)"),
         "publish": (2, "Which crate to publish next, and why"),
     }
     sections = {}
@@ -40,14 +41,16 @@ def check(document: str) -> list[str]:
         return errors
 
     boundary = sections["boundary"].lstrip().split("\n\n", 1)[0]
-    current = re.findall(r"`rustbgpd-(wire|fsm) ([^`]+)`", boundary)
+    package_pattern = "|".join(PACKAGES)
+    current = re.findall(rf"`rustbgpd-({package_pattern}) ([^`]+)`", boundary)
     versions = dict(current)
     if len(current) != len(PACKAGES) or set(versions) != set(PACKAGES):
         return ["current-boundary-version"]
 
     examples = {
-        "wire": (sections["decode"], sections["session"]),
+        "wire": (sections["decode"], sections["session"], sections["rpki"]),
         "fsm": (sections["session"],),
+        "rpki": (sections["rpki"],),
     }
     for package, bodies in examples.items():
         assignment = re.compile(rf'^rustbgpd-{package} = "([^"]+)"$', re.MULTILINE)
@@ -56,7 +59,7 @@ def check(document: str) -> list[str]:
             errors.append(f"{package}-snippet-version")
 
     publish = re.findall(
-        r"^\d+\. \*\*`rustbgpd-(wire|fsm)` \(published as `([^`]+)`\)\.\*\*",
+        rf"^\d+\. \*\*`rustbgpd-({package_pattern})` \(published as `([^`]+)`\)\.\*\*",
         sections["publish"],
         re.MULTILINE,
     )
