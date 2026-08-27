@@ -84,6 +84,20 @@ class CampaignContract(unittest.TestCase):
         tmp=tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup); root=pathlib.Path(tmp.name)
         fixture(root,candidate_ns=909999993,control_ns=999999992,same_left=1000000007,same_right=960000007,finalize=False)
         with self.assertRaises(VERIFY.Invalid): VERIFY.derive(root)
+    def test_timing_raw_variation_with_stable_semantics_passes(self):
+        tmp,root=self.make(); self.addCleanup(tmp.cleanup)
+        edit_rows(root/"raw/b1-s1-ixp-700.timing.jsonl",lambda rows:[row.update(raw_sha256=f"{index:064x}") for index,row in enumerate(rows,1)])
+        write_rows(root/"canonical.jsonl",VERIFY.derive(root)); seal(root)
+        self.assertEqual(VERIFY.verify(root,REPO)["classification"],"go")
+    def test_live_time_parity_mutations_fail(self):
+        mutations={
+          "diagnostic-raw":lambda r:edit_rows(r/"raw/b1-s1-ixp-700.diagnostic.jsonl",lambda x:x[0].update(raw_sha256="9"*64)),
+          "timing-semantic":lambda r:edit_rows(r/"raw/b1-s1-ixp-700.timing.jsonl",lambda x:x[0].update(semantic_sha256="9"*64)),
+          "timing-length":lambda r:edit_rows(r/"raw/b1-s1-ixp-700.timing.jsonl",lambda x:x[0].update(output_len_bytes=x[0]["output_len_bytes"]+1)),
+          "timing-cardinality":lambda r:edit_rows(r/"raw/b1-s1-ixp-700.timing.jsonl",lambda x:x[0].update(decoded_entry_count=x[0]["decoded_entry_count"]-1)),
+        }
+        for name,mutate in mutations.items():
+            with self.subTest(name=name): self.rejected(mutate,rederive=True)
     def rejected(self, mutate, rederive=False, exact=False):
         tmp,root=self.make(); self.addCleanup(tmp.cleanup); mutate(root); seal(root)
         if rederive:
