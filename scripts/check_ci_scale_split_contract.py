@@ -187,19 +187,20 @@ def check(root: Path) -> list[str]:
         if text.count(command) != 1 or command not in job:
             errors.append(f"{command} must exist exactly once in {job_name}")
 
-    wire_step_name = "Wire crate README freshness gate"
-    wire_step = named_step(jobs.get("core", ""), wire_step_name)
-    if text.count(f"- name: {wire_step_name}") != 1 or not wire_step:
-        errors.append("wire README freshness gate must exist exactly once in core")
+    readme_step_name = "Published crate README freshness gate"
+    readme_step = named_step(jobs.get("core", ""), readme_step_name)
+    if text.count(f"- name: {readme_step_name}") != 1 or not readme_step:
+        errors.append("published-crate README freshness gate must exist exactly once in core")
     else:
         for seam in (
-            'git diff "$base"...HEAD -- crates/wire/Cargo.toml \\',
-            'git diff "$base"...HEAD -- crates/wire/README.md \\',
+            "for crate in wire fsm rpki; do",
+            'git diff "$base"...HEAD -- "crates/$crate/Cargo.toml" \\',
+            'git diff "$base"...HEAD -- "crates/$crate/README.md" \\',
             r"'^\+version\s*='",
             "exit 1",
         ):
-            if seam not in wire_step:
-                errors.append(f"wire README freshness gate missing {seam}")
+            if seam not in readme_step:
+                errors.append(f"published-crate README freshness gate missing {seam}")
 
     aggregate = jobs.get("check", "")
     if "if: ${{ always() }}" not in aggregate:

@@ -159,16 +159,20 @@ class ScaleSplitContractTests(unittest.TestCase):
             ),
             ('RUSTDOCFLAGS: "-D warnings"', 'RUSTDOCFLAGS: ""'),
             (
-                "- name: Wire crate README freshness gate",
-                "- name: Unchecked wire README",
+                "- name: Published crate README freshness gate",
+                "- name: Unchecked published crate README",
             ),
             (
-                'git diff "$base"...HEAD -- crates/wire/Cargo.toml',
-                'git diff "$base"...HEAD -- crates/wire/README.md',
+                "for crate in wire fsm rpki; do",
+                "for crate in wire rpki; do",
             ),
             (
-                'git diff "$base"...HEAD -- crates/wire/README.md',
-                'git diff "$base"...HEAD -- crates/wire/NOTES.md',
+                'git diff "$base"...HEAD -- "crates/$crate/Cargo.toml"',
+                'git diff "$base"...HEAD -- "crates/$crate/NOTES.toml"',
+            ),
+            (
+                'git diff "$base"...HEAD -- "crates/$crate/README.md"',
+                'git diff "$base"...HEAD -- "crates/$crate/NOTES.md"',
             ),
             (r"'^\+version\s*='", r"'^version\s*='"),
             ("              exit 1", "              true"),
