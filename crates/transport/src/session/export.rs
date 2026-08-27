@@ -1941,28 +1941,25 @@ impl ExactExportSnapshot for SessionExportProfile {
         }
 
         let max_len = self.max_message_len();
-        Some(
-            encoded_lengths
-                .iter()
-                .copied()
-                .map(|encoded_len| {
-                    if encoded_len > max_len {
-                        Err(ExactExportError::new(
-                            ExactExportErrorCode::MessageTooLong,
-                            format_args!(
-                                "encoded UPDATE is {encoded_len} bytes; negotiated maximum is {max_len} bytes"
-                            ),
-                        ))
-                    } else {
-                        Ok(ExactExportResult {
-                            encoded_len,
-                            max_len,
-                            generation: self.generation,
-                        })
-                    }
+        let mut results = Vec::with_capacity(encoded_lengths.len());
+        for &encoded_len in encoded_lengths {
+            let result = if encoded_len > max_len {
+                Err(ExactExportError::new(
+                    ExactExportErrorCode::MessageTooLong,
+                    format_args!(
+                        "encoded UPDATE is {encoded_len} bytes; negotiated maximum is {max_len} bytes"
+                    ),
+                ))
+            } else {
+                Ok(ExactExportResult {
+                    encoded_len,
+                    max_len,
+                    generation: self.generation,
                 })
-                .collect(),
-        )
+            };
+            results.push(result);
+        }
+        Some(results)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -2575,6 +2572,44 @@ mod tests {
         assert_eq!(error.code(), ExactExportErrorCode::MessageTooLong);
         assert!(error.detail().contains(&(max_len + 1).to_string()));
         assert!(error.detail().contains(&max_len.to_string()));
+    }
+
+    #[test]
+    fn successful_probe_reuse_preserves_empty_and_interleaved_results() {
+        let config = config_with_auth_secret("not-retained");
+        let source = SessionExportProfile::initial(&config, None, false);
+        let mut target = source.clone();
+        target.generation = 17;
+        let max_len = target.max_message_len();
+
+        assert_eq!(
+            target.reuse_successful_probes(&source, &[]),
+            Some(Vec::new())
+        );
+
+        let encoded_lengths = [max_len + 1, max_len - 1, max_len + 2, max_len];
+        let results = target
+            .reuse_successful_probes(&source, &encoded_lengths)
+            .expect("compatible profiles reuse each result independently");
+
+        assert_eq!(results.len(), encoded_lengths.len());
+        for (index, (encoded_len, result)) in encoded_lengths.into_iter().zip(results).enumerate() {
+            if encoded_len > max_len {
+                let error = result.expect_err("above-ceiling entries remain errors in place");
+                assert_eq!(error.code(), ExactExportErrorCode::MessageTooLong);
+                assert!(error.detail().contains(&encoded_len.to_string()));
+            } else {
+                assert_eq!(
+                    result,
+                    Ok(ExactExportResult {
+                        encoded_len,
+                        max_len,
+                        generation: 17,
+                    }),
+                    "successful entry {index} retains its exact position"
+                );
+            }
+        }
     }
 
     #[test]
