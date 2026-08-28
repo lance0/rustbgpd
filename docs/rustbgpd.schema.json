@@ -360,7 +360,7 @@
           "minimum": 0
         },
         "version": {
-          "description": "BMP wire version framed for this collector: 3 (RFC 7854,\ndefault) or 4 (TLV framing per draft-ietf-grow-bmp-tlv-20 —\npre-IANA; code points may renumber at RFC publication).",
+          "description": "BMP wire version framed for this collector: 3 (RFC 7854,\ndefault) or 4 (TLV framing per draft-ietf-grow-bmp-tlv-21 —\npre-IANA; Path Marking awaits a non-colliding assignment).",
           "type": "integer",
           "format": "uint8",
           "default": 3,

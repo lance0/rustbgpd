@@ -618,8 +618,8 @@ pub struct BmpCollector {
     #[serde(default = "default_bmp_monitor")]
     pub monitor: Vec<BmpMonitorView>,
     /// BMP wire version framed for this collector: 3 (RFC 7854,
-    /// default) or 4 (TLV framing per draft-ietf-grow-bmp-tlv-20 —
-    /// pre-IANA; code points may renumber at RFC publication).
+    /// default) or 4 (TLV framing per draft-ietf-grow-bmp-tlv-21 —
+    /// pre-IANA; Path Marking awaits a non-colliding assignment).
     #[serde(default = "default_bmp_version")]
     pub version: u8,
 }

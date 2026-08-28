@@ -1177,7 +1177,7 @@ carries inactive (absent), unlimited (zero), or finite.
 
 - Temporarily unavailable: path-marking-05 self-assigns RM TLV type 5,
   while tlv-21 assigns type 5 to Sequence Number. No ambiguous type-5
-  Path Marking is emitted pending a non-colliding assignment.
+  Path Marking is emitted; emission remains pending a non-colliding assignment.
 - Status bits limited to what an RR can attest: Best + Stale (from the
   GR/LLGR machinery). FIB/damping/filter bits are never fabricated.
 - Reason Code (§3.2) on live unicast announces: re-derived

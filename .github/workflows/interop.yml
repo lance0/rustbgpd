@@ -92,8 +92,9 @@ name: Interop
 #     Catches RibManager BMP integration regressions.
 #   - M81 (~3 min test): the BMP trio receipt — RFC 8671 Adj-RIB-Out
 #     + RFC 9069 Loc-RIB (collector-connect dump + EoR) + BMPv4 TLV
-#     framing (draft-ietf-grow-bmp-tlv-20) + Path Marking
-#     (path-marking-tlv-05) against three collectors at once:
+#     framing (draft-ietf-grow-bmp-tlv-21), with raw proof that the
+#     colliding draft type-5 Path Marking TLV is not emitted, against
+#     three collectors at once:
 #     pmacct pmbmpd bleeding-edge + gobmp (semantic v3 oracles,
 #     digest-pinned) and a raw byte sink with tshark 4.4 pcap
 #     dissection for the v4 frames. 50 assertions; the wall time is
