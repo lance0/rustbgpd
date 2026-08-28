@@ -1047,16 +1047,47 @@ fn decode_type5(payload: &[u8]) -> Result<EvpnRoute, DecodeError> {
 ///
 /// Each entry is framed as `route_type (1) | length (1) | payload`.
 ///
-/// Unknown route types (anything outside 1..=5) are skipped per
-/// RFC 7432 §11.2 ("Receivers MUST ignore Route Types they do not
-/// understand"), so a future EVPN extension does not tear down the
-/// session. Truncation and per-type malformed payloads still error.
+/// Unrecognized or unsupported route types (anything outside 1..=5) are
+/// discarded per RFC 7606 §5.4. RFC 9136 §3 confirms that rule for EVPN.
+/// Truncation and per-type malformed payloads still error.
 ///
 /// # Errors
 ///
 /// Returns [`DecodeError`] if a length byte runs past the end of `buf`,
 /// or a recognized route type's payload is malformed.
-pub fn decode_evpn_nlri(mut buf: &[u8]) -> Result<Vec<EvpnRoute>, DecodeError> {
+pub fn decode_evpn_nlri(buf: &[u8]) -> Result<Vec<EvpnRoute>, DecodeError> {
+    decode_evpn_nlri_counted(buf).map(|(routes, _observations)| routes)
+}
+
+/// Sparse observations of discarded EVPN NLRIs as `(route_type, count)`.
+///
+/// Decoder-returned entries are unique, ordered by ascending route type, and
+/// always carry a non-zero saturating count. The bounded `u8` key space limits
+/// decoder output to at most 256 entries.
+pub type EvpnNlriDiscardObservations = Vec<(u8, u32)>;
+
+/// Decode EVPN NLRI while observing unrecognized or unsupported route types.
+///
+/// This is the additive observation-bearing form of [`decode_evpn_nlri`].
+/// Supported routes are returned normally. Discard observations are sparse,
+/// sorted, and coalesced by route type.
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] if a length byte runs past the end of `buf`, or a
+/// recognized route type's payload is malformed.
+pub fn decode_evpn_nlri_counted(
+    buf: &[u8],
+) -> Result<(Vec<EvpnRoute>, EvpnNlriDiscardObservations), DecodeError> {
+    let mut observations = Vec::new();
+    let routes = decode_evpn_nlri_observed(buf, &mut observations)?;
+    Ok((routes, observations))
+}
+
+pub(crate) fn decode_evpn_nlri_observed(
+    mut buf: &[u8],
+    observations: &mut EvpnNlriDiscardObservations,
+) -> Result<Vec<EvpnRoute>, DecodeError> {
     let mut routes = Vec::new();
     while !buf.is_empty() {
         if buf.len() < 2 {
@@ -1084,9 +1115,16 @@ pub fn decode_evpn_nlri(mut buf: &[u8]) -> Result<Vec<EvpnRoute>, DecodeError> {
             3 => routes.push(decode_type3(payload)?),
             4 => routes.push(decode_type4(payload)?),
             5 => routes.push(decode_type5(payload)?),
-            // RFC 7432 §11.2: silently skip unknown types so the session
-            // survives a peer advertising a future EVPN extension.
-            _ => {}
+            // RFC 7606 §5.4: discard an unrecognized typed NLRI unless the
+            // address-family specification says otherwise. RFC 9136 §3
+            // explicitly applies that rule to EVPN. Keep a sparse, bounded
+            // observation without allocating on supported-only input.
+            _ => match observations.binary_search_by_key(&route_type, |(kind, _)| *kind) {
+                Ok(index) => {
+                    observations[index].1 = observations[index].1.saturating_add(1);
+                }
+                Err(index) => observations.insert(index, (route_type, 1)),
+            },
         }
         buf = &buf[2 + length..];
     }
@@ -1587,10 +1625,9 @@ mod tests {
         assert!(decode_evpn_nlri(&bytes).is_err());
     }
 
-    /// RFC 7432 §11.2: receivers MUST silently ignore unknown route
-    /// types so a session survives a peer advertising a future EVPN
-    /// extension. The decoder skips the unknown TLV and continues
-    /// parsing — known route types after the unknown one still decode.
+    /// RFC 7606 §5.4: an unrecognized typed NLRI is discarded while the
+    /// surrounding EVPN UPDATE remains usable. Supported route types after
+    /// the discarded entry still decode.
     #[test]
     fn decode_skips_unknown_route_type() {
         // Build: known Type 3 IMET | unknown Type 99 (length 4) | another known Type 3.
@@ -1614,6 +1651,33 @@ mod tests {
         assert_eq!(decoded.len(), 2, "unknown type should be skipped");
         assert!(matches!(decoded[0], EvpnRoute::Imet(_)));
         assert!(matches!(decoded[1], EvpnRoute::Imet(_)));
+    }
+
+    #[test]
+    fn counted_decode_preserves_supported_routes_and_sorts_exact_discard_counts() {
+        let first = EvpnRoute::Imet(EvpnImet {
+            rd: sample_rd(),
+            ethernet_tag: EthernetTagId(100),
+            originator_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        });
+        let second = EvpnRoute::Imet(EvpnImet {
+            rd: sample_rd(),
+            ethernet_tag: EthernetTagId(200),
+            originator_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+        });
+        let mut buf = Vec::new();
+        encode_evpn_nlri(std::slice::from_ref(&first), &mut buf).unwrap();
+        buf.extend_from_slice(&[99, 1, 0xaa]);
+        buf.extend_from_slice(&[42, 0]);
+        buf.extend_from_slice(&[99, 2, 0xbb, 0xcc]);
+        encode_evpn_nlri(std::slice::from_ref(&second), &mut buf).unwrap();
+        buf.extend_from_slice(&[42, 1, 0xdd]);
+        buf.extend_from_slice(&[255, 0]);
+
+        let (routes, observations) = decode_evpn_nlri_counted(&buf).unwrap();
+        assert_eq!(routes, vec![first, second]);
+        assert_eq!(observations, vec![(42, 2), (99, 2), (255, 1)]);
+        assert_eq!(decode_evpn_nlri(&buf).unwrap(), routes);
     }
 
     /// Truncation still fails — the length byte must point inside the buffer.

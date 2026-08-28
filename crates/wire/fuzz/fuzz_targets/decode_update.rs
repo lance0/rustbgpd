@@ -29,6 +29,8 @@ fuzz_target!(|data: &[u8]| {
         let _ = update.parse_revised(true, true, false, &[]);
         let _ = update.parse_revised(true, false, false, &[]);
         let _ = update.parse_revised(false, true, true, &[]);
+        let _ = update.parse_revised_observed(true, true, false, &[]);
+        let _ = update.parse_revised_observed(true, false, false, &[]);
         let _ = update.parse(
             true,
             false,

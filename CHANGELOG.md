@@ -38,6 +38,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- EVPN UPDATE decoding now reports unrecognized or unsupported typed NLRIs
+  without dropping supported routes in the same MP attribute. One bounded
+  debug record preserves each route type and count, while
+  `bgp_evpn_nlri_discarded_total{peer}` exposes the aggregate without adding a
+  route-type metric label; malformed framing remains a decode error.
+
 - `/readyz` now checks peer-manager responsiveness with a constant-time actor
   ping instead of building a full peer inventory and querying every session.
   The mutation gate, RIB check, and shared 200 ms deadline are unchanged;

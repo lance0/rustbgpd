@@ -288,9 +288,9 @@ pub use flowspec::{
 // Re-export EVPN types
 pub use evpn::{
     EthernetSegmentIdentifier, EthernetTagId, EvpnEadPerEs, EvpnEadPerEvi, EvpnEs, EvpnImet,
-    EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp, EvpnRoute, EvpnRouteKey, MacAddress,
-    MplsLabel, RouteDistinguisher, RouteDistinguisherParseError, decode_evpn_nlri,
-    encode_evpn_nlri, is_dataplane_route_type,
+    EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp, EvpnNlriDiscardObservations, EvpnRoute,
+    EvpnRouteKey, MacAddress, MplsLabel, RouteDistinguisher, RouteDistinguisherParseError,
+    decode_evpn_nlri, decode_evpn_nlri_counted, encode_evpn_nlri, is_dataplane_route_type,
 };
 
 // Well-known communities (RFC 1997 + RFC 7999 + RFC 8326 + RFC 9494)

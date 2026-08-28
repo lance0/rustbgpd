@@ -1263,7 +1263,7 @@ impl PeerSession {
             .negotiated
             .as_ref()
             .is_some_and(|n| n.peer_asn != self.config.peer.local_asn);
-        let revised = match update.parse_revised(
+        let (revised, evpn_discarded) = match update.parse_revised_observed(
             four_octet_as,
             !is_ebgp,
             add_path_ipv4,
@@ -1284,6 +1284,21 @@ impl PeerSession {
         };
         let malformed = revised.malformed;
         let parsed = revised.update;
+        let mut evpn_discarded_total = 0_u64;
+        for (route_type, discarded) in evpn_discarded {
+            debug!(
+                peer = %self.peer_label,
+                family = "evpn",
+                route_type,
+                discarded,
+                "discarded unrecognized or unsupported EVPN NLRIs"
+            );
+            evpn_discarded_total = evpn_discarded_total.saturating_add(u64::from(discarded));
+        }
+        if evpn_discarded_total > 0 {
+            self.metrics
+                .record_evpn_nlri_discarded(&self.peer_label, evpn_discarded_total);
+        }
         for m in &malformed {
             warn!(
                 peer = %self.peer_label,
