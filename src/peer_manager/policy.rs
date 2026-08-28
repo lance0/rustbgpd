@@ -189,6 +189,11 @@ pub(super) struct PolicySnapshotFailure {
 }
 
 impl PolicySnapshotFailure {
+    #[cfg(test)]
+    pub(super) fn message(&self) -> &str {
+        &self.message
+    }
+
     fn rejected(error: &CatalogMutationError) -> Self {
         Self {
             kind: PolicySnapshotFailureKind::RejectedNoEffect,
@@ -564,7 +569,15 @@ impl PeerManager {
             );
             return Ok(());
         }
-        let code = rejections[0].code;
+        let first_code = rejections[0].code;
+        let code = if rejections
+            .iter()
+            .all(|rejection| rejection.code == first_code)
+        {
+            first_code
+        } else {
+            RuntimeConfigPolicyFailureCode::PreflightRejected
+        };
         Err(PolicyApplyFailure {
             code,
             message: format!(
@@ -574,7 +587,9 @@ impl PeerManager {
                 transitioning.len(),
                 rejections
                     .iter()
-                    .map(std::string::ToString::to_string)
+                    .map(|rejection| {
+                        format!("{}: {}", rejection.code.as_str(), rejection.message)
+                    })
                     .collect::<Vec<_>>()
                     .join("; ")
             ),
