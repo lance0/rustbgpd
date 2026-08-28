@@ -526,7 +526,10 @@ fn outbound_refresh_error_status(error: OutboundRefreshError) -> Status {
 }
 
 pub(crate) fn family_to_string(afi: Afi, safi: Safi) -> String {
-    family_label(afi, safi).unwrap_or("unsupported").to_string()
+    family_label(afi, safi).map_or_else(
+        || format!("afi_{}_safi_{}", afi as u16, safi as u8),
+        str::to_string,
+    )
 }
 
 pub(crate) fn parse_remove_private_as_proto(mode: &str) -> Result<RemovePrivateAs, Status> {
@@ -2792,6 +2795,20 @@ mod tests {
             assert_eq!(error.code(), tonic::Code::InvalidArgument);
             assert!(error.message().contains("linkstate"));
         }
+    }
+
+    #[test]
+    fn family_projection_preserves_out_of_vocabulary_pair_identity() {
+        let evpn_on_ipv4 = family_to_string(Afi::Ipv4, Safi::Evpn);
+        let multicast_on_ipv4 = family_to_string(Afi::Ipv4, Safi::Multicast);
+
+        assert_eq!(evpn_on_ipv4, "afi_1_safi_70");
+        assert_eq!(multicast_on_ipv4, "afi_1_safi_2");
+        assert_ne!(evpn_on_ipv4, multicast_on_ipv4);
+        assert_eq!(
+            parse_families_proto(&[evpn_on_ipv4]).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
     }
 
     #[tokio::test]
