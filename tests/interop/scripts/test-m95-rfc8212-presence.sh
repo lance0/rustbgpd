@@ -412,10 +412,10 @@ else
     mark_log
     sighup_with "frr-missing"
     phase4_log=$(log_since_mark)
-    if grep -q '"error":"policy_preflight_rejected"' <<<"$phase4_log"; then
-        ok "the reload reported a structured preflight rejection while stale routes were retained"
+    if grep -q '"error":"policy_state_non_established"' <<<"$phase4_log"; then
+        ok "the reload reported the non-Established preflight outcome while stale routes were retained"
     else
-        fail "the reload did not report the structured preflight rejection while stale routes were retained; tail: $(tail -5 <<<"$phase4_log")"
+        fail "the reload did not report the non-Established preflight outcome while stale routes were retained; tail: $(tail -5 <<<"$phase4_log")"
     fi
     status=$(rfc8212_import_status "$FRR_PEER")
     if [ "$status" = "RFC8212_POLICY_STATUS_PRESENT" ]; then
