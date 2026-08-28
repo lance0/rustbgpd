@@ -1421,6 +1421,39 @@ pub struct RoutePage {
     pub version: RoutePageVersion,
 }
 
+/// A bounded internal dataplane page could not be served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataplanePageError {
+    /// The manager was not started with eager dataplane prefix indexing.
+    IndexDisabled,
+    /// The process-local route-page version space was exhausted.
+    GenerationExhausted,
+}
+
+/// One bounded page of Loc-RIB best routes for internal dataplane consumers.
+#[derive(Debug, Clone)]
+pub struct BestRoutesPage {
+    /// Live best routes, strictly ascending by prefix.
+    pub routes: Vec<Route>,
+    /// Exclusive continuation cursor, present only when another prefix remains.
+    pub next_cursor: Option<Prefix>,
+    /// Conservative table version observed when the actor entered the handler.
+    /// This is a churn signal, not a continuation fence.
+    pub observed_version: RoutePageVersion,
+}
+
+/// One bounded page of per-prefix FIB install candidates.
+#[derive(Debug, Clone)]
+pub struct FibInstallCandidatesPage {
+    /// Complete candidates, strictly ascending by their best route's prefix.
+    pub candidates: Vec<FibInstallCandidate>,
+    /// Exclusive continuation cursor, present only when another prefix remains.
+    pub next_cursor: Option<Prefix>,
+    /// Conservative table version observed when the actor entered the handler.
+    /// This is a churn signal, not a continuation fence.
+    pub observed_version: RoutePageVersion,
+}
+
 /// Effective live unicast distribution mode for a registered peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectiveDistributionMode {
@@ -1883,6 +1916,15 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<Vec<Route>>,
     },
+    /// Query: return one bounded live-prefix page of Loc-RIB best routes.
+    QueryBestRoutesPage {
+        /// Resume strictly after this prefix; `None` starts at the beginning.
+        after: Option<Prefix>,
+        /// Absolute deadline for queued send plus actor materialization.
+        deadline: tokio::time::Instant,
+        /// Response channel; a dropped receiver cancels the query.
+        reply: oneshot::Sender<Result<BestRoutesPage, DataplanePageError>>,
+    },
     /// Query: return per-prefix FIB install candidates — the best route plus
     /// its equal-cost (ECMP) next-hop set, bounded by `max_paths`. The
     /// deliberate install-candidate view ADR-0066 builds multipath on.
@@ -1901,6 +1943,21 @@ pub enum RibUpdate {
         deadline: tokio::time::Instant,
         /// Response channel.
         reply: oneshot::Sender<Vec<FibInstallCandidate>>,
+    },
+    /// Query: return one bounded live-prefix page of FIB install candidates.
+    QueryFibInstallCandidatesPage {
+        /// Resume strictly after this prefix; `None` starts at the beginning.
+        after: Option<Prefix>,
+        /// Max equal-cost next-hops per prefix, normalized to `1..=256`.
+        max_paths: u32,
+        /// ADR-0066 multipath-relax selection rule.
+        relax: bool,
+        /// ADR-0068 weighted multipath selection rule.
+        weighted: bool,
+        /// Absolute deadline for queued send plus actor materialization.
+        deadline: tokio::time::Instant,
+        /// Response channel; a dropped receiver cancels the query.
+        reply: oneshot::Sender<Result<FibInstallCandidatesPage, DataplanePageError>>,
     },
     /// Query: return the current per-peer peer-group map.
     QueryPeerGroups {

@@ -1257,6 +1257,7 @@ async fn llgr_gate_peer_up(
 mod attr_intern;
 mod bgpls;
 mod bmp;
+mod dataplane_paging;
 mod events_metrics;
 mod evpn;
 mod evpn_dataplane_query;

@@ -65,6 +65,10 @@ pub struct LocRib {
     /// rebuilding, and an unqueried flapping table must not grow the journal
     /// without bound). The next listing rebuilds the index from scratch.
     ordered_rebuild: bool,
+    /// Whether the ordered prefix index is maintained eagerly for bounded
+    /// internal dataplane walks. This mode is opt-in on an empty manager;
+    /// ordinary route listings retain the lazy journal/rebuild path above.
+    dataplane_index_eager: bool,
     /// `FlowSpec` Loc-RIB: best route per `FlowSpec` rule.
     flowspec_routes: HashMap<FlowSpecKey, FlowSpecRoute>,
     /// EVPN Loc-RIB: best route per RFC 7432 route identity.
@@ -103,6 +107,7 @@ impl LocRib {
             // never allocates on the hot path.
             ordered_journal: Vec::with_capacity(ORDERED_JOURNAL_MIN_CAP),
             ordered_rebuild: false,
+            dataplane_index_eager: false,
             flowspec_routes: HashMap::default(),
             evpn_routes: HashMap::default(),
             bgpls_routes: HashMap::default(),
@@ -166,6 +171,14 @@ impl LocRib {
     /// also bounds journal memory when no listing ever runs.
     #[inline]
     fn note_membership_change(&mut self, prefix: Prefix) {
+        if self.dataplane_index_eager {
+            if self.routes.contains_key(&prefix) {
+                self.ordered_prefixes.entry_or_default(prefix);
+            } else {
+                self.ordered_prefixes.remove(&prefix);
+            }
+            return;
+        }
         if self.ordered_rebuild {
             return;
         }
@@ -232,6 +245,42 @@ impl LocRib {
             .filter(move |route| after.is_none_or(|cursor| route_query_key(route) > cursor))
     }
 
+    /// Enable eager ordered-prefix maintenance for internal dataplane pages.
+    ///
+    /// The caller must select this mode before any unicast best route exists;
+    /// switching a populated lazy table would otherwise require an unbounded
+    /// synchronous rebuild.
+    pub(crate) fn enable_dataplane_prefix_index(&mut self) -> bool {
+        if !self.routes.is_empty()
+            || self.ordered_prefixes.iter_from(None).next().is_some()
+            || !self.ordered_journal.is_empty()
+            || self.ordered_rebuild
+        {
+            return false;
+        }
+        self.dataplane_index_eager = true;
+        true
+    }
+
+    /// Whether bounded dataplane pages may read the eager index.
+    pub(crate) const fn dataplane_prefix_index_enabled(&self) -> bool {
+        self.dataplane_index_eager
+    }
+
+    /// Iterate live best routes strictly after a prefix cursor without
+    /// synchronizing or rebuilding the ordered index.
+    ///
+    /// Callers must first check [`Self::dataplane_prefix_index_enabled`].
+    pub(crate) fn iter_dataplane_ordered_after(
+        &self,
+        after: Option<Prefix>,
+    ) -> impl Iterator<Item = &Route> {
+        debug_assert!(self.dataplane_index_eager);
+        self.ordered_prefixes
+            .iter_after(after)
+            .filter_map(|(prefix, ())| self.routes.get(&prefix).map(|(route, _)| route))
+    }
+
     /// Return the number of best routes.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -259,6 +308,26 @@ impl LocRib {
         (
             self.ordered_prefixes.iter_from(None).count(),
             self.ordered_journal.len(),
+        )
+    }
+
+    /// Eager-index state probe for deterministic dataplane paging tests.
+    #[cfg(test)]
+    pub(crate) fn dataplane_index_probe(&self) -> (bool, usize, usize, bool) {
+        (
+            self.dataplane_index_eager,
+            self.ordered_prefixes.iter_from(None).count(),
+            self.ordered_journal.len(),
+            self.ordered_rebuild,
+        )
+    }
+
+    /// Compact ordered-index memory receipt for the dataplane benchmark.
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn bench_ordered_index_receipt(&self) -> (usize, usize) {
+        (
+            self.ordered_prefixes.len(),
+            self.ordered_prefixes.mem_size(),
         )
     }
 
@@ -2233,6 +2302,42 @@ mod tests {
         // The next listing resolves both journal entries (-1 +1 = n rows).
         assert_eq!(loc.iter_ordered_from(None).count(), n);
         assert_eq!(loc.ordered_index_probe(), (n, 0));
+    }
+
+    #[test]
+    fn eager_dataplane_index_tracks_membership_without_journal_or_rebuild() {
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 10, 0, 0), 16);
+        let mut route = make_route(1, prefix, 100);
+        let mut loc = LocRib::new();
+        assert!(loc.enable_dataplane_prefix_index());
+
+        assert!(loc.recompute(route.prefix, std::iter::once(&route)));
+        assert_eq!(loc.dataplane_index_probe(), (true, 1, 0, false));
+
+        route.next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 44));
+        assert!(loc.recompute(route.prefix, std::iter::once(&route)));
+        assert_eq!(
+            loc.dataplane_index_probe(),
+            (true, 1, 0, false),
+            "best-peer/path/payload churn must not mutate prefix membership"
+        );
+
+        assert!(loc.recompute(route.prefix, std::iter::empty()));
+        assert_eq!(loc.dataplane_index_probe(), (true, 0, 0, false));
+    }
+
+    #[test]
+    fn eager_dataplane_index_rejects_populated_then_emptied_lazy_state() {
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 20, 0, 0), 16);
+        let route = make_route(1, prefix, 100);
+        let mut loc = LocRib::new();
+
+        assert!(loc.recompute(route.prefix, std::iter::once(&route)));
+        assert!(loc.recompute(route.prefix, std::iter::empty()));
+        let before = loc.dataplane_index_probe();
+        assert!(!loc.enable_dataplane_prefix_index());
+        assert_eq!(loc.dataplane_index_probe(), before);
+        assert!(!loc.dataplane_prefix_index_enabled());
     }
 
     #[test]

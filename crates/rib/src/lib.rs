@@ -59,8 +59,9 @@ pub use loc_rib::LocRib;
 pub use manager::RibManager;
 #[cfg(feature = "bench-internals")]
 pub use manager::{
-    EvpnDataplaneQueryBenchReceipt, bench_evpn_dataplane_generation_query,
-    bench_evpn_dataplane_generation_snapshot, bench_evpn_dataplane_legacy_snapshot,
+    DataplanePrefixIndexBenchReceipt, EvpnDataplaneQueryBenchReceipt,
+    bench_evpn_dataplane_generation_query, bench_evpn_dataplane_generation_snapshot,
+    bench_evpn_dataplane_legacy_snapshot,
 };
 pub use manager::{SelectionDeferralConfig, SelectionDeferralWaiterConfig};
 pub use orr::{
@@ -74,22 +75,22 @@ pub use route::{
     VpnRibRouteKey,
 };
 pub use update::{
-    AdjRibOutCounts, BestPathCandidate, EffectiveDistributionMode, EvpnDataplaneRoutesResponse,
-    ExactExportCandidate, ExactExportEncoder, ExactExportError, ExactExportErrorCode,
-    ExactExportKey, ExactExportResult, ExactExportSnapshot, ExplainAdvertisedRoute,
-    ExplainAdvertisedRouteError, ExplainBestPath, ExplainDecision, ExplainReason, ExportGateStep,
-    ExportGateVerdict, ExportPolicyCohortOutcome, MrtPeerEntry, MrtSnapshotData,
-    NeighborPolicyStats, NeighborRibSnapshot, NeighborRibSnapshotResponse,
-    OUTBOUND_PREFIX_LIMIT_REACHED, OrrExplainCandidate, OutboundPrefixLimitConfig,
-    OutboundPrefixLimitFamilyState, OutboundPrefixLimitPair, OutboundPrefixLimitViolation,
-    OutboundRouteUpdate, PeerExportPolicyReplacement, PeerExportPolicyRestoreReceipt,
-    PeerOutboundState, PlannedGroupability, RibCommandError, RibReadinessError, RibReadinessQuery,
-    RibRowFilter, RibUpdate, RoutePage, RoutePageError, RoutePageVersion, RouteQueryFilter,
-    RouteQueryKey, RouteQueryScope, RouteSourceIdentity, SelectionDeferralPeerFamilyState,
-    SharedGroupEncode, UpdateGroupClassification, UpdateGroupClassifierInput,
-    UpdateGroupComparisonDifference, UpdateGroupComparisonMembership, UpdateGroupComparisonVerdict,
-    UpdateGroupFamilyImpact, UpdateGroupFingerprint, UpdateGroupImpactPlan,
-    UpdateGroupImpactRollup, UpdateGroupPeerComparison, UpdateGroupPeerSnapshot,
-    UpdateGroupSnapshot, WarmMrtSnapshotBudget, WarmMrtSnapshotView, classify_update_group,
-    route_query_key,
+    AdjRibOutCounts, BestPathCandidate, BestRoutesPage, DataplanePageError,
+    EffectiveDistributionMode, EvpnDataplaneRoutesResponse, ExactExportCandidate,
+    ExactExportEncoder, ExactExportError, ExactExportErrorCode, ExactExportKey, ExactExportResult,
+    ExactExportSnapshot, ExplainAdvertisedRoute, ExplainAdvertisedRouteError, ExplainBestPath,
+    ExplainDecision, ExplainReason, ExportGateStep, ExportGateVerdict, ExportPolicyCohortOutcome,
+    FibInstallCandidatesPage, MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats,
+    NeighborRibSnapshot, NeighborRibSnapshotResponse, OUTBOUND_PREFIX_LIMIT_REACHED,
+    OrrExplainCandidate, OutboundPrefixLimitConfig, OutboundPrefixLimitFamilyState,
+    OutboundPrefixLimitPair, OutboundPrefixLimitViolation, OutboundRouteUpdate,
+    PeerExportPolicyReplacement, PeerExportPolicyRestoreReceipt, PeerOutboundState,
+    PlannedGroupability, RibCommandError, RibReadinessError, RibReadinessQuery, RibRowFilter,
+    RibUpdate, RoutePage, RoutePageError, RoutePageVersion, RouteQueryFilter, RouteQueryKey,
+    RouteQueryScope, RouteSourceIdentity, SelectionDeferralPeerFamilyState, SharedGroupEncode,
+    UpdateGroupClassification, UpdateGroupClassifierInput, UpdateGroupComparisonDifference,
+    UpdateGroupComparisonMembership, UpdateGroupComparisonVerdict, UpdateGroupFamilyImpact,
+    UpdateGroupFingerprint, UpdateGroupImpactPlan, UpdateGroupImpactRollup,
+    UpdateGroupPeerComparison, UpdateGroupPeerSnapshot, UpdateGroupSnapshot, WarmMrtSnapshotBudget,
+    WarmMrtSnapshotView, classify_update_group, route_query_key,
 };

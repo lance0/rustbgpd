@@ -18,19 +18,28 @@ use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
 use crate::event::{RouteEvent, RouteEventType};
 use crate::update::{
-    BestPathCandidate, ExactExportKey, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
-    ExplainBestPath, MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, NeighborRibSnapshot,
-    NeighborRibSnapshotResponse, RibRowFilter, RoutePage, RoutePageError, RoutePageVersion,
-    RouteQueryFilter, RouteQueryKey, RouteQueryScope, UpdateGroupPeerComparison,
-    WarmMrtSnapshotBudget, WarmMrtSnapshotView, ordered_route_query, route_query_key,
+    BestPathCandidate, BestRoutesPage, DataplanePageError, ExactExportKey, ExplainAdvertisedRoute,
+    ExplainAdvertisedRouteError, ExplainBestPath, FibInstallCandidatesPage, MrtPeerEntry,
+    MrtSnapshotData, NeighborPolicyStats, NeighborRibSnapshot, NeighborRibSnapshotResponse,
+    RibRowFilter, RoutePage, RoutePageError, RoutePageVersion, RouteQueryFilter, RouteQueryKey,
+    RouteQueryScope, UpdateGroupPeerComparison, WarmMrtSnapshotBudget, WarmMrtSnapshotView,
+    ordered_route_query, route_query_key,
 };
 
 /// Full-snapshot queries check cancellation at bounded work intervals instead
 /// of adding a branch and clock read to every route on the normal path.
 const FULL_SNAPSHOT_CANCELLATION_STRIDE: usize = 256;
+pub(super) const DATAPLANE_PAGE_MAX_PREFIXES: usize = 1_000;
+pub(super) const DATAPLANE_PAGE_MAX_NEXT_HOPS: usize = 8_192;
+const DATAPLANE_PAGE_MAX_PATHS: u32 = 256;
 
 fn canceled_at_stride(completed: usize, canceled: &mut impl FnMut() -> bool) -> bool {
     completed.is_multiple_of(FULL_SNAPSHOT_CANCELLATION_STRIDE) && canceled()
+}
+
+fn dataplane_visit(completed: &mut usize, canceled: &mut impl FnMut() -> bool) -> bool {
+    *completed = completed.saturating_add(1);
+    (*completed).is_multiple_of(FULL_SNAPSHOT_CANCELLATION_STRIDE) && canceled()
 }
 
 fn collect_full_snapshot<'a, T: Clone + 'a>(
@@ -714,6 +723,135 @@ impl RibManager {
             warn!("query caller dropped before receiving response");
         }
     }
+
+    pub(super) fn materialize_best_routes_page(
+        &self,
+        after: Option<Prefix>,
+        observed_version: Option<RoutePageVersion>,
+        canceled: &mut impl FnMut() -> bool,
+    ) -> Option<Result<BestRoutesPage, DataplanePageError>> {
+        if canceled() {
+            return None;
+        }
+        let Some(observed_version) = observed_version else {
+            return Some(Err(DataplanePageError::GenerationExhausted));
+        };
+        if !self.loc_rib.dataplane_prefix_index_enabled() {
+            return Some(Err(DataplanePageError::IndexDisabled));
+        }
+
+        let mut routes = Vec::with_capacity(DATAPLANE_PAGE_MAX_PREFIXES);
+        let mut prefix_visits = 0;
+        let mut has_more = false;
+        for route in self.loc_rib.iter_dataplane_ordered_after(after) {
+            if dataplane_visit(&mut prefix_visits, &mut *canceled) {
+                return None;
+            }
+            if routes.len() == DATAPLANE_PAGE_MAX_PREFIXES {
+                has_more = true;
+                break;
+            }
+            routes.push(route.clone());
+        }
+        if canceled() {
+            return None;
+        }
+        let next_cursor = has_more.then(|| {
+            routes
+                .last()
+                .expect("a full dataplane page has a last route")
+                .prefix
+        });
+        Some(Ok(BestRoutesPage {
+            routes,
+            next_cursor,
+            observed_version,
+        }))
+    }
+
+    pub(super) fn handle_query_best_routes_page(
+        &mut self,
+        after: Option<Prefix>,
+        deadline: tokio::time::Instant,
+        reply: tokio::sync::oneshot::Sender<Result<BestRoutesPage, DataplanePageError>>,
+    ) {
+        // Capture the signal at handler entry. It deliberately does not fence
+        // continuation: prefix cursors have live-walk churn semantics.
+        let observed_version = self.route_page_table_version;
+        let page = self.materialize_best_routes_page(after, observed_version, &mut || {
+            reply.is_closed() || tokio::time::Instant::now() >= deadline
+        });
+        let Some(page) = page else {
+            debug!("best-route page query canceled during materialization");
+            return;
+        };
+        if reply.send(page).is_err() {
+            warn!("query caller dropped before receiving response");
+        }
+    }
+
+    fn finish_fib_install_candidate(
+        best: &crate::route::Route,
+        mut siblings: Vec<&crate::route::Route>,
+        cap: usize,
+        weighted: bool,
+    ) -> crate::route::FibInstallCandidate {
+        use crate::best_path::link_bandwidth_weights;
+        use crate::route::{FibInstallCandidate, FibInstallNextHop};
+
+        if cap == 1 {
+            return FibInstallCandidate {
+                best: best.clone(),
+                next_hops: vec![FibInstallNextHop {
+                    next_hop: best.next_hop,
+                    link_local_next_hop: best.link_local_next_hop,
+                    next_hop_scope: best.next_hop_scope.as_deref().cloned(),
+                    peer: best.peer,
+                    path_id: best.path_id,
+                    weight: 1,
+                }],
+            };
+        }
+
+        siblings.sort_by(|a, b| {
+            a.next_hop
+                .cmp(&b.next_hop)
+                .then(a.peer.cmp(&b.peer))
+                .then(a.path_id.cmp(&b.path_id))
+        });
+        let mut next_hops = Vec::new();
+        let mut seen: std::collections::BTreeSet<(IpAddr, Option<u32>)> =
+            std::collections::BTreeSet::new();
+        let mut bandwidths = Vec::new();
+        for route in std::iter::once(best).chain(siblings) {
+            if next_hops.len() >= cap {
+                break;
+            }
+            let scope_ifindex = route.next_hop_scope.as_ref().map(|scope| scope.ifindex);
+            if seen.insert((route.next_hop, scope_ifindex)) {
+                next_hops.push(FibInstallNextHop {
+                    next_hop: route.next_hop,
+                    link_local_next_hop: route.link_local_next_hop,
+                    next_hop_scope: route.next_hop_scope.as_deref().cloned(),
+                    peer: route.peer,
+                    path_id: route.path_id,
+                    weight: 1,
+                });
+                bandwidths.push(route.link_bandwidth());
+            }
+        }
+        for (next_hop, weight) in next_hops
+            .iter_mut()
+            .zip(link_bandwidth_weights(weighted, &bandwidths))
+        {
+            next_hop.weight = weight;
+        }
+        FibInstallCandidate {
+            best: best.clone(),
+            next_hops,
+        }
+    }
+
     /// Build the per-prefix FIB install-candidate view: each Loc-RIB best plus
     /// the equal-cost (ECMP) next-hop set, bounded by `max_paths`. Loc-RIB holds
     /// only the single best per prefix, so the equal-cost siblings are gathered
@@ -729,8 +867,7 @@ impl RibManager {
         weighted: bool,
         canceled: &mut impl FnMut() -> bool,
     ) -> Option<Vec<crate::route::FibInstallCandidate>> {
-        use crate::best_path::{link_bandwidth_weights, multipath_equal};
-        use crate::route::{FibInstallCandidate, FibInstallNextHop};
+        use crate::best_path::multipath_equal;
 
         if canceled() {
             debug!("FIB install-candidate query canceled before materialization");
@@ -746,22 +883,8 @@ impl RibManager {
                 debug!("FIB install-candidate query canceled during Loc-RIB materialization");
                 return None;
             }
-            let mut next_hops: Vec<FibInstallNextHop> = Vec::new();
-            if cap <= 1 {
-                // ECMP off (the default `maximum_paths` of 1): skip the
-                // equal-cost sibling scan + sort entirely and program just the
-                // best next-hop. This keeps default FIB deployments off the new
-                // multipath query cost — they pay nothing for sibling gathering.
-                next_hops.push(FibInstallNextHop {
-                    next_hop: best.next_hop,
-                    link_local_next_hop: best.link_local_next_hop,
-                    next_hop_scope: best.next_hop_scope.as_deref().cloned(),
-                    peer: best.peer,
-                    path_id: best.path_id,
-                    weight: 1,
-                });
-            } else {
-                let mut siblings: Vec<&crate::route::Route> = Vec::new();
+            let mut siblings = Vec::new();
+            if cap > 1 {
                 for rib in self.ribs.values() {
                     peer_rib_work += 1;
                     if canceled_at_stride(peer_rib_work, &mut *canceled) {
@@ -781,58 +904,110 @@ impl RibManager {
                         }
                     }
                 }
-                siblings.sort_by(|a, b| {
-                    a.next_hop
-                        .cmp(&b.next_hop)
-                        .then(a.peer.cmp(&b.peer))
-                        .then(a.path_id.cmp(&b.path_id))
-                });
-
-                let mut seen: std::collections::BTreeSet<(IpAddr, Option<u32>)> =
-                    std::collections::BTreeSet::new();
-                // Gather (next-hop, link-bandwidth) best-first, deduped by
-                // (next-hop, egress ifindex), capped. The ifindex is part of the
-                // key so two equal `fe80::/10` gateways reached over different
-                // interfaces stay distinct and both install as ECMP (ADR-0069);
-                // a same-family next-hop carries no scope, so this collapses to
-                // plain next-hop dedup for the common case. Bandwidth is held
-                // alongside so weights can be normalized over exactly the
-                // installed set below.
-                let mut bandwidths: Vec<Option<f32>> = Vec::new();
-                for r in std::iter::once(best).chain(siblings.iter().copied()) {
-                    if next_hops.len() >= cap {
-                        break;
-                    }
-                    let scope_ifindex = r.next_hop_scope.as_ref().map(|scope| scope.ifindex);
-                    if seen.insert((r.next_hop, scope_ifindex)) {
-                        next_hops.push(FibInstallNextHop {
-                            next_hop: r.next_hop,
-                            link_local_next_hop: r.link_local_next_hop,
-                            next_hop_scope: r.next_hop_scope.as_deref().cloned(),
-                            peer: r.peer,
-                            path_id: r.path_id,
-                            weight: 1,
-                        });
-                        bandwidths.push(r.link_bandwidth());
-                    }
-                }
-                for (next_hop, weight) in next_hops
-                    .iter_mut()
-                    .zip(link_bandwidth_weights(weighted, &bandwidths))
-                {
-                    next_hop.weight = weight;
-                }
             }
-            out.push(FibInstallCandidate {
-                best: best.clone(),
-                next_hops,
-            });
+            out.push(Self::finish_fib_install_candidate(
+                best, siblings, cap, weighted,
+            ));
         }
         if canceled() {
             debug!("FIB install-candidate query canceled after materialization");
             return None;
         }
         Some(out)
+    }
+
+    pub(super) fn materialize_fib_install_candidates_page(
+        &self,
+        after: Option<Prefix>,
+        max_paths: u32,
+        relax: bool,
+        weighted: bool,
+        observed_version: Option<RoutePageVersion>,
+        canceled: &mut impl FnMut() -> bool,
+    ) -> Option<Result<FibInstallCandidatesPage, DataplanePageError>> {
+        use crate::best_path::multipath_equal;
+
+        if canceled() {
+            return None;
+        }
+        let Some(observed_version) = observed_version else {
+            return Some(Err(DataplanePageError::GenerationExhausted));
+        };
+        if !self.loc_rib.dataplane_prefix_index_enabled() {
+            return Some(Err(DataplanePageError::IndexDisabled));
+        }
+
+        let cap = max_paths.clamp(1, DATAPLANE_PAGE_MAX_PATHS) as usize;
+        let mut candidates = Vec::with_capacity(DATAPLANE_PAGE_MAX_PREFIXES);
+        let mut next_hop_rows = 0usize;
+        let mut prefix_visits = 0usize;
+        let mut announcer_visits = 0usize;
+        let mut sibling_visits = 0usize;
+        let mut has_more = false;
+        for best in self.loc_rib.iter_dataplane_ordered_after(after) {
+            if dataplane_visit(&mut prefix_visits, &mut *canceled) {
+                return None;
+            }
+            if candidates.len() == DATAPLANE_PAGE_MAX_PREFIXES
+                || next_hop_rows == DATAPLANE_PAGE_MAX_NEXT_HOPS
+            {
+                has_more = true;
+                break;
+            }
+
+            let mut siblings = Vec::new();
+            if cap > 1 {
+                // Count the announcing-peer index walk independently from the
+                // routes it yields. This keeps cancellation bounded even when
+                // many stale announcer entries produce no sibling rows.
+                for _ in self.unicast_prefix_peers.peers(&best.prefix) {
+                    #[cfg(test)]
+                    self.dataplane_page_announcer_visits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if dataplane_visit(&mut announcer_visits, &mut *canceled) {
+                        return None;
+                    }
+                }
+                for route in
+                    Self::unicast_candidates(&self.ribs, &self.unicast_prefix_peers, &best.prefix)
+                {
+                    #[cfg(test)]
+                    self.dataplane_page_sibling_visits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if dataplane_visit(&mut sibling_visits, &mut *canceled) {
+                        return None;
+                    }
+                    if multipath_equal(best, route, relax) {
+                        siblings.push(route);
+                    }
+                }
+            }
+            let candidate = Self::finish_fib_install_candidate(best, siblings, cap, weighted);
+            if !candidates.is_empty()
+                && next_hop_rows.saturating_add(candidate.next_hops.len())
+                    > DATAPLANE_PAGE_MAX_NEXT_HOPS
+            {
+                has_more = true;
+                break;
+            }
+            next_hop_rows = next_hop_rows.saturating_add(candidate.next_hops.len());
+            candidates.push(candidate);
+        }
+        if canceled() {
+            return None;
+        }
+        let next_cursor = has_more.then(|| {
+            candidates
+                .last()
+                .expect("a non-terminal dataplane page has a last candidate")
+                .best
+                .prefix
+        });
+        Some(Ok(FibInstallCandidatesPage {
+            candidates,
+            next_cursor,
+            observed_version,
+        }))
     }
     pub(super) fn handle_query_fib_install_candidates(
         &mut self,
@@ -850,6 +1025,33 @@ impl RibManager {
             return;
         };
         if reply.send(candidates).is_err() {
+            warn!("query caller dropped before receiving response");
+        }
+    }
+
+    pub(super) fn handle_query_fib_install_candidates_page(
+        &mut self,
+        after: Option<Prefix>,
+        max_paths: u32,
+        relax: bool,
+        weighted: bool,
+        deadline: tokio::time::Instant,
+        reply: tokio::sync::oneshot::Sender<Result<FibInstallCandidatesPage, DataplanePageError>>,
+    ) {
+        let observed_version = self.route_page_table_version;
+        let page = self.materialize_fib_install_candidates_page(
+            after,
+            max_paths,
+            relax,
+            weighted,
+            observed_version,
+            &mut || reply.is_closed() || tokio::time::Instant::now() >= deadline,
+        );
+        let Some(page) = page else {
+            debug!("FIB install-candidate page query canceled during materialization");
+            return;
+        };
+        if reply.send(page).is_err() {
             warn!("query caller dropped before receiving response");
         }
     }

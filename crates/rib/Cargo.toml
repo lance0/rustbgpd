@@ -52,3 +52,8 @@ required-features = ["bench-internals"]
 name = "evpn_dataplane_query"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "dataplane_prefix_paging"
+harness = false
+required-features = ["bench-internals"]
