@@ -4504,7 +4504,7 @@ remote_asn = 65002
             (transaction, ".execute_owned_operation(", 5),
             (settlement, "let coordinator_permit = coordinator.acquire().await?;", 1),
             (settlement, "watchdog.register_owned(", 1),
-            (fib, ".acquire()", 2),
+            (fib, ".acquire()", 1),
             (neighbor, "self.execute_owned_neighbor_mutation(", 4),
             (neighbor, "reserve_config_event_slot(self.config_tx.clone()).await?", 4),
             (server, "runtime_config_lock.acquire()", 0),
