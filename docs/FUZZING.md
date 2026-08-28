@@ -48,7 +48,8 @@ reachable input space: decode → encode → decode must reproduce the value.
 
 ## Running locally
 
-Requires nightly and cargo-fuzz (`cargo install cargo-fuzz`).
+Requires the reviewed nightly and cargo-fuzz release
+(`cargo install cargo-fuzz --version 0.13.2 --locked`).
 
 ```sh
 cd crates/wire
@@ -85,7 +86,7 @@ most 20,000 files, and at most 16 MiB. A miss or cache-service outage is
 reported and falls back to tracked seeds. If a matched bundle is incomplete,
 unexpected, over a bound, or does not match its manifest, the campaign stops
 before installing it. After a successful run, the same helper seals a fresh
-staging bundle; a valid corpus over either aggregate cap simply skips saving.
+staging bundle; a corpus crossing either aggregate cap simply skips saving.
 Only scheduled or manually dispatched runs on `main` can save, and save-service
 availability does not change the result of the completed test campaign.
 

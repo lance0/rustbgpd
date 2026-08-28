@@ -96,7 +96,9 @@ class CorpusCacheTests(unittest.TestCase):
                 cache.inventory(mutated)
 
     def test_manifest_byte_size_and_shape_mutations_are_rejected(self) -> None:
-        for index, mutation in enumerate(("bytes", "manifest", "extra", "link")):
+        for index, mutation in enumerate(
+            ("bytes", "manifest", "non_utf8", "extra", "link")
+        ):
             live = self.root / f"source-{index}"
             cache._copy_corpus(self.seeds, live)
             bundle = self.root / f"bundle-{index}"
@@ -110,6 +112,8 @@ class CorpusCacheTests(unittest.TestCase):
                 value = json.loads((bundle / cache.MANIFEST).read_text())
                 value["schema"] = 99
                 (bundle / cache.MANIFEST).write_text(json.dumps(value))
+            elif mutation == "non_utf8":
+                (bundle / cache.MANIFEST).write_bytes(b"\xff")
             elif mutation == "extra":
                 (bundle / "extra").write_text("unexpected")
             else:
@@ -118,8 +122,15 @@ class CorpusCacheTests(unittest.TestCase):
                     bundle / cache.CORPUS / "decode_bgpls" / "seed",
                     bundle / cache.MANIFEST,
                 )
-            with self.subTest(mutation=mutation), self.assertRaises(cache.CorpusError):
-                cache.validate_bundle(bundle)
+            with self.subTest(mutation=mutation):
+                if mutation == "non_utf8":
+                    with self.assertRaisesRegex(
+                        cache.CorpusError, "cannot read cache manifest"
+                    ):
+                        cache.validate_bundle(bundle)
+                else:
+                    with self.assertRaises(cache.CorpusError):
+                        cache.validate_bundle(bundle)
 
     def test_invalid_matched_bundle_fails_before_live_install(self) -> None:
         bundle = self.bundle()
@@ -138,10 +149,13 @@ class CorpusCacheTests(unittest.TestCase):
     def test_over_cap_seal_skips_without_output(self) -> None:
         live = self.root / "live"
         cache._copy_corpus(self.seeds, live)
-        with mock.patch.object(cache, "MAX_FILES", 1):
+        with mock.patch.object(cache, "MAX_FILES", 1), mock.patch.object(
+            cache.hashlib, "sha256", wraps=cache.hashlib.sha256
+        ) as sha256:
             saved, detail = cache.seal(live, self.root / "output")
         self.assertFalse(saved)
         self.assertIn("skipping save", detail)
+        self.assertEqual(sha256.call_count, 1)
         self.assertFalse((self.root / "output").exists())
 
     def test_restore_rejects_file_and_byte_caps(self) -> None:

@@ -463,6 +463,11 @@ class FuzzTargetInventoryTests(unittest.TestCase):
             ("restore action", "actions/cache/restore@v6", "actions/cache/restore@v5"),
             ("save action", "actions/cache/save@v6", "actions/cache/save@v5"),
             (
+                "cargo-fuzz version",
+                "cargo install cargo-fuzz --version 0.13.2 --locked",
+                "cargo install cargo-fuzz --locked",
+            ),
+            (
                 "staging",
                 "${{ runner.temp }}/wire-corpus-cache",
                 "crates/wire/fuzz/corpus",

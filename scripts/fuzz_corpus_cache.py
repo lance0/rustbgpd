@@ -37,6 +37,18 @@ class CorpusError(RuntimeError):
     """The cached corpus violates its reviewed trust boundary."""
 
 
+class CorpusCapExceeded(CorpusError):
+    """The corpus crossed an aggregate save or restore bound."""
+
+    def __init__(self, file_count: int, total_bytes: int) -> None:
+        self.file_count = file_count
+        self.total_bytes = total_bytes
+        super().__init__(
+            f"corpus exceeds caps: {file_count} files/{total_bytes} bytes; "
+            f"limits are {MAX_FILES}/{MAX_BYTES}"
+        )
+
+
 def _reject_non_directory(path: Path, label: str) -> None:
     try:
         mode = path.lstat().st_mode
@@ -55,9 +67,7 @@ def _reject_non_regular(path: Path, label: str) -> None:
         raise CorpusError(f"{label} must be a regular file: {path}")
 
 
-def inventory(
-    corpus: Path, *, enforce_caps: bool = True
-) -> tuple[list[dict[str, object]], int]:
+def inventory(corpus: Path) -> tuple[list[dict[str, object]], int]:
     _reject_non_directory(corpus, "corpus")
     expected = set(TARGET_MAX_LENS)
     with os.scandir(corpus) as entries:
@@ -84,7 +94,11 @@ def inventory(
                 raise CorpusError(
                     f"{target}/{entry.name} is {size} bytes; max_len is {TARGET_MAX_LENS[target]}"
                 )
-            total += size
+            next_count = len(rows) + 1
+            next_total = total + size
+            if next_count > MAX_FILES or next_total > MAX_BYTES:
+                raise CorpusCapExceeded(next_count, next_total)
+            total = next_total
             rows.append(
                 {
                     "path": f"{target}/{entry.name}",
@@ -92,11 +106,6 @@ def inventory(
                     "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                 }
             )
-            if enforce_caps and (len(rows) > MAX_FILES or total > MAX_BYTES):
-                raise CorpusError(
-                    f"corpus exceeds caps: {len(rows)} files/{total} bytes; "
-                    f"limits are {MAX_FILES}/{MAX_BYTES}"
-                )
     return rows, total
 
 
@@ -112,8 +121,8 @@ def manifest(rows: list[dict[str, object]], total: int) -> dict[str, object]:
 def _read_manifest(path: Path) -> dict[str, object]:
     _reject_non_regular(path, "cache manifest")
     try:
-        value = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as error:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise CorpusError(f"cannot read cache manifest {path}: {error}") from error
     if not isinstance(value, dict):
         raise CorpusError("cache manifest must be an object")
@@ -167,15 +176,18 @@ def restore(cache_bundle: Path, seeds: Path, live: Path, cache_hit: bool) -> str
 
 
 def seal(live: Path, output: Path) -> tuple[bool, str]:
-    rows, total = inventory(live, enforce_caps=False)
-    if len(rows) > MAX_FILES or total > MAX_BYTES:
+    try:
+        rows, total = inventory(live)
+    except CorpusCapExceeded as error:
         return False, (
-            f"valid corpus exceeds save caps ({len(rows)} files/{total} bytes); skipping save"
+            "corpus crossed save caps "
+            f"({error.file_count} files/{error.total_bytes} bytes); skipping save"
         )
     _fresh_directory(output)
     _copy_corpus(live, output / CORPUS)
     (output / MANIFEST).write_text(
-        json.dumps(manifest(rows, total), sort_keys=True, separators=(",", ":")) + "\n"
+        json.dumps(manifest(rows, total), sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
     )
     validate_bundle(output)
     manifest_digest = hashlib.sha256((output / MANIFEST).read_bytes()).hexdigest()

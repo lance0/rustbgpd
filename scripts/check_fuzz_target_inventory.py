@@ -508,6 +508,7 @@ def validate_wire_corpus_cache_contract(
         ),
         "standalone restore action": "uses: actions/cache/restore@v6",
         "standalone save action": "uses: actions/cache/save@v6",
+        "reviewed cargo-fuzz": "cargo install cargo-fuzz --version 0.13.2 --locked",
         "main lineage key": "wire-fuzz-corpus-v1-main-",
         "unique run key": "${{ github.run_id }}-${{ github.run_attempt }}",
         "matched-key validation": (
