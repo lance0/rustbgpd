@@ -166,6 +166,7 @@ fn transport_config(remote: SocketAddr) -> TransportConfig {
         interpret_rfc1997: true,
         rs_control_communities: false,
         remove_private_as: RemovePrivateAs::Disabled,
+        discard_path_attributes: Arc::from([]),
         cluster_id: Some(Ipv4Addr::new(127, 255, 0, 1)),
         explain_enabled: false,
         explain_cache_size: 0,
