@@ -535,6 +535,12 @@ def validate_wire_corpus_cache_contract(
         raise InventoryError("nightly wire corpus cache unique run key count differs")
     if "WIRE_SEALED_BUNDLE" in workflow:
         raise InventoryError("nightly wire corpus cache has distinct seal staging")
+    job_header = workflow[: workflow.index("    steps:\n")]
+    if "runner." in job_header:
+        raise InventoryError("nightly wire corpus cache uses runner context in job env")
+    bundle_env = "WIRE_CACHE_BUNDLE: ${{ runner.temp }}/wire-corpus-cache"
+    if workflow.count(bundle_env) != 2:
+        raise InventoryError("wire corpus cache step staging count differs")
 
     restore_block = re.search(
         r"(?ms)^      - name: Restore bounded wire corpus cache\n(?P<body>.*?)(?=^      - name:)",
@@ -550,7 +556,7 @@ def validate_wire_corpus_cache_contract(
         raise InventoryError("cache restore outage is not an explicit fallback")
     if save_block is None or "continue-on-error: true" not in save_block.group("body"):
         raise InventoryError("cache save outage can fail the completed campaign")
-    cache_path = "path: ${{ env.WIRE_CACHE_BUNDLE }}"
+    cache_path = "path: ${{ runner.temp }}/wire-corpus-cache"
     if (
         cache_path not in restore_block.group("body")
         or cache_path not in save_block.group("body")
