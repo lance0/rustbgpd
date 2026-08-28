@@ -44,6 +44,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   policy replay; RFC 8212 preflight and clean-convergence cohort selection use
   the same closed three-way outcome model.
 
+- The nightly and hosted wire fuzz campaigns now exercise complete BGP
+  messages through the 65,535-byte RFC 8654 limit and UPDATE bodies through
+  the corresponding 65,516-byte framing boundary instead of stopping at the
+  legacy 4,096-byte ceiling.
+
 - Policy mutation preflight failures now preserve `NOT_FOUND`, `INVALID_ARGUMENT`, and
   `FAILED_PRECONDITION` while retaining the closed `policy_preflight_rejected` diagnostic.
 

@@ -52,7 +52,7 @@ jobs:
             mkdir -p "fuzz/corpus/$t"
             seeds=""
             [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
-            cargo fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=4096
+            cargo fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=65535
           done
       - name: Fuzz rpol policy frontend (2 minutes per target)
         run: |

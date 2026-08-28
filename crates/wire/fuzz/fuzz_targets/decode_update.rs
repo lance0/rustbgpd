@@ -3,6 +3,15 @@ use bytes::Bytes;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
+    // The session decoder admits an UPDATE body only after framing the full
+    // message under the RFC 8654 limit. Keep this body-only harness on that
+    // same boundary instead of exploring bytes the daemon cannot pass here.
+    if data.len()
+        > usize::from(rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN)
+            - rustbgpd_wire::constants::HEADER_LEN
+    {
+        return;
+    }
     // Need at least 4 bytes for the minimal UPDATE body
     if data.len() < 4 {
         return;

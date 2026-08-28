@@ -168,6 +168,56 @@ class FuzzTargetInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(inventory.InventoryError, "target options"):
             inventory.validate_pipeline_enrollment(mutated, workflow)
 
+    def test_wire_extended_message_campaign_bound_drift_is_rejected(self) -> None:
+        builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        mutated = workflow.replace(
+            f"-max_len={inventory.WIRE_EXTENDED_MAX_LEN}", "-max_len=4096", 1
+        )
+        with self.assertRaisesRegex(inventory.InventoryError, "RFC 8654"):
+            inventory.validate_pipeline_enrollment(builder, mutated)
+
+    def test_wire_extended_message_target_options_are_load_bearing(self) -> None:
+        builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        read_text = Path.read_text
+
+        for target, (hosted_max_len, _) in inventory.WIRE_EXTENDED_TARGETS.items():
+            options = inventory.ROOT / "crates/wire/fuzz" / f"{target}.options"
+
+            def changed_options(path, *args, **kwargs):
+                if path == options:
+                    return f"[libfuzzer]\nmax_len = {hosted_max_len - 1}\n"
+                return read_text(path, *args, **kwargs)
+
+            with self.subTest(target=target):
+                with mock.patch.object(Path, "read_text", changed_options):
+                    with self.assertRaisesRegex(inventory.InventoryError, "must set"):
+                        inventory.validate_pipeline_enrollment(builder, workflow)
+
+    def test_wire_extended_message_harness_limits_are_load_bearing(self) -> None:
+        builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        read_text = Path.read_text
+
+        for target in inventory.WIRE_EXTENDED_TARGETS:
+            harness = (
+                inventory.ROOT / f"crates/wire/fuzz/fuzz_targets/{target}.rs"
+            )
+
+            def removed_extended_limit(path, *args, **kwargs):
+                text = read_text(path, *args, **kwargs)
+                if path == harness:
+                    return text.replace("EXTENDED_MAX_MESSAGE_LEN", "MAX_MESSAGE_LEN")
+                return text
+
+            with self.subTest(target=target):
+                with mock.patch.object(Path, "read_text", removed_extended_limit):
+                    with self.assertRaisesRegex(
+                        inventory.InventoryError, "EXTENDED_MAX_MESSAGE_LEN"
+                    ):
+                        inventory.validate_pipeline_enrollment(builder, workflow)
+
     def test_new_nightly_campaign_omission_is_rejected(self) -> None:
         builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
         workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
