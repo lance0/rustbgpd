@@ -63,6 +63,46 @@ fn route_server_topologies_have_exact_control_plane_setup() {
 }
 
 #[test]
+fn m83_pins_refreshed_incumbent_images_and_preflights_before_capture() {
+    let topology = topology("m83-routeserver-multistack.clab.yml");
+    assert_eq!(
+        topology["topology"]["nodes"]["bird"]["image"],
+        "bird:v2.19.2-m83"
+    );
+    assert_eq!(
+        topology["topology"]["nodes"]["gobgp"]["image"],
+        "gobgp:v4.8.0-m83"
+    );
+    assert_eq!(
+        topology["topology"]["nodes"]["frr"]["image"],
+        "quay.io/frrouting/frr:10.3.1"
+    );
+
+    let script = fs::read_to_string(interop_path("scripts/test-m83-routeserver-multistack.sh"))
+        .expect("read M83 script");
+    for exact_version in [
+        "BIRD version 2.19.2",
+        "gobgp version 4.8.0",
+        "gobgpd version 4.8.0",
+    ] {
+        assert!(
+            script.contains(exact_version),
+            "missing {exact_version} preflight"
+        );
+    }
+    let preflight = script
+        .rfind("if ! preflight_incumbent_versions; then")
+        .expect("M83 main invokes exact version preflight");
+    let capture = script
+        .rfind("start_capture raw")
+        .expect("M83 main starts raw capture");
+    assert!(
+        preflight < capture,
+        "M83 must preflight versions before capture"
+    );
+}
+
+#[test]
 fn m83_eor_order_rejects_same_frame_reversal() {
     // Destructive red proof: replacing tuple order with frame-only order makes
     // the script's reversed same-frame fixture pass and this test fail.
@@ -99,6 +139,37 @@ fn m83_reload_continuity_rejects_a_dropped_peer() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn m83_gobgp_readiness_is_structured_and_exact() {
+    let script = interop_path("scripts/test-m83-routeserver-multistack.sh");
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--self-test-gobgp-readiness")
+        .output()
+        .unwrap_or_else(|error| panic!("run {}: {error}", script.display()));
+    assert!(
+        output.status.success(),
+        "{} --self-test-gobgp-readiness failed\nstdout:\n{}\nstderr:\n{}",
+        script.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let source = fs::read_to_string(&script).expect("read M83 script");
+    let wait = source
+        .split_once("wait_gobgp_established() {")
+        .and_then(|(_, remainder)| remainder.split_once("# Poll until").map(|(body, _)| body))
+        .expect("M83 GoBGP wait helper has a bounded source section");
+    assert!(wait.contains("gobgp_neighbor_established \"$RS_GOBGP_ADDR\""));
+    for forbidden in ["grep", "awk", "$4 ==", "BGP state =", "state = ESTABLISHED"] {
+        assert!(
+            !wait.contains(forbidden),
+            "structured wait contains `{forbidden}`"
+        );
+    }
+    assert!(source.contains("docker exec \"$GOBGP\" gobgp --json neighbor \"$peer\""));
 }
 
 #[test]

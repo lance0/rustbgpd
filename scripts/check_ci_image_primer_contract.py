@@ -500,7 +500,7 @@ def check(root: Path) -> list[str]:
             + (["bird3_archive"] if setup else [])
         )
         gobgp_consumers = (
-            {"m65", "m71", "m72"} if setup else {"m74", "m75", "m81", "m82", "m83"}
+            {"m65", "m71", "m72"} if setup else {"m74", "m75", "m81", "m82"}
         )
         expected = [
             "classify_changes",
@@ -712,6 +712,16 @@ def check(root: Path) -> list[str]:
                         errors.append(
                             f"{name}:{job_name}: bird3 buildx layer cache missing {seam}"
                         )
+            if not setup and job_name == "m83":
+                m83_required = {
+                    "needs: [grpcurl_archive, prime_dev_image]": 1,
+                    "docker build -t bird:v2.19.2-m83 -f tests/interop/Dockerfile.bird-v2192 tests/interop": 1,
+                    "--build-arg GOBGP_VERSION=4.8.0": 1,
+                    "--build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03": 1,
+                    "-t gobgp:v4.8.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop": 1,
+                }
+                if any(job.count(seam) != count for seam, count in m83_required.items()):
+                    errors.append("interop.yml:m83: exact incumbent image contract drifted")
             if CHECKOUT not in job:
                 errors.append(f"{name}:{job_name}: pinned checkout drifted")
             if setup:
@@ -1109,7 +1119,7 @@ def check(root: Path) -> list[str]:
         errors.append("gnmic release URL escaped the producer helper")
     if re.search(r"curl\s.*gnmic|curl\s.*\|\s*(?:sudo\s+)?tar", gnmic_surfaces):
         errors.append("interop.yml retains a streaming gnmic download")
-    if texts["interop.yml"].count(GOBGP_ACTION) != 5:
+    if texts["interop.yml"].count(GOBGP_ACTION) != 4:
         errors.append("interop.yml: gobgp stage consumer inventory drifted")
     if texts["kernel-dataplane.yml"].count(GOBGP_ACTION) != 3:
         errors.append("kernel-dataplane.yml: gobgp stage consumer inventory drifted")

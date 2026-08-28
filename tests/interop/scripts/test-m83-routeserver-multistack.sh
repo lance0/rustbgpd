@@ -3,15 +3,15 @@
 # (RFC 7947 / RFC 7948 / RFC 9234 / ADR-0101 proof-ladder closer).
 #
 # rustbgpd is the route server (AS 65500) for three member stacks —
-# BIRD 2.0.12, GoBGP 3.x (Add-Path receive), FRR 10.3.1 — with a
+# BIRD 2.19.2, GoBGP 4.8.0 (Add-Path receive), FRR 10.3.1 — with a
 # StayRTR RTR fixture feeding ROV and a tshark capture on the RS↔BIRD
 # link for the byte-level assertions.
 #
 # First-AS relaxation per stack (client-side, RFC 7947 §2.2.2.1):
 #   FRR 10.3.1  — per-neighbor `no neighbor X enforce-first-as`
 #                 (global form alone is insufficient, the M19 finding)
-#   BIRD 2.0.12 — `enforce first as off` (explicit; also the default)
-#   GoBGP 3.x   — no first-AS enforcement exists; nothing to disable
+#   BIRD 2.19.2 — `enforce first as off` (explicit; also the default)
+#   GoBGP 4.8.0 — no first-AS enforcement exists; nothing to disable
 #
 # Assertions:
 #    1  RTR: both VRPs loaded from StayRTR (bgp_rpki_vrp_count == 2)
@@ -88,8 +88,8 @@
 #
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
-#   - docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
-#   - docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+#   - docker build -t bird:v2.19.2-m83 -f tests/interop/Dockerfile.bird-v2192 tests/interop
+#   - docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.8.0 --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03 -t gobgp:v4.8.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 #   - containerlab deploy -t tests/interop/m83-routeserver-multistack.clab.yml
 #
 # Usage:
@@ -453,6 +453,99 @@ self_test_signal_artifacts() {
     echo "M83 TERM failure-artifact self-test passed"
 }
 
+gobgp_neighbor_snapshot_is_established() {
+    jq -e -s --arg neighbor "${1:?}" '
+        length == 1
+        and (.[0] | type == "object")
+        and (.[0].state | type == "object")
+        and .[0].state.neighbor_address == $neighbor
+        and .[0].state.local_asn == 65002
+        and .[0].state.peer_asn == 65500
+        and (.[0].state.session_state | type == "number")
+        and .[0].state.session_state == 6
+    ' >/dev/null 2>&1
+}
+
+gobgp_neighbor_established() {
+    local peer=${1:?} snapshot
+    snapshot=$(docker exec "$GOBGP" gobgp --json neighbor "$peer") || return 1
+    printf '%s\n' "$snapshot" | gobgp_neighbor_snapshot_is_established "$peer"
+}
+
+self_test_gobgp_readiness() {
+    local scratch argv
+    scratch=$(mktemp -d "${TMPDIR:-/tmp}/m83-gobgp-readiness.XXXXXX")
+    argv="$scratch/argv"
+    GOBGP=canonical-gobgp
+    RS_GOBGP_ADDR=10.83.2.1
+
+    docker() {
+        printf '%s\n' "$@" >"$M83_GOBGP_SELFTEST_ARGV"
+        printf '%s\n' '{"state":{"neighbor_address":"10.83.2.1","local_asn":65002,"peer_asn":65500,"session_state":6}}'
+    }
+    export M83_GOBGP_SELFTEST_ARGV="$argv"
+    if ! gobgp_neighbor_established "$RS_GOBGP_ADDR"; then
+        echo "ERROR: canonical GoBGP readiness snapshot rejected" >&2
+        rm -rf "$scratch"
+        return 1
+    fi
+    if ! cmp -s "$argv" <(printf '%s\n' exec canonical-gobgp gobgp --json neighbor 10.83.2.1); then
+        echo "ERROR: GoBGP readiness argv drifted" >&2
+        sed -n '1,20p' "$argv" >&2
+        rm -rf "$scratch"
+        return 1
+    fi
+    unset -f docker
+
+    local rejected=0 fixture
+    while IFS= read -r fixture; do
+        if printf '%s\n' "$fixture" \
+            | gobgp_neighbor_snapshot_is_established "$RS_GOBGP_ADDR"; then
+            echo "ERROR: invalid GoBGP readiness snapshot accepted: $fixture" >&2
+            rm -rf "$scratch"
+            return 1
+        fi
+        rejected=$((rejected + 1))
+    done <<'EOF'
+[]
+not-json
+{}
+{"state":[]}
+{"state":{"local_asn":65002,"peer_asn":65500,"session_state":6}}
+{"state":{"neighbor_address":"10.83.2.9","local_asn":65002,"peer_asn":65500,"session_state":6}}
+{"state":{"neighbor_address":"10.83.2.1","peer_asn":65500,"session_state":6}}
+{"state":{"neighbor_address":"10.83.2.1","local_asn":65003,"peer_asn":65500,"session_state":6}}
+{"state":{"neighbor_address":"10.83.2.1","local_asn":65002,"session_state":6}}
+{"state":{"neighbor_address":"10.83.2.1","local_asn":65002,"peer_asn":65501,"session_state":6}}
+{"state":{"neighbor_address":"10.83.2.1","local_asn":65002,"peer_asn":65500}}
+{"state":{"neighbor_address":"10.83.2.1","local_asn":65002,"peer_asn":65500,"session_state":5}}
+{"state":{"neighbor_address":"10.83.2.1","local_asn":65002,"peer_asn":65500,"session_state":"ESTABLISHED"}}
+EOF
+    if [ "$rejected" -ne 13 ]; then
+        echo "ERROR: GoBGP readiness rejection inventory drifted: $rejected" >&2
+        rm -rf "$scratch"
+        return 1
+    fi
+    if printf '%s\n%s\n' \
+        '{"state":{"neighbor_address":"10.83.2.1","local_asn":65002,"peer_asn":65500,"session_state":6}}' \
+        '{"state":{"neighbor_address":"10.83.2.1","local_asn":65002,"peer_asn":65500,"session_state":6}}' \
+        | gobgp_neighbor_snapshot_is_established "$RS_GOBGP_ADDR"; then
+        echo "ERROR: GoBGP readiness accepted more than one JSON object" >&2
+        rm -rf "$scratch"
+        return 1
+    fi
+
+    docker() { return 1; }
+    if gobgp_neighbor_established "$RS_GOBGP_ADDR"; then
+        echo "ERROR: GoBGP readiness accepted a command failure" >&2
+        rm -rf "$scratch"
+        return 1
+    fi
+    unset -f docker
+    rm -rf "$scratch"
+    echo "M83 structured GoBGP readiness self-test passed"
+}
+
 case "${1:-}" in
     --check-eor-order)
         if [ "$#" -ne 4 ]; then
@@ -472,6 +565,10 @@ case "${1:-}" in
         ;;
     --self-test-signal-artifacts)
         self_test_signal_artifacts "$0"
+        exit
+        ;;
+    --self-test-gobgp-readiness)
+        self_test_gobgp_readiness
         exit
         ;;
     --self-test-signal-child)
@@ -572,8 +669,7 @@ wait_bird_established() {
 wait_gobgp_established() {
     log "Waiting for GoBGP session to reach Established..."
     for i in $(seq 1 45); do
-        if docker exec "$GOBGP" gobgp neighbor "$RS_GOBGP_ADDR" 2>/dev/null \
-            | grep -i "state = ESTABLISHED\|BGP state = established" >/dev/null; then
+        if gobgp_neighbor_established "$RS_GOBGP_ADDR"; then
             ok "GoBGP session established (attempt $i)"
             return 0
         fi
@@ -722,6 +818,26 @@ start_capture() {
         sh "$M83_CAPTURE_PATH" "$M83_CAPTURE_LOG"
     M83_CAPTURE_RUNNING=1
     sleep 2
+}
+
+preflight_incumbent_versions() {
+    local bird_version gobgp_version gobgpd_version
+    bird_version=$(docker exec "$BIRD" bird --version 2>&1) || return 1
+    gobgp_version=$(docker exec "$GOBGP" gobgp --version 2>&1) || return 1
+    gobgpd_version=$(docker exec "$GOBGP" gobgpd --version 2>&1) || return 1
+    [ "$bird_version" = "BIRD version 2.19.2" ] || {
+        echo "ERROR: M83 requires BIRD version 2.19.2, got: $bird_version" >&2
+        return 1
+    }
+    [ "$gobgp_version" = "gobgp version 4.8.0" ] || {
+        echo "ERROR: M83 requires gobgp version 4.8.0, got: $gobgp_version" >&2
+        return 1
+    }
+    [ "$gobgpd_version" = "gobgpd version 4.8.0" ] || {
+        echo "ERROR: M83 requires gobgpd version 4.8.0, got: $gobgpd_version" >&2
+        return 1
+    }
+    log "Runtime preflight: BIRD 2.19.2 and GoBGP 4.8.0 exact versions confirmed"
 }
 
 stop_capture() {
@@ -1454,6 +1570,10 @@ main() {
     log "Topology: $TOPO"
 
     resolve_grpc_addr
+    if ! preflight_incumbent_versions; then
+        echo "ERROR: M83 incumbent runtime version preflight failed" >&2
+        exit 1
+    fi
     start_capture raw
     start_gobgpd
     patch_rs_config

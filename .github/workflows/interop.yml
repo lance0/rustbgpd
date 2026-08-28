@@ -971,12 +971,8 @@ jobs:
           script: tests/interop/scripts/test-m82-evpn-bundle-synthetic-gobgp.sh
 
   m83:
-    needs: [grpcurl_archive, gobgp_archive, prime_dev_image]
-    # Full 3-stack leg in CI: BIRD 2 is a plain apt install on
-    # bookworm-slim (deterministic build) and BIRD already runs in
-    # hosted CI (M43, kernel-dataplane.yml) without flake history —
-    # no BIRD-manual fallback needed.
-    name: M83 — route-server profile, multi-stack (BIRD 2 + GoBGP + FRR + RTR)
+    needs: [grpcurl_archive, prime_dev_image]
+    name: M83 — route-server profile, multi-stack (BIRD 2.19.2 + GoBGP 4.8.0 + FRR + RTR)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -1005,16 +1001,17 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
-      - name: Build bird:2-bookworm
-        # bird2 + tshark: the member stack that carries the byte-level
+      - name: Build bird:v2.19.2-m83
+        # BIRD 2.19.2 + tshark: the member stack that carries the byte-level
         # RFC 7947 transparency / OTC / EoR wire assertions.
-        run: docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+        run: docker build -t bird:v2.19.2-m83 -f tests/interop/Dockerfile.bird-v2192 tests/interop
 
-      - name: Stage verified GoBGP archive
-        uses: ./.github/actions/stage-gobgp-artifact
-
-      - name: Build gobgp:interop
-        run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+      - name: Build gobgp:v4.8.0-m83
+        run: >-
+          docker build --build-arg TARGETARCH=amd64
+          --build-arg GOBGP_VERSION=4.8.0
+          --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03
+          -t gobgp:v4.8.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Run M83 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
