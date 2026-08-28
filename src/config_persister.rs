@@ -421,6 +421,7 @@ log_format = "json"
             route_reflector_client: Some(false),
             orr_vantage: None,
             route_server_client: Some(false),
+            send_non_transitive_extended_communities: Some(false),
             per_client_best: Some(false),
             next_hop_ownership: None,
             interpret_rfc1997: None,

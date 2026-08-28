@@ -136,6 +136,7 @@ reload).
 | `route_reflector_client` | live (effective next session) | RFC 4456 RR-client flag affects iBGP best-path + reflection behavior. Toggling re-evaluates the existing Adj-RIB-Out on the next distribution pass. |
 | `orr_vantage` | live (effective next session) | RFC 9107 ORR vantage point (the client's IGP location as a BGP-LS topology node), or `"peer_address"` for the peer's own peering address. Resolved to a concrete address during neighbor resolution and registered with the RIB manager at session establishment, so a change takes effect on the next session. Drives the vantage registry, cached SPF state, per-vantage best-path selection, and `rbgp orr` status. |
 | `route_server_client` | live (effective next session) | Transparent RS-client behavior on egress. |
+| `send_non_transitive_extended_communities` | live (effective next session) | Plain-eBGP opt-in for exporting non-transitive Extended Communities. SIGHUP rebuilds the session and the replacement export profile applies the value to the next advertisement; iBGP and route-server-client sessions remain preserving. |
 | `per_client_best` | live (effective next session) | RFC 7947 §2.3.2 per-client best-path selection mode. Registered with the RIB manager at session establishment (like `orr_vantage`), so a change takes effect on the next session. |
 | `next_hop_ownership` | live (effective next session) | ADR-0107 pre-policy `NEXT_HOP` ownership enforcement for route-server clients (RFC 7948 §4.8). Bound at session establishment; on SIGHUP the reconciler rebuilds the session so the new mode applies right away. Annotated "session reset: session re-establish" by `rustbgpd --diff`. |
 | `interpret_rfc1997` | live (effective next session) | RFC 1997 `NO_EXPORT` egress enforcement (derived default: `true` unless `route_server_client` is set). Same session-re-establish bucket as `next_hop_ownership`. |
@@ -189,6 +190,7 @@ configure their keyring directly.
 | `route_reflector_client` | live (effective next session) | |
 | `orr_vantage` | live (effective next session) | Inherited RFC 9107 vantage; same semantics as the neighbor field. `"peer_address"` on a group backing a `[[dynamic_neighbors]]` range gives every accepted peer its own vantage. |
 | `route_server_client` | live (effective next session) | |
+| `send_non_transitive_extended_communities` | live (effective next session) | Inherited plain-eBGP export opt-in; same session-rebuild semantics as the neighbor field. |
 | `per_client_best` | live (effective next session) | Inherited per-client best-path mode; same semantics as the neighbor field. |
 | `next_hop_ownership` | live (effective next session) | Inherited ADR-0107 ownership enforcement; same semantics as the neighbor field. |
 | `interpret_rfc1997` | live (effective next session) | Same as neighbor. |

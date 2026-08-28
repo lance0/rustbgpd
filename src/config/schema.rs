@@ -1472,6 +1472,18 @@ define_neighbor_and_peer_group_configs! {
                 /// See the neighbor-level `route_server_client`.
             }
         }
+        send_non_transitive_extended_communities: Option<bool> {
+            neighbor {
+                /// Permit non-transitive Extended Communities to cross this plain
+                /// eBGP boundary. Default: `false`. iBGP and transparent
+                /// `route_server_client` sessions always preserve them.
+            }
+            peer_group {
+                /// Plain-eBGP non-transitive Extended Community export opt-in
+                /// inherited by neighbors in this group. See the neighbor-level
+                /// `send_non_transitive_extended_communities`.
+            }
+        }
         per_client_best: Option<bool> {
             neighbor {
                 /// RFC 7947 §2.3.2 per-client best-path for this route-server
@@ -1699,6 +1711,10 @@ impl fmt::Debug for Neighbor {
             .field("route_reflector_client", &self.route_reflector_client)
             .field("orr_vantage", &self.orr_vantage)
             .field("route_server_client", &self.route_server_client)
+            .field(
+                "send_non_transitive_extended_communities",
+                &self.send_non_transitive_extended_communities,
+            )
             .field("per_client_best", &self.per_client_best)
             .field("next_hop_ownership", &self.next_hop_ownership)
             .field("interpret_rfc1997", &self.interpret_rfc1997)
@@ -1876,6 +1892,10 @@ impl fmt::Debug for PeerGroupConfig {
             .field("route_reflector_client", &self.route_reflector_client)
             .field("orr_vantage", &self.orr_vantage)
             .field("route_server_client", &self.route_server_client)
+            .field(
+                "send_non_transitive_extended_communities",
+                &self.send_non_transitive_extended_communities,
+            )
             .field("per_client_best", &self.per_client_best)
             .field("next_hop_ownership", &self.next_hop_ownership)
             .field("interpret_rfc1997", &self.interpret_rfc1997)

@@ -876,6 +876,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             route_reflector_client: None,
             orr_vantage: None,
             route_server_client: None,
+            send_non_transitive_extended_communities: None,
             per_client_best: None,
             next_hop_ownership: None,
             interpret_rfc1997: None,
@@ -937,6 +938,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         route_reflector_client: None,
         orr_vantage: None,
         route_server_client: None,
+        send_non_transitive_extended_communities: None,
         per_client_best: None,
         next_hop_ownership: None,
         interpret_rfc1997: None,
@@ -987,6 +989,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         route_reflector_client: None,
         orr_vantage: None,
         route_server_client: None,
+        send_non_transitive_extended_communities: None,
         per_client_best: None,
         next_hop_ownership: None,
         interpret_rfc1997: None,
@@ -1066,6 +1069,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         route_reflector_client: None,
         orr_vantage: None,
         route_server_client: None,
+        send_non_transitive_extended_communities: None,
         per_client_best: None,
         next_hop_ownership: None,
         interpret_rfc1997: None,
@@ -1163,6 +1167,10 @@ fn config_field_impact_surfaces_reload_matrix_classes() {
     assert_eq!(class("min_hold_time"), Some(SessionReset));
     assert_eq!(class("families"), Some(SessionReset));
     assert_eq!(class("md5_password"), Some(SessionReset));
+    assert_eq!(
+        class("send_non_transitive_extended_communities"),
+        Some(SessionReset)
+    );
     // Hot-applied: a description edit never touches the session.
     assert_eq!(class("description"), Some(HotApplied));
     assert_eq!(class("gr_peer_restart_time_max"), Some(HotApplied));
@@ -1192,6 +1200,16 @@ fn config_field_impact_surfaces_reload_matrix_classes() {
     let group_changes = super::describe_peer_group_changes(&old_group, &new_group);
     assert_eq!(group_changes.len(), 1);
     assert_eq!(group_changes[0].field, "min_hold_time");
+    assert_eq!(group_changes[0].impact, Some(SessionReset));
+
+    let mut new_group = old_group.clone();
+    new_group.send_non_transitive_extended_communities = Some(true);
+    let group_changes = super::describe_peer_group_changes(&old_group, &new_group);
+    assert_eq!(group_changes.len(), 1);
+    assert_eq!(
+        group_changes[0].field,
+        "send_non_transitive_extended_communities"
+    );
     assert_eq!(group_changes[0].impact, Some(SessionReset));
 }
 

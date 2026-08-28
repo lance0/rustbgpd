@@ -473,6 +473,7 @@ impl PeerManager {
             route_reflector_client: tc.route_reflector_client,
             orr_vantage: tc.orr_vantage,
             route_server_client: tc.route_server_client,
+            send_non_transitive_extended_communities: tc.send_non_transitive_extended_communities,
             per_client_best: tc.per_client_best,
             next_hop_ownership_strict_peer: tc.next_hop_ownership_strict_peer,
             slow_peer_threshold_pct: tc.slow_peer_threshold_pct,

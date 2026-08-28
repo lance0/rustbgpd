@@ -1927,6 +1927,9 @@ pub struct PeerManagerNeighborConfig {
     pub orr_vantage: Option<IpAddr>,
     /// Whether this eBGP peer is a transparent route-server client.
     pub route_server_client: bool,
+    /// Whether a plain eBGP session may export non-transitive Extended
+    /// Communities. iBGP and route-server-client sessions always preserve them.
+    pub send_non_transitive_extended_communities: bool,
     /// RFC 7947 §2.3.2 per-client best-path (path-hiding mitigation
     /// for route-server clients without Add-Path). Requires
     /// `route_server_client`.

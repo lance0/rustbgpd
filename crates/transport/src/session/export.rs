@@ -38,6 +38,7 @@ pub(crate) struct SessionExportProfile {
     local_router_id: Ipv4Addr,
     local_role: Option<BgpRole>,
     route_server_client: bool,
+    send_non_transitive_extended_communities: bool,
     remove_private_as: RemovePrivateAs,
     cluster_id: Option<Ipv4Addr>,
     configured_local_ipv6_nexthop: Option<Ipv6Addr>,
@@ -65,6 +66,10 @@ impl std::fmt::Debug for SessionExportProfile {
             .field("local_router_id", &self.local_router_id)
             .field("local_role", &self.local_role)
             .field("route_server_client", &self.route_server_client)
+            .field(
+                "send_non_transitive_extended_communities",
+                &self.send_non_transitive_extended_communities,
+            )
             .field("remove_private_as", &self.remove_private_as)
             .field("cluster_id", &self.cluster_id)
             .field(
@@ -123,6 +128,9 @@ impl SessionExportProfile {
             local_router_id: session.config.peer.local_router_id,
             local_role: session.config.peer.local_role,
             route_server_client: session.config.route_server_client,
+            send_non_transitive_extended_communities: session
+                .config
+                .send_non_transitive_extended_communities,
             remove_private_as: session.config.remove_private_as,
             cluster_id: session.config.cluster_id,
             configured_local_ipv6_nexthop: session.config.local_ipv6_nexthop,
@@ -194,6 +202,8 @@ impl SessionExportProfile {
             local_router_id: config.peer.local_router_id,
             local_role: config.peer.local_role,
             route_server_client: config.route_server_client,
+            send_non_transitive_extended_communities: config
+                .send_non_transitive_extended_communities,
             remove_private_as: config.remove_private_as,
             cluster_id: config.cluster_id,
             configured_local_ipv6_nexthop: config.local_ipv6_nexthop,
@@ -368,6 +378,44 @@ impl SessionExportProfile {
         ]));
     }
 
+    /// Prepare one Extended Communities attribute for outbound export.
+    ///
+    /// The common paths allocate exactly once for a retained attribute: an
+    /// unchanged attribute is cloned as usual, an all-non-transitive attribute
+    /// is omitted without allocating, and only a mixed attribute builds a
+    /// filtered vector.
+    fn prepare_extended_communities(&self, attr: &PathAttribute) -> Option<PathAttribute> {
+        if !self.is_ebgp
+            || self.route_server_client
+            || self.send_non_transitive_extended_communities
+        {
+            return Some(attr.clone());
+        }
+
+        let (values, partial) = match attr {
+            PathAttribute::ExtendedCommunities(values) => (values, false),
+            PathAttribute::ExtendedCommunitiesPartial(values) => (values, true),
+            _ => return Some(attr.clone()),
+        };
+        if values.iter().all(|community| community.is_transitive()) {
+            return Some(attr.clone());
+        }
+        if values.iter().all(|community| !community.is_transitive()) {
+            return None;
+        }
+
+        let retained = values
+            .iter()
+            .copied()
+            .filter(|community| community.is_transitive())
+            .collect();
+        Some(if partial {
+            PathAttribute::ExtendedCommunitiesPartial(retained)
+        } else {
+            PathAttribute::ExtendedCommunities(retained)
+        })
+    }
+
     /// Prepare the classic unicast attribute set using only this immutable
     /// profile and the post-policy route candidate.
     #[expect(
@@ -429,6 +477,12 @@ impl SessionExportProfile {
                 }
                 PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_) => {}
                 PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
+                PathAttribute::ExtendedCommunities(_)
+                | PathAttribute::ExtendedCommunitiesPartial(_) => {
+                    if let Some(attr) = self.prepare_extended_communities(attr) {
+                        attrs.push(attr);
+                    }
+                }
                 _ => attrs.push(attr.clone()),
             }
         }
@@ -550,6 +604,12 @@ impl SessionExportProfile {
                     }
                 }
                 PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
+                PathAttribute::ExtendedCommunities(_)
+                | PathAttribute::ExtendedCommunitiesPartial(_) => {
+                    if let Some(attr) = self.prepare_extended_communities(attr) {
+                        attrs.push(attr);
+                    }
+                }
                 _ => attrs.push(attr.clone()),
             }
         }
@@ -2072,6 +2132,7 @@ pub fn fanout_bench_add_path_export_encoder() -> Arc<dyn ExactExportEncoder> {
         local_router_id: Ipv4Addr::new(10, 255, 255, 255),
         local_role: None,
         route_server_client: false,
+        send_non_transitive_extended_communities: false,
         remove_private_as: RemovePrivateAs::Disabled,
         cluster_id: Some(Ipv4Addr::new(10, 255, 255, 255)),
         configured_local_ipv6_nexthop: None,
@@ -2102,6 +2163,7 @@ fn fanout_bench_encoder(
         local_router_id: Ipv4Addr::new(10, 255, 255, 255),
         local_role: None,
         route_server_client,
+        send_non_transitive_extended_communities: false,
         remove_private_as: RemovePrivateAs::Disabled,
         cluster_id,
         configured_local_ipv6_nexthop: None,
@@ -2640,13 +2702,17 @@ mod tests {
 
         let config = config_with_auth_secret("not-retained");
         let target = SessionExportProfile::initial(&config, None, false);
-        let cases: [(&str, ProfileMutation); 8] = [
+        let cases: [(&str, ProfileMutation); 9] = [
             ("local ASN", |profile| profile.local_asn += 1),
             ("router ID", |profile| {
                 profile.local_router_id = Ipv4Addr::new(192, 0, 2, 99);
             }),
             ("route-server mode", |profile| {
                 profile.route_server_client = !profile.route_server_client;
+            }),
+            ("non-transitive Extended Community export", |profile| {
+                profile.send_non_transitive_extended_communities =
+                    !profile.send_non_transitive_extended_communities;
             }),
             ("four-octet ASN encoding", |profile| {
                 profile.four_octet_as = !profile.four_octet_as;

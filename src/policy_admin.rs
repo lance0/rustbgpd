@@ -215,6 +215,7 @@ pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerG
         route_reflector_client: definition.route_reflector_client,
         orr_vantage: definition.orr_vantage,
         route_server_client: definition.route_server_client,
+        send_non_transitive_extended_communities: None,
         per_client_best: definition.per_client_best,
         // Not exposed on the peer-group gRPC definition: absent means
         // no ADR-0107 ownership enforcement; configure via TOML.
@@ -511,6 +512,7 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigErr
         route_reflector_client: None,
         orr_vantage: None,
         route_server_client: raw.route_server_client,
+        send_non_transitive_extended_communities: None,
         per_client_best: raw.per_client_best,
         next_hop_ownership: None,
         interpret_rfc1997: None,
@@ -602,6 +604,9 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     // a concrete IGP location — render it literally.
                     orr_vantage: cfg.orr_vantage.map(|addr| addr.to_string()),
                     route_server_client: Some(cfg.route_server_client),
+                    send_non_transitive_extended_communities: Some(
+                        cfg.send_non_transitive_extended_communities,
+                    ),
                     per_client_best: Some(cfg.per_client_best),
                     next_hop_ownership: cfg
                         .next_hop_ownership_strict_peer
@@ -1147,6 +1152,7 @@ peer_group = "fabric"
             route_reflector_client: false,
             orr_vantage: None,
             route_server_client: false,
+            send_non_transitive_extended_communities: false,
             per_client_best: false,
             next_hop_ownership_strict_peer: false,
             slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,
@@ -1242,11 +1248,13 @@ peer_group = "fabric"
         // Mutation-red for min_hold_time: deleting persistence projection
         // leaves the inserted neighbor at None instead of 30.
         let mut config = minimal_config();
+        let mut neighbor_config = test_neighbor_config("10.0.0.3".parse().unwrap());
+        neighbor_config.send_non_transitive_extended_communities = true;
 
         apply_config_event(
             &mut config,
             &ConfigEvent::NeighborAdded {
-                config: test_neighbor_config("10.0.0.3".parse().unwrap()),
+                config: neighbor_config,
                 ack: None,
             },
         )
@@ -1259,6 +1267,10 @@ peer_group = "fabric"
             .unwrap();
         let tcp_ao = neighbor.tcp_ao.as_ref().expect("tcp_ao preserved");
         assert_eq!(neighbor.min_hold_time, Some(30));
+        assert_eq!(
+            neighbor.send_non_transitive_extended_communities,
+            Some(true)
+        );
         let tcp_ao = &tcp_ao.0[0];
         assert_eq!(tcp_ao.key, "ao-secret");
         assert_eq!(tcp_ao.send_id, 7);

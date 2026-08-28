@@ -808,6 +808,10 @@ impl Config {
             .route_server_client
             .or_else(|| group.and_then(|g| g.route_server_client))
             .unwrap_or(false);
+        transport.send_non_transitive_extended_communities = neighbor
+            .send_non_transitive_extended_communities
+            .or_else(|| group.and_then(|g| g.send_non_transitive_extended_communities))
+            .unwrap_or(false);
         transport.per_client_best = neighbor
             .per_client_best
             .or_else(|| group.and_then(|g| g.per_client_best))
@@ -972,6 +976,7 @@ impl Config {
             route_reflector_client: None,
             orr_vantage: None,
             route_server_client: None,
+            send_non_transitive_extended_communities: None,
             per_client_best: None,
             next_hop_ownership: None,
             interpret_rfc1997: None,

@@ -357,6 +357,43 @@ fn route_server_client_defaults_to_false() {
 }
 
 #[test]
+fn non_transitive_extended_community_export_defaults_off_and_inherits() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ebgp]
+send_non_transitive_extended_communities = true
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "ebgp"
+
+[[neighbors]]
+address = "10.0.0.4"
+remote_asn = 65004
+peer_group = "ebgp"
+send_non_transitive_extended_communities = false
+"#;
+    let config = parse(toml_str).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert!(!peers[0].0.send_non_transitive_extended_communities);
+    assert!(peers[1].0.send_non_transitive_extended_communities);
+    assert!(!peers[2].0.send_non_transitive_extended_communities);
+}
+
+#[test]
 fn per_client_best_requires_route_server_client() {
     let toml_str = r#"
 [global]

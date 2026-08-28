@@ -1626,6 +1626,24 @@ carries inactive (absent), unlimited (zero), or finite.
 
 ---
 
+## Extended Communities — non-transitive eBGP export
+
+- **draft-ietf-idr-rfc4360-bis-09 §6 (RFC Editor queue):** received
+  non-transitive Extended Communities remain available to local policy and
+  iBGP, but ordinary eBGP export removes them after export policy and before
+  UPDATE encoding. `send_non_transitive_extended_communities = true` is the
+  explicit per-neighbor / peer-group opt-in for crossing that AS boundary.
+- **RFC 7947 §2.2.4:** `route_server_client` export is exempt and preserves
+  transitive and non-transitive Communities. iBGP also preserves them because
+  it crosses no AS boundary.
+- The shared classic-unicast and MP attribute-preparation paths apply the same
+  rule. Mixed attributes retain their normal or Partial form with only the
+  transitive values; an attribute with no remaining values is omitted.
+- This is send-side behavior only. Inbound decoding, retained attributes, and
+  export-policy semantics are unchanged.
+
+---
+
 ## RFC 10005 — Link Bandwidth receiver subset
 
 - **§2 / §3.2:** `ExtendedCommunity::as_link_bandwidth()` accepts the exact
@@ -1641,7 +1659,8 @@ carries inactive (absent), unlimited (zero), or finite.
   the raw Extended Communities vector, so unchanged-next-hop reflection remains
   byte-preserving.
 
-This is a receiver subset, not full RFC 10005 sender or re-advertisement policy.
+The typed accessor remains a receiver subset. Re-advertisement follows the
+non-transitive eBGP export rule above.
 
 ---
 
