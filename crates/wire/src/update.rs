@@ -187,6 +187,33 @@ impl UpdateMessage {
         add_path_ipv4: bool,
         add_path_families: &[(Afi, Safi)],
     ) -> Result<RevisedParsedUpdate, DecodeError> {
+        self.parse_revised_observed(four_octet_as, is_ibgp, add_path_ipv4, add_path_families)
+            .map(|(parsed, _observations)| parsed)
+    }
+
+    /// Parse with RFC 7606 revised error handling and report EVPN typed-NLRI
+    /// discards without changing [`RevisedParsedUpdate`]'s public shape.
+    ///
+    /// The observation vector is sparse, sorted by route type, and aggregates
+    /// discards across `MP_REACH_NLRI` and `MP_UNREACH_NLRI`. Existing callers
+    /// that do not need this diagnostic should keep using [`Self::parse_revised`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the same session-reset-class errors as [`Self::parse_revised`].
+    pub fn parse_revised_observed(
+        &self,
+        four_octet_as: bool,
+        is_ibgp: bool,
+        add_path_ipv4: bool,
+        add_path_families: &[(Afi, Safi)],
+    ) -> Result<
+        (
+            RevisedParsedUpdate,
+            crate::evpn::EvpnNlriDiscardObservations,
+        ),
+        DecodeError,
+    > {
         let withdrawn = if add_path_ipv4 {
             crate::nlri::decode_nlri_addpath(&self.withdrawn_routes)?
         } else {
@@ -195,7 +222,7 @@ impl UpdateMessage {
                 .map(|prefix| Ipv4NlriEntry { path_id: 0, prefix })
                 .collect()
         };
-        let decoded = crate::attribute::decode_path_attributes_revised(
+        let (decoded, evpn_discarded) = crate::attribute::decode_path_attributes_revised_observed(
             &self.path_attributes,
             four_octet_as,
             is_ibgp,
@@ -209,15 +236,18 @@ impl UpdateMessage {
                 .map(|prefix| Ipv4NlriEntry { path_id: 0, prefix })
                 .collect()
         };
-        Ok(RevisedParsedUpdate {
-            update: ParsedUpdate {
-                withdrawn,
-                attributes: decoded.attributes,
-                announced,
-                bgpls_nlri_discarded: decoded.bgpls_nlri_discarded,
+        Ok((
+            RevisedParsedUpdate {
+                update: ParsedUpdate {
+                    withdrawn,
+                    attributes: decoded.attributes,
+                    announced,
+                    bgpls_nlri_discarded: decoded.bgpls_nlri_discarded,
+                },
+                malformed: decoded.malformed,
             },
-            malformed: decoded.malformed,
-        })
+            evpn_discarded,
+        ))
     }
     /// Encode a complete UPDATE message (header + body) into a buffer.
     ///
@@ -955,5 +985,53 @@ mod tests {
             nlri: Bytes::from_static(&[33, 10, 0, 0, 0]), // prefix length 33
         };
         assert!(msg.parse_revised(true, false, false, &[]).is_err());
+    }
+
+    #[test]
+    fn parse_revised_observed_aggregates_evpn_reach_and_unreach_discards() {
+        let reach_value = [
+            0, 25, 70, // L2VPN / EVPN
+            4, 10, 0, 0, 2, // IPv4 next hop
+            0, // reserved
+            99, 1, 0xaa, // unsupported type 99
+            42, 0, // unsupported type 42
+        ];
+        let unreach_value = [
+            0, 25, 70, // L2VPN / EVPN
+            99, 0, // second type 99 observation
+            42, 1, 0xbb, // second type 42 observation
+            255, 0, // one type 255 observation
+        ];
+        let mut attributes = Vec::new();
+        attributes.extend([0x80, 14, u8::try_from(reach_value.len()).unwrap()]);
+        attributes.extend(reach_value);
+        attributes.extend([0x80, 15, u8::try_from(unreach_value.len()).unwrap()]);
+        attributes.extend(unreach_value);
+        let msg = UpdateMessage {
+            withdrawn_routes: Bytes::new(),
+            path_attributes: Bytes::from(attributes),
+            nlri: Bytes::new(),
+        };
+
+        let legacy = msg.parse_revised(true, false, false, &[]).unwrap();
+        let (observed, observations) = msg.parse_revised_observed(true, false, false, &[]).unwrap();
+        assert_eq!(observed, legacy);
+        assert_eq!(observations, vec![(42, 2), (99, 2), (255, 1)]);
+    }
+
+    #[test]
+    fn parse_revised_observed_rejects_duplicate_mp_before_reparsing_it() {
+        let value = [0, 25, 70, 4, 10, 0, 0, 2, 0, 99, 0];
+        let mut attributes = Vec::new();
+        for _ in 0..2 {
+            attributes.extend([0x80, 14, u8::try_from(value.len()).unwrap()]);
+            attributes.extend(value);
+        }
+        let msg = UpdateMessage {
+            withdrawn_routes: Bytes::new(),
+            path_attributes: Bytes::from(attributes),
+            nlri: Bytes::new(),
+        };
+        assert!(msg.parse_revised_observed(true, false, false, &[]).is_err());
     }
 }

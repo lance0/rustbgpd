@@ -1074,6 +1074,68 @@ async fn rfc7606_treat_as_withdraw_covers_previously_accepted_evpn_routes() {
     assert_eq!(session.fsm.state(), SessionState::Established);
 }
 
+/// RFC 7606 §5.4 / RFC 9136 §3: an unsupported EVPN route type is isolated,
+/// while supported NLRIs in the same `MP_REACH` are delivered and the session
+/// remains Established. The peer-scoped counter records the exact discard.
+#[tokio::test]
+async fn unsupported_evpn_route_type_is_observed_without_losing_supported_routes() {
+    use rustbgpd_wire::{EthernetTagId, EvpnImet, EvpnRoute, RouteDistinguisher};
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+    negotiated
+        .negotiated_families
+        .push((Afi::L2Vpn, Safi::Evpn));
+    session.negotiated = Some(Arc::new(negotiated));
+    rfc7606_drain(&mut rib_rx);
+
+    let route = EvpnRoute::Imet(EvpnImet {
+        rd: RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]),
+        ethernet_tag: EthernetTagId(100),
+        originator_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+    });
+    let mut evpn_nlri = Vec::new();
+    rustbgpd_wire::encode_evpn_nlri(std::slice::from_ref(&route), &mut evpn_nlri).unwrap();
+    evpn_nlri.extend_from_slice(&[99, 2, 0xaa, 0xbb]);
+    evpn_nlri.extend_from_slice(&[99, 0]);
+
+    let mut mp_reach = vec![0, 25, 70, 4, 10, 0, 0, 2, 0];
+    mp_reach.extend_from_slice(&evpn_nlri);
+    let mut attributes = vec![0x40, 1, 1, 0];
+    attributes.extend([0x40, 2, 6, 2, 1, 0, 0, 0xFD, 0xEA]);
+    attributes.extend([0x80, 14, u8::try_from(mp_reach.len()).unwrap()]);
+    attributes.extend(mp_reach);
+
+    session
+        .process_update(UpdateMessage {
+            withdrawn_routes: Bytes::new(),
+            path_attributes: Bytes::from(attributes),
+            nlri: Bytes::new(),
+        })
+        .await;
+
+    let RibUpdate::RoutesReceived { evpn_announced, .. } = rib_rx
+        .try_recv()
+        .expect("supported EVPN route must reach the RIB")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(evpn_announced.len(), 1);
+    assert_eq!(evpn_announced[0].route, route);
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    let samples = counter_samples(&session.metrics, "bgp_evpn_nlri_discarded_total");
+    assert_eq!(
+        samples,
+        vec![(
+            HashMap::from([("peer".to_string(), session.peer_label.clone())]),
+            2.0
+        )]
+    );
+}
+
 /// RFC 4724 §2 MP End-of-RIB: an UPDATE whose only content is an empty
 /// `MP_UNREACH_NLRI` marks End-of-RIB for that family and the session stays
 /// Established.

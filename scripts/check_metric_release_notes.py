@@ -13,10 +13,11 @@ from types import ModuleType
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE_RELEASE = "v0.66.0"
-BASELINE_COMMIT = "5873768daaeb197d7b5a7f531efd7feb5535e258"
-TARGET_RELEASE = "0.67.0"
-BASELINE = ROOT / "scripts/fixtures/metric-release-notes/v0.66.0.json"
+BASELINE_RELEASE = "v0.67.0"
+BASELINE_COMMIT = "69b27812eecc66e7affc505fbe887259b48990f5"
+WORKSPACE_RELEASE = "0.67.0"
+TARGET_CHANGELOG_SECTION = "Unreleased"
+BASELINE = ROOT / "scripts/fixtures/metric-release-notes/v0.67.0.json"
 CHANGELOG = ROOT / "CHANGELOG.md"
 CARGO_MANIFEST = ROOT / "Cargo.toml"
 METRIC_NAME = re.compile(r"[A-Za-z_:][A-Za-z0-9_:]*")
@@ -89,11 +90,12 @@ def workspace_version(manifest: bytes) -> str:
     return version
 
 
-def validate_target_release(version: str) -> None:
-    if version != TARGET_RELEASE:
+def validate_workspace_release(version: str) -> None:
+    if version != WORKSPACE_RELEASE:
         raise ValueError(
-            f"workspace release changed from {TARGET_RELEASE} to {version}; roll the "
-            "metric baseline and target release together"
+            f"workspace release changed from {WORKSPACE_RELEASE} to {version}; select the "
+            "target changelog section explicitly and review whether the released metric "
+            "baseline must roll"
         )
 
 
@@ -165,7 +167,7 @@ def validate_release_notes(
         if missing_removed:
             details.append("removed=" + ", ".join(missing_removed))
         raise ValueError(
-            "current release CHANGELOG section omits changed metric families: "
+            "target CHANGELOG section omits changed metric families: "
             + "; ".join(details)
         )
     return added, removed
@@ -176,15 +178,18 @@ def main() -> int:
         baseline = parse_baseline(BASELINE.read_text(encoding="utf-8"))
         current = set(METRIC_CHECK.workspace_metric_inventory())
         version = workspace_version(CARGO_MANIFEST.read_bytes())
-        validate_target_release(version)
-        section = release_section(CHANGELOG.read_text(encoding="utf-8"), version)
+        validate_workspace_release(version)
+        section = release_section(
+            CHANGELOG.read_text(encoding="utf-8"), TARGET_CHANGELOG_SECTION
+        )
         added, removed = validate_release_notes(baseline, current, section)
     except (OSError, ValueError) as error:
         print(f"metric release-note check: {error}", file=sys.stderr)
         return 1
     print(
         "metric release-note check: "
-        f"{BASELINE_RELEASE} -> v{version}: {len(added)} added, "
+        f"{BASELINE_RELEASE} -> {TARGET_CHANGELOG_SECTION} at v{version}: "
+        f"{len(added)} added, "
         f"{len(removed)} removed; all changed families documented"
     )
     return 0

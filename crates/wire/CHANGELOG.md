@@ -5,6 +5,12 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- Added `EvpnNlriDiscardObservations`, `decode_evpn_nlri_counted`, and
+  `UpdateMessage::parse_revised_observed` so callers can observe exact,
+  bounded counts of EVPN route types discarded under RFC 7606 §5.4. Existing
+  EVPN and revised-UPDATE decoders retain their public shapes and discard the
+  additive observations; supported routes in the same MP attributes remain
+  available.
 - Added bounded, allocation-free framing validation for opaque Tunnel
   Encapsulation and ATTR_SET attributes. Tunnel TLVs and their variable-width
   sub-TLV lengths must consume their declared values exactly; ATTR_SET must
