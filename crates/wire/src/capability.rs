@@ -78,6 +78,50 @@ impl Safi {
     }
 }
 
+/// Canonical configuration and control-plane labels for the AFI/SAFI pairs
+/// supported by rustbgpd.
+///
+/// BGP-LS deliberately uses the operator-facing `linkstate` spelling here.
+/// Metrics retain their existing `bgpls` labels independently so dashboards
+/// and alerts do not acquire a label-cardinality fork.
+pub const CONFIGURED_FAMILIES: &[(&str, Afi, Safi)] = &[
+    ("ipv4_unicast", Afi::Ipv4, Safi::Unicast),
+    ("ipv6_unicast", Afi::Ipv6, Safi::Unicast),
+    ("ipv4_flowspec", Afi::Ipv4, Safi::FlowSpec),
+    ("ipv6_flowspec", Afi::Ipv6, Safi::FlowSpec),
+    ("l2vpn_evpn", Afi::L2Vpn, Safi::Evpn),
+    ("linkstate", Afi::BgpLs, Safi::BgpLs),
+    ("linkstate_vpn", Afi::BgpLs, Safi::BgpLsVpn),
+    ("l3vpn_ipv4_unicast", Afi::Ipv4, Safi::MplsVpn),
+    ("l3vpn_ipv6_unicast", Afi::Ipv6, Safi::MplsVpn),
+    ("ipv4_labeled_unicast", Afi::Ipv4, Safi::LabeledUnicast),
+    ("ipv6_labeled_unicast", Afi::Ipv6, Safi::LabeledUnicast),
+    ("rtc", Afi::Ipv4, Safi::RtConstrain),
+];
+
+/// Parse a canonical configuration or control-plane family label.
+#[must_use]
+pub fn parse_family(label: &str) -> Option<(Afi, Safi)> {
+    for &(candidate, afi, safi) in CONFIGURED_FAMILIES {
+        if candidate == label {
+            return Some((afi, safi));
+        }
+    }
+    None
+}
+
+/// Return the canonical configuration and control-plane label for an AFI/SAFI
+/// pair supported by rustbgpd.
+#[must_use]
+pub fn family_label(afi: Afi, safi: Safi) -> Option<&'static str> {
+    for &(label, candidate_afi, candidate_safi) in CONFIGURED_FAMILIES {
+        if candidate_afi == afi && candidate_safi == safi {
+            return Some(label);
+        }
+    }
+    None
+}
+
 /// Per-AFI/SAFI entry in the Graceful Restart capability (RFC 4724 §3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GracefulRestartFamily {
@@ -985,6 +1029,27 @@ pub(crate) fn encode_extended_optional_parameters(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_family_labels_round_trip_canonically() {
+        for &(label, afi, safi) in CONFIGURED_FAMILIES {
+            assert_eq!(parse_family(label), Some((afi, safi)), "label {label}");
+            assert_eq!(family_label(afi, safi), Some(label), "label {label}");
+        }
+    }
+
+    #[test]
+    fn configured_family_labels_keep_metric_aliases_out_of_the_parser() {
+        assert_eq!(parse_family("bgpls"), None);
+        assert_eq!(parse_family("bgpls_vpn"), None);
+        assert_eq!(family_label(Afi::BgpLs, Safi::BgpLs), Some("linkstate"));
+        assert_eq!(
+            family_label(Afi::BgpLs, Safi::BgpLsVpn),
+            Some("linkstate_vpn")
+        );
+        assert_eq!(family_label(Afi::Ipv4, Safi::Evpn), None);
+        assert_eq!(family_label(Afi::Ipv4, Safi::Multicast), None);
+    }
 
     #[test]
     fn decode_multi_protocol_ipv4_unicast() {

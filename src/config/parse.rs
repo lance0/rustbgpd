@@ -8,6 +8,7 @@ use rustbgpd_policy::{
     NeighborSetMatch, RouteExtendedCommunityAdmin, RouteExtendedCommunityKind, RouteType,
     encode_route_extended_community,
 };
+use rustbgpd_wire::{CONFIGURED_FAMILIES, parse_family};
 
 /// Parse and validate a single CIDR prefix string with optional ge/le bounds.
 fn parse_prefix_entry(
@@ -699,32 +700,16 @@ fn encode_config_route_community(
 pub(super) fn parse_families(families: &[String]) -> Result<Vec<(Afi, Safi)>, ConfigError> {
     let mut result = Vec::with_capacity(families.len());
     for f in families {
-        let family = match f.as_str() {
-            "ipv4_unicast" => (Afi::Ipv4, Safi::Unicast),
-            "ipv6_unicast" => (Afi::Ipv6, Safi::Unicast),
-            "ipv4_flowspec" => (Afi::Ipv4, Safi::FlowSpec),
-            "ipv6_flowspec" => (Afi::Ipv6, Safi::FlowSpec),
-            "l2vpn_evpn" => (Afi::L2Vpn, Safi::Evpn),
-            "linkstate" => (Afi::BgpLs, Safi::BgpLs),
-            "linkstate_vpn" => (Afi::BgpLs, Safi::BgpLsVpn),
-            "l3vpn_ipv4_unicast" => (Afi::Ipv4, Safi::MplsVpn),
-            "l3vpn_ipv6_unicast" => (Afi::Ipv6, Safi::MplsVpn),
-            "ipv4_labeled_unicast" => (Afi::Ipv4, Safi::LabeledUnicast),
-            "ipv6_labeled_unicast" => (Afi::Ipv6, Safi::LabeledUnicast),
-            "rtc" => (Afi::Ipv4, Safi::RtConstrain),
-            other => {
-                return Err(ConfigError::InvalidPolicyEntry {
-                    reason: format!(
-                        "unknown address family {other:?}, expected one of: \
-                         \"ipv4_unicast\", \"ipv6_unicast\", \"ipv4_flowspec\", \
-                         \"ipv6_flowspec\", \"l2vpn_evpn\", \"linkstate\", \
-                         \"linkstate_vpn\", \"l3vpn_ipv4_unicast\", \
-                         \"l3vpn_ipv6_unicast\", \"ipv4_labeled_unicast\", \
-                         \"ipv6_labeled_unicast\", \"rtc\""
-                    ),
-                });
-            }
-        };
+        let family = parse_family(f).ok_or_else(|| ConfigError::InvalidPolicyEntry {
+            reason: format!(
+                "unknown address family {f:?}, expected one of: {}",
+                CONFIGURED_FAMILIES
+                    .iter()
+                    .map(|(label, _, _)| format!("{label:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        })?;
         if !result.contains(&family) {
             result.push(family);
         }

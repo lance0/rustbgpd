@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use rustbgpd_transport::RemovePrivateAs;
-use rustbgpd_wire::{Afi, BgpRole, Safi};
+use rustbgpd_wire::{Afi, BgpRole, CONFIGURED_FAMILIES, Safi, family_label, parse_family};
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
@@ -67,15 +67,16 @@ pub(crate) fn parse_families_proto(families: &[String]) -> Result<Vec<(Afi, Safi
     }
     let mut result = Vec::with_capacity(families.len());
     for f in families {
-        let family = match f.as_str() {
-            "ipv4_unicast" => (Afi::Ipv4, Safi::Unicast),
-            "ipv6_unicast" => (Afi::Ipv6, Safi::Unicast),
-            other => {
-                return Err(Status::invalid_argument(format!(
-                    "unknown address family {other:?}, expected \"ipv4_unicast\" or \"ipv6_unicast\""
-                )));
-            }
-        };
+        let family = parse_family(f).ok_or_else(|| {
+            Status::invalid_argument(format!(
+                "unknown address family {f:?}, expected one of: {}",
+                CONFIGURED_FAMILIES
+                    .iter()
+                    .map(|(label, _, _)| format!("{label:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
         if !result.contains(&family) {
             result.push(family);
         }
@@ -525,11 +526,10 @@ fn outbound_refresh_error_status(error: OutboundRefreshError) -> Status {
 }
 
 pub(crate) fn family_to_string(afi: Afi, safi: Safi) -> String {
-    match (afi, safi) {
-        (Afi::Ipv4, Safi::Unicast) => "ipv4_unicast".to_string(),
-        (Afi::Ipv6, Safi::Unicast) => "ipv6_unicast".to_string(),
-        _ => format!("{afi:?}_{safi:?}"),
-    }
+    family_label(afi, safi).map_or_else(
+        || format!("afi_{}_safi_{}", afi as u16, safi as u8),
+        str::to_string,
+    )
 }
 
 pub(crate) fn parse_remove_private_as_proto(mode: &str) -> Result<RemovePrivateAs, Status> {
@@ -2766,6 +2766,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_families_proto_accepts_and_emits_the_configured_vocabulary() {
+        let labels = CONFIGURED_FAMILIES
+            .iter()
+            .map(|(label, _, _)| (*label).to_string())
+            .collect::<Vec<_>>();
+        let parsed = parse_families_proto(&labels).unwrap();
+        let expected = CONFIGURED_FAMILIES
+            .iter()
+            .map(|(_, afi, safi)| (*afi, *safi))
+            .collect::<Vec<_>>();
+
+        assert_eq!(parsed, expected);
+        assert_eq!(
+            parsed
+                .iter()
+                .map(|(afi, safi)| family_to_string(*afi, *safi))
+                .collect::<Vec<_>>(),
+            labels
+        );
+    }
+
+    #[test]
+    fn parse_families_proto_rejects_noncanonical_metric_labels() {
+        for label in ["bgpls", "bgpls_vpn"] {
+            let error = parse_families_proto(&[label.to_string()]).unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(error.message().contains("linkstate"));
+        }
+    }
+
+    #[test]
+    fn family_projection_preserves_out_of_vocabulary_pair_identity() {
+        let evpn_on_ipv4 = family_to_string(Afi::Ipv4, Safi::Evpn);
+        let multicast_on_ipv4 = family_to_string(Afi::Ipv4, Safi::Multicast);
+
+        assert_eq!(evpn_on_ipv4, "afi_1_safi_70");
+        assert_eq!(multicast_on_ipv4, "afi_1_safi_2");
+        assert_ne!(evpn_on_ipv4, multicast_on_ipv4);
+        assert_eq!(
+            parse_families_proto(&[evpn_on_ipv4]).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
     #[tokio::test]
     async fn soft_reset_in_deduplicates_requested_families() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
@@ -3766,7 +3811,7 @@ mod tests {
                 .iter()
                 .map(|row| row.family.as_str())
                 .collect::<Vec<_>>(),
-            vec!["ipv4_unicast", "ipv6_unicast", "L2Vpn_Evpn"]
+            vec!["ipv4_unicast", "ipv6_unicast", "l2vpn_evpn"]
         );
         // Load-bearing: changing the projection's inactive/unlimited/finite
         // mapping makes one of these three presence-aware assertions red.

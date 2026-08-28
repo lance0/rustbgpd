@@ -486,7 +486,10 @@ message NeighborConfig {
   string description = 3;
   uint32 hold_time = 4;
   uint32 max_prefixes = 5;
-  // Address families (e.g., "ipv4_unicast", "ipv6_unicast").
+  // Canonical address-family labels: ipv4_unicast, ipv6_unicast,
+  // ipv4_flowspec, ipv6_flowspec, l2vpn_evpn, linkstate, linkstate_vpn,
+  // l3vpn_ipv4_unicast, l3vpn_ipv6_unicast, ipv4_labeled_unicast,
+  // ipv6_labeled_unicast, or rtc.
   // If empty, defaults to ["ipv4_unicast"].
   repeated string families = 6;
   // Private AS removal mode: "", "remove", "all", or "replace".
@@ -1138,6 +1141,7 @@ message PeerGroupDefinition {
   // 1..255. Requires ttl_security = true; omission preserves the historical
   // one-hop policy (inbound TTL/Hop-Limit exactly 255).
   optional uint32 ttl_security_hops = 30;
+  // Uses the same canonical family labels as NeighborConfig.families.
   repeated string families = 5;
   optional bool graceful_restart = 6;
   optional uint32 gr_restart_time = 7;

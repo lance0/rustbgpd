@@ -85,7 +85,10 @@ Public surface (re-exported at crate root — `crates/wire/src/lib.rs`):
   `Aggregator`, `AtomicAggregate`, `NextHop`, `Communities`, `MpReachNlri`, `LargeCommunities`,
   `PmsiTunnel`, `OnlyToCustomer`, ...).
 - **`Prefix`** (`V4(Ipv4Prefix)` / `V6(Ipv6Prefix)`), `NlriEntry`, Add-Path IDs.
-- **`Afi` / `Safi`** — IANA address-family identifiers.
+- **`Afi` / `Safi`** — IANA address-family identifiers. The
+  `CONFIGURED_FAMILIES`, `parse_family`, and `family_label` helpers expose the
+  canonical configuration/control-plane labels for the supported pairs;
+  BGP-LS is `linkstate` / `linkstate_vpn` on that surface.
 - **EVPN** (`EvpnRoute`/`EvpnRouteKey`, Types 1–5; route keys implement `Ord`),
   **FlowSpec** (`FlowSpecRule`),
   **VPNv4/v6** (`vpn` module), **BGP-LS** (`bgpls` module), **ORF** (`orf` module),
