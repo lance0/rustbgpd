@@ -2016,7 +2016,7 @@ impl BgpMetrics {
         let bmp_source_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_source_drops_total",
-                "BMP events dropped at the PeerSession→BmpManager channel by reason (channel_full, channel_closed)",
+                "Per-peer BMP events or periodic reports dropped before BmpManager by reason (channel_full, channel_closed, state_query_timeout)",
             ),
             &["peer", "reason"],
         )
@@ -4977,7 +4977,8 @@ impl BgpMetrics {
         self.0.mrt_dump_failures.with_label_values(&[stage]).inc();
     }
 
-    /// Record a BMP event dropped at the PeerSession→BmpManager channel.
+    /// Record a per-peer BMP event or periodic report dropped before it reaches
+    /// `BmpManager`.
     pub fn record_bmp_source_drop(&self, peer: &str, reason: &str) {
         self.0
             .bmp_source_drops
@@ -7173,6 +7174,7 @@ mod tests {
         m.record_bmp_source_drop("10.0.0.1", "channel_full");
         m.record_bmp_source_drop("10.0.0.1", "channel_full");
         m.record_bmp_source_drop("10.0.0.2", "channel_closed");
+        m.record_bmp_source_drop("10.0.0.3", "state_query_timeout");
 
         let full =
             m.0.bmp_source_drops
@@ -7185,6 +7187,12 @@ mod tests {
                 .with_label_values(&["10.0.0.2", "channel_closed"])
                 .get();
         assert_eq!(closed, 1);
+
+        let state_unknown =
+            m.0.bmp_source_drops
+                .with_label_values(&["10.0.0.3", "state_query_timeout"])
+                .get();
+        assert_eq!(state_unknown, 1);
     }
 
     #[test]

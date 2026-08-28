@@ -1878,7 +1878,7 @@
       "id": 29,
       "type": "timeseries",
       "title": "BMP drops",
-      "description": "bmp_source_drops_total (session\u2192manager), bmp_collector_drops_total (manager\u2192collector, by phase), bmp_control_event_drops_total. Any non-zero rate means the BMP feed is lossy.",
+      "description": "bmp_source_drops_total (peer source\u2192manager, including periodic state-query timeouts), bmp_collector_drops_total (manager\u2192collector, by phase), bmp_control_event_drops_total. Any non-zero rate means the BMP feed is lossy.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

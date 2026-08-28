@@ -42,7 +42,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or non-Established session from a timed-out state query. Ambiguous queries
   fail the refresh and retain the pending import or export work for a later
   policy replay; RFC 8212 preflight and clean-convergence cohort selection use
-  the same closed three-way outcome model.
+  the same closed three-way outcome model. Periodic BMP statistics use that
+  distinction too: a timed-out snapshot is counted and logged as
+  `state_query_timeout`, not silently treated as a departed peer.
 
 - Policy mutation preflight failures now preserve `NOT_FOUND`, `INVALID_ARGUMENT`, and
   `FAILED_PRECONDITION` while retaining the closed `policy_preflight_rejected` diagnostic.

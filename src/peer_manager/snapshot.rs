@@ -8,7 +8,7 @@ use rustbgpd_api::peer_types::{
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_transport::{PeerHandle, PeerSessionState};
+use rustbgpd_transport::{PeerHandle, PeerSessionState, StateQueryOutcome};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::warn;
 
@@ -210,31 +210,32 @@ fn effective_remote_asn(managed: &ManagedPeer, session_state: Option<&PeerSessio
         .unwrap_or(managed.remote_asn)
 }
 
-/// Run a bounded `query_state` against every peer concurrently.
+/// Run a bounded state query against every peer concurrently.
 ///
 /// Each query is bounded by [`PEER_QUERY_TIMEOUT`]; a peer whose session
-/// task is parked on TCP write (or whose command channel is full) lands
-/// in the result map as `Some(addr) -> None`. A peer whose task spawn
-/// failed entirely is absent from the map. Both cases are treated as
-/// `stale = true` by [`build_peer_info`].
+/// task is parked on TCP write (or whose command channel is full) lands as
+/// [`StateQueryOutcome::TimedOut`], while a closed session task lands as
+/// [`StateQueryOutcome::SessionGone`]. A peer whose query task fails to join
+/// is absent from the map. Every non-state outcome is treated as `stale =
+/// true` by [`build_peer_info`].
 async fn collect_session_states(
     peers: &HashMap<PeerKey, ManagedPeer>,
-) -> HashMap<PeerKey, Option<PeerSessionState>> {
+) -> HashMap<PeerKey, StateQueryOutcome> {
     let mut tasks = Vec::with_capacity(peers.len());
     for (peer, managed) in peers {
         let peer = peer.clone();
         let commands = managed.handle.commands_sender();
         tasks.push(AbortOnDropHandle::new(tokio::spawn(async move {
-            let state = PeerHandle::query_state_with(commands, PEER_QUERY_TIMEOUT).await;
-            (peer, state)
+            let outcome = PeerHandle::query_state_outcome_with(commands, PEER_QUERY_TIMEOUT).await;
+            (peer, outcome)
         })));
     }
 
     let mut out = HashMap::with_capacity(tasks.len());
     for task in tasks {
         match task.await {
-            Ok((addr, state)) => {
-                out.insert(addr, state);
+            Ok((addr, outcome)) => {
+                out.insert(addr, outcome);
             }
             Err(e) => {
                 warn!(error = %e, "query_state task join failed");
@@ -450,7 +451,10 @@ impl PeerManager {
 
         let mut infos = Vec::with_capacity(self.peers.len());
         for (peer, managed) in &self.peers {
-            let session_state = states.get(peer).and_then(Option::as_ref);
+            let session_state = states.get(peer).and_then(|outcome| match outcome {
+                StateQueryOutcome::State(state) => Some(state),
+                StateQueryOutcome::TimedOut | StateQueryOutcome::SessionGone => None,
+            });
             let mut info = build_peer_info(
                 peer,
                 managed,
@@ -605,8 +609,19 @@ impl PeerManager {
         self.emit_loc_rib_bmp_stats(bmp_tx).await;
         for (peer, managed) in &self.peers {
             let peer_addr = peer.address;
-            let Some(Some(state)) = states.get(peer) else {
-                continue;
+            let state = match states.get(peer) {
+                Some(StateQueryOutcome::State(state)) => state,
+                Some(StateQueryOutcome::TimedOut) => {
+                    let peer_label = rustbgpd_telemetry::peer_label(peer_addr);
+                    self.metrics
+                        .record_bmp_source_drop(&peer_label, "state_query_timeout");
+                    warn!(
+                        peer = %peer_addr,
+                        "peer state query timed out, omitting periodic BMP stats report"
+                    );
+                    continue;
+                }
+                Some(StateQueryOutcome::SessionGone) | None => continue,
             };
             if state.fsm_state != SessionState::Established {
                 continue;
@@ -640,6 +655,12 @@ impl PeerManager {
             };
 
             if let Err(e) = bmp_tx.try_send(event) {
+                let reason = match &e {
+                    tokio::sync::mpsc::error::TrySendError::Full(_) => "channel_full",
+                    tokio::sync::mpsc::error::TrySendError::Closed(_) => "channel_closed",
+                };
+                self.metrics
+                    .record_bmp_source_drop(&rustbgpd_telemetry::peer_label(peer_addr), reason);
                 warn!(
                     peer = %peer_addr,
                     error = %e,

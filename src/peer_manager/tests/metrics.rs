@@ -17,6 +17,27 @@ fn peer_metric_series_count(metrics: &BgpMetrics, peer: &str) -> usize {
         .count()
 }
 
+fn bmp_source_drop_metric(metrics: &BgpMetrics, peer: &str, reason: &str) -> Option<f64> {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bmp_source_drops_total")
+        .and_then(|family| {
+            family.get_metric().iter().find_map(|metric| {
+                let has_peer = metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer);
+                let has_reason = metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "reason" && label.value() == reason);
+                (has_peer && has_reason).then(|| metric.get_counter().value())
+            })
+        })
+}
+
 fn blocked_truth_observing_start_handle(
     metrics: BgpMetrics,
     peer: PeerKey,
@@ -644,4 +665,118 @@ async fn periodic_bmp_stats_carry_adj_rib_out_counts() {
         }
         other => panic!("expected StatsReport, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn periodic_bmp_stats_distinguish_state_timeout_from_departed_session() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let (bmp_tx, mut bmp_rx) = mpsc::channel(16);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics.clone(),
+        rib_tx,
+        Some(bmp_tx),
+    );
+    let timed_out: IpAddr = "192.0.2.10".parse().unwrap();
+    let departed: IpAddr = "192.0.2.11".parse().unwrap();
+    insert_test_managed_peer(&mut mgr, timed_out, stalled_policy_query_handle(), false);
+    insert_test_managed_peer(&mut mgr, departed, closed_peer_handle(), false);
+
+    let rib_task = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::QueryAdjRibOutCounts { reply } = update {
+                let _ = reply.send(std::collections::HashMap::new());
+                return;
+            }
+        }
+        panic!("QueryAdjRibOutCounts never arrived");
+    });
+
+    mgr.emit_periodic_bmp_stats().await;
+    rib_task.await.unwrap();
+
+    assert!(matches!(
+        bmp_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        bmp_source_drop_metric(&metrics, "192.0.2.10", "state_query_timeout"),
+        Some(1.0)
+    );
+    assert_eq!(
+        bmp_source_drop_metric(&metrics, "192.0.2.11", "state_query_timeout"),
+        None,
+        "a closed session is definitive and must not be counted as a slow live peer"
+    );
+}
+
+#[tokio::test]
+async fn periodic_bmp_stats_channel_full_records_the_source_drop() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let (bmp_tx, _bmp_rx) = mpsc::channel(1);
+    let addr: IpAddr = "192.0.2.20".parse().unwrap();
+    bmp_tx
+        .try_send(BmpEvent::StatsReport {
+            peer_info: rustbgpd_bmp::BmpPeerInfo {
+                peer_addr: addr,
+                peer_asn: 65002,
+                peer_bgp_id: Ipv4Addr::UNSPECIFIED,
+                peer_type: rustbgpd_bmp::BmpPeerType::Global,
+                is_ipv6: false,
+                is_post_policy: false,
+                is_rib_out: false,
+                is_as4: true,
+                timestamp: std::time::SystemTime::now(),
+            },
+            adj_rib_in_routes: 0,
+            adj_rib_out_post: None,
+        })
+        .unwrap();
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics.clone(),
+        rib_tx,
+        Some(bmp_tx),
+    );
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        fake_peer_handle(
+            addr,
+            SessionState::Established,
+            Some(Ipv4Addr::new(192, 0, 2, 20)),
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+
+    let rib_task = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::QueryAdjRibOutCounts { reply } = update {
+                let _ = reply.send(std::collections::HashMap::new());
+                return;
+            }
+        }
+        panic!("QueryAdjRibOutCounts never arrived");
+    });
+
+    mgr.emit_periodic_bmp_stats().await;
+    rib_task.await.unwrap();
+
+    assert_eq!(
+        bmp_source_drop_metric(&metrics, "192.0.2.20", "channel_full"),
+        Some(1.0)
+    );
 }
