@@ -99,7 +99,7 @@ pub fn bench_evpn_dataplane_generation_snapshot(
 ) -> EvpnDataplaneQueryBenchReceipt {
     let relevant_rows = rows
         .iter()
-        .filter(|route| matches!(route.route_type(), 1 | 2 | 5))
+        .filter(|route| rustbgpd_wire::is_dataplane_route_type(route.route_type()))
         .count();
     let visits = Cell::new(0usize);
     let routes = super::collect_evpn_dataplane_routes(

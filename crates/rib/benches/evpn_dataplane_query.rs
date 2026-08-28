@@ -107,7 +107,7 @@ fn bench(c: &mut Criterion) {
             let routes = fixture(rows, mixed);
             let relevant_rows = routes
                 .iter()
-                .filter(|route| matches!(route.route_type(), 1 | 2 | 5))
+                .filter(|route| rustbgpd_wire::is_dataplane_route_type(route.route_type()))
                 .count();
             let changed = bench_evpn_dataplane_generation_snapshot(
                 &routes,

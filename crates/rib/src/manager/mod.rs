@@ -903,7 +903,7 @@ fn collect_evpn_dataplane_routes<'a>(
     }
     let mut routes = Vec::with_capacity(relevant_rows);
     routes.extend(
-        rows.filter(|route| matches!(route.route_type(), 1 | 2 | 5))
+        rows.filter(|route| rustbgpd_wire::is_dataplane_route_type(route.route_type()))
             .cloned(),
     );
     Some(routes)

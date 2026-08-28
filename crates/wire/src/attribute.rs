@@ -1671,25 +1671,13 @@ fn decode_attribute_value(
             ),
         });
     }
-    if matches!(
-        type_code,
-        attr_type::IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY
-            | attr_type::COMMUNITY_CONTAINER
-            | attr_type::DOMAIN_PATH
-            | attr_type::SFP
-            | attr_type::BFD_DISCRIMINATOR
-            | attr_type::NHC
-            | attr_type::PREFIX_SID
-            | attr_type::BIER
-    ) {
-        crate::assigned_attributes::validate(type_code, value).map_err(|detail| {
-            DecodeError::UpdateAttributeError {
-                subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
-                data: attr_error_data(flags, type_code, value),
-                detail: format!("attribute type {type_code}: {detail}"),
-            }
-        })?;
-    }
+    crate::assigned_attributes::validate(type_code, value).map_err(|detail| {
+        DecodeError::UpdateAttributeError {
+            subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+            data: attr_error_data(flags, type_code, value),
+            detail: format!("attribute type {type_code}: {detail}"),
+        }
+    })?;
     match type_code {
         attr_type::ORIGIN => {
             if value.len() != 1 {

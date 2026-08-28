@@ -2,6 +2,8 @@
 
 use crate::constants::attr_type;
 
+/// Called unconditionally from attribute decode; type codes without a
+/// framing check here fall through to `Ok(())`.
 pub(crate) fn validate(type_code: u8, value: &[u8]) -> Result<(), &'static str> {
     match type_code {
         attr_type::COMMUNITY_CONTAINER => community_container(value),
