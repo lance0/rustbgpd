@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,6 +17,7 @@ CHECK = '"$tree/usr/bin/rustbgpd" --check "$tree/etc/rustbgpd/config.toml"'
 RPM_EXTRACT = "cpio --quiet -id --no-absolute-filenames --directory=extracted/rpm"
 EXE_LOOP = "for exe in rustbgpd rbgp rs-config-render birdwatcher-adapter; do"
 IMAGE_RUN = "run: docker run --rm --entrypoint birdwatcher-adapter"
+SYSTEMD_VERIFY = "systemd-analyze verify examples/systemd/rustbgpd-container.service"
 UNIT_ASSERT = 'grep -qxF "$directive" "$unit"'
 TEMPLATE_EXEC_ASSERT = "grep -qxF 'ExecStart=/usr/bin/rustbgpd /var/lib/rustbgpd/%i/activation/current/config.toml' \"$template\""
 STATUS_GUARD = "from scripts.check_release_install_contract import check_systemd_template, systemd_assignments, systemd_status_is_70"
@@ -32,8 +35,11 @@ INPUTS = (
     "docs/grafana/rustbgpd-evpn.json",
     "examples/prometheus/rustbgpd-alerts.yml",
     "examples/prometheus/rustbgpd-alerts_test.yml",
+    "Dockerfile",
+    "docs/deployment.md",
     contract.SYSTEMD_UNIT,
     contract.SYSTEMD_TEMPLATE,
+    contract.SYSTEMD_CONTAINER_UNIT,
     contract.COMPOSE_FILE,
     contract.LICENSE_MAP,
 )
@@ -244,6 +250,156 @@ MUTATIONS = (
         "systemd unit",
     ),
     (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "After=docker.service network-online.target",
+        "After=network-online.target",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "Requires=docker.service",
+        "Requires=network-online.target",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "Wants=network-online.target",
+        "Wants=docker.service",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "WantedBy=multi-user.target",
+        "WantedBy=default.target",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "--network=host",
+        "--network=bridge",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "--user=root",
+        "--user=rustbgpd",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "target=/etc/rustbgpd,readonly",
+        "target=/etc/rustbgpd",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "target=/var/lib/rustbgpd",
+        "target=/tmp/rustbgpd",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "ExecStartPre=/usr/bin/test x${RUSTBGPD_IMAGE} != x\n",
+        "",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "ExecStartPre=/usr/bin/test x${RUSTBGPD_IMAGE} != x",
+        "ExecStartPre=/usr/bin/test -n ${RUSTBGPD_IMAGE}",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "EnvironmentFile=/etc/rustbgpd/rustbgpd-container.env",
+        "EnvironmentFile=-/etc/rustbgpd/rustbgpd-container.env",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "  --cap-drop=ALL \\\n",
+        "  --cap-drop=NET_RAW \\\n",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "  --cap-add=NET_BIND_SERVICE \\\n",
+        "",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "  ${RUSTBGPD_IMAGE} \\\n",
+        "  ${RUSTBGPD_IMAGE_TAG} \\\n",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "ExecStartPre=-/usr/bin/docker pull",
+        "ExecStartPre=/usr/bin/docker pull",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "ExecReload=/usr/bin/docker kill --signal=HUP rustbgpd",
+        "ExecReload=/usr/bin/docker restart rustbgpd",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "ExecStop=-/usr/bin/docker stop -t 1920 rustbgpd",
+        "ExecStop=-/usr/bin/docker stop --timeout=1920 rustbgpd",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "TimeoutStopSec=33min",
+        "TimeoutStopSec=32min",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "[Service]",
+        "[Service]\nSuccessExitStatus=70",
+        "systemd container unit",
+    ),
+    (
+        contract.SYSTEMD_CONTAINER_UNIT,
+        "[Service]",
+        "[Service]\nRestartPreventExitStatus=SOFTWARE",
+        "systemd container unit",
+    ),
+    (
+        WORKFLOW,
+        SYSTEMD_VERIFY,
+        "true # " + SYSTEMD_VERIFY,
+        "container systemd syntax verification",
+    ),
+    (
+        "docs/deployment.md",
+        "`--cap-add=NET_BIND_SERVICE` is **not sufficient**",
+        "`--cap-add=NET_BIND_SERVICE` is sufficient",
+        "container deployment docs",
+    ),
+    (
+        "docs/deployment.md",
+        "    --network=bridge \\\n",
+        "    --network=bridge \\\n    --cap-add=NET_BIND_SERVICE \\\n",
+        "container deployment docs",
+    ),
+    (
+        "docs/deployment.md",
+        "docker run --rm \\\n  --user=root \\\n  --cap-drop=ALL \\\n",
+        "sudo systemctl enable --now rustbgpd-container\ndocker run --rm \\\n  --user=root \\\n  --cap-drop=ALL \\\n",
+        "container deployment docs",
+    ),
+    (
+        "Dockerfile",
+        "USER rustbgpd",
+        "USER root",
+        "container image contract",
+    ),
+    (
         contract.COMPOSE_FILE,
         "stop_grace_period: 32m",
         "stop_grace_period: 31m",
@@ -278,6 +434,79 @@ class ReleaseInstallContractTest(unittest.TestCase):
 
     def test_repository_contract(self) -> None:
         self.assertEqual(contract.check(ROOT), [])
+
+    def test_required_container_image_guard_is_empty_safe(self) -> None:
+        unit = (ROOT / contract.SYSTEMD_CONTAINER_UNIT).read_text()
+        guards = [
+            value
+            for section, key, value in contract.systemd_assignments(unit)
+            if section == "Service"
+            and key == "ExecStartPre"
+            and value.startswith("/usr/bin/test ")
+        ]
+        self.assertEqual(guards, ["/usr/bin/test x${RUSTBGPD_IMAGE} != x"])
+        for image in (None, ""):
+            with self.subTest(image=image):
+                expanded = guards[0].replace("${RUSTBGPD_IMAGE}", image or "")
+                self.assertNotEqual(
+                    subprocess.run(shlex.split(expanded), check=False).returncode,
+                    0,
+                )
+        expanded = guards[0].replace(
+            "${RUSTBGPD_IMAGE}", "ghcr.io/lance0/rustbgpd:0.67.0"
+        )
+        self.assertEqual(
+            subprocess.run(shlex.split(expanded), check=False).returncode,
+            0,
+        )
+
+    def test_host_network_container_rejects_every_publish_flag(self) -> None:
+        unit = (ROOT / contract.SYSTEMD_CONTAINER_UNIT).read_text()
+        message = (
+            "systemd container unit: host networking must not carry bridge "
+            "publish flags"
+        )
+        for flag in (
+            "-p 179:179",
+            "-p179:179",
+            "-p=179:179",
+            "-P ",
+            "-P=true ",
+            "-P=false ",
+            "--publish 179:179",
+            "--publish=179:179",
+            "--publish-all ",
+            "--publish-all=true ",
+        ):
+            with self.subTest(flag=flag):
+                errors: list[str] = []
+                mutated = unit.replace("--network=host", f"--network=host {flag}", 1)
+                contract.check_systemd_container(errors, mutated)
+                self.assertIn(message, errors)
+
+    def test_container_publish_guard_ignores_non_docker_option_tokens(self) -> None:
+        unit = (ROOT / contract.SYSTEMD_CONTAINER_UNIT).read_text()
+        message = (
+            "systemd container unit: host networking must not carry bridge "
+            "publish flags"
+        )
+        mutations = (
+            unit.replace(
+                "ExecStartPre=/usr/bin/test x${RUSTBGPD_IMAGE} != x",
+                "ExecStartPre=/usr/bin/test -p /run/docker.sock",
+                1,
+            ),
+            unit.replace(
+                "rustbgpd ${RUSTBGPD_CONFIG_FILE}",
+                "rustbgpd ${RUSTBGPD_CONFIG_FILE} -profile",
+                1,
+            ),
+        )
+        for mutated in mutations:
+            with self.subTest(mutated=mutated):
+                errors: list[str] = []
+                contract.check_systemd_container(errors, mutated)
+                self.assertNotIn(message, errors)
 
     def test_destructive_mutations_fail(self) -> None:
         for relative, old, new, label in MUTATIONS:
