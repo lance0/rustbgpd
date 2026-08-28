@@ -1031,7 +1031,17 @@ RUSTBGPD_RIB_MEMORY_SIZES=1000 \
 
 # A/B summary against another ref
 bench/compare-rib-memory.sh --base origin/main --head HEAD --profile quick
+
+# Enforce the fixed +5% OR +32 MiB review threshold. A `review` or `missing-row`
+# classification exits 1 only after all three artifacts are finalized.
+bench/compare-rib-memory.sh --base origin/main --head HEAD --profile quick \
+  --fail-on-regression
 ```
+
+Without `--fail-on-regression`, the comparison remains advisory. Both modes
+classify the same rows as `ok`, `review`, or `missing-row`; metadata records
+the fixed percentage-or-absolute rule, selected mode, gate result, and row
+counts. The summary repeats the mode and result beside the row table.
 
 ### Type Sizes (stack)
 
@@ -1150,7 +1160,7 @@ full-daemon surfaces and container cgroup-usage behavior, so bgperf2 remains
 the operator-facing container-memory surface. The A/B review rule for this
 harness is
 deliberately coarse: flag a row for review only when head grows by at least
-**+5% and +32 MiB** for the same shape/size; smaller movement is recorded but
+**+5% or +32 MiB** for the same shape/size; smaller movement is recorded but
 treated as allocator/map-capacity noise unless the PR is memory-targeted.
 
 > **Correction — RouteSlab + attribute interning (2026-07-17).** The

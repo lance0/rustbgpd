@@ -339,10 +339,15 @@ Profiles:
 | `quick` | 10k, 100k | Mechanics check / small PR review |
 | `full` | 100k, 500k, 900k | Full-table memory review on a large host |
 
-The summary flags a row for review only when head grows by at least **+5%**
-and **+32 MiB** for the same shape/size. Smaller movement is recorded but
-treated as allocator/map-capacity noise unless the PR is explicitly
-memory-targeted.
+The summary flags a row for review when head grows by at least **+5%** or
+**+32 MiB** for the same shape/size. Smaller movement is recorded but treated
+as allocator/map-capacity noise unless the PR is explicitly memory-targeted.
+The default is advisory and exits successfully after writing the receipt.
+Pass `--fail-on-regression` to exit 1 for any `review` or `missing-row`; the
+CSV, summary, and finalized metadata are still written before that exit. The
+metadata records the fixed thresholds, selected mode, row counts, and gate
+result, so an archived receipt shows whether the comparison was advisory or
+enforced.
 
 The attribute-layout prototype gate is stricter and is not implied by a green
 generic summary: at the 900k calibrated shapes, a candidate must save more than
