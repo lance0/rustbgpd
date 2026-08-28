@@ -71,5 +71,7 @@ later owner-matching correction regenerated both compressed derivatives'
 component labels/order and their summaries from the unchanged normalized
 stacks and per-stack byte counts. It now reports current demangled RIB owners,
 requires an actual `ImportDecisionCache` owner, and makes the disabled cache's
-zero directly visible. The total live heaps and the semantic explain-cache
-netting result did not change.
+zero directly visible. A subsequent taxonomy update separates interned
+attribute-set backing and nested path-attribute payloads from transport scratch
+and generic RIB ownership. The total live heaps, allocation stacks and counts,
+and semantic explain-cache netting result did not change.
