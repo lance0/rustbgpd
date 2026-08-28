@@ -13,6 +13,12 @@ A/B/B/A order, all green, cross-checked by the campaign's independent
 verifier. A standalone grouped-export control cell (never a comparison
 row) prices rustbgpd's per-client path-hiding fan-out.
 
+*Post-publication note:* the
+[realistic-mix receipt](irr-reload-realistic-mix-2026-08.md) extends this
+comparison with controlled announcement overlap and carries the forward link
+to the later grouped per-client-best acceptance receipt. This document's rows
+and verdict remain unchanged.
+
 ## Headline
 
 | Cell (320 members × 183,040 routes, 3.2M filter entries, 4 reloads × 2 roots) | Completion p50 (reload 1; reloads 2–4) | Completion p95 (reloads 2–4) | Reload stall p50 (reload 1; reloads 2–4) | First new-generation route p50 | Process-tree RSS peak (root A / B) |

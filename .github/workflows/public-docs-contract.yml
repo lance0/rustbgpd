@@ -26,6 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: Check published crate boundary
         if: matrix.contract == 'embedding'
         run: |
@@ -61,3 +63,8 @@ jobs:
         run: |
           python3 -m unittest -v scripts/test_check_release_checklist_paths.py
           python3 scripts/check_release_checklist_paths.py
+      - name: Check performance receipt provenance and freshness
+        if: matrix.contract == 'public'
+        run: |
+          python3 -m unittest -v scripts/test_check_perf_receipt_freshness.py
+          python3 scripts/check_perf_receipt_freshness.py
