@@ -1155,16 +1155,16 @@ carries inactive (absent), unlimited (zero), or finite.
 
 ---
 
-## draft-ietf-grow-bmp-tlv-20 — BMPv4 TLV framing (pre-IANA)
+## draft-ietf-grow-bmp-tlv-21 — BMPv4 TLV framing (pre-IANA)
 
 - Per-collector `version = 3 | 4`, default 3; v3 output byte-identical
   to prior releases (golden-bytes pinned).
 - v4: common-header version 4 on every message; Route Monitoring wraps
-  the UPDATE in the mandatory BGP Message TLV (type 7, index 0, §5.2);
+  the UPDATE in the mandatory BGP Message TLV (type 4, index 0, §5.2);
   Stats Reports wrap in the Stats TLV (code 1, §5.4); the
   TLV-provisioned message types change only their version byte.
 - Indexed-TLV (§4.3: 2-byte index after length, excluded from the
-  length value, G-bit) and Group TLV (type 4) encoding infrastructure.
+  length value, G-bit) and Group TLV (type 1) encoding infrastructure.
 - All draft code points live in `crates/bmp/src/tlv.rs` with a renumber
   note — an IANA renumber at RFC publication is a single-file change.
   The draft's Appendix A contradicts its normative §5.2.1 on the Group
@@ -1175,9 +1175,9 @@ carries inactive (absent), unlimited (zero), or finite.
 
 ## draft-ietf-grow-bmp-path-marking-tlv-05 — Path Marking (pre-IANA)
 
-- Path Marking TLV on Loc-RIB Route Monitoring toward BMPv4 collectors
-  (an RM TLV — v4-gated by construction; v3 output is byte-identical
-  with or without it).
+- Temporarily unavailable: path-marking-05 self-assigns RM TLV type 5,
+  while tlv-21 assigns type 5 to Sequence Number. No ambiguous type-5
+  Path Marking is emitted pending a non-colliding assignment.
 - Status bits limited to what an RR can attest: Best + Stale (from the
   GR/LLGR machinery). FIB/damping/filter bits are never fabricated.
 - Reason Code (§3.2) on live unicast announces: re-derived
@@ -1186,9 +1186,8 @@ carries inactive (absent), unlimited (zero), or finite.
   candidate → no reason; decisive steps without a registered draft code
   are omitted rather than mislabeled. VPN and dump entries carry bits
   only.
-- Known collision: the draft self-assigns RM TLV type 5, which tlv-20
-  §9 has since taken for VRF/Table Name; rustbgpd never emits the
-  latter, and the constant carries a renumber note.
+- The internal status payload remains available so emission can resume
+  without changing the RIB seam once the drafts converge.
 - See ADR-0097 (Decision 5).
 
 ---

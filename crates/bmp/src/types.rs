@@ -63,9 +63,9 @@ pub enum BmpEvent {
         update_pdu: Bytes,
         /// Route install time (RFC 9069 per-peer header timestamp).
         timestamp: SystemTime,
-        /// Path Marking payload for the announced route. `None` on
-        /// withdrawals (a gone path has no status to mark) and when the
-        /// RIB attaches no marking. Encoded only for v4 collectors.
+        /// Retained path-status payload for a future non-colliding Path
+        /// Marking assignment. `None` on withdrawals and when the RIB
+        /// attaches no marking.
         path_status: Option<BmpPathStatus>,
     },
     /// RFC 9069 Loc-RIB statistics: per-AFI/SAFI Loc-RIB route counts.
@@ -168,25 +168,20 @@ pub struct BmpDumpRequest {
 #[derive(Debug)]
 pub struct BmpDumpChunk {
     /// Synthesized UPDATE PDUs with their route install times and the
-    /// Path Marking payload (`None` on the End-of-RIB markers).
+    /// Retained path-status payload (`None` on End-of-RIB markers).
     pub messages: Vec<(Bytes, SystemTime, Option<BmpPathStatus>)>,
     /// Where the next request should resume; `None` = dump complete
     /// (this chunk carries the End-of-RIB markers).
     pub next: Option<BmpDumpCursor>,
 }
 
-/// Path Marking TLV payload (draft-ietf-grow-bmp-path-marking-tlv-05
-/// §2): the 4-octet Path Status bitmap plus the optional 2-octet
-/// Reason Code. Carried on Route Monitoring events by the RIB, encoded
-/// on the wire only for BMP v4 collectors (the TLV cannot be framed in
-/// RFC 7854 v3).
+/// Path Marking candidate payload. Retained internally while emission
+/// waits for a non-colliding assignment from the active drafts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BmpPathStatus {
-    /// Path Status bitmap (§3.1) — see the `PATH_STATUS_*` constants
-    /// in [`crate::tlv`].
+    /// Path Status bitmap (§3.1 of the Path Marking draft).
     pub status: u32,
-    /// Optional Reason Code (§3.2) — see the `REASON_*` constants in
-    /// [`crate::tlv`]. Omitted from the wire when `None`.
+    /// Optional Reason Code (§3.2 of the Path Marking draft).
     pub reason: Option<u16>,
 }
 
@@ -294,14 +289,14 @@ pub enum PeerDownReason {
 /// BMP wire version a collector receives.
 ///
 /// V3 output is the RFC 7854/8671/9069 encoding, byte-identical to
-/// pre-v4 releases. V4 frames per draft-ietf-grow-bmp-tlv-20
+/// pre-v4 releases. V4 frames per draft-ietf-grow-bmp-tlv-21
 /// (pre-IANA; code points may renumber at RFC publication).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BmpVersion {
     /// RFC 7854 BMP version 3 (default).
     #[default]
     V3,
-    /// draft-ietf-grow-bmp-tlv-20 BMP version 4.
+    /// draft-ietf-grow-bmp-tlv-21 BMP version 4.
     V4,
 }
 

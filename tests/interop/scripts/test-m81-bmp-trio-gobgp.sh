@@ -1,62 +1,24 @@
 #!/usr/bin/env bash
 # M81 interop test — the BMP trio receipt: RFC 8671 Adj-RIB-Out +
-# RFC 9069 Loc-RIB + BMPv4 TLV framing (draft-ietf-grow-bmp-tlv-20) +
-# Path Marking (draft-ietf-grow-bmp-path-marking-tlv-05), validated
+# RFC 9069 Loc-RIB + BMPv4 TLV framing (draft-ietf-grow-bmp-tlv-21), validated
 # against three collectors at once.
 #
-# ── Oracle-support matrix (Phase 0, validated against the pinned
-#    image digests in the topology file) ────────────────────────────
+# ── Oracle-support matrix (validated against pinned images) ─────────
 #
-#   oracle                        | v3 (7854/8671/9069) | v4 tlv-20 framing        | path-marking-05
-#   ------------------------------+---------------------+--------------------------+----------------
-#   pmacct pmbmpd 1.8.1-git       | full semantic       | NO. Accepts the          | decodes a type-5
-#    20260513 (bleeding-edge,     | decode incl. peer   | version-4 header and     | path-status TLV,
-#    digest-pinned)               | type 3, O/L flags,  | the indexed-TLV          | but only behind
-#                                 | VRF table name,     | structure, but expects   | its pre-tlv-20 RM
-#                                 | type-10 loc-rib     | the pre-tlv-20 BGP PDU   | parse, so it is
-#                                 | stats               | TLV code point 4 and     | unreachable for a
-#                                 |                     | discards every tlv-20    | tlv-20 sender
-#                                 |                     | RM ("BMPv4 BGP PDU       |
-#                                 |                     | TLV != 1", verified      |
-#                                 |                     | live). Its bmp.h         |
-#                                 |                     | comment claims tlv-20    |
-#                                 |                     | but implements the old   |
-#                                 |                     | numbering. v4 Stats      |
-#                                 |                     | TLV wrap not parsed.     |
-#   gobmp master 2026-06-24       | full (RFC 8671      | NO. Hard-rejects         | no
-#    (digest-pinned)              | IsAdjRIBOutPost +   | version != 3 at the      |
-#                                 | RFC 9069 IsLocRIB   | common header            |
-#                                 | + type-10 loc-rib   | (common-header.go:38).   |
-#                                 | stats JSON fields;  |                          |
-#                                 | Initiation content  |                          |
-#                                 | validated but       |                          |
-#                                 | discarded)          |                          |
-#   tshark 4.4.7 (alpine 3.22)    | full dissection     | PARTIAL. Version byte,   | NO released
-#                                 | (BMP + inner BGP    | per-peer header, and     | Wireshark decodes
-#                                 | PDU)                | the RM TLV header        | it: 4.4 has no
-#                                 |                     | fields (type/length/     | path-status TLV;
-#                                 |                     | index) dissect           | 4.6 puts it at
-#                                 |                     | generically; but every   | type 9; only
-#                                 |                     | released Wireshark maps  | unreleased master
-#                                 |                     | RM TLV code points per   | (tlv-13 +
-#                                 |                     | older drafts (4.4/4.6:   | path-marking-02)
-#                                 |                     | BGP Msg = 4, type 7 =    | matches our
-#                                 |                     | Multi-Label Cap), so     | type 5 + status/
-#                                 |                     | TLV *values* misparse    | reason values
-#                                 |                     | with Malformed noise —   |
-#                                 |                     | draft-revision skew,     |
-#                                 |                     | not an encoding verdict  |
+#   oracle                  | v3 semantics             | v4 draft-21
+#   ------------------------+--------------------------+---------------------------
+#   pmacct pmbmpd pinned    | full semantic decode     | accepts version 4; raw
+#                           | across all three views   | oracle remains decisive
+#   gobmp pinned            | full semantic decode     | rejects version != 3
+#   tshark 4.4.7 pinned     | full dissection          | version, peer headers,
+#                           |                          | generic TLV header fields
+#   raw sink                | byte reference           | normative wire oracle
 #
-#   Consequences for scoping: pmacct + gobmp are the semantic v3
-#   oracles (all three RM streams); tshark is the dissector oracle for
-#   the v3 stream, the v4 version byte, per-peer headers, and the
-#   generic RM TLV header fields. NO shipped collector or dissector
-#   decodes tlv-20's final code points (BGP Message TLV 7, Stats
-#   TLV 1) or path-marking-05-on-tlv-20 yet — the ecosystem tracks
-#   older revisions — so those are asserted at raw-byte offsets
-#   against the drafts' wire figures, with the v3 byte-stream as the
-#   reference. No assertion below claims an oracle decoded something
-#   Phase 0 showed it cannot.
+# pmacct and gobmp remain independent semantic v3 oracles. The raw sink
+# pins draft-21 Route Monitoring code points and exact embedded PDU bytes;
+# tshark is used only for fields the pinned release dissects generically.
+# Path Marking is not emitted: its active draft's type 5 conflicts with
+# draft-21 Sequence Number. No assertion claims otherwise.
 #
 # Assertions (numbered in output):
 #    1  pmacct: Initiation sysName/sysDescr
@@ -80,8 +42,8 @@
 #   16  loc-rib withdraw propagates on the v3 stream after route removal
 #   17  gobmp: reconnect triggers a full loc-rib dump (PeerUp + table
 #       re-delivery) — RFC 9069 collector-connect sync
-#   18  raw v4: reconnect dump = loc-rib PeerUp + status-only Best
-#       markings on every dump announce + exactly 4 End-of-RIBs
+#   18  raw v4: reconnect dump = loc-rib PeerUp + unmarked dump
+#       announces + exactly 4 End-of-RIBs
 #   19  pmacct: PeerDown for pe2 with a reason code
 #   20  gobmp: peer down message for pe2
 #   21  loc-rib withdraw of pe2's route after session down
@@ -90,7 +52,7 @@
 #   24  raw: loc-rib instance PeerDown reason 6 on shutdown (v3 + v4)
 #   25  raw: every message on the v4 slot is version 4 (v3 slot: 3)
 #   26  raw v4 RM framing: exact TLV walk; single BGP Message TLV
-#       type 7, index 0; TLV length == PDU length (excludes index)
+#       type 4, index 0; TLV length == PDU length (excludes index)
 #   27  raw: rib-in/rib-out/loc-rib RM PDU sets byte-equal across the
 #       v3 stream and the v4 BGP Message TLVs (mixed-fleet equality)
 #   28  raw: v4 Initiation byte-identical to v3 except the version byte
@@ -99,32 +61,23 @@
 #       code 1; unwrapped value byte-matches a v3 stats body
 #   31  raw: stats carry loc-rib type 8 + 10 counters (instance peer)
 #       and type 7 (Adj-RIB-In) on a regular peer
-#   32  raw v4: every live loc-rib announce carries exactly one Path
-#       Marking TLV with Best (0x2); withdraws + EoR carry none
-#   33  raw v4: the contested prefix's winning announce carries reason
-#       0x0003 (local preference)
-#   34  raw v4: rib-in/rib-out RM carry no Path Marking TLV
-#   35  tshark: all v4-port messages dissect with bmp.version == 4
-#   36  tshark: v4 RM TLV header fields dissect generically as
-#       type 7 / index 0 (value naming per released Wireshark tracks
+#   32  raw v4: every RM carries only BGP Message TLV type 4; no
+#       ambiguous type-5 Path Marking is emitted
+#   33  tshark: all v4-port messages dissect with bmp.version == 4
+#   34  tshark: v4 RM TLV header fields dissect generically as
+#       type 4 / index 0 (value naming per released Wireshark tracks
 #       older tlv drafts — documented skew, see matrix)
-#   37  tshark: per-peer headers dissect on both ports — loc-rib
+#   35  tshark: per-peer headers dissect on both ports — loc-rib
 #       instance peer (type 3) and Adj-RIB-Out + post-policy flags
-#   38  tshark: the dissected v3 loc-rib UPDATE for the contested
+#   36  tshark: the dissected v3 loc-rib UPDATE for the contested
 #       prefix carries LOCAL_PREF 200 (the LP winner is in the
 #       Loc-RIB stream)
-#   39  tshark: v3-port RM messages dissect as plain BGP UPDATEs
+#   37  tshark: v3-port RM messages dissect as plain BGP UPDATEs
 #       (bmp.version == 3, no v4 TLV fields)
 #
-# Deferred (documented, not asserted): a released third-party decoder
-# for the Path Marking TLV under tlv-20 numbering does not exist yet
-# (see matrix) — assertions 32/33/34 pin it at raw-byte level; re-add
-# a dissector oracle when Wireshark ships its master-branch BMP
-# updates or pmacct adopts the tlv-20 code points. Also deferred: the
-# Stale path-status bit
-# (0x400) via a GR restart — arranging a graceful restart just for the
-# bit bloats the lab; the GR/LLGR machinery itself is receipted in
-# M77/M79. pmacct-side stats decoding is not asserted (pmbmpd msglog
+# Deferred (documented, not asserted): Path Marking is unavailable
+# until its draft receives a non-colliding assignment; draft-21 uses
+# type 5 for Sequence Number. pmacct-side stats decoding is not asserted (pmbmpd msglog
 # does not emit per-counter stats entries); stats are pinned at byte
 # level (30/31) instead.
 #
@@ -522,7 +475,7 @@ test_reconnect_dump() {
         fi
         sleep 2
     done
-    raw_assert "(18) v4 reconnect dump: PeerUp + status-only Best marks + 4 EoRs" \
+    raw_assert "(18) v4 reconnect dump: PeerUp + unmarked announces + 4 EoRs" \
         dump 100
 }
 
@@ -578,57 +531,53 @@ test_shutdown() {
 }
 
 test_raw_byte_matrix() {
-    log "Assertions 25-34: byte-level BMPv4 framing + path marking"
+    log "Assertions 25-32: byte-level BMPv4 draft-21 framing"
     raw_assert "(25a) v4 slot all version 4" versions 11020 4
     raw_assert "(25b) v3 slot all version 3" versions 11019 3
-    raw_assert "(26) v4 RM: single BGP Message TLV 7, index 0, len excludes index" rm_tlv7
+    raw_assert "(26) v4 RM: single BGP Message TLV 4, index 0, len excludes index" rm_bgp_tlv
     raw_assert "(27) mixed fleet: RM PDU byte-equality across v3/v4 streams" rm_pdu_equality
     raw_assert "(28) v4 Initiation == v3 except version byte" init_equal
     raw_assert "(29) v4 PeerUp == v3 except version byte (pe1)" peerup_equal "$PE1_ADDR"
     raw_assert "(30) v4 Stats wrapped in Stats TLV 1, value == v3 body" stats_v4_wrap
     raw_assert "(31) stats: loc-rib types 8+10, peer type 7" stats_locrib_counts
-    raw_assert "(32) loc-rib announces marked Best; withdraws/EoR unmarked" locrib_marking
-    raw_assert "(33) contested prefix carries reason 0x0003 (local-pref)" \
-        reason_local_pref "$CONTEST_NLRI_HEX"
-    raw_assert "(34) no Path Marking outside loc-rib" no_marking_outside_locrib
+    raw_assert "(32) no ambiguous type-5 Path Marking on any v4 RM" no_path_marking
 }
 
 test_tshark_matrix() {
-    log "Assertions 35-39: tshark 4.4 dissection of the capture (scoped per the oracle matrix)"
+    log "Assertions 33-37: tshark 4.4 dissection of the capture (scoped per the oracle matrix)"
     docker exec "$SINK" pkill tshark || true
     sleep 2
 
-    # 35 — nothing on the v4 port dissects as any other BMP version.
-    assert_tshark "(35a) v4 port carries bmp.version 4 frames" \
+    # 33 — nothing on the v4 port dissects as any other BMP version.
+    assert_tshark "(33a) v4 port carries bmp.version 4 frames" \
         'tcp.port == 11020 && bmp.version == 4' 1
-    assert_tshark "(35b) no non-4 BMP version on the v4 port" \
+    assert_tshark "(33b) no non-4 BMP version on the v4 port" \
         'tcp.port == 11020 && bmp.version && bmp.version != 4' 0
-    # 36 — the RM TLV header (type/length/index) dissects generically
+    # 34 — the RM TLV header (type/length/index) dissects generically
     # before any per-type value parsing: an independent read of "first
-    # TLV type is 7, index 0" even though released Wireshark names
-    # type 7 per an older draft revision (see matrix).
-    assert_tshark "(36) v4 RM TLV header fields: type 7, index 0" \
-        'bmp.tlv.type == 7 && bmp.tlv.index == 0' 1
-    # 37 — per-peer header dissection is draft-revision-independent.
-    assert_tshark "(37a) loc-rib instance peer (type 3) frames on the v4 port" \
+    # TLV type is 4, index 0" under draft-21.
+    assert_tshark "(34) v4 RM TLV header fields: type 4, index 0" \
+        'bmp.tlv.type == 4 && bmp.tlv.index == 0' 1
+    # 35 — per-peer header dissection is draft-revision-independent.
+    assert_tshark "(35a) loc-rib instance peer (type 3) frames on the v4 port" \
         'tcp.port == 11020 && bmp.peer.type == 3' 1
-    assert_tshark "(37b) loc-rib instance peer (type 3) frames on the v3 port" \
+    assert_tshark "(35b) loc-rib instance peer (type 3) frames on the v3 port" \
         'tcp.port == 11019 && bmp.peer.type == 3' 1
-    assert_tshark "(37c) Adj-RIB-Out + post-policy peer flags (RFC 8671 O+L)" \
+    assert_tshark "(35c) Adj-RIB-Out + post-policy peer flags (RFC 8671 O+L)" \
         'bmp.peer.flags.adj_rib_out == 1 && bmp.peer.flags.post_policy == 1' 1
-    # 38 — semantic loc-rib check through full v3 dissection: the
+    # 36 — semantic loc-rib check through full v3 dissection: the
     # contested prefix's Loc-RIB copy carries the winning LOCAL_PREF.
-    assert_tshark "(38) v3 loc-rib UPDATE for the contested prefix has LOCAL_PREF 200" \
+    assert_tshark "(36) v3 loc-rib UPDATE for the contested prefix has LOCAL_PREF 200" \
         'tcp.port == 11019 && bmp.peer.type == 3 && bgp.update.path_attribute.local_pref == 200 && bgp.nlri_prefix == 10.99.0.0' 1
-    # 39 — v3 side: classic RM, BGP PDU dissected inline, no v4 TLVs.
-    assert_tshark "(39a) v3 port RM dissects as plain BGP UPDATE" \
+    # 37 — v3 side: classic RM, BGP PDU dissected inline, no v4 TLVs.
+    assert_tshark "(37a) v3 port RM dissects as plain BGP UPDATE" \
         'tcp.port == 11019 && bmp.version == 3 && bgp.type == 2' 1
-    assert_tshark "(39b) no v4 TLV fields on the v3 port" \
+    assert_tshark "(37b) no v4 TLV fields on the v3 port" \
         'tcp.port == 11019 && bmp.tlv.type' 0
 }
 
 main() {
-    log "M81 interop test: BMP trio receipt (RFC 8671 + RFC 9069 + BMPv4 TLV + Path Marking)"
+    log "M81 interop test: BMP trio receipt (RFC 8671 + RFC 9069 + BMPv4 draft-21 TLV)"
     log "Topology: $TOPO"
 
     preflight

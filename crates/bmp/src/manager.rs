@@ -1419,10 +1419,10 @@ mod tests {
         handle.await.unwrap();
     }
 
-    /// Mixed-version fan-out (draft-ietf-grow-bmp-tlv-20): one v3 and
+    /// Mixed-version fan-out (draft-ietf-grow-bmp-tlv-21): one v3 and
     /// one v4 collector receive the same events, each framed at its
     /// configured version. Route Monitoring: bare PDU for v3, BGP
-    /// Message TLV (type 7, index 0) for v4. Peer Up (TLV-provisioned
+    /// Message TLV (type 4, index 0) for v4. Peer Up (TLV-provisioned
     /// already in v3) differs only in the version byte — including the
     /// cached copy replayed on reconnect.
     #[tokio::test]
@@ -1486,7 +1486,7 @@ mod tests {
         assert_eq!(&rm3[6 + 42..], &pdu, "v3: bare PDU after per-peer header");
         assert_eq!(rm4[0], 4);
         let tlv = &rm4[6 + 42..];
-        assert_eq!(u16::from_be_bytes([tlv[0], tlv[1]]), 7, "BGP Message TLV");
+        assert_eq!(u16::from_be_bytes([tlv[0], tlv[1]]), 4, "BGP Message TLV");
         assert_eq!(u16::from_be_bytes([tlv[2], tlv[3]]) as usize, pdu.len());
         assert_eq!(u16::from_be_bytes([tlv[4], tlv[5]]), 0, "index 0");
         assert_eq!(&tlv[6..], &pdu);
@@ -2909,10 +2909,10 @@ mod tests {
     /// Mixed v3/v4 collectors, one marked Loc-RIB RM event: the v3
     /// collector's message carries no TLV bytes at all (bare PDU after
     /// the per-peer header) while the v4 collector gets the BGP
-    /// Message TLV followed by the Path Marking TLV with the event's
-    /// status bitmap and reason code.
+    /// Message TLV only. Path Marking stays unavailable while its
+    /// draft type 5 collides with draft-21 Sequence Number.
     #[tokio::test]
-    async fn mixed_version_collectors_loc_rib_path_marking() {
+    async fn mixed_version_collectors_loc_rib_omit_path_marking() {
         let (event_tx, event_rx) = mpsc::channel(16);
         let (control_tx, control_rx) = mpsc::channel(16);
         let (v3_tx, mut v3_rx) = mpsc::channel(16);
@@ -2937,8 +2937,8 @@ mod tests {
                 update_pdu: Bytes::copy_from_slice(&pdu),
                 timestamp: UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
                 path_status: Some(crate::types::BmpPathStatus {
-                    status: crate::tlv::PATH_STATUS_BEST,
-                    reason: Some(crate::tlv::REASON_LOCAL_PREF),
+                    status: 0x0000_0002,
+                    reason: Some(0x0003),
                 }),
             })
             .await
@@ -2949,22 +2949,12 @@ mod tests {
         assert_eq!(msg[0], 3);
         assert_eq!(&msg[6 + 42..], &pdu, "v3 carries the bare PDU, no TLVs");
 
-        // v4: BGP Message TLV then the Path Marking TLV.
+        // v4: only the draft-21 BGP Message TLV.
         let msg = v4_rx.recv().await.unwrap();
         assert_eq!(msg[0], 4);
         let tlvs = &msg[6 + 42..];
-        assert_eq!(u16::from_be_bytes([tlvs[0], tlvs[1]]), 7, "BGP Message");
-        let pm = &tlvs[6 + pdu.len()..];
-        assert_eq!(
-            pm,
-            &[
-                0x00, 0x05, // Path Marking TLV (type 5)
-                0x00, 0x06, // status(4) + reason(2)
-                0x00, 0x00, // index 0
-                0x00, 0x00, 0x00, 0x02, // Best
-                0x00, 0x03, // local preference
-            ]
-        );
+        assert_eq!(u16::from_be_bytes([tlvs[0], tlvs[1]]), 4, "BGP Message");
+        assert_eq!(&tlvs[6..], &pdu);
 
         drop(event_tx);
         drop(control_tx);
